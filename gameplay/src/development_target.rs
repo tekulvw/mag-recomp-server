@@ -3,7 +3,7 @@ use super::*;
 
 pub(super) struct Target {
     pub object_index: u16,
-    pub display_name: Option<&'static str>,
+    pub display_name: Option<String>,
     pub generation: u32,
     pub position: replication::CharacterPosition,
     pub faction: u8,

@@ -179,3 +179,7 @@ helm upgrade --install mag oci://ghcr.io/tekulvw/charts/mag-recomp-server \
 ```
 
 The command is an operator example, not a chart hook. No deployment hooks, account migration jobs or cluster-administration resources are installed. Updating public settings, bundle checksum or the bundled scripts changes the Pod template hash and restarts the affected application Pods. For changes to external Secret contents, bump `runtime.revision`; for existing-claim data replacement, bump `data.revision` after preparing consistent data. Neither external Secret rotation nor existing-claim mutation is detected automatically. Recreate updates cause downtime; ephemeral event logs disappear when their Pod is replaced. Preserve any logs you need privately before an update.
+
+### Optional bot identities
+
+Set `data.files.botNames` to a private JSON member in the verified bundle or data PVC to pass `--bot-names /data/<member>`. Empty keeps synthetic defaults. The gameplay image must contain the external identity loader (0.2.0 does not). See [operator bot identities](../../docs/bot-identities.md) for the schema and startup validation.

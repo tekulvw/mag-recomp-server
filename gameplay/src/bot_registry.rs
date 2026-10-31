@@ -428,7 +428,10 @@ impl WorldBot {
             &loadout,
             self.target.faction,
             profile,
-            crate::bot_names::name_for(self.name_index).ok_or("bot_name_index")?,
+            self.target
+                .display_name
+                .as_deref()
+                .ok_or("bot_name_index")?,
             self.target.squad,
             Some(&physical),
         )
@@ -446,6 +449,9 @@ impl<W: Write> Engine<W> {
         config.validate()?;
         if self.development_dummy_enabled() {
             return Err("bot_population_conflicts_with_legacy_dummy");
+        }
+        if total > self.bot_names.len() {
+            return Err("bot_names_insufficient_capacity");
         }
         if !(2..=256).contains(&total)
             || total > self.admission_capacity_for(20231)
@@ -2178,10 +2184,14 @@ impl<W: Write> Engine<W> {
                 .values()
                 .map(|b| b.name_index)
                 .collect();
-            let name_index = (0..crate::bot_names::BOT_NAME_COUNT as u16)
+            let name_index = (0..self.bot_names.len() as u16)
                 .find(|i| !used_names.contains(i))
                 .ok_or("bot_name_index_exhausted")?;
-            let display_name = crate::bot_names::name_for(name_index).ok_or("bot_name_index")?;
+            let display_name = self
+                .bot_names
+                .name_for(name_index)
+                .ok_or("bot_name_index")?
+                .to_owned();
             // A side containing only bots still owns a shared schedule. Adopt
             // the same authored first-participant policy as human confirmation,
             // while preserving both initial bot admission and an existing phase.
@@ -2283,5 +2293,150 @@ impl<W: Write> Engine<W> {
         self.bot_registry.delay_book = Default::default();
         self.bot_registry.collision_evidence = None;
         self.bot_registry.firearm_cursor = 0;
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    use crate::resources::tests::{retail_items, wire_profiles};
+    fn engine(prefix: &str) -> Engine<Vec<u8>> {
+        let mut proof = json!({"verified_binding":{"validated":true,"positions_compared":667,"blank_positions_compared":25,"blank_zero_empirically_verified":true}});
+        for name in [
+            "original_retail_elf_sha256",
+            "snapshot_sha256",
+            "catalog_sha256",
+            "rules_sha256",
+            "owner_attestation_sha256",
+            "gear_slots_sha256",
+            "comparator_sha256",
+        ] {
+            proof[name] = json!("a".repeat(64));
+        }
+        let mut kit = vec![None; 22];
+        kit[..3].fill(Some(2));
+        let rows:Vec<_>=(0..5).map(|i|json!({"update_id":1,"items":if i<3 {kit.clone()} else {vec![None;22]},"primary_ammo":if i<3 {7}else{0}})).collect();
+        let bootstrap=crate::bootstrap_loadouts::BootstrapLoadouts::from_json(&json!({"schema_version":1,"application_id":20231,"provenance":proof,
+            "factions":(0..3).map(|f|json!({"faction":f,"class_ref":"CharacterClassInfo0","loadouts":rows})).collect::<Vec<_>>()}).to_string()).unwrap();
+        let items = std::sync::Arc::try_unwrap(retail_items())
+            .ok()
+            .unwrap()
+            .with_bootstrap_loadouts(bootstrap);
+        let names=crate::bot_names::Catalog::from_json(&serde_json::to_vec(&json!({"entries":[{"name":format!("{prefix} Alpha")},{"name":format!("{prefix} Bravo")}]})).unwrap()).unwrap();
+        let spawns:spawn_catalog::SpawnCatalog=serde_json::from_value(json!({
+            "format":"mag_spawn_catalog","schema_version":1,"source":"SYNTHETIC identity test",
+            "active":{"map_name":"synthetic_arena","squad_index":0,"default_spawn":0,"available":[0]},
+            "match_profile":{"has_bunkers":false,"has_objectives":false},
+            "maps":[{"name":"synthetic_arena","owner_faction":2,"spawn_count":1,
+                "locations":[{"index":0,"token":1,"kind":"on_foot","position":{"x":2.,"y":0.,"z":2.}}],
+                "squads":[{"index":0,"team":0,"platoon":0,"squad":0,"faction":null,"available":[0],"default_spawn":0},
+                {"index":16,"team":1,"platoon":0,"squad":0,"faction":2,"available":[0],"default_spawn":0}]}]})).unwrap();
+        let resources = EngineResources::for_application(
+            std::sync::Arc::new(items),
+            spawns,
+            None,
+            wire_profiles(),
+            20231,
+        )
+        .unwrap()
+        .with_bot_names(names);
+        let mut engine = Engine::from_resources(Vec::new(), 100_000, resources);
+        engine.maximum_players = 2;
+        let world = json!({"format":"mag_collision_world","schema_version":1,"coordinate_space":"world",
+            "metadata":{"map_name":"synthetic_arena","build":"synthetic","coverage":"provisional","provenance":["Synthetic identity test floor"],"unknowns":["Not a game map"],
+            "physics_regions":[{"min":[-10.,-5.,-10.],"max":[10.,8.,10.],"ground_verified":true,"obstacles_verified":true,"provenance":["Synthetic floor"]}]},
+            "instances":[{"id":"floor","vertices_xyz":[[-10.,0.,-10.],[10.,0.,-10.],[10.,0.,10.],[-10.,0.,10.]],"triangles":[[0,2,1],[0,3,2]]}]});
+        let path = std::env::temp_dir().join(format!(
+            "mag-synthetic-identity-floor-{}-{prefix}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, serde_json::to_vec(&world).unwrap()).unwrap();
+        engine = engine.with_collision_world(
+            collision::CollisionWorld::load(&path, collision::CollisionLimits::default()).unwrap(),
+        );
+        std::fs::remove_file(path).unwrap();
+        let config:BotPopulation=serde_json::from_value(json!({"format":"mag_bot_population_v1","map_name":"synthetic_arena","slots":[
+            {"team":0,"position":{"x":2.,"y":0.,"z":2.}}, {"team":1,"position":{"x":6.,"y":0.,"z":2.}}]})).unwrap();
+        engine.with_bot_population(config, 2).unwrap()
+    }
+    #[test]
+    fn external_identities_reach_real_allocation_audit_and_client_snapshots() {
+        let mut a = engine("Synthetic First");
+        let mut b = engine("Synthetic Second");
+        for (engine, prefix) in [(&mut a, "Synthetic First"), (&mut b, "Synthetic Second")] {
+            engine
+                .reconcile_bot_population(Duration::ZERO, 1, &mut Default::default())
+                .unwrap();
+            assert_eq!(engine.bot_registry.bots.len(), 2);
+            let names: std::collections::BTreeSet<_> = engine
+                .bot_registry
+                .bots
+                .values()
+                .map(|b| b.target.display_name.as_deref().unwrap().to_owned())
+                .collect();
+            assert_eq!(
+                names,
+                std::collections::BTreeSet::from([
+                    format!("{prefix} Alpha"),
+                    format!("{prefix} Bravo")
+                ])
+            );
+            for bot in engine.bot_registry.bots.values() {
+                let snapshot = bot.snapshot(Duration::ZERO, engine.wire_profile).unwrap();
+                let expected = format!(
+                    "{prefix} {}",
+                    if bot.name_index == 0 {
+                        "Alpha"
+                    } else {
+                        "Bravo"
+                    }
+                );
+                let runtime = bot.target.runtime.unwrap();
+                let physical = replication::CharacterRespawn {
+                    sequence: 1,
+                    timestamp_ms: 0,
+                    object_index: bot.target.object_index,
+                    state: replication::CharacterState {
+                        state: 1,
+                        stance: 0,
+                        user_data: [0; 3],
+                    },
+                    position: runtime.position,
+                    pitch: bot.firearm.packed_pitch(),
+                    yaw: bot.yaw,
+                    damage: bot.damage,
+                };
+                let mut loadout = bot.target.loadout.clone();
+                loadout.primary = bot.firearm.item(loadout.primary);
+                let expected_packet = dummy::character_snapshot(
+                    bot.target.object_index,
+                    1,
+                    0,
+                    &loadout,
+                    bot.target.faction,
+                    engine.wire_profile,
+                    &expected,
+                    bot.target.squad,
+                    Some(&physical),
+                )
+                .unwrap();
+                assert_eq!(
+                    snapshot, expected_packet,
+                    "selected external identity must reach the native character snapshot"
+                );
+            }
+            let records: Vec<serde_json::Value> = String::from_utf8(engine.writer.clone())
+                .unwrap()
+                .lines()
+                .map(|l| serde_json::from_str(l).unwrap())
+                .filter(|d: &serde_json::Value| d["op"] == "bot_population_spawn")
+                .collect();
+            assert_eq!(records.len(), 2);
+            assert!(
+                records
+                    .iter()
+                    .all(|r| names.contains(r["name"].as_str().unwrap()))
+            );
+        }
     }
 }

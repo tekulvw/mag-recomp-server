@@ -446,6 +446,20 @@
               "not": {
                 "pattern": "(^|/)\\.\\.(/|$)"
               }
+            },
+            "botNames": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/-]*$",
+                  "not": {
+                    "pattern": "(^|/)\\.\\.(/|$)"
+                  }
+                },
+                {
+                  "const": ""
+                }
+              ]
             }
           }
         },
