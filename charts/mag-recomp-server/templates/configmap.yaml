@@ -1,0 +1,29 @@
+{{- if gt (int .Values.runtime.minimumPlayers) (int .Values.runtime.maximumPlayers) -}}
+{{- fail "runtime.minimumPlayers cannot exceed runtime.maximumPlayers" -}}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mag.name" . }}-scripts
+  labels: {{ include "mag.labels" . | nindent 4 }}
+data:
+  init_config.py: |
+{{ .Files.Get "files/init_config.py" | indent 4 }}
+  {{- if eq .Values.data.mode "s3" }}
+  data_bundle.py: |
+{{ required "chart is missing files/data_bundle.py" (.Files.Get "files/data_bundle.py") | indent 4 }}
+  {{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mag.name" . }}-config
+  labels: {{ include "mag.labels" . | nindent 4 }}
+data:
+{{- range $role := list "main" "maps" }}
+  {{ $role }}.json: |
+    {{- $main := eq $role "main" }}
+    {{- $files := $.Values.data.files }}
+    {{- $config := dict "UsePublicIp" true "PublicIpOverride" $.Values.network.advertisedIPv4 "MASPort" (ternary 10475 10471 $main) "MLSPort" (ternary 10478 10472 $main) "MPSPort" (ternary 10477 10476 $main) "EnableMagPluginAdapter" (not $main) "EnableMagMasAdapter" $main "EnableMagDevelopmentAuth" true "EnableMagCharacterStorage" true "EnableMagAccountLogin" $main "EnableMagCharacterData" $main "EnableMagCharacterCatalogs" true "MagApplicationId" $.Values.runtime.applicationId "MagProtocolVersion" $.Values.runtime.protocolVersion "MagGameType" $.Values.runtime.gameType "MagMinimumPlayers" $.Values.runtime.minimumPlayers "MagMaximumPlayers" $.Values.runtime.maximumPlayers "MagCharacterStorePath" "/accounts/characters.json" "MagItemCatalogPath" (printf "/data/%s" $files.items) "MagLoadoutDefaultsPath" (printf "/data/%s" $files.loadoutDefaults) "MagSkillCatalogPath" (printf "/data/%s" $files.skills) "MagDevelopmentProgressionPath" (printf "/data/%s" $files.developmentProgression) "MediusFileServerRootPath" (printf "/config/%s/files" $role) "PluginsPath" (printf "/config/%s/plugins" $role) "Logging" (dict "LogToConsole" true "LogPath" (printf "/logs/%s/medius.log" $role)) }}
+{{ $config | toPrettyJson | indent 4 }}
+{{- end }}

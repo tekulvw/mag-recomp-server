@@ -1,0 +1,630 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "replicaCount": {
+      "type": "integer",
+      "const": 1
+    },
+    "images": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "medius": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "repository": {
+              "type": "string",
+              "minLength": 1
+            },
+            "tag": {
+              "type": "string",
+              "minLength": 1
+            },
+            "pullPolicy": {
+              "enum": [
+                "Always",
+                "IfNotPresent",
+                "Never"
+              ]
+            }
+          },
+          "required": [
+            "repository",
+            "tag",
+            "pullPolicy"
+          ]
+        },
+        "gameplay": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "repository": {
+              "type": "string",
+              "minLength": 1
+            },
+            "tag": {
+              "type": "string",
+              "minLength": 1
+            },
+            "pullPolicy": {
+              "enum": [
+                "Always",
+                "IfNotPresent",
+                "Never"
+              ]
+            }
+          },
+          "required": [
+            "repository",
+            "tag",
+            "pullPolicy"
+          ]
+        },
+        "awsCli": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "repository": {
+              "type": "string",
+              "minLength": 1
+            },
+            "tag": {
+              "type": "string",
+              "minLength": 1
+            },
+            "pullPolicy": {
+              "enum": [
+                "Always",
+                "IfNotPresent",
+                "Never"
+              ]
+            }
+          },
+          "required": [
+            "repository",
+            "tag",
+            "pullPolicy"
+          ]
+        },
+        "python": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "repository": {
+              "type": "string",
+              "minLength": 1
+            },
+            "tag": {
+              "type": "string",
+              "minLength": 1
+            },
+            "pullPolicy": {
+              "enum": [
+                "Always",
+                "IfNotPresent",
+                "Never"
+              ]
+            }
+          },
+          "required": [
+            "repository",
+            "tag",
+            "pullPolicy"
+          ]
+        }
+      }
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "name"
+        ]
+      }
+    },
+    "nodeSelector": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "tolerations": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "affinity": {
+      "type": "object"
+    },
+    "network": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "advertisedIPv4": {
+          "type": "string",
+          "pattern": "^(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$"
+        },
+        "authDns": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.-]*$"
+        },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "externalTrafficPolicy": {
+          "enum": [
+            "Cluster",
+            "Local"
+          ]
+        },
+        "mapsPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "not": {
+            "enum": [
+              10475,
+              10478,
+              10477,
+              10472,
+              10476,
+              10473
+            ]
+          }
+        }
+      },
+      "required": [
+        "advertisedIPv4",
+        "authDns"
+      ]
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "existingSecret": {
+          "type": "string",
+          "minLength": 1
+        },
+        "revision": {
+          "type": "string"
+        },
+        "applicationId": {
+          "enum": [
+            20230,
+            20231
+          ]
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "gameType": {
+          "enum": [
+            0,
+            2,
+            3
+          ]
+        },
+        "minimumPlayers": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8
+        },
+        "maximumPlayers": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8
+        }
+      },
+      "required": [
+        "existingSecret"
+      ]
+    },
+    "accounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "existingClaim": {
+          "type": "string"
+        },
+        "size": {
+          "type": "string",
+          "minLength": 1
+        },
+        "storageClass": {
+          "type": "string"
+        },
+        "accessModes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {
+            "enum": [
+              "ReadWriteOnce",
+              "ReadWriteOncePod"
+            ]
+          }
+        }
+      }
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": [
+            "existingClaim",
+            "s3"
+          ]
+        },
+        "existingClaim": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "emptyDirSizeLimit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "s3": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "endpoint": {
+              "type": "string",
+              "pattern": "^$|^https?://[^\\s]+$"
+            },
+            "region": {
+              "type": "string",
+              "minLength": 1
+            },
+            "bucket": {
+              "type": "string"
+            },
+            "key": {
+              "type": "string"
+            },
+            "versionId": {
+              "type": "string"
+            },
+            "sha256": {
+              "type": "string"
+            },
+            "existingSecret": {
+              "type": "string"
+            },
+            "forcePathStyle": {
+              "type": "boolean"
+            }
+          }
+        },
+        "files": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "items": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/-]*$",
+              "not": {
+                "pattern": "(^|/)\\.\\.(/|$)"
+              }
+            },
+            "spawns": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/-]*$",
+              "not": {
+                "pattern": "(^|/)\\.\\.(/|$)"
+              }
+            },
+            "wireProfiles": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/-]*$",
+              "not": {
+                "pattern": "(^|/)\\.\\.(/|$)"
+              }
+            },
+            "skills": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/-]*$",
+              "not": {
+                "pattern": "(^|/)\\.\\.(/|$)"
+              }
+            },
+            "loadoutDefaults": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/-]*$",
+              "not": {
+                "pattern": "(^|/)\\.\\.(/|$)"
+              }
+            },
+            "developmentProgression": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/-]*$",
+              "not": {
+                "pattern": "(^|/)\\.\\.(/|$)"
+              }
+            },
+            "trainingCompletion": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/-]*$",
+              "not": {
+                "pattern": "(^|/)\\.\\.(/|$)"
+              }
+            },
+            "progression": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/-]*$",
+              "not": {
+                "pattern": "(^|/)\\.\\.(/|$)"
+              }
+            },
+            "retailSkills": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/-]*$",
+              "not": {
+                "pattern": "(^|/)\\.\\.(/|$)"
+              }
+            },
+            "retailArmory": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/-]*$",
+              "not": {
+                "pattern": "(^|/)\\.\\.(/|$)"
+              }
+            }
+          }
+        },
+        "gameplayExtraArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "s3"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "s3": {
+                "required": [
+                  "bucket",
+                  "key",
+                  "sha256",
+                  "existingSecret"
+                ],
+                "properties": {
+                  "bucket": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "key": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[a-fA-F0-9]{64}$"
+                  },
+                  "existingSecret": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "existingClaim"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "existingClaim": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "gameplay": {
+          "type": "object"
+        },
+        "medius": {
+          "type": "object"
+        },
+        "maps": {
+          "type": "object"
+        },
+        "init": {
+          "type": "object"
+        }
+      }
+    },
+    "logs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sizeLimit": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "dns": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "image": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "repository": {
+              "type": "string",
+              "minLength": 1
+            },
+            "tag": {
+              "type": "string",
+              "minLength": 1
+            },
+            "pullPolicy": {
+              "enum": [
+                "Always",
+                "IfNotPresent",
+                "Never"
+              ]
+            }
+          },
+          "required": [
+            "repository",
+            "tag",
+            "pullPolicy"
+          ]
+        },
+        "answerIPv4": {
+          "type": "string"
+        },
+        "hostnames": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "maxLength": 253,
+            "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+\\.?$"
+          }
+        },
+        "upstreams": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^(/etc/resolv\\.conf|(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(:([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?)$"
+          }
+        },
+        "service": {
+          "type": "object"
+        },
+        "resources": {
+          "type": "object"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "answerIPv4": {
+                "type": "string",
+                "pattern": "^(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$"
+              },
+              "hostnames": {
+                "minItems": 1
+              },
+              "service": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "type": {
+                    "enum": [
+                      "LoadBalancer",
+                      "ClusterIP"
+                    ]
+                  },
+                  "loadBalancerIP": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$"
+                      },
+                      {
+                        "const": ""
+                      }
+                    ]
+                  },
+                  "annotations": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  },
+                  "loadBalancerSourceRanges": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/([0-9]|[12][0-9]|3[0-2])$"
+                    }
+                  }
+                },
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {
+                        "type": {
+                          "const": "LoadBalancer"
+                        }
+                      }
+                    },
+                    "then": {
+                      "properties": {
+                        "loadBalancerSourceRanges": {
+                          "minItems": 1
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft-07/schema#"
+}

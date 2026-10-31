@@ -1,0 +1,193 @@
+{{- range $component := list "gameplay" "medius" }}
+{{- $root := $ }}
+{{- $medius := eq $component "medius" }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "mag.name" $ }}-{{ $component }}
+  labels:
+    {{- include "mag.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ $.Release.Name }}
+      app.kubernetes.io/component: {{ $component }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mag-recomp-server
+        app.kubernetes.io/instance: {{ $.Release.Name }}
+        app.kubernetes.io/component: {{ $component }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") $ | sha256sum }}
+        runtime-revision: {{ $.Values.runtime.revision | quote }}
+        data-revision: {{ $.Values.data.revision | quote }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: {type: RuntimeDefault}
+      {{- with $.Values.imagePullSecrets }}
+      imagePullSecrets: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      nodeSelector: {{ toYaml $.Values.nodeSelector | nindent 8 }}
+      {{- with $.Values.tolerations }}
+      tolerations: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $.Values.affinity }}
+      affinity: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if or $medius (eq $.Values.data.mode "s3") }}
+      initContainers:
+        {{- include "mag.dataInit" $ | nindent 8 }}
+        {{- if $medius }}
+        - name: prepare-config
+          image: {{ include "mag.image" $.Values.images.python }}
+          imagePullPolicy: {{ $.Values.images.python.pullPolicy }}
+          command: [python3, /scripts/init_config.py]
+          args: [/public-config, /runtime-secrets, /config]
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          resources: {{ toYaml $.Values.resources.init | nindent 12 }}
+          volumeMounts:
+            - {name: scripts, mountPath: /scripts, readOnly: true}
+            - {name: public-config, mountPath: /public-config, readOnly: true}
+            - {name: runtime-secrets, mountPath: /runtime-secrets, readOnly: true}
+            - {name: config, mountPath: /config}
+        {{- end }}
+      {{- end }}
+      containers:
+        {{- if $medius }}
+        {{- range $role := list "medius" "maps" }}
+        {{- $main := eq $role "medius" }}
+        - name: {{ $role }}
+          image: {{ include "mag.image" $root.Values.images.medius }}
+          imagePullPolicy: {{ $root.Values.images.medius.pullPolicy }}
+          workingDir: /app/medius
+          command: [/bin/sh, -ec]
+          args:
+            - |
+              mkdir -p /logs/{{ ternary "main" "maps" $main }}
+              exec dotnet /app/medius/Server.Medius.dll /config/{{ ternary "main" "maps" $main }}
+          env:
+            - {name: HORIZON_SCERT_MAS_CERTIFICATE_PATH, value: /runtime-secrets/scert-mas-certificate.bin}
+            - {name: HORIZON_SCERT_MLS_CERTIFICATE_PATH, value: /runtime-secrets/scert-mls-certificate.bin}
+            - {name: HOME, value: /config}
+            - {name: DOTNET_CLI_HOME, value: /config}
+            - {name: MAG_ADVERTISE_IPV4, value: {{ $root.Values.network.advertisedIPv4 | quote }}}
+            - {name: MAG_AUTH_DNS, value: {{ $root.Values.network.authDns | quote }}}
+            - {name: MAG_AUTH_PORT, value: "10475"}
+            - {name: MAG_LOBBY_PORT, value: "10478"}
+            - {name: MAG_GAME_TCP_PORT, value: "10473"}
+            {{- if $main }}
+            - {name: MAG_LOCAL_DME, value: "1"}
+            - {name: MAG_GAMEPLAY_HOST, value: {{ printf "%s-gameplay" (include "mag.name" $root) | quote }}}
+            - {name: MAG_GAMEPLAY_PORT, value: "31000"}
+            {{- end }}
+            {{- range $env, $file := dict "MAG_TRAINING_COMPLETION_CATALOG" "trainingCompletion" "MAG_PROGRESSION_CATALOG" "progression" "MAG_RETAIL_SKILL_CATALOG" "retailSkills" "MAG_RETAIL_ARMORY_CATALOG" "retailArmory" }}
+            {{- if or (not (hasPrefix "MAG_RETAIL_" $env)) (eq (int $root.Values.runtime.applicationId) 20231) }}
+            - {name: {{ $env }}, value: {{ printf "/data/%s" (index $root.Values.data.files $file) | quote }}}
+            {{- end }}
+            {{- end }}
+          ports:
+            {{- if $main }}
+            - {name: auth, containerPort: 10475, protocol: TCP}
+            - {name: lobby, containerPort: 10478, protocol: TCP}
+            - {name: proxy, containerPort: 10477, protocol: TCP}
+            - {name: game-tcp, containerPort: 10073, protocol: TCP}
+            - {name: game-udp, containerPort: 10474, protocol: UDP}
+            {{- else }}
+            - {name: maps-auth, containerPort: 10471, protocol: TCP}
+            - {name: maps-lobby, containerPort: 10472, protocol: TCP}
+            - {name: maps-proxy, containerPort: 10476, protocol: TCP}
+            {{- end }}
+          startupProbe:
+            tcpSocket: {port: {{ ternary "auth" "maps-auth" $main }}}
+            periodSeconds: 2
+            failureThreshold: 90
+          readinessProbe:
+            tcpSocket: {port: {{ ternary "auth" "maps-auth" $main }}}
+            periodSeconds: 5
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          resources: {{ toYaml (index $root.Values.resources $role) | nindent 12 }}
+          volumeMounts:
+            - {name: data, mountPath: /data, readOnly: true}
+            - {name: accounts, mountPath: /accounts, readOnly: {{ not $main }}}
+            - {name: config, mountPath: /config}
+            - {name: runtime-secrets, mountPath: /runtime-secrets, readOnly: true}
+            - {name: logs, mountPath: /logs}
+            - {name: tmp, mountPath: /tmp}
+        {{- end }}
+        {{- else }}
+        - name: gameplay
+          image: {{ include "mag.image" $.Values.images.gameplay }}
+          imagePullPolicy: {{ $.Values.images.gameplay.pullPolicy }}
+          command: [/bin/sh, -ec]
+          args:
+            - |
+              run_dir=$(mktemp -d /logs/run.XXXXXXXXXX)
+              exec /usr/local/bin/mag-gameplay --bind 0.0.0.0:31000 --log "$run_dir/events.jsonl" --item-catalog "$ITEMS" --spawn-catalog "$SPAWNS" --wire-profiles "$WIRES" --skill-catalog "$SKILLS" "$@"
+            - mag-gameplay
+            {{- range $.Values.data.gameplayExtraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          env:
+            - {name: ITEMS, value: {{ printf "/data/%s" $.Values.data.files.items | quote }}}
+            - {name: SPAWNS, value: {{ printf "/data/%s" $.Values.data.files.spawns | quote }}}
+            - {name: WIRES, value: {{ printf "/data/%s" $.Values.data.files.wireProfiles | quote }}}
+            - {name: SKILLS, value: {{ printf "/data/%s" $.Values.data.files.skills | quote }}}
+          ports:
+            - {name: bridge, containerPort: 31000, protocol: TCP}
+          startupProbe:
+            tcpSocket: {port: bridge}
+            periodSeconds: 2
+            failureThreshold: 90
+          readinessProbe:
+            tcpSocket: {port: bridge}
+            periodSeconds: 5
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          resources: {{ toYaml $.Values.resources.gameplay | nindent 12 }}
+          volumeMounts:
+            - {name: data, mountPath: /data, readOnly: true}
+            - {name: logs, mountPath: /logs}
+            - {name: tmp, mountPath: /tmp}
+        {{- end }}
+      volumes:
+        {{- include "mag.dataVolume" $ | nindent 8 }}
+        - name: logs
+          emptyDir: {sizeLimit: {{ $.Values.logs.sizeLimit }}}
+        - name: tmp
+          emptyDir: {}
+        {{- if or $medius (eq $.Values.data.mode "s3") }}
+        - name: scripts
+          configMap:
+            name: {{ include "mag.name" $ }}-scripts
+        {{- end }}
+        {{- if eq $.Values.data.mode "s3" }}
+        - name: archive
+          emptyDir: {sizeLimit: {{ $.Values.data.emptyDirSizeLimit }}}
+        - name: init-work
+          emptyDir: {}
+        {{- end }}
+        {{- if $medius }}
+        - name: accounts
+          persistentVolumeClaim:
+            claimName: {{ include "mag.accountClaim" $ }}
+        - name: config
+          emptyDir: {}
+        - name: public-config
+          configMap:
+            name: {{ include "mag.name" $ }}-config
+        - name: runtime-secrets
+          secret:
+            secretName: {{ $.Values.runtime.existingSecret }}
+            defaultMode: 0440
+        {{- end }}
+{{- end }}

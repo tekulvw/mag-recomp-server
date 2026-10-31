@@ -209,4 +209,36 @@ Test("public address is explicit external configuration without network discover
     finally { Environment.SetEnvironmentVariable(variable, previous); }
 });
 
+Test("advertised endpoints validate independently from listener ports", () =>
+{
+    var defaults = MagNetworkSettings.Load(_ => null);
+    Check(defaults.Address.ToString() == "127.0.0.1" && defaults.AuthPort == 10475 &&
+        defaults.LobbyPort == 10478 && defaults.GameTcpPort == 10473, "Legacy defaults");
+    var values = new Dictionary<string, string> { ["MAG_ADVERTISE_IPV4"] = "203.0.113.10",
+        ["MAG_AUTH_DNS"] = "auth.example.invalid", ["MAG_AUTH_PORT"] = "11475",
+        ["MAG_LOBBY_PORT"] = "11478", ["MAG_GAME_TCP_PORT"] = "11473" };
+    string Read(string key) => values.GetValueOrDefault(key);
+    var configured = MagNetworkSettings.Load(Read);
+    Check(configured.Address.ToString() == "203.0.113.10" && configured.AuthDns == "auth.example.invalid" &&
+        configured.AuthPort == 11475 && configured.LobbyPort == 11478 && configured.GameTcpPort == 11473, "External endpoints");
+    var previous = values.Keys.ToDictionary(key => key, Environment.GetEnvironmentVariable);
+    try
+    {
+        foreach (var pair in values) Environment.SetEnvironmentVariable(pair.Key, pair.Value);
+        var response = new MagLoginRegistry().Issue(1, 1, DateTime.UtcNow).CreateResponse(1);
+        Check(System.Text.Encoding.ASCII.GetString(response.ServerAddress).TrimEnd('\0') == "203.0.113.10" &&
+            response.ServerPort == 11478, "Login response uses advertised endpoint");
+    }
+    finally
+    { foreach (var pair in previous) Environment.SetEnvironmentVariable(pair.Key, pair.Value); }
+    foreach (string bad in new[] { "0.0.0.0", "127.1", "::1", "256.1.2.3", "224.1.2.3", " 203.0.113.10" })
+    { values["MAG_ADVERTISE_IPV4"] = bad; Throws<ArgumentException>(() => MagNetworkSettings.Load(Read)); }
+    values["MAG_ADVERTISE_IPV4"] = "203.0.113.10";
+    foreach (string bad in new[] { "0", "65536", "-1", " 10475" })
+    { values["MAG_AUTH_PORT"] = bad; Throws<ArgumentException>(() => MagNetworkSettings.Load(Read)); }
+    values["MAG_AUTH_PORT"] = "10475";
+    foreach (string bad in new[] { "", "https://auth.example.invalid/", "auth.example.invalid/path" })
+    { values["MAG_AUTH_DNS"] = bad; Throws<ArgumentException>(() => MagNetworkSettings.Load(Read)); }
+});
+
 Console.WriteLine($"{passed} synthetic checks passed; no service or game started.");

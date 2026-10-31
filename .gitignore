@@ -4,6 +4,7 @@
 .vs/
 .vscode/
 .idea/
+.venv/
 *.suo
 *.user
 *.rsuser
@@ -90,3 +91,10 @@ database/
 # Generated extraction output is private runtime material.
 /extracted/
 /generated-data/
+
+# Private data bundles and packaged Helm output are generated artifacts.
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+/bundles/

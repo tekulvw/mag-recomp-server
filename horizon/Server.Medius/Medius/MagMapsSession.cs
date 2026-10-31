@@ -114,7 +114,8 @@ namespace Server.Medius
             // Retail8D2D0/8CAF0 confirms this field order; runtime acceptance remains separate.
             MagUniverseListResponse response = retail ? new MagRetailUniverseListResponse() : new MagUniverseListResponse();
             response.TransactionId = transactionId; response.UniverseId = 26; response.Name = "Local MAG Test";
-            response.AuthDns = "mag.test"; response.AuthIp = "127.0.0.1"; response.AuthPort = 10475;
+            var network = MagNetworkSettings.FromEnvironment();
+            response.AuthDns = network.AuthDns; response.AuthIp = network.Address.ToString(); response.AuthPort = network.AuthPort;
             response.SvoUrl = Program.Settings.MagSvoUrl; response.Success = true; response.IsLast = true;
             return response;
         }

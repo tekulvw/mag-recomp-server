@@ -23,8 +23,9 @@ namespace Server.Medius
             MagAccountLoginResponse response = ApplicationId == 20231
                 ? new MagRetailAccountLoginResponse() : new MagAccountLoginResponse();
             response.TransactionId = transactionId; response.LobbyWorldUid = 1; response.AccountId = AccountId;
-            response.ConnectionType = 1; response.AddressType = 1; response.ServerAddress = FixedAscii("127.0.0.1", 16);
-            response.ServerPort = 10478; response.WorldId = WorldId;
+            var network = MagNetworkSettings.FromEnvironment();
+            response.ConnectionType = 1; response.AddressType = 1; response.ServerAddress = FixedAscii(network.Address.ToString(), 16);
+            response.ServerPort = network.LobbyPort; response.WorldId = WorldId;
             response.AccessKey = FixedAscii(AccessToken, 17); response.SessionKey = FixedAscii(SessionKey, 17); response.Result = 1;
             return response;
         }

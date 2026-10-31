@@ -1,0 +1,112 @@
+# Chart releases and application image tags are independently versioned.
+replicaCount: 1
+images:
+  medius:
+    repository: ghcr.io/tekulvw/mag-recomp-server-medius
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  gameplay:
+    repository: ghcr.io/tekulvw/mag-recomp-server-game
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  awsCli:
+    repository: public.ecr.aws/aws-cli/aws-cli
+    tag: "2.31.15"
+    pullPolicy: IfNotPresent
+  python:
+    repository: python
+    tag: "3.13.7-slim"
+    pullPolicy: IfNotPresent
+imagePullSecrets: []
+nodeSelector:
+  kubernetes.io/arch: amd64
+tolerations: []
+affinity: {}
+network:
+  # Required: address clients can reach, also provisioned/routed by your LB controller.
+  advertisedIPv4: ""
+  authDns: ""
+  # Match the original client MAPS endpoint port when using a DNS-only redirect.
+  mapsPort: 10471
+  annotations: {}
+  externalTrafficPolicy: Cluster
+runtime:
+  # Existing Secret with medius-keys.json; never put RSA material in Helm values.
+  existingSecret: ""
+  # Bump on external Secret rotation to roll Pods.
+  revision: "1"
+  applicationId: 20230
+  protocolVersion: 1725
+  gameType: 2
+  minimumPlayers: 1
+  maximumPlayers: 8
+accounts:
+  existingClaim: ""
+  size: 1Gi
+  # Empty uses the cluster default. Private homelabs should use their block CSI class.
+  storageClass: ""
+  accessModes: [ReadWriteOnce]
+data:
+  mode: existingClaim
+  # Must contain the files below at its root. Needs RWX when Pods use different nodes.
+  existingClaim: mag-runtime-data
+  revision: "1"
+  emptyDirSizeLimit: 8Gi
+  s3:
+    endpoint: ""
+    region: us-east-1
+    bucket: ""
+    key: ""
+    versionId: ""
+    sha256: ""
+    existingSecret: ""
+    forcePathStyle: true
+  files:
+    items: items.json
+    spawns: spawns.json
+    wireProfiles: wire-profiles.json
+    skills: skills.json
+    loadoutDefaults: loadout-defaults.json
+    developmentProgression: development-progression.json
+    trainingCompletion: training-completion.json
+    progression: progression.json
+    retailSkills: retail-skills.json
+    retailArmory: retail-armory.json
+  # Optional gameplay flags in addition to required catalog paths. Use /data/<path>.
+  gameplayExtraArgs: []
+resources:
+  gameplay:
+    requests: {cpu: 250m, memory: 256Mi}
+    limits: {memory: 2Gi}
+  medius:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {memory: 1Gi}
+  maps:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {memory: 1Gi}
+  init:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {memory: 1Gi}
+logs:
+  sizeLimit: 2Gi
+
+# Optional targeted forwarding resolver. No original hostnames are guessed.
+dns:
+  enabled: false
+  image:
+    repository: registry.k8s.io/coredns/coredns
+    tag: "v1.12.4"
+    pullPolicy: IfNotPresent
+  answerIPv4: ""
+  hostnames: []
+  # /etc/resolv.conf uses the cluster resolver. Never point it back to this service.
+  upstreams: [/etc/resolv.conf]
+  service:
+    type: LoadBalancer
+    loadBalancerIP: ""
+    annotations: {}
+    # Required when DNS is enabled with a LoadBalancer; limit to your LAN/VPN.
+    loadBalancerSourceRanges: []
+  resources:
+    requests: {cpu: 25m, memory: 32Mi}
+    limits: {memory: 128Mi}

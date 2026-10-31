@@ -5,7 +5,15 @@
   "bump-minor-pre-major": true,
   "include-v-in-tag": true,
   "include-component-in-tag": false,
+  "separate-pull-requests": true,
   "packages": {
-    ".": {}
+    ".": {
+      "exclude-paths": ["charts/mag-recomp-server"]
+    },
+    "charts/mag-recomp-server": {
+      "release-type": "helm",
+      "component": "chart",
+      "include-component-in-tag": true
+    }
   }
 }

@@ -1,0 +1,6 @@
+# Synthetic inputs for offline chart validation; no Secret or runtime data is embedded.
+network:
+  advertisedIPv4: 203.0.113.10
+  authDns: auth.example.invalid
+runtime:
+  existingSecret: mag-runtime-keys
