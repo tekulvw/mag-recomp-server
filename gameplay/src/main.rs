@@ -4,7 +4,7 @@ use mag_gameplay::{
     Engine, EngineResources, IO_DEADLINE, MAX_LOG, Response, parse_request, read_line,
 };
 use std::fs::OpenOptions;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
@@ -783,17 +783,12 @@ fn serve_subscription(
     static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
     {
-        let mut guard = shared.lock().map_err(|_| ConnectionFailure {
-            stage: ConnectionStage::WriteResponse,
-            kind: io::ErrorKind::Other,
-        })?;
-        if guard.is_some() {
-            drop(guard);
+        let Some(mut guard) = vacant_subscriber_slot(&shared)? else {
             return write_response(
                 &mut stream,
                 &Response::error(request.request_id, "world_subscription_exists"),
             );
-        }
+        };
         let mut engine = engine.lock().map_err(|_| ConnectionFailure {
             stage: ConnectionStage::WriteResponse,
             kind: io::ErrorKind::Other,
@@ -828,36 +823,112 @@ fn serve_subscription(
     }
     // Persistent subscriptions have their own single slot, separate from request workers.
     drop(slot);
-    let result = (|| {
-        loop {
-            if shared
-                .lock()
-                .ok()
-                .is_none_or(|guard| !guard.as_ref().is_some_and(|s| s.generation == generation))
-            {
+    forward_subscription(stream, shared, generation, receiver)
+}
+
+// Keep the occupancy check and registration under the same lock: a new
+// connection can never replace a live subscription, even during reconnects.
+fn vacant_subscriber_slot(
+    shared: &SharedSubscriber,
+) -> Result<Option<std::sync::MutexGuard<'_, Option<WorldSubscriber>>>, ConnectionFailure> {
+    let guard = shared.lock().map_err(|_| ConnectionFailure {
+        stage: ConnectionStage::WriteResponse,
+        kind: io::ErrorKind::Other,
+    })?;
+    Ok(if guard.is_none() { Some(guard) } else { None })
+}
+
+fn forward_subscription(
+    mut stream: TcpStream,
+    shared: SharedSubscriber,
+    generation: u64,
+    receiver: mpsc::Receiver<Response>,
+) -> Result<(), ConnectionFailure> {
+    let _owner = SubscriptionOwner {
+        shared: Arc::clone(&shared),
+        generation,
+    };
+    // A peer can send FIN while its read side continues accepting every
+    // heartbeat. Poll the read side too; successful writes cannot detect that.
+    // The subscription owns both TCP directions: read-side EOF ends ownership,
+    // including a peer half-close that keeps consuming responses.
+    stream
+        .set_read_timeout(Some(Duration::from_millis(1)))
+        .map_err(|error| ConnectionFailure::io(ConnectionStage::ReadRequest, error))?;
+    let mut frame_deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if shared
+            .lock()
+            .ok()
+            .is_none_or(|guard| !guard.as_ref().is_some_and(|s| s.generation == generation))
+        {
+            return Err(ConnectionFailure {
+                stage: ConnectionStage::WriteResponse,
+                kind: io::ErrorKind::ConnectionAborted,
+            });
+        }
+        let mut incoming = [0u8; 1];
+        match stream.read(&mut incoming) {
+            Ok(0) => {
+                return Err(ConnectionFailure {
+                    stage: ConnectionStage::ReadRequest,
+                    kind: io::ErrorKind::ConnectionAborted,
+                });
+            }
+            Ok(_) => {
+                return Err(ConnectionFailure {
+                    stage: ConnectionStage::ReadRequest,
+                    kind: io::ErrorKind::InvalidData,
+                });
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::TimedOut
+                        | io::ErrorKind::WouldBlock
+                        | io::ErrorKind::Interrupted
+                ) => {}
+            Err(error) => return Err(ConnectionFailure::io(ConnectionStage::ReadRequest, error)),
+        }
+        let remaining = frame_deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(ConnectionFailure {
+                stage: ConnectionStage::WriteResponse,
+                kind: io::ErrorKind::ConnectionAborted,
+            });
+        }
+        match receiver.recv_timeout(remaining.min(Duration::from_millis(100))) {
+            Ok(response) => {
+                write_response(&mut stream, &response)?;
+                frame_deadline = Instant::now() + Duration::from_secs(2);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
                 return Err(ConnectionFailure {
                     stage: ConnectionStage::WriteResponse,
                     kind: io::ErrorKind::ConnectionAborted,
                 });
             }
-            match receiver.recv_timeout(Duration::from_secs(2)) {
-                Ok(response) => write_response(&mut stream, &response)?,
-                Err(_) => {
-                    return Err(ConnectionFailure {
-                        stage: ConnectionStage::WriteResponse,
-                        kind: io::ErrorKind::ConnectionAborted,
-                    });
-                }
-            }
         }
-    })();
-    if let Ok(mut guard) = shared.lock()
-        && guard.as_ref().is_some_and(|s| s.generation == generation)
-    {
-        *guard = None;
     }
-    result
 }
+
+struct SubscriptionOwner {
+    shared: SharedSubscriber,
+    generation: u64,
+}
+impl Drop for SubscriptionOwner {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.shared.lock()
+            && guard
+                .as_ref()
+                .is_some_and(|s| s.generation == self.generation)
+        {
+            *guard = None;
+        }
+    }
+}
+
 fn spawn_world_scheduler(
     engine: Arc<Mutex<Engine<std::fs::File>>>,
     subscriber: SharedSubscriber,
@@ -941,4 +1012,181 @@ fn spawn_world_scheduler(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod subscription_tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Shutdown};
+    use std::sync::atomic::AtomicBool;
+
+    fn response() -> Response {
+        Response {
+            v: mag_gameplay::BRIDGE_VERSION,
+            request_id: "synthetic-world-stream".into(),
+            ok: true,
+            error: None,
+            messages: Vec::new(),
+            rewards: Vec::new(),
+            match_terminal: None,
+        }
+    }
+
+    fn sockets() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let client =
+            TcpStream::connect_timeout(&listener.local_addr().unwrap(), Duration::from_secs(1))
+                .unwrap();
+        let (server, _) = listener.accept().unwrap();
+        (client, server)
+    }
+
+    fn register(
+        shared: &SharedSubscriber,
+        generation: u64,
+    ) -> (SyncSender<Response>, mpsc::Receiver<Response>) {
+        let (sender, receiver) = mpsc::sync_channel(32);
+        let mut guard = vacant_subscriber_slot(shared)
+            .ok()
+            .flatten()
+            .expect("vacant subscriber");
+        *guard = Some(WorldSubscriber {
+            generation,
+            world_id: 1,
+            request_id: "synthetic-world-stream".into(),
+            sender: sender.clone(),
+        });
+        (sender, receiver)
+    }
+
+    #[test]
+    fn peer_fin_releases_subscription_while_heartbeats_keep_writing() {
+        let (client, server) = sockets();
+        let shared = Arc::new(Mutex::new(None));
+        let (sender, receiver) = register(&shared, 1);
+        assert!(
+            vacant_subscriber_slot(&shared).ok().flatten().is_none(),
+            "a live owner must reject another registration"
+        );
+        let running = Arc::new(AtomicBool::new(true));
+        let pulse = Arc::clone(&running);
+        let heartbeat = std::thread::spawn(move || {
+            while pulse.load(Ordering::Acquire) {
+                if sender.try_send(response()).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let worker_shared = Arc::clone(&shared);
+        let worker =
+            std::thread::spawn(move || forward_subscription(server, worker_shared, 1, receiver));
+        // FIN leaves the peer's read side open: all tiny heartbeats can still
+        // write successfully. Only checking writes/queue timeouts misses it.
+        client.shutdown(Shutdown::Write).unwrap();
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while shared.lock().unwrap().is_some() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let released = shared.lock().unwrap().is_none();
+        running.store(false, Ordering::Release);
+        *shared.lock().unwrap() = None;
+        heartbeat.join().unwrap();
+        let _ = worker.join().unwrap();
+        assert!(
+            released,
+            "peer FIN must release the owner despite successful heartbeat writes"
+        );
+
+        // Exercise a replacement through the same atomic slot reservation and
+        // forwarding loop: its first acknowledgement must reach the new peer.
+        let (mut replacement, server) = sockets();
+        let (sender, receiver) = register(&shared, 2);
+        sender.send(response()).unwrap();
+        let worker_shared = Arc::clone(&shared);
+        let worker =
+            std::thread::spawn(move || forward_subscription(server, worker_shared, 2, receiver));
+        let line = mag_gameplay::read_line(&mut replacement, Duration::from_secs(1)).unwrap();
+        let reply: Response = serde_json::from_slice(&line).unwrap();
+        assert!(reply.ok);
+        assert_eq!(reply.request_id, "synthetic-world-stream");
+        replacement.shutdown(Shutdown::Write).unwrap();
+        assert!(worker.join().unwrap().is_err());
+        assert!(shared.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn idle_read_timeout_keeps_the_active_subscription_exclusive() {
+        let (client, server) = sockets();
+        let shared = Arc::new(Mutex::new(None));
+        let (_sender, receiver) = register(&shared, 1);
+        let worker_shared = Arc::clone(&shared);
+        let worker =
+            std::thread::spawn(move || forward_subscription(server, worker_shared, 1, receiver));
+        std::thread::sleep(Duration::from_millis(250));
+        assert!(vacant_subscriber_slot(&shared).ok().flatten().is_none());
+        client.shutdown(Shutdown::Write).unwrap();
+        assert!(worker.join().unwrap().is_err());
+        assert!(shared.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn missing_scheduler_frames_still_expire_the_subscription() {
+        let (_client, server) = sockets();
+        let shared = Arc::new(Mutex::new(None));
+        let (_sender, receiver) = register(&shared, 1);
+        let began = Instant::now();
+        let failure = forward_subscription(server, Arc::clone(&shared), 1, receiver)
+            .err()
+            .unwrap();
+        assert!(began.elapsed() >= Duration::from_secs(2));
+        assert!(began.elapsed() < Duration::from_secs(3));
+        assert_eq!(failure.kind, io::ErrorKind::ConnectionAborted);
+        assert!(shared.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn unexpected_subscription_input_releases_its_owner() {
+        let (mut client, server) = sockets();
+        let shared = Arc::new(Mutex::new(None));
+        let (_sender, receiver) = register(&shared, 1);
+        client.write_all(b"x").unwrap();
+        let failure = forward_subscription(server, Arc::clone(&shared), 1, receiver)
+            .err()
+            .unwrap();
+        assert_eq!(failure.kind, io::ErrorKind::InvalidData);
+        assert_eq!(failure.diagnostic()["category"], "invalid_framing");
+        assert!(shared.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn unwinding_subscription_owner_releases_the_slot() {
+        let shared = Arc::new(Mutex::new(None));
+        let (_sender, _receiver) = register(&shared, 1);
+        let worker_shared = Arc::clone(&shared);
+        let result = std::panic::catch_unwind(move || {
+            let _owner = SubscriptionOwner {
+                shared: worker_shared,
+                generation: 1,
+            };
+            panic!("synthetic subscription worker failure");
+        });
+        assert!(result.is_err());
+        assert!(shared.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn late_cleanup_cannot_remove_a_newer_generation() {
+        let shared = Arc::new(Mutex::new(None));
+        let (_sender, _receiver) = register(&shared, 1);
+        let old_owner = SubscriptionOwner {
+            shared: Arc::clone(&shared),
+            generation: 1,
+        };
+        // The scheduler can retire an old generation before its writer exits.
+        *shared.lock().unwrap() = None;
+        let (_sender, _receiver) = register(&shared, 2);
+        drop(old_owner);
+        assert_eq!(shared.lock().unwrap().as_ref().unwrap().generation, 2);
+    }
 }
