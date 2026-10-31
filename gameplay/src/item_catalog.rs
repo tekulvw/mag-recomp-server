@@ -1,4 +1,4 @@
-//! Validated authored prototype parameters, loaded once before accepting clients.
+//! Validated authored equipment, loaded once before accepting clients.
 //! The raw catalog retains every extracted item; typed views cover only equipment
 //! whose runtime authority and native formulas have already been established.
 use serde_json::Value;
@@ -67,7 +67,8 @@ pub struct GrenadeParameters {
 pub struct ItemCatalog {
     raw: Value,
     character_blast_rules: crate::blast_rules::CharacterBlastRules,
-    valor_defaults: crate::loadouts::SavedLoadouts,
+    valor_defaults: Option<crate::loadouts::SavedLoadouts>,
+    retail_item_refs: BTreeMap<u16, String>,
     bootstrap_loadouts: Option<crate::bootstrap_loadouts::BootstrapLoadouts>,
     retail_combat: Option<crate::retail_combat::RetailCombatCatalog>,
     retail_armory: Option<crate::retail_armory::RetailArmory>,
@@ -154,6 +155,152 @@ impl ItemCatalog {
             Self::read_defaults(defaults_path)?,
             crate::blast_rules::CharacterBlastRules::load(rules_path)?,
         )
+    }
+    /// Select the catalog schema explicitly. Retail never reads prototype defaults.
+    pub fn load_for_application(
+        path: impl AsRef<Path>,
+        rules_path: impl AsRef<Path>,
+        application_id: u32,
+    ) -> io::Result<Self> {
+        match application_id {
+            20230 => Self::load_with_blast_rules(path, rules_path),
+            20231 => {
+                let raw = serde_json::from_reader(io::BufReader::new(std::fs::File::open(path)?))
+                    .map_err(|e| invalid(e.to_string()))?;
+                Self::from_value_for_application(
+                    raw,
+                    crate::blast_rules::CharacterBlastRules::load(rules_path)?,
+                    application_id,
+                )
+            }
+            _ => Err(invalid("unsupported item catalog application")),
+        }
+    }
+    pub fn from_value_for_application(
+        raw: Value,
+        character_blast_rules: crate::blast_rules::CharacterBlastRules,
+        application_id: u32,
+    ) -> io::Result<Self> {
+        let schema = match application_id {
+            20230 => 1,
+            20231 => 2,
+            _ => return Err(invalid("unsupported item catalog application")),
+        };
+        if raw.get("schema_version").and_then(Value::as_u64) != Some(schema)
+            || raw.get("application_id").and_then(Value::as_u64) != Some(u64::from(application_id))
+        {
+            return Err(invalid("unsupported item catalog schema/application"));
+        }
+        if application_id == 20230 {
+            return Self::from_values(
+                raw,
+                Self::read_defaults(
+                    Path::new(env!("CARGO_MANIFEST_DIR")).join("data/prototype-loadouts.json"),
+                )?,
+                character_blast_rules,
+            );
+        }
+        let items = field(&raw, "items")?
+            .as_object()
+            .filter(|items| !items.is_empty())
+            .ok_or_else(|| invalid("invalid retail item table"))?;
+        let definitions = field(&raw, "definitions")?
+            .as_object()
+            .ok_or_else(|| invalid("invalid retail definition table"))?;
+        let mut retail_item_refs = BTreeMap::new();
+        for (reference, item) in items {
+            let (namespace, ordinal) = reference
+                .split_once(':')
+                .ok_or_else(|| invalid("invalid retail authored reference"))?;
+            let list = namespace
+                .strip_prefix("FactionItemList")
+                .and_then(|s| s.parse::<u16>().ok())
+                .filter(|&list| list < 4 && namespace == format!("FactionItemList{list}"))
+                .ok_or_else(|| invalid("invalid retail item namespace"))?;
+            let ordinal = ordinal
+                .parse::<u16>()
+                .ok()
+                .filter(|&ordinal| ordinal < 1024 && reference == &format!("{namespace}:{ordinal}"))
+                .ok_or_else(|| invalid("invalid retail local ordinal"))?;
+            if item.get("authored_ref").and_then(Value::as_str) != Some(reference)
+                || item.get("faction_list").and_then(Value::as_str) != Some(namespace)
+                || item.get("local_ordinal").and_then(Value::as_u64) != Some(u64::from(ordinal))
+                || item.get("wire_item_id") != Some(&Value::Null)
+            {
+                return Err(invalid("inconsistent retail item identity"));
+            }
+            // Native ordinary inventory flag 0, also used by the offline native
+            // comparator: faction namespaces carry ten ordinal bits plus offset.
+            // This binds inventory IDs only; it proves no ammo-token algorithm.
+            let wire_id = ((list << 10) | ordinal) + if list == 0 { 0 } else { 50 };
+            if wire_id >= 4096
+                || retail_item_refs
+                    .insert(wire_id, reference.clone())
+                    .is_some()
+            {
+                return Err(invalid("invalid or duplicate retail wire item ID"));
+            }
+            if item.get("item_type") == Some(&Value::Null) {
+                if item.get("name") != Some(&Value::Null)
+                    || item.get("definition") != Some(&Value::Null)
+                {
+                    return Err(invalid("malformed reserved retail item"));
+                }
+                continue;
+            }
+            field(item, "item_type")?
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| invalid("invalid retail item type"))?;
+            let name = field(item, "name")?
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| invalid("invalid retail item name"))?;
+            let binding = field(item, "definition")?;
+            // Preserve incomplete extraction coverage without treating it as
+            // supported equipment. validate_item rejects these assigned rows.
+            if binding.is_null() {
+                continue;
+            }
+            let group = field(binding, "group")?
+                .as_str()
+                .ok_or_else(|| invalid("invalid retail definition group"))?;
+            let definition_name = field(binding, "name")?
+                .as_str()
+                .ok_or_else(|| invalid("invalid retail definition name"))?;
+            if name != definition_name
+                || definitions
+                    .get(group)
+                    .and_then(|group| group.get(name))
+                    .is_none()
+            {
+                return Err(invalid("unresolved retail item definition"));
+            }
+        }
+        Ok(Self {
+            raw,
+            character_blast_rules,
+            valor_defaults: None,
+            retail_item_refs,
+            bootstrap_loadouts: None,
+            retail_combat: None,
+            retail_armory: None,
+            bullets: BTreeMap::new(),
+            vehicle_bullets: BTreeMap::new(),
+            bullet_attachments: BTreeMap::new(),
+            armor: BTreeMap::new(),
+            body: [BodyParameters {
+                armor_area: 0,
+                multiplier: 0.0,
+            }; 16],
+            healing: BTreeMap::new(),
+            grenades: BTreeMap::new(),
+        })
+    }
+    pub fn application_id(&self) -> u32 {
+        self.raw["application_id"]
+            .as_u64()
+            .expect("validated application") as u32
     }
     pub fn from_value(raw: Value) -> io::Result<Self> {
         Self::from_values(
@@ -446,7 +593,8 @@ impl ItemCatalog {
         let catalog = Self {
             raw,
             character_blast_rules,
-            valor_defaults,
+            valor_defaults: Some(valor_defaults),
+            retail_item_refs: BTreeMap::new(),
             bootstrap_loadouts: None,
             retail_combat: None,
             retail_armory: None,
@@ -458,7 +606,12 @@ impl ItemCatalog {
             healing,
             grenades,
         };
-        catalog.valor_defaults.validate(&catalog).map_err(invalid)?;
+        catalog
+            .valor_defaults
+            .as_ref()
+            .expect("prototype defaults")
+            .validate(&catalog)
+            .map_err(invalid)?;
         Ok(catalog)
     }
     pub fn with_retail_combat(
@@ -511,17 +664,28 @@ impl ItemCatalog {
     }
     /// Runtime authored defaults, used only when no character edits were saved.
     pub fn valor_loadout(&self, index: u8) -> Option<crate::replication::CharacterLoadout> {
-        self.valor_defaults.loadout(self, index)
+        self.valor_defaults.as_ref()?.loadout(self, index)
     }
-    pub fn validate_item(&self, id: u16) -> Result<(), &'static str> {
-        if id >= 1024 {
+    fn item(&self, id: u16) -> Result<&Value, &'static str> {
+        let retail = self.application_id() == 20231;
+        if id >= if retail { 4096 } else { 1024 } {
             return Err("saved_item_out_of_wire_range");
         }
-        let item = self
-            .raw
+        let key = if retail {
+            self.retail_item_refs
+                .get(&id)
+                .ok_or("unknown_saved_item")?
+                .clone()
+        } else {
+            id.to_string()
+        };
+        self.raw
             .get("items")
-            .and_then(|items| items.get(id.to_string()))
-            .ok_or("unknown_saved_item")?;
+            .and_then(|items| items.get(key))
+            .ok_or("unknown_saved_item")
+    }
+    pub fn validate_item(&self, id: u16) -> Result<(), &'static str> {
+        let item = self.item(id)?;
         if item.get("item_type").and_then(Value::as_str).is_none() {
             return Err("reserved_saved_item");
         }
@@ -543,7 +707,7 @@ impl ItemCatalog {
     }
     pub fn primary_magazine_capacity(&self, id: u16) -> Result<u8, &'static str> {
         self.validate_item(id)?;
-        let item = &self.raw["items"][id.to_string()];
+        let item = self.item(id)?;
         if item["item_type"].as_str() != Some("kWeapon") {
             return Err("saved_primary_not_weapon");
         }
@@ -634,6 +798,9 @@ impl ItemCatalog {
                 .copied()
                 .find(|id| retail.grenade_for_damage(*id).is_ok())
                 .ok_or("retail_grenade_authority_unavailable");
+        }
+        if self.application_id() == 20231 {
+            return Err("retail_grenade_authority_unavailable");
         }
         Ok(42)
     }

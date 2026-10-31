@@ -777,6 +777,9 @@ struct Active {
 pub struct Engine<W: Write> {
     wire_profiles: wire_profile::WireProfileCatalog,
     wire_profile: wire_profile::WireProfile,
+    /// Explicit production resources bind this instance to one application.
+    /// Legacy development constructors permit profile changes before admission.
+    runtime_application_id: Option<u32>,
     writer: W,
     active: Option<Active>,
     peers: std::collections::BTreeMap<String, Active>,
@@ -1221,6 +1224,12 @@ impl<W: Write> Engine<W> {
                 application_id,
                 ..
             } => {
+                if self
+                    .runtime_application_id
+                    .is_some_and(|selected| selected != application_id)
+                {
+                    return Err("runtime_application_mismatch");
+                }
                 if minimum_players == 0
                     || minimum_players > maximum_players
                     || maximum_players > self.admission_capacity_for(application_id)

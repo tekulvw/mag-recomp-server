@@ -572,6 +572,15 @@ fn plan_update_reply<W: Write>(
         && active.emplacement_creation.is_none()
         && history_available
     {
+        let bunkers = if ctx.engine.match_profile().has_bunkers {
+            ctx.engine
+                .bunker_world
+                .as_ref()
+                .ok_or("bunker_world_unavailable")?
+                .creations(next_sequence, now.as_millis() as u32)
+        } else {
+            Vec::new()
+        };
         let creation = replication::AlphaSpawnSetup {
             sequence: next_sequence,
             timestamp_ms: now.as_millis() as u32,
@@ -580,11 +589,7 @@ fn plan_update_reply<W: Write>(
             active.reservation.player,
             ctx.engine.alpha_owner(),
             active.squad_catalog.as_ref(),
-            &ctx.engine
-                .bunker_world
-                .as_ref()
-                .ok_or("bunker_world_unavailable")?
-                .creations(next_sequence, now.as_millis() as u32),
+            &bunkers,
             ctx.engine.wire_profile,
         )?;
         plan.outgoing = Some(creation.clone());
