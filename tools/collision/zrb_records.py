@@ -27,8 +27,10 @@ def parse(data, *, retail13_compat=False):
   if cls==0x2a8bdf5a and (rv==12 or (rv==13 and retail13_compat)):
    typ,n=u(p+44),u(p+48)
    array_base=p+52+(4 if rv==13 else 0)
-   if rv==13:record['retail13_opaque_word_hex']=data[p+52:p+56].hex()
-   record['body_basis']='prototype native ReadHeader' if rv==12 else 'retail byte-structure compatibility; opaque extra word, native semantics unresolved'
+   if rv==13:
+    record['retail13_opaque_word_hex']=data[p+52:p+56].hex()
+    record['retail13_instance_count']=u(p+52)
+   record['body_basis']='prototype native ReadHeader' if rv==12 else 'retail native ReadHeader: type/count/instance-count, sizes, material-index counts, parent tokens, collision tags'
    if n>100000 or array_base+16*n>end:raise ValueError('bad physics count')
    sizes=[u(array_base+i*4) for i in range(n)]
    counts=[u(array_base+4*n+i*4) for i in range(n)]

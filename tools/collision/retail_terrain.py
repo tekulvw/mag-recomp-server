@@ -49,11 +49,11 @@ def branch_target(word, address):
     return address + displacement
 
 
-def native_proof(proof_path, retail_path):
+def native_proof(proof_path, retail_path, *, map_name=MAP):
     """Validate identity of an external proof; do not claim to recreate that proof."""
     proof = json.loads(proof_path.read_text())
     require(proof.get('schema') == 'mag_retail_terrain_identity_v1', 'unsupported external terrain proof')
-    require(proof.get('map') == MAP and proof.get('build') == 'retail-bcus98110-01.00', 'external proof map/build mismatch')
+    require(proof.get('map') == map_name and proof.get('build') == 'retail-bcus98110-01.00', 'external proof map/build mismatch')
     require(sha(retail_path.read_bytes()) == RETAIL_SHA == proof.get('source_elf_sha256'), 'external proof ELF mismatch')
     require(proof.get('world_transform') == dict(translation_xyz=[0,0,0], rotation_xyzw=[0,0,0,1], scale_xyz=[1,1,1]), 'external proof is not identity placement')
     return proof

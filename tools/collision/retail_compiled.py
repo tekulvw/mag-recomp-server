@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Place existing Cosmodrome neutral meshes using bound compiled collision records.
+"""Place existing retail neutral meshes using bound compiled collision records.
 
-Initial static world only. No new extraction, authored placement or live state.
+Static export by default. Parent attachments require an explicit, source-bound
+reference-pose export; those outputs never certify a physics region.
 """
 import argparse
 import collections
@@ -50,6 +51,7 @@ def compiled_records(join, clv):
         require(placement['token'] == row['collision_mesh_token'], 'compiled/native instance resource token mismatch')
         counts['compiled_present'] += 1
         records.append(dict(name=row['name'], instance_properties_offset=offset,
+                            world_geometry_offset=start,
                             collision_offset=collision, placement=placement))
     return records, dict(counts)
 
@@ -79,21 +81,25 @@ def load_meshes(pack, catalog, cache):
 
 def export(args):
     require(not args.output.exists(), 'refusing existing output')
-    terrain_proof = native_proof(args.terrain_proof, args.retail_elf)
+    map_name = getattr(args, 'map_name', None) or MAP
+    terrain_token = getattr(args, 'terrain_token', None) or TERRAIN
+    require(len(terrain_token) == 8 and all(c in '0123456789abcdef' for c in terrain_token),
+            'terrain token must be eight lowercase hexadecimal digits')
+    terrain_proof = native_proof(args.terrain_proof, args.retail_elf, map_name=map_name)
     placement_proof = verify_placement(args.placement_proof, args.retail_elf)
     manifest_bytes = args.map_manifest.read_bytes()
     manifest = json.loads(manifest_bytes)
-    require(manifest['build'] == 'retail-bcus98110-01.00' and manifest['map'] == MAP, 'wrong retail map')
+    require(manifest['build'] == 'retail-bcus98110-01.00' and manifest['map'] == map_name, 'wrong retail map')
     join_bytes = args.instance_join.read_bytes()
     join = json.loads(gzip.decompress(join_bytes))
-    require(join['build'] == manifest['build'] and join['map'] == MAP, 'wrong instance join')
+    require(join['build'] == manifest['build'] and join['map'] == map_name, 'wrong instance join')
     archive_bytes = args.archive.read_bytes()
     require(sha(archive_bytes) == join['source']['archive_sha256'] == manifest['source']['archive_sha256'], 'original map archive mismatch')
     archive = Psarc(archive_bytes)
     clv = archive.extract(archive.names.index(join['source']['clv_member']) + 1)
     require(sha(clv) == join['source']['clv_sha256'], 'compiled source CLV mismatch')
     import instance_linkage
-    regenerated = instance_linkage.inspect(archive_bytes, {}, {}, manifest['build'], MAP, None)
+    regenerated = instance_linkage.inspect(archive_bytes, {}, {}, manifest['build'], map_name, None)
     require(join['instances'] == regenerated['instances'], 'external instance join differs from complete source regeneration')
     records, counts = compiled_records(join, clv)
     native = module('compiled_native_zrb', Path(__file__).with_name('zrb_records.py'))
@@ -119,14 +125,32 @@ def export(args):
             require(pack['source_sha256'] == source['sha256'] and pack['unsupported_collision_objects'] == 0
                     and sha(raw[source['offset']:source['offset']+source['bytes']]) == source['sha256'], 'partial/unverified source pack')
             packs[binding['resource_name_token']].append(pack)
-    require(TERRAIN in packs and all(p['resource_binding']['physics_type_raw'] == 1 for p in packs[TERRAIN]), 'terrain binding absent')
+    require(terrain_token in packs and all(p['resource_binding']['physics_type_raw'] == 1 for p in packs[terrain_token]), 'terrain binding absent')
+    parented = any(pack['resource_binding']['parent_token'] != '00000000'
+                   for record in records for pack in packs.get(record['placement']['token'], []))
+    resolver = None
+    if parented:
+        require(getattr(args, 'reference_pose', False) and getattr(args, 'parent_proof', None),
+                'parented collision requires --reference-pose and --parent-proof; live animation is not reconstructed')
+        require(args.physics_region_min is None and args.physics_region_max is None,
+                'reference-pose attachments cannot certify a physics region')
+        from retail_parents import ParentResolver, verify_native_proof
+        resolver = ParentResolver(archive, clv, verify_native_proof(args.parent_proof, args.retail_elf))
     instances, bindings, missing, removed = [], [], [], []
     cache = {}
-    def add(name, resource, placement):
+    def add(name, resource, placement, record=None):
         for ordinal, pack in enumerate(packs[resource]):
-            require(pack['resource_binding']['parent_token'] == '00000000', 'placed pack has unproved parent transform')
+            parent_matrix = None
+            if pack['resource_binding']['parent_token'] != '00000000':
+                require(resolver is not None and record is not None,
+                        'parented terrain or unbound parent is unsupported')
+                parent_matrix = resolver.resolve(record, pack)
             for index, mesh in enumerate(load_meshes(pack, args.catalog, cache)):
-                vertices = [bake_vertex(v, placement) for v in mesh['vertices_xyz']] if placement else mesh['vertices_xyz']
+                if parent_matrix is not None:
+                    from retail_parents import bake_parent_vertex
+                    vertices = [bake_parent_vertex(v, parent_matrix) for v in mesh['vertices_xyz']]
+                else:
+                    vertices = [bake_vertex(v, placement) for v in mesh['vertices_xyz']] if placement else mesh['vertices_xyz']
                 identity = f'{name}:pack-{ordinal}:mesh-{index}'
                 triangles, deleted = nondegenerate_triangles(vertices, mesh['triangles'])
                 if deleted:
@@ -136,15 +160,15 @@ def export(args):
     for record in records:
         placement = record['placement']
         token = placement['token']
-        require(token != TERRAIN, 'terrain unexpectedly embedded as placed collision')
+        require(token != terrain_token, 'terrain unexpectedly embedded as placed collision')
         if token not in packs:
             missing.append(dict(collision_offset=record['collision_offset'], token=token))
             continue
         require(all(p['resource_binding']['physics_type_raw'] == 0 for p in packs[token]), 'compiled resource is not ordinary type0')
-        add(f"compiled:{record['collision_offset']:x}", token, placement)
+        add(f"compiled:{record['collision_offset']:x}", token, placement, record)
         bindings.append(dict(collision_offset=record['collision_offset'], resource_token=token,
                              record_sha256=placement['sha256'], matrix=placement['matrix'], scale_already_in_matrix=placement['scale']))
-    add('terrain:' + TERRAIN, TERRAIN, None)
+    add('terrain:' + terrain_token, terrain_token, None)
     require(not missing, 'unresolved compiled resources; cannot silently omit initial static obstacles')
     terrain_bytes = (json.dumps(terrain_proof, indent=2)+'\n').encode()
     placement_bytes = (json.dumps(placement_proof, indent=2)+'\n').encode()
@@ -152,6 +176,11 @@ def export(args):
                 'Material/filter semantics remain unvalidated; development queries treat these triangles as opaque.',
                 'Other entity-created collision and global dynamic resources are outside this adapter.',
                 'Live bot physics and obstacle alignment remain unaccepted.']
+    scope = 'initial_compiled_static_geometry'
+    if resolver is not None:
+        scope = 'compiled_reference_pose'
+        unknowns[0] = 'scope=compiled_reference_pose; parent attachments use frozen compiled poses, not current animation.'
+        unknowns.append('Reference-pose output has no verified physics regions and cannot establish current collision authority.')
     provenance = [f'Original CLV SHA256 {sha(clv)}', f'Existing map catalog SHA256 {sha(manifest_bytes)}',
                   f'Existing instance join SHA256 {sha(join_bytes)}', f'Externally supplied terrain proof SHA256 {sha(terrain_bytes)}',
                   f'Externally supplied placement proof SHA256 {sha(placement_bytes)}',
@@ -160,17 +189,21 @@ def export(args):
     if args.physics_region_min is not None or args.physics_region_max is not None:
         require(args.physics_region_min is not None and args.physics_region_max is not None, 'require both region bounds')
         regions.append(static_region(args.physics_region_min, args.physics_region_max, provenance))
+    if resolver is not None:
+        provenance.append('Parent tokens resolved through typed retail hierarchy nodes; child-to-root transforms applied once; native collision quaternion extraction modeled before compiled shape scale.')
     world = dict(format='mag_collision_world', schema_version=1, coordinate_space='world',
-                 metadata=dict(map_name=MAP, build=manifest['build'], coverage='provisional',
+                 metadata=dict(map_name=map_name, build=manifest['build'], coverage='provisional',
                                physics_regions=regions, provenance=provenance, unknowns=unknowns), instances=instances)
     world_bytes = (json.dumps(world, separators=(',', ':'), allow_nan=False)+'\n').encode()
     require(len(world_bytes) <= 64*1024*1024, 'world exceeds existing loader default bytes')
-    report = dict(schema='mag_retail_compiled_reuse_v1', map=MAP, counts=counts,
-                  scope='initial_compiled_static_geometry', physics_regions=regions,
+    report = dict(schema='mag_retail_compiled_reuse_v1', map=map_name, counts=counts,
+                  scope=scope, physics_regions=regions,
                   compiled_joined=len(bindings), instances=len(instances), triangles=sum(len(i['triangles']) for i in instances),
                   world_bytes=len(world_bytes), world_sha256=sha(world_bytes), missing_resources=missing,
                   bindings=bindings, exact_zero_area_removals=removed,
                   geometry_files={k: list(v[0]) for k, v in cache.items()}, unknowns=unknowns)
+    if resolver is not None:
+        report['parent_resolution'] = resolver.report()
     args.output.mkdir(parents=True)
     (args.output/'world.json').write_bytes(world_bytes)
     (args.output/'terrain-native-proof.json').write_bytes(terrain_bytes)
@@ -189,6 +222,10 @@ def main():
     parser.add_argument('--instance-join', required=True, type=Path)
     parser.add_argument('--catalog', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--map-name', help='Retail map identity; defaults to the existing export target')
+    parser.add_argument('--terrain-token', help='Source-bound type1 terrain token, eight lowercase hex digits')
+    parser.add_argument('--reference-pose', action='store_true', help='Allow frozen compiled parent poses without verified physics regions')
+    parser.add_argument('--parent-proof', type=Path, help='Externally reviewed, ELF-bound retail parent witness')
     parser.add_argument('--physics-region-min', type=lambda s: [float(v) for v in s.split(',')])
     parser.add_argument('--physics-region-max', type=lambda s: [float(v) for v in s.split(',')])
     export(parser.parse_args())
