@@ -4,16 +4,22 @@
   "initial-version": "0.1.0",
   "bump-minor-pre-major": true,
   "include-v-in-tag": true,
-  "include-component-in-tag": false,
-  "separate-pull-requests": true,
+  "include-component-in-tag": true,
+  "separate-pull-requests": false,
+  "bootstrap-sha": "14f61ffd09f3fe6b94a0a37f52b64aebac349544",
   "packages": {
-    ".": {
-      "exclude-paths": ["charts/mag-recomp-server"]
+    "horizon": {
+      "release-type": "simple",
+      "component": "medius",
+      "version-file": "version.txt"
+    },
+    "gameplay": {
+      "release-type": "rust",
+      "component": "gameplay"
     },
     "charts/mag-recomp-server": {
       "release-type": "helm",
-      "component": "chart",
-      "include-component-in-tag": true
+      "component": "chart"
     }
   }
 }

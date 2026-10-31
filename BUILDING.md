@@ -80,3 +80,19 @@ staged file paths against their working-tree contents. In an uninitialized
 export it recursively checks source files. It rejects binary artifacts, private
 runtime paths, private-key blobs, opaque encoded images and unmarked runtime
 catalogs. It is a tripwire; passing it does not establish provenance by itself.
+
+## Release routing checks
+
+CI installs the exact Release Please version bundled by the pinned action into
+a temporary directory, then runs offline GitHub fixtures and publication
+contract checks. With Node.js and npm installed, the same check is:
+
+```sh
+release_test_dir=$(mktemp -d)
+npm install --prefix "$release_test_dir" --ignore-scripts --no-audit --no-fund release-please@17.6.0
+NODE_PATH="$release_test_dir/node_modules" node tests/release-routing.cjs
+```
+
+The fixture creates no tags, releases, PRs, packages or network services. The
+initial npm install downloads dependencies; the fixture itself runs offline.
+Remove the temporary dependency directory after use.

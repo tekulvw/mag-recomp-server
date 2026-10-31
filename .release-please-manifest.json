@@ -1,4 +1,5 @@
 {
-  ".": "0.1.0",
+  "horizon": "0.1.0",
+  "gameplay": "0.1.0",
   "charts/mag-recomp-server": "0.1.0"
 }
