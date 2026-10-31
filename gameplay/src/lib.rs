@@ -791,6 +791,7 @@ pub struct Engine<W: Write> {
     last_wall_secs: u64,
     world_epoch: Option<Duration>,
     bot_registry: bot_registry::BotRegistry,
+    bot_names: bot_names::Catalog,
     world_tick_enabled: bool,
     last_world_tick: Option<Duration>,
     match_epoch: Option<Duration>,

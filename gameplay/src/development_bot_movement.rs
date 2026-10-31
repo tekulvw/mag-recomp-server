@@ -1042,7 +1042,7 @@ impl Target {
             runtime,
             health: hp,
             swept_bounds: context.swept_bounds,
-            receipt: json!({"op":"bot_idle_physics","ground_events":context.ground_events,"name":self.display_name.unwrap_or("BOT Mercer"),"object_id":0x03800000|u32::from(self.object_index),"generation":runtime.generation,"position":runtime.position,"health_quarter_points":context.hp,"simulated_seconds":dt,"player_collision":{"blocking_object_index":context.waiting_on}}),
+            receipt: json!({"op":"bot_idle_physics","ground_events":context.ground_events,"name":self.display_name.as_deref().unwrap_or("BOT Mercer"),"object_id":0x03800000|u32::from(self.object_index),"generation":runtime.generation,"position":runtime.position,"health_quarter_points":context.hp,"simulated_seconds":dt,"player_collision":{"blocking_object_index":context.waiting_on}}),
         }))
     }
     #[allow(clippy::too_many_arguments)]
@@ -1422,7 +1422,7 @@ impl Target {
             runtime,
             health: landing_health,
             swept_bounds: context.swept_bounds,
-            receipt: json!({"object_id":(0x0380_0000 | u32::from(self.object_index)),"name":self.display_name.unwrap_or("BOT Mercer"),"owner_index":dummy::SERVER_OWNER,
+            receipt: json!({"object_id":(0x0380_0000 | u32::from(self.object_index)),"name":self.display_name.as_deref().unwrap_or("BOT Mercer"),"owner_index":dummy::SERVER_OWNER,
             "team":self.squad.team(),"squad_index":self.squad.squad_index(),"faction":self.faction,"owner_life_generation":self.generation,"generation":runtime.generation,
             "phase":if physics_error.is_some() || navigation_error.is_some(){"move_stopped"}else if finished{"move_complete"}else{"move"},"route_leg":"redirect","movement_id":pending.movement_id,
             "position":position,"destination":destination,"sequence":sequence,"timestamp_ms":now.as_millis() as u32,

@@ -48,6 +48,16 @@ def gameplay_arguments(docs):
 
 
 class ChartTests(unittest.TestCase):
+    def test_optional_external_bot_names_path(self):
+        args = gameplay_arguments(render({'data': {'files': {'botNames': 'operators/bot-names.json'}}}))
+        self.assertEqual(args.count('--bot-names'), 1)
+        self.assertEqual(args[args.index('--bot-names') + 1], '/data/operators/bot-names.json')
+        self.assertNotIn('--bot-names', gameplay_arguments(render()))
+        for override in ('--bot-names', '--bot-names=/data/override.json'):
+            render({'data': {'gameplayExtraArgs': [override]}}, ok=False)
+        for filename in ('../names.json', '/names.json', 'bad name.json'):
+            render({'data': {'files': {'botNames': filename}}}, ok=False)
+
     def test_default_retail_startup_contract(self):
         docs = render()
         service = next(d for d in docs if d['kind'] == 'Service' and d['metadata']['name'].endswith('-medius'))

@@ -138,12 +138,15 @@ spec:
           args:
             - |
               run_dir=$(mktemp -d /logs/run.XXXXXXXXXX)
-              exec /usr/local/bin/mag-gameplay --bind 0.0.0.0:31000 --log "$run_dir/events.jsonl" --item-catalog "$ITEMS" --spawn-catalog "$SPAWNS" --wire-profiles "$WIRES" --skill-catalog "$SKILLS"{{ if eq (int $.Values.runtime.applicationId) 20231 }} --application-id 20231 --character-blast-rules "$BLAST" --bootstrap-loadouts "$BOOTSTRAP" --retail-combat-metadata "$COMBAT" --retail-armory-catalog "$ARMORY" --fall-damage-rules "$FALL"{{ end }} "$@"
+              exec /usr/local/bin/mag-gameplay --bind 0.0.0.0:31000 --log "$run_dir/events.jsonl" --item-catalog "$ITEMS" --spawn-catalog "$SPAWNS" --wire-profiles "$WIRES" --skill-catalog "$SKILLS"{{ if $.Values.data.files.botNames }} --bot-names "$BOT_NAMES"{{ end }}{{ if eq (int $.Values.runtime.applicationId) 20231 }} --application-id 20231 --character-blast-rules "$BLAST" --bootstrap-loadouts "$BOOTSTRAP" --retail-combat-metadata "$COMBAT" --retail-armory-catalog "$ARMORY" --fall-damage-rules "$FALL"{{ end }} "$@"
             - mag-gameplay
             {{- range $.Values.data.gameplayExtraArgs }}
             - {{ . | quote }}
             {{- end }}
           env:
+            {{- with $.Values.data.files.botNames }}
+            - {name: BOT_NAMES, value: {{ printf "/data/%s" . | quote }}}
+            {{- end }}
             - {name: ITEMS, value: {{ printf "/data/%s" $.Values.data.files.items | quote }}}
             - {name: SPAWNS, value: {{ printf "/data/%s" $.Values.data.files.spawns | quote }}}
             - {name: WIRES, value: {{ printf "/data/%s" $.Values.data.files.wireProfiles | quote }}}

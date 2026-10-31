@@ -68,6 +68,8 @@ data:
     items: retail-items.json
     spawns: retail-sver-sup-spawns.json
     wireProfiles: wire-profiles.json
+    # Optional operator identities; empty keeps the synthetic public defaults.
+    botNames: ""
     # Raw owned-skill modifiers consumed by gameplay, not the purchase projection.
     skills: retail-skills.json
     characterBlastRules: character-blast-rules.json

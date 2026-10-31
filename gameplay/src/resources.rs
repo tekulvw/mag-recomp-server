@@ -5,6 +5,7 @@ use std::sync::Arc;
 /// Loaded dependencies for engine construction. Loading and validation happen
 /// before supplying this value; constructing the engine performs no file I/O.
 pub struct EngineResources {
+    bot_names: bot_names::Catalog,
     wire_profiles: wire_profile::WireProfileCatalog,
     initial_wire_profile: wire_profile::WireProfile,
     runtime_application_id: Option<u32>,
@@ -14,6 +15,10 @@ pub struct EngineResources {
     bunker_exit_policy: Option<vehicle_exit::BunkerExitPolicy>,
 }
 impl EngineResources {
+    pub fn with_bot_names(mut self, names: bot_names::Catalog) -> Self {
+        self.bot_names = names;
+        self
+    }
     pub fn new(
         item_catalog: Arc<item_catalog::ItemCatalog>,
         spawn_catalog: spawn_catalog::SpawnCatalog,
@@ -25,6 +30,7 @@ impl EngineResources {
                 .profile(20230)
                 .expect("embedded prototype profile"),
             wire_profiles,
+            bot_names: Default::default(),
             runtime_application_id: None,
             item_catalog,
             spawn_catalog,
@@ -62,6 +68,7 @@ impl EngineResources {
         }
         Ok(Self {
             wire_profiles,
+            bot_names: Default::default(),
             initial_wire_profile,
             runtime_application_id: Some(application_id),
             item_catalog,
@@ -161,6 +168,7 @@ impl<W: Write> Engine<W> {
             last_wall_secs: 0,
             world_epoch: None,
             bot_registry: Default::default(),
+            bot_names: resources.bot_names,
             world_tick_enabled: false,
             last_world_tick: None,
             match_epoch: None,
@@ -199,11 +207,11 @@ impl<W: Write> Engine<W> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde_json::json;
 
-    fn retail_items() -> Arc<item_catalog::ItemCatalog> {
+    pub(crate) fn retail_items() -> Arc<item_catalog::ItemCatalog> {
         Arc::new(
             item_catalog::ItemCatalog::from_value_for_application(
                 json!({"schema_version":2,"application_id":20231,
@@ -240,7 +248,7 @@ mod tests {
         })).unwrap()
     }
 
-    fn wire_profiles() -> wire_profile::WireProfileCatalog {
+    pub(crate) fn wire_profiles() -> wire_profile::WireProfileCatalog {
         wire_profile::WireProfileCatalog::from_json(include_str!(
             "../data/synthetic-wire-profiles.json"
         ))

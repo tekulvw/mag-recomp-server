@@ -76,6 +76,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     let mut collision_path: Option<PathBuf> = None;
     let mut navmesh_path: Option<PathBuf> = None;
     let mut bot_population_path: Option<PathBuf> = None;
+    let mut bot_names_path: Option<PathBuf> = None;
     let mut bot_fill_total: usize = 0;
     let mut spawn_path: Option<PathBuf> = None;
     let mut objective_path: Option<PathBuf> = None;
@@ -106,6 +107,13 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                 })?)?);
             }
             "--validate-catalogs" => validate_catalogs = true,
+            "--bot-names" => {
+                bot_names_path = Some(
+                    args.next()
+                        .ok_or_else(|| io::Error::other("--bot-names requires a path"))?
+                        .into(),
+                );
+            }
             "--bot-population" => {
                 bot_population_path = Some(
                     args.next()
@@ -312,7 +320,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             }
             _ => {
                 return Err(io::Error::other(
-                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json] [--navmesh-world MESH.mag-nav] [--bot-fill-total N --bot-population POPULATION.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
+                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json] [--navmesh-world MESH.mag-nav] [--bot-fill-total N --bot-population POPULATION.json] [--bot-names /absolute/NAMES.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
                 ));
             }
         }
@@ -662,6 +670,23 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             mag_gameplay::fall_damage::Rules::load(path)
         })
         .transpose()?;
+    let bot_names = bot_names_path
+        .as_ref()
+        .map(|path| {
+            if !path.is_absolute() {
+                return Err(io::Error::other("--bot-names requires an absolute path"));
+            }
+            mag_gameplay::bot_names::Catalog::load(path)
+                .map_err(|e| io::Error::other(format!("failed to load bot names: {e}")))
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let bot_names_count = bot_names.len();
+    if bot_fill_total > bot_names_count {
+        return Err(io::Error::other(
+            "bot names have insufficient capacity for --bot-fill-total",
+        ));
+    }
     let actual_dummy_position = if development_dummy {
         Some(
             development_dummy_position
@@ -688,6 +713,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             .with_bunker_exit_policy(policy)
             .map_err(io::Error::other)?;
     }
+    resources = resources.with_bot_names(bot_names);
     if validate_catalogs {
         if log.is_some() || telemetry_path.is_some() {
             return Err(io::Error::other(
@@ -778,7 +804,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     );
     println!(
         "{}",
-        serde_json::json!({"event":"listening","application_id":application_id.unwrap_or(20230),"profile_selection":if application_id.is_some(){"explicit"}else{"legacy"},"protocol":mag_gameplay::BRIDGE_VERSION,"address":listener.local_addr()?.to_string(),"collision":collision_info,"spawn_catalog":spawn_path,"objective_catalog":objective_info,"item_catalog":item_path,"character_blast_rules":blast_rules_path,"retail_combat_metadata":retail_metadata,"bootstrap_loadouts":bootstrap_loadouts_path,"fall_damage_rules":fall_rules_path,"skill_catalog":skill_path,"retail_armory_catalog":retail_armory_path,"leadership_passives":leadership_passives_path,"leadership_role_policy":leadership_role_policy_path,"bunkers":bunker_info,"tick_telemetry":telemetry_path,"tick_budget_us":tick_budget_us,"scheduler":"independent_50ms_when_subscribed","bot_fill_total":bot_fill_total,"bot_population":bot_population_path,"development_dummy_position":actual_dummy_position})
+        serde_json::json!({"event":"listening","application_id":application_id.unwrap_or(20230),"profile_selection":if application_id.is_some(){"explicit"}else{"legacy"},"protocol":mag_gameplay::BRIDGE_VERSION,"address":listener.local_addr()?.to_string(),"collision":collision_info,"spawn_catalog":spawn_path,"objective_catalog":objective_info,"item_catalog":item_path,"character_blast_rules":blast_rules_path,"retail_combat_metadata":retail_metadata,"bootstrap_loadouts":bootstrap_loadouts_path,"fall_damage_rules":fall_rules_path,"skill_catalog":skill_path,"retail_armory_catalog":retail_armory_path,"leadership_passives":leadership_passives_path,"leadership_role_policy":leadership_role_policy_path,"bunkers":bunker_info,"tick_telemetry":telemetry_path,"tick_budget_us":tick_budget_us,"scheduler":"independent_50ms_when_subscribed","bot_fill_total":bot_fill_total,"bot_population":bot_population_path,"bot_names":bot_names_path,"bot_names_count":bot_names_count,"development_dummy_position":actual_dummy_position})
     );
     for connection in listener.incoming() {
         let stream = connection?;
@@ -1556,6 +1582,39 @@ mod runtime_profile_tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn offline_cli_validates_explicit_bot_names_without_opening_logs() {
+        let files = SyntheticCatalogs::new();
+        files.write(
+            "names.json",
+            &serde_json::json!({"entries":[{"name":"Synthetic Pilot"}]}),
+        );
+        let args = || {
+            let mut args = files.args();
+            args.extend([
+                "--bot-names".to_string(),
+                files.0.join("names.json").display().to_string(),
+            ]);
+            args
+        };
+        assert!(run(args()).is_ok());
+        let mut insufficient = args();
+        insufficient.extend(["--bot-fill-total".to_string(), "64".to_string()]);
+        assert!(
+            run(insufficient)
+                .unwrap_err()
+                .to_string()
+                .contains("insufficient capacity")
+        );
+        files.write("names.json", &serde_json::json!({"entries":[{"name":""}]}));
+        assert!(run(args()).unwrap_err().to_string().contains("bot names"));
+        std::fs::remove_file(files.0.join("names.json")).unwrap();
+        assert!(run(args()).is_err());
+        let mut relative = files.args();
+        relative.extend(["--bot-names".to_string(), "names.json".to_string()]);
+        assert!(run(relative).unwrap_err().to_string().contains("absolute"));
     }
 
     #[test]

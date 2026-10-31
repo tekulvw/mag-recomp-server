@@ -95,7 +95,7 @@ exec:
 {{- if and $retail (eq $image.repository "ghcr.io/tekulvw/mag-recomp-server-game") (not $image.digest) (has $image.tag (list "0.1.0" "0.1.1" "v0.1.0" "v0.1.1")) -}}
 {{- fail "retail gameplay requires a release containing --application-id (0.2.0 or newer); official 0.1.0/0.1.1 images are incompatible" -}}
 {{- end -}}
-{{- $managed := list "--application-id" "--bind" "--log" "--item-catalog" "--spawn-catalog" "--wire-profiles" "--skill-catalog" "--validate-catalogs" -}}
+{{- $managed := list "--bot-names" "--application-id" "--bind" "--log" "--item-catalog" "--spawn-catalog" "--wire-profiles" "--skill-catalog" "--validate-catalogs" -}}
 {{- if $retail -}}
 {{- $managed = concat $managed (list "--character-blast-rules" "--bootstrap-loadouts" "--retail-combat-metadata" "--retail-armory-catalog" "--fall-damage-rules" "--structure-catalog" "--bunker-catalog" "--bunker-exit-policy") -}}
 {{- end -}}
