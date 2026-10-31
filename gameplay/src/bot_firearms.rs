@@ -1,6 +1,8 @@
 //! World-owned firearm admission. AI policy is explicit; weapon values come
 //! exclusively from the extracted retail combat catalog. No client hit spoofing.
 use super::*;
+#[path = "bot_recoil.rs"]
+mod recoil;
 use crate::actor_collision::Bounds;
 use crate::bot_registry::WorldBot;
 use crate::development_target::BotPhase;
@@ -13,6 +15,10 @@ pub struct Policy {
     pub turn_degrees_per_second: f64,
     pub aim_tolerance_degrees: f64,
     pub accuracy_per_mille: u16,
+    pub far_accuracy_per_mille: u16,
+    pub recoil_compensation_per_mille: u16,
+    pub max_engagement_distance_m: f64,
+    pub acquisition_fov_degrees: f64,
     pub perception_interval_ms: u64,
     pub max_candidates_per_bot: usize,
     pub max_rays_per_tick: usize,
@@ -22,10 +28,14 @@ impl Default for Policy {
     fn default() -> Self {
         Self {
             enabled: true,
-            reaction_ms: 350,
-            turn_degrees_per_second: 180.,
+            reaction_ms: 800,
+            turn_degrees_per_second: 90.,
             aim_tolerance_degrees: 3.,
-            accuracy_per_mille: 650,
+            accuracy_per_mille: 300,
+            far_accuracy_per_mille: 100,
+            recoil_compensation_per_mille: 250,
+            max_engagement_distance_m: 60.,
+            acquisition_fov_degrees: 120.,
             perception_interval_ms: 200,
             max_candidates_per_bot: 8,
             max_rays_per_tick: 64,
@@ -41,6 +51,12 @@ impl Policy {
             || !self.aim_tolerance_degrees.is_finite()
             || !(0.1..=15.).contains(&self.aim_tolerance_degrees)
             || self.accuracy_per_mille > 1000
+            || self.far_accuracy_per_mille > 1000
+            || self.recoil_compensation_per_mille > 1000
+            || !self.max_engagement_distance_m.is_finite()
+            || !(1.0..=2048.).contains(&self.max_engagement_distance_m)
+            || !self.acquisition_fov_degrees.is_finite()
+            || !(1.0..=360.).contains(&self.acquisition_fov_degrees)
             || !(50..=5000).contains(&self.perception_interval_ms)
             || !(1..=32).contains(&self.max_candidates_per_bot)
             || !(1..=256).contains(&self.max_rays_per_tick)
@@ -49,6 +65,30 @@ impl Policy {
             return Err("invalid_bot_firearm_policy");
         }
         Ok(())
+    }
+    fn within_range(&self, distance: f64, weapon_range: f64) -> bool {
+        distance.is_finite()
+            && weapon_range.is_finite()
+            && weapon_range > 0.
+            && distance >= 0.
+            && distance < self.max_engagement_distance_m.min(weapon_range)
+    }
+    fn can_acquire(&self, from: [f64; 3], to: [f64; 3], yaw: f64, weapon_range: f64) -> bool {
+        if !self.within_range(length(from, to), weapon_range) {
+            return false;
+        }
+        let wanted = (to[0] - from[0]).atan2(to[2] - from[2]);
+        let (_, angle) = turn(yaw, wanted, 0.);
+        angle <= self.acquisition_fov_degrees.to_radians() * 0.5
+    }
+    fn accuracy_at(&self, distance: f64, weapon_range: f64) -> u16 {
+        if !self.within_range(distance, weapon_range) {
+            return 0;
+        }
+        let fraction = distance / self.max_engagement_distance_m.min(weapon_range);
+        let near = f64::from(self.accuracy_per_mille);
+        let far = f64::from(self.far_accuracy_per_mille.min(self.accuracy_per_mille));
+        (near + (far - near) * fraction).round() as u16
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,6 +112,9 @@ pub(super) struct State {
     pitch: f64,
     shot_number: u64,
     last_diagnostic: Option<Duration>,
+    recoil: recoil::State,
+    recoil_profile: Option<recoil::Profile>,
+    last_fired: Option<Duration>,
 }
 impl State {
     pub(super) fn item(&self, equipped: replication::InventoryItem) -> replication::InventoryItem {
@@ -92,6 +135,7 @@ impl State {
         &mut self,
         key: (u32, u8, u8, u8, u16),
         p: &retail_combat::RetailBulletMetadata,
+        recoil_profile: recoil::Profile,
         yaw: u16,
     ) {
         if self.equipment != Some(key) {
@@ -100,6 +144,8 @@ impl State {
                 magazine: p.magazine_capacity,
                 reserve: p.magazine_capacity * p.initial_magazine_count.saturating_sub(1),
                 yaw: f64::from(yaw) * std::f64::consts::TAU / 1024.,
+                recoil: recoil::State::new(recoil_profile),
+                recoil_profile: Some(recoil_profile),
                 ..Default::default()
             };
         }
@@ -290,6 +336,21 @@ fn accurate(id: u16, generation: u32, shot: u64, threshold: u16) -> bool {
     x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb);
     (x ^ (x >> 31)) % 1000 < u64::from(threshold)
 }
+pub(crate) fn validate_weapon_recoil(
+    items: &item_catalog::ItemCatalog,
+    kit: &replication::CharacterLoadout,
+) -> Result<(), &'static str> {
+    let catalog = items.retail_combat()?;
+    let equipped = kit.primary;
+    let profile = retail_combat::RetailBulletProfile::from_equipped(
+        catalog,
+        kit,
+        equipped,
+        equipped.gear_slot,
+        equipped.ammo_pool,
+    )?;
+    recoil::Profile::from_weapon(items.weapon_parameters(profile.item_id())?).map(|_| ())
+}
 impl<W: Write> Engine<W> {
     pub(crate) fn tick_bot_firearms(
         &mut self,
@@ -440,6 +501,12 @@ impl<W: Write> Engine<W> {
             let bot = &self.bot_registry.bots[&id];
             if !safe(bot) {
                 let state = &mut self.bot_registry.bots.get_mut(&id).unwrap().firearm;
+                if let Some(profile) = state.recoil_profile {
+                    let dt = state
+                        .last_tick
+                        .map_or(0., |last| now.saturating_sub(last).as_secs_f64().min(0.25));
+                    state.recoil.tick(profile, dt, false, 0., 0.);
+                }
                 state.target = None;
                 state.last_tick = Some(now);
                 continue;
@@ -461,9 +528,24 @@ impl<W: Write> Engine<W> {
                 if schedule.infinite_ammo {
                     return Err("unsupported_infinite_ammunition");
                 }
-                Ok((p, metadata, schedule))
+                let key = (
+                    me.life.generation,
+                    kit.handle.update_id,
+                    kit.handle.inventory_index,
+                    equipped.gear_slot,
+                    p.item_id(),
+                );
+                let existing = &self.bot_registry.bots[&id].firearm;
+                let recoil_profile = if existing.equipment == Some(key) {
+                    existing
+                        .recoil_profile
+                        .ok_or("missing_bound_weapon_recoil")?
+                } else {
+                    recoil::Profile::from_weapon(items.weapon_parameters(p.item_id())?)?
+                };
+                Ok((p, metadata, schedule, recoil_profile))
             });
-            let (profile, metadata, schedule) = match supported {
+            let (profile, metadata, schedule, recoil_profile) = match supported {
                 Ok(v) => v,
                 Err(reason) => {
                     let s = &mut self.bot_registry.bots.get_mut(&id).unwrap().firearm;
@@ -486,6 +568,7 @@ impl<W: Write> Engine<W> {
                     profile.item_id(),
                 ),
                 metadata,
+                recoil_profile,
                 self.bot_registry.bots[&id].yaw,
             );
             let dt = state
@@ -500,7 +583,7 @@ impl<W: Write> Engine<W> {
                 !actors.iter().any(|a| {
                     a.life == *life
                         && a.health > 0
-                        && length(from, torso(a.feet)) < metadata.max_range
+                        && policy.within_range(length(from, torso(a.feet)), metadata.max_range)
                 })
             }) {
                 state.target = None;
@@ -516,7 +599,13 @@ impl<W: Write> Engine<W> {
                         a.team != me.team
                             && a.health > 0
                             && a.armor.is_some()
-                            && length(from, torso(a.feet)) < metadata.max_range
+                            && policy.can_acquire(
+                                from,
+                                torso(a.feet),
+                                f64::from(self.bot_registry.bots[&id].yaw) * std::f64::consts::TAU
+                                    / 1024.,
+                                metadata.max_range,
+                            )
                     })
                     .collect();
                 candidates.sort_by(|a, b| {
@@ -563,6 +652,9 @@ impl<W: Write> Engine<W> {
                 }
             }
             let mut shot = None;
+            if state.target.is_none() {
+                state.recoil.tick(recoil_profile, dt, false, 0., 0.);
+            }
             if let Some(target) = state
                 .target
                 .as_ref()
@@ -570,6 +662,19 @@ impl<W: Write> Engine<W> {
                 .cloned()
             {
                 let to = torso(target.feet);
+                let moving = matches!(
+                    self.bot_registry.bots[&id].target.runtime.unwrap().phase,
+                    BotPhase::Relocating
+                );
+                let held = matches!(
+                    schedule.initial_fire_mode,
+                    retail_combat::RetailFireMode::Auto
+                ) && state.last_fired.is_some_and(|last| {
+                    now.saturating_sub(last).as_secs_f64() <= schedule.refire_seconds + 0.05
+                });
+                state
+                    .recoil
+                    .tick(recoil_profile, dt, held, if moving { 1. } else { 0. }, 0.);
                 let wanted = (to[0] - from[0]).atan2(to[2] - from[2]);
                 let (yaw, error) = turn(
                     state.yaw,
@@ -587,7 +692,8 @@ impl<W: Write> Engine<W> {
                 state.pitch += pitch_move;
                 let pitch_error = (pitch_delta - pitch_move).abs();
                 let aimed_end = aim_endpoint(from, state.yaw, state.pitch, length(from, to));
-                if error <= policy.aim_tolerance_degrees.to_radians()
+                if policy.within_range(length(from, to), metadata.max_range)
+                    && error <= policy.aim_tolerance_degrees.to_radians()
                     && pitch_error <= policy.aim_tolerance_degrees.to_radians()
                     && intersects(
                         from,
@@ -600,11 +706,28 @@ impl<W: Write> Engine<W> {
                     && state.reload_until.is_none()
                     && now >= state.next_shot
                 {
+                    let seed = (u64::from(id) << 32)
+                        ^ u64::from(me.life.generation)
+                        ^ state
+                            .shot_number
+                            .wrapping_add(1)
+                            .wrapping_mul(0xd6e8feb86659fd93);
+                    let mut next_recoil = state.recoil;
+                    next_recoil.fire(recoil_profile, seed);
+                    let shot_end = next_recoil.endpoint(
+                        recoil_profile,
+                        from,
+                        state.yaw,
+                        state.pitch,
+                        length(from, to),
+                        policy.recoil_compensation_per_mille,
+                        seed,
+                    );
                     match visible(
                         self.collision_world.as_ref(),
                         &map,
                         from,
-                        aimed_end,
+                        shot_end,
                         id,
                         target.life.id,
                         &actors,
@@ -613,11 +736,17 @@ impl<W: Write> Engine<W> {
                     ) {
                         Ok(()) => {
                             if state.consume(now, schedule) {
-                                let hit = accurate(
+                                state.recoil = next_recoil;
+                                state.last_fired = Some(now);
+                                let hit = intersects(
+                                    from,
+                                    shot_end,
+                                    Bounds::body(target.feet, Default::default()),
+                                ) && accurate(
                                     id,
                                     me.life.generation,
                                     state.shot_number,
-                                    policy.accuracy_per_mille,
+                                    policy.accuracy_at(length(from, to), metadata.max_range),
                                 );
                                 let resolved = damage::resolve_character_hit(
                                     profile.raw_character_damage(length(from, to) as f32, 1., 0)?,
@@ -627,7 +756,7 @@ impl<W: Write> Engine<W> {
                                     0,
                                     target.health,
                                 )?;
-                                shot = Some((target, hit, resolved, aimed_end));
+                                shot = Some((target, hit, resolved, shot_end));
                             }
                         }
                         Err(reason) => {
@@ -666,6 +795,8 @@ impl<W: Write> Engine<W> {
                 receipts.push(json!({"op":"bot_firearm_shot","timestamp_ms":now.as_millis() as u64,"object_index":id,"generation":me.life.generation,
                     "target":target.life.id,"target_generation":target.life.generation,"weapon_item":profile.item_id(),"magazine":state.magazine,"reserve":state.reserve,
                     "origin":from,"destination":torso(target.feet),"aim_endpoint":aimed_end,"yaw_radians":state.yaw,"pitch_radians":state.pitch,"hit":hit,"amount_hp":if hit {amount} else {0.},"damage_calculation":calculation,
+                    "recoil_pitch_degrees":state.recoil.pitch_degrees,"recoil_yaw_degrees":state.recoil.yaw_degrees,"spread_degrees":state.recoil.width_degrees(recoil_profile),"recoil_compensation_per_mille":policy.recoil_compensation_per_mille,
+                    "distance_m":length(from,torso(target.feet)),"accuracy_per_mille":policy.accuracy_at(length(from,torso(target.feet)),metadata.max_range),
                     "health_before":target.health,"health_after":if hit {resolved.map_or(target.health,|d|d.health_quarter_points)} else {target.health}}));
                 if hit && let Some(damage) = resolved {
                     if let Some(world) = self.active.as_ref().map(|a| a.reservation.world) {
@@ -758,5 +889,114 @@ impl<W: Write> Engine<W> {
             }
         }
         Ok(messages)
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_engagement_policy_loads_and_rejects_invalid_limits() {
+        let policy = serde_json::from_value::<Policy>(json!({
+            "max_engagement_distance_m": 60.0,
+            "acquisition_fov_degrees": 120.0,
+            "far_accuracy_per_mille": 100,
+            "recoil_compensation_per_mille": 250
+        }));
+        assert!(
+            policy.is_ok(),
+            "external engagement limits must be supported"
+        );
+        assert!(policy.unwrap().validate().is_ok());
+    }
+
+    #[test]
+    fn default_policy_gives_a_human_time_to_react() {
+        assert_eq!(Policy::default().reaction_ms, 800);
+        assert_eq!(Policy::default().accuracy_per_mille, 300);
+    }
+    #[test]
+    fn range_and_field_of_view_bound_both_acquisition_and_retention() {
+        let p = Policy::default();
+        assert!(p.can_acquire([0.; 3], [0., 0., 59.], 0., 300.));
+        assert!(!p.can_acquire([0.; 3], [0., 0., 60.], 0., 300.));
+        assert!(!p.within_range(60., 300.));
+        assert!(!p.within_range(30., 30.));
+        assert!(!p.within_range(f64::NAN, 300.));
+        assert!(!p.can_acquire([0.; 3], [0., 0., -10.], 0., 300.));
+        assert!(!p.can_acquire([0.; 3], [10., 0., 0.], 0., 300.));
+        assert!(p.can_acquire([0.; 3], [10., 0., 0.], std::f64::consts::FRAC_PI_2, 300.));
+        // Angular wraparound must not hide a target just across zero yaw.
+        assert!(p.can_acquire([0.; 3], [0., 0., 10.], std::f64::consts::TAU - 0.01, 300.));
+    }
+
+    #[test]
+    fn distance_accuracy_decreases_and_never_exceeds_explicit_near_accuracy() {
+        let p = Policy::default();
+        assert_eq!(p.accuracy_at(0., 300.), 300);
+        assert_eq!(p.accuracy_at(30., 300.), 200);
+        assert_eq!(p.accuracy_at(60., 300.), 0);
+        let mut zero = p.clone();
+        zero.accuracy_per_mille = 0;
+        assert_eq!(zero.accuracy_at(1., 300.), 0);
+        for i in 0..600 {
+            let a = p.accuracy_at(i as f64 / 10., 300.);
+            let b = p.accuracy_at((i + 1) as f64 / 10., 300.);
+            assert!(a >= b);
+        }
+        assert!(accurate(3, 1, 1, 1000));
+        assert!(!accurate(3, 1, 1, 0));
+    }
+
+    #[test]
+    fn invalid_engagement_limits_fail_validation() {
+        for range in [0., -1., f64::NAN, f64::INFINITY, 2049.] {
+            let p = Policy {
+                max_engagement_distance_m: range,
+                ..Policy::default()
+            };
+            assert!(p.validate().is_err());
+        }
+        for fov in [0., 361., f64::NAN] {
+            let p = Policy {
+                acquisition_fov_degrees: fov,
+                ..Policy::default()
+            };
+            assert!(p.validate().is_err());
+        }
+        let p = Policy {
+            far_accuracy_per_mille: 1001,
+            ..Policy::default()
+        };
+        assert!(p.validate().is_err());
+    }
+    #[test]
+    fn recoil_changes_hit_geometry_instead_of_only_an_accuracy_coin_flip() {
+        let p=recoil::Profile::from_weapon(&json!({"reticule_params_stand":{
+            "KnockAdd":0,"KnockFire":3.,"KnockReturn":1.,"SideKnockFire":0.,"SideKnockReturn":1.,
+            "SpreadFire":0.,"SpreadReturn":1.,"SpreadMove":0.,"SpreadRotate":0.,"MoveSpreadReturn":1.,
+            "cone_width_range":[0.,0.],"pitch_offset_range":[0.,9.],"yaw_offset_range":[-1.,1.],
+            "SpreadNormalization":0,"WidthCombineOp":"kWCO_Add"}})).unwrap();
+        let from = [0.; 3];
+        let body = Bounds::body([0., -1., 30.], Default::default());
+        let mut state = recoil::State::new(p);
+        assert!(intersects(
+            from,
+            state.endpoint(p, from, 0., 0., 30., 0, 1),
+            body
+        ));
+        state.fire(p, 1);
+        assert!(!intersects(
+            from,
+            state.endpoint(p, from, 0., 0., 30., 0, 1),
+            body
+        ));
+        state.tick(p, 5., false, 0., 0.);
+        assert!(intersects(
+            from,
+            state.endpoint(p, from, 0., 0., 30., 0, 1),
+            body
+        ));
     }
 }

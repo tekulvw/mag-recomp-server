@@ -310,3 +310,95 @@ fn legacy_single_tile_bytes_remain_loadable() {
         Status::Complete
     );
 }
+
+#[test]
+fn long_supported_ground_route_is_not_rejected_as_a_query_length_limit() {
+    let mut input = fixture(false, false, false);
+    for v in &mut input.vertices {
+        v[0] *= 20.;
+    }
+    input.bounds.max[0] = 400.;
+    input.physics_regions[0].max[0] = 400.;
+    let mut h = Sha256::new();
+    h.update(b"MAG-NAV-GEOMETRY-v1\0");
+    h.update((input.vertices.len() as u32).to_le_bytes());
+    h.update((input.triangles.len() as u32).to_le_bytes());
+    for x in input.vertices.iter().flatten() {
+        h.update(x.to_le_bytes());
+    }
+    for x in input.triangles.iter().flatten() {
+        h.update(x.to_le_bytes());
+    }
+    input.geometry_sha256 = format!("{:x}", h.finalize());
+    let m = load(input);
+    let rules = mag_gameplay::fall_damage::Rules {
+        schema_version: 1,
+        source_build: "synthetic".into(),
+        application_id: 20231,
+        min_height: 10.,
+        damage_factor: 1.,
+        minimum_damage_exclusive: 0.,
+        jump_fall_state: 0,
+        damage_type: 5,
+        damage_source_type: 1,
+    };
+    let result = m.route_with_drops([3., 0., 5.], [380., 0., 5.], 0.2, &rules, 400);
+    assert!(
+        result.is_ok(),
+        "a complete bounded corridor must not fail only because it exceeds256m: {result:?}"
+    );
+    assert!(result.unwrap().length_m > 300.);
+}
+
+#[test]
+fn corridor_prefix_is_bounded_continues_and_preserves_wall_detours() {
+    let mesh = load(fixture(true, false, false));
+    let full = mesh.route([3., 0., 5.], [16., 0., 5.], 0.2).unwrap();
+    let segment = full.bounded_prefix(12.).unwrap();
+    assert_eq!(segment.status, Status::Complete);
+    assert!(segment.length_m <= 12.000001);
+    assert!(segment.projected_goal[2] > 14.5);
+    assert!(mesh.contains(segment.projected_goal, &segment));
+    let next = mesh
+        .route(segment.projected_goal, full.requested_goal, 0.2)
+        .unwrap();
+    assert_eq!(next.status, Status::Complete);
+    assert!(next.length_m < full.length_m);
+    assert!(next.waypoints.iter().any(|p| p[2] > 14.5));
+    assert!(full.bounded_prefix(f64::NAN).is_err());
+    let mut invalid = full.clone();
+    invalid.status = Status::Partial;
+    assert!(invalid.bounded_prefix(12.).is_err());
+}
+
+#[test]
+fn corridor_prefix_never_cuts_an_airborne_drop() {
+    let mesh = load(fixture(false, false, false));
+    let mut full = mesh.route([3., 0., 5.], [16., 0., 5.], 0.2).unwrap();
+    full.waypoints = vec![
+        [3., 0., 5.],
+        [5., 0., 5.],
+        [6., 0., 5.],
+        [10., -3., 5.],
+        [10., -3., 5.],
+        [16., -3., 5.],
+    ];
+    full.waypoint_kinds = vec![
+        WaypointKind::Walk,
+        WaypointKind::Walk,
+        WaypointKind::DropStart,
+        WaypointKind::DropEnd,
+        WaypointKind::Walk,
+        WaypointKind::Walk,
+    ];
+    full.waypoint_drop_ids = vec![None, None, Some(7), Some(7), None, None];
+    full.length_m = 13.;
+    let before = full.bounded_prefix(5.).unwrap();
+    assert_eq!(before.projected_goal, [5., 0., 5.]);
+    assert!(before.waypoint_drop_ids.iter().all(Option::is_none));
+    let after = full.bounded_prefix(9.).unwrap();
+    assert!(after.waypoint_kinds.contains(&WaypointKind::DropStart));
+    assert!(after.waypoint_kinds.contains(&WaypointKind::DropEnd));
+    assert_eq!(after.waypoint_kinds.last(), Some(&WaypointKind::Walk));
+    assert!(after.length_m <= 9.000001);
+}

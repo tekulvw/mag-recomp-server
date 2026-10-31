@@ -733,6 +733,21 @@ impl ItemCatalog {
             .and_then(|capacity| u8::try_from(capacity).ok())
             .ok_or("unsupported_saved_primary_magazine")
     }
+    pub(crate) fn weapon_parameters(&self, id: u16) -> Result<&Value, &'static str> {
+        self.validate_item(id)?;
+        let item = self.item(id)?;
+        if item["item_type"].as_str() != Some("kWeapon")
+            || item["definition"]["group"].as_str() != Some("weapons")
+        {
+            return Err("unsupported_weapon_reticule_item");
+        }
+        let name = item["definition"]["name"]
+            .as_str()
+            .ok_or("unresolved_saved_item")?;
+        self.raw["definitions"]["weapons"][name]
+            .get("parameters")
+            .ok_or("missing_weapon_reticule_parameters")
+    }
     pub fn character_blast_rules(&self) -> crate::blast_rules::CharacterBlastRules {
         self.character_blast_rules
     }

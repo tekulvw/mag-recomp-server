@@ -104,6 +104,72 @@ pub struct Route {
     #[serde(default)]
     pub predicted_remaining_health: Option<u16>,
 }
+impl Route {
+    /// Follow only a bounded prefix of a complete, validated corridor. Never
+    /// replace a failed query with a straight-line guess or cut a certified drop.
+    pub fn bounded_prefix(&self, maximum_m: f64) -> Result<Self, Error> {
+        if self.status != Status::Complete
+            || !maximum_m.is_finite()
+            || !(1.0..=256.0).contains(&maximum_m)
+            || self.waypoints.len() < 2
+            || self.waypoint_kinds.len() != self.waypoints.len()
+            || self.waypoint_drop_ids.len() != self.waypoints.len()
+            || self.waypoints.iter().any(|p| !valid_point(*p))
+        {
+            return err("navmesh_invalid_segment_request");
+        }
+        if self.length_m <= maximum_m {
+            return Ok(self.clone());
+        }
+        let mut result = self.clone();
+        let mut length = 0.;
+        let mut safe_end = 0;
+        let mut safe_length = 0.;
+        let mut interpolated = None;
+        for i in 1..self.waypoints.len() {
+            let a = self.waypoints[i - 1];
+            let b = self.waypoints[i];
+            let edge = (b[0] - a[0]).hypot(b[2] - a[2]);
+            if length + edge > maximum_m {
+                if self.waypoint_kinds[i - 1] == WaypointKind::Walk
+                    && self.waypoint_kinds[i] == WaypointKind::Walk
+                    && edge > 0.
+                {
+                    let fraction = (maximum_m - length) / edge;
+                    interpolated = Some((
+                        i,
+                        std::array::from_fn(|axis| a[axis] + fraction * (b[axis] - a[axis])),
+                    ));
+                    safe_length = maximum_m;
+                }
+                break;
+            }
+            length += edge;
+            if self.waypoint_kinds[i] == WaypointKind::Walk {
+                safe_end = i;
+                safe_length = length;
+            }
+        }
+        let count = interpolated.map_or(safe_end + 1, |(i, _)| i);
+        result.waypoints.truncate(count);
+        result.waypoint_kinds.truncate(count);
+        result.waypoint_drop_ids.truncate(count);
+        if let Some((_, point)) = interpolated {
+            result.waypoints.push(point);
+            result.waypoint_kinds.push(WaypointKind::Walk);
+            result.waypoint_drop_ids.push(None);
+        }
+        if result.waypoints.len() < 2 || safe_length < 0.03125 {
+            return err("navmesh_no_supported_segment");
+        }
+        result.projected_goal = *result.waypoints.last().unwrap();
+        result.requested_goal = result.projected_goal;
+        result.length_m = safe_length;
+        // A full-route prediction includes drops beyond this prefix.
+        result.predicted_remaining_health = None;
+        Ok(result)
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Error(pub &'static str);
 impl std::fmt::Display for Error {

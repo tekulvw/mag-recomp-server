@@ -494,9 +494,13 @@ impl<W: Write> Engine<W> {
                 .item_catalog
                 .bootstrap_default_inventory_index(faction)
                 .ok_or("missing_retail_target_loadout")?;
-            self.item_catalog
+            let kit = self
+                .item_catalog
                 .bootstrap_loadout(faction, index)
                 .ok_or("missing_retail_target_loadout")?;
+            if config.firearms.enabled {
+                crate::bot_firearms::validate_weapon_recoil(&self.item_catalog, &kit)?;
+            }
         }
         let terrain =
             bot_physics::WorldTerrain::new(self.collision_world.as_ref(), self.map_name())
