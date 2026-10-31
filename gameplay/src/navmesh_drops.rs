@@ -327,7 +327,10 @@ impl NavMesh {
             .windows(2)
             .map(|p| (p[1][0] - p[0][0]).hypot(p[1][2] - p[0][2]))
             .sum();
-        if route.length_m > 256. || route.waypoints.len() > 1024 || route.corridor_refs.len() > 1024
+        if !route.length_m.is_finite()
+            || route.length_m > 2048.
+            || route.waypoints.len() > 1024
+            || route.corridor_refs.len() > 1024
         {
             return err("navmesh_route_limit");
         }

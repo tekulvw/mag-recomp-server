@@ -227,6 +227,7 @@ pub(super) struct Task {
     pub(super) role_goal: Option<replication::CharacterPosition>,
     generation: u32,
     pub(super) recovering: bool,
+    continuing: bool,
     routed: bool,
     wide: bool,
     unavailable_reported: bool,
@@ -235,6 +236,12 @@ pub(super) struct Task {
     retry_at: Duration,
     attempts: u32,
     candidate_attempts: usize,
+}
+impl Task {
+    fn finish_segment(&mut self, now: Duration) {
+        self.goal = None;
+        self.retry_at = now;
+    }
 }
 fn eligible(state: replication::ObjectiveState) -> bool {
     use replication::ObjectiveState::*;
@@ -842,7 +849,7 @@ impl<W: Write> Engine<W> {
             b.drop_reroute = false;
             b.drop_resume_failure_at = None;
             b.delay_episode = None;
-            b.task.goal = Some(goal);
+            b.task.goal = Some(b.target.registry_move_destination().unwrap_or(goal));
             b.task.recovering = false;
             b.task.progress_at = now;
             b.task.progress_distance = b.target.registry_route_progress();
@@ -1355,7 +1362,7 @@ impl<W: Write> Engine<W> {
                 return Err(reason);
             }
             if resume {
-                b.task.goal = Some(goal);
+                b.task.goal = Some(b.target.registry_move_destination().unwrap_or(goal));
                 b.task.recovering = false;
                 b.task.progress_at = now;
                 b.task.progress_distance = b.target.registry_route_progress();
@@ -1766,7 +1773,7 @@ impl<W: Write> Engine<W> {
             }
             if resume {
                 if !physical_exit {
-                    bot.task.goal = Some(goal);
+                    bot.task.goal = Some(bot.target.registry_move_destination().unwrap_or(goal));
                     bot.task.recovering = false;
                 }
                 bot.drop_holding_goal = None;
@@ -1984,6 +1991,7 @@ impl<W: Write> Engine<W> {
                 t.operator = operator;
                 t.goal = None;
                 t.role_goal = None;
+                t.continuing = false;
                 bot.delay_episode = None;
                 bot.reconsider = None;
                 bot.reconsider_history.clear();
@@ -2016,6 +2024,11 @@ impl<W: Write> Engine<W> {
             let mut arrived = t
                 .goal
                 .is_some_and(|g| distance(g, r.position) <= policy.arrival_m);
+            if arrived && t.continuing && !bot.drop_committed && bot.drop_waiting.is_none() {
+                receipts.push(json!({"op":"bot_objective_segment_complete","object_index":id,"objective":t.objective,"position":r.position,"final_goal":t.role_goal,"timestamp_ms":now.as_millis()as u64}));
+                t.finish_segment(now);
+                arrived = false;
+            }
             if arrived && t.recovering {
                 t.goal = None;
                 t.recovering = false;
@@ -2299,6 +2312,12 @@ impl<W: Write> Engine<W> {
             } else {
                 role_candidate(center, anchor, role, offset)
             };
+            if bot.task.continuing
+                && bot.task.goal.is_none()
+                && let Some(final_goal) = bot.task.role_goal
+            {
+                raw = final_goal;
+            }
             if recovering {
                 let p = bot.target.runtime.unwrap().position;
                 let a = f64::from((u32::from(id) + attempt / 2) % 8) * std::f64::consts::FRAC_PI_4;
@@ -2477,8 +2496,10 @@ impl<W: Write> Engine<W> {
                 };
                 query_us = query_started.elapsed().as_micros() as u64;
                 result?;
+                let segment_goal = bot.target.registry_move_destination().unwrap_or(goal);
                 let t = &mut bot.task;
-                t.goal = Some(goal);
+                t.goal = Some(segment_goal);
+                t.continuing = !recovering && distance(segment_goal, goal) > policy.arrival_m;
                 if !recovering {
                     if t.role_goal != Some(goal) {
                         bot.traffic_yield_cursor = 0;
@@ -2510,7 +2531,7 @@ impl<W: Write> Engine<W> {
                 break;
             }
             receipts.push(match result {
-                Ok(goal)=>json!({"op":"bot_objective_task","timestamp_ms":now.as_millis()as u64,"object_index":id,"squad_index":squad,"objective":objective,"destination_role":role.name,"role_slot":self.bot_registry.bots[&id].role_slot,"reinforced_allocation":self.bot_registry.bots[&id].task.wide,"recovering":recovering,"role":if defending{"defend"}else{"attack"},"goal":goal,"attempt":attempt,"planning_query_us":query_us,"drop_cost_equivalent_m":drop_costs,"drop_reserved_demand_s":demand,"drop_headway_s":policy.drop_congestion_headway_s,"selected_next_drop":self.bot_registry.bots[&id].target.next_registry_drop(policy.drop_entry_buffer_m).map(|p|p.id)}),
+                Ok(goal)=>json!({"op":"bot_objective_task","timestamp_ms":now.as_millis()as u64,"object_index":id,"squad_index":squad,"objective":objective,"destination_role":role.name,"role_slot":self.bot_registry.bots[&id].role_slot,"reinforced_allocation":self.bot_registry.bots[&id].task.wide,"recovering":recovering,"segment_goal":self.bot_registry.bots[&id].task.goal,"continuing":self.bot_registry.bots[&id].task.continuing,"role":if defending{"defend"}else{"attack"},"goal":goal,"attempt":attempt,"planning_query_us":query_us,"drop_cost_equivalent_m":drop_costs,"drop_reserved_demand_s":demand,"drop_headway_s":policy.drop_congestion_headway_s,"selected_next_drop":self.bot_registry.bots[&id].target.next_registry_drop(policy.drop_entry_buffer_m).map(|p|p.id)}),
                 Err(reason)=>json!({"op":"bot_objective_waiting","timestamp_ms":now.as_millis()as u64,"object_index":id,"squad_index":squad,"assigned_objective":objective,"destination_role":role.name,"reason":reason,"attempt":attempt,"planning_query":query_us>0,"planning_query_us":query_us}),
             });
         }
@@ -2530,6 +2551,24 @@ impl<W: Write> Engine<W> {
 
 #[cfg(test)]
 mod public_synthetic_policy_tests {
+    #[test]
+    fn reaching_an_intermediate_leg_preserves_the_final_objective() {
+        let final_goal = super::position([300., 20., 300.]);
+        let mut task = super::Task {
+            objective: Some(4),
+            goal: Some(super::position([100., 20., 100.])),
+            role_goal: Some(final_goal),
+            continuing: true,
+            retry_at: std::time::Duration::from_secs(50),
+            ..Default::default()
+        };
+        task.finish_segment(std::time::Duration::from_secs(12));
+        assert!(task.goal.is_none());
+        assert_eq!(task.objective, Some(4));
+        assert_eq!(task.role_goal, Some(final_goal));
+        assert!(task.continuing);
+        assert_eq!(task.retry_at, std::time::Duration::from_secs(12));
+    }
     #[test]
     fn bundled_synthetic_policy_satisfies_bounds() {
         let policy = super::ObjectivePolicy::bundled();

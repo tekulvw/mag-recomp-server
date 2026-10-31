@@ -86,7 +86,7 @@ impl BotMove {
                 Err("bot_gravity_requires_vertical_only")
             };
         }
-        if (self.destination.y - from.y).abs() > 16.0 {
+        if self.mode != BotMoveMode::Navmesh && (self.destination.y - from.y).abs() > 16.0 {
             return Err("bot_move_vertical_distance_limit");
         }
         let maximum_distance = if self.mode == BotMoveMode::Navmesh {
@@ -416,6 +416,9 @@ impl Target {
             .navigation
             .as_ref()?
             .drop_passage(self.runtime?, id, entry_buffer_m)
+    }
+    pub(super) fn registry_move_destination(&self) -> Option<replication::CharacterPosition> {
+        self.pending_move.as_ref().map(|p| p.movement.destination)
     }
     pub(super) fn registry_route(&self) -> Option<&navmesh::Route> {
         Some(
@@ -784,7 +787,7 @@ impl Target {
         &mut self,
         mesh: Arc<navmesh::NavMesh>,
         map: &str,
-        movement: BotMove,
+        mut movement: BotMove,
         now: Duration,
         health: u16,
         rules: Option<&fall_damage::Rules>,
@@ -793,7 +796,7 @@ impl Target {
         first_drop: Option<u32>,
     ) -> Result<(), &'static str> {
         let runtime = self.runtime.ok_or("bot_not_spawned")?;
-        movement.validate_from(runtime.position)?;
+        movement.validate()?;
         let navigation = NavigationMove::plan_navmesh_with_drop_costs(
             mesh,
             map,
@@ -803,20 +806,12 @@ impl Target {
             health,
             penalties,
             first_drop,
+            Some(192.),
+            goal_tolerance,
         )?;
-        if let Some(tolerance) = goal_tolerance
-            && navigation.navmesh.as_ref().is_none_or(|(_, route)| {
-                point(movement.destination)
-                    .iter()
-                    .zip(route.projected_goal)
-                    .map(|(a, b)| (a - b).powi(2))
-                    .sum::<f64>()
-                    .sqrt()
-                    > tolerance
-            })
-        {
-            return Err("bot_objective_projection_too_far");
-        }
+        movement.destination =
+            character_position(navigation.navmesh.as_ref().unwrap().1.projected_goal);
+        movement.validate_from(runtime.position)?;
         self.pending_move = Some(PendingMove {
             movement_id: format!("population-{}-{}", self.object_index, runtime.generation),
             from: runtime.position,
@@ -2026,6 +2021,8 @@ impl NavigationMove {
             health,
             &std::collections::BTreeMap::new(),
             None,
+            None,
+            None,
         )
     }
     #[allow(clippy::too_many_arguments)]
@@ -2038,6 +2035,8 @@ impl NavigationMove {
         health: u16,
         penalties: &std::collections::BTreeMap<u32, f64>,
         first_drop: Option<u32>,
+        segment_limit: Option<f64>,
+        goal_tolerance: Option<f64>,
     ) -> Result<Self, &'static str> {
         if mesh.artifact().map_name != map_name {
             return Err("bot_navmesh_map_mismatch");
@@ -2068,6 +2067,22 @@ impl NavigationMove {
                 navmesh::Status::Complete => unreachable!(),
             });
         }
+        if let Some(tolerance) = goal_tolerance
+            && point(movement.destination)
+                .iter()
+                .zip(route.projected_goal)
+                .map(|(a, b)| (a - b).powi(2))
+                .sum::<f64>()
+                .sqrt()
+                > tolerance
+        {
+            return Err("bot_objective_projection_too_far");
+        }
+        let route = if let Some(limit) = segment_limit {
+            route.bounded_prefix(limit).map_err(|e| e.0)?
+        } else {
+            route
+        };
         if route.length_m > 256.0 || route.waypoints.len() < 2 {
             return Err("bot_navigation_route_distance_limit");
         }
