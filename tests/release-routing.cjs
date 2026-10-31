@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const {Manifest} = require('release-please/build/src/manifest');
 const YAML = require('yaml');
+const {validateTitle} = require('../tools/check-pr-title.cjs');
 assert.equal(require('release-please/package.json').version, '17.6.0');
 const root = path.resolve(__dirname, '..');
 const config = JSON.parse(fs.readFileSync(path.join(root, 'release-please-config.json')));
@@ -64,7 +65,10 @@ async function candidates(changes, versions=seed, allReleased=false) {
 async function check(name, changes, bumps, versions=seed, allReleased=false) {
   const {prs,releases} = await candidates(changes, versions, allReleased);
   assert.equal(prs.length, Object.keys(bumps).length ? 1 : 0, `${name}: one combined PR`);
-  for (const pr of prs) assert.equal(pr.headRefName,'release-please--branches--main');
+  for (const pr of prs) {
+    assert.equal(pr.headRefName,'release-please--branches--main');
+    assert.equal(validateTitle(pr.title.toString()).valid,true,`${name}: generated release title accepted`);
+  }
   const components = {horizon:'medius',gameplay:'gameplay',[chartPath]:'chart'};
   assert.deepEqual(releases.map(r=>r.tag.toString()).sort(),Object.entries(bumps).map(([p,v])=>`${components[p]}-v${v}`).sort(),`${name}: component release tags`);
   assert.deepEqual(releases.map(r=>r.path).sort(),Object.keys(bumps).sort(),`${name}: component output paths`);
