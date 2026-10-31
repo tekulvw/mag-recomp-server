@@ -95,7 +95,26 @@ helm package charts/mag-recomp-server --destination /tmp/mag-chart-packages
 python3 -m unittest discover -s tests -p test_helm_chart.py
 ```
 
-The Python graph tests require PyYAML 6.0.3 and Helm 3.19 or newer. They render local manifests, reject invalid values, inspect role/storage/Secret boundaries and the optional DNS graph, and package into a temporary directory. They do not contact a cluster. Application readiness checks TCP listeners; those probes do not prove client login, complete game behavior, data compatibility, external routing, DNS propagation or load characteristics. Test those with private operator inputs when deployment is authorized.
+The Python graph tests require PyYAML 6.0.3 and Helm 3.19 or newer. They render local manifests, reject invalid values, inspect role/storage/Secret boundaries and the optional DNS graph, and package into a temporary directory. They do not contact a cluster.
+
+Application startup and readiness probes inspect the exact role port in Linux's
+`/proc/net/tcp` and `/proc/net/tcp6` tables for TCP state `0A` (LISTEN). They use
+`/bin/sh` and `awk`, which must be available in custom images as they are in the
+published application images. Either readable address-family table can satisfy
+the check; unavailable tables or an absent listener fail the probe. Probe periods
+and startup thresholds are unchanged.
+
+These probes open no client connections. The previous TCP socket probes closed
+without sending a gameplay request or SCERT handshake, which produced repeated
+incomplete-request and disconnect diagnostics despite healthy listeners. Server
+diagnostics for actual client traffic are unchanged. The dedicated DNS Pod keeps
+its existing HTTP probes.
+
+A listening socket alone does not prove Pod-IP reachability, engine/bridge health,
+client login, complete game behavior, data compatibility, external routing, DNS
+propagation or load characteristics. The chart binds application listeners to
+wildcard addresses; changing that binding needs separate reachability checks.
+Test these properties with private operator inputs when deployment is authorized.
 
 When deployment is intended, use your reviewed private values and the chart's independent version:
 

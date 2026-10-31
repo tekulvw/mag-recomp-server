@@ -28,6 +28,52 @@ def render(extra=None, ok=True):
 
 
 class ChartTests(unittest.TestCase):
+    def test_nonconnecting_listener_probes(self):
+        containers = {c['name']: c for d in render() if d['kind'] == 'Deployment'
+                      for c in d['spec']['template']['spec']['containers']}
+        for role, port in {'gameplay': 31000, 'medius': 10475, 'maps': 10471}.items():
+            for name in ('startupProbe', 'readinessProbe'):
+                probe = containers[role][name]
+                self.assertNotIn('tcpSocket', probe)
+                command = probe['exec']['command']
+                self.assertEqual(command[:2], ['/bin/sh', '-ec'])
+                self.assertEqual(command[3:], ['socket-listening', f'{port:04X}'])
+                self.assertIn('/proc/net/tcp /proc/net/tcp6', command[2])
+            self.assertEqual(containers[role]['startupProbe']['periodSeconds'], 2)
+            self.assertEqual(containers[role]['startupProbe']['failureThreshold'], 90)
+            self.assertEqual(containers[role]['readinessProbe']['periodSeconds'], 5)
+
+    def test_listener_probe_table_semantics(self):
+        containers = {c['name']: c for d in render() if d['kind'] == 'Deployment'
+                      for c in d['spec']['template']['spec']['containers']}
+        # Independently constructed Linux proc table rows, with no real service/data.
+        header = '  sl  local_address rem_address   st tx_queue rx_queue\n'
+        def row(address, port, state='0A'):
+            return f'  0: {address}:{port:04X} 00000000:0000 {state} 00000000:00000000\n'
+        for role, port in {'gameplay': 31000, 'medius': 10475, 'maps': 10471}.items():
+            command = containers[role]['readinessProbe']['exec']['command']
+            with tempfile.TemporaryDirectory() as temporary:
+                ipv4, ipv6 = (Path(temporary) / name for name in ('tcp', 'tcp6'))
+                # Only replace the proc table paths; execute the actual rendered command.
+                script = command[2].replace('/proc/net/tcp /proc/net/tcp6', f'"{ipv4}" "{ipv6}"')
+                def run(v4, v6):
+                    for file, text in ((ipv4, v4), (ipv6, v6)):
+                        if text is None:
+                            file.unlink(missing_ok=True)
+                        else:
+                            file.write_text(header + text)
+                    return subprocess.run(command[:2] + [script] + command[3:], capture_output=True, timeout=2)
+                for v4, v6 in ((row('00000000', port), None),
+                               ('', row('0' * 32, port)),
+                               (None, row('0' * 32, port))):
+                    self.assertEqual(run(v4, v6).returncode, 0, role)
+                for v4, v6 in (('', ''), (None, None),
+                               (row('00000000', port, '01'), ''),
+                               (row('00000000', port + 1), ''),
+                               (row('00000000', port - 1), ''),
+                               ('', row('0' * 32, port, '06'))):
+                    self.assertNotEqual(run(v4, v6).returncode, 0, role)
+
     def test_default_graph(self):
         docs = render()
         deployments = [d for d in docs if d['kind'] == 'Deployment']
