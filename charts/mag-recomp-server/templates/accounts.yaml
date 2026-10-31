@@ -1,0 +1,17 @@
+{{- if not .Values.accounts.existingClaim }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "mag.accountClaim" . }}
+  labels: {{ include "mag.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: {{ toJson .Values.accounts.accessModes }}
+  {{- if .Values.accounts.storageClass }}
+  storageClassName: {{ .Values.accounts.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.accounts.size }}
+{{- end }}

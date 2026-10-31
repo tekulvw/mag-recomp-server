@@ -71,7 +71,7 @@ namespace Server.Medius
             if (_started) throw new InvalidOperationException("DME already started."); _started = true;
             if (!await _bridge.RequestAsync(new { v = 2, request_id = Id(), op = "hello" })) throw new IOException("Gameplay service is not ready.");
             if (!await _bridge.RequestAsync(new { v = 2, request_id = Id(), op = "configure_match", application_id = _applicationId, minimum_players = _minimumPlayers, maximum_players = _maximumPlayers })) throw new IOException("Gameplay match configuration was not acknowledged.");
-            DmeProgram.SERVER_IP = IPAddress.Loopback; DmeProgram.Settings.TCPPort = 10073; DmeProgram.Settings.UDPPort = 10474;
+            DmeProgram.SERVER_IP = MagNetworkSettings.FromEnvironment().Address; DmeProgram.Settings.TCPPort = 10073; DmeProgram.Settings.UDPPort = 10474;
             DmeProgram.Plugins = Program.Plugins ?? new Server.Plugins.PluginsManager("plugins/");
             var manager = new Server.Dme.MediusManager(_applicationId) { LocalOnly = true }; DmeProgram.Managers.Add(_applicationId, manager);
             World = new Server.Dme.Models.World(manager, _applicationId, _maximumPlayers); DmeProgram.LocalGameplay = this;
@@ -151,7 +151,8 @@ namespace Server.Medius
                 lock (_gate) { if (!Current(reservation) || reservation.Invalidated || !_worldStreamHealthy) { reservation.Invalidated = true; reservation.ReleaseReason = "world_stream_gap"; return failure; } reservation.Accepted = true; }
                 var response = JoinResponse(request.TransactionId, 0);
                 response.MediusWorldUid = (uint)World.WorldId; response.ConnectionType = 3; response.AddressType = 1;
-                response.ServerAddress = FixedAscii("127.0.0.1", 16); response.ServerPort = 10473;
+                var network = MagNetworkSettings.FromEnvironment();
+                response.ServerAddress = FixedAscii(network.Address.ToString(), 16); response.ServerPort = network.GameTcpPort;
                 response.WorldId = (uint)World.WorldId; response.AccessKey = FixedAscii(client.Token, 17);
                 return response;
             }

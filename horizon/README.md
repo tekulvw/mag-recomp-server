@@ -61,6 +61,23 @@ PS3 hello serialization requires external raw certificate-packet templates:
 
 The code also accepts explicitly supplied `RT_MSG_SERVER_HELLO.Certificate` / `MLSCert` byte arrays. These are runtime inputs, not published fixtures. Missing templates or insufficient length cause an explicit exception. No zero-filled substitute or vendor certificate is emitted. MAS serialization patches a copy of the supplied template with the selected public modulus; operators remain responsible for a template and keys compatible with their client. PS2 hello serialization retains its original short layout and does not require these templates.
 
+## Client-visible network endpoints
+
+When deploying behind a load balancer, set `MAG_ADVERTISE_IPV4` to its reachable
+dotted-decimal IPv4 address and `MAG_AUTH_DNS` to the authentication hostname.
+`MAG_AUTH_PORT`, `MAG_LOBBY_PORT` and `MAG_GAME_TCP_PORT` select the ports sent in
+MAPS, login and game-join replies. Defaults preserve the local development
+endpoints: loopback, `mag.test`, and ports 10475, 10478 and 10473 respectively.
+Invalid addresses, hostnames and out-of-range ports fail explicitly.
+
+These settings describe the endpoints seen by clients. Configure MAS/MLS
+listener ports separately in `medius.json`. The embedded local DME listens on
+TCP 10073 and UDP 10474 on all interfaces; its handshake advertises the selected
+IPv4 address and UDP 10474. A load balancer must map the advertised game TCP
+port to 10073 and preserve UDP 10474. The Helm chart supplies these mappings.
+DNS overrides change only hostname resolution; they cannot change client ports
+or replace compatible certificate templates.
+
 ## Licensing
 
 The upstream Horizon MIT license is retained in `LICENSE`. The vendored HighResolutionTimer license is retained in `HighResolutionTimer/LICENSE`. Package dependencies retain their respective licenses. These licenses cover the distributed code; they do not grant rights to game data or third-party runtime material.

@@ -16,6 +16,7 @@ credentials. Operators supply required runtime resources separately.
 | `gameplay/` | Rust gameplay state, protocol codecs, bots, collision and navigation |
 | `gameplay/vendor/recastnavigation/` | Pinned Recast/Detour sources and original license |
 | `horizon/` | Horizon SCERT/Medius transport, lobby integration and synthetic checks |
+| `charts/mag-recomp-server/` | Independently versioned Helm deployment, including optional forwarding DNS |
 | `tools/extraction/`, `tools/collision/`, `tools/navmesh/` | Original-input extractors and evidence-dependent projectors; see [extraction guide](docs/extraction.md) |
 | `tests/`, `tools/` | Publication-boundary checks and synthetic input provenance |
 | `docs/` | Build instructions and public/private resource boundary |
@@ -23,7 +24,9 @@ credentials. Operators supply required runtime resources separately.
 ## Build and test
 
 Install Rust 1.99.0, a C++11 compiler, Python 3.11 or later, and the .NET 10 SDK.
-The first build downloads the dependencies named in the manifests.
+The first build downloads the dependencies named in the manifests. The Helm
+contract tests also require Helm 3.19 or later and PyYAML 6.0.3; install the
+Python dependency into a virtual environment before running the full suite.
 
 ```sh
 python3 -m unittest discover -s tests -v
@@ -52,6 +55,16 @@ Stable releases publish full version tags such as `0.1.0`, a moving minor tag
 such as `0.1`, and `latest`. Images contain replacement server code and synthetic
 defaults; operators still provide their own permitted runtime resources.
 See [the release guide](docs/releasing.md) for setup, versioning and recovery.
+
+The Helm chart has a separate Release Please package at
+`charts/mag-recomp-server`, tagged `chart-v<VERSION>` and published to
+`oci://ghcr.io/tekulvw/charts/mag-recomp-server`. Chart-only changes do not
+release the application images. Image tags in chart values are explicit and
+independent of the chart version.
+
+See [the chart guide](charts/mag-recomp-server/README.md) for deployment inputs,
+storage and optional DNS overrides. Use [private immutable data bundles](docs/data-bundles.md)
+for extracted JSON updates; catalogs and account state are external inputs.
 
 ## Runtime resources and status
 

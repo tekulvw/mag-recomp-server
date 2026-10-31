@@ -61,6 +61,15 @@ game data, authentication certificates, persistent accounts or packet captures.
 
 ## Publication checks
 
+Use Helm 3.19 or later for the chart render checks, and install the pinned YAML
+parser in a Python virtual environment:
+
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install PyYAML==6.0.3
+```
+
 ```sh
 python3 -m unittest discover -s tests -v
 python3 tools/check_public_tree.py

@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "mag.name" . }}-gameplay
+  labels: {{ include "mag.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: gameplay
+  ports:
+    - {name: bridge, port: 31000, targetPort: bridge, protocol: TCP}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "mag.name" . }}-medius
+  labels: {{ include "mag.labels" . | nindent 4 }}
+  {{- with .Values.network.annotations }}
+  annotations: {{ toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: LoadBalancer
+  loadBalancerIP: {{ .Values.network.advertisedIPv4 | quote }}
+  externalTrafficPolicy: {{ .Values.network.externalTrafficPolicy }}
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: medius
+  ports:
+    - {name: auth, port: 10475, targetPort: auth, protocol: TCP}
+    - {name: lobby, port: 10478, targetPort: lobby, protocol: TCP}
+    - {name: proxy, port: 10477, targetPort: proxy, protocol: TCP}
+    - {name: maps-auth, port: {{ .Values.network.mapsPort }}, targetPort: maps-auth, protocol: TCP}
+    - {name: maps-lobby, port: 10472, targetPort: maps-lobby, protocol: TCP}
+    - {name: maps-proxy, port: 10476, targetPort: maps-proxy, protocol: TCP}
+    - {name: game-tcp, port: 10473, targetPort: game-tcp, protocol: TCP}
+    - {name: game-udp, port: 10474, targetPort: game-udp, protocol: UDP}
