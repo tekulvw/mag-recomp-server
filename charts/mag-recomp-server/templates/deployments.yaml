@@ -109,11 +109,11 @@ spec:
             - {name: maps-proxy, containerPort: 10476, protocol: TCP}
             {{- end }}
           startupProbe:
-            tcpSocket: {port: {{ ternary "auth" "maps-auth" $main }}}
+            {{- include "mag.listenerProbe" (dict "port" (ternary 10475 10471 $main)) | nindent 12 }}
             periodSeconds: 2
             failureThreshold: 90
           readinessProbe:
-            tcpSocket: {port: {{ ternary "auth" "maps-auth" $main }}}
+            {{- include "mag.listenerProbe" (dict "port" (ternary 10475 10471 $main)) | nindent 12 }}
             periodSeconds: 5
           securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
           resources: {{ toYaml (index $root.Values.resources $role) | nindent 12 }}
@@ -146,11 +146,11 @@ spec:
           ports:
             - {name: bridge, containerPort: 31000, protocol: TCP}
           startupProbe:
-            tcpSocket: {port: bridge}
+            {{- include "mag.listenerProbe" (dict "port" 31000) | nindent 12 }}
             periodSeconds: 2
             failureThreshold: 90
           readinessProbe:
-            tcpSocket: {port: bridge}
+            {{- include "mag.listenerProbe" (dict "port" 31000) | nindent 12 }}
             periodSeconds: 5
           securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
           resources: {{ toYaml $.Values.resources.gameplay | nindent 12 }}

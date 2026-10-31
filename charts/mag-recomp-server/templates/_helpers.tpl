@@ -13,6 +13,21 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | quote }}
 {{- define "mag.accountClaim" -}}
 {{ default (printf "%s-accounts" (include "mag.name" .)) .Values.accounts.existingClaim }}
 {{- end -}}
+{{- define "mag.listenerProbe" -}}
+exec:
+  command:
+    - /bin/sh
+    - -ec
+    - |
+      for table in /proc/net/tcp /proc/net/tcp6; do
+        if [ -r "$table" ] && awk -v port="$1" '$2 ~ (":" port "$") && $4 == "0A" { found = 1 } END { exit !found }' "$table"; then
+          exit 0
+        fi
+      done
+      exit 1
+    - socket-listening
+    - {{ printf "%04X" (int .port) | quote }}
+{{- end -}}
 {{- define "mag.dataVolume" -}}
 - name: data
   {{- if eq .Values.data.mode "s3" }}
