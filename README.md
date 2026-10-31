@@ -44,9 +44,9 @@ See [BUILDING.md](BUILDING.md) for details.
 
 ## Releases and container images
 
-Release Please manages a shared version for the Medius and gameplay images.
-Merging its release PR creates a GitHub release and runs checks on the release
-tag before publishing separate `linux/amd64` images:
+Release Please versions Medius, gameplay and the chart independently in one
+combined release PR. Merging it creates releases only for the changed components
+and checks their tags before publication. The `linux/amd64` image names are:
 
 - `ghcr.io/tekulvw/mag-recomp-server-medius`
 - `ghcr.io/tekulvw/mag-recomp-server-game`
@@ -58,8 +58,8 @@ See [the release guide](docs/releasing.md) for setup, versioning and recovery.
 
 The Helm chart has a separate Release Please package at
 `charts/mag-recomp-server`, tagged `chart-v<VERSION>` and published to
-`oci://ghcr.io/tekulvw/charts/mag-recomp-server`. Chart-only changes do not
-release the application images. Image tags in chart values are explicit and
+`oci://ghcr.io/tekulvw/charts/mag-recomp-server`. A chart-only version bump publishes only the chart; a Medius-only or gameplay-only
+bump publishes only that image. All pending bumps share one release PR. Image tags in chart values are explicit and
 independent of the chart version.
 
 See [the chart guide](charts/mag-recomp-server/README.md) for deployment inputs,

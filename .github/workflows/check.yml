@@ -76,3 +76,14 @@ jobs:
           "$RUNNER_TEMP/chart-venv/bin/python" -m unittest discover -s tests -p test_helm_chart.py -v
           "$RUNNER_TEMP/chart-venv/bin/python" -m unittest discover -s tests -p test_data_bundle.py -v
       - run: python3 tools/check_public_tree.py
+  release-routing:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - name: Install the Release Please version bundled by the pinned action
+        run: npm install --prefix "$RUNNER_TEMP/release-routing" --ignore-scripts --no-audit --no-fund release-please@17.6.0
+      - name: Check real component routing and publication contracts offline
+        run: NODE_PATH="$RUNNER_TEMP/release-routing/node_modules" node tests/release-routing.cjs

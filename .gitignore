@@ -98,3 +98,6 @@ database/
 *.tgz
 *.zip
 /bundles/
+
+# Release-check dependencies belong in a temporary directory.
+node_modules/

@@ -1,24 +1,48 @@
 # Releases, container images and Helm chart
 
-Release Please maintains a root release for both server components. It updates
-`version.txt`, `CHANGELOG.md` and `.release-please-manifest.json` in a release PR.
-The `simple` strategy deliberately leaves the gameplay crate's internal package
-version independent of the shared distribution version. The Helm chart has its
-own release path, `charts/mag-recomp-server`, and a separate release PR. The empty
-initial manifest means neither component has shipped; each starts at `0.1.0`
-and advances independently thereafter.
+Release Please versions Medius, gameplay and the Helm chart independently. It
+collects all pending component releases into **one release PR** and updates
+`.release-please-manifest.json` once. A PR may contain one, two or three version
+bumps; merging it publishes only those components. Independent versions do not
+require separate PRs.
 
-| Component | Release tag | Version source | Published artifacts |
-| --- | --- | --- | --- |
-| Server application | `vX.Y.Z` | Root `version.txt` | Medius and gameplay container images |
-| Helm chart | `chart-vX.Y.Z` | `charts/mag-recomp-server/Chart.yaml` `version` | OCI Helm chart in GHCR |
+| Component | Path | Release tag | Version source | Artifact |
+| --- | --- | --- | --- | --- |
+| Medius, including embedded DME | `horizon/` | `medius-vX.Y.Z` | `horizon/version.txt` | Medius image |
+| Gameplay | `gameplay/` | `gameplay-vX.Y.Z` | `gameplay/Cargo.toml` and `Cargo.lock` | Gameplay image |
+| Helm chart | `charts/mag-recomp-server/` | `chart-vX.Y.Z` | `Chart.yaml` `version` | OCI Helm chart |
 
-The chart uses Release Please's `helm` strategy, which updates `version` and its
-chart-local changelog. It leaves `appVersion` and image tags unchanged. Those
-fields describe the application images selected by the chart and are updated
-explicitly when changing the supported application release. Runtime data revision
-is a third, operator-controlled value: chart or image publication never embeds or
-increments an operator's external game data.
+One combined PR avoids sibling release PRs conflicting on their central manifest.
+When several components have pending releases, they share one review and merge;
+they still retain separate versions, tags, release notes and publication gates.
+Ordinary source changes can still require refreshing a stale release PR.
+
+The Rust strategy keeps the gameplay crate and lockfile version in step with its
+image version. The simple Medius strategy updates its version file and local
+changelog. The Helm strategy updates chart `version` and its local changelog,
+while preserving `appVersion` and explicit image tags. Operators can choose
+Medius and gameplay versions separately in deployment values. Use a verified
+compatible pair: a bridge protocol change can require changes and releases in
+both server paths. Independent version numbers do not establish compatibility.
+
+Runtime data revision is a separate operator-controlled value. Artifact
+publication never embeds or increments the external game catalogs.
+
+## Migration from the initial shared release
+
+The historical `v0.1.0` release published both server images at `0.1.0`. That tag,
+release and its image versions remain intact; the root `CHANGELOG.md` remains
+historical. The obsolete root `version.txt` is replaced by Medius's version file.
+The chart's existing `chart-v0.1.0` release also remains intact.
+
+Both server paths inherit version `0.1.0` in the manifest. The configuration's
+`bootstrap-sha` points to the merged initial chart release, after the shared
+application release. Until component releases are discoverable for both server
+paths, this bounds history so already-published features are not replayed as new
+releases. Once all configured component releases are discoverable, Release
+Please uses their release SHAs and ignores the bootstrap boundary. No alias tags
+or rewritten historical releases are needed. The migration itself is a `chore`
+and does not request another application or chart release.
 
 ## Repository setup
 
@@ -50,31 +74,41 @@ and [package access settings](https://docs.github.com/en/packages/learn-github-p
 ## Release flow
 
 1. Merge Conventional Commits into `main`, such as `feat: add an objective` or
-   `fix: reject an invalid packet`. Release Please creates or updates a release
-   PR after a qualifying change. Before version `1.0.0`, breaking changes bump
-   the minor version; fixes bump the patch version.
-2. Changes confined to `charts/mag-recomp-server/` are excluded from the root
-   application release. A qualifying chart change, such as `fix(chart): correct
-   a service port`, creates or updates the chart release PR. Commit scope helps
-   explain intent; changed file paths determine routing. Keep chart-only changes
-   in their own commits: a qualifying commit touching chart and application files
-   can contribute to both releases. No linked-version plugin couples them.
-3. Review and merge the relevant release PR. The next workflow run creates a
-   `vX.Y.Z` application release or `chart-vX.Y.Z` chart release. A manual run on
-   `main` can also reconcile a merged release PR.
-4. The root `release_created` output enables public checks for the application
-   tag. On success, a matrix builds and pushes the Medius and gameplay images
-   from that tag using separate `horizon/` and `gameplay/` contexts.
-5. The `charts/mag-recomp-server--release_created` output independently enables
-   chart checks for the chart tag: `helm lint --strict`, `helm template` with
-   synthetic CI values, and `helm package`. After those pass, the workflow logs
-   in with `GITHUB_TOKEN` and uses `helm push` to publish the OCI chart. A
-   chart-only release skips server compilation and image publication.
+   `fix: reject an invalid packet`. Changed file paths route qualifying commits:
+   `horizon/` to Medius, `gameplay/` to gameplay, and the chart directory to the
+   chart. Scopes explain intent but do not override path routing. Root-only docs
+   and workflow edits do not create component releases.
+2. Release Please creates or updates one combined release PR. A fix in one
+   server path bumps only that server; a chart-only fix bumps only the chart.
+   A qualifying commit touching several paths can contribute to several
+   component releases. There is no linked-version plugin. Before `1.0.0`, fixes
+   bump patch versions and breaking changes bump minor versions.
+3. Review and merge that release PR. The next workflow run creates only its
+   component releases, with separate `medius-v`, `gameplay-v` and `chart-v` tags.
+   A manual workflow run on `main` can also reconcile a merged release PR.
+4. If either application releases, the shared application check suite runs once
+   against its tagged source. The two application tags refer to the same merge
+   commit when both release from the combined PR. After checks pass,
+   `horizon--release_created` enables only Medius image publication, while
+   `gameplay--release_created` enables only gameplay image publication. Each
+   publisher checks out its own component tag and uses that component's plain
+   version output for image tags.
+5. `charts/mag-recomp-server--release_created` independently enables tagged chart
+   checks and OCI publication. Chart-only releases skip server compilation and
+   image publication. The chart version does not advance either image tag.
 
 Publishing stays in the Release Please workflow because a release made with
-`GITHUB_TOKEN` does not start another release/tag workflow. A normal source push
-or manual workflow run that creates no release publishes no artifacts. A workflow
-dispatch from a branch other than `main` skips release creation.
+`GITHUB_TOKEN` does not start another release/tag workflow. A source push or
+manual run that creates no release publishes no artifacts. Dispatching from a
+branch other than `main` skips release creation. The reusable image publisher
+requires read-only source access and package-write access; it receives no
+broad repository-write permission.
+
+`tests/release-routing.cjs` exercises the real Release Please library version
+bundled by the pinned action against offline synthetic GitHub adapters. CI
+checks historical bootstrap, independent path routing and version bumps, the
+single combined PR and complete manifest, generated release tags, Cargo/Helm
+updates, and each publication gate. It makes no GitHub writes or releases.
 
 ## Image names and tags
 
@@ -85,11 +119,13 @@ dispatch from a branch other than `main` skips release creation.
 
 The workflow derives the lower-case namespace from the repository owner, so forks
 publish to their own owner namespace. Images currently target `linux/amd64`.
-Stable application release `v0.1.0`, for example, publishes `0.1.0`, `0.1` and
-`latest` on both names. Semver prereleases receive only their full prerelease
+Each stable component release publishes its own full version, moving minor tag
+and `latest` on its image name. For example, `medius-v0.1.1` updates only the
+Medius image with `0.1.1`, `0.1` and `latest`; the gameplay image remains at its
+separately released version. The historical `v0.1.0` published `0.1.0` on both names. Semver prereleases receive only their full prerelease
 version tag; they do not advance minor or `latest` aliases. Use a full version or
 image digest when a deployment needs a fixed image. Minor and `latest` tags move
-on later stable application releases.
+on later stable releases of that image component.
 
 ```sh
 docker pull ghcr.io/tekulvw/mag-recomp-server-medius:0.1.0
@@ -132,8 +168,8 @@ image tags or external data revision.
 The GitHub release is created before artifact checks and publication. If a check
 or publication job fails, correct transient runner/registry access problems and
 choose **Re-run failed jobs** on that same run. This preserves the successful
-release job's outputs and retries the failed jobs against the release tag. Both
-image jobs are independent, so one can succeed while the other needs a retry.
+release job's outputs and retries the failed jobs against the release tag. When both applications release, their
+publish jobs are independent, so one can succeed while the other needs a retry.
 Chart publication likewise uses its own tag and check dependency.
 
 A fresh manual run does not republish an existing release because Release Please
