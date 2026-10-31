@@ -87,3 +87,5 @@ jobs:
         run: npm install --prefix "$RUNNER_TEMP/release-routing" --ignore-scripts --no-audit --no-fund release-please@17.6.0
       - name: Check real component routing and publication contracts offline
         run: NODE_PATH="$RUNNER_TEMP/release-routing/node_modules" node tests/release-routing.cjs
+      - name: Check PR title validation and event handling
+        run: NODE_PATH="$RUNNER_TEMP/release-routing/node_modules" node --test tests/pr-title.cjs
