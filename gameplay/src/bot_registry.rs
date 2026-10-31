@@ -2355,7 +2355,7 @@ mod identity_tests {
             collision::CollisionWorld::load(&path, collision::CollisionLimits::default()).unwrap(),
         );
         std::fs::remove_file(path).unwrap();
-        let config:BotPopulation=serde_json::from_value(json!({"format":"mag_bot_population_v1","map_name":"synthetic_arena","slots":[
+        let config:BotPopulation=serde_json::from_value(json!({"format":"mag_bot_population_v1","map_name":"synthetic_arena","firearms":{"enabled":false},"slots":[
             {"team":0,"position":{"x":2.,"y":0.,"z":2.}}, {"team":1,"position":{"x":6.,"y":0.,"z":2.}}]})).unwrap();
         engine.with_bot_population(config, 2).unwrap()
     }
