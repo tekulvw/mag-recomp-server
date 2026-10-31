@@ -481,6 +481,9 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             .validate_match(catalog.map_name(), catalog.match_profile())
             .map_err(io::Error::other)?;
     }
+    catalog
+        .validate_objectives(objective_catalog.as_ref())
+        .map_err(io::Error::other)?;
     let objective_info = objective_catalog.as_ref().map(|objectives| serde_json::json!({"path":objective_path,"object_count":objectives.object_count(),"source":objectives.source()}));
     let item_path = item_path
         .ok_or_else(|| io::Error::other("--item-catalog is required for gameplay startup"))?;

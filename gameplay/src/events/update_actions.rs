@@ -299,18 +299,45 @@ pub(super) fn plan_respawn<W: Write>(
         )
         .unwrap();
     let bunker = matches!(point.kind, spawn_catalog::SpawnKind::BunkerPassenger);
+    if matches!(point.kind, spawn_catalog::SpawnKind::Parachute) && loadout.is_none() {
+        plan.gameplay_denial = Some("parachute_spawn_requires_inventory");
+        return Ok(());
+    }
     if bunker && ctx.engine.bunker_exit_policy.is_none() {
         plan.gameplay_denial = Some("bunker_exit_policy_required");
         return Ok(());
     }
     let generation = active.life.next_generation();
+    let mut spawn_position = point.position;
+    if matches!(point.kind, spawn_catalog::SpawnKind::Parachute) {
+        let deadline = active
+            .pending_spawn_deadline
+            .ok_or("parachute_spawn_requires_pending_wave")?;
+        let ordinal = match ctx.engine.parachute_ordinal(point.index, deadline) {
+            Ok(ordinal) => ordinal,
+            Err(code) => {
+                plan.gameplay_denial = Some(code);
+                return Ok(());
+            }
+        };
+        spawn_position = point.parachute_position(ordinal)?;
+        plan.parachute_spawn = Some((point.index, deadline, ordinal));
+    }
     let mut respawn =
-        replication::CharacterRespawn::at_position(now.as_millis() as u32, point.position);
+        replication::CharacterRespawn::at_position(now.as_millis() as u32, spawn_position);
+    if let Some(pose) = point.parachute {
+        respawn.state = replication::CharacterState {
+            state: 17,
+            stance: 0,
+            user_data: [0; 3],
+        };
+        respawn.yaw = pose.yaw;
+    }
     respawn.damage.health_quarter_points = active.modifiers.max_health_quarter_points()?;
     respawn.sequence = next_sequence;
     respawn.object_index = active.reservation.player;
     plan.session.server_position =
-        Some((point.position, player_tracking::PositionOrigin::ServerSpawn));
+        Some((spawn_position, player_tracking::PositionOrigin::ServerSpawn));
     plan.audit.spawned_point = Some(point.index);
     let passenger_seat = if bunker {
         Some(
@@ -329,6 +356,7 @@ pub(super) fn plan_respawn<W: Write>(
         };
     }
     plan.session.new_mounted_seat = Some(passenger_seat);
+    plan.session.spawn_pose = Some((respawn.state, respawn.yaw));
     plan.combat.new_life = Some(CharacterLife::Alive {
         generation: generation.unwrap(),
         health_quarter_points: respawn.damage.health_quarter_points,

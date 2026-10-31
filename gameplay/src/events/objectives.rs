@@ -116,6 +116,7 @@ pub(super) fn interaction<W: Write>(
 
 impl<W: Write> Engine<W> {
     pub(crate) fn reset_objective_world(&mut self) {
+        self.reset_spawn_progression();
         self.objective_world = self.objective_catalog.as_ref().map(ObjectiveWorld::new);
         self.bot_registry.director = Default::default();
         for bot in self.bot_registry.bots.values_mut() {
@@ -442,6 +443,7 @@ impl<W: Write> Engine<W> {
             .collect();
         self.check_reward_capacity(&rewards)?;
         if changed.is_empty() {
+            self.advance_forward_spawns(now)?;
             return Ok(Vec::new());
         }
         let packet = replication::ObjectiveControlSnapshot {
@@ -471,6 +473,7 @@ impl<W: Write> Engine<W> {
         )?;
         self.objective_world = Some(world);
         self.commit_rewards(rewards);
+        self.advance_forward_spawns(now)?;
         for recipient in self.peers.values_mut().chain(self.active.iter_mut()) {
             if recipient.initial_objects.is_some() && recipient.ready_for_updates {
                 recipient.queue_shared(packet.clone());

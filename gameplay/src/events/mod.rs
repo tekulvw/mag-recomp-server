@@ -50,6 +50,8 @@ struct EventPlan {
     outgoing: Option<Vec<u8>>,
     rejection: Option<&'static str>,
     gameplay_denial: Option<&'static str>,
+    /// Consumed only after the physical spawn and evidence have committed.
+    parachute_spawn: Option<(u16, Duration, usize)>,
 }
 impl EventPlan {
     fn new(active: &Active) -> Self {
@@ -75,6 +77,7 @@ struct SessionChanges {
     new_mounted_seat: Option<Option<u8>>,
     last_exit: Option<protocol::DismountSeat>,
     exit_yaw: Option<u16>,
+    spawn_pose: Option<(replication::CharacterState, u16)>,
     clock_points: Option<i16>,
     selected_loadout: Option<protocol::SelectLoadout>,
     new_inventory_handle: Option<replication::InventoryHandle>,
@@ -659,6 +662,11 @@ impl<W: Write> Engine<W> {
         if let Some(points) = plan.session.clock_points {
             active.last_clock_points = points;
         }
+        if let Some((state, yaw)) = plan.session.spawn_pose {
+            active.owner_fields.state = Some(state);
+            active.owner_fields.pitch = Some(127);
+            active.owner_fields.yaw = Some(yaw);
+        }
         if plan.session.new_inventory_handle.is_some() {
             active.current_inventory_handle = plan.session.new_inventory_handle;
         }
@@ -710,6 +718,11 @@ impl<W: Write> Engine<W> {
         if nominations_changed {
             self.publish_nominations(now)?;
         }
+        if let Some((point, deadline, ordinal)) = plan.parachute_spawn {
+            self.parachute_waves.insert((point, deadline), ordinal + 1);
+            self.prune_parachute_waves();
+        }
+        self.advance_forward_spawns(now)?;
         Ok(plan.messages)
     }
 }
