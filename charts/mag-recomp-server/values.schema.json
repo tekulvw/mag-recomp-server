@@ -28,6 +28,10 @@
                 "IfNotPresent",
                 "Never"
               ]
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^$|^sha256:[a-fA-F0-9]{64}$"
             }
           },
           "required": [
@@ -54,6 +58,10 @@
                 "IfNotPresent",
                 "Never"
               ]
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^$|^sha256:[a-fA-F0-9]{64}$"
             }
           },
           "required": [
@@ -80,6 +88,10 @@
                 "IfNotPresent",
                 "Never"
               ]
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^$|^sha256:[a-fA-F0-9]{64}$"
             }
           },
           "required": [
@@ -106,6 +118,10 @@
                 "IfNotPresent",
                 "Never"
               ]
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^$|^sha256:[a-fA-F0-9]{64}$"
             }
           },
           "required": [
@@ -362,18 +378,32 @@
               }
             },
             "trainingCompletion": {
-              "type": "string",
-              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/-]*$",
-              "not": {
-                "pattern": "(^|/)\\.\\.(/|$)"
-              }
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/-]*$",
+                  "not": {
+                    "pattern": "(^|/)\\.\\.(/|$)"
+                  }
+                },
+                {
+                  "const": ""
+                }
+              ]
             },
             "progression": {
-              "type": "string",
-              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/-]*$",
-              "not": {
-                "pattern": "(^|/)\\.\\.(/|$)"
-              }
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/-]*$",
+                  "not": {
+                    "pattern": "(^|/)\\.\\.(/|$)"
+                  }
+                },
+                {
+                  "const": ""
+                }
+              ]
             },
             "retailSkills": {
               "type": "string",
@@ -383,6 +413,34 @@
               }
             },
             "retailArmory": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/-]*$",
+              "not": {
+                "pattern": "(^|/)\\.\\.(/|$)"
+              }
+            },
+            "characterBlastRules": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/-]*$",
+              "not": {
+                "pattern": "(^|/)\\.\\.(/|$)"
+              }
+            },
+            "bootstrapLoadouts": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/-]*$",
+              "not": {
+                "pattern": "(^|/)\\.\\.(/|$)"
+              }
+            },
+            "retailCombatMetadata": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/-]*$",
+              "not": {
+                "pattern": "(^|/)\\.\\.(/|$)"
+              }
+            },
+            "fallDamageRules": {
               "type": "string",
               "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/-]*$",
               "not": {
@@ -626,5 +684,48 @@
       ]
     }
   },
-  "$schema": "https://json-schema.org/draft-07/schema#"
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "runtime": {
+            "properties": {
+              "applicationId": {
+                "const": 20231
+              }
+            },
+            "required": [
+              "applicationId"
+            ]
+          }
+        },
+        "required": [
+          "runtime"
+        ]
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "properties": {
+              "files": {
+                "required": [
+                  "items",
+                  "spawns",
+                  "wireProfiles",
+                  "skills",
+                  "characterBlastRules",
+                  "bootstrapLoadouts",
+                  "retailCombatMetadata",
+                  "retailArmory",
+                  "fallDamageRules",
+                  "retailSkills"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

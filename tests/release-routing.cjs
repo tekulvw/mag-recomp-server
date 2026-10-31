@@ -154,5 +154,9 @@ function publicationContract() {
   await check('later releases keep independent versions',[
     {message:'fix: synthetic pair fix',files:['horizon/Server.Medius/Program.cs','gameplay/src/main.rs']}
   ],{horizon:'0.4.1',gameplay:'0.7.1'},divergent,true);
+  await check('retail runtime and chart release together from published patches',[
+    {message:'feat: select explicit retail catalogs',files:['gameplay/src/main.rs',`${chartPath}/values.yaml`]}
+  ],{gameplay:'0.2.0',[chartPath]:'0.2.0'},
+  {horizon:'0.1.0',gameplay:'0.1.1',[chartPath]:'0.1.1'},true);
   publicationContract();
 })().catch(error=>{console.error(error);process.exitCode=1;});

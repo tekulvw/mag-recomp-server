@@ -3,11 +3,12 @@ use mag_gameplay::telemetry::{TickRecorder, TickSample};
 use mag_gameplay::{
     Engine, EngineResources, IO_DEADLINE, MAX_LOG, Response, parse_request, read_line,
 };
+use sha2::{Digest, Sha256};
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::{
     Arc, Mutex,
@@ -15,7 +16,59 @@ use std::sync::{
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+fn parse_application_id(value: &str) -> io::Result<u32> {
+    match value {
+        "20230" => Ok(20230),
+        "20231" => Ok(20231),
+        _ => Err(io::Error::other("--application-id requires 20230 or 20231")),
+    }
+}
+
+fn validate_runtime_paths(
+    application_id: Option<u32>,
+    paths: &[(&str, Option<&Path>)],
+) -> io::Result<()> {
+    if application_id != Some(20231) {
+        return Ok(());
+    }
+    for (flag, path) in paths {
+        match path {
+            Some(path) if path.is_absolute() => {}
+            _ => {
+                return Err(io::Error::other(format!(
+                    "retail startup requires an explicit absolute {flag}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_item_catalog_links(items: &Path, linked: &[(&str, &Path, &str)]) -> io::Result<()> {
+    let digest = format!("{:x}", Sha256::digest(std::fs::read(items)?));
+    for (name, path, pointer) in linked {
+        let metadata: serde_json::Value = serde_json::from_reader(std::fs::File::open(path)?)
+            .map_err(|_| io::Error::other(format!("invalid {name} metadata")))?;
+        if metadata
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+            != Some(digest.as_str())
+        {
+            return Err(io::Error::other(format!(
+                "{name} does not match the selected retail item catalog"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn main() -> io::Result<()> {
+    run(std::env::args().skip(1))
+}
+
+fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
+    let mut application_id: Option<u32> = None;
+    let mut validate_catalogs = false;
     let mut bind = SocketAddr::from(([127, 0, 0, 1], 31000));
     let mut log: Option<PathBuf> = None;
     let mut telemetry_path: Option<PathBuf> = None;
@@ -44,9 +97,15 @@ fn main() -> io::Result<()> {
     let mut development_dummy_position = None;
     let mut development_control = false;
     let mut development_grenade_radius = false;
-    let mut args = std::env::args().skip(1);
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--application-id" => {
+                application_id = Some(parse_application_id(&args.next().ok_or_else(|| {
+                    io::Error::other("--application-id requires 20230 or 20231")
+                })?)?);
+            }
+            "--validate-catalogs" => validate_catalogs = true,
             "--bot-population" => {
                 bot_population_path = Some(
                     args.next()
@@ -253,10 +312,15 @@ fn main() -> io::Result<()> {
             }
             _ => {
                 return Err(io::Error::other(
-                    "usage: mag-gameplay --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--fall-damage-rules /absolute/FALL.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json] [--navmesh-world MESH.mag-nav] [--bot-fill-total N --bot-population POPULATION.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
+                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json] [--navmesh-world MESH.mag-nav] [--bot-fill-total N --bot-population POPULATION.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
                 ));
             }
         }
+    }
+    if validate_catalogs && collision_query.is_some() {
+        return Err(io::Error::other(
+            "--validate-catalogs cannot be combined with --collision-query",
+        ));
     }
     if development_dummy_position.is_some() && !development_dummy {
         return Err(io::Error::other(
@@ -313,6 +377,61 @@ fn main() -> io::Result<()> {
             "--tick-budget-ms requires --tick-telemetry",
         ));
     }
+    if validate_catalogs && application_id.is_none() {
+        return Err(io::Error::other(
+            "--validate-catalogs requires --application-id",
+        ));
+    }
+    validate_runtime_paths(
+        application_id,
+        &[
+            ("--item-catalog", item_path.as_deref()),
+            ("--spawn-catalog", spawn_path.as_deref()),
+            ("--wire-profiles", wire_profiles_path.as_deref()),
+            ("--character-blast-rules", blast_rules_path.as_deref()),
+            ("--bootstrap-loadouts", bootstrap_loadouts_path.as_deref()),
+            ("--retail-combat-metadata", retail_metadata_path.as_deref()),
+            ("--retail-armory-catalog", retail_armory_path.as_deref()),
+            ("--skill-catalog", skill_path.as_deref()),
+            ("--fall-damage-rules", fall_rules_path.as_deref()),
+        ],
+    )?;
+    if application_id == Some(20231) {
+        // Required paths were checked above. Verify projections identify these exact
+        // item bytes rather than accepting unrelated catalogs with the same app ID.
+        validate_item_catalog_links(
+            item_path.as_deref().unwrap(),
+            &[
+                (
+                    "bootstrap loadouts",
+                    bootstrap_loadouts_path.as_deref().unwrap(),
+                    "/provenance/catalog_sha256",
+                ),
+                (
+                    "retail combat",
+                    retail_metadata_path.as_deref().unwrap(),
+                    "/provenance/catalog_sha256",
+                ),
+                (
+                    "retail Armory",
+                    retail_armory_path.as_deref().unwrap(),
+                    "/source_sha256/gameplay~1data~1retail-items.json",
+                ),
+                (
+                    "retail skills",
+                    skill_path.as_deref().unwrap(),
+                    "/source_sha256/gameplay~1data~1retail-items.json",
+                ),
+            ],
+        )?;
+    }
+    if application_id == Some(20231)
+        && (structure_path.is_some() || bunker_path.is_some() || bunker_exit_policy_path.is_some())
+    {
+        return Err(io::Error::other(
+            "retail structure/bunker authority is unverified; omit structure/bunker inputs for the supported no-bunker profile",
+        ));
+    }
     // Validate once before listening; the installed catalog resolves ordinary retail hits.
     let mut retail_combat_catalog = None;
     let retail_metadata = match &retail_metadata_path {
@@ -337,6 +456,20 @@ fn main() -> io::Result<()> {
     let spawn_path = spawn_path
         .ok_or_else(|| io::Error::other("--spawn-catalog is required for gameplay startup"))?;
     let catalog = mag_gameplay::spawn_catalog::SpawnCatalog::load(&spawn_path)?;
+    if application_id.is_some()
+        && collision_world
+            .as_ref()
+            .is_some_and(|world| world.metadata().map_name != catalog.map_name())
+    {
+        return Err(io::Error::other(
+            "collision world map does not match the selected spawn catalog",
+        ));
+    }
+    if application_id == Some(20231) && catalog.match_profile().has_bunkers {
+        return Err(io::Error::other(
+            "retail bunker features are unsupported without verified retail authority",
+        ));
+    }
     let collision_info = collision_world.as_ref().map(|world| serde_json::json!({
         "source":collision_path,"metadata":world.metadata(),"stats":world.stats(),"bullet_authority":"audit_only","grenade_policy":"disk_triangles_three_body_samples","grenade_radius_enabled":development_grenade_radius,"active_map_name":catalog.map_name(),"map_matches_active":world.metadata().map_name == catalog.map_name()}));
     let objective_catalog = objective_path
@@ -358,10 +491,17 @@ fn main() -> io::Result<()> {
             "character-blast rules require an absolute path",
         ));
     }
-    let mut item_catalog = mag_gameplay::item_catalog::ItemCatalog::load_with_blast_rules(
-        &item_path,
-        &blast_rules_path,
-    )?;
+    let mut item_catalog = match application_id {
+        Some(id) => mag_gameplay::item_catalog::ItemCatalog::load_for_application(
+            &item_path,
+            &blast_rules_path,
+            id,
+        )?,
+        None => mag_gameplay::item_catalog::ItemCatalog::load_with_blast_rules(
+            &item_path,
+            &blast_rules_path,
+        )?,
+    };
     if let Some(path) = &bootstrap_loadouts_path {
         if !path.is_absolute() {
             return Err(io::Error::other(
@@ -387,10 +527,45 @@ fn main() -> io::Result<()> {
         item_catalog =
             item_catalog.with_retail_armory(mag_gameplay::retail_armory::RetailArmory::load(path)?);
     }
+    if application_id == Some(20231) {
+        let armory = item_catalog
+            .retail_armory()
+            .ok_or_else(|| io::Error::other("retail Armory required"))?;
+        for faction in 0..3 {
+            let bootstrap = item_catalog.bootstrap_loadout(faction, 0).ok_or_else(|| {
+                io::Error::other("retail bootstrap must include all supported factions")
+            })?;
+            let saved = mag_gameplay::loadouts::SavedLoadouts {
+                selected_index: 0,
+                update_ids: std::array::from_fn(|index| bootstrap.inventories[index].update_id),
+                inventories: std::array::from_fn(|index| bootstrap.inventories[index].slots),
+            };
+            for inventory in &saved.inventories {
+                for &item in inventory.iter().flatten() {
+                    item_catalog.validate_item(item).map_err(io::Error::other)?;
+                }
+            }
+            armory
+                .validate_saved(faction, &saved)
+                .map_err(io::Error::other)?;
+        }
+    }
     let item_catalog = Arc::new(item_catalog);
     let wire_profiles_path =
         wire_profiles_path.unwrap_or_else(|| item_path.with_file_name("wire-profiles.json"));
     let wire_profiles = mag_gameplay::wire_profile::WireProfileCatalog::load(&wire_profiles_path)?;
+    if let Some(id) = application_id {
+        let profile = wire_profiles.profile(id).map_err(io::Error::other)?;
+        if let Some(objectives) = &objective_catalog {
+            objectives
+                .validate_profile(profile)
+                .map_err(io::Error::other)?;
+        } else if catalog.match_profile().has_objectives {
+            return Err(io::Error::other(
+                "objective catalog required when the match profile enables objectives",
+            ));
+        }
+    }
     if skill_path.as_ref().is_some_and(|path| !path.is_absolute()) {
         return Err(io::Error::other(
             "--skill-catalog requires an absolute path",
@@ -407,6 +582,11 @@ fn main() -> io::Result<()> {
             .join("prototype-skills.json"),
     };
     let skill_catalog = mag_gameplay::skill_catalog::SkillCatalog::load(&skill_path)?;
+    if application_id.is_some_and(|id| skill_catalog.application_id() != id) {
+        return Err(io::Error::other(
+            "skill catalog application does not match --application-id",
+        ));
+    }
     let leadership = match (&leadership_passives_path, &leadership_role_policy_path) {
         (None, None) => None,
         (Some(passives), Some(policy)) => {
@@ -434,27 +614,40 @@ fn main() -> io::Result<()> {
         structure_path.unwrap_or_else(|| item_path.with_file_name("prototype-structures.json"));
     let bunker_path =
         bunker_path.unwrap_or_else(|| item_path.with_file_name("prototype-bunkers.json"));
-    let bunker_world = if catalog.match_profile().has_bunkers {
-        mag_gameplay::structures::BunkerWorld::load(
+    let bunker_world = if application_id == Some(20231) {
+        None
+    } else if catalog.match_profile().has_bunkers {
+        Some(mag_gameplay::structures::BunkerWorld::load(
             &bunker_path,
             &structure_path,
             catalog.map_name(),
-        )?
+        )?)
     } else {
-        mag_gameplay::structures::BunkerWorld::without_bunkers(&structure_path)?
+        Some(mag_gameplay::structures::BunkerWorld::without_bunkers(
+            &structure_path,
+        )?)
     };
     let bunker_exit_policy = bunker_exit_policy_path
         .as_ref()
         .map(mag_gameplay::vehicle_exit::BunkerExitPolicy::load)
         .transpose()?;
-    let bunker_info = serde_json::json!({"active":bunker_world.active_count(),"unresolved":bunker_world.unresolved_count(),"placement_source":bunker_path,"combat_source":structure_path});
+    let bunker_info = match &bunker_world {
+        Some(world) => {
+            serde_json::json!({"active":world.active_count(),"unresolved":world.unresolved_count(),"placement_source":bunker_path,"combat_source":structure_path})
+        }
+        None => {
+            serde_json::json!({"enabled":false,"reason":"retail_authority_unverified","placement_source":null,"combat_source":null})
+        }
+    };
     if let Some(position) = development_dummy_position {
         mag_gameplay::dummy::respawn_at_with_catalog_and_profile(
             2,
             0,
             position,
             &item_catalog,
-            wire_profiles.profile(20230).map_err(io::Error::other)?,
+            wire_profiles
+                .profile(application_id.unwrap_or(20230))
+                .map_err(io::Error::other)?,
         )
         .map_err(io::Error::other)?;
     }
@@ -478,6 +671,35 @@ fn main() -> io::Result<()> {
     } else {
         None
     };
+    let mut resources = match application_id {
+        Some(id) => {
+            EngineResources::for_application(item_catalog, catalog, bunker_world, wire_profiles, id)
+                .map_err(io::Error::other)?
+        }
+        None => EngineResources::new(
+            item_catalog,
+            catalog,
+            bunker_world.ok_or_else(|| io::Error::other("legacy bunker resources missing"))?,
+        )
+        .with_wire_profiles(wire_profiles),
+    };
+    if let Some(policy) = bunker_exit_policy {
+        resources = resources
+            .with_bunker_exit_policy(policy)
+            .map_err(io::Error::other)?;
+    }
+    if validate_catalogs {
+        if log.is_some() || telemetry_path.is_some() {
+            return Err(io::Error::other(
+                "--validate-catalogs does not open logs; omit --log and --tick-telemetry",
+            ));
+        }
+        println!(
+            "{}",
+            serde_json::json!({"event":"catalogs_validated","application_id":application_id,"skill_application_id":skill_catalog.application_id(),"bunkers":bunker_info,"fall_damage_enabled":fall_rules.is_some(),"scope":"schema_and_profile_validation_not_client_acceptance"})
+        );
+        return Ok(());
+    }
     let path = log.ok_or_else(|| {
         io::Error::other("--log is required; existing logs are never overwritten")
     })?;
@@ -497,13 +719,6 @@ fn main() -> io::Result<()> {
         .create_new(true)
         .mode(0o600)
         .open(path)?;
-    let mut resources =
-        EngineResources::new(item_catalog, catalog, bunker_world).with_wire_profiles(wire_profiles);
-    if let Some(policy) = bunker_exit_policy {
-        resources = resources
-            .with_bunker_exit_policy(policy)
-            .map_err(io::Error::other)?;
-    }
     let mut engine =
         Engine::from_resources(writer, MAX_LOG, resources).with_skill_catalog(skill_catalog);
     if let Some(objectives) = objective_catalog {
@@ -563,7 +778,7 @@ fn main() -> io::Result<()> {
     );
     println!(
         "{}",
-        serde_json::json!({"event":"listening","protocol":mag_gameplay::BRIDGE_VERSION,"address":listener.local_addr()?.to_string(),"collision":collision_info,"spawn_catalog":spawn_path,"objective_catalog":objective_info,"item_catalog":item_path,"character_blast_rules":blast_rules_path,"retail_combat_metadata":retail_metadata,"bootstrap_loadouts":bootstrap_loadouts_path,"fall_damage_rules":fall_rules_path,"skill_catalog":skill_path,"retail_armory_catalog":retail_armory_path,"leadership_passives":leadership_passives_path,"leadership_role_policy":leadership_role_policy_path,"bunkers":bunker_info,"tick_telemetry":telemetry_path,"tick_budget_us":tick_budget_us,"scheduler":"independent_50ms_when_subscribed","bot_fill_total":bot_fill_total,"bot_population":bot_population_path,"development_dummy_position":actual_dummy_position})
+        serde_json::json!({"event":"listening","application_id":application_id.unwrap_or(20230),"profile_selection":if application_id.is_some(){"explicit"}else{"legacy"},"protocol":mag_gameplay::BRIDGE_VERSION,"address":listener.local_addr()?.to_string(),"collision":collision_info,"spawn_catalog":spawn_path,"objective_catalog":objective_info,"item_catalog":item_path,"character_blast_rules":blast_rules_path,"retail_combat_metadata":retail_metadata,"bootstrap_loadouts":bootstrap_loadouts_path,"fall_damage_rules":fall_rules_path,"skill_catalog":skill_path,"retail_armory_catalog":retail_armory_path,"leadership_passives":leadership_passives_path,"leadership_role_policy":leadership_role_policy_path,"bunkers":bunker_info,"tick_telemetry":telemetry_path,"tick_budget_us":tick_budget_us,"scheduler":"independent_50ms_when_subscribed","bot_fill_total":bot_fill_total,"bot_population":bot_population_path,"development_dummy_position":actual_dummy_position})
     );
     for connection in listener.incoming() {
         let stream = connection?;
@@ -1188,5 +1403,361 @@ mod subscription_tests {
         let (_sender, _receiver) = register(&shared, 2);
         drop(old_owner);
         assert_eq!(shared.lock().unwrap().as_ref().unwrap().generation, 2);
+    }
+}
+
+#[cfg(test)]
+mod runtime_profile_tests {
+    use super::*;
+
+    #[test]
+    fn offline_catalog_validation_cannot_be_replaced_by_a_collision_query() {
+        let error = run([
+            "--validate-catalogs".to_string(),
+            "--collision-query".to_string(),
+            "0,0,0".to_string(),
+            "1,0,0".to_string(),
+        ])
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("--validate-catalogs cannot be combined with --collision-query")
+        );
+    }
+
+    struct SyntheticCatalogs(PathBuf);
+
+    impl SyntheticCatalogs {
+        fn new() -> Self {
+            static NEXT_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "mag-synthetic-runtime-{}-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&path).unwrap();
+            let files = Self(path);
+            let items = serde_json::json!({"schema_version":2,"application_id":20231,
+                "items":{"FactionItemList0:2":{"authored_ref":"FactionItemList0:2",
+                    "faction_list":"FactionItemList0","local_ordinal":2,"wire_item_id":null,
+                    "name":"synthetic_weapon","item_type":"kWeapon",
+                    "definition":{"group":"weapons","name":"synthetic_weapon"}}},
+                "definitions":{"weapons":{"synthetic_weapon":{"parameters":{}}}},
+                "resources":{}});
+            files.write("items.json", &items);
+            let digest = format!(
+                "{:x}",
+                Sha256::digest(std::fs::read(files.0.join("items.json")).unwrap())
+            );
+            files.write("spawns.json", &serde_json::json!({
+                "format":"mag_spawn_catalog","schema_version":1,"source":"SYNTHETIC CLI schema test",
+                "active":{"map_name":"synthetic_arena","squad_index":0,"default_spawn":0,"available":[0]},
+                "match_profile":{"has_bunkers":false,"has_objectives":false},
+                "maps":[{"name":"synthetic_arena","spawn_count":1,"locations":[
+                    {"index":0,"token":1,"kind":"on_foot","position":{"x":10.,"y":2.,"z":12.}}
+                ]}]
+            }));
+            let mut wire: serde_json::Value =
+                serde_json::from_str(include_str!("../data/synthetic-wire-profiles.json")).unwrap();
+            wire["profiles"] = serde_json::json!([wire["profiles"][1].clone()]);
+            files.write("wire.json", &wire);
+            files.write("blast.json", &serde_json::json!({"schema_version":1,"applications":[20230,20231],
+                "character_damage":{"armor_rating_reduction":0.25,"armor_prevention_reduction":0.75,"hit_location":3,"damage_type":10}}));
+            let mut provenance = serde_json::json!({"verified_binding":{"validated":true,
+                "positions_compared":667,"blank_positions_compared":25,"blank_zero_empirically_verified":true}});
+            for name in [
+                "original_retail_elf_sha256",
+                "snapshot_sha256",
+                "catalog_sha256",
+                "rules_sha256",
+                "owner_attestation_sha256",
+                "gear_slots_sha256",
+                "comparator_sha256",
+            ] {
+                provenance[name] = serde_json::json!(if name == "catalog_sha256" {
+                    digest.clone()
+                } else {
+                    "a".repeat(64)
+                });
+            }
+            let mut kit = vec![None; 22];
+            kit[..3].fill(Some(2_u16));
+            let loadouts: Vec<_> = (0..5)
+                .map(|index| {
+                    serde_json::json!({
+                        "update_id":1,"items":if index < 3 {kit.clone()} else {vec![None;22]},
+                        "primary_ammo":if index < 3 {7} else {0}
+                    })
+                })
+                .collect();
+            files.write("bootstrap.json", &serde_json::json!({"schema_version":1,"application_id":20231,
+                "provenance":provenance,
+                "factions":(0..3).map(|faction|serde_json::json!({"faction":faction,"class_ref":"CharacterClassInfo0","loadouts":loadouts})).collect::<Vec<_>>()
+            }));
+            files.write("combat.json", &serde_json::json!({"schema_version":2,"application_id":20231,
+                "status":"SYNTHETIC schema test","authority":{"bullet_damage":true,"grenade_damage":false,
+                    "grenade_physics":false,"armor_reduction":true,"body_damage":true,"healing_schedule":false,"ammo_tokens":false},
+                "provenance":{"catalog_sha256":digest},"bullets":{},"grenades":{},"armor":{},"healing":{},"unsupported":{},
+                "body":(0..16).map(|location|serde_json::json!({"location":location,"armor_area":0,"multiplier":1.0,"source":"SYNTHETIC"})).collect::<Vec<_>>(),
+                "limitations":["Synthetic schema data proves no native compatibility"]}));
+            files.write("armory.json", &serde_json::json!({"schema_version":1,"application_id":20231,
+                "source_sha256":{"gameplay/data/retail-items.json":digest},
+                "items":[{"wire_id":2,"name":"synthetic_weapon","authored_ref":"FactionItemList0:2","available_bit":2,"factions":[0,1,2],"primary_ammo":7}],
+                "factions":(0..3).map(|faction|serde_json::json!({"faction":faction,"available_item_bits":[2],"skill_ids":[],
+                    "loadouts":loadouts.iter().map(|row|serde_json::json!({"update_id":row["update_id"],"items":row["items"]})).collect::<Vec<_>>()
+                })).collect::<Vec<_>>()
+            }));
+            files.write("skills.json", &serde_json::json!({"schema_version":2,"application_id":20231,
+                "source_sha256":{"gameplay/data/retail-items.json":digest},
+                "table":{"Skills":{"MagCharacterSkill1":{"MagCharacterSkill":{"Green":{"Available":true}}}}}}));
+            files.write("fall.json", &serde_json::json!({"schema_version":1,"source_build":"retail","application_id":20231,
+                "min_height":3.0,"damage_factor":4.0,"minimum_damage_exclusive":2.0,"jump_fall_state":1,"damage_type":5,"damage_source_type":1}));
+            files
+        }
+
+        fn write(&self, name: &str, value: &serde_json::Value) {
+            std::fs::write(self.0.join(name), serde_json::to_vec(value).unwrap()).unwrap();
+        }
+
+        fn read(&self, name: &str) -> serde_json::Value {
+            serde_json::from_slice(&std::fs::read(self.0.join(name)).unwrap()).unwrap()
+        }
+
+        fn args(&self) -> Vec<String> {
+            let mut args = vec![
+                "--application-id".into(),
+                "20231".into(),
+                "--validate-catalogs".into(),
+            ];
+            for (flag, name) in [
+                ("--item-catalog", "items.json"),
+                ("--spawn-catalog", "spawns.json"),
+                ("--wire-profiles", "wire.json"),
+                ("--character-blast-rules", "blast.json"),
+                ("--bootstrap-loadouts", "bootstrap.json"),
+                ("--retail-combat-metadata", "combat.json"),
+                ("--retail-armory-catalog", "armory.json"),
+                ("--skill-catalog", "skills.json"),
+                ("--fall-damage-rules", "fall.json"),
+            ] {
+                args.push(flag.into());
+                args.push(self.0.join(name).to_str().unwrap().into());
+            }
+            args
+        }
+    }
+
+    impl Drop for SyntheticCatalogs {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn offline_retail_cli_validates_only_explicit_synthetic_resources() {
+        let files = SyntheticCatalogs::new();
+        assert!(run(files.args()).is_ok());
+        assert_eq!(std::fs::read_dir(&files.0).unwrap().count(), 9);
+    }
+
+    #[test]
+    fn offline_retail_cli_rejects_unresolved_raw_items_in_armory_bootstrap() {
+        let files = SyntheticCatalogs::new();
+        let mut items = files.read("items.json");
+        items["items"]["FactionItemList0:2"]["definition"] = serde_json::Value::Null;
+        files.write("items.json", &items);
+        let digest = format!(
+            "{:x}",
+            Sha256::digest(std::fs::read(files.0.join("items.json")).unwrap())
+        );
+        for (name, pointer) in [
+            ("bootstrap.json", "/provenance/catalog_sha256"),
+            ("combat.json", "/provenance/catalog_sha256"),
+            (
+                "armory.json",
+                "/source_sha256/gameplay~1data~1retail-items.json",
+            ),
+            (
+                "skills.json",
+                "/source_sha256/gameplay~1data~1retail-items.json",
+            ),
+        ] {
+            let mut value = files.read(name);
+            *value.pointer_mut(pointer).unwrap() = serde_json::json!(digest);
+            files.write(name, &value);
+        }
+        assert!(
+            run(files.args())
+                .unwrap_err()
+                .to_string()
+                .contains("unresolved_saved_item")
+        );
+    }
+
+    #[test]
+    fn offline_retail_cli_requires_selected_collision_world_to_match_the_map() {
+        let files = SyntheticCatalogs::new();
+        let mut world = serde_json::json!({
+            "format":"mag_collision_world","schema_version":1,"coordinate_space":"world",
+            "metadata":{"map_name":"different_synthetic_arena","build":"synthetic",
+                "coverage":"provisional","provenance":["Synthetic CLI test"],"unknowns":["Not native geometry"]},
+            "instances":[{"id":"synthetic-wall","vertices_xyz":[[2.,-2.,-2.],[2.,2.,-2.],[2.,0.,2.]],"triangles":[[0,1,2]]}]
+        });
+        files.write("world.json", &world);
+        let mut args = files.args();
+        args.extend([
+            "--collision-world".into(),
+            files.0.join("world.json").to_str().unwrap().into(),
+        ]);
+        assert!(
+            run(args.clone())
+                .unwrap_err()
+                .to_string()
+                .contains("collision world map does not match")
+        );
+        world["metadata"]["map_name"] = serde_json::json!("synthetic_arena");
+        files.write("world.json", &world);
+        assert!(run(args).is_ok());
+    }
+
+    #[test]
+    fn offline_retail_cli_rejects_skill_profile_mismatch() {
+        let files = SyntheticCatalogs::new();
+        let mut skills = files.read("skills.json");
+        skills["schema_version"] = serde_json::json!(1);
+        skills["application_id"] = serde_json::json!(20230);
+        files.write("skills.json", &skills);
+        let error = run(files.args()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("skill catalog application does not match")
+        );
+    }
+
+    #[test]
+    fn offline_retail_cli_rejects_item_projection_hash_mismatch() {
+        let files = SyntheticCatalogs::new();
+        let mut combat = files.read("combat.json");
+        combat["provenance"]["catalog_sha256"] = serde_json::json!("0".repeat(64));
+        files.write("combat.json", &combat);
+        let error = run(files.args()).unwrap_err();
+        assert!(error.to_string().contains("retail combat does not match"));
+    }
+
+    #[test]
+    fn offline_retail_cli_requires_catalog_for_enabled_objectives() {
+        let files = SyntheticCatalogs::new();
+        let mut spawns = files.read("spawns.json");
+        spawns["match_profile"]["has_objectives"] = serde_json::json!(true);
+        files.write("spawns.json", &spawns);
+        let error = run(files.args()).unwrap_err();
+        assert!(error.to_string().contains("objective catalog required"));
+    }
+
+    #[test]
+    fn offline_retail_cli_requires_bootstrap_for_all_factions() {
+        let files = SyntheticCatalogs::new();
+        let mut bootstrap = files.read("bootstrap.json");
+        bootstrap["factions"].as_array_mut().unwrap().pop();
+        files.write("bootstrap.json", &bootstrap);
+        let error = run(files.args()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("retail bootstrap must include all supported factions")
+        );
+    }
+
+    #[test]
+    fn offline_retail_cli_does_not_create_runtime_logs() {
+        let files = SyntheticCatalogs::new();
+        let mut args = files.args();
+        for (flag, name) in [("--log", "runtime.log"), ("--tick-telemetry", "ticks.log")] {
+            args.push(flag.into());
+            args.push(files.0.join(name).to_str().unwrap().into());
+        }
+        assert!(
+            run(args)
+                .unwrap_err()
+                .to_string()
+                .contains("does not open logs")
+        );
+        assert!(!files.0.join("runtime.log").exists());
+        assert!(!files.0.join("ticks.log").exists());
+    }
+
+    #[test]
+    fn application_selection_is_explicit_and_bounded() {
+        assert_eq!(parse_application_id("20230").unwrap(), 20230);
+        assert_eq!(parse_application_id("20231").unwrap(), 20231);
+        for invalid in ["", "0", "20232", " 20231", "20231 "] {
+            assert!(parse_application_id(invalid).is_err());
+        }
+    }
+    #[test]
+    fn retail_paths_cannot_fall_back_to_sibling_defaults() {
+        assert!(validate_runtime_paths(Some(20231), &[("--item-catalog", None)]).is_err());
+        assert!(
+            validate_runtime_paths(
+                Some(20231),
+                &[("--item-catalog", Some(Path::new("relative.json")))]
+            )
+            .is_err()
+        );
+        assert!(
+            validate_runtime_paths(
+                Some(20231),
+                &[("--item-catalog", Some(Path::new("/catalogs/items.json")))]
+            )
+            .is_ok()
+        );
+        assert!(validate_runtime_paths(None, &[("legacy-default", None)]).is_ok());
+    }
+    #[test]
+    fn retail_projections_must_identify_the_exact_item_bytes() {
+        let temporary = std::env::temp_dir().join(format!(
+            "synthetic-retail-links-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&temporary).unwrap();
+        let items = temporary.join("items.json");
+        let projection = temporary.join("projection.json");
+        std::fs::write(&items, b"synthetic item bytes").unwrap();
+        let digest = format!("{:x}", Sha256::digest(b"synthetic item bytes"));
+        std::fs::write(
+            &projection,
+            serde_json::to_vec(&serde_json::json!({"provenance":{"catalog_sha256":digest}}))
+                .unwrap(),
+        )
+        .unwrap();
+        let matched = validate_item_catalog_links(
+            &items,
+            &[("projection", &projection, "/provenance/catalog_sha256")],
+        )
+        .is_ok();
+        std::fs::write(&items, b"different synthetic bytes").unwrap();
+        let mismatched = validate_item_catalog_links(
+            &items,
+            &[("projection", &projection, "/provenance/catalog_sha256")],
+        )
+        .is_err();
+        std::fs::write(&projection, b"{}").unwrap();
+        let missing = validate_item_catalog_links(
+            &items,
+            &[("projection", &projection, "/provenance/catalog_sha256")],
+        )
+        .is_err();
+        std::fs::remove_dir_all(temporary).unwrap();
+        assert!(matched && mismatched && missing);
     }
 }

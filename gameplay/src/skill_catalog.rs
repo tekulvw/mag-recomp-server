@@ -11,6 +11,7 @@ struct Skill {
 }
 #[derive(Clone, Debug)]
 pub struct SkillCatalog {
+    application_id: u32,
     skills: BTreeMap<usize, Skill>,
 }
 #[derive(Clone, Copy, Debug)]
@@ -157,7 +158,13 @@ impl SkillCatalog {
                 return Err(invalid("duplicate skill ordinal"));
             }
         }
-        Ok(Self { skills })
+        Ok(Self {
+            application_id: raw["application_id"].as_u64().unwrap() as u32,
+            skills,
+        })
+    }
+    pub fn application_id(&self) -> u32 {
+        self.application_id
     }
     pub fn resolve(&self, faction: u8, owned: &[u32; 5]) -> Result<OwnedModifiers, &'static str> {
         let faction = usize::from(faction);
@@ -185,6 +192,7 @@ impl SkillCatalog {
         Ok(result)
     }
 }
+
 impl OwnedModifiers {
     /// Compose from immutable owned base slots. Calling this on an already
     /// combined value would double leadership; Engine keeps its base unchanged.
@@ -226,5 +234,33 @@ impl OwnedModifiers {
             return Err("skill_health_exceeds_wire_bounds");
         }
         Ok(points as u16)
+    }
+}
+
+#[cfg(test)]
+mod application_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn catalog_identity_tracks_the_schema_used_for_owned_modifiers() {
+        for (schema, application) in [(1, 20230), (2, 20231)] {
+            let mut raw = json!({"schema_version":schema,"application_id":application,
+            "table":{"Skills":{"MagCharacterSkill1":{"MagCharacterSkill":{
+                "Default":{"Modifier":"kCharModHealth","ModifierValue":0.5},
+                "Green":{"Available":true}
+            }}}}});
+            let catalog = SkillCatalog::from_value(raw.clone()).unwrap();
+            assert_eq!(catalog.application_id(), application);
+            assert_eq!(
+                catalog
+                    .resolve(0, &[2, 0, 0, 0, 0])
+                    .unwrap()
+                    .max_health_quarter_points(),
+                Ok(600)
+            );
+            raw["application_id"] = json!(if application == 20230 { 20231 } else { 20230 });
+            assert!(SkillCatalog::from_value(raw).is_err());
+        }
     }
 }

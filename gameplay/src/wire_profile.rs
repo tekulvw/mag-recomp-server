@@ -166,9 +166,6 @@ impl WireProfileCatalog {
                 return Err(invalid());
             }
         }
-        if !profiles.contains_key(&20230) {
-            return Err(invalid());
-        }
         Ok(Self { profiles })
     }
     pub fn profile(&self, application_id: u32) -> Result<WireProfile, &'static str> {
@@ -184,4 +181,23 @@ impl WireProfileCatalog {
 }
 pub fn default_application_id() -> u32 {
     20230
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retail_only_catalog_needs_no_prototype_entry() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../data/synthetic-wire-profiles.json")).unwrap();
+        let retail = value["profiles"][1].clone();
+        value["profiles"] = serde_json::json!([retail]);
+        let catalog = WireProfileCatalog::from_json(&value.to_string()).unwrap();
+        assert_eq!(catalog.profile(20231).unwrap().inventory_item_bits(), 12);
+        assert_eq!(
+            catalog.profile(20230),
+            Err("unsupported_application_wire_profile")
+        );
+    }
 }

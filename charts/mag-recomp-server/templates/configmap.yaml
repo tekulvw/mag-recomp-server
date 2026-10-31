@@ -1,3 +1,4 @@
+{{- include "mag.validateGameplay" . -}}
 {{- if gt (int .Values.runtime.minimumPlayers) (int .Values.runtime.maximumPlayers) -}}
 {{- fail "runtime.minimumPlayers cannot exceed runtime.maximumPlayers" -}}
 {{- end }}
@@ -24,6 +25,12 @@ data:
   {{ $role }}.json: |
     {{- $main := eq $role "main" }}
     {{- $files := $.Values.data.files }}
-    {{- $config := dict "UsePublicIp" true "PublicIpOverride" $.Values.network.advertisedIPv4 "MASPort" (ternary 10475 10471 $main) "MLSPort" (ternary 10478 10472 $main) "MPSPort" (ternary 10477 10476 $main) "EnableMagPluginAdapter" (not $main) "EnableMagMasAdapter" $main "EnableMagDevelopmentAuth" true "EnableMagCharacterStorage" true "EnableMagAccountLogin" $main "EnableMagCharacterData" $main "EnableMagCharacterCatalogs" true "MagApplicationId" $.Values.runtime.applicationId "MagProtocolVersion" $.Values.runtime.protocolVersion "MagGameType" $.Values.runtime.gameType "MagMinimumPlayers" $.Values.runtime.minimumPlayers "MagMaximumPlayers" $.Values.runtime.maximumPlayers "MagCharacterStorePath" "/accounts/characters.json" "MagItemCatalogPath" (printf "/data/%s" $files.items) "MagLoadoutDefaultsPath" (printf "/data/%s" $files.loadoutDefaults) "MagSkillCatalogPath" (printf "/data/%s" $files.skills) "MagDevelopmentProgressionPath" (printf "/data/%s" $files.developmentProgression) "MediusFileServerRootPath" (printf "/config/%s/files" $role) "PluginsPath" (printf "/config/%s/plugins" $role) "Logging" (dict "LogToConsole" true "LogPath" (printf "/logs/%s/medius.log" $role)) }}
+    {{- $config := dict "UsePublicIp" true "PublicIpOverride" $.Values.network.advertisedIPv4 "MASPort" (ternary 10475 10471 $main) "MLSPort" (ternary 10478 10472 $main) "MPSPort" (ternary 10477 10476 $main) "EnableMagPluginAdapter" (not $main) "EnableMagMasAdapter" $main "EnableMagDevelopmentAuth" true "EnableMagCharacterStorage" true "EnableMagAccountLogin" $main "EnableMagCharacterData" $main "EnableMagCharacterCatalogs" true "MagApplicationId" $.Values.runtime.applicationId "MagProtocolVersion" $.Values.runtime.protocolVersion "MagGameType" $.Values.runtime.gameType "MagMinimumPlayers" $.Values.runtime.minimumPlayers "MagMaximumPlayers" $.Values.runtime.maximumPlayers "MagCharacterStorePath" "/accounts/characters.json" "MediusFileServerRootPath" (printf "/config/%s/files" $role) "PluginsPath" (printf "/config/%s/plugins" $role) "Logging" (dict "LogToConsole" true "LogPath" (printf "/logs/%s/medius.log" $role)) }}
+    {{- if eq (int $.Values.runtime.applicationId) 20230 }}
+    {{- $_ := set $config "MagItemCatalogPath" (printf "/data/%s" $files.items) }}
+    {{- $_ := set $config "MagLoadoutDefaultsPath" (printf "/data/%s" $files.loadoutDefaults) }}
+    {{- $_ := set $config "MagSkillCatalogPath" (printf "/data/%s" $files.skills) }}
+    {{- $_ := set $config "MagDevelopmentProgressionPath" (printf "/data/%s" $files.developmentProgression) }}
+    {{- end }}
 {{ $config | toPrettyJson | indent 4 }}
 {{- end }}

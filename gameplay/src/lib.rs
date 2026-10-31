@@ -145,6 +145,7 @@ impl Character {
     ) -> Option<replication::CharacterLoadout> {
         if profile.application_id() == 20231 {
             if let (Some(saved), Some(armory)) = (&self.loadouts, catalog.retail_armory()) {
+                catalog.validate_saved_item_bindings(saved).ok()?;
                 return armory.saved_loadout(self.faction, saved, index);
             }
             return catalog.bootstrap_loadout(self.faction, index);
@@ -777,6 +778,9 @@ struct Active {
 pub struct Engine<W: Write> {
     wire_profiles: wire_profile::WireProfileCatalog,
     wire_profile: wire_profile::WireProfile,
+    /// Explicit production resources bind this instance to one application.
+    /// Legacy development constructors permit profile changes before admission.
+    runtime_application_id: Option<u32>,
     writer: W,
     active: Option<Active>,
     peers: std::collections::BTreeMap<String, Active>,
@@ -1221,6 +1225,12 @@ impl<W: Write> Engine<W> {
                 application_id,
                 ..
             } => {
+                if self
+                    .runtime_application_id
+                    .is_some_and(|selected| selected != application_id)
+                {
+                    return Err("runtime_application_mismatch");
+                }
                 if minimum_players == 0
                     || minimum_players > maximum_players
                     || maximum_players > self.admission_capacity_for(application_id)
@@ -1292,6 +1302,7 @@ impl<W: Write> Engine<W> {
                     if self.wire_profile.application_id() == 20231
                         && let Some(armory) = self.item_catalog.retail_armory()
                     {
+                        self.item_catalog.validate_saved_item_bindings(saved)?;
                         armory.validate_saved(candidate.character.faction, saved)?;
                     } else {
                         saved.validate(&self.item_catalog)?;
