@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/tekulvw/mag-recomp-server/compare/chart-v0.2.0...chart-v0.3.0) (2026-10-31)
+
+
+### Features
+
+* **gameplay:** load external bot identities ([#13](https://github.com/tekulvw/mag-recomp-server/issues/13)) ([8b7c003](https://github.com/tekulvw/mag-recomp-server/commit/8b7c0030232a99a79e132990b31b457d16fadda9))
+
 ## [0.2.0](https://github.com/tekulvw/mag-recomp-server/compare/chart-v0.1.1...chart-v0.2.0) (2026-10-31)
 
 
