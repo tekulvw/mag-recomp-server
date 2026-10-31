@@ -1,0 +1,14 @@
+*
+!Cargo.toml
+!Cargo.lock
+!build.rs
+!LICENSE
+!Dockerfile
+!src/
+!src/**
+!vendor/
+!vendor/**
+!data/
+!data/synthetic-bot-objective-policy.json
+!data/synthetic-wire-profiles.json
+!data/synthetic-movement-metadata.json

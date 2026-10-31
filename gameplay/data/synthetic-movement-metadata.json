@@ -1,0 +1,4 @@
+{
+  "SYNTHETIC": true,
+  "description": "Public movement metadata placeholder; movement constants are implemented in src/retail_movement.rs. No extracted settings included."
+}

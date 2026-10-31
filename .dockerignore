@@ -1,0 +1,11 @@
+.git
+**/target
+**/bin
+!gameplay/src/bin
+!gameplay/src/bin/**
+**/obj
+**/__pycache__
+local
+runtime
+captures
+*.private.*

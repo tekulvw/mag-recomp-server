@@ -1,0 +1,147 @@
+{
+  "interactions_enabled": false,
+  "drop_failure_cooldown_ms": 10000,
+  "drop_delay": {
+    "alpha": 0.5,
+    "decay_ms": 12000,
+    "maximum_s": 24.0,
+    "cache_limit": 64,
+    "reconsider_ms": 4000,
+    "minimum_gain_s": 2.0,
+    "minimum_gain_ratio": 0.25,
+    "reversal_ms": 12000,
+    "reversal_history_limit": 4
+  },
+  "drop_traffic_query_budget": 1024,
+  "drop_congestion_headway_s": 2.0,
+  "drop_entry_lane_m": 4.0,
+  "drop_egress_grid_m": 0.5,
+  "drop_holding_grid_m": 2.0,
+  "drop_holding_candidate_limit": 32,
+  "drop_holding_stall_ms": 10000,
+  "drop_entry_buffer_m": 1.0,
+  "drop_queue_distance_m": 8.0,
+  "drop_clearance_m": 1.0,
+  "drop_preentry_stall_ms": 4000,
+  "planning_slice_us": 1000,
+  "candidate_checks_per_tick": 4,
+  "route_queries_per_tick": 1,
+  "fresh_route_share": 2,
+  "retry_ms": [
+    100,
+    500,
+    1000
+  ],
+  "stall_ms": 4000,
+  "reservation_spacing_m": 2.0,
+  "arrival_m": 0.5,
+  "recovery_m": 1.0,
+  "ground_search_m": 2.0,
+  "cache_limit": 256,
+  "candidate_offsets_m": [
+    [
+      0.0,
+      0.0
+    ],
+    [
+      1.0,
+      0.0
+    ]
+  ],
+  "paired_squad_lateral_m": [
+    -3.0,
+    -1.0,
+    1.0,
+    3.0
+  ],
+  "reinforced_squad_lateral_m": [
+    -6.0,
+    -2.0,
+    2.0,
+    6.0
+  ],
+  "attack_roles": [
+    {
+      "name": "synthetic_attack_0",
+      "back_m": 0.0,
+      "side_m": 0.0
+    },
+    {
+      "name": "synthetic_attack_1",
+      "back_m": 1.0,
+      "side_m": 0.0
+    },
+    {
+      "name": "synthetic_attack_2",
+      "back_m": 2.0,
+      "side_m": 0.0
+    },
+    {
+      "name": "synthetic_attack_3",
+      "back_m": 3.0,
+      "side_m": 0.0
+    },
+    {
+      "name": "synthetic_attack_4",
+      "back_m": 4.0,
+      "side_m": 0.0
+    },
+    {
+      "name": "synthetic_attack_5",
+      "back_m": 5.0,
+      "side_m": 0.0
+    },
+    {
+      "name": "synthetic_attack_6",
+      "back_m": 6.0,
+      "side_m": 0.0
+    },
+    {
+      "name": "synthetic_attack_7",
+      "back_m": 7.0,
+      "side_m": 0.0
+    }
+  ],
+  "defend_roles": [
+    {
+      "name": "synthetic_defend_0",
+      "back_m": 0.0,
+      "side_m": 0.0
+    },
+    {
+      "name": "synthetic_defend_1",
+      "back_m": 1.0,
+      "side_m": 0.0
+    },
+    {
+      "name": "synthetic_defend_2",
+      "back_m": 2.0,
+      "side_m": 0.0
+    },
+    {
+      "name": "synthetic_defend_3",
+      "back_m": 3.0,
+      "side_m": 0.0
+    },
+    {
+      "name": "synthetic_defend_4",
+      "back_m": 4.0,
+      "side_m": 0.0
+    },
+    {
+      "name": "synthetic_defend_5",
+      "back_m": 5.0,
+      "side_m": 0.0
+    },
+    {
+      "name": "synthetic_defend_6",
+      "back_m": 6.0,
+      "side_m": 0.0
+    },
+    {
+      "name": "synthetic_defend_7",
+      "back_m": 7.0,
+      "side_m": 0.0
+    }
+  ]
+}

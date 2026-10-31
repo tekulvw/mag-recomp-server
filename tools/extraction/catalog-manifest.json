@@ -1,0 +1,518 @@
+{
+  "schema_version": 1,
+  "scope": "All 53 catalog filenames known to this source import; presence in this inventory does not mean every file is required by every runtime mode.",
+  "status_definitions": {
+    "direct": "Included parser/projector reads explicit original data or an included earlier catalog; no unpublished evidence input.",
+    "direct-with-policy": "Included projector also requires explicit local operator policy.",
+    "external-proof": "Included projector requires separately qualified native/capture evidence; this repository does not create that evidence.",
+    "external-export": "Included projector requires an external normalized export; upstream acquisition not included.",
+    "operator-configuration": "User-authored policy/protocol configuration rather than extracted content.",
+    "gap": "Complete regeneration tooling is not included; required external work is stated."
+  },
+  "catalogs": [
+    {
+      "output": "bot-names.json",
+      "status": "operator-configuration",
+      "command": null,
+      "inputs": "Operator-authored policy/protocol configuration; consult runtime loaders and synthetic public examples",
+      "dependencies": [],
+      "limitations": "These are not archive-extracted catalogs. Supply deliberate configuration for selected features; no retail values are fabricated."
+    },
+    {
+      "output": "bot-objective-policy.json",
+      "status": "operator-configuration",
+      "command": null,
+      "inputs": "Operator-authored policy/protocol configuration; consult runtime loaders and synthetic public examples",
+      "dependencies": [],
+      "limitations": "These are not archive-extracted catalogs. Supply deliberate configuration for selected features; no retail values are fabricated."
+    },
+    {
+      "output": "character-blast-rules.json",
+      "status": "external-proof",
+      "command": "project-character-blast-rules.py --evidence WITNESS_DIRECTORY --checker ORIGINAL_CHECKER --output BLAST_RULES",
+      "inputs": "Exact hash-qualified comparison.json, blast-callback.json, blast-armor-literal.json, toc-cells.json and dev/dev-blast-armor-literal.json plus external original checker source",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Projects qualified proof only. Native witness acquisition and original checker are not supplied; expected instruction words are not embedded. Optional --retain-dev-literal --dev-elf DEV_ELF --output DEV_LITERAL reads one bounded scalar cell from the exact supported original file, not the complete proof bundle."
+    },
+    {
+      "output": "development-bot-script.json",
+      "status": "operator-configuration",
+      "command": null,
+      "inputs": "Operator-authored policy/protocol configuration; consult runtime loaders and synthetic public examples",
+      "dependencies": [],
+      "limitations": "These are not archive-extracted catalogs. Supply deliberate configuration for selected features; no retail values are fabricated."
+    },
+    {
+      "output": "local-development-progression.json",
+      "status": "operator-configuration",
+      "command": null,
+      "inputs": "Operator-authored policy/protocol configuration; consult runtime loaders and synthetic public examples",
+      "dependencies": [],
+      "limitations": "These are not archive-extracted catalogs. Supply deliberate configuration for selected features; no retail values are fabricated."
+    },
+    {
+      "output": "local-owned-skill-trial.json",
+      "status": "operator-configuration",
+      "command": null,
+      "inputs": "Operator-authored policy/protocol configuration; consult runtime loaders and synthetic public examples",
+      "dependencies": [],
+      "limitations": "These are not archive-extracted catalogs. Supply deliberate configuration for selected features; no retail values are fabricated."
+    },
+    {
+      "output": "local-xp-trial.json",
+      "status": "operator-configuration",
+      "command": null,
+      "inputs": "Operator-authored policy/protocol configuration; consult runtime loaders and synthetic public examples",
+      "dependencies": [],
+      "limitations": "These are not archive-extracted catalogs. Supply deliberate configuration for selected features; no retail values are fabricated."
+    },
+    {
+      "output": "prototype-bunkers.json",
+      "status": "external-export",
+      "command": "extract-bunker-runtime-catalog.py --evidence EXPORT_BUNDLE --active-policy POLICY --output-dir OUTPUT_DIR",
+      "inputs": "Normalized spawn/bunker exports and independently verified pool/objective identity witnesses",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Projector only; complete export bundle format below. No native export generation or live verification is performed."
+    },
+    {
+      "output": "prototype-character-grants.json",
+      "status": "external-export",
+      "command": "extract-character-grants.py --skills SKILLS_ZPR --items ITEMS --loadouts LOADOUTS --output OUTPUT",
+      "inputs": "Prototype skill resource, items and projected loadout defaults",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Bounded Tier0 starter grants plus explicit existing default equipment policy."
+    },
+    {
+      "output": "prototype-items.json",
+      "status": "external-proof",
+      "command": "extract-item-catalog.py --assets SCRIPTS --elf ELF --token-proof PROOF --output OUTPUT",
+      "inputs": "Prototype scripts directory, original prototype ELF and independent token proof JSON",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "All literal resources retained; token proof checks source identity and profile agreement. Native token-proof generation is external."
+    },
+    {
+      "output": "prototype-loadouts.json",
+      "status": "external-export",
+      "command": "extract-loadout-defaults.py --source DEFAULTS_EXPORT --output OUTPUT",
+      "inputs": "Normalized prototype class/faction loadout defaults export",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Slots/IDs validated; original defaults-export generation is not included."
+    },
+    {
+      "output": "prototype-mediation-profile.json",
+      "status": "operator-configuration",
+      "command": null,
+      "inputs": "Operator-authored policy/protocol configuration; consult runtime loaders and synthetic public examples",
+      "dependencies": [],
+      "limitations": "These are not archive-extracted catalogs. Supply deliberate configuration for selected features; no retail values are fabricated."
+    },
+    {
+      "output": "prototype-progression.json",
+      "status": "direct",
+      "command": "extract-progression-catalog.py --assets RESOURCE_ROOT --output OUTPUT",
+      "inputs": "Prototype resource tree with scripts/ and settings/",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Literal XP/award/stat/default tables; native threshold rounding remains external."
+    },
+    {
+      "output": "prototype-skills.json",
+      "status": "direct",
+      "command": "extract-skill-catalog.py --source SKILLS_ZPR --items ITEMS --output OUTPUT",
+      "inputs": "Prototype character_skills.zpr and regenerated item catalog",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Literal authored table; equipment binding uses prototype ordinals only."
+    },
+    {
+      "output": "prototype-spawns.json",
+      "status": "external-export",
+      "command": "extract-bunker-runtime-catalog.py --evidence EXPORT_BUNDLE --active-policy POLICY --output-dir OUTPUT_DIR",
+      "inputs": "Normalized spawn/bunker exports and independently verified pool/objective identity witnesses",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Projector only; complete export bundle format below. No native export generation or live verification is performed."
+    },
+    {
+      "output": "prototype-structures.json",
+      "status": "external-proof",
+      "command": "extract-structure-catalog.py --assets SCRIPTS --items ITEMS --native-rules NATIVE_RULES --output STRUCTURES",
+      "inputs": "Explicit prototype scripts directory with sibling settings directory; projected prototype item catalog; externally qualified native_rules JSON object",
+      "dependencies": [
+        "Python 3.11+ standard library",
+        "extract-item-catalog.py"
+      ],
+      "limitations": "Literal parser/projector included. Native durability thresholds are external prerequisites; no native rule acquisition or source/evidence copies are supplied. Missing DamageProperties remains unresolved."
+    },
+    {
+      "output": "retail-abilities.json",
+      "status": "direct",
+      "command": "project-retail-abilities.py --rules RULES --output OUTPUT",
+      "inputs": "Regenerated retail-rules.json",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Availability/timing projection; effects/target validation/replication disabled."
+    },
+    {
+      "output": "retail-all-factions-bootstrap-loadouts.json",
+      "status": "external-proof",
+      "command": "project-retail-bootstrap.py --snapshot SNAPSHOT --catalog ITEMS --owner-attestation ATTESTATION --rules RULES --gear-slots SLOT_ENUM --faction-enum FACTION_ENUM --faction-identities IDENTITIES --faction-class 0:CharacterClassInfoA --faction-class 1:CharacterClassInfoB --faction-class 2:CharacterClassInfoC --output BOOTSTRAP",
+      "inputs": "Qualified native snapshot and owner attestation; authored item and rule catalogs; exact hash-qualified slot and faction enum texts; explicit numeric class mappings and external faction label/display/level identities. Replace A/B/C placeholders with actual numeric class suffixes.",
+      "dependencies": [
+        "Python 3.11+ standard library",
+        "compare-native-item-catalog.py",
+        "extract-item-catalog.py"
+      ],
+      "limitations": "Projector and comparator included. Snapshot acquisition, enum extraction and native identity qualification are external. No faction display/map table is embedded. Generated equipment is not live acceptance proof."
+    },
+    {
+      "output": "retail-armory.json",
+      "status": "external-proof",
+      "command": "extract-retail-armory.py --catalog-dir CATALOG_DIR --output OUTPUT",
+      "inputs": "retail-items.json, retail-item-bindings.json, retail-all-factions-bootstrap-loadouts.json, retail-skill-purchases.json",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Required native evidence acquisition and independent qualification remain external. Binding/bootstrap/skill-purchase projectors are included; no live acceptance is inferred."
+    },
+    {
+      "output": "retail-collision-resources.json",
+      "status": "direct",
+      "command": "tools/collision/extract-retail.py --disc DISC --manifest MAPS --output BULK --summary-output OUTPUT",
+      "inputs": "Retail disc and regenerated retail-maps.json",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Resource-local geometry; shared resources outside map archives not scanned. Optional summary name can be chosen freely."
+    },
+    {
+      "output": "retail-combat.json",
+      "status": "external-proof",
+      "command": "project-retail-combat.py --catalog ITEMS --bindings BINDINGS --bootstrap BOOTSTRAP --bullet-witness BULLET_PROOF --melee-witness MELEE_PROOF --selection SELECTION --runtime-policy POLICY --output COMBAT",
+      "inputs": "Authored retail item catalog; exact hash-qualified binding report, bootstrap and bullet witness; independently qualified external melee witness; explicit equipment-name selection with melee witness digest; explicit supported server runtime policy",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Actual projection included, not native evidence acquisition. Retained evidence hashes intentionally reject regenerated/changed artifacts until independently requalified. Selection is operator input requiring native qualification, not new proof; policy has no embedded grace default. Native physics/collision and live acceptance remain unproved."
+    },
+    {
+      "output": "retail-extraction-coverage.json",
+      "status": "direct",
+      "command": "extract-retail-rules.py --game-archive GAME --items ITEMS --output RULES --coverage-output COVERAGE",
+      "inputs": "Original retail archive and regenerated retail-items.json",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Executable Lua is inventoried without execution; unsupported literal syntax fails."
+    },
+    {
+      "output": "retail-extraction-manifest.json",
+      "status": "gap",
+      "command": null,
+      "inputs": "Hashes and provenance for a completed operator extraction run",
+      "dependencies": [],
+      "limitations": "Historical extraction manifest is not reproducible byte-for-byte with relocated tools; create a fresh run manifest locally. No historical evidence manifest is distributed."
+    },
+    {
+      "output": "retail-falling-damage.json",
+      "status": "direct",
+      "command": "extract-retail-falling-damage.py --elf RETAIL_ELF --game-archive GAME_ARCHIVE --config-output FALLING_RULES",
+      "inputs": "Exact supported decrypted original retail PPC64 big-endian ELF and retail game archive (both SHA256 checked)",
+      "dependencies": [
+        "Python 3.11+ standard library",
+        "tools/collision/archive.py",
+        "tools/collision/packfile.py",
+        "extract-item-catalog.py"
+      ],
+      "limitations": "Reads authored server.zpr fields and supported-build scalar offsets only. No DEV ELF, disassembly/DWARF subprocess, debug-string copies or native instruction literals are bundled/generated. Fixed hash/layout support; not generic new-build analysis."
+    },
+    {
+      "output": "retail-item-bindings.json",
+      "status": "external-proof",
+      "command": "compare-native-item-catalog.py --snapshot SNAPSHOT --catalog ITEMS --owner-attestation ATTESTATION --output BINDINGS",
+      "inputs": "Complete supported native four-list token-order snapshot; matching authored retail item catalog; owner attestation tied to snapshot digest and original build",
+      "dependencies": [
+        "Python 3.11+ standard library",
+        "extract-item-catalog.py"
+      ],
+      "limitations": "Complete offline position comparison and binding projector included. Native snapshot capture and identity qualification are external; owner attestation is trusted input, never independent live verification. No binding configuration is emitted for a mismatch."
+    },
+    {
+      "output": "retail-itemlist-native-order.json",
+      "status": "gap",
+      "command": null,
+      "inputs": "Owner-qualified native token-order snapshots, binding attestation and starter-record evidence",
+      "dependencies": [],
+      "limitations": "Snapshot acquisition and independent native identity qualification remain external. Offline comparison, numeric-binding projection and bootstrap projection are included; see docs/native-projectors.md."
+    },
+    {
+      "output": "retail-items.json",
+      "status": "direct",
+      "command": "extract-item-catalog.py --game-archive GAME --output OUTPUT",
+      "inputs": "Decrypted original retail game.psarc",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Authored namespace references; numeric runtime wire bindings remain unresolved."
+    },
+    {
+      "output": "retail-leadership-passives.json",
+      "status": "external-proof",
+      "command": "project-retail-leadership-passives.py --rules RULES --native-witness WITNESS --output OUTPUT",
+      "inputs": "Regenerated rules and independent native consumer witness",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Witness supplies refresh_hold_ms/removal_grace_ms; code checks schema/ELF identity but does not recreate analysis."
+    },
+    {
+      "output": "retail-leadership-role-policy-native.json",
+      "status": "direct-with-policy",
+      "command": "project-retail-leadership-role-policy.py --rules RULES --default-record POLICY --output OUTPUT",
+      "inputs": "Regenerated rules and explicit fallback record",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Authored weights plus local fallback policy; no native instruction extraction."
+    },
+    {
+      "output": "retail-leadership-role-policy.json",
+      "status": "operator-configuration",
+      "command": null,
+      "inputs": "Operator-selected development leadership assignments",
+      "dependencies": [],
+      "limitations": "Use the native-election projector for the separate native policy output."
+    },
+    {
+      "output": "retail-maps.json",
+      "status": "direct",
+      "command": "extract-retail-maps.py --disc DISC --game-archive GAME --output OUTPUT",
+      "inputs": "Original retail disc directory and decrypted game.psarc",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Authored points/bunkers/objective metadata only; final terrain placement and runtime identities unresolved."
+    },
+    {
+      "output": "retail-mode-gates.json",
+      "status": "gap",
+      "command": null,
+      "inputs": "Independent native semantic evidence and original authored data where applicable",
+      "dependencies": [],
+      "limitations": "No public native-analysis/projection pipeline is supplied for this output. Existing source contains specialized analysis but depends on unpublished proof inputs or embedded native witnesses; do not substitute guesses."
+    },
+    {
+      "output": "retail-movement.json",
+      "status": "gap",
+      "command": null,
+      "inputs": "Independent native semantic evidence and original authored data where applicable",
+      "dependencies": [],
+      "limitations": "No public native-analysis/projection pipeline is supplied for this output. Existing source contains specialized analysis but depends on unpublished proof inputs or embedded native witnesses; do not substitute guesses."
+    },
+    {
+      "output": "retail-progression.json",
+      "status": "external-proof",
+      "command": "extract-retail-progression-catalog.py --game-archive GAME --witness WITNESS --output OUTPUT",
+      "inputs": "Retail archive and original-retail Training-completion witness",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Witness supplies native completion mask; archive/member hashes and reward/scale agreement checked. Witness generation is external."
+    },
+    {
+      "output": "retail-rules.json",
+      "status": "direct",
+      "command": "extract-retail-rules.py --game-archive GAME --items ITEMS --output RULES --coverage-output COVERAGE",
+      "inputs": "Original retail archive and regenerated retail-items.json",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Executable Lua is inventoried without execution; unsupported literal syntax fails."
+    },
+    {
+      "output": "retail-sabotage-objective-observer.json",
+      "status": "external-proof",
+      "command": "project-retail-objective-observer.py --catalog CATALOG --spawn-observer SPAWN --pool-proof POOL --binding-proof BINDING --startup-proof STARTUP --output OUTPUT",
+      "inputs": "Authored objective metadata, external spawn observer config and three reviewed native witnesses",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Produces observer configuration only; does not attach to or operate a client."
+    },
+    {
+      "output": "retail-sabotage-spawn-observer.json",
+      "status": "gap",
+      "command": null,
+      "inputs": "Native spawn-manager root, TOC/function and allocation-policy witnesses",
+      "dependencies": [],
+      "limitations": "No public observer-root qualification/projection pipeline supplied; no runtime observation is performed."
+    },
+    {
+      "output": "retail-skill-purchases.json",
+      "status": "external-proof",
+      "command": "extract-retail-skill-purchases.py --inputs QUALIFIED_FILE_MANIFEST --output PURCHASES",
+      "inputs": "Explicit logical-key-to-file JSON manifest for the six exact hash-qualified skill native witness, authored skills/items, binding report, native item-order snapshot and global-index proof sources documented in docs/native-projectors.md",
+      "dependencies": [
+        "Python 3.11+ standard library",
+        "extract-item-catalog.py"
+      ],
+      "limitations": "Actual projector included; capture/native proof acquisition external. Exact source pins remain enforced, including authored costs/tiers, matching bindings and missing-token skip semantics. Emits one explicit catalog and no hidden fixture copy."
+    },
+    {
+      "output": "retail-skills.json",
+      "status": "external-proof",
+      "command": "extract-retail-catalogs.py --game-archive GAME --items ITEMS --native-rules NATIVE_RULES --skills-output SKILLS --structures-output STRUCTURES",
+      "inputs": "Original retail archive, regenerated item catalog and external structure native_rules object",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Native constants are not extracted from authored resources; independently qualified native rules are required even though skills are literal data."
+    },
+    {
+      "output": "retail-structures.json",
+      "status": "external-proof",
+      "command": "extract-retail-catalogs.py --game-archive GAME --items ITEMS --native-rules NATIVE_RULES --skills-output SKILLS --structures-output STRUCTURES",
+      "inputs": "Original retail archive, regenerated item catalog and external structure native_rules object",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Native constants are not extracted from authored resources; independently qualified native rules are required even though skills are literal data."
+    },
+    {
+      "output": "retail-sver-bootstrap-loadouts.json",
+      "status": "external-proof",
+      "command": "project-retail-bootstrap.py --snapshot SNAPSHOT --catalog ITEMS --owner-attestation ATTESTATION --rules RULES --gear-slots SLOT_ENUM --class-ref CLASS_REF --faction 2 --output BOOTSTRAP",
+      "inputs": "Qualified native snapshot and owner attestation; authored item/rule catalogs; exact slot-enumeration witness; explicit original class reference for faction 2",
+      "dependencies": [
+        "Python 3.11+ standard library",
+        "compare-native-item-catalog.py",
+        "extract-item-catalog.py"
+      ],
+      "limitations": "Same schema/projector as all-faction bootstrap, configured for one explicit class/faction. Single-faction mode treats numeric faction as caller policy; it does not independently establish label correspondence. Capture/enum acquisition and live acceptance are external."
+    },
+    {
+      "output": "retail-sver-sab-defuse-fixture.json",
+      "status": "gap",
+      "command": null,
+      "inputs": "Qualified objective catalog and explicit private test progression state",
+      "dependencies": [],
+      "limitations": "These are derived test states; no public fixture-preparation pipeline is included."
+    },
+    {
+      "output": "retail-sver-sab-defuse-fixture.report.json",
+      "status": "gap",
+      "command": null,
+      "inputs": "Qualified objective catalog and explicit private test progression state",
+      "dependencies": [],
+      "limitations": "These are derived test states; no public fixture-preparation pipeline is included."
+    },
+    {
+      "output": "retail-sver-sab-local-objective-interactions.json",
+      "status": "external-proof",
+      "command": "project-retail-objective-runtime.py --catalog CATALOG --bindings BINDINGS --startup-proof STARTUP --rules RULES --include-interactions --local-end-game-delay-ms MS --output OUTPUT",
+      "inputs": "Same objective inputs and explicit local timing policy",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Local delay is an operator policy."
+    },
+    {
+      "output": "retail-sver-sab-objective-interactions.json",
+      "status": "external-proof",
+      "command": "project-retail-objective-runtime.py --catalog CATALOG --bindings BINDINGS --startup-proof STARTUP --rules RULES --include-interactions --output OUTPUT",
+      "inputs": "Same inputs as objective runtime projection",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Interaction policy also uses --interaction-radius-m; default is explicit local tool policy, not an extracted game balance."
+    },
+    {
+      "output": "retail-sver-sab-objective-runtime.json",
+      "status": "external-proof",
+      "command": "project-retail-objective-runtime.py --catalog CATALOG --bindings BINDINGS --startup-proof STARTUP --rules RULES --output OUTPUT",
+      "inputs": "Authored objective catalog, reviewed normalized token/slot bindings, native startup witness and regenerated rules",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "No capture normalization/acquisition or native startup-proof generator is supplied."
+    },
+    {
+      "output": "retail-sver-sab-objectives-spawns.json",
+      "status": "gap",
+      "command": null,
+      "inputs": "Entry spawn catalog plus qualified runtime objective activation policy",
+      "dependencies": [],
+      "limitations": "Base entry spawn builder deliberately disables objectives; activation overlay is not reproduced here."
+    },
+    {
+      "output": "retail-sver-sab-objectives.json",
+      "status": "direct",
+      "command": "project-retail-sabotage-objectives.py --disc DISC --game-archive GAME --output OUTPUT",
+      "inputs": "Original retail disc and game archive",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Bounded script fact inventory, not a Lua interpreter or runtime object-ID assignment."
+    },
+    {
+      "output": "retail-sver-sab-spawns.json",
+      "status": "direct",
+      "command": "build-retail-spawn-catalog.py --disc DISC --game-archive GAME --map MAP --active TEAM/PLATOON/SQUAD --output OUTPUT",
+      "inputs": "Original retail disc and game archive; explicit selection policy",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Only Suppression and SVER Sabotage entry supported; authored pre-snap coordinates; objectives disabled."
+    },
+    {
+      "output": "retail-sver-sup-spawns.json",
+      "status": "direct",
+      "command": "build-retail-spawn-catalog.py --disc DISC --game-archive GAME --map MAP --active TEAM/PLATOON/SQUAD --output OUTPUT",
+      "inputs": "Original retail disc and game archive; explicit selection policy",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Only Suppression and SVER Sabotage entry supported; authored pre-snap coordinates; objectives disabled."
+    },
+    {
+      "output": "retail-v1-mediation-profile.json",
+      "status": "direct",
+      "command": "extract-retail-mediation-profile.py --elf ELF --output OUTPUT",
+      "inputs": "Original decrypted retail big-endian ELF64",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Hash-pinned ELF load mappings supply protocol version; character catalogs disabled by local policy."
+    },
+    {
+      "output": "statistics-login-profiles.json",
+      "status": "operator-configuration",
+      "command": null,
+      "inputs": "Operator-authored policy/protocol configuration; consult runtime loaders and synthetic public examples",
+      "dependencies": [],
+      "limitations": "These are not archive-extracted catalogs. Supply deliberate configuration for selected features; no retail values are fabricated."
+    },
+    {
+      "output": "wire-profiles.json",
+      "status": "operator-configuration",
+      "command": null,
+      "inputs": "Operator-authored policy/protocol configuration; consult runtime loaders and synthetic public examples",
+      "dependencies": [],
+      "limitations": "These are not archive-extracted catalogs. Supply deliberate configuration for selected features; no retail values are fabricated."
+    }
+  ]
+}

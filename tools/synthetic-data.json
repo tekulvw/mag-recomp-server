@@ -1,0 +1,14 @@
+{
+  "gameplay/data/synthetic-bot-objective-policy.json": {
+    "source": "Independently authored synthetic validator example; not extracted game data. See gameplay/data/SYNTHETIC.md.",
+    "sha256": "20097f6333749f515176144e48a76c32385d7984957c8684a022e3c638bfba11"
+  },
+  "gameplay/data/synthetic-movement-metadata.json": {
+    "source": "Independently authored synthetic validator example; not extracted game data. See gameplay/data/SYNTHETIC.md.",
+    "sha256": "8867a397b6535767a3e6494ead453e084ad712a695ed35f2ea9ac9549acf3e3e"
+  },
+  "gameplay/data/synthetic-wire-profiles.json": {
+    "source": "Independently authored synthetic validator example; not extracted game data. See gameplay/data/SYNTHETIC.md.",
+    "sha256": "3f09a0a9a0e35f26d51493584c1fe4f5166227ccf123909bd64a3c8db9a2bc4d"
+  }
+}

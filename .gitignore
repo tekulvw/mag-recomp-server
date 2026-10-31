@@ -1,0 +1,92 @@
+# Local editor and language caches
+.DS_Store
+._*
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+*.rsuser
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Generated Rust, .NET and native build products
+target/
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+artifacts/
+TestResults/
+*.dll
+*.exe
+*.pdb
+*.so
+*.dylib
+*.a
+*.o
+*.binlog
+# src/bin contains Rust source, including on case-insensitive Git hosts.
+!gameplay/src/bin/
+!gameplay/src/bin/**
+
+# Logs, coverage, profiling and temporary output
+*.log
+*.tmp
+*.bak
+*.swp
+*~
+coverage/
+*.coverage
+*.coveragexml
+
+# Game files and packet captures are never public inputs.
+*.bin
+*.elf
+*.self
+*.sprx
+*.iso
+*.pkg
+*.pup
+*.PUP
+*.pcap
+*.pcapng
+
+# Runtime secrets, certificates, account databases and operator settings
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.cer
+*.crt
+*.der
+*.jks
+*.keystore
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.sqlite3-*
+*.db-shm
+*.db-wal
+**/db.config.json
+**/medius.json
+**/dme.json
+**/muis.json
+# Match runtime JSON only: Config/*.cs is required C# source.
+**/[Cc]onfig/*.json
+**/[Cc]onfigs/*.json
+/local/
+/runtime/
+/captures/
+accounts/
+database/
+*.private.*
+
+# Generated extraction output is private runtime material.
+/extracted/
+/generated-data/

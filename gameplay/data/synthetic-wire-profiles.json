@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "profiles": [
+    {
+      "build": "prototype",
+      "application_id": 20230,
+      "object_type_bits": 19,
+      "inventory_item_bits": 10,
+      "stat_encoding": "fixed_be_i32",
+      "evidence": "SYNTHETIC schema example; values constrained by WireProfileCatalog validator"
+    },
+    {
+      "build": "retail",
+      "application_id": 20231,
+      "object_type_bits": 20,
+      "inventory_item_bits": 12,
+      "stat_encoding": "unsigned_continuation_u32",
+      "mag_info_extension": {
+        "member_0a": 0,
+        "member_0b": 0
+      },
+      "evidence": "SYNTHETIC schema example; not game catalog data"
+    }
+  ]
+}

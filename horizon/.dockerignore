@@ -1,0 +1,22 @@
+# Allowlist distributable source and project metadata only.
+**
+!**/
+!**/*.cs
+!**/*.csproj
+!Horizon.Server.sln
+!LICENSE
+!HighResolutionTimer/LICENSE
+!licenses/
+!licenses/**
+!Dockerfile
+# Runtime/generated/private material remains excluded even under an allowed path.
+**/bin/**
+**/obj/**
+**/Fixtures/**
+**/config/*.json
+**/configs/*.json
+**/data/**
+**/logs/**
+**/out/**
+**/.git/**
+**/._*
