@@ -2,6 +2,6 @@ apiVersion: v2
 name: mag-recomp-server
 description: Private-runtime deployment of the MAG Medius, MAPS and gameplay services.
 type: application
-version: 0.1.1
+version: 0.2.0
 appVersion: "0.1.0"
 kubeVersion: ">=1.27.0-0"
