@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -27,7 +28,123 @@ def render(extra=None, ok=True):
     return result.stderr
 
 
+def gameplay_arguments(docs):
+    """Execute the rendered launcher with a harmless argv recorder, never a game server."""
+    container = next(c for d in docs if d['kind'] == 'Deployment'
+                     for c in d['spec']['template']['spec']['containers'] if c['name'] == 'gameplay')
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        recorder = root / 'argv-recorder'
+        recorder.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\"\n")
+        recorder.chmod(0o700)
+        script = container['args'][0].replace('/usr/local/bin/mag-gameplay', shlex.quote(str(recorder)))
+        script = script.replace('/logs/run.', str(root / 'run.'))
+        env = {**os.environ, **{e['name']: e['value'] for e in container['env']}}
+        result = subprocess.run(container['command'] + [script] + container['args'][1:],
+                                env=env, capture_output=True, text=True, timeout=3)
+        if result.returncode:
+            raise AssertionError(result.stderr)
+        return result.stdout.splitlines()
+
+
 class ChartTests(unittest.TestCase):
+    def test_default_retail_startup_contract(self):
+        docs = render()
+        service = next(d for d in docs if d['kind'] == 'Service' and d['metadata']['name'].endswith('-medius'))
+        self.assertEqual(next(p for p in service['spec']['ports'] if p['name'] == 'maps-auth')['port'], 10073)
+        args = gameplay_arguments(docs)
+        expected = {
+            '--application-id': '20231',
+            '--bind': '0.0.0.0:31000',
+            '--item-catalog': '/data/retail-items.json',
+            '--spawn-catalog': '/data/retail-sver-sup-spawns.json',
+            '--wire-profiles': '/data/wire-profiles.json',
+            '--skill-catalog': '/data/retail-skills.json',
+            '--character-blast-rules': '/data/character-blast-rules.json',
+            '--bootstrap-loadouts': '/data/retail-all-factions-bootstrap-loadouts.json',
+            '--retail-combat-metadata': '/data/retail-combat.json',
+            '--retail-armory-catalog': '/data/retail-armory.json',
+            '--fall-damage-rules': '/data/retail-falling-damage.json',
+        }
+        self.assertEqual(len(args), 2 * (len(expected) + 1))  # Plus the fresh event log.
+        for flag, value in expected.items():
+            self.assertEqual(args.count(flag), 1)
+            self.assertEqual(args[args.index(flag) + 1], value)
+        self.assertNotIn('--structure-catalog', args)
+        self.assertNotIn('--bunker-catalog', args)
+        self.assertNotIn('--bunker-exit-policy', args)
+        containers = {c['name']: c for d in docs if d['kind'] == 'Deployment'
+                      for c in d['spec']['template']['spec']['containers']}
+        self.assertEqual(containers['gameplay']['image'], 'ghcr.io/tekulvw/mag-recomp-server-game:0.2.0')
+        self.assertEqual(containers['medius']['image'], 'ghcr.io/tekulvw/mag-recomp-server-medius:0.1.0')
+        config = next(d['data'] for d in docs if d['kind'] == 'ConfigMap' and 'main.json' in d.get('data', {}))
+        for role in ('main', 'maps'):
+            settings = json.loads(config[role + '.json'])
+            self.assertEqual((settings['MagApplicationId'], settings['MagProtocolVersion'], settings['MagGameType']), (20231, 1740, 3))
+            for key in ('MagItemCatalogPath', 'MagLoadoutDefaultsPath', 'MagSkillCatalogPath', 'MagDevelopmentProgressionPath'):
+                self.assertNotIn(key, settings)
+        for role in ('medius', 'maps'):
+            env = {e['name']: e.get('value') for e in containers[role]['env']}
+            self.assertEqual(env['MAG_RETAIL_SKILL_CATALOG'], '/data/retail-skill-purchases.json')
+            self.assertEqual(env['MAG_RETAIL_ARMORY_CATALOG'], '/data/retail-armory.json')
+            for name in ('MAG_TRAINING_COMPLETION_CATALOG', 'MAG_PROGRESSION_CATALOG', 'MAG_SKILL_CATALOG', 'MAG_LOADOUT_DEFAULTS'):
+                self.assertNotIn(name, env)
+
+    def test_explicit_legacy_profile_with_old_images(self):
+        for tag in ('0.1.0', '0.1.1'):
+            docs = render({'runtime': {'applicationId': 20230, 'protocolVersion': 1725, 'gameType': 2},
+                           'images': {'gameplay': {'tag': tag}},
+                           'data': {'files': {'items': 'items.json', 'spawns': 'spawns.json', 'skills': 'skills.json', 'trainingCompletion': 'training-completion.json', 'progression': 'progression.json', 'characterBlastRules': None, 'bootstrapLoadouts': None, 'retailCombatMetadata': None, 'retailArmory': None, 'fallDamageRules': None, 'retailSkills': None}}})
+            args = gameplay_arguments(docs)
+            self.assertNotIn('--application-id', args)
+            self.assertNotIn('--retail-armory-catalog', args)
+            self.assertNotIn('--bootstrap-loadouts', args)
+            self.assertNotIn('--fall-damage-rules', args)
+            self.assertEqual(args[args.index('--skill-catalog') + 1], '/data/skills.json')
+            medius = next(d for d in docs if d['kind'] == 'Deployment' and d['metadata']['name'].endswith('-medius'))
+            for c in medius['spec']['template']['spec']['containers']:
+                env = {e['name']: e.get('value') for e in c['env']}
+                self.assertNotIn('MAG_RETAIL_SKILL_CATALOG', env)
+                self.assertIn('MAG_TRAINING_COMPLETION_CATALOG', env)
+            config = next(d['data'] for d in docs if d['kind'] == 'ConfigMap' and 'main.json' in d.get('data', {}))
+            self.assertEqual(json.loads(config['main.json'])['MagLoadoutDefaultsPath'], '/data/loadout-defaults.json')
+
+    def test_optional_retail_progression_inputs(self):
+        docs = render({'data': {'files': {'trainingCompletion': 'retail-progression.json', 'progression': 'retail-progression.json'}}})
+        medius = next(d for d in docs if d['kind'] == 'Deployment' and d['metadata']['name'].endswith('-medius'))
+        for c in medius['spec']['template']['spec']['containers']:
+            env = {e['name']: e.get('value') for e in c['env']}
+            self.assertEqual(env['MAG_TRAINING_COMPLETION_CATALOG'], '/data/retail-progression.json')
+            self.assertEqual(env['MAG_PROGRESSION_CATALOG'], '/data/retail-progression.json')
+            self.assertEqual(env['MAG_RETAIL_SKILL_CATALOG'], '/data/retail-skill-purchases.json')
+            self.assertEqual(env['MAG_RETAIL_ARMORY_CATALOG'], '/data/retail-armory.json')
+        docs = render({'data': {'files': {'trainingCompletion': '', 'progression': ''}}})
+        for d in (d for d in docs if d['kind'] == 'Deployment'):
+            for c in d['spec']['template']['spec']['containers']:
+                names = {e['name'] for e in c['env']}
+                self.assertNotIn('MAG_TRAINING_COMPLETION_CATALOG', names)
+                self.assertNotIn('MAG_PROGRESSION_CATALOG', names)
+
+    def test_retail_catalog_and_argument_guards(self):
+        for key in ('items', 'spawns', 'wireProfiles', 'skills', 'characterBlastRules', 'bootstrapLoadouts', 'retailCombatMetadata', 'retailArmory', 'fallDamageRules', 'retailSkills'):
+            with self.subTest(key=key):
+                render({'data': {'files': {key: None}}}, ok=False)
+        for tag in ('0.1.0', '0.1.1'):
+            error = render({'images': {'gameplay': {'tag': tag}}}, ok=False)
+            self.assertIn('retail gameplay requires', error)
+        for flag in ('--application-id', '--bind', '--log', '--item-catalog', '--spawn-catalog', '--wire-profiles', '--skill-catalog', '--character-blast-rules', '--bootstrap-loadouts', '--retail-combat-metadata', '--retail-armory-catalog', '--fall-damage-rules', '--structure-catalog', '--bunker-catalog', '--bunker-exit-policy', '--validate-catalogs'):
+            with self.subTest(flag=flag):
+                render({'data': {'gameplayExtraArgs': [flag, '/data/override.json']}}, ok=False)
+                render({'data': {'gameplayExtraArgs': [flag + '=/data/override.json']}}, ok=False)
+        args = gameplay_arguments(render({'data': {'gameplayExtraArgs': ['--collision-world', '/data/collision-world.json']}}))
+        self.assertEqual(args[-2:], ['--collision-world', '/data/collision-world.json'])
+        # Custom builders and digest pins are not judged by an unrelated numeric tag.
+        render({'images': {'gameplay': {'repository': 'registry.example.invalid/custom-game', 'tag': '0.1.0'}}})
+        pinned = render({'images': {'gameplay': {'tag': '0.1.0', 'digest': 'sha256:' + 'a' * 64}}})
+        image = next(c['image'] for d in pinned if d['kind'] == 'Deployment'
+                     for c in d['spec']['template']['spec']['containers'] if c['name'] == 'gameplay')
+        self.assertEqual(image, 'ghcr.io/tekulvw/mag-recomp-server-game@sha256:' + 'a' * 64)
+
     def test_nonconnecting_listener_probes(self):
         containers = {c['name']: c for d in render() if d['kind'] == 'Deployment'
                       for c in d['spec']['template']['spec']['containers']}
@@ -136,7 +253,7 @@ class ChartTests(unittest.TestCase):
         deployment = next(d for d in docs if d['kind'] == 'Deployment' and d['metadata']['name'].endswith('-medius'))
         for c in deployment['spec']['template']['spec']['containers']:
             env = {e['name']: e.get('value') for e in c['env']}
-            self.assertNotIn('MAG_RETAIL_SKILL_CATALOG', env)
+            self.assertEqual(env['MAG_RETAIL_SKILL_CATALOG'], '/data/retail-skill-purchases.json')
             self.assertEqual(env['HORIZON_SCERT_MAS_CERTIFICATE_PATH'], '/runtime-secrets/scert-mas-certificate.bin')
             self.assertEqual(env['HORIZON_SCERT_MLS_CERTIFICATE_PATH'], '/runtime-secrets/scert-mls-certificate.bin')
         with tempfile.TemporaryDirectory() as tmp:

@@ -145,6 +145,7 @@ impl Character {
     ) -> Option<replication::CharacterLoadout> {
         if profile.application_id() == 20231 {
             if let (Some(saved), Some(armory)) = (&self.loadouts, catalog.retail_armory()) {
+                catalog.validate_saved_item_bindings(saved).ok()?;
                 return armory.saved_loadout(self.faction, saved, index);
             }
             return catalog.bootstrap_loadout(self.faction, index);
@@ -1301,6 +1302,7 @@ impl<W: Write> Engine<W> {
                     if self.wire_profile.application_id() == 20231
                         && let Some(armory) = self.item_catalog.retail_armory()
                     {
+                        self.item_catalog.validate_saved_item_bindings(saved)?;
                         armory.validate_saved(candidate.character.faction, saved)?;
                     } else {
                         saved.validate(&self.item_catalog)?;

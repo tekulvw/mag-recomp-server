@@ -7,7 +7,9 @@ images:
     pullPolicy: IfNotPresent
   gameplay:
     repository: ghcr.io/tekulvw/mag-recomp-server-game
-    tag: "0.1.0"
+    tag: "0.2.0"
+    # Optional immutable pin; when nonempty it replaces the image tag.
+    digest: ""
     pullPolicy: IfNotPresent
   awsCli:
     repository: public.ecr.aws/aws-cli/aws-cli
@@ -27,7 +29,7 @@ network:
   advertisedIPv4: ""
   authDns: ""
   # Match the original client MAPS endpoint port when using a DNS-only redirect.
-  mapsPort: 10471
+  mapsPort: 10073
   annotations: {}
   externalTrafficPolicy: Cluster
 runtime:
@@ -35,9 +37,10 @@ runtime:
   existingSecret: ""
   # Bump on external Secret rotation to roll Pods.
   revision: "1"
-  applicationId: 20230
-  protocolVersion: 1725
-  gameType: 2
+  # Retail Suppression. Select 20230 plus matching files/protocol for legacy clients.
+  applicationId: 20231
+  protocolVersion: 1740
+  gameType: 3
   minimumPlayers: 1
   maximumPlayers: 8
 accounts:
@@ -62,17 +65,26 @@ data:
     existingSecret: ""
     forcePathStyle: true
   files:
-    items: items.json
-    spawns: spawns.json
+    items: retail-items.json
+    spawns: retail-sver-sup-spawns.json
     wireProfiles: wire-profiles.json
-    skills: skills.json
+    # Raw owned-skill modifiers consumed by gameplay, not the purchase projection.
+    skills: retail-skills.json
+    characterBlastRules: character-blast-rules.json
+    bootstrapLoadouts: retail-all-factions-bootstrap-loadouts.json
+    retailCombatMetadata: retail-combat.json
+    fallDamageRules: retail-falling-damage.json
+    # These two paths are used only by explicit legacy application 20230.
     loadoutDefaults: loadout-defaults.json
     developmentProgression: development-progression.json
-    trainingCompletion: training-completion.json
-    progression: progression.json
-    retailSkills: retail-skills.json
+    # Optional profile-qualified progression inputs for either application; empty omits env.
+    trainingCompletion: ""
+    progression: ""
+    # Medius purchase tiers/costs; distinct from gameplay files.skills above.
+    retailSkills: retail-skill-purchases.json
     retailArmory: retail-armory.json
-  # Optional gameplay flags in addition to required catalog paths. Use /data/<path>.
+  # Optional gameplay flags, e.g. collision inputs. Chart-managed flags cannot be overridden.
+  # Retail structure/bunker inputs are unsupported and rejected. Use /data/<path>.
   gameplayExtraArgs: []
 resources:
   gameplay:

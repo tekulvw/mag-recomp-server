@@ -705,6 +705,20 @@ impl ItemCatalog {
             .ok_or("unresolved_saved_item")?;
         Ok(())
     }
+    /// The Armory proves saved equipment identity/faction eligibility separately.
+    /// Every populated slot must also resolve through this raw item catalog,
+    /// including items in inventories that are not currently selected.
+    pub(crate) fn validate_saved_item_bindings(
+        &self,
+        saved: &crate::loadouts::SavedLoadouts,
+    ) -> Result<(), &'static str> {
+        for row in &saved.inventories {
+            for &item in row.iter().flatten() {
+                self.validate_item(item)?;
+            }
+        }
+        Ok(())
+    }
     pub fn primary_magazine_capacity(&self, id: u16) -> Result<u8, &'static str> {
         self.validate_item(id)?;
         let item = self.item(id)?;

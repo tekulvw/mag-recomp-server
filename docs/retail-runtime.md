@@ -50,6 +50,11 @@ scheduler, and does not create gameplay or telemetry logs. Omit `--log` and
 `event: "catalogs_validated"` and identifies its scope as schema and profile
 validation, without claiming client acceptance.
 
+Do not combine the validator with `--collision-query`; diagnostic queries are a
+separate command. When an explicit application selects an optional collision
+world, its map must match the selected spawn catalog in both offline validation
+and normal startup.
+
 Validation checks the selected item and skill applications, the wire profile,
 starter equipment availability for all factions, and starter equipment validity
 against the retail Armory. Bootstrap, combat, Armory and raw skill metadata must
@@ -57,6 +62,12 @@ identify the SHA-256 of the exact selected raw item JSON bytes. Changing those
 bytes requires matching projections; a shared application ID alone is
 insufficient. These links check consistency between supplied files. They do not
 independently prove that the files were extracted from the intended originals.
+
+Every populated starter and saved-equipment slot must also resolve through the
+raw retail item catalog. Armory membership alone cannot accept an unresolved raw
+item definition. Admission and equipment replication enforce this check across
+all five inventories, including inventories that are not currently selected.
+Unresolved item IDs fail explicitly; they are not renamed or converted.
 
 The neutral spawn schema does not encode an application identity. Operators must
 verify its source provenance, selected map, match policy and runtime identity

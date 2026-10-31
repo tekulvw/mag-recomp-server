@@ -247,6 +247,140 @@ mod tests {
         .unwrap()
     }
 
+    fn retail_items_with_armory() -> Arc<item_catalog::ItemCatalog> {
+        let mut raw = retail_items().raw().clone();
+        raw["items"] = json!({
+            "FactionItemList0:2":{"authored_ref":"FactionItemList0:2","faction_list":"FactionItemList0",
+                "local_ordinal":2,"wire_item_id":null,"name":"synthetic_weapon","item_type":"kWeapon",
+                "definition":{"group":"weapons","name":"synthetic_weapon"}},
+            "FactionItemList0:3":{"authored_ref":"FactionItemList0:3","faction_list":"FactionItemList0",
+                "local_ordinal":3,"wire_item_id":null,"name":"synthetic_unresolved_uniform",
+                "item_type":"kUniform","definition":null}
+        });
+        raw["definitions"] =
+            json!({"weapons":{"synthetic_weapon":{"parameters":{"magazine_capacity":7}}}});
+        let catalog = item_catalog::ItemCatalog::from_value_for_application(
+            raw,
+            retail_items().character_blast_rules(),
+            20231,
+        )
+        .unwrap();
+        let armory = retail_armory::RetailArmory::from_json(&json!({
+            "schema_version":1,"application_id":20231,"source_sha256":{"synthetic":"a".repeat(64)},
+            "items":[
+                {"wire_id":2,"name":"synthetic_weapon","authored_ref":"FactionItemList0:2",
+                    "available_bit":2,"factions":[0,1,2],"primary_ammo":7},
+                {"wire_id":3,"name":"synthetic_unresolved_uniform","authored_ref":"FactionItemList0:3",
+                    "available_bit":3,"factions":[0,1,2],"primary_ammo":null}
+            ],
+            "factions":(0..3).map(|faction|json!({"faction":faction,"available_item_bits":[2,3],"skill_ids":[],
+                "loadouts":(0..5).map(|_|json!({"update_id":1,"items":vec![None::<u16>;22]})).collect::<Vec<_>>()
+            })).collect::<Vec<_>>()
+        }).to_string()).unwrap();
+        Arc::new(catalog.with_retail_armory(armory))
+    }
+
+    fn saved_equipment(unresolved_inventory: Option<usize>) -> loadouts::SavedLoadouts {
+        let mut saved = loadouts::SavedLoadouts {
+            selected_index: 0,
+            update_ids: [1; 5],
+            inventories: [[None; 22]; 5],
+        };
+        saved.inventories[0][0] = Some(2);
+        if let Some(index) = unresolved_inventory {
+            saved.inventories[index][0] = Some(2);
+            saved.inventories[index][21] = Some(3);
+        }
+        saved
+    }
+
+    fn saved_character(saved: loadouts::SavedLoadouts) -> Character {
+        serde_json::from_value(json!({
+            "name":"Synthetic Player","faction":0,"head":0,"voice":0,"universe_id":1,
+            "character_id":7,"loadouts":saved,
+        }))
+        .unwrap()
+    }
+
+    fn reserve_saved_character(engine: &mut Engine<Vec<u8>>, character: Character) -> Response {
+        engine.handle(
+            Request::Reserve {
+                v: BRIDGE_VERSION,
+                request_id: "synthetic-saved-reserve".into(),
+                reservation_id: "synthetic-reservation-0001".into(),
+                world_id: 1,
+                player_id: 0,
+                account_id: 3,
+                session_key: "aaaaaaaaaaaaaaaa".into(),
+                access_key: "bbbbbbbbbbbbbbbb".into(),
+                character,
+            },
+            Duration::ZERO,
+            1,
+        )
+    }
+
+    #[test]
+    fn retail_reserve_rejects_unresolved_raw_items_even_when_armory_accepts_every_inventory() {
+        for inventory in 0..5 {
+            let items = retail_items_with_armory();
+            let saved = saved_equipment(Some(inventory));
+            assert_eq!(items.validate_item(3), Err("unresolved_saved_item"));
+            assert_eq!(
+                items.retail_armory().unwrap().validate_saved(0, &saved),
+                Ok(())
+            );
+            let resources = EngineResources::for_application(
+                items,
+                spawns(false),
+                None,
+                wire_profiles(),
+                20231,
+            )
+            .unwrap();
+            let mut engine = Engine::from_resources(Vec::new(), 100_000, resources);
+            let response = reserve_saved_character(&mut engine, saved_character(saved));
+            assert_eq!(
+                response.error.as_deref(),
+                Some("unresolved_saved_item"),
+                "inventory {inventory}"
+            );
+            assert!(!response.ok);
+            assert!(engine.active.is_none());
+        }
+    }
+
+    #[test]
+    fn retail_replication_rejects_unresolved_raw_items_in_unselected_inventories() {
+        let items = retail_items_with_armory();
+        for inventory in 0..5 {
+            let character = saved_character(saved_equipment(Some(inventory)));
+            assert!(
+                character
+                    .replication_loadout(&items, 0, wire_profiles().profile(20231).unwrap())
+                    .is_none(),
+                "inventory {inventory}"
+            );
+        }
+    }
+
+    #[test]
+    fn retail_resolved_saved_equipment_still_reserves_and_replicates() {
+        let items = retail_items_with_armory();
+        let character = saved_character(saved_equipment(None));
+        let kit = character
+            .replication_loadout(&items, 0, wire_profiles().profile(20231).unwrap())
+            .unwrap();
+        assert_eq!(kit.inventories[0].slots[0], Some(2));
+        let resources =
+            EngineResources::for_application(items, spawns(false), None, wire_profiles(), 20231)
+                .unwrap();
+        let mut engine = Engine::from_resources(Vec::new(), 100_000, resources);
+        let response = reserve_saved_character(&mut engine, character);
+        assert!(response.ok, "{:?}", response.error);
+        assert!(engine.active.is_some());
+    }
+
     #[test]
     fn explicit_runtime_starts_retail_and_rejects_prototype_reconfiguration() {
         let resources = EngineResources::for_application(

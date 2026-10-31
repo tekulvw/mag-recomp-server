@@ -317,6 +317,11 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             }
         }
     }
+    if validate_catalogs && collision_query.is_some() {
+        return Err(io::Error::other(
+            "--validate-catalogs cannot be combined with --collision-query",
+        ));
+    }
     if development_dummy_position.is_some() && !development_dummy {
         return Err(io::Error::other(
             "--development-dummy-position requires --development-dummy",
@@ -451,6 +456,15 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     let spawn_path = spawn_path
         .ok_or_else(|| io::Error::other("--spawn-catalog is required for gameplay startup"))?;
     let catalog = mag_gameplay::spawn_catalog::SpawnCatalog::load(&spawn_path)?;
+    if application_id.is_some()
+        && collision_world
+            .as_ref()
+            .is_some_and(|world| world.metadata().map_name != catalog.map_name())
+    {
+        return Err(io::Error::other(
+            "collision world map does not match the selected spawn catalog",
+        ));
+    }
     if application_id == Some(20231) && catalog.match_profile().has_bunkers {
         return Err(io::Error::other(
             "retail bunker features are unsupported without verified retail authority",
@@ -526,6 +540,11 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                 update_ids: std::array::from_fn(|index| bootstrap.inventories[index].update_id),
                 inventories: std::array::from_fn(|index| bootstrap.inventories[index].slots),
             };
+            for inventory in &saved.inventories {
+                for &item in inventory.iter().flatten() {
+                    item_catalog.validate_item(item).map_err(io::Error::other)?;
+                }
+            }
             armory
                 .validate_saved(faction, &saved)
                 .map_err(io::Error::other)?;
@@ -1391,17 +1410,35 @@ mod subscription_tests {
 mod runtime_profile_tests {
     use super::*;
 
+    #[test]
+    fn offline_catalog_validation_cannot_be_replaced_by_a_collision_query() {
+        let error = run([
+            "--validate-catalogs".to_string(),
+            "--collision-query".to_string(),
+            "0,0,0".to_string(),
+            "1,0,0".to_string(),
+        ])
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("--validate-catalogs cannot be combined with --collision-query")
+        );
+    }
+
     struct SyntheticCatalogs(PathBuf);
 
     impl SyntheticCatalogs {
         fn new() -> Self {
+            static NEXT_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
             let path = std::env::temp_dir().join(format!(
-                "mag-synthetic-runtime-{}-{}",
+                "mag-synthetic-runtime-{}-{}-{}",
                 std::process::id(),
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
-                    .as_nanos()
+                    .as_nanos(),
+                NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
             ));
             std::fs::create_dir(&path).unwrap();
             let files = Self(path);
@@ -1526,6 +1563,66 @@ mod runtime_profile_tests {
         let files = SyntheticCatalogs::new();
         assert!(run(files.args()).is_ok());
         assert_eq!(std::fs::read_dir(&files.0).unwrap().count(), 9);
+    }
+
+    #[test]
+    fn offline_retail_cli_rejects_unresolved_raw_items_in_armory_bootstrap() {
+        let files = SyntheticCatalogs::new();
+        let mut items = files.read("items.json");
+        items["items"]["FactionItemList0:2"]["definition"] = serde_json::Value::Null;
+        files.write("items.json", &items);
+        let digest = format!(
+            "{:x}",
+            Sha256::digest(std::fs::read(files.0.join("items.json")).unwrap())
+        );
+        for (name, pointer) in [
+            ("bootstrap.json", "/provenance/catalog_sha256"),
+            ("combat.json", "/provenance/catalog_sha256"),
+            (
+                "armory.json",
+                "/source_sha256/gameplay~1data~1retail-items.json",
+            ),
+            (
+                "skills.json",
+                "/source_sha256/gameplay~1data~1retail-items.json",
+            ),
+        ] {
+            let mut value = files.read(name);
+            *value.pointer_mut(pointer).unwrap() = serde_json::json!(digest);
+            files.write(name, &value);
+        }
+        assert!(
+            run(files.args())
+                .unwrap_err()
+                .to_string()
+                .contains("unresolved_saved_item")
+        );
+    }
+
+    #[test]
+    fn offline_retail_cli_requires_selected_collision_world_to_match_the_map() {
+        let files = SyntheticCatalogs::new();
+        let mut world = serde_json::json!({
+            "format":"mag_collision_world","schema_version":1,"coordinate_space":"world",
+            "metadata":{"map_name":"different_synthetic_arena","build":"synthetic",
+                "coverage":"provisional","provenance":["Synthetic CLI test"],"unknowns":["Not native geometry"]},
+            "instances":[{"id":"synthetic-wall","vertices_xyz":[[2.,-2.,-2.],[2.,2.,-2.],[2.,0.,2.]],"triangles":[[0,1,2]]}]
+        });
+        files.write("world.json", &world);
+        let mut args = files.args();
+        args.extend([
+            "--collision-world".into(),
+            files.0.join("world.json").to_str().unwrap().into(),
+        ]);
+        assert!(
+            run(args.clone())
+                .unwrap_err()
+                .to_string()
+                .contains("collision world map does not match")
+        );
+        world["metadata"]["map_name"] = serde_json::json!("synthetic_arena");
+        files.write("world.json", &world);
+        assert!(run(args).is_ok());
     }
 
     #[test]

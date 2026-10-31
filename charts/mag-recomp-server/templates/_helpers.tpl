@@ -8,7 +8,11 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | quote }}
 {{- end -}}
 {{- define "mag.image" -}}
+{{- if .digest -}}
+{{ printf "%s@%s" .repository .digest | quote }}
+{{- else -}}
 {{ printf "%s:%s" .repository .tag | quote }}
+{{- end -}}
 {{- end -}}
 {{- define "mag.accountClaim" -}}
 {{ default (printf "%s-accounts" (include "mag.name" .)) .Values.accounts.existingClaim }}
@@ -83,4 +87,22 @@ exec:
     - {name: scripts, mountPath: /scripts, readOnly: true}
     - {name: data, mountPath: /catalogs}
 {{- end }}
+{{- end -}}
+
+{{- define "mag.validateGameplay" -}}
+{{- $retail := eq (int .Values.runtime.applicationId) 20231 -}}
+{{- $image := .Values.images.gameplay -}}
+{{- if and $retail (eq $image.repository "ghcr.io/tekulvw/mag-recomp-server-game") (not $image.digest) (has $image.tag (list "0.1.0" "0.1.1" "v0.1.0" "v0.1.1")) -}}
+{{- fail "retail gameplay requires a release containing --application-id (0.2.0 or newer); official 0.1.0/0.1.1 images are incompatible" -}}
+{{- end -}}
+{{- $managed := list "--application-id" "--bind" "--log" "--item-catalog" "--spawn-catalog" "--wire-profiles" "--skill-catalog" "--validate-catalogs" -}}
+{{- if $retail -}}
+{{- $managed = concat $managed (list "--character-blast-rules" "--bootstrap-loadouts" "--retail-combat-metadata" "--retail-armory-catalog" "--fall-damage-rules" "--structure-catalog" "--bunker-catalog" "--bunker-exit-policy") -}}
+{{- end -}}
+{{- range .Values.data.gameplayExtraArgs -}}
+{{- $flag := first (splitList "=" .) -}}
+{{- if has $flag $managed -}}
+{{- fail (printf "data.gameplayExtraArgs cannot supply chart-managed or unsupported flag %s" $flag) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}

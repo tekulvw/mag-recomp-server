@@ -2,7 +2,9 @@
 
 This chart deploys the source server with operator-supplied private runtime catalogs and stable keys. Kubernetes 1.27 or newer, an amd64 worker, application images, a mixed TCP/UDP LoadBalancer controller, and private runtime inputs are prerequisites. The chart contains no game data, accounts, credentials, certificates, or private addresses. It does not run a game client or deploy anything during packaging.
 
-Chart `version` and application image tags have separate release lifecycles. Version 0.1.0 defaults to the independently selected `ghcr.io/tekulvw/mag-recomp-server-medius:0.1.0` and `ghcr.io/tekulvw/mag-recomp-server-game:0.1.0`. Set `images.medius.tag` and `images.gameplay.tag` explicitly when upgrading applications; a chart release does not change either tag automatically. The current source supports a captured development authentication profile. This chart explicitly enables that profile for Medius and MAPS; it is a development server deployment, and does not implement a production identity provider.
+Chart `version` and application image tags have separate release lifecycles. The retail defaults in this source target the paired **gameplay 0.2.0 and chart 0.2.0 feature release**: `ghcr.io/tekulvw/mag-recomp-server-game:0.2.0` with Medius independently pinned to `ghcr.io/tekulvw/mag-recomp-server-medius:0.1.0`. Both the gameplay image and chart feature release must be published before deploying these defaults; the source change alone does not make those artifacts available. Earlier official gameplay 0.1.0/0.1.1 images lack the required `--application-id` CLI, so rendering a retail profile with those tag pins fails with a compatibility error.
+
+Set `images.medius.tag` and `images.gameplay.tag` explicitly when selecting other application releases. An optional `images.gameplay.digest: sha256:...` selects an immutable image instead of its tag. Custom repositories and digest pins are accepted without inferring their feature support from an unrelated tag; the operator must verify that the selected image implements this runtime contract. Neither chart `appVersion` nor its release number automatically selects application images. The current source supports a captured development authentication profile. This chart explicitly enables that profile for Medius and MAPS; it is a development server deployment, and does not implement a production identity provider.
 
 ## Runtime layout
 
@@ -10,7 +12,7 @@ Chart `version` and application image tags have separate release lifecycles. Ver
 | --- | --- | --- | --- |
 | Gameplay | One Pod | Private ClusterIP TCP 31000 | None; read-only catalogs |
 | Main Medius + local DME | One container in the Medius Pod | TCP 10475 auth, 10478 lobby, 10477 proxy, external 10473 to container 10073; UDP 10474 | Account PVC read/write |
-| MAPS | Second container in the same Medius Pod, same image | TCP `network.mapsPort` (default 10471) to auth 10471, 10472 lobby, 10476 proxy | Same account PVC read-only |
+| MAPS | Second container in the same Medius Pod, same image | TCP `network.mapsPort` (retail default 10073) to auth 10471, 10472 lobby, 10476 proxy | Same account PVC read-only |
 | Optional DNS | Separate Pod, disabled by default | TCP/UDP 53 to container port 1053 | None |
 
 Medius and MAPS have separate `/config/main` and `/config/maps` directories in a writable `emptyDir`, with separate listener ports. The main role enables MAS, account login, character data and local DME. MAPS enables the plugin adapter and reads the same character store. Both load the same stable operator-supplied RSA keys. The source server's `MAG_ADVERTISE_IPV4`, `MAG_AUTH_DNS`, `MAG_AUTH_PORT`, `MAG_LOBBY_PORT` and `MAG_GAME_TCP_PORT` environment settings are provided by the chart. DME binds internally on TCP 10073 and UDP 10474; the Service maps the external TCP port. The advertised address must be reachable by the client and match the LoadBalancer address or the address actually routed to it.
@@ -54,7 +56,60 @@ The object-store Secret uses `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, wi
 
 The verification init container runs the bundled public `data_bundle.py` with `unpack --archive /download/bundle.tar.gz --sha256 ... --output-dir /catalogs`. It verifies the archive checksum and per-file manifest, rejects unsafe members, then makes extracted files read-only. SHA-256 is mandatory even when a version ID is supplied. Use a fresh object key and checksum for every data update; do not overwrite a pinned release. See [private bundle preparation](../../docs/data-bundles.md) for the explicit input selection and packaging commands. The default verifier limits are 512 MiB per file, 2 GiB total/archive, and 4096 files; its 1 GiB memory limit is configurable through `resources.init` and must accommodate parsed JSON, not just compressed archive size. `data.emptyDirSizeLimit` bounds each archive and extracted-data volume separately; account for both when sizing node ephemeral storage. A completed data init container is not a live synchronizer. Failed verification prevents the application from starting.
 
-The `data.files` table selects private paths relative to `/data`: required gameplay inputs are `items`, `spawns`, `wireProfiles`, and `skills`; Medius additionally consumes `loadoutDefaults`, `developmentProgression`, `trainingCompletion`, and `progression`. Retail application ID 20231 also selects `retailSkills` and `retailArmory`; these environment variables are omitted for prototype 20230 because the source rejects retail catalogs for that profile. All supplied catalogs must match the selected application and map. Additional gameplay catalog or collision options can be supplied as the string array `data.gameplayExtraArgs`, using `/data/...` paths. The required gameplay bind, event log and baseline catalog arguments are supplied by the chart; do not override them through extra arguments.
+The default runtime is retail application **20231**, protocol **1740**, with Suppression game type **3**. The `data.files` table selects private paths relative to `/data`. The chart launches gameplay with `--application-id 20231` and all nine explicit absolute inputs:
+
+| Values key under `data.files` | Gameplay flag | Default private filename |
+| --- | --- | --- |
+| `items` | `--item-catalog` | `retail-items.json` |
+| `spawns` | `--spawn-catalog` | `retail-sver-sup-spawns.json` |
+| `wireProfiles` | `--wire-profiles` | `wire-profiles.json` |
+| `characterBlastRules` | `--character-blast-rules` | `character-blast-rules.json` |
+| `bootstrapLoadouts` | `--bootstrap-loadouts` | `retail-all-factions-bootstrap-loadouts.json` |
+| `retailCombatMetadata` | `--retail-combat-metadata` | `retail-combat.json` |
+| `retailArmory` | `--retail-armory-catalog` | `retail-armory.json` |
+| `skills` | `--skill-catalog` | `retail-skills.json` |
+| `fallDamageRules` | `--fall-damage-rules` | `retail-falling-damage.json` |
+
+These are external files, not files packaged with the chart or application image. Their names alone establish no source provenance. Supply a qualified retail spawn catalog for the selected map with `has_bunkers: false` and, for the supported Suppression entry policy, `has_objectives: false`. Retail structure and bunker authority remains unsupported: the chart adds no structure, bunker or bunker-exit inputs and rejects those flags in retail extra arguments. Falling damage uses the required retail rules. See [the explicit retail startup contract](../../docs/retail-runtime.md) for offline `--validate-catalogs` checks, exact-item hash links, feature limits and the distinction between schema/profile validation and client acceptance.
+
+Medius consumes `data.files.retailArmory` through `MAG_RETAIL_ARMORY_CATALOG` and **`data.files.retailSkills` through `MAG_RETAIL_SKILL_CATALOG`** in both main Medius and MAPS. The latter defaults to `retail-skill-purchases.json`, a purchase-tier/cost projection. Gameplay's `data.files.skills` defaults to the different raw modifier input `retail-skills.json`; do not interchange those files. Retail Medius configuration omits the prototype item, loadout-default, skill and development-progression paths entirely, so an otherwise unused prototype file is not needed to start the retail profile.
+
+`data.files.trainingCompletion` and `data.files.progression` are optional for either application and default empty. A nonempty value is mounted through `MAG_TRAINING_COMPLETION_CATALOG` or `MAG_PROGRESSION_CATALOG` in both main Medius and MAPS; retain these values when migrating a runtime that already uses them. For example, a qualified retail progression input can supply both roles:
+
+```yaml
+data:
+  files:
+    trainingCompletion: retail-progression.json
+    progression: retail-progression.json
+```
+
+Empty values omit the respective environment variable and leave that feature disabled; the chart does not substitute an embedded policy. These inputs must match the selected application and the loader's schema. They are separate from legacy `data.files.developmentProgression`, which is never referenced in the retail configuration.
+
+Additional collision or other optional gameplay inputs can be supplied as the string array `data.gameplayExtraArgs`, using `/data/...` paths. The chart rejects overrides of its managed application ID, listener, event log and catalog flags, including `--flag=value` variants. It also rejects `--validate-catalogs` in the service launcher; run validation separately before deploying. Optional flags remain subject to the selected application's source checks.
+
+To use a legacy prototype deployment explicitly, select application 20230, its matching protocol/game type and its own filenames. The legacy launcher keeps the original four catalog arguments and omits the new `--application-id` flag, so official gameplay 0.1.0/0.1.1 remains usable for that branch. The following is a legacy example, not a retail input fallback:
+
+```yaml
+runtime:
+  applicationId: 20230
+  protocolVersion: 1725
+  gameType: 2
+images:
+  gameplay:
+    tag: "0.1.0"
+data:
+  files:
+    items: items.json
+    spawns: spawns.json
+    wireProfiles: wire-profiles.json
+    skills: skills.json
+    loadoutDefaults: loadout-defaults.json
+    developmentProgression: development-progression.json
+    trainingCompletion: training-completion.json
+    progression: progression.json
+```
+
+Legacy-specific optional inputs can still be passed through `data.gameplayExtraArgs` when its chart-managed flags are not overridden. Both profiles require compatible source data and a separately authorized deployment; changing the profile does not migrate accounts.
 
 Catalog mounts are read-only in application containers. Logs and temporary files use writable `emptyDir` volumes. Gameplay creates a unique event-log directory on each container start because the server rejects reuse of an existing event-log path. The applications run as UID/GID 10001, drop Linux capabilities, use the runtime-default seccomp profile, and do not receive a service-account token. Application root filesystems remain writable for compatibility with Horizon's startup writes. The optional DNS image uses a read-only root filesystem and adds only the `NET_BIND_SERVICE` capability to its otherwise empty capability set, because the upstream image marks its binary with that file capability and cannot execute with it removed from the bounding set. It still runs without privilege escalation on port 1053.
 
@@ -95,7 +150,7 @@ helm package charts/mag-recomp-server --destination /tmp/mag-chart-packages
 python3 -m unittest discover -s tests -p test_helm_chart.py
 ```
 
-The Python graph tests require PyYAML 6.0.3 and Helm 3.19 or newer. They render local manifests, reject invalid values, inspect role/storage/Secret boundaries and the optional DNS graph, and package into a temporary directory. They do not contact a cluster.
+The Python graph tests require PyYAML 6.0.3 and Helm 3.19 or newer. They render local manifests, reject invalid values, inspect role/storage/Secret boundaries and the optional DNS graph, execute the rendered launcher with a harmless argument recorder to verify the retail and legacy CLI contracts, and package into a temporary directory. They do not start the application executable or contact a cluster.
 
 Application startup and readiness probes inspect the exact role port in Linux's
 `/proc/net/tcp` and `/proc/net/tcp6` tables for TCP state `0A` (LISTEN). They use
@@ -116,11 +171,11 @@ propagation or load characteristics. The chart binds application listeners to
 wildcard addresses; changing that binding needs separate reachability checks.
 Test these properties with private operator inputs when deployment is authorized.
 
-When deployment is intended, use your reviewed private values and the chart's independent version:
+After the paired gameplay 0.2.0 and chart 0.2.0 artifacts have been published and deployment is authorized, use your reviewed private values and the chart's independent version:
 
 ```sh
 helm upgrade --install mag oci://ghcr.io/tekulvw/charts/mag-recomp-server \
-  --version 0.1.0 --namespace mag --create-namespace -f /secure/operator-values.yaml
+  --version 0.2.0 --namespace mag --create-namespace -f /secure/operator-values.yaml
 ```
 
 The command is an operator example, not a chart hook. No deployment hooks, account migration jobs or cluster-administration resources are installed. Updating public settings, bundle checksum or the bundled scripts changes the Pod template hash and restarts the affected application Pods. For changes to external Secret contents, bump `runtime.revision`; for existing-claim data replacement, bump `data.revision` after preparing consistent data. Neither external Secret rotation nor existing-claim mutation is detected automatically. Recreate updates cause downtime; ephemeral event logs disappear when their Pod is replaced. Preserve any logs you need privately before an update.

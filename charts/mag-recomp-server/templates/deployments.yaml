@@ -91,9 +91,14 @@ spec:
             - {name: MAG_GAMEPLAY_HOST, value: {{ printf "%s-gameplay" (include "mag.name" $root) | quote }}}
             - {name: MAG_GAMEPLAY_PORT, value: "31000"}
             {{- end }}
-            {{- range $env, $file := dict "MAG_TRAINING_COMPLETION_CATALOG" "trainingCompletion" "MAG_PROGRESSION_CATALOG" "progression" "MAG_RETAIL_SKILL_CATALOG" "retailSkills" "MAG_RETAIL_ARMORY_CATALOG" "retailArmory" }}
-            {{- if or (not (hasPrefix "MAG_RETAIL_" $env)) (eq (int $root.Values.runtime.applicationId) 20231) }}
-            - {name: {{ $env }}, value: {{ printf "/data/%s" (index $root.Values.data.files $file) | quote }}}
+            {{- $catalogs := dict "MAG_TRAINING_COMPLETION_CATALOG" "trainingCompletion" "MAG_PROGRESSION_CATALOG" "progression" }}
+            {{- if eq (int $root.Values.runtime.applicationId) 20231 }}
+            {{- $_ := set $catalogs "MAG_RETAIL_SKILL_CATALOG" "retailSkills" }}
+            {{- $_ := set $catalogs "MAG_RETAIL_ARMORY_CATALOG" "retailArmory" }}
+            {{- end }}
+            {{- range $env, $file := $catalogs }}
+            {{- with index $root.Values.data.files $file }}
+            - {name: {{ $env }}, value: {{ printf "/data/%s" . | quote }}}
             {{- end }}
             {{- end }}
           ports:
@@ -133,7 +138,7 @@ spec:
           args:
             - |
               run_dir=$(mktemp -d /logs/run.XXXXXXXXXX)
-              exec /usr/local/bin/mag-gameplay --bind 0.0.0.0:31000 --log "$run_dir/events.jsonl" --item-catalog "$ITEMS" --spawn-catalog "$SPAWNS" --wire-profiles "$WIRES" --skill-catalog "$SKILLS" "$@"
+              exec /usr/local/bin/mag-gameplay --bind 0.0.0.0:31000 --log "$run_dir/events.jsonl" --item-catalog "$ITEMS" --spawn-catalog "$SPAWNS" --wire-profiles "$WIRES" --skill-catalog "$SKILLS"{{ if eq (int $.Values.runtime.applicationId) 20231 }} --application-id 20231 --character-blast-rules "$BLAST" --bootstrap-loadouts "$BOOTSTRAP" --retail-combat-metadata "$COMBAT" --retail-armory-catalog "$ARMORY" --fall-damage-rules "$FALL"{{ end }} "$@"
             - mag-gameplay
             {{- range $.Values.data.gameplayExtraArgs }}
             - {{ . | quote }}
@@ -143,6 +148,11 @@ spec:
             - {name: SPAWNS, value: {{ printf "/data/%s" $.Values.data.files.spawns | quote }}}
             - {name: WIRES, value: {{ printf "/data/%s" $.Values.data.files.wireProfiles | quote }}}
             - {name: SKILLS, value: {{ printf "/data/%s" $.Values.data.files.skills | quote }}}
+            {{- if eq (int $.Values.runtime.applicationId) 20231 }}
+            {{- range $env, $file := dict "BLAST" "characterBlastRules" "BOOTSTRAP" "bootstrapLoadouts" "COMBAT" "retailCombatMetadata" "ARMORY" "retailArmory" "FALL" "fallDamageRules" }}
+            - {name: {{ $env }}, value: {{ printf "/data/%s" (index $.Values.data.files $file) | quote }}}
+            {{- end }}
+            {{- end }}
           ports:
             - {name: bridge, containerPort: 31000, protocol: TCP}
           startupProbe:
