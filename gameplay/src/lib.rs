@@ -56,6 +56,7 @@ pub mod retail_melee;
 mod score_clock;
 pub mod skill_catalog;
 pub mod spawn_catalog;
+mod spawn_progression;
 pub mod structure_catalog;
 pub mod structures;
 pub mod telemetry;
@@ -811,6 +812,7 @@ pub struct Engine<W: Write> {
     collision_world: Option<collision::CollisionWorld>,
     navmesh_world: Option<std::sync::Arc<navmesh::NavMesh>>,
     spawn_catalog: Option<spawn_catalog::SpawnCatalog>,
+    parachute_waves: std::collections::BTreeMap<(u16, Duration), usize>,
     objective_catalog: Option<objective_catalog::ObjectiveCatalog>,
     objective_world: Option<objective_control::ObjectiveWorld>,
     score_clock: score_clock::Clock,
@@ -992,6 +994,9 @@ impl<W: Write> Engine<W> {
         catalog: objective_catalog::ObjectiveCatalog,
     ) -> Result<Self, &'static str> {
         catalog.validate_match(self.map_name(), self.match_profile())?;
+        if let Some(spawns) = &self.spawn_catalog {
+            spawns.validate_objectives(Some(&catalog))?;
+        }
         self.objective_world = Some(objective_control::ObjectiveWorld::new(&catalog));
         self.objective_catalog = Some(catalog);
         Ok(self)
@@ -1000,6 +1005,9 @@ impl<W: Write> Engine<W> {
         &self,
         profile: wire_profile::WireProfile,
     ) -> Result<(), &'static str> {
+        if let Some(spawns) = &self.spawn_catalog {
+            spawns.validate_objectives(self.objective_catalog.as_ref())?;
+        }
         objective_catalog::validate_configuration(
             self.objective_catalog.as_ref(),
             self.map_name(),

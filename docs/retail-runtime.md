@@ -123,3 +123,68 @@ retail projections.
 Use the private bundle workflow in [data-bundles.md](data-bundles.md) to select
 and distribute the exact inputs needed by each service. The bundle tool does
 not infer these distinctions from filenames.
+
+## Objective-driven forward and parachute spawns
+
+The optional `maps[].forward_spawns` array links an objective's completion to a
+squad's available points and shared default. Each entry contains
+`objective_index`, `squad_index` and `spawn_point_index`. These are explicit
+external runtime indices. They require `runtime_indices_verified: true` and a
+nonempty `runtime_indices_basis`, describing initial-load pool order. This
+identity qualification does not certify live behavior at every point.
+
+Bindings must reference existing squads and initially inactive supported points,
+exclude those points from initial availability, and cannot share a target across
+incompatible squad sides/factions. Duplicate objective/squad and squad/point
+bindings fail validation. The selected objective catalog must contain each
+referenced objective and squad. Both startup and `--validate-catalogs` check these
+links before opening listeners. An objective's owner side can describe the
+opposing structure being completed; it does not imply that the benefiting squad
+has that same side. Catalogs without forward bindings retain their existing
+initial availability and selection behavior.
+
+Only the bound objective reaching `Completed` (native state 7) activates a rule.
+Assigning a later objective, or merely activating the bound objective, does not.
+Completion updates every affected squad, including empty squads, and new human
+admissions inherit the progressed default. Existing members following the old
+shared default follow the new point; personal overrides remain selected. The
+runtime publishes an availability-only GameState update, squad assignments and
+private character assignments through the existing reliable queues. This does
+not move or respawn a living character. Subsequent leader selections remain
+constrained to the squad's currently available points.
+
+A spawn location with `kind: "parachute"` requires an external `parachute` object:
+
+```json
+{
+  "forward": [0.6, 0.0, 0.8],
+  "spacing_m": 5.0,
+  "yaw": 377
+}
+```
+
+These example values are synthetic. `position` is the reviewed world-space
+**airborne center**; the server supplies no launch height or terrain correction.
+`forward` must be finite and approximately unit length (squared-length tolerance
+0.001); spacing must be finite, positive and at most 64 meters; yaw is the native
+10-bit value 0–1023. All eight possible offsets must fit the existing position
+wire range. Other spawn kinds cannot carry a parachute pose, and parachute points
+must begin inactive and unavailable.
+
+A committed human parachute respawn carries character state 17, stance 0, zero user
+data, the external yaw, normal inventory fields and no mounted vehicle state.
+It requires a resolved replication inventory. Ordinary on-foot spawns retain
+state 1. For each point and actual pending respawn-wave deadline, committed humans
+use ordinal 0, 1, … and `center + forward * spacing_m * ordinal`, bounded by configured
+squad capacity. Selection, confirmation retries, deferred replies, recording
+failures and replication replay do not consume an ordinal. New wave deadlines
+start at 0; delayed older pending waves retain their own counter. Round reset
+clears activation, shared defaults and counters using immutable in-memory source
+bindings, without rereading files.
+
+This support covers the human candidate/protocol path and offline synthetic
+verification. It does not establish aircraft simulation or full original client
+entry parity. Bots retain their existing physical population and respawn paths;
+objective progression does not teleport them into parachute locations. Extracted
+world poses, runtime identity evidence and any private client acceptance remain
+external inputs and evidence, outside public source distribution.

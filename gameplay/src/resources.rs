@@ -188,6 +188,7 @@ impl<W: Write> Engine<W> {
             collision_world: None,
             navmesh_world: None,
             spawn_catalog: Some(resources.spawn_catalog),
+            parachute_waves: Default::default(),
             objective_catalog: None,
             objective_world: None,
             score_clock: score_clock::Clock::default(),

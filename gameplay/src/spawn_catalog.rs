@@ -2,7 +2,7 @@
 use crate::replication::CharacterPosition;
 use serde::Deserialize;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{self, Read},
     path::{Path, PathBuf},
@@ -14,6 +14,7 @@ pub enum SpawnKind {
     Alternate,
     BunkerPassenger,
     OnFoot,
+    Parachute,
     Unsupported,
 }
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -25,6 +26,35 @@ pub struct SpawnLocation {
     #[serde(default = "default_active")]
     pub active: bool,
     pub position: CharacterPosition,
+    #[serde(default)]
+    pub parachute: Option<ParachutePose>,
+}
+/// Reviewed world-space airborne pose. No terrain snapping or implicit launch height.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParachutePose {
+    pub forward: [f64; 3],
+    pub spacing_m: f64,
+    pub yaw: u16,
+}
+impl SpawnLocation {
+    pub(crate) fn parachute_position(
+        &self,
+        ordinal: usize,
+    ) -> Result<CharacterPosition, &'static str> {
+        let pose = self.parachute.ok_or("missing_parachute_pose")?;
+        if ordinal >= 8 {
+            return Err("parachute_wave_full");
+        }
+        let offset = pose.spacing_m * ordinal as f64;
+        let position = CharacterPosition {
+            x: (f64::from(self.position.x) + pose.forward[0] * offset) as f32,
+            y: (f64::from(self.position.y) + pose.forward[1] * offset) as f32,
+            z: (f64::from(self.position.z) + pose.forward[2] * offset) as f32,
+        };
+        position.validate()?;
+        Ok(position)
+    }
 }
 fn default_active() -> bool {
     true
@@ -44,6 +74,15 @@ pub struct MapSpawns {
     pub runtime_indices_basis: Option<String>,
     #[serde(default)]
     pub squads: Vec<SquadSpawnBinding>,
+    #[serde(default)]
+    pub forward_spawns: Vec<ForwardSpawnBinding>,
+}
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForwardSpawnBinding {
+    pub objective_index: u16,
+    pub squad_index: u16,
+    pub spawn_point_index: u16,
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -64,6 +103,11 @@ struct ActiveSpawns {
     squad_index: u16,
     default_spawn: u16,
     available: Vec<u16>,
+}
+#[derive(Clone, Debug)]
+struct RuntimeSquadSpawns {
+    available: Vec<u16>,
+    default_spawn: u16,
 }
 /// Match presentation and world-feature policy for the selected map.
 /// Absent fields keep the original local Alyeska Domination policy.
@@ -134,6 +178,13 @@ pub struct SpawnCatalog {
     #[serde(default)]
     match_profile: Option<MatchProfileFile>,
     maps: Vec<MapSpawns>,
+    // Authored bindings above remain immutable, including across round reset.
+    #[serde(skip)]
+    runtime_selection: Option<ActiveSpawns>,
+    #[serde(skip)]
+    activated: BTreeSet<u16>,
+    #[serde(skip)]
+    runtime_squads: BTreeMap<u16, RuntimeSquadSpawns>,
 }
 impl SpawnCatalog {
     pub fn load(path: impl AsRef<Path>) -> io::Result<Self> {
@@ -214,6 +265,76 @@ impl SpawnCatalog {
                     || p.position.z < 0.0
                 {
                     return Err("invalid_spawn_position");
+                }
+                match (p.kind, p.parachute) {
+                    (SpawnKind::Parachute, Some(pose)) => {
+                        let norm = pose.forward.iter().map(|v| v * v).sum::<f64>();
+                        if p.active
+                            || pose.forward.iter().any(|v| !v.is_finite())
+                            || (norm - 1.0).abs() > 0.001
+                            || !pose.spacing_m.is_finite()
+                            || !(0.0..=64.0).contains(&pose.spacing_m)
+                            || pose.spacing_m == 0.0
+                            || pose.yaw > 1023
+                            || (0..8).any(|ordinal| p.parachute_position(ordinal).is_err())
+                        {
+                            return Err("invalid_parachute_pose");
+                        }
+                    }
+                    (SpawnKind::Parachute, None) => return Err("missing_parachute_pose"),
+                    (_, Some(_)) => return Err("unexpected_parachute_pose"),
+                    (_, None) => (),
+                }
+            }
+            if !map.forward_spawns.is_empty()
+                && (!map.runtime_indices_verified || map.runtime_indices_basis.is_none())
+            {
+                return Err("forward_spawns_require_verified_pool_order");
+            }
+            let mut bindings = BTreeSet::new();
+            let mut squad_points = BTreeSet::new();
+            let mut point_sides = BTreeMap::new();
+            for rule in &map.forward_spawns {
+                let squad = map
+                    .squads
+                    .iter()
+                    .find(|s| s.index == rule.squad_index)
+                    .ok_or("unknown_forward_spawn_squad")?;
+                let point = map
+                    .locations
+                    .iter()
+                    .find(|p| p.index == rule.spawn_point_index)
+                    .ok_or("unknown_forward_spawn_point")?;
+                if rule.objective_index >= 128
+                    || !bindings.insert((rule.objective_index, rule.squad_index))
+                    || !squad_points.insert((rule.squad_index, rule.spawn_point_index))
+                    || point.active
+                    || matches!(point.kind, SpawnKind::Unsupported)
+                    || map
+                        .squads
+                        .iter()
+                        .any(|s| s.available.contains(&point.index))
+                    || (matches!(point.kind, SpawnKind::BunkerPassenger) && squad.team != 1)
+                {
+                    return Err("invalid_forward_spawn_binding");
+                }
+                if point_sides
+                    .insert(point.index, (squad.team, squad.faction))
+                    .is_some_and(|side| side != (squad.team, squad.faction))
+                {
+                    return Err("incompatible_forward_spawn_factions");
+                }
+            }
+            for squad in &map.squads {
+                if squad.available.len()
+                    + map
+                        .forward_spawns
+                        .iter()
+                        .filter(|r| r.squad_index == squad.index)
+                        .count()
+                    > 8
+                {
+                    return Err("invalid_spawn_availability");
                 }
             }
         }
@@ -342,20 +463,28 @@ impl SpawnCatalog {
         self.map_pool().squads.iter().find(|s| s.index == index)
     }
     pub fn available_for_squad(&self, index: u16) -> Option<&[u16]> {
-        self.selected_squad(index).map(|s| s.available.as_slice())
+        self.runtime_squads
+            .get(&index)
+            .map(|s| s.available.as_slice())
+            .or_else(|| self.selected_squad(index).map(|s| s.available.as_slice()))
     }
     pub fn default_for_squad(&self, index: u16) -> Option<u16> {
-        self.selected_squad(index).map(|s| s.default_spawn)
+        self.runtime_squads
+            .get(&index)
+            .map(|s| s.default_spawn)
+            .or_else(|| self.selected_squad(index).map(|s| s.default_spawn))
     }
     /// Select an authored squad without changing or re-reading the source file.
     /// This infrequent copy is retained per participant, never made per tick.
     pub fn for_squad(&self, index: u16) -> Result<Self, &'static str> {
-        let binding = self.selected_squad(index).ok_or("unknown_squad")?;
+        self.selected_squad(index).ok_or("unknown_squad")?;
         let mut selected = self.clone();
-        selected.active.squad_index = binding.index;
-        selected.active.available = binding.available.clone();
-        selected.active.default_spawn = binding.default_spawn;
-        selected.validate()?;
+        selected.runtime_selection = Some(ActiveSpawns {
+            map_name: self.active.map_name.clone(),
+            squad_index: index,
+            available: self.available_for_squad(index).unwrap().to_vec(),
+            default_spawn: self.default_for_squad(index).unwrap(),
+        });
         Ok(selected)
     }
     /// Runtime leader selection is constrained to the authored squad's choices.
@@ -364,11 +493,85 @@ impl SpawnCatalog {
         if self.alpha(index).is_none() {
             return Err("unavailable_squad_spawn");
         }
-        self.active.default_spawn = index;
+        self.runtime_selection
+            .get_or_insert_with(|| self.active.clone())
+            .default_spawn = index;
         Ok(())
     }
+    fn selection(&self) -> &ActiveSpawns {
+        self.runtime_selection.as_ref().unwrap_or(&self.active)
+    }
+    pub(crate) fn point_active(&self, index: u16) -> bool {
+        self.point(index)
+            .is_some_and(|p| p.active || self.activated.contains(&index))
+    }
+    pub(crate) fn forward_applied(&self, rule: ForwardSpawnBinding) -> bool {
+        self.runtime_squads
+            .get(&rule.squad_index)
+            .is_some_and(|s| s.available.contains(&rule.spawn_point_index))
+    }
+    pub(crate) fn activate_forward(
+        &mut self,
+        rule: ForwardSpawnBinding,
+    ) -> Result<(), &'static str> {
+        if self.forward_applied(rule) {
+            return Ok(());
+        }
+        let binding = self
+            .selected_squad(rule.squad_index)
+            .ok_or("unknown_forward_spawn_squad")?;
+        let initial = RuntimeSquadSpawns {
+            available: binding.available.clone(),
+            default_spawn: binding.default_spawn,
+        };
+        let selected_squad = self.squad_index();
+        let state = self
+            .runtime_squads
+            .entry(rule.squad_index)
+            .or_insert(initial);
+        state.available.push(rule.spawn_point_index);
+        state.default_spawn = rule.spawn_point_index;
+        self.activated.insert(rule.spawn_point_index);
+        if selected_squad == rule.squad_index {
+            let selected = self
+                .runtime_selection
+                .get_or_insert_with(|| self.active.clone());
+            selected.available = state.available.clone();
+            selected.default_spawn = rule.spawn_point_index;
+        }
+        Ok(())
+    }
+    /// Validate external objective references before admission/listeners.
+    pub fn validate_objectives(
+        &self,
+        catalog: Option<&crate::objective_catalog::ObjectiveCatalog>,
+    ) -> Result<(), &'static str> {
+        for rule in &self.map_pool().forward_spawns {
+            let catalog = catalog.ok_or("forward_spawns_require_objective_catalog")?;
+            if !catalog
+                .objects
+                .iter()
+                .any(|o| o.object_index == rule.objective_index)
+            {
+                return Err("unknown_forward_spawn_objective");
+            }
+            catalog.initial_assignment(rule.squad_index)?;
+        }
+        Ok(())
+    }
+    pub(crate) fn reset_runtime(&mut self) {
+        let squad = self.squad_index();
+        self.activated.clear();
+        self.runtime_squads.clear();
+        self.runtime_selection = self.selected_squad(squad).map(|binding| ActiveSpawns {
+            map_name: self.active.map_name.clone(),
+            squad_index: squad,
+            available: binding.available.clone(),
+            default_spawn: binding.default_spawn,
+        });
+    }
     pub fn alpha(&self, index: u16) -> Option<&SpawnLocation> {
-        self.active
+        self.selection()
             .available
             .contains(&index)
             .then(|| {
@@ -382,7 +585,7 @@ impl SpawnCatalog {
             .flatten()
     }
     pub fn default_spawn(&self) -> u16 {
-        self.active.default_spawn
+        self.selection().default_spawn
     }
     pub fn spawn_count(&self) -> u8 {
         self.maps
@@ -392,7 +595,7 @@ impl SpawnCatalog {
             .spawn_count
     }
     pub fn squad_index(&self) -> u16 {
-        self.active.squad_index
+        self.selection().squad_index
     }
     pub fn map_name(&self) -> &str {
         &self.active.map_name
@@ -404,7 +607,8 @@ impl SpawnCatalog {
             .locations
             .iter()
             .find(|p| {
-                self.active.available.contains(&p.index) && matches!(p.kind, SpawnKind::Alternate)
+                self.selection().available.contains(&p.index)
+                    && matches!(p.kind, SpawnKind::Alternate)
             })
             .map(|p| p.position)
     }

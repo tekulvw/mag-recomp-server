@@ -1665,8 +1665,28 @@ impl AlphaVehicleOwnership {
 }
 
 /// Native GameState fields2/3: a byte count and 128 logical flags in index order.
-struct SpawnAvailability;
+pub struct SpawnAvailability;
 impl SpawnAvailability {
+    /// Availability-only GameState update; existing actors, inventory and personal
+    /// preview selections are unaffected. Recipient queues assign reliable sequences.
+    pub fn encode_update_with_profile(
+        sequence: u32,
+        timestamp_ms: u32,
+        catalog: &crate::spawn_catalog::SpawnCatalog,
+        profile: crate::wire_profile::WireProfile,
+    ) -> Result<Vec<u8>, &'static str> {
+        let mut bits = BitWriter::with_profile(profile);
+        UpdateHeader {
+            sequence,
+            nak_sequence: 0,
+            client_index: 0,
+            object_type_mask: 1 << 7,
+            timestamp_ms,
+        }
+        .encode(&mut bits)?;
+        Self::encode(&mut bits, catalog, true)?;
+        Ok(bits.finish())
+    }
     fn encode(
         bits: &mut BitWriter,
         catalog: &crate::spawn_catalog::SpawnCatalog,
@@ -1683,7 +1703,7 @@ impl SpawnAvailability {
                 for index in 0..128 {
                     let usable = if all_supported {
                         catalog.point(index).is_some_and(|point| {
-                            point.active
+                            catalog.point_active(index)
                                 && !matches!(
                                     point.kind,
                                     crate::spawn_catalog::SpawnKind::Unsupported
