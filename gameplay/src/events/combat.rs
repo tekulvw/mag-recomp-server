@@ -219,14 +219,9 @@ pub(super) fn hit<W: Write>(
                     && let Some(bot) = registry_target
                     && let Some(recipient) = progression::RewardRecipient::from_active(active)
                 {
-                    plan.combat.new_rewards.push(recipient.event(
-                        format!(
-                            "kill-{}-bot-{:04x}-{:08x}",
-                            active.reservation.id, bot.object_index, bot.generation
-                        ),
-                        progression::RewardKind::EnemyKilled,
-                        1,
-                    ));
+                    plan.combat
+                        .new_rewards
+                        .push(recipient.bot_killed(bot.object_index, bot.generation));
                 }
                 if damage.health_quarter_points == 0
                     && peer_target.is_none()

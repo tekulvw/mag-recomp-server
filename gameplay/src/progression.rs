@@ -110,6 +110,18 @@ impl RewardRecipient {
             character_id: character.character_id?,
         })
     }
+    /// Shared weapon-independent receipt identity for one represented bot life.
+    /// The caller proves kill eligibility; no bot account/reservation is invented.
+    pub(crate) fn bot_killed(&self, object_index: u16, generation: u32) -> RewardEvent {
+        self.event(
+            format!(
+                "kill-{}-bot-{object_index:04x}-{generation:08x}",
+                self.reservation_id
+            ),
+            RewardKind::EnemyKilled,
+            1,
+        )
+    }
     pub(crate) fn event(&self, reward_id: String, kind: RewardKind, units: u32) -> RewardEvent {
         RewardEvent {
             match_id: self.match_id.clone(),
