@@ -39,7 +39,7 @@ fn combat_items() -> Arc<item_catalog::ItemCatalog> {
     Arc::new(items.with_retail_armory(armory).with_retail_combat(combat))
 }
 
-fn fixture() -> Engine<Vec<u8>> {
+pub(crate) fn fixture() -> Engine<Vec<u8>> {
     let mut engine = engine()
         .with_incapacitation_rules(incapacitation::Rules {
             schema_version: 1,
@@ -131,7 +131,7 @@ fn native_hit(defender: u32, user_data: u32) -> Vec<u8> {
     bytes.extend(1000u16.to_be_bytes());
     bytes
 }
-fn hit(
+pub(crate) fn hit(
     engine: &mut Engine<Vec<u8>>,
     user_data: u32,
     now_ms: u64,

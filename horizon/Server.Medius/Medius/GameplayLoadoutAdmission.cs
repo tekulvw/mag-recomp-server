@@ -9,14 +9,23 @@ namespace Server.Medius
     public sealed class GameplayAdmissionLoadouts
     {
         [JsonPropertyName("selected_index")] public byte SelectedIndex { get; }
-        [JsonPropertyName("update_ids")] public int[] UpdateIds { get; }
-        [JsonPropertyName("inventories")] public ushort?[][] Inventories { get; }
+        readonly int[] _updateIds;
+        readonly ushort?[][] _inventories;
+        [JsonPropertyName("update_ids")] public int[] UpdateIds => (int[])_updateIds.Clone();
+        [JsonPropertyName("inventories")] public ushort?[][] Inventories => _inventories.Select(row => (ushort?[])row.Clone()).ToArray();
         internal GameplayAdmissionLoadouts(MagCharacterRecord record)
         {
             SelectedIndex = record.LastUsedLoadout;
-            UpdateIds = record.Loadouts.Select(row => (int)row.UpdateId).ToArray();
-            Inventories = record.Loadouts.Select(row => row.Items.Select(item => item < 0 ? (ushort?)null : (ushort)item).ToArray()).ToArray();
+            _updateIds = record.Loadouts.Select(row => (int)row.UpdateId).ToArray();
+            _inventories = record.Loadouts.Select(row => row.Items.Select(item => item < 0 ? (ushort?)null : (ushort)item).ToArray()).ToArray();
         }
+        GameplayAdmissionLoadouts(byte selected, int[] updates, ushort?[][] inventories)
+        {
+            SelectedIndex = selected;
+            _updateIds = (int[])updates.Clone();
+            _inventories = inventories.Select(row => (ushort?[])row.Clone()).ToArray();
+        }
+        internal GameplayAdmissionLoadouts Snapshot() => new GameplayAdmissionLoadouts(SelectedIndex, _updateIds, _inventories);
     }
 
     /// <summary>Admission projects the actual record's saved or configured default

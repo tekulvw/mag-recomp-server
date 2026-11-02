@@ -326,6 +326,9 @@ impl<W: Write> Engine<W> {
                 return Err("match_finished");
             }
         }
+        if matches!(&request, Request::RefreshLoadouts { .. }) {
+            return self.refresh_loadouts(request, now, wall);
+        }
         if matches!(&request, Request::LoadoutSelectionSettled { .. }) {
             return self.settle_loadout_selection(request, wall);
         }
@@ -374,7 +377,8 @@ impl<W: Write> Engine<W> {
             Request::Hello { .. }
             | Request::ConfigureMatch { .. }
             | Request::ProgressionCommitted { .. }
-            | Request::LoadoutSelectionSettled { .. } => None,
+            | Request::LoadoutSelectionSettled { .. }
+            | Request::RefreshLoadouts { .. } => None,
             Request::Reserve { reservation_id, .. }
             | Request::Event { reservation_id, .. }
             | Request::DevelopmentSpawnTarget { reservation_id, .. }

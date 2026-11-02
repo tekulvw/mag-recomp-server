@@ -92,7 +92,10 @@ fn hello_advertises_committed_selection_capability_and_empty_actions_are_omitted
     let mut empty = crate::spawn_progression::engine();
     assert_eq!(
         hello(&mut empty, 0)["capabilities"],
-        json!(["committed_loadout_selection_v1"])
+        json!([
+            "committed_loadout_selection_v1",
+            "active_loadout_refresh_v1"
+        ])
     );
     let mut engine = fixture();
     let response = hello(&mut engine, 0);

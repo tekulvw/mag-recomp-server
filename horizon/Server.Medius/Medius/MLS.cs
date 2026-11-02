@@ -241,8 +241,9 @@ namespace Server.Medius
                             }), data.ApplicationId), clientChannel); break; }
                         }
                         data.MagMlsSession.CharacterStore = Program.CreateCharacterStore();
+                        data.MagMlsSession.LoadoutCommitted = (account, character) => Program.LocalDme?.ArmoryLoadoutCommitted(account, character);
                         var replies = data.MagMlsSession.HandleMany(plugin, magNow);
-                        Logger.Info($"MAG MLS plugin type={plugin.ApplicationMessageType:X4} bytes={plugin.Payload?.Length ?? 0} state={data.MagMlsSession.State}/{data.MagMlsSession.StorageStatus} replies={replies.Count}");
+                        Logger.Info($"MAG MLS plugin type={plugin.ApplicationMessageType:X4} bytes={plugin.Payload?.Length ?? 0} state={data.MagMlsSession.State}/{data.MagMlsSession.StorageStatus} refresh={data.MagMlsSession.LoadoutRefreshStatus} replies={replies.Count}");
                         Queue(replies, clientChannel);
                         break;
                     }
