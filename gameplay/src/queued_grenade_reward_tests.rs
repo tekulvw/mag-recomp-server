@@ -140,6 +140,47 @@ fn friendly_native_hit_records_bot_friendly_kill_without_enemy_xp() {
 }
 
 #[test]
+fn native_hit_relation_base_applies_to_registry_bots_without_faction_inference() {
+    for friendly in [true, false] {
+        let (mut engine, target) = firearm_fixture(friendly);
+        // Use the existing file-loaded synthetic spawn identity for rule binding.
+        engine.spawn_catalog = crate::human_kill_reward_tests::fixture().spawn_catalog;
+        let mut engine = crate::human_kill_reward_tests::enable_incoming_base(engine, 0.25);
+        if friendly {
+            // Independent world ticks may retain admitted peers without an active focus.
+            let source = engine.active.take().unwrap();
+            let source_id = source.reservation.id.clone();
+            let attacker = 0x0380_0000 | u32::from(source.reservation.player);
+            let world = source.reservation.world;
+            engine.peers.insert(source_id.clone(), source);
+            assert_eq!(
+                engine.character_incoming_base(attacker, 0x0380_0000 | u32::from(target), world,),
+                0.25
+            );
+            engine.active = engine.peers.remove(&source_id);
+        }
+        let bot = &engine.bot_registry.bots[&target];
+        assert_eq!(
+            bot.target.faction,
+            engine
+                .active
+                .as_ref()
+                .unwrap()
+                .reservation
+                .character
+                .faction
+        );
+        let wire = crate::human_kill_reward_tests::native_hit(0x0380_0000 | u32::from(target), 23);
+        dispatch(&mut engine, &wire, 1000).unwrap();
+        assert_eq!(
+            engine.bot_registry.bots[&target].health,
+            if friendly { 80 } else { 0 }
+        );
+        assert_eq!(engine.pending_reward_batch().len(), usize::from(!friendly));
+    }
+}
+
+#[test]
 fn opposing_same_faction_native_hit_records_one_shared_bot_life_reward() {
     let (mut engine, target) = firearm_fixture(false);
     let bot = &engine.bot_registry.bots[&target];

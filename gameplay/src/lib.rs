@@ -42,6 +42,7 @@ use event_decode::DecodedEvent;
 mod resources;
 mod world_tick;
 pub use resources::EngineResources;
+pub mod character_damage_rules;
 pub mod healing;
 pub mod item_catalog;
 mod loadout_refresh;
@@ -964,6 +965,7 @@ pub struct Engine<W: Write> {
     leadership: Option<leadership_runtime::LeadershipRuntime>,
     fall_damage_rules: Option<fall_damage::Rules>,
     incapacitation_rules: Option<incapacitation::Rules>,
+    character_damage_rules: Option<character_damage_rules::Rules>,
     pending_rewards: std::collections::BTreeMap<String, progression::RewardEvent>,
     reward_order: std::collections::VecDeque<String>,
     committed_rewards: std::collections::BTreeMap<String, progression::CommittedReward>,

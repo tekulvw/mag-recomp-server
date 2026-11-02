@@ -744,7 +744,18 @@ impl<W: Write> Engine<W> {
                                 );
                                 let resolved = damage::resolve_character_hit(
                                     profile.raw_character_damage(length(from, to) as f32, 1., 0)?,
-                                    target.armor.unwrap(),
+                                    target.armor.unwrap().with_incoming_base(
+                                        self.active
+                                            .as_ref()
+                                            .or_else(|| self.peers.values().next())
+                                            .map_or(1.0, |a| {
+                                                self.character_incoming_base(
+                                                    0x0380_0000 | u32::from(id),
+                                                    0x0380_0000 | u32::from(target.life.id),
+                                                    a.reservation.world,
+                                                )
+                                            }),
+                                    )?,
                                     damage::DamageKind::Bullet,
                                     0x03800000 | u32::from(id),
                                     0,

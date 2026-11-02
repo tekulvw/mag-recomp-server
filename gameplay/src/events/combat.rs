@@ -137,7 +137,12 @@ pub(super) fn hit<W: Write>(
                 &peer_target.map_or_else(skill_catalog::OwnedModifiers::default, |p| {
                     plan.leadership.modifiers(p)
                 }),
-            );
+            )
+            .with_incoming_base(ctx.engine.character_incoming_base(
+                0x0380_0000 | u32::from(active.reservation.player),
+                request.defender,
+                active.reservation.world,
+            ))?;
             let armor = if peer_target
                 .is_some_and(|p| matches!(p.life, CharacterLife::Incapacitated { .. }))
             {

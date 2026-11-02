@@ -86,6 +86,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     let mut bootstrap_loadouts_path: Option<PathBuf> = None;
     let mut fall_rules_path: Option<PathBuf> = None;
     let mut incapacitation_rules_path: Option<PathBuf> = None;
+    let mut character_damage_rules_path: Option<PathBuf> = None;
     let mut skill_path: Option<PathBuf> = None;
     let mut retail_armory_path: Option<PathBuf> = None;
     let mut leadership_passives_path: Option<PathBuf> = None;
@@ -178,6 +179,15 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                     return Err(io::Error::other("tick budget must be .001..1000 ms"));
                 }
                 tick_budget_us = Some((value * 1000.0).round() as u64);
+            }
+            "--character-damage-rules" => {
+                character_damage_rules_path = Some(
+                    args.next()
+                        .ok_or_else(|| {
+                            io::Error::other("--character-damage-rules requires an absolute path")
+                        })?
+                        .into(),
+                );
             }
             "--incapacitation-rules" => {
                 incapacitation_rules_path = Some(
@@ -330,7 +340,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             }
             _ => {
                 return Err(io::Error::other(
-                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json] [--navmesh-world MESH.mag-nav] [--bot-fill-total N --bot-population POPULATION.json] [--bot-names /absolute/NAMES.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
+                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json] [--navmesh-world MESH.mag-nav] [--bot-fill-total N --bot-population POPULATION.json] [--bot-names /absolute/NAMES.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
                 ));
             }
         }
@@ -672,6 +682,26 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         )
         .map_err(io::Error::other)?;
     }
+    let character_damage_rules = character_damage_rules_path
+        .as_ref()
+        .map(|path| {
+            if !path.is_absolute() {
+                return Err(io::Error::other(
+                    "--character-damage-rules requires an absolute path",
+                ));
+            }
+            if application_id != Some(20231) {
+                return Err(io::Error::other(
+                    "character damage rules require the retail application profile",
+                ));
+            }
+            let rules = mag_gameplay::character_damage_rules::Rules::load(path)?;
+            rules
+                .validate_match(20231, &catalog)
+                .map_err(io::Error::other)?;
+            Ok(rules)
+        })
+        .transpose()?;
     let incapacitation_rules = incapacitation_rules_path
         .as_ref()
         .map(|path| {
@@ -768,7 +798,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         }
         println!(
             "{}",
-            serde_json::json!({"event":"catalogs_validated","application_id":application_id,"skill_application_id":skill_catalog.application_id(),"bunkers":bunker_info,"fall_damage_enabled":fall_rules.is_some(),"incapacitation_enabled":incapacitation_rules.is_some(),"scope":"schema_and_profile_validation_not_client_acceptance"})
+            serde_json::json!({"event":"catalogs_validated","application_id":application_id,"skill_application_id":skill_catalog.application_id(),"bunkers":bunker_info,"fall_damage_enabled":fall_rules.is_some(),"incapacitation_enabled":incapacitation_rules.is_some(),"character_damage_rules_enabled":character_damage_rules.is_some(),"scope":"schema_and_profile_validation_not_client_acceptance"})
         );
         return Ok(());
     }
@@ -796,6 +826,11 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     if let Some(objectives) = objective_catalog {
         engine = engine
             .with_objective_catalog(objectives)
+            .map_err(io::Error::other)?;
+    }
+    if let Some(rules) = character_damage_rules {
+        engine = engine
+            .with_character_damage_rules(rules)
             .map_err(io::Error::other)?;
     }
     if let Some(rules) = incapacitation_rules {
@@ -855,7 +890,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     );
     println!(
         "{}",
-        serde_json::json!({"event":"listening","application_id":application_id.unwrap_or(20230),"profile_selection":if application_id.is_some(){"explicit"}else{"legacy"},"protocol":mag_gameplay::BRIDGE_VERSION,"address":listener.local_addr()?.to_string(),"collision":collision_info,"spawn_catalog":spawn_path,"objective_catalog":objective_info,"item_catalog":item_path,"character_blast_rules":blast_rules_path,"retail_combat_metadata":retail_metadata,"bootstrap_loadouts":bootstrap_loadouts_path,"fall_damage_rules":fall_rules_path,"incapacitation_rules":incapacitation_rules_path,"skill_catalog":skill_path,"retail_armory_catalog":retail_armory_path,"leadership_passives":leadership_passives_path,"leadership_role_policy":leadership_role_policy_path,"bunkers":bunker_info,"tick_telemetry":telemetry_path,"tick_budget_us":tick_budget_us,"scheduler":"independent_50ms_when_subscribed","bot_fill_total":bot_fill_total,"bot_population":bot_population_path,"bot_names":bot_names_path,"bot_names_count":bot_names_count,"development_dummy_position":actual_dummy_position})
+        serde_json::json!({"event":"listening","application_id":application_id.unwrap_or(20230),"profile_selection":if application_id.is_some(){"explicit"}else{"legacy"},"protocol":mag_gameplay::BRIDGE_VERSION,"address":listener.local_addr()?.to_string(),"collision":collision_info,"spawn_catalog":spawn_path,"objective_catalog":objective_info,"item_catalog":item_path,"character_blast_rules":blast_rules_path,"retail_combat_metadata":retail_metadata,"bootstrap_loadouts":bootstrap_loadouts_path,"fall_damage_rules":fall_rules_path,"incapacitation_rules":incapacitation_rules_path,"character_damage_rules":character_damage_rules_path,"skill_catalog":skill_path,"retail_armory_catalog":retail_armory_path,"leadership_passives":leadership_passives_path,"leadership_role_policy":leadership_role_policy_path,"bunkers":bunker_info,"tick_telemetry":telemetry_path,"tick_budget_us":tick_budget_us,"scheduler":"independent_50ms_when_subscribed","bot_fill_total":bot_fill_total,"bot_population":bot_population_path,"bot_names":bot_names_path,"bot_names_count":bot_names_count,"development_dummy_position":actual_dummy_position})
     );
     for connection in listener.incoming() {
         let stream = connection?;
@@ -1677,6 +1712,51 @@ mod runtime_profile_tests {
         let files = SyntheticCatalogs::new();
         assert!(run(files.args()).is_ok());
         assert_eq!(std::fs::read_dir(&files.0).unwrap().count(), 9);
+    }
+
+    #[test]
+    fn character_damage_rules_are_optional_explicit_and_bound_to_exact_spawn_bytes() {
+        let files = SyntheticCatalogs::new();
+        files.write(
+            "character-damage.json",
+            &serde_json::json!({"invalid":"not implicitly loaded"}),
+        );
+        assert!(run(files.args()).is_ok());
+        let digest = format!(
+            "{:x}",
+            Sha256::digest(std::fs::read(files.0.join("spawns.json")).unwrap())
+        );
+        files.write(
+            "character-damage.json",
+            &serde_json::json!({"schema_version":1,"application_id":20231,
+            "map_name":"synthetic_arena","game_type":2,"friendly_fire_multiplier":0.375,
+            "provenance":{"spawn_catalog_sha256":digest,"source":"synthetic"}}),
+        );
+        let args = || {
+            let mut args = files.args();
+            args.extend([
+                "--character-damage-rules".into(),
+                files.0.join("character-damage.json").display().to_string(),
+            ]);
+            args
+        };
+        assert!(run(args()).is_ok());
+        // Same parsed match identity, different original file bytes: fail clearly.
+        let mut bytes = std::fs::read(files.0.join("spawns.json")).unwrap();
+        bytes.push(b' ');
+        std::fs::write(files.0.join("spawns.json"), bytes).unwrap();
+        assert!(
+            run(args())
+                .unwrap_err()
+                .to_string()
+                .contains("match_mismatch")
+        );
+        let mut relative = files.args();
+        relative.extend([
+            "--character-damage-rules".into(),
+            "character-damage.json".into(),
+        ]);
+        assert!(run(relative).unwrap_err().to_string().contains("absolute"));
     }
 
     #[test]

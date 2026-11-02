@@ -1,6 +1,7 @@
 //! Neutral authored spawn data loaded from disk; no native resources or compiled coordinates.
 use crate::replication::CharacterPosition;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -171,6 +172,8 @@ impl Default for MatchProfile {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpawnCatalog {
+    #[serde(skip)]
+    source_sha256: Option<String>,
     format: String,
     schema_version: u32,
     source: String,
@@ -195,9 +198,22 @@ impl SpawnCatalog {
         if bytes.len() > 1_048_576 {
             return Err(io::Error::other("spawn_catalog_too_large"));
         }
-        let value: Self = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+        Self::from_bytes(&bytes)
+    }
+    pub fn from_json(text: &str) -> io::Result<Self> {
+        if text.len() > 1_048_576 {
+            return Err(io::Error::other("spawn_catalog_too_large"));
+        }
+        Self::from_bytes(text.as_bytes())
+    }
+    fn from_bytes(bytes: &[u8]) -> io::Result<Self> {
+        let mut value: Self = serde_json::from_slice(bytes).map_err(io::Error::other)?;
         value.validate().map_err(io::Error::other)?;
+        value.source_sha256 = Some(format!("{:x}", Sha256::digest(bytes)));
         Ok(value)
+    }
+    pub fn source_sha256(&self) -> Option<&str> {
+        self.source_sha256.as_deref()
     }
     fn validate(&self) -> Result<(), &'static str> {
         if self.format != "mag_spawn_catalog"
