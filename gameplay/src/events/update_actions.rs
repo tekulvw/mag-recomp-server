@@ -188,8 +188,21 @@ pub(super) fn plan_pending_damage<W: Write>(
             plan.combat
                 .bot_damage
                 .push((bot.object_index, bot.generation, resolved));
-            if lethal {
+            // Grenade damage stays on its launcher's authenticated queue, even
+            // after that launcher dies. Require its full attacker handle rather
+            // than crediting whichever actor happens to dispatch an event.
+            if lethal
+                && pending.damage.attacker_id
+                    == (0x0380_0000 | u32::from(active.reservation.player))
+            {
                 statistics::target_killed(plan, active, bot.team);
+                if active.team() != bot.team
+                    && let Some(recipient) = progression::RewardRecipient::from_active(active)
+                {
+                    plan.combat
+                        .new_rewards
+                        .push(recipient.bot_killed(bot.object_index, bot.generation));
+                }
             }
         } else {
             plan.combat.dummy_health = Some(resolved.health_quarter_points);

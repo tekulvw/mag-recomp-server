@@ -2304,7 +2304,7 @@ impl<W: Write> Engine<W> {
 mod identity_tests {
     use super::*;
     use crate::resources::tests::{retail_items, wire_profiles};
-    fn engine(prefix: &str) -> Engine<Vec<u8>> {
+    pub(super) fn engine(prefix: &str) -> Engine<Vec<u8>> {
         let mut proof = json!({"verified_binding":{"validated":true,"positions_compared":667,"blank_positions_compared":25,"blank_zero_empirically_verified":true}});
         for name in [
             "original_retail_elf_sha256",
@@ -2444,3 +2444,7 @@ mod identity_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "queued_grenade_reward_tests.rs"]
+mod queued_grenade_reward_tests;
