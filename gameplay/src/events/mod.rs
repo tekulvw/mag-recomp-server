@@ -81,6 +81,7 @@ struct SessionChanges {
     spawn_pose: Option<(replication::CharacterState, u16)>,
     clock_points: Option<i16>,
     selected_loadout: Option<protocol::SelectLoadout>,
+    loadout_selection: Option<loadout_selection::CommittedLoadoutSelection>,
     new_inventory_handle: Option<replication::InventoryHandle>,
     selected_spawn: Option<protocol::CharacterSpawnSelection>,
     squad_spawn: Option<u16>,
@@ -743,6 +744,16 @@ impl<W: Write> Engine<W> {
             self.prune_parachute_waves();
         }
         self.advance_forward_spawns(now)?;
+        // Expose persistence work only once the complete event commit succeeds,
+        // including its remaining fallible publication/progression steps.
+        if let Some(receipt) = plan.session.loadout_selection {
+            let active = self
+                .active
+                .as_mut()
+                .ok_or("missing_loadout_selection_owner")?;
+            active.loadout_selection_revision = receipt.revision;
+            active.pending_loadout_selection = Some(receipt);
+        }
         Ok(plan.messages)
     }
 }

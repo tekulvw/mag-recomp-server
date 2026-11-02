@@ -29,6 +29,23 @@ namespace Server.Medius {
    RewardId=id;ReservationId=reservation;MatchId=match;WorldId=world;PlayerId=player;AccountId=account;CharacterId=character;Kind=kind;Units=units;
   }
  }
+ public sealed class GameplayLoadoutSelection {
+  public string SelectionId {get;}
+  public string ReservationId {get;}
+  public uint WorldId {get;}
+  public ushort PlayerId {get;}
+  public string AccountId {get;}
+  public uint CharacterId {get;}
+  public ulong Revision {get;}
+  public byte InventoryIndex {get;}
+  internal GameplayLoadoutSelection(string id,string reservation,uint world,ushort player,string account,uint character,ulong revision,byte index) {
+   SelectionId=id;ReservationId=reservation;WorldId=world;PlayerId=player;AccountId=account;CharacterId=character;Revision=revision;InventoryIndex=index;
+  }
+  public bool MatchesOwner(string reservation,uint world,ushort player,string account,uint character)=>
+   string.Equals(ReservationId,reservation,StringComparison.Ordinal)&&WorldId==world&&PlayerId==player&&
+   string.Equals(AccountId,account,StringComparison.Ordinal)&&CharacterId==character;
+  internal bool Same(GameplayLoadoutSelection other)=>other!=null&&SelectionId==other.SelectionId&&ReservationId==other.ReservationId&&WorldId==other.WorldId&&PlayerId==other.PlayerId&&AccountId==other.AccountId&&CharacterId==other.CharacterId&&Revision==other.Revision&&InventoryIndex==other.InventoryIndex;
+ }
  public enum GameplayBridgeFailure { None, Timeout, Unavailable, InvalidRequest, MalformedResponse }
  public sealed class GameplayMatchTerminal {
   public uint WorldId {get;}
@@ -46,7 +63,10 @@ namespace Server.Medius {
   public IReadOnlyList<GameplayBridgeMessage> Messages {get;}
   public IReadOnlyList<GameplayReward> Rewards {get;}
   public GameplayMatchTerminal MatchTerminal {get;}
-  internal GameplayBridgeResponse(bool ok,string error,IReadOnlyList<GameplayBridgeMessage> messages,GameplayBridgeFailure failure=GameplayBridgeFailure.None,IReadOnlyList<GameplayReward> rewards=null,GameplayMatchTerminal matchTerminal=null){Ok=ok;Error=error;Messages=messages;Failure=failure;Rewards=rewards??Array.Empty<GameplayReward>();MatchTerminal=matchTerminal;}
+  public IReadOnlyList<GameplayLoadoutSelection> LoadoutSelections {get;}
+  public IReadOnlyList<string> Capabilities {get;}
+  public bool SupportsCommittedLoadoutSelections => Capabilities.Contains("committed_loadout_selection_v1",StringComparer.Ordinal);
+  internal GameplayBridgeResponse(bool ok,string error,IReadOnlyList<GameplayBridgeMessage> messages,GameplayBridgeFailure failure=GameplayBridgeFailure.None,IReadOnlyList<GameplayReward> rewards=null,GameplayMatchTerminal matchTerminal=null,IReadOnlyList<GameplayLoadoutSelection> loadoutSelections=null,IReadOnlyList<string> capabilities=null){LoadoutSelections=loadoutSelections??Array.Empty<GameplayLoadoutSelection>();Capabilities=capabilities??Array.Empty<string>();Ok=ok;Error=error;Messages=messages;Failure=failure;Rewards=rewards??Array.Empty<GameplayReward>();MatchTerminal=matchTerminal;}
   internal static GameplayBridgeResponse Failed(GameplayBridgeFailure failure,long elapsed)=>new GameplayBridgeResponse(false,null,Array.Empty<GameplayBridgeMessage>(),failure){ElapsedMilliseconds=elapsed};
  }
  /// <summary>Strict bridge v2 reply codec. Event and release replies may carry bounded, independently addressed reliable messages.</summary>
@@ -67,7 +87,9 @@ namespace Server.Medius {
     using var document=JsonDocument.Parse(line);var root=document.RootElement;
     bool hasRewards=root.TryGetProperty("rewards",out var rewards);
     bool hasTerminal=root.TryGetProperty("match_terminal",out var terminal);
-    var fields=new List<string>{"v","request_id","ok","error","messages"};if(hasRewards)fields.Add("rewards");if(hasTerminal)fields.Add("match_terminal");
+    bool hasSelections=root.TryGetProperty("loadout_selections",out var selections);
+    bool hasCapabilities=root.TryGetProperty("capabilities",out var capabilities);
+    var fields=new List<string>{"v","request_id","ok","error","messages"};if(hasSelections)fields.Add("loadout_selections");if(hasCapabilities)fields.Add("capabilities");if(hasRewards)fields.Add("rewards");if(hasTerminal)fields.Add("match_terminal");
     if(!ExactFields(root,fields.ToArray())||!root.GetProperty("v").TryGetInt32(out var version)||version!=2||
      root.GetProperty("request_id").ValueKind!=JsonValueKind.String||root.GetProperty("request_id").GetString()!=requestId)return false;
     var ok=root.GetProperty("ok");if(ok.ValueKind!=JsonValueKind.True&&ok.ValueKind!=JsonValueKind.False)return false;
@@ -98,6 +120,27 @@ namespace Server.Medius {
       parsedRewards.Add(new GameplayReward(id,reservation,match,world,player,account,character,kind,units));
      }
     }
+    var parsedCapabilities=new List<string>();var capabilityNames=new HashSet<string>(StringComparer.Ordinal);
+    if(hasCapabilities) {
+     if(capabilities.ValueKind!=JsonValueKind.Array||capabilities.GetArrayLength()>16)return false;
+     foreach(var capability in capabilities.EnumerateArray()) {
+      if(capability.ValueKind!=JsonValueKind.String)return false;
+      var name=capability.GetString();if(name.Length==0||name.Length>64||!name.All(c=>char.IsAsciiLetterOrDigit(c)||c=='_'||c=='-')||!capabilityNames.Add(name))return false;
+      parsedCapabilities.Add(name);
+     }
+    }
+    var parsedSelections=new List<GameplayLoadoutSelection>();var selectionIds=new HashSet<string>(StringComparer.Ordinal);var selectionOwners=new HashSet<string>(StringComparer.Ordinal);
+    if(hasSelections) {
+     if(selections.ValueKind!=JsonValueKind.Array||selections.GetArrayLength()>32||(!success&&selections.GetArrayLength()!=0))return false;
+     foreach(var selection in selections.EnumerateArray()) {
+      if(!ExactFields(selection,"selection_id","reservation_id","world_id","player_id","account_id","character_id","revision","inventory_index"))return false;
+      string id=selection.GetProperty("selection_id").GetString(),reservation=selection.GetProperty("reservation_id").GetString(),account=selection.GetProperty("account_id").GetString();
+      if(id==null||id.Length==0||id.Length>128||!id.All(c=>char.IsAsciiLetterOrDigit(c)||c=='-'||c=='_')||!selectionIds.Add(id)||!Identifier(reservation)||!selectionOwners.Add(reservation)||!MagDevelopmentAccountPolicy.ValidAccount(account)||
+       !selection.GetProperty("world_id").TryGetUInt32(out var world)||!selection.GetProperty("player_id").TryGetUInt16(out var player)||!selection.GetProperty("character_id").TryGetUInt32(out var character)||character==0||
+       !selection.GetProperty("revision").TryGetUInt64(out var revision)||revision==0||!selection.GetProperty("inventory_index").TryGetByte(out var index)||index>=5)return false;
+      parsedSelections.Add(new GameplayLoadoutSelection(id,reservation,world,player,account,character,revision,index));
+     }
+    }
     GameplayMatchTerminal parsedTerminal=null;
     if(hasTerminal&&terminal.ValueKind!=JsonValueKind.Null) {
      if(!success||!eventReply||!ExactFields(terminal,"world_id","match_id","reason","reservation_ids")||
@@ -109,7 +152,7 @@ namespace Server.Medius {
      foreach(var member in members.EnumerateArray()) {if(member.ValueKind!=JsonValueKind.String||!Identifier(member.GetString())||!identities.Add(member.GetString()))return false;ordered.Add(member.GetString());}
      parsedTerminal=new GameplayMatchTerminal(world,terminal.GetProperty("match_id").GetString(),reason,ordered.AsReadOnly());
     }
-    response=new GameplayBridgeResponse(success,error.ValueKind==JsonValueKind.String?error.GetString():null,parsed.AsReadOnly(),rewards:parsedRewards.AsReadOnly(),matchTerminal:parsedTerminal);return true;
+    response=new GameplayBridgeResponse(success,error.ValueKind==JsonValueKind.String?error.GetString():null,parsed.AsReadOnly(),rewards:parsedRewards.AsReadOnly(),matchTerminal:parsedTerminal,loadoutSelections:parsedSelections.AsReadOnly(),capabilities:parsedCapabilities.AsReadOnly());return true;
    }catch(Exception e)when(e is JsonException||e is InvalidOperationException||e is FormatException||e is ArgumentException){return false;}
   }
  }

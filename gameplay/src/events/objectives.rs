@@ -127,6 +127,9 @@ impl<W: Write> Engine<W> {
         self.match_terminal = None;
         self.reward_match_id = None;
         self.round_participants.clear();
+        for actor in self.active.iter_mut().chain(self.peers.values_mut()) {
+            actor.pending_loadout_selection = None;
+        }
     }
 
     /// Cancel the old actor while its bot identity is still known. Human life

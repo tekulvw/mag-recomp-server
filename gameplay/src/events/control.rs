@@ -198,12 +198,17 @@ pub(super) fn select_loadout<W: Write>(
     let accepted = active.claimed.is_some() && active.initial_objects.is_some();
     if accepted {
         plan.session.selected_loadout = Some(request);
+        match ctx.engine.plan_loadout_selection(active, request) {
+            Ok(receipt) => plan.session.loadout_selection = receipt,
+            Err(code) => plan.gameplay_denial = Some(code),
+        }
     }
     // This stores a desired slot, not equipped inventory. Native
     // inventory validity and application belong to respawn.
     Ok(
         json!({"type":"select_loadout","index":request.index,"accepted":accepted,
-        "desired_inventory_index":request.desired_inventory_index()}),
+        "desired_inventory_index":request.desired_inventory_index(),
+        "loadout_selection":plan.session.loadout_selection.as_ref()}),
     )
 }
 

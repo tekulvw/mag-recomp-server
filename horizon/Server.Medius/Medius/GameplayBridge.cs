@@ -10,7 +10,10 @@ namespace Server.Medius {
  public sealed class GameplayBridge {
   readonly string _host; readonly int _port;
   public GameplayBridge(string host,int port) { if(string.IsNullOrWhiteSpace(host)||port<1||port>65535) throw new ArgumentException("Invalid gameplay endpoint."); _host=host;_port=port; }
+  public Task<GameplayBridgeResponse> RequestControlAsync(object request) => ExchangeAsync(request,false);
   public async Task<bool> RequestAsync(object request) => (await ExchangeAsync(request,false))?.Ok == true;
+  public Task<GameplayBridgeResponse> RequestHelloAsync(object request) => ExchangeAsync(request,true);
+  public Task<GameplayBridgeResponse> RequestLoadoutSelectionSettlementAsync(object request) => ExchangeAsync(request,true);
   public Task<GameplayBridgeResponse> RequestEventAsync(object request) => ExchangeAsync(request,true);
   public Task<GameplayBridgeResponse> RequestProgressionAsync(object request) => ExchangeAsync(request,true);
   public Task<GameplayBridgeResponse> RequestReleaseAsync(object request) => ExchangeAsync(request,true);
@@ -54,7 +57,7 @@ namespace Server.Medius {
     var body=JsonSerializer.SerializeToUtf8Bytes(request); if(body.Length>65536) return Failed(GameplayBridgeFailure.InvalidRequest);
     using var sent=JsonDocument.Parse(body); string id=sent.RootElement.GetProperty("request_id").GetString();
     var op=sent.RootElement.GetProperty("op").GetString();
-    if(sent.RootElement.GetProperty("v").GetInt32()!=2 || (eventReply ? op!="event"&&op!="release"&&op!="progression_committed"&&op!="hello" : op=="event"))return Failed(GameplayBridgeFailure.InvalidRequest);
+    if(sent.RootElement.GetProperty("v").GetInt32()!=2 || (eventReply ? op!="event"&&op!="release"&&op!="progression_committed"&&op!="loadout_selection_settled"&&op!="hello" : op=="event"))return Failed(GameplayBridgeFailure.InvalidRequest);
     using var socket=new TcpClient(); await socket.ConnectAsync(_host,_port,deadline.Token); using var stream=socket.GetStream();
     await stream.WriteAsync(body,deadline.Token); await stream.WriteAsync(new byte[]{10},deadline.Token);
     using var line=new MemoryStream(); var one=new byte[1];
