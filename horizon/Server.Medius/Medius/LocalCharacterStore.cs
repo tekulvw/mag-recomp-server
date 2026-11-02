@@ -12,6 +12,7 @@ namespace Server.Medius
 {
     public sealed class StoredLoadout
     {
+        [JsonExtensionData] public Dictionary<string, JsonElement> ExtensionData { get; set; }
         [JsonRequired]
         public byte UpdateId { get; set; }
         [JsonRequired]
@@ -29,6 +30,7 @@ namespace Server.Medius
     }
     public sealed class StoredCharacter
     {
+        [JsonExtensionData] public Dictionary<string, JsonElement> ExtensionData { get; set; }
         public string Account { get; set; }
         [JsonRequired]
         public uint Id { get; set; }
@@ -112,6 +114,7 @@ namespace Server.Medius
     }
     public sealed class ProgressionRewardOutcome
     {
+        [JsonExtensionData] public Dictionary<string, JsonElement> ExtensionData { get; set; }
         [JsonRequired] public MagNetResult Result { get; set; }
         [JsonRequired] public string Reason { get; set; }
         public bool Duplicate { get; set; }
@@ -159,6 +162,7 @@ namespace Server.Medius
     {
         private sealed class RewardReceipt
         {
+            [JsonExtensionData] public Dictionary<string, JsonElement> ExtensionData { get; set; }
             [JsonRequired] public string Account { get; set; }
             [JsonRequired] public uint CharacterId { get; set; }
             [JsonRequired] public string MatchKey { get; set; }
@@ -168,6 +172,7 @@ namespace Server.Medius
         }
         private sealed class MatchRewardProgress
         {
+            [JsonExtensionData] public Dictionary<string, JsonElement> ExtensionData { get; set; }
             [JsonRequired] public string Account { get; set; }
             [JsonRequired] public uint CharacterId { get; set; }
             [JsonRequired] public string MatchKey { get; set; }
@@ -178,6 +183,7 @@ namespace Server.Medius
         }
         private sealed class Document
         {
+            [JsonExtensionData] public Dictionary<string, JsonElement> ExtensionData { get; set; }
             [JsonRequired]
             public int SchemaVersion { get; set; }
             [JsonRequired]
@@ -310,18 +316,8 @@ namespace Server.Medius
             if (character == null) return Outcome(MagNetResult.Error, "character-not-owned");
             if (!catalog.ValidForFaction(replacement.ToLoadout(), character.Faction))
                 return Outcome(MagNetResult.Error, "invalid-faction-loadout");
-            if (catalog.ApplicationId == 20231 || SkillCatalog != null)
-            {
-                var available = character.ToRecord().AvailableItems;
-                for (int slot = 0; slot < replacement.Items.Length; slot++)
-                {
-                    short id = replacement.Items[slot];
-                    if (id < 0 || (catalog.ApplicationId != 20231 && !SkillCatalog.RequiresPurchaseOwnership(id))) continue;
-                    if (catalog.ApplicationId == 20231 && catalog.IsStarterDefaultItem(character.Faction, slot, id)) continue;
-                    if (!catalog.TryOwnershipOrdinal(id, out int ordinal) || (available[ordinal >> 5] & (1u << (ordinal & 31))) == 0)
-                        return Outcome(MagNetResult.Error, "loadout-item-not-owned");
-                }
-            }
+            if (!HasLoadoutOwnership(character, catalog, replacement.Items))
+                return Outcome(MagNetResult.Error, "loadout-item-not-owned");
             if (character.Loadouts == null || character.Loadouts.All(row => row.Items.All(id => id == -1)))
             {
                 // A populated kit1 alone leaves kit0 absent and triggers native InitializeLoadouts,
@@ -378,9 +374,25 @@ namespace Server.Medius
             if (rows.Any(row => !catalog.ValidForFaction(row, character.Faction))) return Outcome(MagNetResult.Error, "invalid-faction-loadout");
             if (!catalog.HasValidPrimary(rows[0])) return Outcome(MagNetResult.Error, "primary-loadout-required");
             if (!catalog.HasValidPrimary(rows[loadoutIndex])) return Outcome(MagNetResult.Error, "selected-loadout-primary-required");
+            if (!HasLoadoutOwnership(character, catalog, rows[loadoutIndex].Items))
+                return Outcome(MagNetResult.Error, "loadout-item-not-owned");
             character.LastUsedLoadout = loadoutIndex;
             Commit(path, all);
             return Outcome(MagNetResult.Success, "last-used-loadout-committed");
+        }
+        private bool HasLoadoutOwnership(StoredCharacter character, MagLoadoutCatalog catalog, short[] items)
+        {
+            if (catalog.ApplicationId != 20231 && SkillCatalog == null) return true;
+            var available = character.ToRecord().AvailableItems;
+            for (int slot = 0; slot < items.Length; slot++)
+            {
+                short id = items[slot];
+                if (id < 0 || (catalog.ApplicationId != 20231 && !SkillCatalog.RequiresPurchaseOwnership(id))) continue;
+                if (catalog.ApplicationId == 20231 && catalog.IsStarterDefaultItem(character.Faction, slot, id)) continue;
+                if (!catalog.TryOwnershipOrdinal(id, out int ordinal) || (available[ordinal >> 5] & (1u << (ordinal & 31))) == 0)
+                    return false;
+            }
+            return true;
         }
         private static bool ValidRewardKey(string value) => !string.IsNullOrEmpty(value) && value.Length <= 256 && value.All(c => c >= 33 && c <= 126);
         private static string MatchProgressKey(string account, uint characterId, string matchKey) => account + ":" + characterId.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":" + matchKey;
