@@ -122,6 +122,26 @@ impl RewardRecipient {
             1,
         )
     }
+    /// Native death statistics count initial collapses, including a new collapse
+    /// after same-object revival. Use that retained ordinal rather than treating
+    /// a physical spawn generation as an entire rewardable life.
+    pub(crate) fn human_killed(
+        &self,
+        victim: &crate::Reservation,
+        generation: u32,
+        collapse_ordinal: i32,
+    ) -> RewardEvent {
+        let identity = serde_json::json!([
+            "human-collapse-v1",
+            self.reservation_id,
+            victim.id,
+            victim.account,
+            victim.character.character_id,
+            generation,
+            collapse_ordinal
+        ]);
+        self.event(identity.to_string(), RewardKind::EnemyKilled, 1)
+    }
     pub(crate) fn event(&self, reward_id: String, kind: RewardKind, units: u32) -> RewardEvent {
         RewardEvent {
             match_id: self.match_id.clone(),

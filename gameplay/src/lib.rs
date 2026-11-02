@@ -21,6 +21,8 @@ pub mod collision;
 pub mod damage;
 mod death_notifications;
 mod development_bot_movement;
+#[cfg(test)]
+mod human_kill_reward_tests;
 pub mod incapacitation;
 mod incapacitation_runtime;
 #[cfg(test)]

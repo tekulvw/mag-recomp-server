@@ -60,7 +60,50 @@ fn died<W: Write>(
         a.reservation.world == victim.reservation.world
             && (0x03800000 | u32::from(a.reservation.player)) == damage.last_attacker
     }) {
+        // Native hits and grenade queues belong to the currently authenticated
+        // source actor. A full handle naming a different admitted human does
+        // not transfer this event's kill ownership to that human.
+        if !engine
+            .active
+            .as_ref()
+            .is_some_and(|owner| owner.reservation.id == killer.reservation.id)
+        {
+            return;
+        }
         target_killed(plan, killer, victim.team());
+        if killer.team() != victim.team()
+            && let CharacterLife::Alive {
+                generation,
+                health_quarter_points,
+            } = victim.life
+            && health_quarter_points > 0
+            && let Some(recipient) = progression::RewardRecipient::from_active(killer)
+        {
+            let staged_deaths = plan
+                .statistics
+                .increments
+                .get(&(victim.reservation.id.clone(), DEATHS))
+                .copied()
+                .unwrap_or(0);
+            let ordinal = victim
+                .reward_statistics
+                .get(&DEATHS)
+                .copied()
+                .unwrap_or(0)
+                .checked_add(staged_deaths)
+                .filter(|value| *value > 0);
+            if let Some(ordinal) = ordinal {
+                plan.combat.new_rewards.push(recipient.human_killed(
+                    &victim.reservation,
+                    generation,
+                    ordinal,
+                ));
+            } else {
+                // Continue damage/stat publication, but never alias a saturated
+                // or corrupt ordinal to a previous reward receipt.
+                plan.gameplay_denial = Some("human_kill_reward_invalid_collapse_ordinal");
+            }
+        }
     }
 }
 /// World bot damage has no authenticated killer account. Reuse the native
