@@ -54,6 +54,10 @@ and checks their tags before publication. The `linux/amd64` image names are:
 Stable releases publish full version tags such as `0.1.0`, a moving minor tag
 such as `0.1`, and `latest`. Images contain replacement server code and synthetic
 defaults; operators still provide their own permitted runtime resources.
+Checked builds of `main` also publish a rolling `main` tag and full
+`sha-<commit>` tags for both server images, for manual prerelease testing.
+The chart keeps its existing versioned releases. See the
+[main image testing guide](docs/releasing.md#main-image-testing-channel).
 See [the release guide](docs/releasing.md) for setup, versioning and recovery.
 In-game NEWS uses the latest gameplay and Medius changelog sections bundled
 with the selected deployed images; chart releases are excluded and no release

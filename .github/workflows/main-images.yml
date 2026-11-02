@@ -1,0 +1,103 @@
+name: Main container images
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+# Keep main-alias promotion ordered, including manual retries. A stale queued
+# run is also checked against current main before it can move either alias.
+concurrency:
+  group: main-container-images-${{ github.ref }}
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  checks:
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/check.yml
+    with:
+      ref: ${{ github.sha }}
+
+  build-images:
+    needs: checks
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - context: horizon
+            suffix: medius
+          - context: gameplay
+            suffix: game
+    steps:
+      - name: Check out the tested main commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Resolve the component image name
+        id: source
+        env:
+          IMAGE_SUFFIX: ${{ matrix.suffix }}
+        run: |
+          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          echo "image=ghcr.io/$owner/mag-recomp-server-$IMAGE_SUFFIX" >> "$GITHUB_OUTPUT"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Build and publish the checked source image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ./${{ matrix.context }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.source.outputs.image }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=main-${{ matrix.suffix }}
+          cache-to: type=gha,mode=max,scope=main-${{ matrix.suffix }}
+
+  promote-main:
+    needs: build-images
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Promote current main images
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          current_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
+          if [ "$current_sha" != "$GITHUB_SHA" ]; then
+            printf 'Skipping main aliases: %s is no longer current main.\n' "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          for suffix in medius game; do
+            image="ghcr.io/$owner/mag-recomp-server-$suffix"
+            docker buildx imagetools create --prefer-index=false --tag "$image:main" "$image:sha-$GITHUB_SHA"
+            printf '* Published `%s:main` from `%s`.\n' "$image" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          done

@@ -1,0 +1,11 @@
+# Overlay for manual testing with the current main server images.
+# Reapply with a fresh runtime.revision to restart existing Pods.
+images:
+  medius:
+    tag: main
+    digest: ""
+    pullPolicy: Always
+  gameplay:
+    tag: main
+    digest: ""
+    pullPolicy: Always

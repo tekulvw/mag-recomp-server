@@ -154,6 +154,60 @@ database, credentials or usable production configuration. Supply permitted
 runtime resources separately as described in [resource-boundary.md](resource-boundary.md)
 and the [Horizon runtime guide](../horizon/README.md).
 
+## Main image testing channel
+
+The separate `Main container images` workflow runs after pushes to `main`.
+It runs the public source checks, then builds both `linux/amd64` server images
+from that exact commit. Each image is first published as `sha-<full-commit-sha>`.
+Only after both builds succeed does the workflow advance these moving aliases:
+
+```text
+ghcr.io/tekulvw/mag-recomp-server-medius:main
+ghcr.io/tekulvw/mag-recomp-server-game:main
+```
+
+Runs are queued without replacing pending runs, with separate concurrency groups
+for each branch, and promotion checks the repository's current main SHA.
+Rerunning an old workflow cannot move `main` back to an older commit. If checks
+or either build fail, the existing `main` aliases remain on the previous
+successful build. Promotion consists of two registry writes; a registry failure
+between them can temporarily leave different revisions. Rerun the failed
+promotion job for current main to finish it. The workflow summary and image
+`org.opencontainers.image.revision` labels identify the source commit. Forks
+publish under their own lower-case owner namespace.
+
+`Run workflow` on the `main` branch rebuilds the channel without cutting a
+release. Dispatches on other branches do not publish. This channel creates no
+Git tags or GitHub releases, never moves stable SemVer or `latest` image tags,
+and does not publish a rolling chart or deploy services. Stable releases remain
+under the human release process above. NEWS still contains the component release
+notes bundled with the images; it is not a feed of unreleased commits.
+
+For an existing Helm deployment, keep the chart version you want and apply
+[the main image values overlay](main-images-values.yaml). It selects both `main`
+image tags, clears existing digest overrides and uses `imagePullPolicy: Always`.
+For example, from this checkout, with an existing installation named `mag`:
+
+```sh
+# Set this to the published chart version used by your test installation.
+chart_version=0.3.0
+helm upgrade mag oci://ghcr.io/tekulvw/charts/mag-recomp-server \
+  --version "$chart_version" --namespace mag --reuse-values \
+  --values docs/main-images-values.yaml \
+  --set-string runtime.revision="main-$(date -u +%Y%m%dT%H%M%SZ)"
+```
+
+Updating a registry tag does not restart running Pods. Supply a fresh
+`runtime.revision` when retesting to roll gameplay and Medius/MAPS together and
+pull the new images. You can instead use a local checkout's
+`./charts/mag-recomp-server` as the chart argument without publishing a chart.
+External runtime resources and operator settings are still required. For a
+specific source snapshot, set both image tags to the same `sha-<full-commit-sha>`;
+pin image digests when exact artifact reproducibility is needed. To return to
+stable, restore the selected stable tags/digests in your operator values and
+roll the test deployment again. Authenticate to GHCR first if the packages are
+private. This workflow never deploys either channel automatically.
+
 ## OCI Helm chart
 
 The chart is published to `ghcr.io/tekulvw/charts/mag-recomp-server` with the
