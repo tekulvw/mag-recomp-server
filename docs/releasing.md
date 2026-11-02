@@ -28,6 +28,22 @@ both server paths. Independent version numbers do not establish compatibility.
 Runtime data revision is a separate operator-controlled value. Artifact
 publication never embeds or increments the external game catalogs.
 
+## Human release ownership
+
+The human maintainer reviews changes in a live match before cutting a release
+and always performs the release action manually. Agents may prepare source fixes,
+focused source PRs, checks and clearly identified unreleased test builds within
+their authorized scope. Agents must not merge release PRs, create release tags,
+publish releases or initiate release publication on the maintainer's behalf.
+Passing checks, source integration and deployment readiness do not grant that
+authorization.
+
+Release Please may keep an open candidate PR up to date. Agents must leave that
+release decision to the human and must not enable automatic merging of release
+PRs. The publication pipeline below remains downstream of the human's release
+action; it is not an autonomous release decision. Source-only documentation or
+implementation merges do not satisfy the live-match review requirement.
+
 ## Migration from the initial shared release
 
 The historical `v0.1.0` release published both server images at `0.1.0`. That tag,
@@ -83,7 +99,7 @@ and [package access settings](https://docs.github.com/en/packages/learn-github-p
    A qualifying commit touching several paths can contribute to several
    component releases. There is no linked-version plugin. Before `1.0.0`, fixes
    bump patch versions and breaking changes bump minor versions.
-3. Review and merge that release PR. The next workflow run creates only its
+3. After live-match review, the human maintainer manually reviews and merges that release PR. The next workflow run creates only its
    component releases, with separate `medius-v`, `gameplay-v` and `chart-v` tags.
    A manual workflow run on `main` can also reconcile a merged release PR.
 4. If either application releases, the shared application check suite runs once
