@@ -38,7 +38,8 @@ and the world-Y half-height center adjustment. Negative/zero extents are retaine
 not repaired or claimed query-compatible. Native rotation convention is
 Rz*Ry*Rx for column vectors, but no host trigonometric matrix is substituted for
 the native SIMD path. Extreme/denormal/native arithmetic modes remain outside the
-bounded private transform probes. No actual penetration query is implemented.
+bounded private transform probes. The explicit dynamic provider described below
+now performs actual convex penetration queries for its admitted shapes.
 
 The pair-level raw-filter6 helper uses the supplied CURRENT row6 mask and the
 target filter's low5-bit layer. Query system group0 means upper target filter bits
@@ -69,10 +70,10 @@ callbacks and are not substituted.
 ## Installation requirements
 
 The source components do not implement the complete backend. Current missing
-capabilities include the complete live collidable roster/local transforms/filter
-state/generation-safe root mappings, full character mounted/kit/objective/scoring
+capabilities include native-equivalent world casts/current filter authority,
+mutable ground and mine lifecycles, full character mounted/kit/objective/scoring
 consequences, vehicle update/occupant/vaporize behavior, mine radial effects and
-removal, FSP immediate spawn allocation/replication, and entry/tag/stat authority.
+removal, FSP immediate existing-Escort respawn/replication, and entry/tag/stat authority.
 Native entry depends on previous state and additional stats beyond the existing
 reward variants. Complete structural instruction bridges are evidence, not proof
 that all transitive consequences have been modeled.
@@ -80,3 +81,7 @@ that all transitive consequences have been modeled.
 Keep callback installation off until those requirements are implemented and
 qualified. Initial-load objective qualification remains pre-MissionStart.
 Releases remain manual after human live-match review.
+
+The subsequent [dynamic body provider](acquisition-dynamic-collision.md) supplies
+explicit convex geometry and owned Engine roster snapshots. Its scopes and
+remaining static-world cast/lifecycle requirements remain explicit.

@@ -4,6 +4,7 @@ pub mod acquisition_control;
 pub mod acquisition_damage_metadata;
 pub mod acquisition_objective_runtime;
 pub mod acquisition_score_rate;
+pub mod acquisition_spawn_blockers;
 pub mod acquisition_volume_damage;
 pub mod acquisition_volume_geometry;
 pub mod active_abilities;
@@ -28,6 +29,8 @@ pub mod collision;
 pub mod damage;
 mod death_notifications;
 mod development_bot_movement;
+pub mod dynamic_collision;
+pub mod dynamic_collision_runtime;
 #[cfg(test)]
 mod human_kill_reward_tests;
 pub mod incapacitation;
@@ -984,6 +987,7 @@ pub struct Engine<W: Write> {
     navmesh_world: Option<std::sync::Arc<navmesh::NavMesh>>,
     spawn_catalog: Option<spawn_catalog::SpawnCatalog>,
     ground_vehicles: Option<ground_vehicles::Catalog>,
+    dynamic_body_resources: Option<dynamic_collision_runtime::Resources>,
     parachute_waves: std::collections::BTreeMap<(u16, Duration), usize>,
     objective_catalog: Option<objective_catalog::ObjectiveCatalog>,
     objective_world: Option<objective_control::ObjectiveWorld>,

@@ -963,3 +963,6 @@ mod acquisition_entry;
 mod ground_vehicle_runtime;
 #[path = "startup_quorum_tests.rs"]
 mod startup_quorum;
+
+#[path = "dynamic_collision_runtime_tests.rs"]
+mod dynamic_bodies;

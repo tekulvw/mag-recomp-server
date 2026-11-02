@@ -50,3 +50,48 @@ fn ground_request_uses_unknown_attacker_and_vaporize_without_claiming_immediate_
             .is_err()
     );
 }
+
+#[test]
+fn vehicle_death_occupants_use_explosive_metadata_and_post_fallback_team_compensation() {
+    use mag_gameplay::acquisition_damage_metadata::{SeatKillPolicy, vehicle_death_occupant};
+    let r = vehicle_death_occupant(0x03800007, u32::MAX, [1., 2., 3.], Some(true), 0.25).unwrap();
+    assert_eq!(r.attacker, 0x03800007);
+    assert_eq!(r.amount_hp, 4000.);
+    assert_eq!((r.damage_type, r.source_type, r.source_index), (2, 5, -1));
+    assert_eq!(
+        (r.armor_rating_reduction, r.armor_prevention_reduction),
+        (1000., 100.)
+    );
+    assert_eq!(r.from_direction, [1., 2., 3.]);
+    assert_eq!(r.source_object, u32::MAX);
+    for m in [0., 1., 2.] {
+        assert_eq!(
+            vehicle_death_occupant(0x03800007, 0x03800008, [0.; 3], Some(true), m)
+                .unwrap()
+                .amount_hp,
+            1000.
+        );
+    }
+    assert_eq!(
+        vehicle_death_occupant(0x03800007, 0x03800008, [0.; 3], None, 0.25)
+            .unwrap()
+            .amount_hp,
+        1000.
+    );
+    assert_eq!(
+        vehicle_death_occupant(0x03800007, 0x03800008, [0.; 3], Some(false), 0.25)
+            .unwrap()
+            .attacker,
+        0x03800008
+    );
+    assert!(vehicle_death_occupant(0x03800007, u32::MAX, [0.; 3], Some(true), f32::NAN).is_err());
+    let policy = SeatKillPolicy {
+        operator: true,
+        turret: false,
+        passenger: false,
+    };
+    assert!(policy.includes(0));
+    assert!(!policy.includes(1));
+    assert!(!policy.includes(2));
+    assert!(policy.includes(99));
+}

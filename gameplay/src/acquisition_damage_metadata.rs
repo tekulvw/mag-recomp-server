@@ -82,3 +82,82 @@ impl Metadata {
         }
     }
 }
+
+/// The native null-context vehicle-death occupant call. These category flags
+/// precede an OPTIONAL DAMAGE REQUEST POINTER, not a fourth category Boolean.
+#[derive(Clone, Copy, Debug)]
+pub struct SeatKillPolicy {
+    pub operator: bool,
+    pub turret: bool,
+    pub passenger: bool,
+}
+impl SeatKillPolicy {
+    pub fn includes(self, seat_type: u32) -> bool {
+        match seat_type {
+            1 => self.turret,
+            2 => self.passenger,
+            _ => self.operator,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OccupantDamage {
+    pub amount_hp: f32,
+    pub from_direction: [f32; 3],
+    pub damage_type: u8,
+    pub source_type: u32,
+    pub source_index: i32,
+    pub attacker: u32,
+    pub source_object: u32,
+    pub location: u8,
+    pub user_data: u32,
+    pub armor_rating_reduction: f32,
+    pub armor_prevention_reduction: f32,
+}
+/// Construct ordinary ApplyDamage for OnDeath's null optional request. Resolve
+/// same-team status AFTER selecting class3 attacker or falling back to occupant
+/// self. Failed resolution is None. This never bypasses invulnerability and must
+/// not be routed through kill_self or the volume-character lethal constructor.
+pub fn vehicle_death_occupant(
+    occupant: u32,
+    last_attacker: u32,
+    vehicle_vector: [f32; 3],
+    resolved_attacker_same_team: Option<bool>,
+    teamkill_modifier: f32,
+) -> Result<OccupantDamage, &'static str> {
+    if occupant == u32::MAX
+        || !vehicle_vector.iter().all(|v| v.is_finite())
+        || !teamkill_modifier.is_finite()
+    {
+        return Err("unsupported_vehicle_occupant_damage");
+    }
+    let attacker = if last_attacker >> 24 == 3 {
+        last_attacker
+    } else {
+        occupant
+    };
+    let amount_hp = if resolved_attacker_same_team == Some(true)
+        && teamkill_modifier > 0.
+        && teamkill_modifier < 1.
+    {
+        1000.0 / teamkill_modifier
+    } else {
+        1000.0
+    };
+    if !amount_hp.is_finite() {
+        return Err("unsupported_vehicle_occupant_arithmetic");
+    }
+    Ok(OccupantDamage {
+        amount_hp,
+        from_direction: vehicle_vector,
+        damage_type: 2,
+        source_type: 5,
+        source_index: -1,
+        attacker,
+        source_object: u32::MAX,
+        location: 0,
+        user_data: 0,
+        armor_rating_reduction: 1000.0,
+        armor_prevention_reduction: 100.0,
+    })
+}

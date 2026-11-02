@@ -3,6 +3,14 @@ use super::*;
 
 pub(super) fn acquisition() -> Engine<Vec<u8>> {
     let mut engine = engine();
+    let value = acquisition_spawns();
+    engine.spawn_catalog = Some(spawns(value).unwrap());
+    engine.objective_catalog = None;
+    engine.objective_world = None;
+    engine
+}
+
+pub(super) fn acquisition_spawns() -> Value {
     let mut value = spawn_json();
     value["source"] = json!("SYNTHETIC Acquisition entry");
     value["active"]["available"] = json!([0]);
@@ -29,10 +37,7 @@ pub(super) fn acquisition() -> Engine<Vec<u8>> {
             }))
             .collect::<Vec<_>>()
     );
-    engine.spawn_catalog = Some(spawns(value).unwrap());
-    engine.objective_catalog = None;
-    engine.objective_world = None;
-    engine
+    value
 }
 
 fn claimed(actor: &mut Active) {
