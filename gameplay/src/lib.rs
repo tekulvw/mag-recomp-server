@@ -200,6 +200,8 @@ pub enum Request {
         v: u8,
         request_id: String,
         minimum_players: usize,
+        #[serde(default)]
+        minimum_players_per_team: [usize; 2],
         maximum_players: usize,
         #[serde(default = "wire_profile::default_application_id")]
         application_id: u32,
@@ -427,12 +429,16 @@ impl Request {
             Request::Hello { .. } => {}
             Request::ConfigureMatch {
                 minimum_players,
+                minimum_players_per_team,
                 maximum_players,
                 ..
             } => {
                 if *minimum_players == 0
                     || minimum_players > maximum_players
                     || *maximum_players > MAX_MATCH_PLAYERS
+                    || minimum_players_per_team.iter().any(|n| n > maximum_players)
+                    || minimum_players_per_team[0].saturating_add(minimum_players_per_team[1])
+                        > *maximum_players
                 {
                     return Err("invalid_match_limits");
                 }
@@ -786,6 +792,7 @@ pub struct Engine<W: Write> {
     active: Option<Active>,
     peers: std::collections::BTreeMap<String, Active>,
     minimum_players: usize,
+    minimum_players_per_team: [usize; 2],
     maximum_players: usize,
     match_started: bool,
     /// Wall time of the request being handled, for records made outside a plan.
@@ -1217,7 +1224,7 @@ impl<W: Write> Engine<W> {
                 self.last_published_rosters.clear();
                 self.world_epoch = None;
                 self.match_epoch = None;
-                self.match_started = self.minimum_players == 1;
+                self.match_started = self.starts_without_quorum();
             }
         }
         match request {
@@ -1230,6 +1237,7 @@ impl<W: Write> Engine<W> {
             Request::ProgressionCommitted { .. } => unreachable!("handled before actor selection"),
             Request::ConfigureMatch {
                 minimum_players,
+                minimum_players_per_team,
                 maximum_players,
                 application_id,
                 ..
@@ -1246,6 +1254,7 @@ impl<W: Write> Engine<W> {
                 {
                     return Err("invalid_match_limits");
                 }
+                self.validate_team_quorum(minimum_players_per_team, maximum_players)?;
                 if self.active.is_some() || !self.peers.is_empty() {
                     return Err("match_configuration_locked");
                 }
@@ -1259,11 +1268,12 @@ impl<W: Write> Engine<W> {
                 {
                     return Err("dummy_slot_conflicts_with_multiplayer");
                 }
-                self.record(json!({"op":"match_configured","application_id":application_id,"object_type_bits":profile.object_type_bits(),"header_bits":profile.header_bits(),"inventory_item_bits":profile.inventory_item_bits(),"stat_encoding":profile.stat_encoding(),"minimum_players":minimum_players,"maximum_players":maximum_players}),wall_secs)?;
+                self.record(json!({"op":"match_configured","application_id":application_id,"object_type_bits":profile.object_type_bits(),"header_bits":profile.header_bits(),"inventory_item_bits":profile.inventory_item_bits(),"stat_encoding":profile.stat_encoding(),"minimum_players":minimum_players,"minimum_players_per_team":minimum_players_per_team,"maximum_players":maximum_players}),wall_secs)?;
                 self.minimum_players = minimum_players;
+                self.minimum_players_per_team = minimum_players_per_team;
                 self.wire_profile = profile;
                 self.maximum_players = maximum_players;
-                self.match_started = minimum_players == 1;
+                self.match_started = self.starts_without_quorum();
                 Ok(Vec::new())
             }
             Request::Reserve {
@@ -1631,7 +1641,7 @@ impl<W: Write> Engine<W> {
                         self.last_published_rosters.clear();
                         self.world_epoch = None;
                         self.match_epoch = None;
-                        self.match_started = self.minimum_players == 1;
+                        self.match_started = self.starts_without_quorum();
                     }
                 }
                 Ok(Vec::new())

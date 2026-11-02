@@ -150,7 +150,7 @@ pub(super) fn client_ready<W: Write>(
                             replication::MatchPhase::EndCountdown
                         }
                     } else if ctx.engine.match_started
-                        || ctx.engine.ready_count() + 1 >= ctx.engine.minimum_players
+                        || ctx.engine.quorum_satisfied(now, Some(active))
                     {
                         replication::MatchPhase::Playing
                     } else {
