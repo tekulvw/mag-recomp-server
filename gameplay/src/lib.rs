@@ -1866,3 +1866,6 @@ fn collision_audit(
         },
     }
 }
+
+#[cfg(test)]
+mod falling_damage_tests;

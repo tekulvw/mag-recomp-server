@@ -39,6 +39,22 @@ pub(super) fn plan_report<W: Write>(
     if let Some(hit) = hit {
         let character_id = 0x03800000 | u32::from(active.reservation.player);
         plan.audit.falling_damage = Some(hit);
+        // Falling is self-attributed ExternalKinetic: neutral incoming base,
+        // then the owned general and impact modifiers, after the raw fall gate.
+        // This fall-only path retains its existing armor/body policy.
+        let modifiers = plan.leadership.modifiers(active);
+        let scale = damage::incoming_damage_scale(
+            1.0,
+            modifiers.value("kCharModDamageTaken"),
+            modifiers.value("kCharModImpactDamageTaken"),
+        );
+        let amount_hp = hit.amount * scale;
+        if !amount_hp.is_finite() {
+            return Err("invalid_falling_damage");
+        }
+        if amount_hp == 0.0 {
+            return Ok(());
+        }
         plan.combat.queued_fall = Some(PendingDamage {
             target_character_id: character_id,
             target_reservation_id: Some(active.reservation.id.clone()),
@@ -46,7 +62,7 @@ pub(super) fn plan_report<W: Write>(
             generation,
             falling: true,
             damage: damage::ResolvedDamage {
-                amount_hp: hit.amount,
+                amount_hp,
                 kind: damage::DamageKind::ExternalKinetic,
                 kinetic_response: false,
                 location: 0,
