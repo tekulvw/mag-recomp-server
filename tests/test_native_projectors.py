@@ -243,7 +243,7 @@ class NativeProjectorTests(unittest.TestCase):
             'resources': {
                 'weapons.lua': {'parameters': {'WeaponDataTable': {'MeleeDamageScalarFront': 2., 'MeleeDamageScalarSide': 3., 'MeleeDamageScalarBack': 4.}}},
                 'collision_info.lua': {'parameters': {'CharacterCollisionData': {'CharacterStyles': {'CharacterStyle0': {'CharacterStyle': {
-                    'm_bodyData': {f'CollisionBodyInfo{i}': {'CollisionBodyInfo': {'armorArea': i % 4, 'hitpointMult': 1. + i / 32}} for i in range(16)}
+                    'm_bodyData': {f'CollisionBodyInfo{i}': {'CollisionBodyInfo': {'armorArea': i % 4, 'hitpointMult': 1. + i / 32, 'incapMult': .37 + i / 64}} for i in range(16)}
                 }}}}}},
                 'active_items.lua': {'parameters': {'ActiveItemDataTable': {names[3] + '_heal_percent': 17., names[3] + '_heal_duration': 4.}}},
             }}
@@ -267,6 +267,8 @@ class NativeProjectorTests(unittest.TestCase):
         self.assertEqual(result['grenades']['2']['fuse_ms'], 3000)
         self.assertEqual(result['healing']['3']['heal_percent'], 17.)
         self.assertEqual(len(result['body']), 16)
+        self.assertEqual(result['body'][7]['incapacitated_multiplier'], .479375)
+        self.assertEqual(result['body'][7]['multiplier'], 1.21875)
         catalog['definitions']['weapons'][names[0]]['parameters']['effective_range'] = 32.
         changed = encode(catalog)
         with self.assertRaisesRegex(ValueError, 'catalog_hash_mismatch'):

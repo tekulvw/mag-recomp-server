@@ -21,6 +21,10 @@ pub mod collision;
 pub mod damage;
 mod death_notifications;
 mod development_bot_movement;
+pub mod incapacitation;
+mod incapacitation_runtime;
+#[cfg(test)]
+mod incapacitation_tests;
 pub mod leadership_passives;
 pub mod leadership_runtime;
 pub mod navmesh;
@@ -639,6 +643,10 @@ enum CharacterLife {
         generation: u32,
         health_quarter_points: u16,
     },
+    Incapacitated {
+        generation: u32,
+        downed: incapacitation::Downed,
+    },
     AwaitingRespawn {
         generation: u32,
     },
@@ -647,11 +655,21 @@ impl CharacterLife {
     fn is_alive(self) -> bool {
         matches!(self, Self::Alive { .. })
     }
+    fn damage_health(self) -> Option<(u32, u16)> {
+        match self {
+            Self::Alive {
+                generation,
+                health_quarter_points,
+            } => Some((generation, health_quarter_points)),
+            Self::Incapacitated { generation, .. } => Some((generation, 0)),
+            _ => None,
+        }
+    }
     fn next_generation(self) -> Option<u32> {
         match self {
             Self::AwaitingFirstSpawn => Some(1),
             Self::AwaitingRespawn { generation } => generation.checked_add(1),
-            Self::Alive { .. } => None,
+            Self::Alive { .. } | Self::Incapacitated { .. } => None,
         }
     }
 }
@@ -723,6 +741,7 @@ struct Active {
     initial_objects: Option<Vec<u8>>,
     spawn_delta: Option<Vec<u8>>,
     life: CharacterLife,
+    revive_state_pending: bool,
     tracking: player_tracking::PlayerTracking,
     fall_tracker: fall_damage::Tracker,
     pending_damage: Option<PendingDamage>,
@@ -839,6 +858,7 @@ pub struct Engine<W: Write> {
     skill_catalog: Option<skill_catalog::SkillCatalog>,
     leadership: Option<leadership_runtime::LeadershipRuntime>,
     fall_damage_rules: Option<fall_damage::Rules>,
+    incapacitation_rules: Option<incapacitation::Rules>,
     pending_rewards: std::collections::BTreeMap<String, progression::RewardEvent>,
     reward_order: std::collections::VecDeque<String>,
     committed_rewards: std::collections::BTreeMap<String, progression::CommittedReward>,
@@ -1380,6 +1400,7 @@ impl<W: Write> Engine<W> {
                     initial_objects: None,
                     spawn_delta: None,
                     life: CharacterLife::AwaitingFirstSpawn,
+                    revive_state_pending: false,
                     tracking: player_tracking::PlayerTracking::default(),
                     fall_tracker: fall_damage::Tracker::default(),
                     pending_damage: None,

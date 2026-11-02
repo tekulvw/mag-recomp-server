@@ -6,7 +6,8 @@
 //! damagemodel.lua SHA256 5d876822c4866afb271022dd6fa3d4b6473b0d87266f26a16a28cb44d426eba9;
 //! armor_items.lua SHA256 22e0f478cd5e03d254a9c817d05aafd121c87d77c025500f0921442a8a7f1040;
 //! collision_info.lua SHA256 9189738c2a33267bd15a0848dc856b8b9a939efecd4e4cc07ad2da04b7005e5d.
-//! This supports ordinary living-character damage only; no incap/revive. Owned incoming resistance is applied before armor.
+//! Owned incoming resistance is applied before armor. Incapacitated body
+//! multipliers require an explicitly configured retail combat catalog.
 //! Radius distance is an input from an upstream hit resolver: this module does
 //! not find targets, simulate bounce, or establish visibility/penetration.
 //! Already-resolved development damage must not be sent through this module.
@@ -73,6 +74,25 @@ impl ArmorProfile {
             chemical_taken: 0.0,
         })
     }
+    /// Retain this actor's armor and resistance modifiers while selecting the
+    /// explicitly configured body multipliers for incapacitated damage.
+    pub fn for_incapacitated(
+        mut self,
+        catalog: &crate::retail_combat::RetailCombatCatalog,
+    ) -> Result<Self, &'static str> {
+        for row in catalog.body() {
+            let multiplier = row
+                .incapacitated_multiplier
+                .ok_or("missing_incapacitated_body_multiplier")?;
+            let multiplier = multiplier as f32;
+            if !multiplier.is_finite() || multiplier < 0.0 {
+                return Err("invalid_incapacitated_body_multiplier");
+            }
+            self.body[usize::from(row.location)].multiplier = multiplier;
+        }
+        Ok(self)
+    }
+
     pub fn from_item_id(item_id: u16) -> Result<Self, &'static str> {
         Self::from_item_id_with_catalog(item_id, item_catalog::bundled()?)
     }
@@ -271,5 +291,94 @@ impl GrenadeProfile {
             },
             crate::damage::DamageKind::Explosive,
         )
+    }
+}
+
+#[cfg(test)]
+mod incapacitated_tests {
+    use super::*;
+    use crate::retail_combat::RetailCombatCatalog;
+    use serde_json::{Value, json};
+
+    // Independently authored synthetic rows; no extracted game parameters.
+    fn metadata() -> Value {
+        json!({
+            "schema_version":2,"application_id":20231,"status":"synthetic",
+            "authority":{"bullet_damage":true,"armor_reduction":true,"body_damage":true,
+                "grenade_damage":false,"grenade_physics":false,"healing_schedule":false,"ammo_tokens":false},
+            "provenance":{},"bullets":{},"armor":{},"grenades":{},"healing":{},"unsupported":{},
+            "body":(0..16).map(|location| json!({"location":location,"armor_area":location%4,
+                "multiplier":3.0,"incapacitated_multiplier":0.5+f64::from(location)/8.0,"source":{}})).collect::<Vec<_>>(),
+            "limitations":[]
+        })
+    }
+    fn profile() -> ArmorProfile {
+        ArmorProfile {
+            parameters: ArmorParameters {
+                armor_type: 1,
+                rating: 3.0,
+                prevention: 0.25,
+                coverage: [0.5; 4],
+            },
+            body: std::array::from_fn(|location| BodyParameters {
+                armor_area: location % 4,
+                multiplier: 3.0,
+            }),
+            damage_taken: 0.25,
+            explosive_taken: 0.0,
+            impact_taken: 0.0,
+            chemical_taken: 0.0,
+        }
+    }
+    fn hit(location: u8) -> RawCharacterDamage {
+        RawCharacterDamage {
+            amount_hp: 28.0,
+            armor_rating_redux: 0.0,
+            armor_prevention_redux: 0.0,
+            hit_location: location,
+        }
+    }
+
+    #[test]
+    fn incapacitated_damage_uses_all_explicit_body_rows_and_preserves_actor_armor_and_modifiers() {
+        let catalog = RetailCombatCatalog::from_json(&metadata().to_string()).unwrap();
+        let living = profile();
+        let downed = living.for_incapacitated(&catalog).unwrap();
+        for location in 0..16 {
+            // 28*1.25-3=32; armor factor=1-0.25*0.5=0.875.
+            assert_eq!(
+                downed.adjust(hit(location)),
+                Ok(14.0 + 3.5 * f32::from(location))
+            );
+            assert_eq!(living.adjust(hit(location)), Ok(84.0));
+        }
+        assert_eq!(downed.parameters, living.parameters);
+        assert_eq!(downed.damage_taken, living.damage_taken);
+    }
+
+    #[test]
+    fn incapacitated_profile_requires_every_explicit_row_without_changing_legacy_living_damage() {
+        let mut value = metadata();
+        for row in value["body"].as_array_mut().unwrap() {
+            row.as_object_mut()
+                .unwrap()
+                .remove("incapacitated_multiplier");
+        }
+        let legacy = RetailCombatCatalog::from_json(&value.to_string()).unwrap();
+        assert_eq!(profile().adjust(hit(2)), Ok(84.0));
+        assert_eq!(
+            profile().for_incapacitated(&legacy),
+            Err("missing_incapacitated_body_multiplier")
+        );
+        let mut value = metadata();
+        value["body"][15]
+            .as_object_mut()
+            .unwrap()
+            .remove("incapacitated_multiplier");
+        let incomplete = RetailCombatCatalog::from_json(&value.to_string()).unwrap();
+        assert_eq!(
+            profile().for_incapacitated(&incomplete),
+            Err("missing_incapacitated_body_multiplier")
+        );
     }
 }

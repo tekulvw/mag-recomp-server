@@ -22,10 +22,13 @@ void Throws<T>(Action action) where T : Exception
 }
 void Test(string name, Action action)
 {
+    if (args.Length != 0 && !args.Any(filter => name.Contains(filter, StringComparison.OrdinalIgnoreCase))) return;
     action();
     Console.WriteLine("PASS " + name);
     passed++;
 }
+
+Test("optional finishing and revive reward catalog fields", ReviveRewardChecks.Run);
 
 Test("startup team minima share bridge policy and advertised total", () =>
 {

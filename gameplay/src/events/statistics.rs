@@ -38,6 +38,14 @@ pub(super) fn target_killed(plan: &mut EventPlan, killer: &Active, victim_team: 
         },
     );
 }
+pub(super) fn resuscitated(plan: &mut EventPlan, healer: &Active) {
+    increment(plan, healer, 34);
+}
+pub(super) fn finished(plan: &mut EventPlan, killer: &Active, victim_team: u8) {
+    if killer.team() != victim_team {
+        increment(plan, killer, 24);
+    }
+}
 fn died<W: Write>(
     engine: &Engine<W>,
     plan: &mut EventPlan,

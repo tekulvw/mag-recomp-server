@@ -22,10 +22,17 @@ impl Active {
         damage: replication::CharacterDamage,
         now: Duration,
     ) -> Result<(), &'static str> {
-        if !matches!(self.life,CharacterLife::Alive{generation:g,..} if g==generation) {
+        if !self
+            .life
+            .damage_health()
+            .is_some_and(|(g, _)| g == generation)
+        {
             return Err("stale_peer_damage");
         }
         self.last_damage = damage;
+        if damage.health_quarter_points == 0 {
+            self.revive_state_pending = false;
+        }
         self.life = if damage.health_quarter_points == 0 {
             self.healing = None;
             self.pending_damage = None;
@@ -449,10 +456,10 @@ impl<W: Write> Engine<W> {
             .is_some_and(|a| a.initial_objects.is_some());
         let before_sequence = self.active.as_ref().map_or(0, |a| a.outbound_sequence);
         let before_owner = self.active.as_ref().map_or(0, |a| a.latest_owner_sequence);
-        let before_alive_generation = self.active.as_ref().and_then(|a| match a.life {
-            CharacterLife::Alive { generation, .. } => Some(generation),
-            _ => None,
-        });
+        let before_alive_generation = self
+            .active
+            .as_ref()
+            .and_then(|a| a.life.damage_health().map(|(g, _)| g));
         let had_emplacement = self
             .active
             .as_ref()
@@ -633,13 +640,19 @@ impl<W: Write> Engine<W> {
                 self.queue_alpha_ownership(now)?;
             }
         }
+        let owner_report = owner_report.and_then(|(seq, fields)| {
+            self.active
+                .as_ref()
+                .map(|a| (seq, a.owner_presentation(&fields)))
+        });
         if let Some((sequence, fields)) = owner_report
             && sequence > before_owner
             && self.active.as_ref().is_some_and(|a| {
                 // A report from before spawn must not overwrite the new life
                 // with its old pose or inventory after the authoritative packet.
-                matches!(a.life, CharacterLife::Alive { generation, .. }
-                    if Some(generation) == before_alive_generation)
+                a.life
+                    .damage_health()
+                    .is_some_and(|(generation, _)| Some(generation) == before_alive_generation)
                     && a.ready_for_updates
                     && a.mounted_seat.is_none()
             })

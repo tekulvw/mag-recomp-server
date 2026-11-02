@@ -13,11 +13,14 @@ namespace Server.Medius
         private sealed class LevelRow { public int Threshold; public byte Points; }
         private readonly SortedDictionary<byte, LevelRow> _levels = new SortedDictionary<byte, LevelRow>();
         private readonly Dictionary<string, float> _objectiveAwards = new Dictionary<string, float>(StringComparer.Ordinal);
+        private readonly Dictionary<string, float> _optionalActionAwards = new Dictionary<string, float>(StringComparer.Ordinal);
         private readonly Dictionary<string, float> _victoryModifiers = new Dictionary<string, float>(StringComparer.Ordinal);
         private static readonly Dictionary<string, string> ObjectiveAwardKeys = new Dictionary<string, string>(StringComparer.Ordinal) {
             { "primary_objective_activated", "PrimaryObjectiveActivated" }, { "primary_objective_secured", "PrimaryObjectiveSecured" },
             { "primary_objective_completed", "PrimaryObjective" }, { "secondary_objective_completed", "SecondaryObjective" },
             { "charge_planted", "ChargePlanted" }, { "charge_defused", "ChargeDefused" } };
+        private static readonly Dictionary<string, string> OptionalActionAwardKeys = new Dictionary<string, string>(StringComparer.Ordinal) {
+            { "enemy_finished", "FinishingMoves" }, { "teammate_resuscitated", "Resuscitations" } };
         private static readonly Dictionary<string, string> VictoryModifierKeys = new Dictionary<string, string>(StringComparer.Ordinal) {
             { "match_major_victory", "MajorVictory" }, { "match_minor_victory", "MinorVictory" },
             { "match_major_defeat", "MajorDefeat" }, { "match_minor_defeat", "MinorDefeat" } };
@@ -85,6 +88,13 @@ namespace Server.Medius
                     if (!float.IsFinite(value) || value < 0 || (double)value > int.MaxValue) throw new InvalidDataException("Invalid objective reward field.");
                     result._objectiveAwards.Add(entry.Key, value);
                 }
+                foreach (var entry in OptionalActionAwardKeys)
+                {
+                    if (!awards.TryGetProperty(entry.Value, out var authored)) continue;
+                    float value = authored.GetSingle();
+                    if (!float.IsFinite(value) || value < 0 || (double)value > int.MaxValue) throw new InvalidDataException("Invalid optional action reward field.");
+                    result._optionalActionAwards.Add(entry.Key, value);
+                }
                 var victory = awards.GetProperty("VictoryModifier");
                 foreach (var entry in VictoryModifierKeys)
                 {
@@ -125,7 +135,7 @@ namespace Server.Medius
         }
         internal static bool IsFinalRewardKind(string kind) => kind != null && VictoryModifierKeys.ContainsKey(kind);
         internal static bool ValidKindUnits(string kind, int units) => units > 0 && units <= ushort.MaxValue &&
-            (kind == "teammate_healed" || units == 1 && (kind == "enemy_killed" || kind != null && (ObjectiveAwardKeys.ContainsKey(kind) || IsFinalRewardKind(kind))));
+            (kind == "teammate_healed" || units == 1 && (kind == "enemy_killed" || kind != null && (ObjectiveAwardKeys.ContainsKey(kind) || OptionalActionAwardKeys.ContainsKey(kind) || IsFinalRewardKind(kind))));
         internal bool TryFinalAward(string kind, int units, int matchExperience, out int experience)
         {
             experience = 0;
@@ -145,7 +155,15 @@ namespace Server.Medius
             float reward;
             if (kind == "enemy_killed") { if (units != 1) return false; reward = (float)_enemyKilled; }
             else if (kind == "teammate_healed") reward = _healOther;
-            else if (!_objectiveAwards.TryGetValue(kind, out reward)) return false;
+            else if (!_objectiveAwards.TryGetValue(kind, out reward) && !_optionalActionAwards.TryGetValue(kind, out reward))
+            {
+                // A recognized optional action still needs a durable receipt when
+                // its catalog has no authored XP entry. Settle it without credit
+                // so delivery retries do not leave the gameplay outbox pending.
+                // This absence policy supplies no tuning value for the event.
+                if (!OptionalActionAwardKeys.ContainsKey(kind)) return false;
+                reward = 0;
+            }
             // Native Increment shares fractional carry for integer kills and healing.
             float total = MathF.FusedMultiplyAdd((float)units, reward, matchFraction);
             if (!float.IsFinite(total) || total < 0 || (double)total > int.MaxValue) return false;

@@ -277,7 +277,7 @@ pub(super) fn character_spawn_selection<W: Write>(
     let history_available = ctx.history_available;
     let accepted = active.entered_game
         && active.ready_for_updates
-        && !active.life.is_alive()
+        && active.life.next_generation().is_some()
         && history_available
         && active
             .squad_catalog
@@ -320,7 +320,7 @@ pub(super) fn cancel_respawn<W: Write>(
     // Native connection handler always returns 0x0214; an existing
     // unspawned character can leave the queue idempotently. Neither
     // readiness nor an expired deadline means it already spawned.
-    let accepted = active.initial_objects.is_some() && !active.life.is_alive();
+    let accepted = active.initial_objects.is_some() && active.life.next_generation().is_some();
     plan.session.cancel_pending_spawn = accepted;
     plan.outgoing = Some(protocol::CancelRespawnResult { success: accepted }.encode());
     Ok(json!({"type":"cancel_respawn","accepted":accepted,
