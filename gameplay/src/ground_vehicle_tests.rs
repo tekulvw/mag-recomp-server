@@ -18,6 +18,7 @@ fn vehicle(index: u16) -> Creation {
         },
         rotation: [0., 0., 0., 1.],
         health_quarter_points: 600,
+        initial_state: 2,
         passenger_exit_candidates: Vec::new(),
         passenger_seats: Vec::new(),
         maximum_occupancy: None,
@@ -140,9 +141,11 @@ fn retail_ground_vehicle_batches_preserve_separate_network_indices_and_budget() 
             native_elf_sha256: "a".repeat(64),
             native_binding_sha256: "b".repeat(64),
             vehicle_properties_sha256: "c".repeat(64),
+            creation_scope: None,
         },
         vehicles: (0..32).map(vehicle).collect(),
         passenger_spawns: Vec::new(),
+        vehicle_sources: Vec::new(),
     };
     assert_eq!(world.batch_count(), 2);
     for batch in 0..2 {
@@ -186,4 +189,42 @@ fn retail_ground_vehicle_quaternion_keeps_xyzw_sign_and_fraction_order() {
     for expected in [0, 1024 | 153, 204, 0] {
         assert_eq!(bits.read(11), Ok(expected));
     }
+}
+
+#[test]
+fn requested_free_vehicle_slot_can_be_created_in_hidden_state_zero() {
+    let mut v = vehicle(4);
+    v.initial_state = 0;
+    let wire = encode(2, 0, &[v]).unwrap();
+    let profile = crate::wire_profile::WireProfileCatalog::embedded()
+        .profile(20231)
+        .unwrap();
+    let mut bits = BitReader::with_profile(&wire, profile);
+    bits.position = profile.header_bits();
+    assert_eq!(bits.read(1), Ok(1));
+    assert_eq!(bits.read(16), Ok(4));
+    for field in 0..=5 {
+        let present = bits.read(1).unwrap();
+        match field {
+            0 => {
+                assert_eq!(present, 1);
+                assert_eq!(bits.read(1), Ok(1));
+            }
+            1 => {
+                bits.read(16).unwrap();
+            }
+            2 => assert_eq!(present, 0),
+            3 => {
+                bits.read(32).unwrap();
+            }
+            4 => {
+                bits.read(8).unwrap();
+            }
+            5 => assert_eq!(bits.read(8), Ok(0)),
+            _ => unreachable!(),
+        }
+    }
+    let mut bad = vehicle(0);
+    bad.initial_state = 0;
+    assert!(encode(2, 0, &[bad]).is_err()); // Four initial static slots stay reserved.
 }

@@ -24,6 +24,10 @@ pub struct Creation {
     /// Native shared Object::Rotation order is X,Y,Z,W.
     pub rotation: [f32; 4],
     pub health_quarter_points: u16,
+    /// State0 is an explicitly qualified hidden dynamic creation; state2 is the
+    /// existing operational static foundation. This is not a respawn timer.
+    #[serde(default = "operational_state")]
+    pub initial_state: u8,
     #[serde(default)]
     pub passenger_seats: Vec<u8>,
     #[serde(default)]
@@ -43,7 +47,13 @@ struct Source {
     native_elf_sha256: String,
     native_binding_sha256: String,
     vehicle_properties_sha256: String,
+    #[serde(default)]
+    creation_scope: Option<String>,
 }
+fn operational_state() -> u8 {
+    2
+}
+
 /// Explicit player spawn pool identity to ground vehicle network identity.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -51,6 +61,20 @@ pub struct PassengerSpawn {
     pub spawn_point_index: u16,
     pub spawn_point_token: u32,
     pub vehicle_index: u16,
+}
+/// Source-bound native vehicle source; independent of human spawn availability.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VehicleSource {
+    pub vehicle_index: u16,
+    pub spawn_point_index: u16,
+    pub spawn_point_token: u32,
+    pub vehicle_type_token: u32,
+    pub spawn_type: u8,
+    pub user_class: u8,
+    pub source_family: u8,
+    pub authored_active: bool,
+    pub team: u8,
 }
 /// Explicit qualified external bindings. No default vehicles or native IDs.
 #[derive(Clone, Debug, Deserialize)]
@@ -62,6 +86,8 @@ pub struct Catalog {
     vehicles: Vec<Creation>,
     #[serde(default)]
     passenger_spawns: Vec<PassengerSpawn>,
+    #[serde(default)]
+    vehicle_sources: Vec<VehicleSource>,
 }
 impl Catalog {
     pub fn load(
@@ -114,6 +140,38 @@ impl Catalog {
         if policy.game_type != 1 {
             return Err("ground_vehicles_require_acquisition");
         }
+        if self.source.creation_scope.as_deref().is_some_and(|v| {
+            !matches!(
+                v,
+                "native_requested_free_slot_hidden_state0" | "native_vehicle_source_points"
+            )
+        }) {
+            return Err("invalid_ground_vehicle_creation_scope");
+        }
+        let mut source_points = std::collections::BTreeMap::new();
+        if !self.vehicle_sources.is_empty()
+            && self.source.creation_scope.as_deref() != Some("native_vehicle_source_points")
+        {
+            return Err("vehicle_source_qualification_required");
+        }
+        for source in &self.vehicle_sources {
+            let vehicle = self
+                .vehicle(source.vehicle_index)
+                .ok_or("unknown_vehicle_source_identity")?;
+            if source.vehicle_index < 4
+                || !matches!(source.spawn_type, 7 | 9)
+                || source.user_class != 1
+                || source.source_family != 35
+                || source.spawn_point_index != vehicle.spawn_point_index
+                || source.spawn_point_token != vehicle.spawn_point_token
+                || source.vehicle_type_token != vehicle.vehicle_type_token
+                || source.team != vehicle.team
+                || source.authored_active != (vehicle.initial_state == 2)
+                || source_points.insert(source.vehicle_index, source).is_some()
+            {
+                return Err("invalid_native_vehicle_source");
+            }
+        }
         let mut ids = BTreeSet::new();
         let mut points = BTreeSet::new();
         for v in &self.vehicles {
@@ -126,14 +184,30 @@ impl Catalog {
             } else {
                 policy.defending_faction
             };
+            let source = source_points.get(&v.index);
+            if self.source.creation_scope.as_deref() == Some("native_vehicle_source_points")
+                && v.index >= 4
+                && source.is_none()
+            {
+                return Err("missing_native_vehicle_source");
+            }
+            let source_active = source.map_or(point.active, |s| s.authored_active);
             if !ids.insert(v.index)
                 || !points.insert(v.spawn_point_index)
                 || point.token != v.spawn_point_token
-                || !point.active
+                || (source_active != (v.initial_state == 2))
                 || v.faction != faction
             {
                 return Err("invalid_ground_vehicle_spawn_binding");
             }
+        }
+        if self.vehicles.iter().any(|v| v.initial_state == 0)
+            && !matches!(
+                self.source.creation_scope.as_deref(),
+                Some("native_requested_free_slot_hidden_state0" | "native_vehicle_source_points")
+            )
+        {
+            return Err("hidden_vehicle_requires_creation_qualification");
         }
         let mut passengers = BTreeSet::new();
         for binding in &self.passenger_spawns {
@@ -170,6 +244,9 @@ impl Catalog {
             }
         }
         Ok(())
+    }
+    pub(crate) fn creations(&self) -> impl Iterator<Item = &Creation> {
+        self.vehicles.iter()
     }
     pub(crate) fn vehicle(&self, index: u16) -> Option<&Creation> {
         self.vehicles.iter().find(|vehicle| vehicle.index == index)
@@ -213,6 +290,9 @@ impl<W: io::Write> crate::Engine<W> {
                 .as_ref()
                 .ok_or("spawn_catalog_unavailable")?,
         )?;
+        if let Some(resources) = &self.dynamic_body_resources {
+            resources.validate_vehicles(&catalog)?;
+        }
         self.ground_vehicles = Some(catalog);
         Ok(self)
     }
@@ -244,6 +324,8 @@ impl Creation {
             || self.faction > 2
             || self.team > 1
             || self.modifier >= 64
+            || !matches!(self.initial_state, 0 | 2)
+            || (self.initial_state == 0 && (self.index < 4 || !self.passenger_seats.is_empty()))
             || !(1..4096).contains(&self.health_quarter_points)
             || self.rotation.iter().any(|v| !v.is_finite())
             || (norm - 1.).abs() > 0.002
@@ -289,7 +371,7 @@ impl Creation {
                 1 => bits.write(0x105, 16)?,
                 3 => bits.write(self.vehicle_type_token, 32)?,
                 4 => bits.write(u32::from((self.modifier << 2) | self.faction), 8)?,
-                5 => bits.write(2, 8)?,
+                5 => bits.write(u32::from(self.initial_state), 8)?,
                 6 | 7 => bits.write(u16::MAX.into(), 16)?,
                 18 => VehicleDamage {
                     last_location_and_type: 0,

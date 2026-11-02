@@ -81,6 +81,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     let mut match_profiles_path: Option<PathBuf> = None;
     let mut spawn_path: Option<PathBuf> = None;
     let mut ground_vehicles_path: Option<PathBuf> = None;
+    let mut dynamic_bodies_path: Option<PathBuf> = None;
     let mut objective_path: Option<PathBuf> = None;
     let mut item_path: Option<PathBuf> = None;
     let mut blast_rules_path: Option<PathBuf> = None;
@@ -297,6 +298,15 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                         .into(),
                 );
             }
+            "--dynamic-bodies" => {
+                dynamic_bodies_path = Some(
+                    args.next()
+                        .ok_or_else(|| {
+                            io::Error::other("--dynamic-bodies requires an absolute path")
+                        })?
+                        .into(),
+                );
+            }
             "--ground-vehicles" => {
                 ground_vehicles_path = Some(
                     args.next()
@@ -358,7 +368,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             }
             _ => {
                 return Err(io::Error::other(
-                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--match-profiles /absolute/MATCH_PROFILES.json] [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json] [--navmesh-world MESH.mag-nav] [--bot-fill-total N --bot-population POPULATION.json] [--bot-names /absolute/NAMES.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
+                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--match-profiles /absolute/MATCH_PROFILES.json] [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--dynamic-bodies /absolute/BODIES.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json] [--navmesh-world MESH.mag-nav] [--bot-fill-total N --bot-population POPULATION.json] [--bot-names /absolute/NAMES.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
                 ));
             }
         }
@@ -539,6 +549,30 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     let ground_vehicles = ground_vehicles_path
         .as_ref()
         .map(|path| mag_gameplay::ground_vehicles::Catalog::load(path, &catalog))
+        .transpose()?;
+    let dynamic_bodies = dynamic_bodies_path
+        .as_ref()
+        .map(|path| -> io::Result<_> {
+            if !path.is_absolute() {
+                return Err(io::Error::other(
+                    "--dynamic-bodies requires an absolute path",
+                ));
+            }
+            if application_id != Some(20231) || catalog.match_profile().game_type != 1 {
+                return Err(io::Error::other(
+                    "dynamic bodies require retail Acquisition",
+                ));
+            }
+            let bodies = mag_gameplay::dynamic_collision::Catalog::load(path)?;
+            let bindings = bodies
+                .runtime_bindings()
+                .cloned()
+                .ok_or_else(|| io::Error::other("dynamic_body_bindings_required"))?;
+            bindings
+                .validate_for(&bodies, ground_vehicles.as_ref())
+                .map_err(io::Error::other)?;
+            Ok((bodies, bindings))
+        })
         .transpose()?;
     if application_id.is_some()
         && collision_world
@@ -839,6 +873,11 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                 wire_profiles.profile(20231).map_err(io::Error::other)?,
             )
             .map_err(io::Error::other)?;
+        if let Some((catalog, bindings)) = &dynamic_bodies {
+            registry
+                .validate_dynamic_bodies(catalog, bindings)
+                .map_err(io::Error::other)?;
+        }
     }
     let mut resources = match application_id {
         Some(id) => {
@@ -866,7 +905,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         }
         println!(
             "{}",
-            serde_json::json!({"event":"catalogs_validated","application_id":application_id,"skill_application_id":skill_catalog.application_id(),"bunkers":bunker_info,"fall_damage_enabled":fall_rules.is_some(),"incapacitation_enabled":incapacitation_rules.is_some(),"character_damage_rules_enabled":character_damage_rules.is_some(),"scope":"schema_and_profile_validation_not_client_acceptance"})
+            serde_json::json!({"event":"catalogs_validated","application_id":application_id,"skill_application_id":skill_catalog.application_id(),"bunkers":bunker_info,"fall_damage_enabled":fall_rules.is_some(),"incapacitation_enabled":incapacitation_rules.is_some(),"character_damage_rules_enabled":character_damage_rules.is_some(),"dynamic_body_catalog_validated":dynamic_bodies.is_some(),"scope":"schema_and_profile_validation_not_client_acceptance"})
         );
         return Ok(());
     }
@@ -894,6 +933,11 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     if let Some(vehicles) = ground_vehicles {
         engine = engine
             .with_ground_vehicles(vehicles)
+            .map_err(io::Error::other)?;
+    }
+    if let Some((catalog, bindings)) = dynamic_bodies {
+        engine = engine
+            .with_dynamic_collision_bodies(catalog, bindings)
             .map_err(io::Error::other)?;
     }
     if let Some(objectives) = objective_catalog {
@@ -1829,6 +1873,41 @@ mod runtime_profile_tests {
                 .to_string()
                 .contains("verified_spawn_pool")
         );
+    }
+
+    #[test]
+    fn dynamic_body_cli_validates_explicit_resources_without_opening_logs() {
+        let files = SyntheticCatalogs::new();
+        let mut spawns = files.read("spawns.json");
+        spawns["match_profile"]["game_type"] = serde_json::json!(1);
+        files.write("spawns.json", &spawns);
+        let body = serde_json::json!({"format":"mag_dynamic_bodies","schema_version":1,
+         "source":{"native_binding_sha256":"a".repeat(64),"shape_data_sha256":"b".repeat(64)},
+         "runtime_bindings":{"character_template":"invented","vehicles":[]},
+         "templates":[{"id":"invented","kind":"character","roots":[{"id":"body","layer":21,"dead_layer":6,"translation":[0.,0.,0.],"rotation":"identity","shape":{"kind":"sphere","radius":0.25}}]}]});
+        files.write("bodies.json", &body);
+        let args = || {
+            let mut v = files.args();
+            v.extend([
+                "--dynamic-bodies".to_owned(),
+                files.0.join("bodies.json").display().to_string(),
+            ]);
+            v
+        };
+        assert!(run(args()).is_ok());
+        let mut bad = body.clone();
+        bad["runtime_bindings"]["character_template"] = serde_json::json!("missing");
+        files.write("bodies.json", &bad);
+        assert!(
+            run(args())
+                .unwrap_err()
+                .to_string()
+                .contains("dynamic_body_bindings")
+        );
+        let mut relative = files.args();
+        relative.extend(["--dynamic-bodies".to_owned(), "bodies.json".to_owned()]);
+        assert!(run(relative).unwrap_err().to_string().contains("absolute"));
+        assert_eq!(std::fs::read_dir(&files.0).unwrap().count(), 10);
     }
 
     fn synthetic_match_profile(files: &SyntheticCatalogs) -> PathBuf {

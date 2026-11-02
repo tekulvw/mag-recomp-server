@@ -59,6 +59,16 @@ pub struct Registry {
     profiles: BTreeMap<String, Loaded>,
 }
 impl Registry {
+    pub fn validate_dynamic_bodies(
+        &self,
+        catalog: &crate::dynamic_collision::Catalog,
+        bindings: &crate::dynamic_collision_runtime::RuntimeBindings,
+    ) -> Result<(), &'static str> {
+        for profile in self.profiles.values() {
+            bindings.validate_for(catalog, profile.vehicles.as_ref())?;
+        }
+        Ok(())
+    }
     pub fn load(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref();
         absolute(path)?;
@@ -271,6 +281,9 @@ impl<W: Write> Engine<W> {
             return Err("match_profiles_unsupported_world_extras");
         }
         registry.validate_runtime(&self.item_catalog, self.wire_profile)?;
+        if let Some(resources) = &self.dynamic_body_resources {
+            resources.validate_profiles(&registry)?;
+        }
         self.match_profiles = Some(registry);
         Ok(self)
     }
@@ -318,6 +331,10 @@ impl<W: Write> Engine<W> {
             .get(&profile_id)
             .ok_or("unknown_match_profile")?
             .clone();
+        if let (Some(resources), Some(vehicles)) = (&self.dynamic_body_resources, &loaded.vehicles)
+        {
+            resources.validate_vehicles(vehicles)?;
+        }
         // Allocate everything before the durable acknowledgement. A failed record
         // must leave the previously selected world, identity and outboxes intact.
         let selected = SelectedMatch {
