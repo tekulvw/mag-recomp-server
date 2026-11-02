@@ -419,7 +419,7 @@ impl<W: Write> Engine<W> {
             .active
             .iter()
             .chain(self.peers.values())
-            .filter(|a| a.entered_game && a.ready_for_updates && a.mounted_seat.is_none())
+            .filter(|a| a.entered_game && a.ready_for_updates && !a.is_mounted())
         {
             let CharacterLife::Alive {
                 generation,

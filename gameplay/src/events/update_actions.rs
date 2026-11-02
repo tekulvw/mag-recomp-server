@@ -27,7 +27,7 @@ pub(super) fn plan_pending_damage<W: Write>(
     {
         match active.life.damage_health() {
             Some((generation, health_quarter_points))
-                if generation == pending.generation && active.mounted_seat.is_none() =>
+                if generation == pending.generation && !active.is_mounted() =>
             {
                 Some((
                     generation,
@@ -46,7 +46,7 @@ pub(super) fn plan_pending_damage<W: Write>(
     }) {
         match peer.life.damage_health() {
             Some((generation, health_quarter_points))
-                if generation == pending.generation && peer.mounted_seat.is_none() =>
+                if generation == pending.generation && !peer.is_mounted() =>
             {
                 Some((
                     generation,
@@ -369,6 +369,41 @@ pub(super) fn plan_respawn<W: Write>(
                 .map_or(active.squad_spawn, |s| s.spawn_point_index),
         )
         .unwrap();
+    let ground_passenger = matches!(point.kind, spawn_catalog::SpawnKind::VehiclePassenger);
+    let ground_seat = if ground_passenger {
+        if active.is_mounted() {
+            plan.gameplay_denial = Some("must_exit_current_seat");
+            return Ok(());
+        }
+        let Some(world) = ctx.engine.ground_vehicles.as_ref() else {
+            plan.gameplay_denial = Some("ground_vehicle_catalog_required");
+            return Ok(());
+        };
+        if active.ground_vehicle_batch < world.batch_count() {
+            plan.gameplay_denial = Some("ground_vehicle_creation_required");
+            return Ok(());
+        }
+        let Some(vehicle) = world.passenger_vehicle(point.index) else {
+            plan.gameplay_denial = Some("passenger_spawn_binding_required");
+            return Ok(());
+        };
+        if vehicle.team != active.team() || vehicle.faction != active.reservation.character.faction
+        {
+            plan.gameplay_denial = Some("passenger_vehicle_side_mismatch");
+            return Ok(());
+        }
+        if vehicle.exit_policy().is_none() {
+            plan.gameplay_denial = Some("ground_exit_policy_required");
+            return Ok(());
+        }
+        let Some(seat) = ctx.engine.ground_passenger_seat(vehicle) else {
+            plan.gameplay_denial = Some("ground_passenger_seats_full");
+            return Ok(());
+        };
+        Some(seat)
+    } else {
+        None
+    };
     let bunker = matches!(point.kind, spawn_catalog::SpawnKind::BunkerPassenger);
     if matches!(point.kind, spawn_catalog::SpawnKind::Parachute) && loadout.is_none() {
         plan.gameplay_denial = Some("parachute_spawn_requires_inventory");
@@ -379,7 +414,14 @@ pub(super) fn plan_respawn<W: Write>(
         return Ok(());
     }
     let generation = active.life.next_generation();
-    let mut spawn_position = point.position;
+    let mut spawn_position = ground_seat
+        .and_then(|seat| {
+            ctx.engine
+                .ground_vehicles
+                .as_ref()?
+                .vehicle(seat.vehicle_index)
+        })
+        .map_or(point.position, |vehicle| vehicle.position);
     if matches!(point.kind, spawn_catalog::SpawnKind::Parachute) {
         let deadline = active
             .pending_spawn_deadline
@@ -426,6 +468,10 @@ pub(super) fn plan_respawn<W: Write>(
             user_data: [13, 0, seat],
         };
     }
+    if let Some(seat) = ground_seat {
+        respawn.state = seat.character_state();
+    }
+    plan.session.new_ground_seat = Some(ground_seat);
     plan.session.new_mounted_seat = Some(passenger_seat);
     plan.session.spawn_pose = Some((respawn.state, respawn.yaw));
     plan.combat.new_life = Some(CharacterLife::Alive {

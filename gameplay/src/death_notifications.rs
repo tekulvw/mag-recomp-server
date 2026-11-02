@@ -95,7 +95,7 @@ impl<W: Write> Engine<W> {
         if !human.ready_for_updates
             || !human.entered_game
             || human.initial_objects.is_none()
-            || human.mounted_seat.is_some()
+            || human.is_mounted()
         {
             return None;
         }

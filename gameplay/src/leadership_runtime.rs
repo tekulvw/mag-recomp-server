@@ -200,7 +200,7 @@ impl Active {
             damage_model_dead: !self.life.is_alive(),
             locally_dead: false,
             damage_conditions: self.last_damage.conditions,
-            mounted: self.mounted_seat.is_some(),
+            mounted: self.is_mounted(),
         })
     }
 }

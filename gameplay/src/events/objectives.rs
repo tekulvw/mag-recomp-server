@@ -6,7 +6,7 @@ fn actor(active: &Active) -> Option<ObjectiveActor> {
     let CharacterLife::Alive { generation, .. } = active.life else {
         return None;
     };
-    if !active.entered_game || !active.ready_for_updates || active.mounted_seat.is_some() {
+    if !active.entered_game || !active.ready_for_updates || active.is_mounted() {
         return None;
     }
     Some(ObjectiveActor {

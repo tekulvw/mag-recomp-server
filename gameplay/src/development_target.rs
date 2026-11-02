@@ -20,7 +20,7 @@ impl<W: Write> Engine<W> {
         self.match_terminal.is_none() && (self.development_dummy_enabled()
             || active.development_target.as_ref().is_some_and(|target| {
                 matches!(active.life, CharacterLife::Alive { generation, .. } if generation == target.generation)
-                    && active.mounted_seat.is_none()
+                    && !active.is_mounted()
                     && active.entered_game
                     && active.ready_for_updates
             }))
@@ -70,7 +70,7 @@ impl<W: Write> Engine<W> {
         if generation != expected_generation {
             return Err("target_life_mismatch");
         }
-        if active.mounted_seat.is_some() || !active.entered_game || !active.ready_for_updates {
+        if active.is_mounted() || !active.entered_game || !active.ready_for_updates {
             return Err("target_requires_ready_on_foot_character");
         }
         if let Some(previous) = active.target_commands.get(&spawn_id) {

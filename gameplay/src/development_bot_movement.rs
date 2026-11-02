@@ -151,7 +151,7 @@ impl<W: Write> Engine<W> {
         {
             return Err("target_life_mismatch");
         }
-        if !actor.entered_game || !actor.ready_for_updates || actor.mounted_seat.is_some() {
+        if !actor.entered_game || !actor.ready_for_updates || actor.is_mounted() {
             return Err("target_requires_ready_on_foot_character");
         }
         let target = actor.development_target.as_ref().ok_or("bot_not_spawned")?;

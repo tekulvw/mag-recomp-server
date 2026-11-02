@@ -24,6 +24,16 @@ pub struct Creation {
     /// Native shared Object::Rotation order is X,Y,Z,W.
     pub rotation: [f32; 4],
     pub health_quarter_points: u16,
+    #[serde(default)]
+    pub passenger_seats: Vec<u8>,
+    #[serde(default)]
+    pub maximum_occupancy: Option<u8>,
+    #[serde(default)]
+    pub maximum_mount_distance_m: Option<f32>,
+    #[serde(default)]
+    pub maximum_mount_position_age_ms: Option<u64>,
+    #[serde(default)]
+    pub passenger_exit_candidates: Vec<crate::vehicle_exit::ExitCandidate>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -34,6 +44,14 @@ struct Source {
     native_binding_sha256: String,
     vehicle_properties_sha256: String,
 }
+/// Explicit player spawn pool identity to ground vehicle network identity.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PassengerSpawn {
+    pub spawn_point_index: u16,
+    pub spawn_point_token: u32,
+    pub vehicle_index: u16,
+}
 /// Explicit qualified external bindings. No default vehicles or native IDs.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -42,6 +60,8 @@ pub struct Catalog {
     schema_version: u32,
     source: Source,
     vehicles: Vec<Creation>,
+    #[serde(default)]
+    passenger_spawns: Vec<PassengerSpawn>,
 }
 impl Catalog {
     pub fn load(
@@ -115,7 +135,50 @@ impl Catalog {
                 return Err("invalid_ground_vehicle_spawn_binding");
             }
         }
+        let mut passengers = BTreeSet::new();
+        for binding in &self.passenger_spawns {
+            let point = spawns
+                .point(binding.spawn_point_index)
+                .ok_or("unknown_passenger_spawn")?;
+            if !passengers.insert(binding.spawn_point_index)
+                || point.token != binding.spawn_point_token
+                || !point.active
+                || !matches!(
+                    point.kind,
+                    crate::spawn_catalog::SpawnKind::VehiclePassenger
+                )
+                || !self.vehicle(binding.vehicle_index).is_some_and(|v| {
+                    !v.passenger_seats.is_empty()
+                        && v.maximum_occupancy.is_some()
+                        && v.exit_policy().is_some()
+                })
+            {
+                return Err("invalid_passenger_spawn_binding");
+            }
+        }
+        // Every advertised APC insertion point must resolve to a configured creation.
+        for index in 0..128 {
+            if spawns.point(index).is_some_and(|point| {
+                point.active
+                    && matches!(
+                        point.kind,
+                        crate::spawn_catalog::SpawnKind::VehiclePassenger
+                    )
+            }) && self.passenger_vehicle(index).is_none()
+            {
+                return Err("missing_passenger_spawn_binding");
+            }
+        }
         Ok(())
+    }
+    pub(crate) fn vehicle(&self, index: u16) -> Option<&Creation> {
+        self.vehicles.iter().find(|vehicle| vehicle.index == index)
+    }
+    pub(crate) fn passenger_vehicle(&self, point: u16) -> Option<&Creation> {
+        self.passenger_spawns
+            .iter()
+            .find(|binding| binding.spawn_point_index == point)
+            .and_then(|binding| self.vehicle(binding.vehicle_index))
     }
     pub(crate) fn batch_count(&self) -> usize {
         self.vehicles.len().div_ceil(16)
@@ -158,6 +221,17 @@ impl Creation {
     pub fn object_id(&self) -> u32 {
         0x01000000 | u32::from(self.index)
     }
+    pub(crate) fn exit_policy(&self) -> Option<crate::vehicle_exit::BunkerExitPolicy> {
+        (!self.passenger_exit_candidates.is_empty()).then(|| {
+            crate::vehicle_exit::BunkerExitPolicy {
+                transform: crate::vehicle_exit::BunkerTransform {
+                    position: self.position,
+                    rotation_xyzw: self.rotation,
+                },
+                candidates: self.passenger_exit_candidates.clone(),
+            }
+        })
+    }
     fn validate(&self) -> Result<(), &'static str> {
         let norm = self
             .rotation
@@ -176,7 +250,30 @@ impl Creation {
         {
             return Err("invalid_ground_vehicle_creation");
         }
-        self.position.validate()
+        if self
+            .maximum_mount_distance_m
+            .is_some_and(|distance| !distance.is_finite() || distance <= 0.)
+            || self.maximum_mount_position_age_ms == Some(0)
+            || self.maximum_mount_distance_m.is_some()
+                != self.maximum_mount_position_age_ms.is_some()
+        {
+            return Err("invalid_ground_mount_policy");
+        }
+        let seats: BTreeSet<_> = self.passenger_seats.iter().copied().collect();
+        if seats.len() != self.passenger_seats.len()
+            || seats.iter().any(|seat| *seat >= 16)
+            || self
+                .maximum_occupancy
+                .is_some_and(|count| count == 0 || usize::from(count) > seats.len())
+            || (self.passenger_seats.is_empty() != self.maximum_occupancy.is_none())
+        {
+            return Err("invalid_ground_vehicle_passenger_policy");
+        }
+        self.position.validate()?;
+        if let Some(policy) = self.exit_policy() {
+            policy.validate()?;
+        }
+        Ok(())
     }
     fn encode_fields(&self, bits: &mut BitWriter) -> Result<(), &'static str> {
         self.validate()?;

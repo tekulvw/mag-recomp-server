@@ -569,7 +569,7 @@ impl<W: Write> Engine<W> {
             let mut next = bunker.clone();
             let mut amount = amount;
             if repair {
-                if active.mounted_seat.is_some() || bunker.team != active.team() {
+                if active.is_mounted() || bunker.team != active.team() {
                     return Err("repair_requires_allied_onfoot_actor");
                 }
                 if now
@@ -643,7 +643,10 @@ impl<W: Write> Engine<W> {
                 if bunker.health.hp() == 0.0 {
                     return Err("bunker_destroyed");
                 }
-                if active.mounted_seat.is_some_and(|seat| seat != 0) && !pending {
+                if (active.ground_seat.is_some()
+                    || active.mounted_seat.is_some_and(|seat| seat != 0))
+                    && !pending
+                {
                     return Err("bunker_hit_requires_armed_actor");
                 }
                 if bunker.health.conditions() & 4 != 0 && !pending && !critical {

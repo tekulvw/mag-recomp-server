@@ -17,7 +17,7 @@ pub(super) fn plan<W: Write>(
     } else if !healer.entered_game
         || !healer.ready_for_updates
         || !healer.life.is_alive()
-        || healer.mounted_seat.is_some()
+        || healer.is_mounted()
     {
         Some("revive_requires_living_healer")
     } else if !ctx.history_available {

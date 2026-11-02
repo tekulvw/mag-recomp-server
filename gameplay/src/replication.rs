@@ -685,7 +685,7 @@ pub struct CharacterState {
     pub user_data: [u8; 3],
 }
 impl CharacterState {
-    fn encode(&self, bits: &mut BitWriter) -> Result<(), &'static str> {
+    pub(crate) fn encode(&self, bits: &mut BitWriter) -> Result<(), &'static str> {
         if self.state >= 64 || self.stance >= 4 {
             return Err("character_state_out_of_range");
         }

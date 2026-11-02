@@ -21,18 +21,21 @@ including active vehicle-user and hospital points. Raw unsupported kind,
 category, user class, activation and squad links remain in the source metadata.
 
 The local profile uses maximum64/team32/squad4. Authored maximum/minimum counts
-are provenance and do not establish supported capacity. Native pool identities
-remain unverified. Bunkers and objectives are disabled in this foundation.
+are provenance and do not establish supported capacity. This first projector
+leaves native pool identities unverified. Bunkers and objectives are disabled in
+this foundation.
 
 Some authored squad insertion points require APCs. Their unique Basic alternate
 is recorded as a temporary local default fallback. **Vehicle spawning is a
 required Acquisition milestone; these fallbacks do not complete entry support.**
-Vehicle creation, replication and vehicle-backed insertion need their own typed
-implementation and correctness evidence. The [retail static creation path](ground-vehicles.md)
-now supports explicit qualified external bindings and initial/late-join/replay
-delivery. Arulkum native pool identity and APC-backed insertion remain unresolved;
-the current unverified profile cannot enable vehicle creation. A spawn record is
-not a vehicle entity.
+The separate [APC insertion projector and runtime](apc-insertion.md) now replace
+those fallbacks when supplied with qualified initial-load bindings, original
+vehicle properties and grounded exit evidence. It remaps every point and squad
+reference, preserves other unsupported points, restores the four authored APC
+insertion defaults and binds four separate type1 vehicles. Valor, Raven and SVER
+can each attack either opposing defender-owned Acquisition map. Source-qualified
+initial/reset pool order does not establish current live pool occupancy. A spawn
+record and a vehicle entity retain separate identities.
 
 Retail mode1 now has matching source admission policy in Horizon and Rust, within
 the existing64-player maximum. Explicit operator configuration is required; no
@@ -45,6 +48,7 @@ squad's configured point, exact packet replay and late-join roster preservation.
 The existing generic squad addressing and spawn path already preserve both
 platoons; no native field layout is inferred from those checks.
 
-This source foundation does not establish native playability or fulfill required
-vehicle spawning. Keep source integration, native review and the maintainer's
-manual release action distinct.
+Static vehicle creation and passenger insertion have source and synthetic-check
+coverage. Native playability, escort movement/arrival/destruction, objectives and
+results remain separate acceptance work. Keep source integration, native review
+and the maintainer's manual release action distinct.
