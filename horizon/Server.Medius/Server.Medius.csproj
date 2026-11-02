@@ -27,4 +27,9 @@
     <ProjectReference Include="..\Server.Plugins\Server.Plugins.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Release Please creates the component changelog on its first component release. -->
+    <EmbeddedResource Include="../CHANGELOG.md" Condition="Exists('../CHANGELOG.md')" LogicalName="MagServerNews.MediusChangelog" />
+  </ItemGroup>
+
 </Project>

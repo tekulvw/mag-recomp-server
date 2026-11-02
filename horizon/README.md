@@ -81,3 +81,34 @@ or replace compatible certificate templates.
 ## Licensing
 
 The upstream Horizon MIT license is retained in `LICENSE`. The vendored HighResolutionTimer license is retained in `HighResolutionTimer/LICENSE`. Package dependencies retain their respective licenses. These licenses cover the distributed code; they do not grant rights to game data or third-party runtime material.
+
+## Bundled in-game NEWS
+
+MAPS sends the latest release section from each deployed component's changelog
+as plain ASCII NEWS, preserving the separate empty EULA response. Medius embeds
+`horizon/CHANGELOG.md` when that component changelog exists; Release Please
+creates it on the first Medius component release. The legacy root changelog is
+intentionally excluded because it mixes server and chart history.
+
+The gameplay image packages its own `CHANGELOG.md` at
+`/usr/share/mag-recomp-server/gameplay-CHANGELOG.md`. The Helm chart copies this
+file from the **selected gameplay image** into a read-only Medius/MAPS volume.
+Changing the gameplay image tag or digest also rolls Medius/MAPS to refresh
+that snapshot, even if the Medius image is unchanged. Use immutable version
+tags or digests for reproducible image selection. An older gameplay image
+without the file contributes no gameplay notes and remains deployable.
+
+For a deployment outside Helm, copy the changelog from the actual selected
+worker image and set `MAG_GAMEPLAY_NEWS_PATH` to its absolute, read-only file
+path before starting Medius/MAPS. Without this setting, only embedded Medius
+notes are available. No notes are fetched from GitHub at runtime; notes are
+loaded once per process. The NEWS timestamp comes from the newest included
+release date, so rebuilding or deploying a chart alone does not announce a
+new server update. If neither component has notes, NEWS shows an availability
+message with timestamp zero. English is the currently supported NEWS language.
+
+NEWS removes Markdown links and commit/issue suffixes, normalizes supported
+ASCII text, and bounds the combined content to the codec's 4096-byte string
+limit, retaining both component headings when either release is long. These
+are source and synthetic wire checks; real-client display and refresh behavior
+still require an owned in-game check.
