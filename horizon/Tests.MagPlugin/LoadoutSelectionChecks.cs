@@ -19,7 +19,7 @@ internal static class LoadoutSelectionChecks
     };
     static JsonObject Reply(JsonArray actions = null) => new() {
         ["v"] = 2, ["request_id"] = "request", ["ok"] = true, ["error"] = null, ["messages"] = new JsonArray(),
-        ["capabilities"] = new JsonArray("committed_loadout_selection_v1"), ["loadout_selections"] = actions ?? new JsonArray(Action())
+        ["capabilities"] = new JsonArray("committed_loadout_selection_v1", "active_loadout_refresh_v1"), ["loadout_selections"] = actions ?? new JsonArray(Action())
     };
     static bool Parse(JsonObject reply, out GameplayBridgeResponse response) => GameplayBridgeResponseCodec.TryParse(Encoding.UTF8.GetBytes(reply.ToJsonString()), "request", true, out response);
     public static void Run()

@@ -44,6 +44,9 @@ mod world_tick;
 pub use resources::EngineResources;
 pub mod healing;
 pub mod item_catalog;
+mod loadout_refresh;
+#[cfg(test)]
+mod loadout_refresh_tests;
 pub mod loadout_selection;
 #[cfg(test)]
 mod loadout_selection_tests;
@@ -249,6 +252,17 @@ pub enum Request {
         plugin_id: Option<u8>,
         payload_hex: String,
     },
+    RefreshLoadouts {
+        v: u8,
+        request_id: String,
+        reservation_id: String,
+        world_id: u32,
+        player_id: u16,
+        account_id: String,
+        character_id: u32,
+        revision: u64,
+        loadouts: Box<loadouts::SavedLoadouts>,
+    },
     LoadoutSelectionSettled {
         v: u8,
         request_id: String,
@@ -356,6 +370,7 @@ impl Request {
             | Self::Event { v, request_id, .. }
             | Self::ProgressionCommitted { v, request_id, .. }
             | Self::LoadoutSelectionSettled { v, request_id, .. }
+            | Self::RefreshLoadouts { v, request_id, .. }
             | Self::DevelopmentSpawnTarget { v, request_id, .. }
             | Self::DevelopmentMoveBot { v, request_id, .. }
             | Self::DevelopmentDamage { v, request_id, .. }
@@ -554,6 +569,26 @@ impl Request {
                     return Err("invalid_reservation_id");
                 }
                 validate_payload_hex(payload_hex)?;
+            }
+            Request::RefreshLoadouts {
+                reservation_id,
+                account_id,
+                character_id,
+                revision,
+                loadouts,
+                ..
+            } => {
+                if !identifier(reservation_id, 16)
+                    || !identifier(account_id, 1)
+                    || account_id.len() > 32
+                    || *character_id == 0
+                    || *revision == 0
+                {
+                    return Err("invalid_refresh_loadouts_identity");
+                }
+                if loadouts.selected_index >= 5 {
+                    return Err("invalid_saved_inventory_index");
+                }
             }
             Request::LoadoutSelectionSettled {
                 reservation_id,
@@ -858,6 +893,7 @@ struct Active {
     spawned_loadout: Option<replication::CharacterLoadout>,
     selected_loadout: Option<protocol::SelectLoadout>,
     loadout_selection_revision: u64,
+    last_loadout_refresh: Option<loadout_refresh::AppliedRefresh>,
     pending_loadout_selection: Option<loadout_selection::CommittedLoadoutSelection>,
     selected_spawn: Option<protocol::CharacterSpawnSelection>,
     squad_spawn: u16,
@@ -1232,7 +1268,10 @@ impl<W: Write> Engine<W> {
                 rewards: self.pending_reward_batch(),
                 loadout_selections: self.pending_loadout_selections(),
                 capabilities: if hello {
-                    vec![loadout_selection::CAPABILITY.into()]
+                    vec![
+                        loadout_selection::CAPABILITY.into(),
+                        loadout_refresh::CAPABILITY.into(),
+                    ]
                 } else {
                     Vec::new()
                 },
@@ -1319,7 +1358,9 @@ impl<W: Write> Engine<W> {
                     wall_secs,
                 )
                 .map(|_| Vec::new()),
-            Request::ProgressionCommitted { .. } | Request::LoadoutSelectionSettled { .. } => {
+            Request::ProgressionCommitted { .. }
+            | Request::LoadoutSelectionSettled { .. }
+            | Request::RefreshLoadouts { .. } => {
                 unreachable!("handled before actor selection")
             }
             Request::ConfigureMatch {
@@ -1524,6 +1565,7 @@ impl<W: Write> Engine<W> {
                     spawned_loadout: None,
                     selected_loadout: None,
                     loadout_selection_revision: 0,
+                    last_loadout_refresh: None,
                     pending_loadout_selection: None,
                     selected_spawn: None,
                     squad_spawn: shared_spawn,

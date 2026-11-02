@@ -18,6 +18,8 @@ namespace Server.Medius
         public uint CharacterId { get; private set; }
         public LocalCharacterStore CharacterStore { get; set; }
         public string StorageStatus { get; private set; } = "inactive";
+        public Action<string, uint> LoadoutCommitted { get; set; }
+        public string LoadoutRefreshStatus { get; private set; } = "inactive";
         public string SessionKey { get; private set; }
         private MagLoginRegistry _registry;
         private string _channelId;
@@ -100,6 +102,7 @@ namespace Server.Medius
             }
             if (message is MagLoadoutUpdateRequest update && State == SessionState.Ready)
             {
+                LoadoutRefreshStatus = "not-scheduled";
                 bool success = false;
                 try
                 {
@@ -112,6 +115,13 @@ namespace Server.Medius
                 }
                 catch (Exception e) when (e is IOException || e is InvalidDataException || e is UnauthorizedAccessException)
                 { StorageStatus = "loadout-storage-error-no-success"; }
+                if (success && LoadoutCommitted != null)
+                {
+                    // This notification follows the durable save. A refresh failure
+                    // must never change its native success response or replay the save.
+                    try { LoadoutCommitted(AuthenticatedAccount, CharacterId); LoadoutRefreshStatus = "notified"; }
+                    catch (Exception) { LoadoutRefreshStatus = "notification-failed-after-commit"; }
+                }
                 ObserveActivity(now);
                 return new[] { MagMessageCodec.ToPluginMessageForApplication(new MagLoadoutUpdateResponse { Success = success }, ApplicationId) };
             }

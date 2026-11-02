@@ -68,14 +68,39 @@ preference save preserves unrelated accounts, kits, progression, skills,
 leadership, reward history and previously accepted extension fields. Strict
 leadership schema rejection remains strict.
 
+## Editing a saved kit while admitted
+
+A successful MLS Armory save is durable before Horizon schedules any gameplay
+refresh. The notification contains the authenticated account and character,
+rather than the client's proposed inventory bytes. Horizon projects the latest
+canonical record through the configured catalog for the currently owned
+reservation. Without an active reservation, the next admission already reads
+the saved record.
+
+The typed `refresh_loadouts` bridge operation carries the exact reservation,
+world, player, persistent account and character identities, a nonzero revision,
+and the projected saved rows. Gameplay validates those identities and the
+configured item/faction bindings before recording and committing the refresh.
+Only saved inventories and their update IDs change. The native desired index,
+pending preference, already equipped kit, current inventory handle and observed
+ammunition remain intact. A subsequent physical spawn equips from the updated
+saved rows; a late joiner still sees the current life's retained kit.
+
+Refresh retries repeat a bounded, revisioned snapshot, never the native Armory
+save. A lost response may conceal a committed refresh, so an identical revision
+and payload is idempotent. Older revisions and conflicting reuse of a revision
+cannot rewind newer rows. A new successful save supersedes older pending work;
+release cancels that reservation's work and requeue uses a fresh owner identity.
+Failed storage writes never schedule refreshes. A refresh failure does not turn
+a completed durable save into a failed save response.
+
 ## Component compatibility and verification
 
-Bridge version2 remains in use. Hello advertises the explicit capability
-`committed_loadout_selection_v1`; Horizon requires it before configuring or
-starting the world and before queue admission. A new Horizon with an older
-sender refuses startup without this capability. An older strict Horizon decoder
-refuses a new sender's additional Hello capability field. Use matching component
-builds; do not mix them while admitting players.
+Bridge version2 remains in use. Hello advertises the explicit capabilities
+`committed_loadout_selection_v1` and `active_loadout_refresh_v1`; Horizon requires
+both before configuring or starting the world and before queue admission.
+Startup fails clearly if either required capability is missing. Use matching
+component builds; do not mix them while admitting players.
 
 Synthetic Rust tests cover native low-bit semantics, item/owner validation,
 commit failures, coalescing, revisions, acknowledgements, reply recovery and

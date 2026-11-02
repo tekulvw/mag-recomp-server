@@ -42,6 +42,9 @@ namespace Server.Medius
         readonly SemaphoreSlim _rewardSettlement = new SemaphoreSlim(1, 1);
         readonly SemaphoreSlim _loadoutSelectionSettlement = new SemaphoreSlim(1, 1);
         readonly GameplayLoadoutSelectionSettlement _loadoutSelections;
+        readonly GameplayLoadoutRefreshQueue _loadoutRefreshes;
+        readonly CancellationTokenSource _loadoutRefreshCancellation = new CancellationTokenSource();
+        Task _loadoutRefreshWorker = Task.CompletedTask;
         bool _selectionRetry;
         DateTime _nextSelectionPoll;
         bool _rewardRetry;
@@ -69,7 +72,10 @@ namespace Server.Medius
             if (configuredFactions.Length == 0 || configuredFactions.Any(faction => faction < 0 || faction > 2) || configuredFactions.Distinct().Count() != configuredFactions.Length)
                 throw new ArgumentException("MagAllowedFactions requires distinct faction values0..2, or null for legacy availability.");
             _allowedFactions = new HashSet<byte>(configuredFactions.Select(faction => (byte)faction));
-            _bridge = bridge; _store = store; _loadoutSelections = new GameplayLoadoutSelectionSettlement(_gate); _worker = RunEvents();
+            _bridge = bridge; _store = store; _loadoutSelections = new GameplayLoadoutSelectionSettlement(_gate);
+            _loadoutRefreshes = new GameplayLoadoutRefreshQueue(_gate, (target, revision, reason) =>
+                Logger.Warn($"Active Armory refresh dropped: player={target.PlayerId} revision={revision} reason={reason}"));
+            _worker = RunEvents();
         }
         static string Id() => Guid.NewGuid().ToString("N");
         public async Task StartAsync()
@@ -91,8 +97,8 @@ namespace Server.Medius
         }
         public static void RequireLoadoutSelectionCapability(GameplayBridgeResponse hello)
         {
-            if (hello?.Ok != true || !hello.SupportsCommittedLoadoutSelections)
-                throw new IOException("Gameplay service lacks committed_loadout_selection_v1; admission remains disabled.");
+            if (hello?.Ok != true || !hello.SupportsCommittedLoadoutSelections || !hello.SupportsActiveLoadoutRefresh)
+                throw new IOException("Gameplay service lacks committed_loadout_selection_v1 or active_loadout_refresh_v1; admission remains disabled.");
         }
         public MagServerStatusResponse Status(int transactionId)
         {
@@ -166,6 +172,9 @@ namespace Server.Medius
                 bool admitted = admittedReply?.Ok == true;
                 if (!admitted || !IsReady) { await ReleaseAsync(reservation); return failure; }
                 lock (_gate) { if (!Current(reservation) || reservation.Invalidated || !_worldStreamHealthy) { reservation.Invalidated = true; reservation.ReleaseReason = "world_stream_gap"; return failure; } reservation.Accepted = true; }
+                // Reconcile once after admission, closing saves committed between
+                // the initial store read and registration/reserve acknowledgement.
+                ArmoryLoadoutCommitted(reservation.Account, reservation.CharacterId);
                 var response = JoinResponse(request.TransactionId, 0);
                 response.MediusWorldUid = (uint)World.WorldId; response.ConnectionType = 3; response.AddressType = 1;
                 var network = MagNetworkSettings.FromEnvironment();
@@ -304,6 +313,78 @@ namespace Server.Medius
                 await SettleRewardsAsync(reply);
             }
         }
+        bool IsCurrentRefreshOwner(GameplayLoadoutRefreshTarget target)
+        {
+            return !_disposed && _ready && _worldStreamHealthy && World != null &&
+                _reservations.TryGetValue(target.ReservationId, out var owner) && Current(owner) && owner.Accepted && !owner.Invalidated &&
+                owner.Deadline > DateTime.UtcNow && owner.Client != null && !owner.Client.IsDestroyed && !owner.Client.Disconnected &&
+                target.MatchesOwner(owner.Id, (uint)World.WorldId, (ushort)owner.Client.DmeId, owner.Account, owner.CharacterId);
+        }
+        GameplayAdmissionLoadouts ProjectCurrentLoadouts(GameplayLoadoutRefreshTarget target)
+        {
+            var character = _store.ReadForAccount(target.AccountId).SingleOrDefault(row => row.Id == target.CharacterId);
+            if (character == null || _store.LoadoutCatalog == null) throw new InvalidDataException("Current Armory catalog or character unavailable.");
+            return GameplayLoadoutAdmission.Project(character, character.ToRecord(), _store.LoadoutCatalog);
+        }
+        public void ArmoryLoadoutCommitted(string account, uint characterId)
+        {
+            lock (_gate)
+            {
+                if (_disposed || World == null) return;
+                var owner = _reservations.Values.FirstOrDefault(row => Current(row) &&
+                    string.Equals(row.Account, account, StringComparison.Ordinal) && row.CharacterId == characterId);
+                if (owner == null) return; // The next admission reads the latest durable record.
+                var target = new GameplayLoadoutRefreshTarget(owner.Id, (uint)World.WorldId, (ushort)owner.Client.DmeId, owner.Account, owner.CharacterId);
+                _loadoutRefreshes.Schedule(target, DateTime.UtcNow, IsCurrentRefreshOwner, ProjectCurrentLoadouts);
+                StartLoadoutRefreshPump();
+            }
+        }
+        void StartLoadoutRefreshPump()
+        {
+            lock (_gate)
+            {
+                if (_disposed || !_loadoutRefreshWorker.IsCompleted || !_loadoutRefreshes.HasDue(DateTime.UtcNow)) return;
+                _loadoutRefreshWorker = Task.Run(PumpLoadoutRefreshesAsync);
+            }
+        }
+        async Task PumpLoadoutRefreshesAsync()
+        {
+            // Keep refresh RPCs off the game tick. Each RPC has the bridge's two
+            // second deadline; cancellation stops before another request starts.
+            for (int batch = 0; batch < 8 && !_loadoutRefreshCancellation.IsCancellationRequested; batch++)
+            {
+                GameplayLoadoutRefreshRequest request = null;
+                try
+                {
+                    request = _loadoutRefreshes.TakeDue(DateTime.UtcNow, IsCurrentRefreshOwner, ProjectCurrentLoadouts);
+                    if (request == null) return;
+                    // Release may win after this check. Rust also checks the exact
+                    // reservation and revision, so an already-sent old request cannot
+                    // modify the actor that later occupies its player slot.
+                    if (!_loadoutRefreshes.StillCurrent(request, IsCurrentRefreshOwner))
+                    { _loadoutRefreshes.Complete(request, DateTime.UtcNow, false, false, IsCurrentRefreshOwner); continue; }
+                    var reply = await _bridge.RequestControlAsync(request);
+                    lock (_gate)
+                    {
+                        if (_disposed || _loadoutRefreshCancellation.IsCancellationRequested) return;
+                        bool routed = Route(reply);
+                        _loadoutRefreshes.Complete(request, DateTime.UtcNow, routed, reply?.IsTransientFailure == true, IsCurrentRefreshOwner);
+                        if (routed)
+                        {
+                            // Use the normal Hello/outbox settlement paths rather
+                            // than holding this bounded pump on other receipt RPCs.
+                            if (reply.LoadoutSelections.Count > 0) _selectionRetry = true;
+                            if (reply.Rewards.Count > 0) _rewardRetry = true;
+                        }
+                    }
+                }
+                catch (Exception error)
+                {
+                    Logger.Error($"Active Armory refresh failed: player={request?.PlayerId} revision={request?.Revision} error={error.GetType().Name}");
+                    if (request != null) _loadoutRefreshes.Complete(request, DateTime.UtcNow, false, false, IsCurrentRefreshOwner);
+                }
+            }
+        }
         bool IsCurrentLoadoutOwner(GameplayLoadoutSelection action)
         {
             return !_disposed && World != null && _reservations.TryGetValue(action.ReservationId, out var owner) && Current(owner) &&
@@ -402,6 +483,7 @@ namespace Server.Medius
         public async Task TickAsync()
         {
             if (_disposed || !_ready) return;
+            StartLoadoutRefreshPump();
             bool poll; lock (_gate) {
                 poll = (_rewardRetry && DateTime.UtcNow >= _nextRewardPoll) || (_selectionRetry && DateTime.UtcNow >= _nextSelectionPoll);
                 if (poll) { _nextRewardPoll = DateTime.UtcNow.AddSeconds(1); _nextSelectionPoll = DateTime.UtcNow.AddSeconds(1); }
@@ -425,7 +507,7 @@ namespace Server.Medius
         async Task ReleaseAsync(Reservation r)
         {
             PendingRelease pending;
-            lock (_gate) { if (!Current(r)) return; r.Invalidated = true; _reservations.Remove(r.Id); _loadoutSelections.Forget(r.Id); pending = new PendingRelease { Reservation = r, RequestId = Id() }; _pendingReleases.Add(r.Id, pending); }
+            lock (_gate) { if (!Current(r)) return; r.Invalidated = true; _reservations.Remove(r.Id); _loadoutSelections.Forget(r.Id); _loadoutRefreshes.Forget(r.Id); pending = new PendingRelease { Reservation = r, RequestId = Id() }; _pendingReleases.Add(r.Id, pending); }
             Logger.Warn($"Gameplay reservation released: player={r.Client.DmeId} reason={r.ReleaseReason ?? (r.Deadline <= DateTime.UtcNow ? "application_inactivity" : "transport_closed")}");
             await r.Client.Stop(); World.Manager.RemoveClient(r.Client); World.Clients.TryRemove(r.Client.DmeId, out _); World.UnregisterClientIndex(r.Client.DmeId);
             await RetryReleaseAsync(pending);
@@ -458,6 +540,10 @@ namespace Server.Medius
         public async ValueTask DisposeAsync()
         {
             lock (_gate) { if (_disposed) return; _disposed = true; _ready = false; foreach (var r in _reservations.Values) r.Invalidated = true; }
+            _loadoutRefreshCancellation.Cancel();
+            Task refresh; lock (_gate) refresh = _loadoutRefreshWorker;
+            try { await refresh.WaitAsync(TimeSpan.FromSeconds(3)); }
+            catch (TimeoutException) { Logger.Error("Active Armory refresh disposal exceeded its bounded RPC deadline."); }
             _worldStreamCancellation.Cancel(); await _worldStreamWorker;
             _events.Writer.TryComplete(); await _worker;
             Reservation[] release; lock (_gate) release = _reservations.Values.ToArray(); foreach (var r in release) await ReleaseAsync(r);
