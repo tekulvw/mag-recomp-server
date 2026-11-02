@@ -217,6 +217,7 @@ pub(super) fn hit<W: Write>(
                 }
                 if damage.health_quarter_points == 0
                     && let Some(bot) = registry_target
+                    && active.team() != bot.team
                     && let Some(recipient) = progression::RewardRecipient::from_active(active)
                 {
                     plan.combat

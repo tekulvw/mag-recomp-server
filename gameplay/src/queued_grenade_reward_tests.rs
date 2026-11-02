@@ -85,6 +85,90 @@ fn update(engine: &mut Engine<Vec<u8>>, now_ms: u64) -> Result<Vec<OutboundMessa
     .unwrap();
     dispatch(engine, &wire, now_ms)
 }
+
+fn firearm_fixture(friendly: bool) -> (Engine<Vec<u8>>, u16) {
+    let (mut engine, target) = fixture();
+    // Reuse the independent synthetic rifle/armor and admitted equipped snapshot.
+    let mut armed = crate::human_kill_reward_tests::fixture();
+    let equipped = armed.active.take().unwrap();
+    engine.item_catalog = armed.item_catalog;
+    let source = engine.active.as_mut().unwrap();
+    source.current_inventory_handle = equipped.current_inventory_handle;
+    source.spawned_loadout = equipped.spawned_loadout;
+    source.observed_primary = equipped.observed_primary;
+    source.primary_equipped = true;
+    let kit = source.equipped_loadout().unwrap();
+    let team = source.team();
+    let faction = source.reservation.character.faction;
+    let bot = engine.bot_registry.bots.get_mut(&target).unwrap();
+    bot.target.squad = replication::SquadAddress::from_index(
+        u16::from(if friendly { team } else { 1 - team }) * 16,
+    )
+    .unwrap();
+    bot.target.faction = faction;
+    bot.target.loadout = kit;
+    bot.health = 120;
+    bot.damage.health_quarter_points = 120;
+    (engine, target)
+}
+
+fn native_firearm_hit(engine: &mut Engine<Vec<u8>>, target: u16) {
+    let wire = crate::human_kill_reward_tests::native_hit(0x0380_0000 | u32::from(target), 17);
+    dispatch(engine, &wire, 1000).unwrap();
+    assert_eq!(engine.bot_registry.bots[&target].health, 0);
+    // Friendly classification must not suppress the accepted native death notice.
+    let source = engine.active.as_ref().unwrap();
+    assert_eq!(source.pending_notifications.len(), 1);
+    assert_eq!(
+        engine.bot_registry.bots[&target].damage.last_attacker,
+        0x0380_0000 | u32::from(source.reservation.player)
+    );
+}
+
+#[test]
+fn friendly_native_hit_records_bot_friendly_kill_without_enemy_xp() {
+    let (mut engine, target) = firearm_fixture(true);
+    assert_eq!(
+        engine.bot_combat_snapshots()[0].team,
+        engine.active.as_ref().unwrap().team()
+    );
+    native_firearm_hit(&mut engine, target);
+    let source = engine.active.as_ref().unwrap();
+    assert_eq!(source.reward_statistics.get(&14), Some(&1));
+    assert_eq!(source.reward_statistics.get(&10), None);
+    assert!(engine.pending_reward_batch().is_empty());
+}
+
+#[test]
+fn opposing_same_faction_native_hit_records_one_shared_bot_life_reward() {
+    let (mut engine, target) = firearm_fixture(false);
+    let bot = &engine.bot_registry.bots[&target];
+    let source = engine.active.as_ref().unwrap();
+    assert_ne!(bot.target.squad.team(), source.team());
+    assert_eq!(bot.target.faction, source.reservation.character.faction);
+    let generation = bot.target.runtime.unwrap().generation;
+    let expected = progression::RewardRecipient::from_active(source)
+        .unwrap()
+        .bot_killed(target, generation);
+    native_firearm_hit(&mut engine, target);
+    let source = engine.active.as_ref().unwrap();
+    assert_eq!(source.reward_statistics.get(&10), Some(&1));
+    assert_eq!(source.reward_statistics.get(&14), None);
+    assert_eq!(engine.pending_reward_batch(), vec![expected.clone()]);
+    // A repeated hit against the dead life cannot add a reward or notification.
+    let wire = crate::human_kill_reward_tests::native_hit(0x0380_0000 | u32::from(target), 18);
+    dispatch(&mut engine, &wire, 1001).unwrap();
+    assert_eq!(engine.pending_reward_batch(), vec![expected]);
+    assert_eq!(
+        engine.active.as_ref().unwrap().reward_statistics.get(&10),
+        Some(&1)
+    );
+    assert_eq!(
+        engine.active.as_ref().unwrap().pending_notifications.len(),
+        1
+    );
+}
+
 #[test]
 fn hostile_queued_grenade_records_the_real_human_kill_reward_once_per_bot_life() {
     let (mut engine, target) = fixture();

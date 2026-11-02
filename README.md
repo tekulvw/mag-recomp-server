@@ -72,6 +72,8 @@ The gameplay engine and Horizon exchange authenticated gameplay state through a
 JSONL bridge. Their native protocol codecs remain distinct from that bridge.
 Existing implementation covers admission, replication, loadouts, damage,
 progression, objectives, bot behavior, and collision/navigation processing.
+[Combat reward relationships](docs/combat-reward-relationships.md) distinguish
+actual match sides even when opposing characters share a faction.
 Optional [ready-human startup quorum](docs/startup-quorum.md) keeps a configured
 match waiting for enough humans on each side.
 Optional [human incapacitation and resuscitation](docs/incapacitation.md) distinguishes
