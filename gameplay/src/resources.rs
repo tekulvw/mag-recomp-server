@@ -191,6 +191,7 @@ impl<W: Write> Engine<W> {
             collision_world: None,
             navmesh_world: None,
             spawn_catalog: Some(resources.spawn_catalog),
+            ground_vehicles: None,
             parachute_waves: Default::default(),
             objective_catalog: None,
             objective_world: None,

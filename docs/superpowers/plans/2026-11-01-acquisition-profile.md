@@ -63,7 +63,7 @@ Existing SquadAddress indices0..31 and configured wave policy remain authoritati
 - [x] Write critical mode/capacity and second-platoon lifecycle tests, run red.
 - [x] Fix only demonstrated admission/replication assumptions.
 - [x] Run affected Rust/Horizon suites, formatting, Clippy and public guard.
-- [ ] Integrate after checks and retain exact source/private evidence identities.
+- [x] Integrate after checks (PR35, e311237); private evidence checkpoint follows.
 
 ### Task3: Required vehicle spawning
 
@@ -74,3 +74,18 @@ Existing SquadAddress indices0..31 and configured wave policy remain authoritati
   cleanup, observe red, then implement the supported typed paths.
 - [ ] Integrate after focused checks; keep native correctness acceptance separate
   and do not claim entry complete with only Basic-alternate fallbacks.
+
+#### Vehicle checkpoint
+
+Retail minimal creation fields and codecs are now source-bound. Implemented
+`gameplay/src/ground_vehicles.rs`, with synthetic tests in
+`ground_vehicle_tests.rs` and `ground_vehicle_runtime_tests.rs`:
+`Catalog::load/from_json`, `Engine::with_ground_vehicles` and retail type1
+`encode` support external qualified bindings,16-object packet batches,
+initial/late-join snapshots, exact NAK replay and record-before-commit behavior.
+CLI `--ground-vehicles` is optional and requires explicit retail configuration.
+
+Arulkum catalog-to-native spawn identity and world-transform bindings are still
+unresolved. Keep its vehicle inputs unavailable. Retail reverse seat/occupancy
+and raw-spawn plus one placement-Y-offset paths have private original evidence;
+mounted player insertion and general vehicle controls are not implemented here.

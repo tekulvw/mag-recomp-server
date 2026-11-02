@@ -959,5 +959,7 @@ fn parachute_without_resolved_inventory_keeps_the_pending_wave_without_consumpti
 
 #[path = "acquisition_entry_tests.rs"]
 mod acquisition_entry;
+#[path = "ground_vehicle_runtime_tests.rs"]
+mod ground_vehicle_runtime;
 #[path = "startup_quorum_tests.rs"]
 mod startup_quorum;

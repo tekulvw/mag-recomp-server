@@ -28,7 +28,11 @@ Some authored squad insertion points require APCs. Their unique Basic alternate
 is recorded as a temporary local default fallback. **Vehicle spawning is a
 required Acquisition milestone; these fallbacks do not complete entry support.**
 Vehicle creation, replication and vehicle-backed insertion need their own typed
-implementation and correctness evidence. A spawn record is not a vehicle entity.
+implementation and correctness evidence. The [retail static creation path](ground-vehicles.md)
+now supports explicit qualified external bindings and initial/late-join/replay
+delivery. Arulkum native pool identity and APC-backed insertion remain unresolved;
+the current unverified profile cannot enable vehicle creation. A spawn record is
+not a vehicle entity.
 
 Retail mode1 now has matching source admission policy in Horizon and Rust, within
 the existing64-player maximum. Explicit operator configuration is required; no

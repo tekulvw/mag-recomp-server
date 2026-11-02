@@ -1,7 +1,7 @@
 //! Invented two-platoon Acquisition fixtures, independent of native map data.
 use super::*;
 
-fn acquisition() -> Engine<Vec<u8>> {
+pub(super) fn acquisition() -> Engine<Vec<u8>> {
     let mut engine = engine();
     let mut value = spawn_json();
     value["source"] = json!("SYNTHETIC Acquisition entry");
