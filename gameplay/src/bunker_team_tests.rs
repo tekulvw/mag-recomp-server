@@ -29,7 +29,7 @@ fn catalog() -> StructureCatalog {
     })).unwrap()
 }
 
-fn fixture(actor_team: u8, bunker_team: u8, same_faction: bool) -> Engine<Vec<u8>> {
+pub(super) fn fixture(actor_team: u8, bunker_team: u8, same_faction: bool) -> Engine<Vec<u8>> {
     let mut engine = engine();
     reserve(&mut engine, 0);
     engine.wire_profile = engine.wire_profiles.profile(20230).unwrap();

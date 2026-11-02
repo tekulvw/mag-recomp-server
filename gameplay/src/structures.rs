@@ -300,6 +300,9 @@ impl BunkerWorld {
         let index = id as u16;
         self.bunkers.contains_key(&index).then_some(index)
     }
+    pub(super) fn canonical_alpha_team(&self) -> Option<u8> {
+        self.bunkers.get(&0).map(|bunker| bunker.team)
+    }
     pub(super) fn creations(&self, sequence: u32, time: u32) -> Vec<DefensiveEmplacementCreation> {
         self.bunkers
             .iter()
@@ -738,3 +741,7 @@ impl<W: Write> Engine<W> {
 #[cfg(test)]
 #[path = "bunker_team_tests.rs"]
 mod bunker_team_tests;
+
+#[cfg(test)]
+#[path = "alpha_mount_team_tests.rs"]
+mod alpha_mount_team_tests;

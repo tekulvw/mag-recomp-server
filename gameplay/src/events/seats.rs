@@ -14,7 +14,12 @@ pub(super) fn mount_seat<W: Write>(
         && active.ready_for_updates
         && active.life.is_alive()
         && active.emplacement_creation.is_some()
-        && active.reservation.character.faction == 0;
+        && ctx
+            .engine
+            .bunker_world
+            .as_ref()
+            .and_then(structures::BunkerWorld::canonical_alpha_team)
+            .is_some_and(|team| team == active.team());
     let valid = request.vehicle_id == 0x0d000000
         && request.character_id == (0x03800000 | u32::from(active.reservation.player))
         && request.seat_id <= 8;
