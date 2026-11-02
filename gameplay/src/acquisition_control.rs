@@ -2,6 +2,7 @@
 //! This module does not execute scripts, apply commands or infer native events.
 use crate::spawn_catalog::SpawnCatalog;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::File,
@@ -120,6 +121,7 @@ struct Group {
 /// checks its joins and bounds rather than independently certifying its semantics.
 pub struct Catalog {
     definition: Definition,
+    fingerprint: String,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -146,7 +148,14 @@ impl Catalog {
         }
         let definition: Definition = serde_json::from_str(text).map_err(io::Error::other)?;
         definition.validate(spawns).map_err(io::Error::other)?;
-        Ok(Self { definition })
+        Ok(Self {
+            definition,
+            fingerprint: format!("{:x}", Sha256::digest(text.as_bytes())),
+        })
+    }
+    /// Exact bytes loaded by this catalog, for durable callback provenance.
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
     }
     pub fn objective_tokens(&self) -> impl Iterator<Item = u32> + '_ {
         self.definition

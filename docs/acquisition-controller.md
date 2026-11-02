@@ -64,3 +64,8 @@ multiple-group ordering, complete observations, source identity, target-family
 validation, external volume targets and parser rejection. Original-derived
 catalogs and native analysis remain private. Live-match review and manual
 release remain separate from checked source integration.
+
+The [atomic callback adapter](acquisition-atomic-callback.md) now supplies isolated
+prepare/record/commit, replay protection and native-bound score/damage request
+primitives. It requires an explicit complete effect backend; it does not enable
+the initial-load profiles as interactive matches.
