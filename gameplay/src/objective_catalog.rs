@@ -12,16 +12,33 @@ const MAX_BYTES: usize = 65_536;
 #[serde(deny_unknown_fields)]
 pub struct ObjectiveSource {
     pub authored_catalog_sha256: String,
+    /// Legacy field name: identifies token/slot evidence under capture_qualification.
+    /// A native_initial_load receipt is source evidence, never a claimed capture.
     pub binding_capture_sha256: String,
     pub startup_proof_sha256: String,
     pub source_image_sha256: String,
     pub capture_qualification: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_load_scope: Option<String>,
     #[serde(default)]
     pub rules_catalog_sha256: Option<String>,
     #[serde(default)]
     pub game_rules_sha256: Option<String>,
     #[serde(default)]
     pub game_rules_json_pointer: Option<String>,
+}
+impl ObjectiveSource {
+    fn valid_scope(&self, game_type: i8) -> bool {
+        match self.capture_qualification.as_str() {
+            "bounded_concurrent_token_slot_capture" => self.initial_load_scope.is_none(),
+            "native_initial_load" => {
+                game_type == 1
+                    && self.initial_load_scope.as_deref()
+                        == Some("pre_mission_start_before_dynamic_creation")
+            }
+            _ => false,
+        }
+    }
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -173,7 +190,7 @@ impl ObjectiveCatalog {
             || self.format != "mag_retail_objective_catalog"
             || self.application_id != 20231
             || self.protocol != protocol::ProtocolInfo::RETAIL_PROTOCOL
-            || self.game_type != 0
+            || !matches!(self.game_type, 0 | 1)
             || self.entity_family != 12
             || self.network_type != 12
             || self.map_name.is_empty()
@@ -182,7 +199,7 @@ impl ObjectiveCatalog {
                 .map_name
                 .bytes()
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-            || self.source.capture_qualification != "bounded_concurrent_token_slot_capture"
+            || !self.source.valid_scope(self.game_type)
             || [
                 &self.source.authored_catalog_sha256,
                 &self.source.binding_capture_sha256,
@@ -193,6 +210,21 @@ impl ObjectiveCatalog {
             .any(|hash| hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()))
         {
             return Err("invalid_objective_catalog_identity");
+        }
+        // Initial-load network state is not post-script startup or interactive
+        // gameplay. A distinct proof is required before applying those effects.
+        if self.source.capture_qualification == "native_initial_load"
+            && (self.objects.iter().any(|o| {
+                o.initial_state != 0
+                    || o.interaction.is_some()
+                    || o.demolition.is_some()
+                    || o.scoring.is_some()
+                    || o.reward.is_some()
+            }) || self.progression.is_some()
+                || self.score_bleed.is_some()
+                || self.match_rules.is_some())
+        {
+            return Err("initial_objective_load_is_not_gameplay_qualification");
         }
         if self.match_rules.as_ref().is_some_and(|r| {
             r.end_game_delay_ms > 60_000
@@ -218,7 +250,11 @@ impl ObjectiveCatalog {
         {
             return Err("invalid_objective_match_rules");
         }
-        if self.objects.is_empty() || self.objects.len() > 128 || self.squads.len() != 8 {
+        let squads_per_team = if self.game_type == 1 { 8 } else { 4 };
+        if self.objects.is_empty()
+            || self.objects.len() > 128
+            || self.squads.len() != 2 * squads_per_team
+        {
             return Err("invalid_objective_catalog_count");
         }
         let mut tokens = BTreeSet::new();
@@ -334,7 +370,8 @@ impl ObjectiveCatalog {
         }
         let mut squads = BTreeSet::new();
         for squad in &self.squads {
-            if ![0, 1, 2, 3, 16, 17, 18, 19].contains(&squad.squad_index)
+            if squad.squad_index / 16 > 1
+                || usize::from(squad.squad_index % 16) >= squads_per_team
                 || u16::from(squad.team) != squad.squad_index / 16
                 || !squads.insert(squad.squad_index)
                 || squad.authored_objectives.is_empty()
@@ -362,7 +399,12 @@ impl ObjectiveCatalog {
                     })
                 })
                 .map(|authored| authored.object_index);
-            if first_available != Some(squad.initial_objective_index) {
+            let expected_assignment = match first_available {
+                Some(index) => Some(index),
+                None if self.game_type == 1 => Some(u16::MAX),
+                None => None,
+            };
+            if expected_assignment != Some(squad.initial_objective_index) {
                 return Err("invalid_initial_objective_assignment");
             }
         }
