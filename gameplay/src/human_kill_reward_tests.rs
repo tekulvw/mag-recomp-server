@@ -120,7 +120,7 @@ fn kills(engine: &Engine<Vec<u8>>) -> Vec<progression::RewardEvent> {
         .filter(|event| event.kind == progression::RewardKind::EnemyKilled)
         .collect()
 }
-fn native_hit(defender: u32, user_data: u32) -> Vec<u8> {
+pub(crate) fn native_hit(defender: u32, user_data: u32) -> Vec<u8> {
     let mut bytes = 0x020fu16.to_be_bytes().to_vec();
     bytes.extend([0, 0, 3]);
     bytes.extend(user_data.to_be_bytes());
