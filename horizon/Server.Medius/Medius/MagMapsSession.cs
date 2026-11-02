@@ -20,6 +20,9 @@ namespace Server.Medius
         public string AuthenticatedAccount { get; private set; }
         private uint _selectedCharacterId;
         private DateTime _lastActivityUtc;
+        private readonly MagServerNews _news;
+
+        public MagMapsSession(MagServerNews news = null) => _news = news;
 
         public void ObserveActivity(DateTime now)
         {
@@ -82,7 +85,8 @@ namespace Server.Medius
                     State = SessionState.ContentSent;
                     ObserveActivity(now);
                     return Reply(applicationId,
-                        new MagNewsEulaResponse { TransactionId = request.TransactionId, Finished = true, ContentType = MagContentType.News },
+                        new MagNewsEulaResponse { TransactionId = request.TransactionId, Finished = true, ContentType = MagContentType.News,
+                            Content = (_news ?? MagServerNews.Current).Content, Timestamp = (_news ?? MagServerNews.Current).Timestamp },
                         new MagNewsEulaResponse { TransactionId = request.TransactionId, Finished = true, ContentType = MagContentType.Eula });
                 case MagCharacterListRequest request when DevelopmentAuthEnabled && (State == SessionState.ContentSent ||
                     (CharacterStorageEnabled && State == SessionState.CharacterListSent)) &&

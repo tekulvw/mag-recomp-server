@@ -48,6 +48,43 @@ def gameplay_arguments(docs):
 
 
 class ChartTests(unittest.TestCase):
+    def test_news_uses_selected_gameplay_image_and_rolls_with_it(self):
+        def news_contract(overrides=None):
+            docs = render(overrides)
+            deployments = {d['metadata']['name'].rsplit('-', 1)[-1]: d for d in docs if d['kind'] == 'Deployment'}
+            pod = deployments['medius']['spec']['template']
+            spec = pod['spec']
+            self.assertIn('prepare-news', [c['name'] for c in spec['initContainers']], 'deployed gameplay notes are not bundled')
+            copier = next(c for c in spec['initContainers'] if c['name'] == 'prepare-news')
+            worker = deployments['gameplay']['spec']['template']['spec']['containers'][0]
+            self.assertEqual(copier['image'], worker['image'])
+            for container in spec['containers']:
+                env = {e['name']: e.get('value') for e in container['env']}
+                self.assertEqual(env['MAG_GAMEPLAY_NEWS_PATH'], '/news/gameplay-CHANGELOG.md')
+                mount = next(m for m in container['volumeMounts'] if m['name'] == 'news')
+                self.assertTrue(mount['readOnly'])
+            self.assertIn('emptyDir', next(v for v in spec['volumes'] if v['name'] == 'news'))
+            return pod['metadata']['annotations']['checksum/news-image'], copier
+
+        old, copier = news_contract()
+        new, _ = news_contract({'images': {'gameplay': {'tag': '9.8.7'}}})
+        self.assertNotEqual(old, new)
+        digest, _ = news_contract({'images': {'gameplay': {'digest': 'sha256:' + 'a' * 64}}})
+        self.assertNotEqual(old, digest)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'bundled.md'
+            output = root / 'news'
+            output.mkdir()
+            script = copier['args'][0].replace('/usr/share/mag-recomp-server/gameplay-CHANGELOG.md', str(source))
+            script = script.replace('/news', str(output))
+            # Older gameplay images have no bundled notes; no fabricated gameplay NEWS.
+            subprocess.run(copier['command'] + [script], check=True, timeout=3)
+            self.assertEqual(list(output.iterdir()), [])
+            source.write_text('## 9.8.7 (2026-11-02)\n* Synthetic gameplay fix\n')
+            subprocess.run(copier['command'] + [script], check=True, timeout=3)
+            self.assertEqual((output / 'gameplay-CHANGELOG.md').read_text(), source.read_text())
+
     def test_optional_external_bot_names_path(self):
         args = gameplay_arguments(render({'data': {'files': {'botNames': 'operators/bot-names.json'}}}))
         self.assertEqual(args.count('--bot-names'), 1)

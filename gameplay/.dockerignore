@@ -4,6 +4,7 @@
 !build.rs
 !LICENSE
 !Dockerfile
+!CHANGELOG.md
 !src/
 !src/**
 !vendor/

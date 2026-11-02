@@ -20,6 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends libstdc++6 ca-c
 COPY --from=build /src/gameplay/target/release/mag-gameplay /usr/local/bin/mag-gameplay
 COPY --from=build /src/gameplay/target/release/mag-navmesh /usr/local/bin/mag-navmesh
 COPY --from=build /out-licenses/ /usr/share/licenses/mag-recomp-server/
+COPY CHANGELOG.md /usr/share/mag-recomp-server/gameplay-CHANGELOG.md
 USER gameplay
 WORKDIR /home/gameplay
 ENTRYPOINT ["/usr/local/bin/mag-gameplay"]
