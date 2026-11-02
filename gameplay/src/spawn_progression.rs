@@ -4,6 +4,8 @@ use super::*;
 #[cfg(test)]
 #[path = "spawn_progression_tests.rs"]
 mod tests;
+#[cfg(test)]
+pub(super) use tests::{dispatch, engine, ready, reserve};
 
 impl<W: Write> Engine<W> {
     pub(crate) fn advance_forward_spawns(&mut self, now: Duration) -> Result<(), &'static str> {

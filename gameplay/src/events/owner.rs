@@ -287,7 +287,7 @@ fn plan_grenade_blasts<W: Write>(
         && h.client_index == 0
     {
         let mut targets = Vec::new();
-        if let CharacterLife::Alive { generation, .. } = active.life {
+        if let Some((generation, _)) = active.life.damage_health() {
             let position = plan
                 .session
                 .client_position
@@ -305,6 +305,11 @@ fn plan_grenade_blasts<W: Write>(
                 && let Ok(armor) =
                     armor::ArmorProfile::from_loadout_with_catalog(&kit, &ctx.engine.item_catalog)
             {
+                let armor = if matches!(active.life, CharacterLife::Incapacitated { .. }) {
+                    armor.for_incapacitated(ctx.engine.item_catalog.retail_combat()?)?
+                } else {
+                    armor
+                };
                 targets.push(blast_visibility::CharacterBlastTarget {
                     character_id: (0x03800000 | u32::from(active.reservation.player)),
                     life_generation: generation,
@@ -319,8 +324,8 @@ fn plan_grenade_blasts<W: Write>(
             .values()
             .filter(|p| p.ready_for_updates && p.mounted_seat.is_none())
         {
-            if let (CharacterLife::Alive { generation, .. }, Some(sample), Some(handle)) = (
-                peer.life,
+            if let (Some((generation, _)), Some(sample), Some(handle)) = (
+                peer.life.damage_health(),
                 peer.tracking.sample,
                 peer.current_inventory_handle,
             ) && let Some(kit) = peer.reservation.character.replication_loadout(
@@ -328,15 +333,18 @@ fn plan_grenade_blasts<W: Write>(
                 handle.inventory_index,
                 peer.wire_profile,
             ) {
+                let armor =
+                    armor::ArmorProfile::from_loadout_with_catalog(&kit, &ctx.engine.item_catalog)?;
+                let armor = if matches!(peer.life, CharacterLife::Incapacitated { .. }) {
+                    armor.for_incapacitated(ctx.engine.item_catalog.retail_combat()?)?
+                } else {
+                    armor
+                };
                 targets.push(blast_visibility::CharacterBlastTarget {
                     character_id: 0x03800000 | u32::from(peer.reservation.player),
                     life_generation: generation,
                     feet: sample.position,
-                    armor: armor::ArmorProfile::from_loadout_with_catalog(
-                        &kit,
-                        &ctx.engine.item_catalog,
-                    )?
-                    .with_modifiers(&plan.leadership.modifiers(peer)),
+                    armor: armor.with_modifiers(&plan.leadership.modifiers(peer)),
                 });
             }
         }
@@ -762,7 +770,7 @@ fn plan_update_reply<W: Write>(
         && h.nak_sequence == 0
         && active.ready_for_updates
         && active.entered_game
-        && !active.life.is_alive()
+        && active.life.next_generation().is_some()
         && active.pending_spawn_deadline.is_none()
         && history_available
         && ctx.engine.actor_matches_team(active)

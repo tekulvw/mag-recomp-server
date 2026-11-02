@@ -3,6 +3,8 @@
 
 mod death_notification;
 pub use death_notification::{HeadRegionHit, RetailDeathNotification, VictimWasMounted};
+mod resuscitate;
+pub use resuscitate::{Resuscitate, RetailResuscitationNotification};
 
 #[derive(Clone)]
 pub struct ClaimReservation<'a> {
@@ -464,6 +466,7 @@ pub enum GameMessage<'a> {
     StrategicAbility(crate::active_abilities::StrategicRequest),
     FireGrenade(FireGrenade),
     Heal(Heal),
+    Resuscitate(Resuscitate),
     Repair(Repair),
     ObjectiveInteraction(ObjectiveInteraction),
     KillSelf(KillSelf),
@@ -598,6 +601,7 @@ impl<'a> GameMessage<'a> {
                     gear_slot: bytes[4 + count * 4],
                 }))
             }
+            0x021c => Ok(Self::Resuscitate(Resuscitate::decode(bytes)?)),
             0x03ea => Ok(Self::ObjectiveInteraction(ObjectiveInteraction::decode(
                 bytes,
             )?)),
@@ -843,5 +847,34 @@ pub struct CharacterStatsComplete;
 impl CharacterStatsComplete {
     pub fn encode(self) -> Vec<u8> {
         0x0205_u16.to_be_bytes().to_vec()
+    }
+}
+
+#[cfg(test)]
+mod resuscitate_dispatch_tests {
+    use super::*;
+
+    #[test]
+    fn resuscitate_retail_synthetic_request_is_typed_and_exact_length() {
+        let profile = crate::wire_profile::WireProfileCatalog::embedded()
+            .profile(20231)
+            .unwrap();
+        let packet = [0x02, 0x1c, 0x03, 0x80, 0x12, 0x34];
+        let message = GameMessage::decode_with_profile(&packet, profile).unwrap();
+        let GameMessage::Resuscitate(request) = message else {
+            panic!("0x021c must enter typed dispatch");
+        };
+        assert_eq!(
+            request,
+            Resuscitate {
+                patient: 0x0380_1234
+            }
+        );
+        for length in 0..packet.len() {
+            assert!(GameMessage::decode_with_profile(&packet[..length], profile).is_err());
+        }
+        let mut trailing = packet.to_vec();
+        trailing.push(0);
+        assert!(GameMessage::decode_with_profile(&trailing, profile).is_err());
     }
 }

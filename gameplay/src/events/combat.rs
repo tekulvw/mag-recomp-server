@@ -43,6 +43,7 @@ pub(super) fn hit<W: Write>(
                         health_quarter_points,
                         ..
                     } => Some(health_quarter_points),
+                    CharacterLife::Incapacitated { .. } => Some(0),
                     _ => None,
                 })
                 .or_else(|| {
@@ -137,6 +138,13 @@ pub(super) fn hit<W: Write>(
                     plan.leadership.modifiers(p)
                 }),
             );
+            let armor = if peer_target
+                .is_some_and(|p| matches!(p.life, CharacterLife::Incapacitated { .. }))
+            {
+                armor.for_incapacitated(ctx.engine.item_catalog.retail_combat()?)?
+            } else {
+                armor
+            };
             let (calculation, amount, damage) = damage::resolve_character_hit(
                 profile.raw_character_damage(
                     distance,
@@ -158,7 +166,32 @@ pub(super) fn hit<W: Write>(
         match resolved {
             Err(code) => plan.gameplay_denial = Some(code),
             Ok(None) => (),
-            Ok(Some((amount, damage))) => {
+            Ok(Some((amount, mut damage))) => {
+                if let Some(peer) = peer_target {
+                    let (model, life) = ctx.engine.plan_human_damage(peer, amount, damage, now)?;
+                    damage = model;
+                    plan.combat
+                        .peer_lives
+                        .push((peer.reservation.id.clone(), life));
+                    if matches!(peer.life,CharacterLife::Incapacitated {downed,..} if !downed.is_expired(now))
+                        && matches!(life, CharacterLife::AwaitingRespawn { .. })
+                    {
+                        statistics::finished(plan, active, peer.team());
+                        if peer.team() != active.team()
+                            && let Some(recipient) =
+                                progression::RewardRecipient::from_active(active)
+                        {
+                            plan.combat.new_rewards.push(recipient.event(
+                                format!(
+                                    "finish-{}-{}-{}",
+                                    active.reservation.id, peer.reservation.id, next_sequence
+                                ),
+                                progression::RewardKind::EnemyFinished,
+                                1,
+                            ));
+                        }
+                    }
+                }
                 if ordinary_retail_firearm
                     && (peer_target.is_some() || registry_target.is_some())
                     && let Some(notification) = ctx.engine.plan_firearm_death(
@@ -237,7 +270,7 @@ pub(super) fn hit<W: Write>(
                     "target_owner_life_generation":retail_target.map(|t| t.generation),
                     "target_bot_life_generation":retail_target.map(|t| t.runtime.map_or(1, |r| r.generation))}));
                 if let Some(peer) = peer_target {
-                    if let CharacterLife::Alive { generation, .. } = peer.life {
+                    if let Some((generation, _)) = peer.life.damage_health() {
                         plan.combat.peer_damage.push((
                             peer.reservation.id.clone(),
                             generation,
@@ -547,14 +580,14 @@ pub(super) fn kill_self<W: Write>(
             health_quarter_points,
             ..
         } => Some(health_quarter_points),
-        CharacterLife::AwaitingRespawn { .. } => Some(0),
+        CharacterLife::Incapacitated { .. } | CharacterLife::AwaitingRespawn { .. } => Some(0),
         CharacterLife::AwaitingFirstSpawn => None,
     };
     if eligible && !owned {
         plan.gameplay_denial = Some("unowned_damage_target");
     } else if eligible
         && owned
-        && let CharacterLife::Alive { generation, .. } = active.life
+        && let Some((generation, _)) = active.life.damage_health()
     {
         // Mounted death also needs vehicle-occupancy cleanup. Keep
         // that untraced transition nonfatal and explicitly bounded.

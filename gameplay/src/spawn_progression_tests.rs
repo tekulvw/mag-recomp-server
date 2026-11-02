@@ -114,7 +114,7 @@ fn items() -> Arc<item_catalog::ItemCatalog> {
     }).to_string()).unwrap();
     Arc::new(catalog.with_retail_armory(armory))
 }
-fn engine() -> Engine<Vec<u8>> {
+pub(crate) fn engine() -> Engine<Vec<u8>> {
     let resources = EngineResources::for_application(
         items(),
         spawns(spawn_json()).unwrap(),
@@ -129,7 +129,7 @@ fn engine() -> Engine<Vec<u8>> {
         .with_match_limits(1, 16)
         .unwrap()
 }
-fn reserve(engine: &mut Engine<Vec<u8>>, player: u16) {
+pub(crate) fn reserve(engine: &mut Engine<Vec<u8>>, player: u16) {
     reserve_faction(engine, player, 1);
 }
 fn reserve_faction(engine: &mut Engine<Vec<u8>>, player: u16, faction: u8) {
@@ -163,7 +163,7 @@ fn reserve_faction(engine: &mut Engine<Vec<u8>>, player: u16, faction: u8) {
 fn actors(engine: &mut Engine<Vec<u8>>) -> impl Iterator<Item = &mut Active> {
     engine.peers.values_mut().chain(engine.active.iter_mut())
 }
-fn ready(actor: &mut Active) {
+pub(crate) fn ready(actor: &mut Active) {
     actor.ready_for_updates = true;
     actor.entered_game = true;
     actor.initial_objects = Some(Vec::new());
@@ -224,7 +224,7 @@ fn make_operator(engine: &mut Engine<Vec<u8>>) {
         health_quarter_points: 400,
     };
 }
-fn dispatch(
+pub(crate) fn dispatch(
     engine: &mut Engine<Vec<u8>>,
     bytes: &[u8],
     now_ms: u64,

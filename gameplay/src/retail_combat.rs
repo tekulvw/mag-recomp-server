@@ -253,6 +253,8 @@ pub struct RetailBodyMetadata {
     pub location: u8,
     pub armor_area: u8,
     pub multiplier: f64,
+    #[serde(default)]
+    pub incapacitated_multiplier: Option<f64>,
     pub source: Value,
 }
 
@@ -715,6 +717,9 @@ fn validate(value: &CatalogMetadata) -> Result<(), String> {
             return Err("body locations must be unique 0..15 and armor areas 0..3".into());
         }
         nonnegative(&[body.multiplier])?;
+        if let Some(multiplier) = body.incapacitated_multiplier {
+            nonnegative(&[multiplier])?;
+        }
     }
     for healing in value.healing.values() {
         nonnegative(&[
@@ -849,5 +854,29 @@ impl RetailBulletProfile {
         location: u8,
     ) -> Result<f32, &'static str> {
         armor.adjust(self.raw_character_damage(distance, scale, location)?)
+    }
+}
+
+#[cfg(test)]
+mod incapacitated_body_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn explicit_incapacitated_body_multiplier_must_be_finite_and_nonnegative() {
+        let value = json!({"schema_version":2,"application_id":20231,"status":"synthetic",
+            "authority":{"bullet_damage":true,"armor_reduction":true,"body_damage":true,
+                "grenade_damage":false,"grenade_physics":false,"healing_schedule":false,"ammo_tokens":false},
+            "provenance":{},"bullets":{},"armor":{},"grenades":{},"healing":{},"unsupported":{},
+            "body":(0..16).map(|location| json!({"location":location,"armor_area":0,"multiplier":2.0,
+                "incapacitated_multiplier":0.75,"source":{}})).collect::<Vec<_>>(),"limitations":[]});
+        let mut metadata: CatalogMetadata = serde_json::from_value(value).unwrap();
+        assert!(validate(&metadata).is_ok());
+        for invalid in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            metadata.body[0].incapacitated_multiplier = Some(invalid);
+            assert!(validate(&metadata).is_err());
+        }
+        metadata.body[0].incapacitated_multiplier = Some(0.0);
+        assert!(validate(&metadata).is_ok());
     }
 }

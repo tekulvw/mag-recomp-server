@@ -798,7 +798,20 @@ impl<W: Write> Engine<W> {
                     "recoil_pitch_degrees":state.recoil.pitch_degrees,"recoil_yaw_degrees":state.recoil.yaw_degrees,"spread_degrees":state.recoil.width_degrees(recoil_profile),"recoil_compensation_per_mille":policy.recoil_compensation_per_mille,
                     "distance_m":length(from,torso(target.feet)),"accuracy_per_mille":policy.accuracy_at(length(from,torso(target.feet)),metadata.max_range),
                     "health_before":target.health,"health_after":if hit {resolved.map_or(target.health,|d|d.health_quarter_points)} else {target.health}}));
-                if hit && let Some(damage) = resolved {
+                if hit && let Some(mut damage) = resolved {
+                    let mut human_life = None;
+                    if let Some(reservation) = &target.life.reservation {
+                        let victim = self
+                            .active
+                            .iter()
+                            .chain(self.peers.values())
+                            .find(|a| a.reservation.id == *reservation)
+                            .ok_or("stale_bot_firearm_target")?;
+                        let (model, life) = self.plan_human_damage(victim, amount, damage, now)?;
+                        damage = model;
+                        human_life = Some(life);
+                        receipts.push(json!({"op":"bot_firearm_lifecycle_planned","reservation_id":reservation,"life":format!("{life:?}"),"conditions":damage.conditions}));
+                    }
                     if let Some(world) = self.active.as_ref().map(|a| a.reservation.world) {
                         death_notification = self.plan_firearm_death(
                             world,
@@ -812,7 +825,7 @@ impl<W: Write> Engine<W> {
                             receipts.push(json!({"op":"bot_firearm_death_planned","timestamp_ms":now.as_millis() as u64,"notification":plan.audit()}));
                         }
                     }
-                    pending_damage = Some((target, damage));
+                    pending_damage = Some((target, damage, human_life));
                 }
             }
             for receipt in receipts {
@@ -847,7 +860,7 @@ impl<W: Write> Engine<W> {
             if let Some(packet) = packet {
                 self.broadcast_bot_packet(packet);
             }
-            if let Some((target, damage)) = pending_damage {
+            if let Some((target, damage, human_life)) = pending_damage {
                 let packet = replication::CharacterDamageUpdate {
                     sequence: 2,
                     timestamp_ms: now.as_millis() as u32,
@@ -873,6 +886,15 @@ impl<W: Write> Engine<W> {
                             .or_else(|| self.peers.get_mut(reservation))
                             .ok_or("stale_bot_firearm_target")?;
                         victim.apply_peer_damage(target.life.generation, damage, now)?;
+                    }
+                    if let Some(life) = human_life {
+                        let victim = self
+                            .active
+                            .as_mut()
+                            .filter(|a| a.reservation.id == *reservation)
+                            .or_else(|| self.peers.get_mut(reservation))
+                            .ok_or("stale_bot_firearm_target")?;
+                        victim.life = life;
                     }
                     if damage.health_quarter_points == 0 {
                         messages.extend(events::bot_killed_human(self, reservation)?);

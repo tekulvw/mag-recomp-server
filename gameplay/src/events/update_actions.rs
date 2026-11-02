@@ -25,33 +25,35 @@ pub(super) fn plan_pending_damage<W: Write>(
         == (0x03800000 | u32::from(active.reservation.player))
         && pending.target_reservation_id.as_deref() == Some(active.reservation.id.as_str())
     {
-        match active.life {
-            CharacterLife::Alive {
-                generation,
-                health_quarter_points,
-            } if generation == pending.generation && active.mounted_seat.is_none() => Some((
-                generation,
-                health_quarter_points,
-                plan.session
-                    .client_position
-                    .map(|p| p.0)
-                    .or(active.tracking.sample.map(|s| s.position)),
-            )),
+        match active.life.damage_health() {
+            Some((generation, health_quarter_points))
+                if generation == pending.generation && active.mounted_seat.is_none() =>
+            {
+                Some((
+                    generation,
+                    health_quarter_points,
+                    plan.session
+                        .client_position
+                        .map(|p| p.0)
+                        .or(active.tracking.sample.map(|s| s.position)),
+                ))
+            }
             _ => None,
         }
     } else if let Some(peer) = ctx.engine.peers.values().find(|p| {
         0x03800000 | u32::from(p.reservation.player) == pending.target_character_id
             && pending.target_reservation_id.as_deref() == Some(p.reservation.id.as_str())
     }) {
-        match peer.life {
-            CharacterLife::Alive {
-                generation,
-                health_quarter_points,
-            } if generation == pending.generation && peer.mounted_seat.is_none() => Some((
-                generation,
-                health_quarter_points,
-                peer.tracking.sample.map(|s| s.position),
-            )),
+        match peer.life.damage_health() {
+            Some((generation, health_quarter_points))
+                if generation == pending.generation && peer.mounted_seat.is_none() =>
+            {
+                Some((
+                    generation,
+                    health_quarter_points,
+                    peer.tracking.sample.map(|s| s.position),
+                ))
+            }
             _ => None,
         }
     } else if let Some(bot) = registry_target {
@@ -84,11 +86,55 @@ pub(super) fn plan_pending_damage<W: Write>(
         None
     };
     if let Some((generation, health_quarter_points, position)) = victim {
-        let resolved = if pending.falling {
+        let mut resolved = if pending.falling {
             pending.damage.apply_falling(health_quarter_points)?
         } else {
             pending.damage.apply(health_quarter_points)?
         };
+        let mut human_life = None;
+        if let Some(victim) = ctx
+            .engine
+            .active
+            .iter()
+            .chain(ctx.engine.peers.values())
+            .find(|p| {
+                pending.target_reservation_id.as_deref() == Some(p.reservation.id.as_str())
+                    && pending.target_character_id
+                        == (0x0380_0000 | u32::from(p.reservation.player))
+            })
+        {
+            let (model, life) =
+                ctx.engine
+                    .plan_human_damage(victim, pending.damage.amount_hp, resolved, now)?;
+            resolved = model;
+            human_life = Some(life);
+            if matches!(victim.life,CharacterLife::Incapacitated{downed,..} if !downed.is_expired(now))
+                && matches!(life, CharacterLife::AwaitingRespawn { .. })
+                && let Some(killer) = ctx
+                    .engine
+                    .active
+                    .iter()
+                    .chain(ctx.engine.peers.values())
+                    .find(|a| {
+                        pending.damage.attacker_id
+                            == (0x0380_0000 | u32::from(a.reservation.player))
+                    })
+            {
+                statistics::finished(plan, killer, victim.team());
+                if killer.team() != victim.team()
+                    && let Some(recipient) = progression::RewardRecipient::from_active(killer)
+                {
+                    plan.combat.new_rewards.push(recipient.event(
+                        format!(
+                            "finish-{}-{}-{}",
+                            killer.reservation.id, victim.reservation.id, pending.id
+                        ),
+                        progression::RewardKind::EnemyFinished,
+                        1,
+                    ));
+                }
+            }
+        }
         let lethal = resolved.health_quarter_points == 0;
         if lethal
             && health_quarter_points > 0
@@ -117,14 +163,14 @@ pub(super) fn plan_pending_damage<W: Write>(
         .encode_with_profile(ctx.engine.wire_profile)?;
         if pending.target_character_id == (0x03800000 | u32::from(active.reservation.player)) {
             plan.combat.new_damage_model = Some(resolved);
-            plan.combat.new_life = Some(if lethal {
+            plan.combat.new_life = Some(human_life.unwrap_or(if lethal {
                 CharacterLife::AwaitingRespawn { generation }
             } else {
                 CharacterLife::Alive {
                     generation,
                     health_quarter_points: resolved.health_quarter_points,
                 }
-            });
+            }));
         } else if let Some(peer) =
             ctx.engine.peers.values().find(|p| {
                 0x03800000 | u32::from(p.reservation.player) == pending.target_character_id
@@ -133,6 +179,11 @@ pub(super) fn plan_pending_damage<W: Write>(
             plan.combat
                 .peer_damage
                 .push((peer.reservation.id.clone(), generation, resolved));
+            if let Some(life) = human_life {
+                plan.combat
+                    .peer_lives
+                    .push((peer.reservation.id.clone(), life));
+            }
         } else if let Some(bot) = registry_target {
             plan.combat
                 .bot_damage

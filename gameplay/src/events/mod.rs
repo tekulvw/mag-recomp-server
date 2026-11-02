@@ -8,6 +8,7 @@ mod control;
 mod falling;
 mod objectives;
 mod owner;
+mod resuscitate;
 mod seats;
 mod statistics;
 pub(crate) use statistics::bot_killed_human;
@@ -99,10 +100,12 @@ struct SessionChanges {
 #[derive(Default)]
 struct CombatChanges {
     new_life: Option<CharacterLife>,
+    peer_lives: Vec<(String, CharacterLife)>,
     peer_damage: Vec<(String, u32, replication::CharacterDamage)>,
     bot_damage: Vec<(u16, u32, replication::CharacterDamage)>,
     death_notifications: Vec<death_notifications::Plan>,
     new_damage_model: Option<replication::CharacterDamage>,
+    revived_peer: Option<(String, u32, replication::CharacterDamage)>,
     new_healing: Option<Option<progression::HealingSession>>,
     peer_healing: Vec<(String, u32, progression::HealingSession)>,
     new_healing_sequence: Option<u64>,
@@ -173,6 +176,7 @@ fn plan_message<W: Write>(
         Ok(protocol::GameMessage::Hit(_)
             | protocol::GameMessage::FireGrenade(_)
             | protocol::GameMessage::Heal(_)
+            | protocol::GameMessage::Resuscitate(_)
             | protocol::GameMessage::KillSelf(_)
             | protocol::GameMessage::MountSeat(_)
             | protocol::GameMessage::DismountSeat(_)
@@ -217,6 +221,7 @@ fn plan_message<W: Write>(
         Ok(protocol::GameMessage::Hit(request)) => combat::hit(ctx, plan, request),
         Ok(protocol::GameMessage::FireGrenade(request)) => combat::fire_grenade(ctx, plan, request),
         Ok(protocol::GameMessage::Heal(request)) => combat::heal(ctx, plan, request),
+        Ok(protocol::GameMessage::Resuscitate(request)) => resuscitate::plan(ctx, plan, request),
         Ok(protocol::GameMessage::KillSelf(request)) => combat::kill_self(ctx, plan, request),
         Ok(protocol::GameMessage::MountSeat(request)) => seats::mount_seat(ctx, plan, request),
         Ok(protocol::GameMessage::DismountSeat(request)) => {
@@ -348,6 +353,8 @@ impl<W: Write> Engine<W> {
                 "payload_hex": event.payload_hex.to_ascii_lowercase(),
                 "decoded": decoded_log,
                 "leadership_changes": plan.leadership.audit(),
+                "peer_lives":plan.combat.peer_lives.iter().map(|(id,life)|json!({"reservation_id":id,"life":format!("{life:?}")})).collect::<Vec<_>>(),
+                "new_life":plan.combat.new_life.map(|life|format!("{life:?}")),
                 "death_notifications": plan.combat.death_notifications.iter().map(|p| p.audit()).collect::<Vec<_>>(),
                 "messages": plan.messages,
                 "rewards": plan.combat.new_rewards,
@@ -427,6 +434,15 @@ impl<W: Write> Engine<W> {
                 self.commit_bot_damage(id, generation, damage, now)?;
             }
         }
+        if let Some((id, generation, damage)) = plan.combat.revived_peer {
+            let peer = self.peers.get_mut(&id).ok_or("stale_revive_patient")?;
+            peer.commit_revive(generation, damage)?;
+        }
+        for (id, life) in plan.combat.peer_lives {
+            if let Some(peer) = self.peers.get_mut(&id) {
+                peer.life = life;
+            }
+        }
         if let Some(fields) = plan.session.new_turret_fields {
             self.alpha_turret.merge(&fields);
             if fields.primary.is_some()
@@ -445,8 +461,10 @@ impl<W: Write> Engine<W> {
             && update.header.sequence > active.latest_owner_sequence
             && let Some(fields) = &report.character
         {
+            let fields = active.owner_presentation(fields);
             if fields.state.is_some() {
                 active.owner_fields.state = fields.state;
+                active.revive_state_pending = false;
             }
             if fields.position.is_some() {
                 active.owner_fields.position = fields.position;
@@ -555,6 +573,7 @@ impl<W: Write> Engine<W> {
         if let Some(life) = plan.combat.new_life {
             active.life = life;
             if !life.is_alive() || plan.replication.spawn_delta.is_some() {
+                active.revive_state_pending = false;
                 active.healing = None;
                 // An owner's death/new life invalidates its own queued hits,
                 // not damage already owed to independent world characters.
@@ -698,6 +717,7 @@ impl<W: Write> Engine<W> {
         {
             let generation = match active.life {
                 CharacterLife::Alive { generation, .. }
+                | CharacterLife::Incapacitated { generation, .. }
                 | CharacterLife::AwaitingRespawn { generation } => generation,
                 CharacterLife::AwaitingFirstSpawn => 0,
             };

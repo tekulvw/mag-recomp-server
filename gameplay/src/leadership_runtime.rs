@@ -174,6 +174,7 @@ impl Active {
     fn leadership_scope(&self) -> (u32, u32, u16) {
         let generation = match self.life {
             CharacterLife::Alive { generation, .. }
+            | CharacterLife::Incapacitated { generation, .. }
             | CharacterLife::AwaitingRespawn { generation } => generation,
             CharacterLife::AwaitingFirstSpawn => 0,
         };

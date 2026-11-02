@@ -37,7 +37,9 @@ impl ProgressionSnapshot {
 #[serde(rename_all = "snake_case")]
 pub enum RewardKind {
     EnemyKilled,
+    EnemyFinished,
     TeammateHealed,
+    TeammateResuscitated,
     PrimaryObjectiveActivated,
     PrimaryObjectiveSecured,
     PrimaryObjectiveCompleted,
@@ -52,6 +54,9 @@ pub enum RewardKind {
 impl RewardKind {
     pub(crate) fn statistic(self) -> Option<u8> {
         match self {
+            // Gameplay commits own kills, finishing moves (24) and revives (34).
+            // Their later XP receipts must not increment those events again.
+            Self::EnemyKilled | Self::EnemyFinished | Self::TeammateResuscitated => None,
             Self::PrimaryObjectiveActivated => Some(37),
             Self::PrimaryObjectiveSecured => Some(38),
             Self::PrimaryObjectiveCompleted => Some(39),
@@ -445,5 +450,27 @@ impl<W: Write> Engine<W> {
             }
         }
         Ok(messages)
+    }
+}
+
+#[cfg(test)]
+mod revive_reward_tests {
+    use super::RewardKind;
+
+    #[test]
+    fn finish_and_revive_xp_receipts_preserve_event_owned_statistics() {
+        for wire_kind in ["enemy_finished", "teammate_resuscitated"] {
+            let kind: RewardKind = serde_json::from_value(serde_json::json!(wire_kind)).unwrap();
+            assert_eq!(
+                kind.statistic(),
+                None,
+                "XP acknowledgement must not count an event twice"
+            );
+            assert_eq!(
+                serde_json::to_value(kind).unwrap(),
+                serde_json::json!(wire_kind)
+            );
+            assert!(!kind.is_match_result());
+        }
     }
 }

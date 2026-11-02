@@ -234,6 +234,7 @@ def project(catalog_bytes, binding_bytes, bootstrap_bytes, bullet_witness_bytes,
             check(type(p['armorArea']) is int and 0 <= p['armorArea'] < 4, 'invalid_body_armor_area')
             body.append({'location': location, 'armor_area': p['armorArea'],
                          'multiplier': number(p, 'hitpointMult'),
+                         'incapacitated_multiplier': number(p, 'incapMult'),
                          'source': {'file': 'collision_info.lua',
                                     'pointer': body_pointer + f'/CollisionBodyInfo{location}/CollisionBodyInfo'}})
 
