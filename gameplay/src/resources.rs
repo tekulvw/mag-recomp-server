@@ -157,6 +157,7 @@ impl<W: Write> Engine<W> {
             leadership: None,
             fall_damage_rules: None,
             incapacitation_rules: None,
+            character_damage_rules: None,
             pending_rewards: Default::default(),
             reward_order: Default::default(),
             committed_rewards: Default::default(),

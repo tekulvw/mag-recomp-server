@@ -279,6 +279,8 @@ fn plan_grenade_blasts<W: Write>(
     body_supported: bool,
 ) -> Result<std::collections::VecDeque<PendingDamage>, &'static str> {
     let active = ctx.active;
+    let attacker = 0x0380_0000 | u32::from(active.reservation.player);
+    let world = active.reservation.world;
     let mut grenade_queue = active.grenade_damage.clone();
     if ctx.engine.development_grenade_radius
         && body_supported
@@ -308,7 +310,12 @@ fn plan_grenade_blasts<W: Write>(
                     character_id: (0x03800000 | u32::from(active.reservation.player)),
                     life_generation: generation,
                     feet,
-                    armor: armor.with_modifiers(&plan.leadership.modifiers(active)),
+                    armor: armor
+                        .with_modifiers(&plan.leadership.modifiers(active))
+                        .with_incoming_base(
+                            ctx.engine
+                                .character_incoming_base(attacker, attacker, world),
+                        )?,
                 });
             }
         }
@@ -334,7 +341,13 @@ fn plan_grenade_blasts<W: Write>(
                     character_id: 0x03800000 | u32::from(peer.reservation.player),
                     life_generation: generation,
                     feet: sample.position,
-                    armor: armor.with_modifiers(&plan.leadership.modifiers(peer)),
+                    armor: armor
+                        .with_modifiers(&plan.leadership.modifiers(peer))
+                        .with_incoming_base(ctx.engine.character_incoming_base(
+                            attacker,
+                            0x0380_0000 | u32::from(peer.reservation.player),
+                            world,
+                        ))?,
                 });
             }
         }
@@ -354,7 +367,12 @@ fn plan_grenade_blasts<W: Write>(
                 armor: armor::ArmorProfile::from_loadout_with_catalog(
                     kit,
                     &ctx.engine.item_catalog,
-                )?,
+                )?
+                .with_incoming_base(ctx.engine.character_incoming_base(
+                    attacker,
+                    0x0380_0000 | u32::from(bot.object_index),
+                    world,
+                ))?,
             });
         }
         if ctx.engine.development_target_replication_enabled(active)
@@ -382,7 +400,12 @@ fn plan_grenade_blasts<W: Write>(
                 armor: armor::ArmorProfile::from_loadout_with_catalog(
                     &kit,
                     &ctx.engine.item_catalog,
-                )?,
+                )?
+                .with_incoming_base(ctx.engine.character_incoming_base(
+                    attacker,
+                    dummy::OBJECT_ID,
+                    world,
+                ))?,
             });
         }
         for terminal in &plan.audit.projectile_terminals {

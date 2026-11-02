@@ -4,6 +4,9 @@ use crate::spawn_progression::{dispatch, engine, ready, reserve};
 use std::sync::Arc;
 
 fn combat_items() -> Arc<item_catalog::ItemCatalog> {
+    combat_items_with_grenade(false)
+}
+fn combat_items_with_grenade(grenade: bool) -> Arc<item_catalog::ItemCatalog> {
     let items = item_catalog::ItemCatalog::from_value_for_application(json!({
         "schema_version":2,"application_id":20231,
         "items":{
@@ -24,7 +27,7 @@ fn combat_items() -> Arc<item_catalog::ItemCatalog> {
             "loadouts":(0..5).map(|_|json!({"update_id":1,"items":vec![None::<u16>;22]})).collect::<Vec<_>>()
         })).collect::<Vec<_>>()
     }).to_string()).unwrap();
-    let combat = retail_combat::RetailCombatCatalog::from_json(&json!({
+    let mut metadata = json!({
         "schema_version":2,"application_id":20231,"status":"synthetic",
         "authority":{"bullet_damage":true,"armor_reduction":true,"body_damage":true,"grenade_damage":false,"grenade_physics":false,"healing_schedule":false,"ammo_tokens":false},
         "provenance":{},
@@ -35,8 +38,257 @@ fn combat_items() -> Arc<item_catalog::ItemCatalog> {
         "armor":{"3":{"authored_ref":"FactionItemList0:3","name":"synthetic_armor","definition":{},"source":{},"item_source":{},"armor_type":1,"rating":0.0,"prevention":0.0,"coverage":[0.0,0.0,0.0,0.0],"armor_type_source":{}}},
         "body":(0..16).map(|location|json!({"location":location,"armor_area":1,"multiplier":1.0,"incapacitated_multiplier":1.0,"source":{}})).collect::<Vec<_>>(),
         "grenades":{},"healing":{},"unsupported":{},"limitations":["Synthetic fixtures only"]
-    }).to_string()).unwrap();
+    });
+    if grenade {
+        metadata["schema_version"] = json!(3);
+        metadata["authority"]["grenade_damage"] = json!(true);
+        metadata["authority"]["healing_schedule"] = json!(true);
+        metadata["runtime_policy"] = json!({"projectile_motion":"authenticated_owner_reports",
+            "grenade_token_basis":"expected_static_original_resources","projectile_expiry_grace_ms":0,
+            "healing_tick_policy":"guaranteed_ticks_with_bounded_catch_up","healing_tick_seconds":1});
+        metadata["grenades"]["4"] = json!({"authored_ref":"SyntheticGrenade:4","name":"synthetic_frag",
+            "definition":{},"source":{},"item_source":{},
+            "ammo":{"group":"projectile_ammo","name":"synthetic_frag_ammo","source":{},
+                "ammo_token_candidate":91,"ammo_token_verified_for_retail":false},
+            "damage":{"character":20.0,"characterAPierce":0.0,"characterARedux":0.0,
+                "vehicle":0.0,"vehicleAPierce":0.0,"vehicleARedux":0.0,"objective":0.0,
+                "objectiveAPierce":0.0,"objectiveARedux":0.0,"mine":0.0},
+            "full_radius":8.0,"half_radius":4.0,"fuse_ms":100,"authored_lifetime_ms":2000,
+            "initial_count":1,"effective_range":4.0,"max_range":8.0,
+            "detonation_strategy":"kWepDetonationStrategyTimer","explosion_strategy":"kWepExplosionStrategyDebris",
+            "physics":{"launch_velocity":1.0,"radius":0.1,"capsuleHeight":[0.1,0.1,0.1],
+                "collisionType":"kWepProjCollisionShapeCapsule","mass":1.0,"friction":0.0,"restitution":0.0,
+                "linearDamping":0.0,"linearDampingOnGround":0.0,"angularDamping":0.0,"angularDampingOnGround":0.0,
+                "fBounceDampingDefault":0.0,"fBounceDampingCharacter":0.0,"m_fLoftAngle":0.0,
+                "random_rotation_range":0.0,"propulsion_strategy":"kWepPropulsionStrategyThrown"}});
+    }
+    let combat = retail_combat::RetailCombatCatalog::from_json(&metadata.to_string()).unwrap();
     Arc::new(items.with_retail_armory(armory).with_retail_combat(combat))
+}
+
+pub(crate) fn enable_incoming_base(engine: Engine<Vec<u8>>, base: f32) -> Engine<Vec<u8>> {
+    let digest = engine
+        .spawn_catalog
+        .as_ref()
+        .unwrap()
+        .source_sha256()
+        .unwrap();
+    let rules = crate::character_damage_rules::Rules::from_json(&json!({
+        "schema_version":1,"application_id":20231,"map_name":"synthetic_arena","game_type":0,
+        "friendly_fire_multiplier":base,"provenance":{"spawn_catalog_sha256":digest,"source":"synthetic"}
+    }).to_string()).unwrap();
+    engine.with_character_damage_rules(rules).unwrap()
+}
+
+#[test]
+fn native_hit_uses_relation_base_with_same_faction_and_preserves_audit_rollback() {
+    let mut friendly = fixture();
+    friendly.active.as_mut().unwrap().squad_catalog = Arc::clone(&victim(&friendly).squad_catalog);
+    let mut friendly = enable_incoming_base(friendly, 0.25);
+    assert_eq!(
+        friendly.character_incoming_base(0x03800001, 0x03800001, 1),
+        1.0
+    );
+    assert_eq!(
+        friendly.character_incoming_base(0x03800001, 0x0380003f, 1),
+        1.0
+    );
+    hit(&mut friendly, 19, 1000).unwrap();
+    assert!(matches!(
+        victim(&friendly).life,
+        CharacterLife::Alive {
+            health_quarter_points: 80,
+            ..
+        }
+    ));
+    assert_eq!(victim(&friendly).last_damage.last_location_and_type, 0x13);
+    assert!(kills(&friendly).is_empty());
+    let mut opposing = enable_incoming_base(fixture(), 0.25);
+    assert_eq!(
+        victim(&opposing).reservation.character.faction,
+        opposing
+            .active
+            .as_ref()
+            .unwrap()
+            .reservation
+            .character
+            .faction
+    );
+    hit(&mut opposing, 20, 1000).unwrap();
+    assert!(matches!(
+        victim(&opposing).life,
+        CharacterLife::Incapacitated { .. }
+    ));
+    assert_eq!(kills(&opposing).len(), 1);
+    let mut capped = fixture();
+    capped.active.as_mut().unwrap().squad_catalog = Arc::clone(&victim(&capped).squad_catalog);
+    let mut capped = enable_incoming_base(capped, 100.0);
+    hit(&mut capped, 22, 1000).unwrap();
+    assert!(matches!(
+        victim(&capped).life,
+        CharacterLife::Alive {
+            health_quarter_points: 120,
+            ..
+        }
+    ));
+    assert!(
+        std::str::from_utf8(&capped.writer)
+            .unwrap()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .any(|entry| entry["gameplay_denial"] == "invalid_damage_amount")
+    );
+    let mut failed = fixture();
+    failed.active.as_mut().unwrap().squad_catalog = Arc::clone(&victim(&failed).squad_catalog);
+    let mut failed = enable_incoming_base(failed, 0.25);
+    failed.max_log = failed.written;
+    assert_eq!(hit(&mut failed, 21, 1000).err(), Some("log_limit_reached"));
+    assert!(matches!(
+        victim(&failed).life,
+        CharacterLife::Alive {
+            health_quarter_points: 120,
+            ..
+        }
+    ));
+    assert!(kills(&failed).is_empty());
+}
+
+fn friendly_blast_fixture() -> Engine<Vec<u8>> {
+    let mut engine = fixture();
+    engine.item_catalog = combat_items_with_grenade(true);
+    engine.active.as_mut().unwrap().squad_catalog = Arc::clone(&victim(&engine).squad_catalog);
+    for actor in engine.active.iter_mut().chain(engine.peers.values_mut()) {
+        actor.life = CharacterLife::Alive {
+            generation: 4,
+            health_quarter_points: 400,
+        };
+    }
+    let floor = json!({"format":"mag_collision_world","schema_version":1,"coordinate_space":"world",
+        "metadata":{"map_name":"synthetic_arena","build":"synthetic","coverage":"provisional",
+            "provenance":["Synthetic floor"],"unknowns":["Synthetic only"],
+            "physics_regions":[{"min":[0.,-2.,0.],"max":[128.,10.,128.],"ground_verified":true,
+                "obstacles_verified":true,"provenance":["Synthetic floor"]}]},
+        "instances":[{"id":"floor","vertices_xyz":[[0.,-1.,0.],[128.,-1.,0.],[128.,-1.,128.],[0.,-1.,128.]],
+            "triangles":[[0,2,1],[0,3,2]]}]});
+    let path = std::env::temp_dir().join(format!(
+        "mag-synthetic-ff-floor-{}.json",
+        std::process::id()
+    ));
+    std::fs::write(&path, floor.to_string()).unwrap();
+    let world =
+        collision::CollisionWorld::load(&path, collision::CollisionLimits::default()).unwrap();
+    std::fs::remove_file(path).unwrap();
+    engine = engine
+        .with_collision_world(world)
+        .with_development_grenade_radius();
+    let source = engine.active.as_mut().unwrap();
+    source
+        .projectiles
+        .admit_item_with_catalog(0, 4, 0, 0, &[0; 57], 4, &engine.item_catalog)
+        .unwrap();
+    source
+        .projectiles
+        .accept_owner(
+            0,
+            4,
+            1,
+            10,
+            projectile::ProjectileOwnerFields {
+                state: Some(2),
+                position: Some(replication::CharacterPosition {
+                    x: 100.,
+                    y: 3.,
+                    z: 100.,
+                }),
+                rotation_xyzw: None,
+            },
+        )
+        .unwrap();
+    enable_incoming_base(engine, 0.25)
+}
+fn idle_update(
+    engine: &mut Engine<Vec<u8>>,
+    now: u64,
+) -> Result<Vec<OutboundMessage>, &'static str> {
+    let wire = replication::ObjectUpdate {
+        header: replication::UpdateHeader {
+            sequence: engine.active.as_ref().unwrap().latest_owner_sequence + 1,
+            nak_sequence: 0,
+            client_index: 0,
+            object_type_mask: 0,
+            timestamp_ms: now as u32,
+        },
+        wire: &[],
+    }
+    .encode_empty_with_profile(engine.wire_profile)
+    .unwrap();
+    dispatch(engine, &wire, now)
+}
+
+#[test]
+fn grenade_captures_relation_before_armor_and_queue_does_not_rescale_or_commit_failed_record() {
+    let mut failed = friendly_blast_fixture();
+    failed.max_log = failed.written;
+    assert_eq!(
+        idle_update(&mut failed, 1000).err(),
+        Some("log_limit_reached")
+    );
+    assert!(failed.active.as_ref().unwrap().grenade_damage.is_empty());
+    assert!(
+        !failed
+            .active
+            .as_ref()
+            .unwrap()
+            .projectiles
+            .get(0)
+            .unwrap()
+            .completed
+    );
+    assert!(matches!(
+        victim(&failed).life,
+        CharacterLife::Alive {
+            health_quarter_points: 400,
+            ..
+        }
+    ));
+    let mut engine = friendly_blast_fixture();
+    idle_update(&mut engine, 1000).unwrap();
+    // Self base stays1; the distinct same-side recipient is captured at0.25.
+    assert!(matches!(
+        engine.active.as_ref().unwrap().life,
+        CharacterLife::Alive {
+            health_quarter_points: 320,
+            ..
+        }
+    ));
+    let queued = &engine.active.as_ref().unwrap().grenade_damage;
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].damage.amount_hp, 5.0);
+    assert_eq!(queued[0].damage.kind, damage::DamageKind::Explosive);
+    assert!(queued[0].damage.kinetic_response);
+    let other_side = Arc::new(
+        engine
+            .spawn_catalog
+            .as_ref()
+            .unwrap()
+            .for_squad(16)
+            .unwrap(),
+    );
+    engine
+        .peers
+        .get_mut("synthetic-reservation-0000")
+        .unwrap()
+        .squad_catalog = other_side;
+    idle_update(&mut engine, 1001).unwrap();
+    assert!(matches!(
+        victim(&engine).life,
+        CharacterLife::Alive {
+            health_quarter_points: 380,
+            ..
+        }
+    ));
+    assert_eq!(victim(&engine).last_damage.last_location_and_type, 0xa3);
+    assert!(engine.active.as_ref().unwrap().grenade_damage.is_empty());
 }
 
 pub(crate) fn fixture() -> Engine<Vec<u8>> {

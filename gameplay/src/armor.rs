@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 pub struct ArmorProfile {
     parameters: ArmorParameters,
     body: [BodyParameters; 16],
+    incoming_base: f32,
     damage_taken: f32,
     explosive_taken: f32,
     impact_taken: f32,
@@ -68,6 +69,7 @@ impl ArmorProfile {
                 coverage: armor.coverage.map(|v| v as f32),
             },
             body,
+            incoming_base: 1.0,
             damage_taken: 0.0,
             explosive_taken: 0.0,
             impact_taken: 0.0,
@@ -103,6 +105,7 @@ impl ArmorProfile {
         Ok(Self {
             parameters: catalog.armor(item_id)?,
             body: catalog.body(),
+            incoming_base: 1.0,
             damage_taken: 0.0,
             explosive_taken: 0.0,
             impact_taken: 0.0,
@@ -137,6 +140,14 @@ impl ArmorProfile {
         self.chemical_taken = modifiers.value("kCharModChemicalDamageTaken");
         self
     }
+    /// Native friendly damage replaces the ordinary base before owned additions.
+    pub fn with_incoming_base(mut self, base: f32) -> Result<Self, &'static str> {
+        if !base.is_finite() || !(0.0..=100.0).contains(&base) {
+            return Err("invalid_incoming_damage_base");
+        }
+        self.incoming_base = base;
+        Ok(self)
+    }
     pub fn incoming_scale(self, kind: crate::damage::DamageKind) -> f32 {
         let resistance = match kind {
             crate::damage::DamageKind::Explosive => self.explosive_taken,
@@ -144,7 +155,7 @@ impl ArmorProfile {
             crate::damage::DamageKind::Poison => self.chemical_taken,
             _ => 0.0,
         };
-        ((1.0_f32 + self.damage_taken) + resistance).max(0.0)
+        ((self.incoming_base + self.damage_taken) + resistance).max(0.0)
     }
     /// Recorded arithmetic inputs; no damage is applied by this audit method.
     pub fn calculation(
@@ -156,7 +167,7 @@ impl ArmorProfile {
         let body = self.body[usize::from(raw.hit_location)];
         let scale = self.incoming_scale(kind);
         Ok(
-            serde_json::json!({"raw_amount_hp":raw.amount_hp,"incoming_damage_scale":scale,
+            serde_json::json!({"raw_amount_hp":raw.amount_hp,"incoming_damage_base":self.incoming_base,"incoming_damage_scale":scale,
             "after_owned_modifier_hp":raw.amount_hp*scale,"armor_type":self.armor_type(),
             "armor_rating":self.parameters.rating,"armor_rating_reduction":raw.armor_rating_redux,
             "armor_prevention":self.parameters.prevention,"armor_prevention_reduction":raw.armor_prevention_redux,
@@ -324,6 +335,7 @@ mod incapacitated_tests {
                 armor_area: location % 4,
                 multiplier: 3.0,
             }),
+            incoming_base: 1.0,
             damage_taken: 0.25,
             explosive_taken: 0.0,
             impact_taken: 0.0,
@@ -337,6 +349,44 @@ mod incapacitated_tests {
             armor_prevention_redux: 0.0,
             hit_location: location,
         }
+    }
+
+    #[test]
+    fn incoming_base_is_validated_and_composed_additively_before_rating() {
+        let mut armor = profile();
+        armor.parameters.prevention = 0.0;
+        armor.body[0].multiplier = 1.0;
+        armor.explosive_taken = 0.25;
+        armor.impact_taken = -0.25;
+        armor.chemical_taken = 0.5;
+        let raw = RawCharacterDamage {
+            amount_hp: 20.0,
+            ..hit(0)
+        };
+        let armor = armor.with_incoming_base(0.25).unwrap();
+        use crate::damage::DamageKind;
+        for (kind, amount) in [
+            (DamageKind::Bullet, 7.0),
+            (DamageKind::Swipe, 7.0),
+            (DamageKind::Explosive, 12.0),
+            (DamageKind::ExternalKinetic, 2.0),
+            (DamageKind::Poison, 17.0),
+        ] {
+            assert_eq!(armor.adjust_for_kind(raw, kind), Ok(amount));
+        }
+        // Zero base still admits positive owned modifiers; it is not an early deny.
+        assert_eq!(armor.with_incoming_base(0.0).unwrap().adjust(raw), Ok(2.0));
+        let audit = armor.calculation(raw, DamageKind::Bullet).unwrap();
+        assert_eq!(audit["incoming_damage_base"], 0.25);
+        assert_eq!(audit["after_owned_modifier_hp"], 10.0);
+        assert_eq!(audit["after_armor_hp"], 7.0);
+        for invalid in [f32::NAN, f32::INFINITY, -0.01, 100.01] {
+            assert_eq!(
+                armor.with_incoming_base(invalid),
+                Err("invalid_incoming_damage_base")
+            );
+        }
+        assert!(armor.with_incoming_base(100.0).is_ok());
     }
 
     #[test]

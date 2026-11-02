@@ -74,6 +74,8 @@ Existing implementation covers admission, replication, loadouts, damage,
 progression, objectives, bot behavior, and collision/navigation processing.
 [Combat reward relationships](docs/combat-reward-relationships.md) distinguish
 actual match sides even when opposing characters share a faction.
+Optional [selected-match character damage rules](docs/character-damage-rules.md)
+load the friendly-fire base from external configuration before owned modifiers and armor.
 Optional [ready-human startup quorum](docs/startup-quorum.md) keeps a configured
 match waiting for enough humans on each side.
 Optional [human incapacitation and resuscitation](docs/incapacitation.md) distinguishes
