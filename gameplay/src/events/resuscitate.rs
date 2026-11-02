@@ -10,8 +10,8 @@ pub(super) fn plan<W: Write>(
         request.patient == (0x0380_0000 | u32::from(p.reservation.player))
             && p.reservation.world == healer.reservation.world
     });
-    let denial = if !ctx.accepted_owner_route {
-        Some("revive_requires_owned_client_route")
+    let denial = if !ctx.accepted_client_route {
+        Some("revive_requires_authenticated_client_route")
     } else if ctx.engine.incapacitation_rules.is_none() {
         Some("incapacitation_not_enabled")
     } else if !healer.entered_game

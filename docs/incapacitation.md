@@ -49,7 +49,9 @@ by enabling the source feature.
 
 `0x021c` is a six-byte target-only `Resuscitate` request. Its patient is a full
 character handle; the healer comes from the authenticated connection's current
-reservation. The handler requires a living, on-foot healer, a current same-world
+reservation. Both authenticated TCP and UDP plugin routes are accepted; owner
+replication retains its separate UDP-only rule. The bridge parser rejects
+server-originated event directions. The handler requires a living, on-foot healer, a current same-world
 same-team incapacitated human patient, an unexpired deadline and a positive
 effective `kCharModResuscitatePercent` modifier. Restore uses the healer's maximum
 HP times that modifier, capped to the patient's maximum, then quarter quantized.
