@@ -117,6 +117,14 @@ fn deserialize_skills<'de, D: serde::Deserializer<'de>>(
     <[u32; 5]>::deserialize(deserializer).map(Some)
 }
 impl Active {
+    /// Equipment published for this life is independent of future saved edits.
+    fn equipped_loadout(&self) -> Option<replication::CharacterLoadout> {
+        let handle = self.current_inventory_handle?;
+        let mut kit = self.spawned_loadout.clone()?;
+        kit.handle = handle;
+        kit.primary.inventory_update_id = handle.update_id;
+        Some(kit)
+    }
     /// Character field18. Nominations and leadership level follow native
     /// Initialize/SetNominations; specialty remains the existing fixed value.
     fn mag_info(&self, level: u8) -> replication::MagCharacterInfo {
@@ -847,6 +855,7 @@ struct Active {
     results_announced: bool,
     postgame_announced: bool,
     current_inventory_handle: Option<replication::InventoryHandle>,
+    spawned_loadout: Option<replication::CharacterLoadout>,
     selected_loadout: Option<protocol::SelectLoadout>,
     loadout_selection_revision: u64,
     pending_loadout_selection: Option<loadout_selection::CommittedLoadoutSelection>,
@@ -980,13 +989,7 @@ impl<W: Write> Engine<W> {
             .ok_or("bullet_inventory_unavailable")?;
         if active.wire_profile.application_id() == 20231 {
             let mut kit = active
-                .reservation
-                .character
-                .replication_loadout(
-                    &self.item_catalog,
-                    handle.inventory_index,
-                    active.wire_profile,
-                )
+                .equipped_loadout()
                 .ok_or("unsupported_retail_bullet_inventory")?;
             kit.handle = handle;
             if request.gear_index == 2 {
@@ -1038,13 +1041,8 @@ impl<W: Write> Engine<W> {
             ));
         }
         let mut kit = active
-            .reservation
-            .character
-            .loadout(
-                &self.item_catalog,
-                handle.inventory_index,
-                active.wire_profile,
-            )
+            .equipped_loadout()
+            .filter(|_| active.wire_profile.catalog_item_ids_valid())
             .ok_or("unsupported_bullet_inventory")?;
         kit.handle = handle;
         kit.primary.inventory_update_id = handle.update_id;
@@ -1523,6 +1521,7 @@ impl<W: Write> Engine<W> {
                     results_announced: false,
                     postgame_announced: false,
                     current_inventory_handle: None,
+                    spawned_loadout: None,
                     selected_loadout: None,
                     loadout_selection_revision: 0,
                     pending_loadout_selection: None,

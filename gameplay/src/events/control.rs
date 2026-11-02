@@ -162,6 +162,7 @@ pub(super) fn client_ready<W: Write>(
                 ctx.engine.wire_profile,
             )?;
             plan.session.new_inventory_handle = initial_inventory.as_ref().map(|l| l.handle);
+            plan.session.new_spawned_loadout = initial_inventory.clone();
             plan.outgoing = Some(snapshot.clone());
             plan.replication.initial_objects = Some(snapshot);
         }

@@ -77,6 +77,13 @@ fn fixture() -> Engine<Vec<u8>> {
             update_id: 1,
             inventory_index: 0,
         });
+        actor.spawned_loadout = Some(
+            actor
+                .reservation
+                .character
+                .replication_loadout(&engine.item_catalog, 0, actor.wire_profile)
+                .unwrap(),
+        );
         actor.observed_primary = Some(replication::InventoryItem {
             inventory_update_id: 1,
             gear_slot: 0,

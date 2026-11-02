@@ -102,20 +102,20 @@ pub(super) fn hit<W: Write>(
             } else if let Some(target) = retail_target {
                 target.loadout.clone()
             } else if let Some(peer) = peer_target {
-                if peer.wire_profile.application_id() == 20231 {
-                    peer.reservation.character.replication_loadout(
-                        &ctx.engine.item_catalog,
-                        target_inventory,
-                        peer.wire_profile,
-                    )
-                } else {
-                    peer.reservation.character.loadout(
-                        &ctx.engine.item_catalog,
-                        target_inventory,
-                        peer.wire_profile,
-                    )
-                }
-                .ok_or("missing_target_loadout")?
+                peer.equipped_loadout()
+                    .or_else(|| {
+                        // Preserve the existing pre-inventory target fallback.
+                        if peer.current_inventory_handle.is_none() {
+                            peer.reservation.character.replication_loadout(
+                                &ctx.engine.item_catalog,
+                                target_inventory,
+                                peer.wire_profile,
+                            )
+                        } else {
+                            None
+                        }
+                    })
+                    .ok_or("missing_target_loadout")?
             } else {
                 ctx.engine
                     .item_catalog
@@ -323,13 +323,7 @@ pub(super) fn fire_grenade<W: Write>(
     let eligible =
         active.entered_game && active.ready_for_updates && active.life.is_alive() && owned;
     let mut created = false;
-    let kit = active.current_inventory_handle.and_then(|h| {
-        active.reservation.character.replication_loadout(
-            &ctx.engine.item_catalog,
-            h.inventory_index,
-            active.wire_profile,
-        )
-    });
+    let kit = active.equipped_loadout();
     let grenade_item = kit
         .as_ref()
         .and_then(|k| k.inventories.get(k.handle.inventory_index as usize))
@@ -436,13 +430,7 @@ pub(super) fn heal<W: Write>(
 ) -> Result<Value, &'static str> {
     let active = ctx.active;
     let now = ctx.now;
-    let kit = active.current_inventory_handle.and_then(|h| {
-        active.reservation.character.replication_loadout(
-            &ctx.engine.item_catalog,
-            h.inventory_index,
-            active.wire_profile,
-        )
-    });
+    let kit = active.equipped_loadout();
     let item = kit
         .as_ref()
         .ok_or("healing_inventory_unavailable")

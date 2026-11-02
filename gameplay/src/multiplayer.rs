@@ -96,11 +96,7 @@ impl Active {
         }
         Ok(())
     }
-    fn snapshot(
-        &self,
-        now: Duration,
-        catalog: &crate::item_catalog::ItemCatalog,
-    ) -> Result<Vec<u8>, &'static str> {
+    fn snapshot(&self, now: Duration) -> Result<Vec<u8>, &'static str> {
         let claimed = self.claimed.as_ref().ok_or("unclaimed_actor")?;
         let c = &self.reservation.character;
         let character = replication::CharacterCreation {
@@ -119,13 +115,7 @@ impl Active {
             },
             mag_info: self.mag_info(c.progression.unwrap_or_default().level),
         };
-        let mut inventory = self.current_inventory_handle.and_then(|h| {
-            self.reservation.character.replication_loadout(
-                catalog,
-                h.inventory_index,
-                self.wire_profile,
-            )
-        });
+        let mut inventory = self.equipped_loadout();
         if let (Some(kit), Some(handle)) = (&mut inventory, self.current_inventory_handle) {
             kit.handle = handle;
             kit.primary.inventory_update_id = handle.update_id;
@@ -513,17 +503,13 @@ impl<W: Write> Engine<W> {
             && !was_created;
         if created {
             let new_id = id.as_ref().unwrap();
-            let snapshot = self
-                .active
-                .as_ref()
-                .unwrap()
-                .snapshot(now, &self.item_catalog)?;
+            let snapshot = self.active.as_ref().unwrap().snapshot(now)?;
             let existing: Vec<Vec<u8>> = self
                 .peers
                 .values()
                 .filter(|a| a.initial_objects.is_some())
                 .map(|a| {
-                    let mut packets = vec![a.snapshot(now, &self.item_catalog)?];
+                    let mut packets = vec![a.snapshot(now)?];
                     packets.extend(
                         a.projectile_replicas
                             .snapshot_packets(now.as_millis() as u32)?,
@@ -1297,4 +1283,70 @@ fn is_spawn_assignment(packet: &[u8], profile: crate::wire_profile::WireProfile)
     }
     // A field14-only delta starts with fourteen absent fields.
     (0..14).all(|_| bits.read(1) == Ok(0)) && bits.read(1) == Ok(1)
+}
+
+#[cfg(test)]
+mod spawned_kit_tests {
+    use super::*;
+    use crate::spawn_progression::{dispatch, engine, ready, reserve};
+
+    #[test]
+    fn saved_kit_replacement_does_not_change_current_life_snapshot() {
+        let mut engine = engine();
+        reserve(&mut engine, 0);
+        let actor = engine.active.as_mut().unwrap();
+        ready(actor);
+        actor.claimed = Some(Claimed {
+            wire: Vec::new(),
+            np_identity: [0; 36],
+            game_info: protocol::GameInfo {
+                client_index: 0,
+                level_name: "synthetic_arena".into(),
+                start_time_ms: 0,
+                attacking_faction: 1,
+                defending_faction: 0,
+                maximum_points: [100; 2],
+                current_points: [100; 2],
+                game_type: 0,
+            },
+        });
+        actor.life = CharacterLife::AwaitingRespawn { generation: 0 };
+        dispatch(&mut engine, &0x0211u16.to_be_bytes(), 0).unwrap();
+        let update = replication::ObjectUpdate {
+            header: replication::UpdateHeader {
+                sequence: 1,
+                nak_sequence: 0,
+                client_index: 0,
+                object_type_mask: 0,
+                timestamp_ms: 100,
+            },
+            wire: &[],
+        }
+        .encode_empty_with_profile(engine.wire_profile)
+        .unwrap();
+        dispatch(&mut engine, &update, 100).unwrap();
+        let actor = engine.active.as_mut().unwrap();
+        assert!(actor.life.is_alive());
+        assert!(actor.current_inventory_handle.is_some());
+        let now = Duration::from_millis(101);
+        let before = actor.snapshot(now).unwrap();
+        // A future validated armory refresh replaces saved rows, while this
+        // life must retain the kit already published at its physical spawn.
+        actor
+            .reservation
+            .character
+            .loadouts
+            .as_mut()
+            .unwrap()
+            .inventories[0][21] = Some(2);
+        engine
+            .item_catalog
+            .validate_saved_item_bindings(actor.reservation.character.loadouts.as_ref().unwrap())
+            .unwrap();
+        let after = actor.snapshot(now).unwrap();
+        assert_eq!(
+            before, after,
+            "saved rows leaked into the live kit snapshot"
+        );
+    }
 }

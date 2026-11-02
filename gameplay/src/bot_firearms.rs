@@ -431,13 +431,7 @@ impl<W: Write> Engine<W> {
             let Some(sample) = a.tracking.sample else {
                 continue;
             };
-            let kit = a.current_inventory_handle.and_then(|h| {
-                a.reservation.character.replication_loadout(
-                    &self.item_catalog,
-                    h.inventory_index,
-                    a.wire_profile,
-                )
-            });
+            let kit = a.equipped_loadout();
             let armor = kit
                 .and_then(|k| armor::ArmorProfile::from_retail_loadout(&k, catalog).ok())
                 .map(|p| p.with_modifiers(&leadership.modifiers(a)));
