@@ -24,6 +24,7 @@ namespace Server.Medius
         static readonly IInternalLogger Logger = InternalLoggerFactory.GetInstance<LocalDmeHost>();
         readonly int _applicationId;
         readonly int _minimumPlayers;
+        readonly MagMatchStartupPolicy _startupPolicy;
         readonly int _gameType;
         readonly int _maximumPlayers;
         readonly HashSet<byte> _allowedFactions;
@@ -53,7 +54,8 @@ namespace Server.Medius
         public LocalDmeHost(GameplayBridge bridge, LocalCharacterStore store)
         {
             _applicationId = Program.Settings.MagApplicationId;
-            _minimumPlayers = Program.Settings.MagMinimumPlayers;
+            _startupPolicy = new MagMatchStartupPolicy(Program.Settings.MagMinimumPlayers, Program.Settings.MagMaximumPlayers, Program.Settings.MagMinimumPlayersPerTeam);
+            _minimumPlayers = _startupPolicy.MinimumPlayers;
             _gameType = Program.Settings.MagGameType;
             if (_gameType != 2 && _gameType != 3 && !(_applicationId == 20231 && _gameType == 0)) throw new ArgumentException("Local gameplay serves types2/3, plus original retail Sabotage type0.");
             _maximumPlayers = Program.Settings.MagMaximumPlayers;
@@ -70,7 +72,7 @@ namespace Server.Medius
         {
             if (_started) throw new InvalidOperationException("DME already started."); _started = true;
             if (!await _bridge.RequestAsync(new { v = 2, request_id = Id(), op = "hello" })) throw new IOException("Gameplay service is not ready.");
-            if (!await _bridge.RequestAsync(new { v = 2, request_id = Id(), op = "configure_match", application_id = _applicationId, minimum_players = _minimumPlayers, maximum_players = _maximumPlayers })) throw new IOException("Gameplay match configuration was not acknowledged.");
+            if (!await _bridge.RequestAsync(_startupPolicy.ConfigureRequest(Id(), _applicationId))) throw new IOException("Gameplay match configuration was not acknowledged.");
             DmeProgram.SERVER_IP = MagNetworkSettings.FromEnvironment().Address; DmeProgram.Settings.TCPPort = 10073; DmeProgram.Settings.UDPPort = 10474;
             DmeProgram.Plugins = Program.Plugins ?? new Server.Plugins.PluginsManager("plugins/");
             var manager = new Server.Dme.MediusManager(_applicationId) { LocalOnly = true }; DmeProgram.Managers.Add(_applicationId, manager);

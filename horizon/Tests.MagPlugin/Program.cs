@@ -27,6 +27,25 @@ void Test(string name, Action action)
     passed++;
 }
 
+Test("startup team minima share bridge policy and advertised total", () =>
+{
+    var policy = new MagMatchStartupPolicy(1, 8, new[] { 2, 1 });
+    Check(policy.MinimumPlayers == 3, "Status must not advertise fewer players than team minima");
+    using var request = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(policy.ConfigureRequest("synthetic", 20231)));
+    var root = request.RootElement;
+    Check(root.GetProperty("minimum_players").GetInt32() == 3 && root.GetProperty("maximum_players").GetInt32() == 8, "Bridge aggregate differs from status");
+    Check(root.GetProperty("minimum_players_per_team").EnumerateArray().Select(x => x.GetInt32()).SequenceEqual(new[] {2,1}), "Bridge team minima");
+    Check(new MagMatchStartupPolicy(5,8,null).MinimumPlayers == 5, "Legacy total minimum");
+    Check(new MagMatchStartupPolicy(1,8,null).MinimumPlayers == 1, "Solo default");
+    var supplied = new[] {1,1};
+    var copied = new MagMatchStartupPolicy(1,8,supplied); supplied[0]=8;
+    Check(copied.MinimumPlayers == 2, "Policy changed with caller array");
+    foreach (var teams in new[] {new[] {1}, new[] {1,1,1}, new[] {-1,1}, new[] {5,4}, new[] {int.MaxValue,1}})
+        Throws<ArgumentException>(() => new MagMatchStartupPolicy(1,8,teams));
+    Throws<ArgumentException>(() => new MagMatchStartupPolicy(0,8,null));
+    Throws<ArgumentException>(() => new MagMatchStartupPolicy(9,8,null));
+});
+
 Test("signed skill fields and strict request length", () =>
 {
     foreach (sbyte id in new sbyte[] { -1, 0, 1, 126, 127 })

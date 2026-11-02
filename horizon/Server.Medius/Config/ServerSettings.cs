@@ -69,6 +69,8 @@ namespace Server.Medius.Config
         /// <summary>Game type (retail NetJoinGameType value0) served by the attached gameplay process: retail0 GameType64/Sabotage, 2 GameType256/Domination (default), 3 FactionExercise/Suppression.</summary>
         public int MagGameType { get; set; } = 2;
         public int MagMinimumPlayers { get; set; } = 1;
+        /// <summary>Optional ready-human minima for match teams0/1. Null or [0,0] preserves legacy total-only startup. Bots do not count.</summary>
+        public int[] MagMinimumPlayersPerTeam { get; set; } = null;
         /// <summary>Opt-in local capacity: 1..64 for retail Sabotage/Suppression, otherwise 1..8. Rust must acknowledge its matching disk-backed admission policy.</summary>
         public int MagMaximumPlayers { get; set; } = 8;
         /// <summary>Optional served faction values0..2, derived from the attached match profile. Null preserves legacy availability for all three factions.</summary>

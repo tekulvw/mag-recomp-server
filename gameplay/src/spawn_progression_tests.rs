@@ -130,6 +130,9 @@ fn engine() -> Engine<Vec<u8>> {
         .unwrap()
 }
 fn reserve(engine: &mut Engine<Vec<u8>>, player: u16) {
+    reserve_faction(engine, player, 1);
+}
+fn reserve_faction(engine: &mut Engine<Vec<u8>>, player: u16, faction: u8) {
     let mut saved = loadouts::SavedLoadouts {
         selected_index: 0,
         update_ids: [1; 5],
@@ -147,7 +150,7 @@ fn reserve(engine: &mut Engine<Vec<u8>>, player: u16) {
             session_key: "aaaaaaaaaaaaaaaa".into(),
             access_key: "bbbbbbbbbbbbbbbb".into(),
             character: serde_json::from_value(
-                json!({"name":format!("Synthetic {player}"),"faction":1,"head":0,
+                json!({"name":format!("Synthetic {player}"),"faction":faction,"head":0,
             "voice":0,"universe_id":26,"character_id":u32::from(player)+1,"loadouts":saved}),
             )
             .unwrap(),
@@ -858,6 +861,7 @@ fn forward_objective_links_fail_before_configuration_and_legacy_catalogs_are_unc
             v: BRIDGE_VERSION,
             request_id: "synthetic-config".into(),
             minimum_players: 1,
+            minimum_players_per_team: [0; 2],
             maximum_players: 8,
             application_id: 20231,
         },
@@ -952,3 +956,6 @@ fn parachute_without_resolved_inventory_keeps_the_pending_wave_without_consumpti
     );
     assert!(!actor.life.is_alive());
 }
+
+#[path = "startup_quorum_tests.rs"]
+mod startup_quorum;

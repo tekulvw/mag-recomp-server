@@ -183,21 +183,88 @@ impl<W: Write> Engine<W> {
         if self.development_dummy_enabled() && maximum > 1 {
             return Err("dummy_slot_conflicts_with_multiplayer");
         }
+        self.validate_team_quorum(self.minimum_players_per_team, maximum)?;
         self.minimum_players = minimum;
         self.maximum_players = maximum;
-        self.match_started = minimum == 1;
+        self.match_started = self.starts_without_quorum();
         Ok(self)
     }
-    pub(super) fn ready_count(&self) -> usize {
-        self.peers
-            .values()
-            .filter(|p| p.ready_for_updates && p.initial_objects.is_some())
-            .count()
-            + usize::from(
-                self.active
-                    .as_ref()
-                    .is_some_and(|p| p.ready_for_updates && p.initial_objects.is_some()),
-            )
+    pub(super) fn starts_without_quorum(&self) -> bool {
+        self.minimum_players == 1 && self.minimum_players_per_team == [0; 2]
+    }
+    pub(super) fn validate_team_quorum(
+        &self,
+        minimum: [usize; 2],
+        maximum: usize,
+    ) -> Result<(), &'static str> {
+        if minimum == [0; 2] {
+            return Ok(());
+        }
+        let policy = self.match_profile();
+        let team_capacity = |team: usize| {
+            self.spawn_catalog.as_ref().map_or(0, |catalog| {
+                (catalog
+                    .map_pool()
+                    .squads
+                    .iter()
+                    .filter(|s| usize::from(s.team) == team)
+                    .count()
+                    * policy.squad_capacity)
+                    .min(policy.team_capacity)
+            })
+        };
+        if minimum[0].saturating_add(minimum[1]) > maximum
+            || minimum
+                .iter()
+                .enumerate()
+                .any(|(team, n)| *n > team_capacity(team))
+            || !policy.auto_assign_teams
+            || self.development_dummy_enabled()
+        {
+            return Err("invalid_team_quorum");
+        }
+        Ok(())
+    }
+    /// Only authenticated, current human actors count. Bots/Targets never have
+    /// a reservation here. A pending Ready replaces that actor's prior state,
+    /// so initial snapshots and the subsequent start transition use one rule.
+    pub(super) fn ready_humans_by_team(
+        &self,
+        now: Duration,
+        pending: Option<&Active>,
+    ) -> [usize; 2] {
+        let mut counts = [0; 2];
+        let mut accounts = std::collections::BTreeSet::new();
+        let mut owners = std::collections::BTreeSet::new();
+        for actor in self.peers.values().chain(self.active.iter()).chain(pending) {
+            let is_pending = pending.is_some_and(|p| std::ptr::eq(p, actor));
+            if !is_pending && pending.is_some_and(|p| p.reservation.id == actor.reservation.id) {
+                continue;
+            }
+            if actor.claimed.is_none()
+                || actor.replication_backlogged
+                || now.saturating_sub(actor.last_event) >= IDLE_TIMEOUT
+                || (!is_pending && !(actor.ready_for_updates && actor.initial_objects.is_some()))
+                || !accounts.insert(actor.reservation.account)
+            {
+                continue;
+            }
+            if let Some(owner) = actor.reservation.character.account_id.as_deref()
+                && !owners.insert(owner)
+            {
+                continue;
+            }
+            counts[usize::from(actor.team())] += 1;
+        }
+        counts
+    }
+    pub(super) fn quorum_satisfied(&self, now: Duration, pending: Option<&Active>) -> bool {
+        let counts = self.ready_humans_by_team(now, pending);
+        counts.iter().sum::<usize>() >= self.minimum_players
+            && counts
+                .iter()
+                .zip(self.minimum_players_per_team)
+                .all(|(count, minimum)| *count >= minimum)
     }
     pub(super) fn squad_members(&self, squad: u16, include: Option<u16>) -> [u16; 8] {
         let mut ids: Vec<u16> = self
@@ -271,7 +338,7 @@ impl<W: Write> Engine<W> {
             return self.apply(request, decoded, now, wall);
         }
         let development_demolition = matches!(&request, Request::DevelopmentArmDemolition { .. });
-        if self.maximum_players == 1 {
+        if self.maximum_players == 1 && self.minimum_players_per_team == [0; 2] {
             let was_created = self
                 .active
                 .as_ref()
@@ -599,8 +666,8 @@ impl<W: Write> Engine<W> {
                 peer.queue_shared(packet.clone());
             }
         }
-        if !self.match_started && self.ready_count() >= self.minimum_players {
-            self.record(json!({"op":"match_started","ready_players":self.ready_count(),"minimum_players":self.minimum_players}),wall)?;
+        if !self.match_started && self.quorum_satisfied(now, None) {
+            self.record(json!({"op":"match_started","ready_players":self.ready_humans_by_team(now, None).iter().sum::<usize>(),"ready_players_per_team":self.ready_humans_by_team(now, None),"minimum_players":self.minimum_players,"minimum_players_per_team":self.minimum_players_per_team}),wall)?;
             self.match_started = true;
             let next_waves = [
                 self.team_waves[0]
@@ -747,7 +814,7 @@ impl<W: Write> Engine<W> {
             self.match_epoch = None;
             self.alpha_turret = turret::ClientTurretFields::default();
             self.alpha_turret_reporter = None;
-            self.match_started = self.minimum_players == 1;
+            self.match_started = self.starts_without_quorum();
         }
         Ok(Vec::new())
     }
