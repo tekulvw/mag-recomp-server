@@ -80,6 +80,16 @@ record their distinct statistics at gameplay commit. XP acknowledgements and
 repeated requests cannot increment them again. Another collapse after revival is
 a new death event despite retaining the actor's physical life generation.
 
+Hostile human bullet hits and queued grenades also stage the normal
+`EnemyKilled` reward at initial collapse. Credit belongs to the actual
+same-world authenticated source, including its already-queued blast after death.
+Friendly fire, self damage and attribution naming another actor do not grant it.
+The receipt combines the actual victim identity and physical generation with
+the staged next retained death count. A second collapse after same-object revival
+therefore has a distinct identity. Invalid or exhausted ordinals suppress the
+ambiguous reward with an audit diagnostic while damage and statistics continue.
+All awards still use the external progression catalog's configured amounts.
+
 Optional `table.Awards.FinishingMoves` and `table.Awards.Resuscitations` configure
 the corresponding action XP in the Horizon progression catalog. No amounts are
 embedded in source. If an optional action award is absent, the recognized event
