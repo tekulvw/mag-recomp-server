@@ -54,6 +54,7 @@ pub mod loadout_selection;
 mod loadout_selection_tests;
 pub mod loadouts;
 mod match_flow;
+pub mod match_profiles;
 mod multiplayer;
 pub mod objective_catalog;
 mod objective_control;
@@ -221,6 +222,12 @@ pub enum Request {
         v: u8,
         request_id: String,
     },
+    SelectMatchProfile {
+        v: u8,
+        request_id: String,
+        formation_id: String,
+        profile_id: String,
+    },
     ConfigureMatch {
         v: u8,
         request_id: String,
@@ -368,6 +375,7 @@ impl Request {
         match self {
             Self::Hello { v, request_id }
             | Self::ConfigureMatch { v, request_id, .. }
+            | Self::SelectMatchProfile { v, request_id, .. }
             | Self::Reserve { v, request_id, .. }
             | Self::Event { v, request_id, .. }
             | Self::ProgressionCommitted { v, request_id, .. }
@@ -411,6 +419,10 @@ pub struct Response {
     pub capabilities: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub match_terminal: Option<match_flow::MatchTerminal>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub match_profiles: Vec<match_profiles::Summary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_match: Option<match_profiles::SelectedMatch>,
 }
 impl Response {
     pub fn error(request_id: String, error: &str) -> Self {
@@ -424,6 +436,8 @@ impl Response {
             loadout_selections: Vec::new(),
             capabilities: Vec::new(),
             match_terminal: None,
+            match_profiles: Vec::new(),
+            selected_match: None,
         }
     }
 }
@@ -485,6 +499,15 @@ impl Request {
         }
         match self {
             Request::Hello { .. } => {}
+            Request::SelectMatchProfile {
+                formation_id,
+                profile_id,
+                ..
+            } => {
+                if !identifier(formation_id, 1) || !identifier(profile_id, 1) {
+                    return Err("invalid_match_selection_identity");
+                }
+            }
             Request::ConfigureMatch {
                 minimum_players,
                 minimum_players_per_team,
@@ -916,6 +939,11 @@ pub struct Engine<W: Write> {
     /// Legacy development constructors permit profile changes before admission.
     runtime_application_id: Option<u32>,
     writer: W,
+    match_profiles: Option<match_profiles::Registry>,
+    selected_match: Option<match_profiles::SelectedMatch>,
+    retired_formations: std::collections::BTreeSet<String>,
+    retired_loadout_selections:
+        std::collections::BTreeMap<String, loadout_selection::CommittedLoadoutSelection>,
     active: Option<Active>,
     peers: std::collections::BTreeMap<String, Active>,
     minimum_players: usize,
@@ -1258,6 +1286,7 @@ impl<W: Write> Engine<W> {
             _ => None,
         };
         let hello = matches!(&request, Request::Hello { .. });
+        let selection = matches!(&request, Request::SelectMatchProfile { .. });
         let terminal_allowed = matches!(
             &request,
             Request::Event { .. } | Request::Release { .. } | Request::ProgressionCommitted { .. }
@@ -1273,12 +1302,28 @@ impl<W: Write> Engine<W> {
                 rewards: self.pending_reward_batch(),
                 loadout_selections: self.pending_loadout_selections(),
                 capabilities: if hello {
-                    vec![
+                    let mut capabilities = vec![
                         loadout_selection::CAPABILITY.into(),
                         loadout_refresh::CAPABILITY.into(),
-                    ]
+                    ];
+                    if self.match_profiles.is_some() {
+                        capabilities.push(match_profiles::CAPABILITY.into());
+                    }
+                    capabilities
                 } else {
                     Vec::new()
+                },
+                match_profiles: if hello {
+                    self.match_profiles
+                        .as_ref()
+                        .map_or_else(Vec::new, |r| r.summaries())
+                } else {
+                    Vec::new()
+                },
+                selected_match: if selection {
+                    self.selected_match.clone()
+                } else {
+                    None
                 },
                 match_terminal: if terminal_allowed {
                     self.match_terminal.clone()
@@ -1357,6 +1402,11 @@ impl<W: Write> Engine<W> {
             }
         }
         match request {
+            Request::SelectMatchProfile {
+                formation_id,
+                profile_id,
+                ..
+            } => self.select_match_profile(formation_id, profile_id, wall_secs),
             Request::Hello { .. } => self
                 .record(
                     json!({"op":"ready","bridge_version":BRIDGE_VERSION}),
@@ -1375,6 +1425,11 @@ impl<W: Write> Engine<W> {
                 application_id,
                 ..
             } => {
+                if self.match_profiles.is_some()
+                    && (minimum_players < 2 || minimum_players_per_team.contains(&0))
+                {
+                    return Err("match_profiles_require_two_human_sides");
+                }
                 if self
                     .runtime_application_id
                     .is_some_and(|selected| selected != application_id)
@@ -1419,6 +1474,9 @@ impl<W: Write> Engine<W> {
                 character,
                 ..
             } => {
+                if self.match_profiles.is_some() && self.selected_match.is_none() {
+                    return Err("match_profile_not_selected");
+                }
                 self.validate_objective_configuration(self.wire_profile)?;
                 if self.active.is_none() && self.peers.is_empty() {
                     if let Some(world) = &mut self.bunker_world {
@@ -1761,7 +1819,7 @@ impl<W: Write> Engine<W> {
                     )?;
                     self.released_reservations.insert(reservation_id.clone());
                     self.release_order.push_back(reservation_id);
-                    while self.release_order.len() > 512 {
+                    while self.match_profiles.is_none() && self.release_order.len() > 512 {
                         if let Some(old) = self.release_order.pop_front() {
                             self.released_reservations.remove(&old);
                         }
@@ -1771,8 +1829,10 @@ impl<W: Write> Engine<W> {
                     if self.peers.is_empty() {
                         // Horizon settles pending release ACKs before a new cohort.
                         // Retire identities only while this shared world exists.
-                        self.released_reservations.clear();
-                        self.release_order.clear();
+                        if self.match_profiles.is_none() {
+                            self.released_reservations.clear();
+                            self.release_order.clear();
+                        }
                         self.reset_objective_world();
                         self.clear_bot_world();
                         self.team_waves = [None; 2];

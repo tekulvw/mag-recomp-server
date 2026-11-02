@@ -231,6 +231,20 @@ namespace Server.Medius
                         {
                             if (gameplay is RT.Models.MAG.MagServerStatusRequest status)
                             { Queue(RT.Models.MAG.MagMessageCodec.ToPluginMessageForApplication(Program.LocalDme.Status(status.TransactionId), data.ApplicationId), clientChannel); break; }
+                            if (gameplay is RT.Models.MAG.MagRetailCancelJoinRequest)
+                            { Program.LocalDme.CancelQueuedJoin(data.MagMlsSession); break; }
+                            if (gameplay is RT.Models.MAG.MagJoinGameRequest queuedJoin && Program.LocalDme.UsesFactionMatchmaking)
+                            {
+                                var queuedSession=data.MagMlsSession;var queuedCharacter=queuedSession.CharacterId;var queuedApplication=data.ApplicationId;
+                                bool CurrentQueueSession()=>clientChannel.Active && ReferenceEquals(data.MagMlsSession,queuedSession) &&
+                                    queuedSession.CharacterId==queuedCharacter && queuedSession.State==MagMlsSession.SessionState.Ready && !queuedSession.IsExpired(DateTime.UtcNow);
+                                Program.LocalDme.QueueJoin(queuedSession,queuedJoin,
+                                    message=>{if(CurrentQueueSession())Queue(RT.Models.MAG.MagMessageCodec.ToPluginMessageForApplication(message,queuedApplication),clientChannel);},
+                                    CurrentQueueSession,
+                                    record=>{if(CurrentQueueSession()&&record.AccountId==queuedCharacter)Queue(RT.Models.MAG.MagMessageCodec.ToPluginMessageForApplication(
+                                        new RT.Models.MAG.MagCharacterRecordNotification {Record=record},queuedApplication),clientChannel);});
+                                break;
+                            }
                             if (gameplay is RT.Models.MAG.MagJoinGameRequest join)
                             { if (join is RT.Models.MAG.MagRetailJoinGameRequest retailJoin)
                                 Logger.Info($"MAG retail join preference={retailJoin.Preference} value0={retailJoin.Value} value1={retailJoin.Value1} clientType={retailJoin.ClientType} partyId={retailJoin.PartyId}");

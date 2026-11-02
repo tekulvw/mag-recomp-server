@@ -78,6 +78,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     let mut bot_population_path: Option<PathBuf> = None;
     let mut bot_names_path: Option<PathBuf> = None;
     let mut bot_fill_total: usize = 0;
+    let mut match_profiles_path: Option<PathBuf> = None;
     let mut spawn_path: Option<PathBuf> = None;
     let mut ground_vehicles_path: Option<PathBuf> = None;
     let mut objective_path: Option<PathBuf> = None;
@@ -104,6 +105,15 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--match-profiles" => {
+                match_profiles_path = Some(
+                    args.next()
+                        .ok_or_else(|| {
+                            io::Error::other("--match-profiles requires an absolute manifest path")
+                        })?
+                        .into(),
+                );
+            }
             "--application-id" => {
                 application_id = Some(parse_application_id(&args.next().ok_or_else(|| {
                     io::Error::other("--application-id requires 20230 or 20231")
@@ -348,9 +358,30 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             }
             _ => {
                 return Err(io::Error::other(
-                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json] [--navmesh-world MESH.mag-nav] [--bot-fill-total N --bot-population POPULATION.json] [--bot-names /absolute/NAMES.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
+                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--match-profiles /absolute/MATCH_PROFILES.json] [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json] [--navmesh-world MESH.mag-nav] [--bot-fill-total N --bot-population POPULATION.json] [--bot-names /absolute/NAMES.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
                 ));
             }
+        }
+    }
+    if match_profiles_path.is_some() {
+        if application_id != Some(20231) {
+            return Err(io::Error::other(
+                "--match-profiles requires --application-id 20231",
+            ));
+        }
+        if bot_population_path.is_some()
+            || bot_fill_total != 0
+            || development_dummy
+            || structure_path.is_some()
+            || bunker_path.is_some()
+            || bunker_exit_policy_path.is_some()
+            || leadership_passives_path.is_some()
+            || leadership_role_policy_path.is_some()
+            || collision_query.is_some()
+        {
+            return Err(io::Error::other(
+                "--match-profiles does not support bots, bunkers, leadership, dummy or collision-query",
+            ));
         }
     }
     if validate_catalogs && collision_query.is_some() {
@@ -797,6 +828,18 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     } else {
         None
     };
+    let match_profiles = match_profiles_path
+        .as_ref()
+        .map(mag_gameplay::match_profiles::Registry::load)
+        .transpose()?;
+    if let Some(registry) = &match_profiles {
+        registry
+            .validate_runtime(
+                &item_catalog,
+                wire_profiles.profile(20231).map_err(io::Error::other)?,
+            )
+            .map_err(io::Error::other)?;
+    }
     let mut resources = match application_id {
         Some(id) => {
             EngineResources::for_application(item_catalog, catalog, bunker_world, wire_profiles, id)
@@ -906,6 +949,11 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             .with_bot_population(population, bot_fill_total)
             .map_err(io::Error::other)?;
     }
+    if let Some(registry) = match_profiles {
+        engine = engine
+            .with_match_profiles(registry)
+            .map_err(io::Error::other)?;
+    }
     let engine = Arc::new(Mutex::new(engine));
     let listener = TcpListener::bind(bind)?;
     let started = Instant::now();
@@ -920,7 +968,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     );
     println!(
         "{}",
-        serde_json::json!({"event":"listening","application_id":application_id.unwrap_or(20230),"profile_selection":if application_id.is_some(){"explicit"}else{"legacy"},"protocol":mag_gameplay::BRIDGE_VERSION,"address":listener.local_addr()?.to_string(),"collision":collision_info,"spawn_catalog":spawn_path,"objective_catalog":objective_info,"item_catalog":item_path,"character_blast_rules":blast_rules_path,"retail_combat_metadata":retail_metadata,"bootstrap_loadouts":bootstrap_loadouts_path,"fall_damage_rules":fall_rules_path,"incapacitation_rules":incapacitation_rules_path,"character_damage_rules":character_damage_rules_path,"skill_catalog":skill_path,"retail_armory_catalog":retail_armory_path,"leadership_passives":leadership_passives_path,"leadership_role_policy":leadership_role_policy_path,"bunkers":bunker_info,"tick_telemetry":telemetry_path,"tick_budget_us":tick_budget_us,"scheduler":"independent_50ms_when_subscribed","bot_fill_total":bot_fill_total,"bot_population":bot_population_path,"bot_names":bot_names_path,"bot_names_count":bot_names_count,"development_dummy_position":actual_dummy_position})
+        serde_json::json!({"event":"listening","application_id":application_id.unwrap_or(20230),"match_profiles":match_profiles_path,"profile_selection":if application_id.is_some(){"explicit"}else{"legacy"},"protocol":mag_gameplay::BRIDGE_VERSION,"address":listener.local_addr()?.to_string(),"collision":collision_info,"spawn_catalog":spawn_path,"objective_catalog":objective_info,"item_catalog":item_path,"character_blast_rules":blast_rules_path,"retail_combat_metadata":retail_metadata,"bootstrap_loadouts":bootstrap_loadouts_path,"fall_damage_rules":fall_rules_path,"incapacitation_rules":incapacitation_rules_path,"character_damage_rules":character_damage_rules_path,"skill_catalog":skill_path,"retail_armory_catalog":retail_armory_path,"leadership_passives":leadership_passives_path,"leadership_role_policy":leadership_role_policy_path,"bunkers":bunker_info,"tick_telemetry":telemetry_path,"tick_budget_us":tick_budget_us,"scheduler":"independent_50ms_when_subscribed","bot_fill_total":bot_fill_total,"bot_population":bot_population_path,"bot_names":bot_names_path,"bot_names_count":bot_names_count,"development_dummy_position":actual_dummy_position})
     );
     for connection in listener.incoming() {
         let stream = connection?;
@@ -1170,6 +1218,8 @@ fn serve_subscription(
                 rewards: Vec::new(),
                 loadout_selections: Vec::new(),
                 capabilities: Vec::new(),
+                match_profiles: Vec::new(),
+                selected_match: None,
                 match_terminal: None,
             })
             .unwrap();
@@ -1389,6 +1439,8 @@ mod subscription_tests {
             rewards: Vec::new(),
             loadout_selections: Vec::new(),
             capabilities: Vec::new(),
+            match_profiles: Vec::new(),
+            selected_match: None,
             match_terminal: None,
         }
     }
@@ -1777,6 +1829,75 @@ mod runtime_profile_tests {
                 .to_string()
                 .contains("verified_spawn_pool")
         );
+    }
+
+    fn synthetic_match_profile(files: &SyntheticCatalogs) -> PathBuf {
+        files.write("profile-spawns.json", &serde_json::json!({
+            "format":"mag_spawn_catalog","schema_version":1,"source":"SYNTHETIC CLI registry",
+            "active":{"map_name":"synthetic_home","squad_index":0,"default_spawn":0,"available":[0]},
+            "match_profile":{"game_type":0,"auto_assign_teams":true,"team_capacity":1,"squad_capacity":1,"attacking_faction":0,"has_bunkers":false,"has_objectives":false},
+            "maps":[{"name":"synthetic_home","owner_faction":1,"spawn_count":1,
+                "locations":[{"index":0,"token":1,"kind":"on_foot","position":{"x":10.,"y":2.,"z":12.}}],
+                "squads":[{"index":0,"team":0,"platoon":0,"squad":0,"faction":null,"available":[0],"default_spawn":0},
+                {"index":16,"team":1,"platoon":0,"squad":0,"faction":1,"available":[0],"default_spawn":0}]}]}));
+        files.write("profiles.json", &serde_json::json!({"format":"mag_match_profiles_v1","profiles":[{"profile_id":"synthetic-profile","spawn_catalog":files.0.join("profile-spawns.json")}]}));
+        files.0.join("profiles.json")
+    }
+
+    #[test]
+    fn offline_registry_validation_is_explicit_and_still_requires_base_inputs() {
+        let files = SyntheticCatalogs::new();
+        let manifest = synthetic_match_profile(&files);
+        let mut args = files.args();
+        args.extend(["--match-profiles".into(), manifest.display().to_string()]);
+        assert!(run(args.clone()).is_ok());
+        let spawn_flag = args.iter().position(|s| s == "--spawn-catalog").unwrap();
+        args.drain(spawn_flag..=spawn_flag + 1);
+        assert!(
+            run(args)
+                .unwrap_err()
+                .to_string()
+                .contains("--spawn-catalog")
+        );
+    }
+
+    #[test]
+    fn invalid_registry_fails_before_creating_log_or_listener() {
+        let files = SyntheticCatalogs::new();
+        let manifest = synthetic_match_profile(&files);
+        let mut broken = files.read("profiles.json");
+        broken["profiles"][0]["spawn_catalog"] = serde_json::json!(files.0.join("missing.json"));
+        files.write("profiles.json", &broken);
+        let mut args = files.args();
+        args.retain(|s| s != "--validate-catalogs");
+        args.extend([
+            "--match-profiles".into(),
+            manifest.display().to_string(),
+            "--log".into(),
+            files.0.join("should-not-exist.jsonl").display().to_string(),
+        ]);
+        assert!(run(args).is_err());
+        assert!(!files.0.join("should-not-exist.jsonl").exists());
+    }
+
+    #[test]
+    fn registry_rejects_unswitchable_world_extras_before_loading() {
+        for flags in [
+            vec!["--bot-population", "/synthetic/missing.json"],
+            vec!["--bot-fill-total", "1"],
+            vec!["--development-dummy"],
+            vec!["--leadership-passives", "/synthetic/missing.json"],
+            vec!["--bunker-catalog", "/synthetic/missing.json"],
+        ] {
+            let mut args = vec![
+                "--application-id".to_string(),
+                "20231".into(),
+                "--match-profiles".into(),
+                "/synthetic/profiles.json".into(),
+            ];
+            args.extend(flags.into_iter().map(str::to_owned));
+            assert!(run(args).is_err());
+        }
     }
 
     #[test]

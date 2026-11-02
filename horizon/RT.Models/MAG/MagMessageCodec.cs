@@ -22,7 +22,7 @@ namespace RT.Models.MAG
 
         public static bool TryParseClientForApplication(byte[] payload, int applicationId, out MagMessage message)
         {
-            if (TryParseForApplication(payload, applicationId, out message) && (message is MagTrainingCompletedRequest || message is MagKeepAlive || message is MagJoinGameRequest || message is MagServerStatusRequest || message is MagHello || message is MagProtocolInfo || message is MagAccountLoginRequest || message is MagCharacterDataRequest ||
+            if (TryParseForApplication(payload, applicationId, out message) && (message is MagRetailCancelJoinRequest || message is MagTrainingCompletedRequest || message is MagKeepAlive || message is MagJoinGameRequest || message is MagServerStatusRequest || message is MagHello || message is MagProtocolInfo || message is MagAccountLoginRequest || message is MagCharacterDataRequest ||
                 message is MagNpAuthenticateRequest || message is MagUniverseListRequest || message is MagRetailPatchRequest ||
                 message is MagNewsEulaRequest || message is MagCharacterListRequest || message is MagCreateCharacterRequest || message is MagLoadoutUpdateRequest || message is MagPurchaseSkillRequest)) return true;
             message = null;
@@ -43,11 +43,13 @@ namespace RT.Models.MAG
                 var reader = new MagBitReader(payload);
                 ushort messageType = reader.ReadUInt16();
                 // Retail0031 is logout, not prototype NP auth. Never fall back for conflicting IDs.
-                MagMessage parsed = applicationId == 20231 && ((messageType >= 0x0011 && messageType <= 0x0013) || (messageType >= 0x002b && messageType <= 0x002f) || (messageType >= 0x0031 && messageType <= 0x0038) || messageType == 0x01f5 || messageType == 0x01f6)
+                MagMessage parsed = applicationId == 20231 && ((messageType >= 0x0011 && messageType <= 0x0015) || (messageType >= 0x002b && messageType <= 0x002f) || (messageType >= 0x0031 && messageType <= 0x0038) || messageType == 0x01f5 || messageType == 0x01f6)
                     ? messageType switch
                     {
                         0x0012 => new MagRetailJoinGameRequest(),
                         0x0013 => new MagRetailJoinGameResponse(),
+                        0x0014 => new MagRetailJoinGameUpdate(),
+                        0x0015 => new MagRetailCancelJoinRequest(),
                         0x002d => new MagTrainingCompletedRequest(),
                         0x002e => new MagRetailAccountLoginRequest(),
                         0x002f => new MagRetailAccountLoginResponse(),
@@ -127,6 +129,11 @@ namespace RT.Models.MAG
                         join.ClientType=reader.ReadByte(); join.PartyId=reader.ReadUInt32(); break;
                     case MagJoinGameRequest join:
                         join.Preference=reader.ReadByte(); join.Value=reader.ReadUInt32(); join.ClientType=reader.ReadByte(); break;
+                    case MagRetailCancelJoinRequest cancel:
+                        cancel.PartyId=reader.ReadUInt32();break;
+                    case MagRetailJoinGameUpdate update:
+                        update.Success=reader.ReadBoolean();update.QueuedType=unchecked((sbyte)reader.ReadByte());
+                        for(int i=0;i<12;i++)update.QueueSizes[i]=reader.ReadUInt32();break;
                     case MagJoinGameResponse join:
                         join.Result=reader.ReadByte(); join.MediusWorldUid=reader.ReadUInt32(); join.ConnectionType=reader.ReadUInt16(); join.AddressType=reader.ReadUInt16();
                         join.ServerAddress=reader.ReadBytes(16); join.ServerPort=reader.ReadUInt16(); join.WorldId=reader.ReadUInt32(); join.AccessKey=reader.ReadBytes(17); join.Piuid=reader.ReadUInt32(); break;
@@ -237,6 +244,8 @@ namespace RT.Models.MAG
                 throw new ArgumentException("Join game type conflicts with selected application.", nameof(message));
             if (message is MagTrainingCompletedRequest && applicationId != 20231)
                 throw new ArgumentException("Training request is retail-only.", nameof(message));
+            if ((message is MagRetailJoinGameUpdate || message is MagRetailCancelJoinRequest) && applicationId != 20231)
+                throw new ArgumentException("Queue message is retail-only.",nameof(message));
             var writer = new MagBitWriter();
             writer.WriteUInt16(message.MessageType);
             if (message is MagPluginClientMessage common) WriteHeader(writer, common);
@@ -278,6 +287,12 @@ namespace RT.Models.MAG
                     writer.WriteByte(join.ClientType); writer.WriteUInt32(join.PartyId); break;
                 case MagJoinGameRequest join:
                     writer.WriteByte(join.Preference); writer.WriteUInt32(join.Value); writer.WriteByte(join.ClientType); break;
+                case MagRetailCancelJoinRequest cancel:
+                    writer.WriteUInt32(cancel.PartyId);break;
+                case MagRetailJoinGameUpdate update:
+                    if(update.QueueSizes==null||update.QueueSizes.Length!=12)throw new ArgumentException("Queue matrix requires12 cells.");
+                    writer.WriteBoolean(update.Success);writer.WriteByte(unchecked((byte)update.QueuedType));
+                    foreach(var count in update.QueueSizes)writer.WriteUInt32(count);break;
                 case MagJoinGameResponse join:
                     if(join.ServerAddress?.Length!=16 || join.AccessKey?.Length!=17) throw new ArgumentException("Invalid DME descriptor widths.");
                     writer.WriteByte(join.Result); writer.WriteUInt32(join.MediusWorldUid); writer.WriteUInt16(join.ConnectionType); writer.WriteUInt16(join.AddressType);

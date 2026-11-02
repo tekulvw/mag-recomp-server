@@ -159,14 +159,14 @@ pub struct SegmentQuery<'a> {
     pub nearest: Option<RayHit>,
     pub metadata: &'a WorldMetadata,
 }
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Triangle {
     vertices: [Vec3; 3],
     bounds: Bounds,
     instance: usize,
     triangle_index: usize,
 }
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum Node {
     Leaf {
         bounds: Bounds,
@@ -186,13 +186,15 @@ impl Node {
         }
     }
 }
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct CollisionWorld {
     source_sha256: String,
     metadata: WorldMetadata,
-    instance_ids: Vec<String>,
-    triangles: Vec<Triangle>,
-    nodes: Vec<Node>,
+    // Geometry is immutable after BVH construction. Preloaded profiles share
+    // these buffers instead of duplicating map geometry on each selection.
+    instance_ids: std::sync::Arc<[String]>,
+    triangles: std::sync::Arc<[Triangle]>,
+    nodes: std::sync::Arc<[Node]>,
     root: Option<usize>,
     stats: CollisionStats,
     max_abs_coordinate: f64,
@@ -328,9 +330,9 @@ impl CollisionWorld {
         Ok(Self {
             source_sha256,
             metadata,
-            instance_ids,
-            triangles,
-            nodes,
+            instance_ids: instance_ids.into(),
+            triangles: triangles.into(),
+            nodes: nodes.into(),
             root,
             stats,
             max_abs_coordinate: limits.max_abs_coordinate,

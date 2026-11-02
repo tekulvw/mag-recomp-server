@@ -212,6 +212,9 @@ impl<W: Write> Engine<W> {
         catalog: LeadershipCatalog,
         policy: RolePolicy,
     ) -> Result<Self, &'static str> {
+        if self.match_profiles.is_some() {
+            return Err("match_profiles_unsupported_world_extras");
+        }
         if self.active.is_some() || !self.peers.is_empty() {
             return Err("leadership_configuration_locked");
         }

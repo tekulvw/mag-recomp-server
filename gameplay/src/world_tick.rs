@@ -105,6 +105,8 @@ impl<W: Write> Engine<W> {
             rewards: self.pending_reward_batch(),
             loadout_selections: self.pending_loadout_selections(),
             capabilities: Vec::new(),
+            match_profiles: Vec::new(),
+            selected_match: None,
             match_terminal: self.match_terminal.clone(),
         }
     }

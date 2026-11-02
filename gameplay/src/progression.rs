@@ -205,6 +205,19 @@ pub(crate) fn participant_key(reservation: &crate::Reservation) -> Option<Partic
 }
 impl<W: Write> Engine<W> {
     pub(crate) fn remember_round_participant(&mut self, actor: &Active) {
+        if self.match_profiles.is_some()
+            && self
+                .released_reservations
+                .insert(actor.reservation.id.clone())
+        {
+            self.release_order.push_back(actor.reservation.id.clone());
+        }
+        if self.match_profiles.is_some()
+            && let Some(receipt) = &actor.pending_loadout_selection
+        {
+            self.retired_loadout_selections
+                .insert(receipt.selection_id.clone(), receipt.clone());
+        }
         if self.reward_match_id.as_deref() == Some(&actor.reward_match_id)
             && let Some(key) = participant_key(&actor.reservation)
         {

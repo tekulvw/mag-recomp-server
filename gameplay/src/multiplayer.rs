@@ -309,6 +309,20 @@ impl<W: Write> Engine<W> {
         now: Duration,
         wall: u64,
     ) -> Result<Vec<OutboundMessage>, &'static str> {
+        if let Request::SelectMatchProfile {
+            formation_id,
+            profile_id,
+            ..
+        } = request
+        {
+            return self.select_match_profile(formation_id, profile_id, wall);
+        }
+        if matches!(&request, Request::Reserve { .. })
+            && self.match_profiles.is_some()
+            && self.selected_match.is_none()
+        {
+            return Err("match_profile_not_selected");
+        }
         if let Request::Release { reservation_id, .. } = &request
             && self.released_reservations.contains(reservation_id)
         {
@@ -375,6 +389,7 @@ impl<W: Write> Engine<W> {
         }
         let id = match &request {
             Request::Hello { .. }
+            | Request::SelectMatchProfile { .. }
             | Request::ConfigureMatch { .. }
             | Request::ProgressionCommitted { .. }
             | Request::LoadoutSelectionSettled { .. }

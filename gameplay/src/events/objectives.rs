@@ -116,6 +116,7 @@ pub(super) fn interaction<W: Write>(
 
 impl<W: Write> Engine<W> {
     pub(crate) fn reset_objective_world(&mut self) {
+        self.retire_match_selection();
         self.reset_spawn_progression();
         self.objective_world = self.objective_catalog.as_ref().map(ObjectiveWorld::new);
         self.bot_registry.director = Default::default();
@@ -128,6 +129,12 @@ impl<W: Write> Engine<W> {
         self.reward_match_id = None;
         self.round_participants.clear();
         for actor in self.active.iter_mut().chain(self.peers.values_mut()) {
+            if self.match_profiles.is_some()
+                && let Some(receipt) = actor.pending_loadout_selection.take()
+            {
+                self.retired_loadout_selections
+                    .insert(receipt.selection_id.clone(), receipt);
+            }
             actor.pending_loadout_selection = None;
         }
     }

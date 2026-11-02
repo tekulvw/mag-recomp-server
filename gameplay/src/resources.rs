@@ -148,6 +148,10 @@ impl<W: Write> Engine<W> {
 
     pub fn from_resources(writer: W, max_log: u64, resources: EngineResources) -> Self {
         Self {
+            match_profiles: None,
+            selected_match: None,
+            retired_formations: Default::default(),
+            retired_loadout_selections: Default::default(),
             wire_profile: resources.initial_wire_profile,
             runtime_application_id: resources.runtime_application_id,
             wire_profiles: resources.wire_profiles,

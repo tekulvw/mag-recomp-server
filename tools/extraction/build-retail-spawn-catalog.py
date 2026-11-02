@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a retail Suppression, SVER Sabotage or Arulkum Acquisition spawn profile.
+"""Build an all-faction retail Suppression, Sabotage or Acquisition spawn profile.
 
 Reads the original retail disc dump and the decrypted retail game.psarc directly,
 through the tracked extract-retail-spawns.py parser, and writes the Rust
@@ -82,9 +82,7 @@ def extract(disc, game_archive, map_name):
     arc = x.Psarc(game)
     settings = arc.extract(arc.names.index('/run/mag/ps3/settings/gameproperties.zpr') + 1)
     info = {m['map']: m for m in x.catalog_settings(settings.decode())}.get(map_name)
-    if info is None or not (info['mode_enum'] == 'GameTypeFactionExercise'
-                            or (map_name == 'mag_cosmodrome_final' and info['mode_enum'] == 'GameType64')
-                            or (map_name == 'mag_voz_final' and info['mode_enum'] == 'GameType128')):
+    if info is None or info['mode_enum'] not in ('GameTypeFactionExercise', 'GameType64', 'GameType128'):
         raise SystemExit('Map is not a supported retail spawn profile')
     match_rules, rules_source = original_rules(settings, info['mode_enum'])
     level = disc / 'PS3_GAME/USRDIR/run/mag/ps3/levels' / (map_name + '.psarc')
@@ -113,37 +111,40 @@ def build(disc, game_archive, map_name, active_team, active_platoon, active_squa
     sabotage = points['map']['mode_enum'] == 'GameType64'
     acquisition = points['map']['mode_enum'] == 'GameType128'
     opposing = sabotage or acquisition
+    if points['map']['mode_enum'] not in ('GameTypeFactionExercise', 'GameType64', 'GameType128'):
+        raise SystemExit('Map is not a supported retail spawn profile')
     if owner not in FACTIONS or any(p['team'] not in (0, 1)
             or p['faction'] != (None if opposing and p['team'] == 0 else owner)
             for p in points['points']):
         raise SystemExit('Map has inconsistent authored side/faction bindings')
     owner = FACTIONS[owner]
-    if sabotage and (map_name != 'mag_cosmodrome_final' or owner != FACTIONS['SVER']):
-        raise SystemExit('Sabotage entry policy requires SVER Syr Darya')
-    if acquisition:
-        if map_name != 'mag_voz_final' or owner != FACTIONS['SVER']:
-            raise SystemExit('Acquisition profile requires SVER Arulkum')
+    if opposing:
+        # Preserve the established Syr Darya/Valor profile for existing callers.
+        # Every new profile requires its match-selected attacker explicitly.
+        if (attacking_faction is None and sabotage and map_name == 'mag_cosmodrome_final'
+                and owner == FACTIONS['SVER']):
+            attacking_faction = 'Valor'
         if attacking_faction not in FACTIONS or FACTIONS[attacking_faction] == owner:
-            raise SystemExit('Acquisition requires an explicit opposing attacking faction')
+            raise SystemExit('Opposing mode requires an explicit opposing attacking faction')
     elif attacking_faction is not None:
-        raise SystemExit('Explicit attacking faction is supported only for Acquisition')
+        raise SystemExit('Explicit attacking faction is supported only for Sabotage or Acquisition')
     index = {}
     locations = []
     unsupported_links = []
     for i, p in enumerate(points['points']):
-        if p['catalog_id'] != f'{map_name}:{i:03d}' or (not acquisition and p['user_class'] != 0):
+        if p['catalog_id'] != f'{map_name}:{i:03d}' or (not opposing and p['user_class'] != 0):
             raise SystemExit('Unsupported retail spawn identity ' + p['catalog_id'])
         basic = (p['spawn_type_name'] == 'SpawnPointBasic' and p['spawn_type'] == 0
                  and p['user_class'] == 0 and p['category'] in KINDS)
         inactive_lalo = (sabotage and p['spawn_type_name'] == 'SpawnPointLALODropZone'
                          and p['spawn_type'] == 5 and p['category'] == 2 and p['active'] is False)
-        if not basic and not inactive_lalo and not acquisition:
+        if not basic and not opposing:
             raise SystemExit('Unsupported retail spawn point ' + p['catalog_id'])
         if inactive_lalo:
             unsupported_links.append({'index': i, 'catalog_id': p['catalog_id'],
                                       'spawn_type': p['spawn_type'], 'category': p['category'],
                                       'active': False, 'authored_squad_links': p['squad_links']})
-        elif acquisition and not basic:
+        elif opposing and not basic:
             # Compact raw provenance; these indices are not verified native IDs.
             unsupported_links.append({'index': i, 'spawn_type': p['spawn_type'],
                                       'category': p['category'], 'user_class': p['user_class'],
@@ -186,7 +187,8 @@ def build(disc, game_archive, map_name, active_team, active_platoon, active_squa
               'note': 'Authored pre-terrain-snap coordinates; retail runtime pool indices unverified'}
     if opposing:
         graph = points['objectives']
-        if sabotage and (len(graph['definitions']) != 13 or len(graph['instances']) != 13):
+        if (sabotage and map_name == 'mag_cosmodrome_final'
+                and (len(graph['definitions']) != 13 or len(graph['instances']) != 13)):
             raise SystemExit('Original Syr Darya objective cardinality changed')
         source.update(unsupported_spawn_links=unsupported_links, authored_objectives={
             'definitions': len(graph['definitions']), 'direct_instances': len(graph['instances']),
@@ -198,12 +200,13 @@ def build(disc, game_archive, map_name, active_team, active_platoon, active_squa
     # Original-proven modes: Faction Exercise3, Sabotage0, Acquisition1.
     # No vehicle spawns are supported here. Objectives are disabled above;
     # Faction Exercise objectives remain an unverified absence policy.
-    # Acquisition's attacker must be explicit; map ownership never supplies it.
+    # Opposing attackers are explicit except for the legacy Syr Darya profile;
+    # map ownership never supplies an opposing mode's attacker.
     # Admission limits/automatic balancing below are explicit local/user policy;
     # they are not new property fields recovered from the level archive. Keep
     # them in the generated runtime configuration rather than Rust constants.
     profile = {'game_type': 1 if acquisition else 0 if sabotage else 3,
-               'attacking_faction': FACTIONS[attacking_faction] if acquisition else FACTIONS['Valor'] if sabotage else owner,
+               'attacking_faction': FACTIONS[attacking_faction] if opposing else owner,
                'auto_assign_teams': True, 'team_capacity': 32, 'squad_capacity': 4 if acquisition else 8,
                'maximum_points': match_rules['maximum_points'],
                'spawn_wave_ms': match_rules['spawn_wave_ms'],
@@ -226,7 +229,7 @@ def main():
     parser.add_argument('--map', required=True)
     parser.add_argument('--active', required=True, help='team/platoon/squad index for the local player')
     parser.add_argument('--attacking-faction', choices=tuple(FACTIONS),
-                        help='Required explicit opposing attacker for Acquisition')
+                        help='Required opposing attacker for Sabotage and Acquisition; legacy Syr Darya defaults to Valor')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--check', action='store_true', help='Fail unless OUTPUT already matches')
     args = parser.parse_args()

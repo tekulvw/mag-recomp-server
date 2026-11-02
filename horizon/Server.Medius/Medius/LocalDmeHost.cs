@@ -17,7 +17,7 @@ using DmeProgram = Server.Dme.Program;
 namespace Server.Medius
 {
     /// <summary>One shared local Horizon world; each member has a Rust-acknowledged reservation.</summary>
-    public sealed class LocalDmeHost : Server.Dme.ILocalGameplaySink, IAsyncDisposable
+    public sealed partial class LocalDmeHost : Server.Dme.ILocalGameplaySink, IAsyncDisposable
     {
         sealed class Reservation { public string Id; public uint AccountId; public string Account; public uint CharacterId; public Action<MagCharacterRecord> Notify; public DmeClient Client; public DateTime Deadline; public byte Faction; public bool Accepted; public bool Claimed; public bool Invalidated; public string ReleaseReason; public string TerminalMatchId; }
         sealed class PendingRelease { public Reservation Reservation; public string RequestId; public DateTime NextAttempt; }
@@ -89,7 +89,8 @@ namespace Server.Medius
             if (_started) throw new InvalidOperationException("DME already started."); _started = true;
             var hello = await _bridge.RequestHelloAsync(new { v = 2, request_id = Id(), op = "hello" });
             RequireLoadoutSelectionCapability(hello);
-            if (!await _bridge.RequestAsync(_startupPolicy.ConfigureRequest(Id(), _applicationId))) throw new IOException("Gameplay match configuration was not acknowledged.");
+            InitializeFactionMatchmaking(hello);
+            if (!UsesFactionMatchmaking && !await _bridge.RequestAsync(_startupPolicy.ConfigureRequest(Id(), _applicationId))) throw new IOException("Gameplay match configuration was not acknowledged.");
             DmeProgram.SERVER_IP = MagNetworkSettings.FromEnvironment().Address; DmeProgram.Settings.TCPPort = 10073; DmeProgram.Settings.UDPPort = 10474;
             DmeProgram.Plugins = Program.Plugins ?? new Server.Plugins.PluginsManager("plugins/");
             var manager = new Server.Dme.MediusManager(_applicationId) { LocalOnly = true }; DmeProgram.Managers.Add(_applicationId, manager);
@@ -115,7 +116,7 @@ namespace Server.Medius
                     TransactionId = transactionId, ContractOwners = Enumerable.Repeat((byte)255, 9).ToArray(),
                     MinimumPlayers = Enumerable.Repeat((uint)_minimumPlayers, 4).ToArray(), QueueEnabled = new bool[12]
                 };
-                if (_ready && _worldStreamHealthy && !_disposed)
+                if (!UsesFactionMatchmaking && _ready && _worldStreamHealthy && !_disposed)
                     foreach (var faction in _allowedFactions) status.QueueEnabled[_gameType * 3 + faction] = true;
                 var now = DateTime.UtcNow;
                 foreach (var reservation in _reservations.Values)
@@ -127,10 +128,11 @@ namespace Server.Medius
                         (client.Tcp != null && !client.Tcp.Active)) continue;
                     // Native status matrices are game type first, then faction.
                     // These are authenticated world members, not physical spawns.
-                    int index = _gameType * 3 + reservation.Faction;
+                    int index = (UsesFactionMatchmaking?_formedProfile.GameType:_gameType) * 3 + reservation.Faction;
                     if (reservation.Claimed && client.IsAuthenticated && client.Tcp?.Active == true) status.PlayersInGame[index]++;
                     else status.QueueSizes[index]++;
                 }
+                AddQueuedStatus(status);
                 return status;
             }
         }
@@ -140,7 +142,7 @@ namespace Server.Medius
             if ((request is MagRetailJoinGameRequest) != (_applicationId == 20231)) return failure;
             // Party membership/admission is not implemented. Do not silently turn a party request into a solo join.
             if (request is MagRetailJoinGameRequest retail && retail.PartyId != 0) return failure;
-            if (session.ApplicationId != _applicationId || session.State != MagMlsSession.SessionState.Ready || session.IsExpired(DateTime.UtcNow) || session.AccountId == 0 || session.CharacterId == 0 || !MagDevelopmentAccountPolicy.ValidAccount(session.AuthenticatedAccount) || request.Preference != 1 || request.Value != (uint)_gameType || request.ClientType != 0 || !IsReady) return failure;
+            if (session.ApplicationId != _applicationId || session.State != MagMlsSession.SessionState.Ready || session.IsExpired(DateTime.UtcNow) || session.AccountId == 0 || session.CharacterId == 0 || !MagDevelopmentAccountPolicy.ValidAccount(session.AuthenticatedAccount) || request.Preference != 1 || !RequestedModeIsCurrent(request.Value) || request.ClientType != 0 || !IsReady) return failure;
             await _admission.WaitAsync();
             try
             {
@@ -158,7 +160,7 @@ namespace Server.Medius
                 try { character = _store.ReadForAccount(session.AuthenticatedAccount).SingleOrDefault(c => c.Id == session.CharacterId); }
                 catch (Exception e) when (e is IOException || e is InvalidDataException || e is UnauthorizedAccessException) { return failure; }
                 if (character == null) return failure;
-                if (!_allowedFactions.Contains(character.Faction)) return JoinResponse(request.TransactionId, 4);
+                if (UsesFactionMatchmaking ? character.Faction!=_formedProfile.AttackingFaction&&character.Faction!=_formedProfile.DefendingFaction : !_allowedFactions.Contains(character.Faction)) return JoinResponse(request.TransactionId, 4);
                 var record = character.ToRecord();
                 GameplayAdmissionLoadouts admissionLoadouts;
                 try { admissionLoadouts = GameplayLoadoutAdmission.Project(character, record, _store.LoadoutCatalog); }
@@ -507,6 +509,7 @@ namespace Server.Medius
             lock (_gate) release = _reservations.Values.Where(r => r.Invalidated || r.Deadline <= DateTime.UtcNow || r.Client.IsDestroyed || r.Client.Disconnected ||
                 (r.Claimed && r.Client.Tcp != null && !r.Client.Tcp.Active)).ToArray();
             foreach (var r in release) await ReleaseAsync(r);
+            SendQueueNotices();StartMatchmakingPump();
             await DmeProgram.TcpServer.HandleIncomingMessages(); await World.HandleIncomingMessages(); await DmeProgram.TcpServer.HandleOutgoingMessages();
             foreach (var client in World.Clients.Values) client.HandleOutgoingMessages();
         }
@@ -546,6 +549,7 @@ namespace Server.Medius
         public async ValueTask DisposeAsync()
         {
             lock (_gate) { if (_disposed) return; _disposed = true; _ready = false; foreach (var r in _reservations.Values) r.Invalidated = true; }
+            await StopFactionMatchmakingAsync();
             _loadoutRefreshCancellation.Cancel();
             Task refresh; lock (_gate) refresh = _loadoutRefreshWorker;
             try { await refresh.WaitAsync(TimeSpan.FromSeconds(3)); }
