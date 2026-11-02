@@ -29,6 +29,10 @@ void Test(string name, Action action)
 }
 
 Test("active Armory loadout refresh", ActiveLoadoutRefreshChecks.Run);
+Test("typed worker match profile bridge", MatchProfileBridgeChecks.Run);
+Test("retail waiting and cancellation wire", QueueWireChecks.Run);
+Test("faction matchmaking fairness and role selection", FactionMatchmakingChecks.Run);
+Test("pending human queue ownership and cancellation", PendingHumanQueueChecks.Run);
 
 Test("committed loadout selection persistence", LoadoutSelectionChecks.Run);
 

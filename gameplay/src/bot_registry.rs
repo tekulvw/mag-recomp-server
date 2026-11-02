@@ -443,6 +443,9 @@ impl<W: Write> Engine<W> {
         mut config: BotPopulation,
         total: usize,
     ) -> Result<Self, &'static str> {
+        if self.match_profiles.is_some() {
+            return Err("match_profiles_unsupported_world_extras");
+        }
         if config.objective_policy.is_none() {
             config.objective_policy = Some(ObjectivePolicy::bundled());
         }

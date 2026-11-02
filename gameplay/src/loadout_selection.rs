@@ -119,6 +119,7 @@ impl<W: Write> Engine<W> {
             .iter()
             .chain(self.peers.values())
             .filter_map(|actor| actor.pending_loadout_selection.clone())
+            .chain(self.retired_loadout_selections.values().cloned())
             .take(MAX_BATCH)
             .collect()
     }
@@ -155,9 +156,21 @@ impl<W: Write> Engine<W> {
             .is_some_and(|receipt| {
                 receipt.selection_id == selection_id && receipt.revision == revision
             });
+        let retired_matched = self
+            .retired_loadout_selections
+            .get(&selection_id)
+            .is_some_and(|receipt| {
+                receipt.reservation_id == reservation_id
+                    && receipt.world_id == world_id
+                    && receipt.player_id == player_id
+                    && receipt.revision == revision
+            });
         self.record(json!({"op":"loadout_selection_settled","reservation_id":reservation_id,
             "world_id":world_id,"player_id":player_id,"selection_id":selection_id,"revision":revision,
-            "status":status,"matched":matched}),wall)?;
+            "status":status,"matched":matched || retired_matched}),wall)?;
+        if retired_matched {
+            self.retired_loadout_selections.remove(&selection_id);
+        }
         if matched {
             let actor = self
                 .active

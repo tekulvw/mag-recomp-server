@@ -65,9 +65,11 @@ namespace Server.Medius {
   public GameplayMatchTerminal MatchTerminal {get;}
   public IReadOnlyList<GameplayLoadoutSelection> LoadoutSelections {get;}
   public IReadOnlyList<string> Capabilities {get;}
+  public IReadOnlyList<MagMatchProfile> MatchProfiles {get;}
+  public GameplaySelectedMatch SelectedMatch {get;}
   public bool SupportsActiveLoadoutRefresh => Capabilities.Contains("active_loadout_refresh_v1",StringComparer.Ordinal);
   public bool SupportsCommittedLoadoutSelections => Capabilities.Contains("committed_loadout_selection_v1",StringComparer.Ordinal);
-  internal GameplayBridgeResponse(bool ok,string error,IReadOnlyList<GameplayBridgeMessage> messages,GameplayBridgeFailure failure=GameplayBridgeFailure.None,IReadOnlyList<GameplayReward> rewards=null,GameplayMatchTerminal matchTerminal=null,IReadOnlyList<GameplayLoadoutSelection> loadoutSelections=null,IReadOnlyList<string> capabilities=null){LoadoutSelections=loadoutSelections??Array.Empty<GameplayLoadoutSelection>();Capabilities=capabilities??Array.Empty<string>();Ok=ok;Error=error;Messages=messages;Failure=failure;Rewards=rewards??Array.Empty<GameplayReward>();MatchTerminal=matchTerminal;}
+  internal GameplayBridgeResponse(bool ok,string error,IReadOnlyList<GameplayBridgeMessage> messages,GameplayBridgeFailure failure=GameplayBridgeFailure.None,IReadOnlyList<GameplayReward> rewards=null,GameplayMatchTerminal matchTerminal=null,IReadOnlyList<GameplayLoadoutSelection> loadoutSelections=null,IReadOnlyList<string> capabilities=null,IReadOnlyList<MagMatchProfile> matchProfiles=null,GameplaySelectedMatch selectedMatch=null){MatchProfiles=matchProfiles??Array.Empty<MagMatchProfile>();SelectedMatch=selectedMatch;LoadoutSelections=loadoutSelections??Array.Empty<GameplayLoadoutSelection>();Capabilities=capabilities??Array.Empty<string>();Ok=ok;Error=error;Messages=messages;Failure=failure;Rewards=rewards??Array.Empty<GameplayReward>();MatchTerminal=matchTerminal;}
   internal static GameplayBridgeResponse Failed(GameplayBridgeFailure failure,long elapsed)=>new GameplayBridgeResponse(false,null,Array.Empty<GameplayBridgeMessage>(),failure){ElapsedMilliseconds=elapsed};
  }
  /// <summary>Strict bridge v2 reply codec. Event and release replies may carry bounded, independently addressed reliable messages.</summary>
@@ -90,7 +92,9 @@ namespace Server.Medius {
     bool hasTerminal=root.TryGetProperty("match_terminal",out var terminal);
     bool hasSelections=root.TryGetProperty("loadout_selections",out var selections);
     bool hasCapabilities=root.TryGetProperty("capabilities",out var capabilities);
-    var fields=new List<string>{"v","request_id","ok","error","messages"};if(hasSelections)fields.Add("loadout_selections");if(hasCapabilities)fields.Add("capabilities");if(hasRewards)fields.Add("rewards");if(hasTerminal)fields.Add("match_terminal");
+    bool hasProfiles=root.TryGetProperty("match_profiles",out var profiles);
+    bool hasSelectedMatch=root.TryGetProperty("selected_match",out var selectedMatch);
+    var fields=new List<string>{"v","request_id","ok","error","messages"};if(hasProfiles)fields.Add("match_profiles");if(hasSelectedMatch)fields.Add("selected_match");if(hasSelections)fields.Add("loadout_selections");if(hasCapabilities)fields.Add("capabilities");if(hasRewards)fields.Add("rewards");if(hasTerminal)fields.Add("match_terminal");
     if(!ExactFields(root,fields.ToArray())||!root.GetProperty("v").TryGetInt32(out var version)||version!=2||
      root.GetProperty("request_id").ValueKind!=JsonValueKind.String||root.GetProperty("request_id").GetString()!=requestId)return false;
     var ok=root.GetProperty("ok");if(ok.ValueKind!=JsonValueKind.True&&ok.ValueKind!=JsonValueKind.False)return false;
@@ -153,7 +157,10 @@ namespace Server.Medius {
      foreach(var member in members.EnumerateArray()) {if(member.ValueKind!=JsonValueKind.String||!Identifier(member.GetString())||!identities.Add(member.GetString()))return false;ordered.Add(member.GetString());}
      parsedTerminal=new GameplayMatchTerminal(world,terminal.GetProperty("match_id").GetString(),reason,ordered.AsReadOnly());
     }
-    response=new GameplayBridgeResponse(success,error.ValueKind==JsonValueKind.String?error.GetString():null,parsed.AsReadOnly(),rewards:parsedRewards.AsReadOnly(),matchTerminal:parsedTerminal,loadoutSelections:parsedSelections.AsReadOnly(),capabilities:parsedCapabilities.AsReadOnly());return true;
+    IReadOnlyList<MagMatchProfile> parsedProfiles=Array.Empty<MagMatchProfile>();GameplaySelectedMatch parsedMatch=null;
+    if(hasProfiles&&!GameplayMatchProfileCodec.Profiles(profiles,success,out parsedProfiles))return false;
+    if(hasSelectedMatch&&!GameplayMatchProfileCodec.Selection(selectedMatch,success,out parsedMatch))return false;
+    response=new GameplayBridgeResponse(success,error.ValueKind==JsonValueKind.String?error.GetString():null,parsed.AsReadOnly(),rewards:parsedRewards.AsReadOnly(),matchTerminal:parsedTerminal,loadoutSelections:parsedSelections.AsReadOnly(),capabilities:parsedCapabilities.AsReadOnly(),matchProfiles:parsedProfiles,selectedMatch:parsedMatch);return true;
    }catch(Exception e)when(e is JsonException||e is InvalidOperationException||e is FormatException||e is ArgumentException){return false;}
   }
  }
