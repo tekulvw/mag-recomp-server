@@ -58,3 +58,6 @@ must be qualified before installing a live backend. The initial-load objective
 catalog remains pre-MissionStart only. Synthetic owned effect worlds and private
 graph model checks establish adapter orchestration/rollback, not native physics
 or live gameplay acceptance. Releases remain manual after live-match review.
+
+Further bounded native behavior and remaining backend requirements are recorded
+in [effect qualification](acquisition-effect-qualification.md).
