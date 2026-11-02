@@ -51,6 +51,7 @@ fn died<W: Write>(
     plan: &mut EventPlan,
     victim: &Active,
     damage: replication::CharacterDamage,
+    authoritative_source: bool,
 ) {
     increment(plan, victim, DEATHS);
     let victim_id = 0x03800000 | u32::from(victim.reservation.player);
@@ -63,10 +64,11 @@ fn died<W: Write>(
         // Native hits and grenade queues belong to the currently authenticated
         // source actor. A full handle naming a different admitted human does
         // not transfer this event's kill ownership to that human.
-        if !engine
-            .active
-            .as_ref()
-            .is_some_and(|owner| owner.reservation.id == killer.reservation.id)
+        if !authoritative_source
+            && !engine
+                .active
+                .as_ref()
+                .is_some_and(|owner| owner.reservation.id == killer.reservation.id)
         {
             return;
         }
@@ -152,10 +154,25 @@ pub(super) fn stage<W: Write>(
     engine: &Engine<W>,
     plan: &mut EventPlan,
 ) -> Result<(), &'static str> {
+    stage_with_source(engine, plan, false)
+}
+fn stage_with_source<W: Write>(
+    engine: &Engine<W>,
+    plan: &mut EventPlan,
+    authoritative_source: bool,
+) -> Result<(), &'static str> {
     if plan.rejection.is_some() {
         return Ok(());
     }
-    let active = engine.active.as_ref().ok_or("no_reservation")?;
+    let active = engine
+        .active
+        .as_ref()
+        .or_else(|| {
+            authoritative_source
+                .then(|| engine.peers.values().next())
+                .flatten()
+        })
+        .ok_or("no_reservation")?;
     // Current scoreboard repair targets retail. Legacy prototype fixtures retain
     // their earlier single-reply behavior; they are not live retail acceptance.
     if active.wire_profile.application_id() != 20231 {
@@ -165,7 +182,7 @@ pub(super) fn stage<W: Write>(
         && plan.combat.new_life.is_some_and(|life| !life.is_alive())
         && let Some(damage) = plan.combat.new_damage_model
     {
-        died(engine, plan, active, damage);
+        died(engine, plan, active, damage, authoritative_source);
     }
     let mut seen = BTreeSet::new();
     for (id, generation, damage) in plan.combat.peer_damage.clone() {
@@ -175,7 +192,7 @@ pub(super) fn stage<W: Write>(
         if let Some(victim) = engine.peers.get(&id)
             && matches!(victim.life, CharacterLife::Alive { generation:g,.. } if g == generation)
         {
-            died(engine, plan, victim, damage);
+            died(engine, plan, victim, damage, authoritative_source);
         }
     }
     let actors: Vec<_> = engine.active.iter().chain(engine.peers.values()).collect();
@@ -270,4 +287,121 @@ pub(super) fn commit<W: Write>(engine: &mut Engine<W>, plan: StatisticsPlan) {
             actor.reward_statistics.extend(stats);
         }
     }
+}
+
+/// Consequences of a source-qualified immediate world damage call. This is
+/// independent of whichever human currently occupies Engine::active; ordinary
+/// owner events retain their authenticated-source guard above.
+pub(crate) struct CharacterEffectConsequences {
+    statistics: StatisticsPlan,
+    rewards: Vec<progression::RewardEvent>,
+    messages: Vec<OutboundMessage>,
+    denial: Option<&'static str>,
+}
+impl CharacterEffectConsequences {
+    pub(crate) fn audit(&self) -> Value {
+        json!({"rewards":self.rewards,"messages":self.messages,"gameplay_denial":self.denial})
+    }
+    pub(crate) fn validate<W: Write>(&self, engine: &Engine<W>) -> Result<(), &'static str> {
+        engine.check_reward_capacity(&self.rewards)
+    }
+    pub(crate) fn commit<W: Write>(self, engine: &mut Engine<W>) -> Vec<OutboundMessage> {
+        commit(engine, self.statistics);
+        engine.commit_rewards(self.rewards);
+        self.messages
+    }
+}
+pub(crate) struct CharacterEffectInput {
+    pub world: u32,
+    pub victim_id: u16,
+    pub generation: u32,
+    pub attacker: u32,
+    pub damage: replication::CharacterDamage,
+    pub life: Option<CharacterLife>,
+    pub now: Duration,
+}
+pub(crate) fn plan_character_effect_consequences<W: Write>(
+    engine: &Engine<W>,
+    input: CharacterEffectInput,
+) -> Result<CharacterEffectConsequences, &'static str> {
+    let CharacterEffectInput {
+        world,
+        victim_id,
+        generation,
+        attacker,
+        damage,
+        life,
+        now,
+    } = input;
+    let mut plan = EventPlan::default();
+    let humans = || engine.active.iter().chain(engine.peers.values());
+    let victim =
+        humans().find(|a| a.reservation.world == world && a.reservation.player == victim_id);
+    if let Some(victim) = victim {
+        if engine
+            .active
+            .as_ref()
+            .is_some_and(|a| a.reservation.id == victim.reservation.id)
+        {
+            plan.combat.new_life = life;
+            plan.combat.new_damage_model = Some(damage);
+        } else {
+            plan.combat
+                .peer_damage
+                .push((victim.reservation.id.clone(), generation, damage));
+        }
+        if matches!(victim.life, CharacterLife::Incapacitated { downed, .. } if !downed.is_expired(now))
+            && matches!(life, Some(CharacterLife::AwaitingRespawn { .. }))
+            && let Some(killer) = humans().find(|a| {
+                a.reservation.world == world
+                    && attacker == (0x0380_0000 | u32::from(a.reservation.player))
+            })
+        {
+            finished(&mut plan, killer, victim.team());
+            if killer.team() != victim.team()
+                && let Some(recipient) = progression::RewardRecipient::from_active(killer)
+            {
+                plan.combat.new_rewards.push(recipient.event(
+                    format!(
+                        "world-finish-{}-{}-{generation}-{}",
+                        killer.reservation.id,
+                        victim.reservation.id,
+                        victim.reward_statistics.get(&DEATHS).copied().unwrap_or(0)
+                    ),
+                    progression::RewardKind::EnemyFinished,
+                    1,
+                ));
+            }
+        }
+    } else if damage.health_quarter_points == 0
+        && let Some(bot) = engine.bot_registry.bots.get(&victim_id)
+        && bot.health > 0
+        && let Some(killer) = humans().find(|a| {
+            a.reservation.world == world
+                && damage.last_attacker == (0x0380_0000 | u32::from(a.reservation.player))
+        })
+    {
+        target_killed(&mut plan, killer, bot.target.squad.team());
+        if killer.team() != bot.target.squad.team()
+            && let Some(recipient) = progression::RewardRecipient::from_active(killer)
+        {
+            plan.combat
+                .new_rewards
+                .push(recipient.bot_killed(victim_id, generation));
+        }
+    }
+    // A bot-only world has no human counters or XP recipients to publish.
+    if humans().next().is_some() {
+        stage_with_source(engine, &mut plan, true)?;
+    }
+    if engine.match_terminal.is_some() {
+        plan.combat.new_rewards.clear();
+    }
+    engine.check_reward_capacity(&plan.combat.new_rewards)?;
+    Ok(CharacterEffectConsequences {
+        statistics: plan.statistics,
+        rewards: plan.combat.new_rewards,
+        messages: plan.messages,
+        denial: plan.gameplay_denial,
+    })
 }

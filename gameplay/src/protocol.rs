@@ -474,6 +474,7 @@ pub enum GameMessage<'a> {
     DismountSeat(DismountSeat),
     PingRequest(PingRequest),
     ObjectUpdate(crate::replication::ObjectUpdate<'a>),
+    CorrectionAck(crate::correction_ack::CorrectionAck),
     Unknown {
         message_type: u16,
         body: &'a [u8],
@@ -565,6 +566,9 @@ impl<'a> GameMessage<'a> {
             }
             0x0007 => Ok(Self::ObjectUpdate(
                 crate::replication::ObjectUpdate::decode_with_profile(bytes, profile)?,
+            )),
+            0x0008 => Ok(Self::CorrectionAck(
+                crate::correction_ack::CorrectionAck::decode(bytes, profile)?,
             )),
             0x000a => {
                 let client_time_ms = r.u32()?;

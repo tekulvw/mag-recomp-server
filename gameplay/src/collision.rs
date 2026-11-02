@@ -86,6 +86,28 @@ struct InstanceDocument {
     id: String,
     vertices_xyz: Vec<Vec3>,
     triangles: Vec<[usize; 3]>,
+    #[serde(default)]
+    collision: Option<StaticProperties>,
+}
+
+/// Explicit physics inputs. Missing metadata remains unavailable to body casts;
+/// legacy ray queries do not infer layer0 or zero radius for an absent value.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StaticProperties {
+    pub filter_info: u32,
+    pub convex_radius: f64,
+    pub provenance: String,
+    pub child_filter_policy: ChildFilterPolicy,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildFilterPolicy {
+    Uniform,
+}
+pub(crate) struct StaticTriangle<'a> {
+    pub vertices: [Vec3; 3],
+    pub properties: &'a StaticProperties,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -193,6 +215,7 @@ pub struct CollisionWorld {
     // Geometry is immutable after BVH construction. Preloaded profiles share
     // these buffers instead of duplicating map geometry on each selection.
     instance_ids: std::sync::Arc<[String]>,
+    static_properties: std::sync::Arc<[Option<StaticProperties>]>,
     triangles: std::sync::Arc<[Triangle]>,
     nodes: std::sync::Arc<[Node]>,
     root: Option<usize>,
@@ -200,6 +223,92 @@ pub struct CollisionWorld {
     max_abs_coordinate: f64,
 }
 impl CollisionWorld {
+    pub(crate) fn static_query_radius(&self) -> Result<f64, &'static str> {
+        if self.metadata.coverage != Coverage::Complete
+            && !self
+                .metadata
+                .physics_regions
+                .iter()
+                .any(|r| r.ground_verified && r.obstacles_verified)
+        {
+            return Err("world_cast_incomplete_static_coverage");
+        }
+        let mut radius: f64 = 0.;
+        for row in self.static_properties.iter() {
+            radius = radius.max(
+                row.as_ref()
+                    .ok_or("world_cast_static_properties_unavailable")?
+                    .convex_radius,
+            );
+        }
+        Ok(radius)
+    }
+    pub(crate) fn static_groups(&self) -> std::collections::BTreeSet<u32> {
+        self.static_properties
+            .iter()
+            .flatten()
+            .map(|p| p.filter_info >> 16)
+            .collect()
+    }
+    /// Bounded BVH traversal. The caller expands bounds for convex margins.
+    pub(crate) fn static_triangles(
+        &self,
+        min: Vec3,
+        max: Vec3,
+        budget: &mut usize,
+    ) -> Result<Vec<StaticTriangle<'_>>, &'static str> {
+        if !(0..3).all(|i| min[i].is_finite() && max[i].is_finite() && min[i] <= max[i]) {
+            return Err("world_cast_invalid_bounds");
+        }
+        if self.metadata.coverage != Coverage::Complete
+            && !self.metadata.physics_regions.iter().any(|r| {
+                r.ground_verified
+                    && r.obstacles_verified
+                    && (0..3).all(|i| r.min[i] <= min[i] && r.max[i] >= max[i])
+            })
+        {
+            return Err("world_cast_outside_verified_region");
+        }
+        let overlaps = |b: Bounds| (0..3).all(|i| b.min[i] <= max[i] && b.max[i] >= min[i]);
+        let mut stack = Vec::new();
+        if let Some(root) = self.root {
+            stack.push(root);
+        }
+        let mut rows = Vec::new();
+        while let Some(index) = stack.pop() {
+            if *budget == 0 {
+                return Err("world_cast_work_limit");
+            }
+            *budget -= 1;
+            let node = &self.nodes[index];
+            if !overlaps(node.bounds()) {
+                continue;
+            }
+            match node {
+                Node::Branch { left, right, .. } => {
+                    stack.push(*right);
+                    stack.push(*left);
+                }
+                Node::Leaf { start, end, .. } => {
+                    for t in &self.triangles[*start..*end] {
+                        if *budget == 0 {
+                            return Err("world_cast_work_limit");
+                        }
+                        *budget -= 1;
+                        if overlaps(t.bounds) {
+                            rows.push(StaticTriangle {
+                                vertices: t.vertices,
+                                properties: self.static_properties[t.instance]
+                                    .as_ref()
+                                    .ok_or("world_cast_static_properties_unavailable")?,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        Ok(rows)
+    }
     /// Read a regular JSON file once, validate all geometry, and build a BVH.
     /// Any read/schema/geometry failure is an error, never an empty world.
     pub fn load(path: impl AsRef<Path>, limits: CollisionLimits) -> Result<Self, CollisionError> {
@@ -273,9 +382,17 @@ impl CollisionWorld {
             return Err(invalid("collision vertex/triangle limit exceeded"));
         }
         let mut instance_ids = Vec::with_capacity(document.instances.len());
+        let mut static_properties = Vec::with_capacity(document.instances.len());
         let mut seen = HashSet::new();
         let mut triangles = Vec::with_capacity(triangle_count);
         for instance in document.instances {
+            if instance.collision.as_ref().is_some_and(|p| {
+                !p.convex_radius.is_finite()
+                    || !(0.0..=100.).contains(&p.convex_radius)
+                    || p.provenance.trim().is_empty()
+            }) {
+                return Err(invalid("invalid static collision properties"));
+            }
             if instance.id.trim().is_empty() || !seen.insert(instance.id.clone()) {
                 return Err(invalid("empty or duplicate collision instance id"));
             }
@@ -311,6 +428,7 @@ impl CollisionWorld {
                 });
             }
             instance_ids.push(instance.id);
+            static_properties.push(instance.collision);
         }
         let mut nodes = Vec::new();
         let root = if triangles.is_empty() {
@@ -331,6 +449,7 @@ impl CollisionWorld {
             source_sha256,
             metadata,
             instance_ids: instance_ids.into(),
+            static_properties: static_properties.into(),
             triangles: triangles.into(),
             nodes: nodes.into(),
             root,

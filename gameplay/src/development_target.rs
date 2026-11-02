@@ -1,6 +1,7 @@
 //! Private lab command; retail equipment eligibility is explicit and replication-only.
 use super::*;
 
+#[derive(Clone)]
 pub(super) struct Target {
     pub object_index: u16,
     pub display_name: Option<String>,

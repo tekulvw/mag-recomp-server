@@ -653,9 +653,13 @@ impl<W: Write> Engine<W> {
             }
         }
         let owner_report = owner_report.and_then(|(seq, fields)| {
-            self.active
-                .as_ref()
-                .map(|a| (seq, a.owner_presentation(&fields)))
+            self.active.as_ref().map(|a| {
+                let mut fields = a.owner_presentation(&fields);
+                if a.tracking.correction_pending() {
+                    fields.position = None;
+                }
+                (seq, fields)
+            })
         });
         if let Some((sequence, fields)) = owner_report
             && sequence > before_owner
@@ -963,10 +967,7 @@ impl<W: Write> Engine<W> {
             .filter(|a| {
                 a.ready_for_updates
                     && !a.pending_shared.is_empty()
-                    && self
-                        .ground_vehicles
-                        .as_ref()
-                        .is_none_or(|world| a.ground_vehicle_batch >= world.batch_count())
+                    && self.ground_vehicle_creation_complete(a.ground_vehicle_batch)
             })
             .collect();
         ready.sort_unstable_by_key(|a| a.reservation.player);
@@ -1039,7 +1040,15 @@ impl<W: Write> Engine<W> {
             } else {
                 self.peers.get_mut(&id).unwrap()
             };
+            let correction = crate::correction_ack::owner_position_packet(
+                &packet,
+                actor.reservation.player,
+                actor.wire_profile,
+            );
             actor.remember(packet)?;
+            if let Some((sequence, position)) = correction {
+                actor.tracking.bind_correction(sequence, position);
+            }
             actor.pending_shared.pop_front();
         }
         self.shared_drain_cursor = next_cursor;

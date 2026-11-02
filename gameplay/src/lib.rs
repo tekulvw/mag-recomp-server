@@ -1,12 +1,16 @@
 //! Local admission and evidence sink. SCERT authentication remains in Horizon.
 pub mod acquisition_atomic;
+pub mod acquisition_character_effects;
 pub mod acquisition_control;
 pub mod acquisition_damage_metadata;
+pub mod acquisition_ground_runtime;
 pub mod acquisition_objective_runtime;
 pub mod acquisition_score_rate;
 pub mod acquisition_spawn_blockers;
+pub mod acquisition_spawn_effects;
 pub mod acquisition_volume_damage;
 pub mod acquisition_volume_geometry;
+pub mod acquisition_world;
 pub mod active_abilities;
 mod actor_collision;
 mod admission;
@@ -26,6 +30,8 @@ mod bot_traffic_costs;
 mod bot_traffic_flow;
 pub mod bullet_hit;
 pub mod collision;
+mod convex_penetration;
+pub mod correction_ack;
 pub mod damage;
 mod death_notifications;
 mod development_bot_movement;
@@ -859,6 +865,7 @@ struct ProjectileCleanup {
     due: Duration,
     removal: projectile_replication::ProjectileRemoval,
 }
+#[derive(Clone)]
 struct ProjectilePublication {
     include_owner: bool,
     wire: Vec<u8>,
@@ -987,6 +994,8 @@ pub struct Engine<W: Write> {
     navmesh_world: Option<std::sync::Arc<navmesh::NavMesh>>,
     spawn_catalog: Option<spawn_catalog::SpawnCatalog>,
     ground_vehicles: Option<ground_vehicles::Catalog>,
+    ground_runtime: Option<acquisition_ground_runtime::Runtime>,
+    acquisition_effect_origin: std::sync::Arc<()>,
     dynamic_body_resources: Option<dynamic_collision_runtime::Resources>,
     parachute_waves: std::collections::BTreeMap<(u16, Duration), usize>,
     objective_catalog: Option<objective_catalog::ObjectiveCatalog>,

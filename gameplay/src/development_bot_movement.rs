@@ -110,6 +110,7 @@ impl BotMove {
         Ok(())
     }
 }
+#[derive(Clone)]
 pub(super) struct PendingMove {
     movement_id: String,
     from: replication::CharacterPosition,
@@ -1580,6 +1581,7 @@ struct GroundEgress {
     target: navmesh::Point,
     samples: Vec<bot_physics::Motion>,
 }
+#[derive(Clone)]
 struct NavigationMove {
     supported_recovery: bool,
     ground_egress: Option<Arc<GroundEgress>>,

@@ -159,11 +159,8 @@ fn ground_mount<W: Write>(
     request: protocol::MountSeat,
 ) -> Result<Value, &'static str> {
     let active = ctx.active;
-    let vehicle = ctx
-        .engine
-        .ground_vehicles
-        .as_ref()
-        .and_then(|world| world.vehicle(request.vehicle_id as u16));
+    let current_vehicle = ctx.engine.current_ground_vehicle(request.vehicle_id as u16);
+    let vehicle = current_vehicle.as_ref();
     let same_vehicle_switch = active.ground_seat.is_some_and(|seat| {
         seat.vehicle_index == request.vehicle_id as u16 && u32::from(seat.seat) != request.seat_id
     });
@@ -175,6 +172,11 @@ fn ground_mount<W: Write>(
         || request.seat_id >= 16
     {
         Some("invalid_ground_mount_target")
+    } else if !ctx
+        .engine
+        .ground_vehicle_is_operational(request.vehicle_id as u16)
+    {
+        Some("ground_vehicle_not_operational")
     } else if !active.entered_game || !active.ready_for_updates || !active.life.is_alive() {
         Some("ground_mount_requires_living_actor")
     } else if active.is_mounted() && !same_vehicle_switch {
@@ -261,9 +263,7 @@ fn ground_dismount<W: Write>(
         plan.gameplay_denial = Some("replication_history_limit");
     } else if let Some(policy) = ctx
         .engine
-        .ground_vehicles
-        .as_ref()
-        .and_then(|world| world.vehicle(request.vehicle_id as u16))
+        .current_ground_vehicle(request.vehicle_id as u16)
         .and_then(|vehicle| vehicle.exit_policy())
     {
         // Ground candidate generation follows the externally qualified native

@@ -348,6 +348,11 @@ impl<W: Write> Engine<W> {
             .objectives
             .as_ref()
             .map(objective_control::ObjectiveWorld::new);
+        let ground_runtime = loaded
+            .vehicles
+            .as_ref()
+            .map(acquisition_ground_runtime::Runtime::from_catalog)
+            .transpose()?;
         self.record(
             json!({"op":"match_profile_selected","selected_match":selected}),
             wall,
@@ -361,6 +366,7 @@ impl<W: Write> Engine<W> {
         self.collision_world = loaded.collision;
         self.navmesh_world = loaded.navmesh;
         self.ground_vehicles = loaded.vehicles;
+        self.ground_runtime = ground_runtime;
         self.character_damage_rules = loaded.damage;
         self.development_dummy_position = self
             .spawn_catalog

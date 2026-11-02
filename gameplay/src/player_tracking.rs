@@ -136,6 +136,7 @@ impl ClientCharacterFields {
 pub enum PositionOrigin {
     ServerSpawn,
     ServerExit,
+    ServerCorrection,
     ClientReported,
 }
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -145,10 +146,17 @@ pub struct PositionSample {
     pub received_at_ms: u64,
     pub client_sequence: Option<u32>,
 }
-#[derive(Default)]
+#[derive(Clone, Debug)]
+pub(crate) struct PositionCorrection {
+    pub expected_position: CharacterPosition,
+    pub server_sequence: Option<u32>,
+    pub queued: Option<PositionSample>,
+}
+#[derive(Clone, Default)]
 pub struct PlayerTracking {
     pub sample: Option<PositionSample>,
     pub accepted_position_sequence: u32,
+    pub(crate) pending_correction: Option<PositionCorrection>,
 }
 impl PlayerTracking {
     pub fn server_position(
@@ -157,6 +165,15 @@ impl PlayerTracking {
         origin: PositionOrigin,
         received_at_ms: u64,
     ) {
+        self.pending_correction = if matches!(origin, PositionOrigin::ServerCorrection) {
+            Some(PositionCorrection {
+                expected_position: position,
+                server_sequence: None,
+                queued: None,
+            })
+        } else {
+            None
+        };
         self.sample = Some(PositionSample {
             position,
             origin,
@@ -165,7 +182,87 @@ impl PlayerTracking {
         });
     }
     pub fn accepts(&self, sequence: u32) -> bool {
-        sequence > self.accepted_position_sequence
+        self.pending_correction.is_none() && sequence > self.accepted_position_sequence
+    }
+    pub(crate) fn correction_pending(&self) -> bool {
+        self.pending_correction.is_some()
+    }
+    pub(crate) fn queue_correction_report(
+        &mut self,
+        position: CharacterPosition,
+        sequence: u32,
+        received_at_ms: u64,
+    ) -> bool {
+        let Some(pending) = self.pending_correction.as_mut() else {
+            return false;
+        };
+        if sequence <= self.accepted_position_sequence
+            || pending
+                .queued
+                .is_some_and(|p| p.client_sequence.is_some_and(|old| old >= sequence))
+        {
+            return false;
+        }
+        pending.queued = Some(PositionSample {
+            position,
+            origin: PositionOrigin::ClientReported,
+            received_at_ms,
+            client_sequence: Some(sequence),
+        });
+        true
+    }
+    /// Called only after a recipient's rewritten packet has been recorded.
+    /// A correction is bound once; unrelated later field5 packets cannot move
+    /// the required ACK sequence, and superseding pushes create a new record.
+    pub(crate) fn bind_correction(&mut self, sequence: u32, position: CharacterPosition) -> bool {
+        let Some(pending) = self.pending_correction.as_mut() else {
+            return false;
+        };
+        if sequence == 0
+            || pending.server_sequence.is_some()
+            || crate::correction_ack::quantized(pending.expected_position).ok() != Some(position)
+        {
+            return false;
+        }
+        pending.server_sequence = Some(sequence);
+        true
+    }
+    pub(crate) fn acknowledge_correction(
+        &mut self,
+        item: crate::correction_ack::Item,
+        owner: u16,
+        latest_owner_sequence: u32,
+    ) -> bool {
+        if item.object_type != 3
+            || item.object_index != owner
+            || item.field_index != 5
+            || !self.pending_correction.as_ref().is_some_and(|p| {
+                p.server_sequence == Some(item.server_sequence) && item.server_sequence != 0
+            })
+        {
+            return false;
+        }
+        let pending = self.pending_correction.take().unwrap();
+        if item.client_sequence != 0
+            && let Some(sample) = pending.queued
+            && let Some(sequence) = sample.client_sequence
+            && sequence >= item.client_sequence
+            && sequence > self.accepted_position_sequence
+        {
+            self.accepted_position_sequence = sequence;
+            self.sample = Some(sample);
+        } else {
+            // Native wraps zero-1. This server's sequence space is monotonic
+            // and checked rather than wrapping, so zero ACK drops queued data
+            // and keeps the authenticated owner counter as its acceptance floor.
+            let floor = if item.client_sequence == 0 {
+                latest_owner_sequence
+            } else {
+                item.client_sequence - 1
+            };
+            self.accepted_position_sequence = self.accepted_position_sequence.max(floor);
+        }
+        true
     }
     pub fn accept_client(
         &mut self,
@@ -173,6 +270,13 @@ impl PlayerTracking {
         sequence: u32,
         received_at_ms: u64,
     ) {
+        if self.correction_pending() {
+            self.queue_correction_report(position, sequence, received_at_ms);
+            return;
+        }
+        if !self.accepts(sequence) {
+            return;
+        }
         self.accepted_position_sequence = sequence;
         self.sample = Some(PositionSample {
             position,

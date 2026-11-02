@@ -5,13 +5,17 @@ use super::*;
 mod abilities;
 mod combat;
 mod control;
+mod corrections;
 mod falling;
 mod objectives;
 mod owner;
 mod resuscitate;
 mod seats;
 mod statistics;
-pub(crate) use statistics::bot_killed_human;
+pub(crate) use statistics::{
+    CharacterEffectConsequences, CharacterEffectInput, bot_killed_human,
+    plan_character_effect_consequences,
+};
 mod update_actions;
 
 pub(super) struct EventInput {
@@ -91,6 +95,10 @@ struct SessionChanges {
     new_nominations: Option<u8>,
     entered_game: bool,
     client_position: Option<(replication::CharacterPosition, u32)>,
+    queued_correction_position: Option<(replication::CharacterPosition, u32)>,
+    correction_tracking: Option<player_tracking::PlayerTracking>,
+    correction_publication: Option<Vec<u8>>,
+    corrected_owner_position: Option<replication::CharacterPosition>,
     fall_tracker: Option<fall_damage::Tracker>,
     server_position: Option<(
         replication::CharacterPosition,
@@ -201,6 +209,7 @@ fn plan_message<W: Write>(
             control::client_ready(ctx, plan, request)
         }
         Ok(protocol::GameMessage::ObjectUpdate(update)) => owner::object_update(ctx, plan, update),
+        Ok(protocol::GameMessage::CorrectionAck(ack)) => corrections::plan(ctx, plan, ack),
         Ok(protocol::GameMessage::EnterGame(_)) => control::enter_game(ctx, plan),
         Ok(protocol::GameMessage::SelectLoadout(request)) => {
             control::select_loadout(ctx, plan, request)
@@ -462,6 +471,15 @@ impl<W: Write> Engine<W> {
         let squad_changed = plan.session.squad_catalog.is_some();
         let nominations_changed = plan.session.new_nominations.is_some();
         let shared_spawn_changed = plan.session.squad_spawn;
+        if let Some(packet) = plan.session.correction_publication.take() {
+            for peer in self
+                .peers
+                .values_mut()
+                .filter(|a| a.initial_objects.is_some())
+            {
+                peer.queue_shared(packet.clone());
+            }
+        }
         let active = self.active.as_mut().unwrap();
         if let Some((update, report)) = decoded.owner_update()
             && update.header.client_index == 0
@@ -474,7 +492,7 @@ impl<W: Write> Engine<W> {
                 active.owner_fields.state = fields.state;
                 active.revive_state_pending = false;
             }
-            if fields.position.is_some() {
+            if fields.position.is_some() && !active.tracking.correction_pending() {
                 active.owner_fields.position = fields.position;
             }
             if fields.pitch.is_some() {
@@ -507,6 +525,17 @@ impl<W: Write> Engine<W> {
         }
         if let Some(tracker) = plan.session.fall_tracker {
             active.fall_tracker = tracker;
+        }
+        if let Some(tracking) = plan.session.correction_tracking.take() {
+            active.tracking = tracking;
+        }
+        if let Some(position) = plan.session.corrected_owner_position {
+            active.owner_fields.position = Some(position);
+        }
+        if let Some((position, sequence)) = plan.session.queued_correction_position {
+            active
+                .tracking
+                .queue_correction_report(position, sequence, now.as_millis() as u64);
         }
         if let Some((position, sequence)) = plan.session.client_position {
             active
@@ -738,6 +767,7 @@ impl<W: Write> Engine<W> {
         }
         active.entered_game |= plan.session.entered_game;
         if plan.session.server_position.is_some()
+            || plan.session.corrected_owner_position.is_some()
             || plan.session.new_mounted_seat.is_some()
             || plan.session.new_ground_seat.is_some()
             || plan.combat.new_life.is_some_and(|life| !life.is_alive())

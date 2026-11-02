@@ -236,6 +236,7 @@ pub(super) fn costs_with_relations(
 fn costs(passages: &[Passage], budget: &mut usize) -> BTreeMap<u32, Cost> {
     costs_with_relations(passages, &relations(passages, budget))
 }
+#[derive(Clone)]
 pub(super) struct Reconsideration {
     pub key: Key,
     pub goal: crate::replication::CharacterPosition,
@@ -293,6 +294,7 @@ pub(super) struct Key {
     pub role_slot: u8,
     pub passage: u32,
 }
+#[derive(Clone)]
 pub(super) struct Episode {
     pub key: Key,
     pub assigned: Duration,

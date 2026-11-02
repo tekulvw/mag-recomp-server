@@ -12,7 +12,7 @@ use std::{
 };
 use std::{io::Read, path::Path};
 #[path = "dynamic_collision_geometry.rs"]
-mod geometry;
+pub(crate) mod geometry;
 
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -28,7 +28,7 @@ impl Pose {
             rotation: [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]],
         }
     }
-    fn validate(self) -> Result<(), &'static str> {
+    pub(crate) fn validate(self) -> Result<(), &'static str> {
         if !self
             .translation
             .into_iter()
@@ -77,6 +77,12 @@ pub enum Geometry {
         vertices: Vec<[f64; 3]>,
         radius: f64,
     },
+    /// Internal static-world leaf; not accepted as an external body template.
+    #[serde(skip)]
+    Triangle {
+        vertices: [[f64; 3]; 3],
+        radius: f64,
+    },
 }
 impl Geometry {
     pub fn radius(&self) -> f64 {
@@ -84,7 +90,8 @@ impl Geometry {
             Self::Sphere { radius }
             | Self::Capsule { radius, .. }
             | Self::Box { radius, .. }
-            | Self::Hull { radius, .. } => *radius,
+            | Self::Hull { radius, .. }
+            | Self::Triangle { radius, .. } => *radius,
         }
     }
     fn validate(&self) -> Result<(), &'static str> {
@@ -102,6 +109,7 @@ impl Geometry {
             Self::Hull { vertices, .. } => {
                 (4..=16384).contains(&vertices.len()) && vertices.iter().all(|v| valid(*v))
             }
+            Self::Triangle { vertices, .. } => vertices.iter().all(|v| valid(*v)),
         };
         if !ok {
             return Err("invalid_dynamic_body_geometry");
@@ -328,6 +336,8 @@ impl Catalog {
                 } else {
                     root.layer
                 },
+                live_layer: root.layer,
+                dead_layer: root.dead_layer,
             });
         }
         Ok(BodySet { target, bodies })
@@ -346,16 +356,18 @@ fn validate_target(t: Target) -> Result<(), &'static str> {
         Ok(())
     }
 }
-struct Body {
-    root: String,
-    target: Target,
-    pose: Pose,
-    shape: Arc<Geometry>,
-    layer: u8,
+pub(crate) struct Body {
+    pub(crate) root: String,
+    pub(crate) target: Target,
+    pub(crate) pose: Pose,
+    pub(crate) shape: Arc<Geometry>,
+    pub(crate) layer: u8,
+    pub(crate) live_layer: u8,
+    pub(crate) dead_layer: Option<u8>,
 }
 pub struct BodySet {
     target: Target,
-    bodies: Vec<Body>,
+    pub(crate) bodies: Vec<Body>,
 }
 pub struct Snapshot {
     origin: Option<Arc<()>>,
@@ -392,6 +404,9 @@ impl Default for QueryLimits {
     }
 }
 impl Snapshot {
+    pub(crate) fn bodies(&self) -> &[Body] {
+        &self.bodies
+    }
     /// `roster` is the actual authority's complete set, separately enumerated
     /// from shape rows. Neither source catalogs nor caller-set coverage booleans
     /// establish that this roster represents all native game objects.
