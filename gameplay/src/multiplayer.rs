@@ -336,6 +336,9 @@ impl<W: Write> Engine<W> {
                 return Err("match_finished");
             }
         }
+        if matches!(&request, Request::LoadoutSelectionSettled { .. }) {
+            return self.settle_loadout_selection(request, wall);
+        }
         if matches!(&request, Request::ProgressionCommitted { .. }) {
             return self.acknowledge_progression(request, now, wall);
         }
@@ -380,7 +383,8 @@ impl<W: Write> Engine<W> {
         let id = match &request {
             Request::Hello { .. }
             | Request::ConfigureMatch { .. }
-            | Request::ProgressionCommitted { .. } => None,
+            | Request::ProgressionCommitted { .. }
+            | Request::LoadoutSelectionSettled { .. } => None,
             Request::Reserve { reservation_id, .. }
             | Request::Event { reservation_id, .. }
             | Request::DevelopmentSpawnTarget { reservation_id, .. }

@@ -1103,6 +1103,8 @@ fn serve_subscription(
                 error: None,
                 messages: Vec::new(),
                 rewards: Vec::new(),
+                loadout_selections: Vec::new(),
+                capabilities: Vec::new(),
                 match_terminal: None,
             })
             .unwrap();
@@ -1320,6 +1322,8 @@ mod subscription_tests {
             error: None,
             messages: Vec::new(),
             rewards: Vec::new(),
+            loadout_selections: Vec::new(),
+            capabilities: Vec::new(),
             match_terminal: None,
         }
     }

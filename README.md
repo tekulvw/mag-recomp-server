@@ -76,6 +76,8 @@ Optional [ready-human startup quorum](docs/startup-quorum.md) keeps a configured
 match waiting for enough humans on each side.
 Optional [human incapacitation and resuscitation](docs/incapacitation.md) distinguishes
 a downed actor from a respawnable terminal death and preserves the existing kit.
+[Committed kit preferences](docs/loadout-selection.md) remember a valid in-match
+selection through an owned, atomic store save without swapping the current kit.
 Presence of code is not a claim that every feature or map is complete.
 
 The public tests exercise synthetic inputs. They do not establish real-client

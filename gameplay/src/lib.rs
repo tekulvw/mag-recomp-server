@@ -44,6 +44,9 @@ mod world_tick;
 pub use resources::EngineResources;
 pub mod healing;
 pub mod item_catalog;
+pub mod loadout_selection;
+#[cfg(test)]
+mod loadout_selection_tests;
 pub mod loadouts;
 mod match_flow;
 mod multiplayer;
@@ -100,6 +103,9 @@ pub struct Character {
     pub skills: Option<[u32; 5]>,
     #[serde(default)]
     pub account_id: Option<String>,
+    /// Persistent account binding for kit choice, independent of XP opt-in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loadout_account_id: Option<String>,
     #[serde(default)]
     pub progression: Option<progression::ProgressionSnapshot>,
     #[serde(default)]
@@ -235,6 +241,16 @@ pub enum Request {
         plugin_id: Option<u8>,
         payload_hex: String,
     },
+    LoadoutSelectionSettled {
+        v: u8,
+        request_id: String,
+        reservation_id: String,
+        world_id: u32,
+        player_id: u16,
+        selection_id: String,
+        revision: u64,
+        status: loadout_selection::SelectionStatus,
+    },
     ProgressionCommitted {
         v: u8,
         request_id: String,
@@ -331,6 +347,7 @@ impl Request {
             | Self::Reserve { v, request_id, .. }
             | Self::Event { v, request_id, .. }
             | Self::ProgressionCommitted { v, request_id, .. }
+            | Self::LoadoutSelectionSettled { v, request_id, .. }
             | Self::DevelopmentSpawnTarget { v, request_id, .. }
             | Self::DevelopmentMoveBot { v, request_id, .. }
             | Self::DevelopmentDamage { v, request_id, .. }
@@ -359,6 +376,14 @@ pub struct Response {
     pub messages: Vec<OutboundMessage>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rewards: Vec<progression::RewardEvent>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "loadout_selection::deserialize_batch"
+    )]
+    pub loadout_selections: Vec<loadout_selection::CommittedLoadoutSelection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub match_terminal: Option<match_flow::MatchTerminal>,
 }
@@ -371,6 +396,8 @@ impl Response {
             error: Some(error.to_owned()),
             messages: Vec::new(),
             rewards: Vec::new(),
+            loadout_selections: Vec::new(),
+            capabilities: Vec::new(),
             match_terminal: None,
         }
     }
@@ -488,6 +515,24 @@ impl Request {
                 {
                     return Err("invalid_progression_identity");
                 }
+                if let Some(account) = &character.loadout_account_id {
+                    if account.is_empty()
+                        || account.len() > 32
+                        || !account
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                        || character.character_id.is_none_or(|id| id == 0)
+                    {
+                        return Err("invalid_loadout_persistence_identity");
+                    }
+                    if character
+                        .account_id
+                        .as_ref()
+                        .is_some_and(|xp| xp != account)
+                    {
+                        return Err("loadout_account_identity_mismatch");
+                    }
+                }
                 if let Some(state) = character.progression {
                     state.validate()?
                 }
@@ -501,6 +546,17 @@ impl Request {
                     return Err("invalid_reservation_id");
                 }
                 validate_payload_hex(payload_hex)?;
+            }
+            Request::LoadoutSelectionSettled {
+                reservation_id,
+                selection_id,
+                revision,
+                ..
+            } => {
+                if !identifier(reservation_id, 16) || !identifier(selection_id, 1) || *revision == 0
+                {
+                    return Err("invalid_loadout_selection_identity");
+                }
             }
             Request::ProgressionCommitted {
                 reservation_id,
@@ -792,6 +848,8 @@ struct Active {
     postgame_announced: bool,
     current_inventory_handle: Option<replication::InventoryHandle>,
     selected_loadout: Option<protocol::SelectLoadout>,
+    loadout_selection_revision: u64,
+    pending_loadout_selection: Option<loadout_selection::CommittedLoadoutSelection>,
     selected_spawn: Option<protocol::CharacterSpawnSelection>,
     squad_spawn: u16,
     squad_catalog: std::sync::Arc<spawn_catalog::SpawnCatalog>,
@@ -1160,6 +1218,7 @@ impl<W: Write> Engine<W> {
             )),
             _ => None,
         };
+        let hello = matches!(&request, Request::Hello { .. });
         let terminal_allowed = matches!(
             &request,
             Request::Event { .. } | Request::Release { .. } | Request::ProgressionCommitted { .. }
@@ -1173,6 +1232,12 @@ impl<W: Write> Engine<W> {
                 error: None,
                 messages,
                 rewards: self.pending_reward_batch(),
+                loadout_selections: self.pending_loadout_selections(),
+                capabilities: if hello {
+                    vec![loadout_selection::CAPABILITY.into()]
+                } else {
+                    Vec::new()
+                },
                 match_terminal: if terminal_allowed {
                     self.match_terminal.clone()
                 } else {
@@ -1256,7 +1321,9 @@ impl<W: Write> Engine<W> {
                     wall_secs,
                 )
                 .map(|_| Vec::new()),
-            Request::ProgressionCommitted { .. } => unreachable!("handled before actor selection"),
+            Request::ProgressionCommitted { .. } | Request::LoadoutSelectionSettled { .. } => {
+                unreachable!("handled before actor selection")
+            }
             Request::ConfigureMatch {
                 minimum_players,
                 minimum_players_per_team,
@@ -1457,6 +1524,8 @@ impl<W: Write> Engine<W> {
                     postgame_announced: false,
                     current_inventory_handle: None,
                     selected_loadout: None,
+                    loadout_selection_revision: 0,
+                    pending_loadout_selection: None,
                     selected_spawn: None,
                     squad_spawn: shared_spawn,
                     squad_catalog: std::sync::Arc::new(squad_catalog),

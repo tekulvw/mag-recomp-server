@@ -103,6 +103,8 @@ impl<W: Write> Engine<W> {
             error: None,
             messages,
             rewards: self.pending_reward_batch(),
+            loadout_selections: self.pending_loadout_selections(),
+            capabilities: Vec::new(),
             match_terminal: self.match_terminal.clone(),
         }
     }

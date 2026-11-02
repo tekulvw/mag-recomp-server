@@ -28,6 +28,8 @@ void Test(string name, Action action)
     passed++;
 }
 
+Test("committed loadout selection persistence", LoadoutSelectionChecks.Run);
+
 Test("optional finishing and revive reward catalog fields", ReviveRewardChecks.Run);
 Test("selected kit ownership and complete store preservation", LoadoutPreferenceStoreChecks.Run);
 

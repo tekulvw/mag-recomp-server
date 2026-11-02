@@ -40,6 +40,10 @@ namespace Server.Medius
         readonly Dictionary<string, Reservation> _rewardOwners = new Dictionary<string, Reservation>(StringComparer.Ordinal);
         readonly HashSet<string> _notifiedRewards = new HashSet<string>(StringComparer.Ordinal);
         readonly SemaphoreSlim _rewardSettlement = new SemaphoreSlim(1, 1);
+        readonly SemaphoreSlim _loadoutSelectionSettlement = new SemaphoreSlim(1, 1);
+        readonly GameplayLoadoutSelectionSettlement _loadoutSelections;
+        bool _selectionRetry;
+        DateTime _nextSelectionPoll;
         bool _rewardRetry;
         DateTime _nextRewardPoll;
         readonly Channel<(Reservation reservation, object message)> _events = Channel.CreateBounded<(Reservation, object)>(new BoundedChannelOptions(128) { SingleReader = true, FullMode = BoundedChannelFullMode.Wait });
@@ -65,13 +69,14 @@ namespace Server.Medius
             if (configuredFactions.Length == 0 || configuredFactions.Any(faction => faction < 0 || faction > 2) || configuredFactions.Distinct().Count() != configuredFactions.Length)
                 throw new ArgumentException("MagAllowedFactions requires distinct faction values0..2, or null for legacy availability.");
             _allowedFactions = new HashSet<byte>(configuredFactions.Select(faction => (byte)faction));
-            _bridge = bridge; _store = store; _worker = RunEvents();
+            _bridge = bridge; _store = store; _loadoutSelections = new GameplayLoadoutSelectionSettlement(_gate); _worker = RunEvents();
         }
         static string Id() => Guid.NewGuid().ToString("N");
         public async Task StartAsync()
         {
             if (_started) throw new InvalidOperationException("DME already started."); _started = true;
-            if (!await _bridge.RequestAsync(new { v = 2, request_id = Id(), op = "hello" })) throw new IOException("Gameplay service is not ready.");
+            var hello = await _bridge.RequestHelloAsync(new { v = 2, request_id = Id(), op = "hello" });
+            RequireLoadoutSelectionCapability(hello);
             if (!await _bridge.RequestAsync(_startupPolicy.ConfigureRequest(Id(), _applicationId))) throw new IOException("Gameplay match configuration was not acknowledged.");
             DmeProgram.SERVER_IP = MagNetworkSettings.FromEnvironment().Address; DmeProgram.Settings.TCPPort = 10073; DmeProgram.Settings.UDPPort = 10474;
             DmeProgram.Plugins = Program.Plugins ?? new Server.Plugins.PluginsManager("plugins/");
@@ -83,6 +88,11 @@ namespace Server.Medius
                 await DmeProgram.TcpServer.StartAsync(); lock (_gate) _ready = true;
             }
             catch { await DisposeAsync(); throw; }
+        }
+        public static void RequireLoadoutSelectionCapability(GameplayBridgeResponse hello)
+        {
+            if (hello?.Ok != true || !hello.SupportsCommittedLoadoutSelections)
+                throw new IOException("Gameplay service lacks committed_loadout_selection_v1; admission remains disabled.");
         }
         public MagServerStatusResponse Status(int transactionId)
         {
@@ -138,17 +148,22 @@ namespace Server.Medius
                 if (character == null) return failure;
                 if (!_allowedFactions.Contains(character.Faction)) return JoinResponse(request.TransactionId, 4);
                 var record = character.ToRecord();
+                GameplayAdmissionLoadouts admissionLoadouts;
+                try { admissionLoadouts = GameplayLoadoutAdmission.Project(character, record, _store.LoadoutCatalog); }
+                catch (InvalidDataException) { return failure; }
                 var allocation = await World.OnJoinGameRequest(new MediusServerJoinGameRequest { ConnectInfo = new NetConnectionInfo { SessionKey = session.SessionKey } });
                 if (allocation.Confirmation != MGCL_ERROR_CODE.MGCL_SUCCESS || !World.Clients.TryGetValue(allocation.DmeClientIndex, out var client)) return failure;
                 client.ApplicationId = _applicationId;
                 var reservation = new Reservation { Id = Id(), AccountId = character.Id, Account = session.AuthenticatedAccount, CharacterId = character.Id, Faction = character.Faction, Notify = notify, Client = client, Deadline = DateTime.UtcNow.AddSeconds(30) };
                 lock (_gate) { _reservations.Add(reservation.Id, reservation); _rewardOwners.Add(reservation.Id, reservation); }
-                bool admitted = await _bridge.RequestAsync(new { v = 2, request_id = Id(), op = "reserve", reservation_id = reservation.Id,
+                var admittedReply = await _bridge.RequestControlAsync(new { v = 2, request_id = Id(), op = "reserve", reservation_id = reservation.Id,
                     world_id = (uint)World.WorldId, player_id = (ushort)client.DmeId, account_id = character.Id, session_key = client.SessionKey, access_key = client.Token,
-                    character = new { leadership = character.Leadership == null ? null : new GameplayLeadershipRecord(character.Leadership), account_id = _store.ProgressionCatalog == null ? null : reservation.Account, progression = _store.ProgressionCatalog == null ? null : new { experience = record.Experience, level = record.Level, skill_points = record.SkillPoints }, skills = record.Skills, character_id = record.AccountId, name = record.Name, faction = record.Faction, head = record.HeadId, voice = record.VoiceId, universe_id = record.UniverseId,
-                        loadouts = character.Loadouts == null ? null : new { selected_index = record.LastUsedLoadout,
-                            update_ids = record.Loadouts.Select(l => (int)l.UpdateId).ToArray(),
-                            inventories = record.Loadouts.Select(l => l.Items.Select(item => item < 0 ? (ushort?)null : (ushort)item).ToArray()).ToArray() } } });
+                    character = new { loadout_account_id = reservation.Account, leadership = character.Leadership == null ? null : new GameplayLeadershipRecord(character.Leadership), account_id = _store.ProgressionCatalog == null ? null : reservation.Account, progression = _store.ProgressionCatalog == null ? null : new { experience = record.Experience, level = record.Level, skill_points = record.SkillPoints }, skills = record.Skills, character_id = record.AccountId, name = record.Name, faction = record.Faction, head = record.HeadId, voice = record.VoiceId, universe_id = record.UniverseId,
+                        loadouts = admissionLoadouts } });
+                bool admittedRouted; lock (_gate) admittedRouted = Route(admittedReply);
+                if (admittedRouted) await SettleLoadoutSelectionsAsync(admittedReply);
+                await SettleRewardsAsync(admittedReply);
+                bool admitted = admittedReply?.Ok == true;
                 if (!admitted || !IsReady) { await ReleaseAsync(reservation); return failure; }
                 lock (_gate) { if (!Current(reservation) || reservation.Invalidated || !_worldStreamHealthy) { reservation.Invalidated = true; reservation.ReleaseReason = "world_stream_gap"; return failure; } reservation.Accepted = true; }
                 var response = JoinResponse(request.TransactionId, 0);
@@ -231,6 +246,7 @@ namespace Server.Medius
                             _worldStreamHealthy = true;
                             _firstWorldStream.TrySetResult(true);
                         }
+                        await SettleLoadoutSelectionsAsync(reply);
                         await SettleRewardsAsync(reply);
                     }, cancellation);
                 }
@@ -270,7 +286,7 @@ namespace Server.Medius
                     // Keep the authenticated transport; never retry an uncertain shot.
                     if (reply == null || reply.IsTransientFailure)
                     {
-                        _rewardRetry = true;
+                        _rewardRetry = true; _selectionRetry = true;
                         Logger.Warn($"Gameplay bridge event unanswered: player={client.DmeId} failure={reply?.Failure.ToString() ?? "Unavailable"} elapsed_ms={elapsed.ElapsedMilliseconds}; retaining authenticated reservation without retry");
                         continue;
                     }
@@ -284,8 +300,49 @@ namespace Server.Medius
                     }
                     if (current) reservation.Deadline = DateTime.UtcNow.AddSeconds(120);
                 }
+                await SettleLoadoutSelectionsAsync(reply);
                 await SettleRewardsAsync(reply);
             }
+        }
+        bool IsCurrentLoadoutOwner(GameplayLoadoutSelection action)
+        {
+            return !_disposed && World != null && _reservations.TryGetValue(action.ReservationId, out var owner) && Current(owner) &&
+                !owner.Invalidated && owner.Accepted && owner.Client != null &&
+                action.MatchesOwner(owner.Id, (uint)World.WorldId, (ushort)owner.Client.DmeId, owner.Account, owner.CharacterId);
+        }
+        async Task SettleLoadoutSelectionsAsync(GameplayBridgeResponse reply)
+        {
+            if (reply?.Ok != true) return;
+            await _loadoutSelectionSettlement.WaitAsync();
+            try
+            {
+                var actions = new Queue<GameplayLoadoutSelection>(reply.LoadoutSelections);
+                var seen = new HashSet<(string, ulong)>();
+                bool retry = false;
+                int remaining = 64; // Bounded acknowledgements even if the peer repeats an uncleared receipt.
+                while (actions.Count > 0 && remaining-- > 0)
+                {
+                    var action = actions.Dequeue();
+                    if (!seen.Add((action.SelectionId, action.Revision))) { retry = true; continue; }
+                    string status = _loadoutSelections.Settle(action, DateTime.UtcNow, IsCurrentLoadoutOwner,
+                        selection => _store.SaveLastUsedLoadoutForAccount(selection.AccountId, selection.CharacterId, selection.InventoryIndex));
+                    if (status == null) { retry = true; continue; }
+                    var ack = await _bridge.RequestLoadoutSelectionSettlementAsync(new { v = 2, request_id = Id(), op = "loadout_selection_settled",
+                        reservation_id = action.ReservationId, world_id = action.WorldId, player_id = action.PlayerId,
+                        selection_id = action.SelectionId, revision = action.Revision, status });
+                    lock (_gate)
+                    {
+                        if (!Route(ack)) retry = true;
+                        else
+                        {
+                            foreach (var next in ack.LoadoutSelections) actions.Enqueue(next);
+                            if (ack.Rewards.Count > 0) _rewardRetry = true;
+                        }
+                    }
+                }
+                lock (_gate) _selectionRetry = retry || actions.Count > 0;
+            }
+            finally { _loadoutSelectionSettlement.Release(); }
         }
         async Task SettleRewardsAsync(GameplayBridgeResponse reply)
         {
@@ -330,7 +387,9 @@ namespace Server.Medius
                             reservation_id = owner.Id, world_id = reward.WorldId, player_id = reward.PlayerId, reward_id = reward.RewardId,
                             progression = new { experience = (uint)result.Experience, level = result.Level, skill_points = result.SkillPoints },
                             match_experience = (uint)result.MatchExperience });
-                        lock (_gate) { if (!Route(ack)) retry = true; else pending = ack.Rewards.Count > 0; }
+                        bool ackRouted;
+                        lock (_gate) { ackRouted = Route(ack); if (!ackRouted) retry = true; else pending = ack.Rewards.Count > 0; }
+                        if (ackRouted) await SettleLoadoutSelectionsAsync(ack);
                         Logger.Info($"Gameplay reward committed: player={owner.Client.DmeId} kind={reward.Kind} units={reward.Units} xp={result.Experience} level={result.Level} skill_points={result.SkillPoints} match_xp={result.MatchExperience} duplicate={result.Duplicate}");
                     }
                     catch (Exception e) when (e is IOException || e is InvalidDataException || e is UnauthorizedAccessException)
@@ -343,11 +402,15 @@ namespace Server.Medius
         public async Task TickAsync()
         {
             if (_disposed || !_ready) return;
-            bool poll; lock (_gate) { poll = _rewardRetry && DateTime.UtcNow >= _nextRewardPoll; if (poll) _nextRewardPoll = DateTime.UtcNow.AddSeconds(1); }
+            bool poll; lock (_gate) {
+                poll = (_rewardRetry && DateTime.UtcNow >= _nextRewardPoll) || (_selectionRetry && DateTime.UtcNow >= _nextSelectionPoll);
+                if (poll) { _nextRewardPoll = DateTime.UtcNow.AddSeconds(1); _nextSelectionPoll = DateTime.UtcNow.AddSeconds(1); }
+            }
             if (poll)
             {
                 var reply = await _bridge.RequestProgressionAsync(new { v = 2, request_id = Id(), op = "hello" });
-                lock (_gate) Route(reply);
+                bool routed; lock (_gate) routed = Route(reply);
+                if (routed) await SettleLoadoutSelectionsAsync(reply);
                 await SettleRewardsAsync(reply);
             }
             PendingRelease[] pending; lock (_gate) pending = _pendingReleases.Values.Where(r => r.NextAttempt <= DateTime.UtcNow).ToArray();
@@ -362,7 +425,7 @@ namespace Server.Medius
         async Task ReleaseAsync(Reservation r)
         {
             PendingRelease pending;
-            lock (_gate) { if (!Current(r)) return; r.Invalidated = true; _reservations.Remove(r.Id); pending = new PendingRelease { Reservation = r, RequestId = Id() }; _pendingReleases.Add(r.Id, pending); }
+            lock (_gate) { if (!Current(r)) return; r.Invalidated = true; _reservations.Remove(r.Id); _loadoutSelections.Forget(r.Id); pending = new PendingRelease { Reservation = r, RequestId = Id() }; _pendingReleases.Add(r.Id, pending); }
             Logger.Warn($"Gameplay reservation released: player={r.Client.DmeId} reason={r.ReleaseReason ?? (r.Deadline <= DateTime.UtcNow ? "application_inactivity" : "transport_closed")}");
             await r.Client.Stop(); World.Manager.RemoveClient(r.Client); World.Clients.TryRemove(r.Client.DmeId, out _); World.UnregisterClientIndex(r.Client.DmeId);
             await RetryReleaseAsync(pending);
@@ -374,9 +437,11 @@ namespace Server.Medius
             {
                 lock (_gate) if (!_pendingReleases.TryGetValue(pending.Reservation.Id, out var current) || current != pending || pending.NextAttempt > DateTime.UtcNow) return;
                 var reply = await _bridge.RequestReleaseAsync(new { v = 2, request_id = pending.RequestId, op = "release", reservation_id = pending.Reservation.Id });
+                bool routed;
                 lock (_gate)
                 {
-                    if (Route(reply)) _pendingReleases.Remove(pending.Reservation.Id);
+                    routed = Route(reply);
+                    if (routed) _pendingReleases.Remove(pending.Reservation.Id);
                     else
                     {
                         bool retry = reply == null || reply.IsTransientFailure;
@@ -385,6 +450,7 @@ namespace Server.Medius
                         Logger.Warn($"Gameplay release acknowledgement pending: player={pending.Reservation.Client.DmeId} retry={retry} failure={reply?.Failure.ToString() ?? "Unavailable"}");
                     }
                 }
+                if (routed) await SettleLoadoutSelectionsAsync(reply);
                 await SettleRewardsAsync(reply);
             }
             finally { _releaseSettlement.Release(); }
