@@ -271,9 +271,16 @@ pub(super) fn plan_healing_tick<W: Write>(
         .encode_with_profile(ctx.engine.wire_profile)?;
         if let Some(healer) = &effect.healer
             && healer.reservation_id != active.reservation.id
+            // Heal admission requires equal actual teams and squad selection
+            // cannot change sides. This remains the healer's admitted team even
+            // if that healer has since left; credit gating does not alter HP.
             && !ctx
                 .engine
-                .attacker_is_friendly(active.last_damage.last_attacker)
+                .attacker_is_friendly(
+                    active.last_damage.last_attacker,
+                    active.reservation.world,
+                    active.team(),
+                )
         {
             for (tick, units) in &receipts {
                 if *units > 0 {

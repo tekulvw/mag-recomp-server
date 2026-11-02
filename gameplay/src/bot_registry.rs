@@ -2448,3 +2448,7 @@ mod identity_tests {
 #[cfg(test)]
 #[path = "queued_grenade_reward_tests.rs"]
 mod queued_grenade_reward_tests;
+
+#[cfg(test)]
+#[path = "healing_reward_relationship_tests.rs"]
+mod healing_reward_relationship_tests;

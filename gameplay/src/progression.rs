@@ -254,11 +254,40 @@ impl<W: Write> Engine<W> {
                 .insert(reward.reward_id.clone(), reward);
         }
     }
-    pub(crate) fn attacker_is_friendly(&self, attacker: u32) -> bool {
-        self.peers
+    pub(crate) fn attacker_is_friendly(&self, attacker: u32, world: u32, team: u8) -> bool {
+        // Resolve the remembered character attacker, not its source object or faction.
+        // Native credit suppression includes dead characters until actual removal.
+        if let Some(actor) = self
+            .peers
             .values()
             .chain(self.active.iter())
-            .any(|actor| (0x03800000 | u32::from(actor.reservation.player)) == attacker)
+            .find(|actor| (0x03800000 | u32::from(actor.reservation.player)) == attacker)
+        {
+            return actor.reservation.world == world && actor.team() == team;
+        }
+        if attacker & 0xffff_0000 != 0x0380_0000 {
+            return false;
+        }
+        // Registry lives belong to this engine's admitted world (they have no
+        // independent world field). Do not infer a world from a truncated handle.
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|a| a.reservation.world == world)
+            && self.accepts_subscription_world(world)
+            && let Some(bot) = self.bot_registry.bots.get(&(attacker as u16))
+        {
+            return bot.target.squad.team() == team;
+        }
+        self.peers.values().chain(self.active.iter()).any(|owner| {
+            owner.reservation.world == world
+                && owner.dummy_created
+                && owner.development_target.as_ref().is_some_and(|target| {
+                    target.runtime.is_some()
+                        && (0x0380_0000 | u32::from(target.object_index)) == attacker
+                        && target.squad.team() == team
+                })
+        })
     }
     pub(crate) fn acknowledge_progression(
         &mut self,
