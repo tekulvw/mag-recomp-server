@@ -883,3 +883,58 @@ pub fn bundled() -> Result<&'static Arc<ItemCatalog>, &'static str> {
         .as_ref()
         .map_err(|_| "item_catalog_unavailable")
 }
+
+#[cfg(test)]
+pub(crate) mod bunker_test_items {
+    use super::*;
+
+    // Independently authored typed inputs for the legacy bunker event tests.
+    // Keep these test-only; production catalogs still use the validated loaders.
+    pub(crate) fn catalog() -> Arc<ItemCatalog> {
+        Arc::new(ItemCatalog {
+            raw: serde_json::json!({"application_id":20230}),
+            character_blast_rules: crate::blast_rules::CharacterBlastRules {
+                armor_rating_reduction: 0.,
+                armor_prevention_reduction: 0.,
+                hit_location: 0,
+                damage_type: 1,
+            },
+            valor_defaults: None,
+            retail_item_refs: BTreeMap::new(),
+            bootstrap_loadouts: None,
+            retail_combat: None,
+            retail_armory: None,
+            bullets: BTreeMap::from([(
+                13,
+                BulletParameters {
+                    damage: DamageParameters {
+                        character: 80.,
+                        armor_pierce: 0.,
+                        armor_redux: 0.,
+                    },
+                    ammo_token: 1,
+                    effective_range: 10.,
+                    max_range: 20.,
+                    magazine_capacity: 7,
+                    initial_magazine_count: 1,
+                },
+            )]),
+            vehicle_bullets: BTreeMap::from([(
+                13,
+                TargetDamageParameters {
+                    amount: 80.,
+                    armor_pierce: 0.,
+                    armor_redux: 0.,
+                },
+            )]),
+            bullet_attachments: BTreeMap::new(),
+            armor: BTreeMap::new(),
+            body: [BodyParameters {
+                armor_area: 0,
+                multiplier: 1.,
+            }; 16],
+            healing: BTreeMap::new(),
+            grenades: BTreeMap::new(),
+        })
+    }
+}

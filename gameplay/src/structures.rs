@@ -566,9 +566,7 @@ impl<W: Write> Engine<W> {
             let mut next = bunker.clone();
             let mut amount = amount;
             if repair {
-                if active.mounted_seat.is_some()
-                    || bunker.faction != active.reservation.character.faction
-                {
+                if active.mounted_seat.is_some() || bunker.team != active.team() {
                     return Err("repair_requires_allied_onfoot_actor");
                 }
                 if now
@@ -653,7 +651,7 @@ impl<W: Write> Engine<W> {
                     amount = w.damage_amount(
                         index,
                         (params.amount * scale)
-                            * if bunker.team == 1 {
+                            * if bunker.team == active.team() {
                                 w.catalog.friendly_fire_multiplier()
                             } else {
                                 1.0
@@ -736,3 +734,7 @@ impl<W: Write> Engine<W> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "bunker_team_tests.rs"]
+mod bunker_team_tests;

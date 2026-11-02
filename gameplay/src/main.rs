@@ -1893,6 +1893,43 @@ mod runtime_profile_tests {
     }
 
     #[test]
+    fn retail_cli_keeps_bunker_and_alpha_inputs_unsupported() {
+        for flag in [
+            "--structure-catalog",
+            "--bunker-catalog",
+            "--bunker-exit-policy",
+        ] {
+            let files = SyntheticCatalogs::new();
+            let mut args = files.args();
+            args.extend([
+                flag.into(),
+                files
+                    .0
+                    .join("unused-synthetic.json")
+                    .to_str()
+                    .unwrap()
+                    .into(),
+            ]);
+            let error = run(args).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("retail structure/bunker authority is unverified"),
+                "{flag}: {error}"
+            );
+        }
+        let files = SyntheticCatalogs::new();
+        let mut spawns = files.read("spawns.json");
+        spawns["match_profile"]["has_bunkers"] = serde_json::json!(true);
+        files.write("spawns.json", &spawns);
+        assert!(
+            run(files.args()).unwrap_err().to_string().contains(
+                "retail bunker features are unsupported without verified retail authority"
+            )
+        );
+    }
+
+    #[test]
     fn offline_retail_cli_requires_catalog_for_enabled_objectives() {
         let files = SyntheticCatalogs::new();
         let mut spawns = files.read("spawns.json");
