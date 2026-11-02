@@ -29,6 +29,7 @@ void Test(string name, Action action)
 }
 
 Test("optional finishing and revive reward catalog fields", ReviveRewardChecks.Run);
+Test("selected kit ownership and complete store preservation", LoadoutPreferenceStoreChecks.Run);
 
 Test("startup team minima share bridge policy and advertised total", () =>
 {
