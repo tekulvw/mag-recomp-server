@@ -83,6 +83,7 @@ struct SessionChanges {
     selected_loadout: Option<protocol::SelectLoadout>,
     loadout_selection: Option<loadout_selection::CommittedLoadoutSelection>,
     new_inventory_handle: Option<replication::InventoryHandle>,
+    new_spawned_loadout: Option<replication::CharacterLoadout>,
     selected_spawn: Option<protocol::CharacterSpawnSelection>,
     squad_spawn: Option<u16>,
     squad_catalog: Option<std::sync::Arc<spawn_catalog::SpawnCatalog>>,
@@ -594,15 +595,9 @@ impl<W: Write> Engine<W> {
                     active.next_heal_allowed = Duration::ZERO;
                     active.grenade_remaining = plan
                         .session
-                        .new_inventory_handle
-                        .or(active.current_inventory_handle)
-                        .and_then(|h| {
-                            active.reservation.character.replication_loadout(
-                                &self.item_catalog,
-                                h.inventory_index,
-                                active.wire_profile,
-                            )
-                        })
+                        .new_spawned_loadout
+                        .clone()
+                        .or_else(|| active.equipped_loadout())
                         .and_then(|kit| {
                             kit.inventories
                                 .get(usize::from(kit.handle.inventory_index))
@@ -689,6 +684,7 @@ impl<W: Write> Engine<W> {
         }
         if plan.session.new_inventory_handle.is_some() {
             active.current_inventory_handle = plan.session.new_inventory_handle;
+            active.spawned_loadout = plan.session.new_spawned_loadout;
         }
         if plan.session.selected_loadout.is_some() {
             active.selected_loadout = plan.session.selected_loadout;

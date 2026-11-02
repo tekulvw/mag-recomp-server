@@ -77,6 +77,13 @@ fn fixture() -> Engine<Vec<u8>> {
             update_id: 1,
             inventory_index: 0,
         });
+        actor.spawned_loadout = Some(
+            actor
+                .reservation
+                .character
+                .replication_loadout(&engine.item_catalog, 0, actor.wire_profile)
+                .unwrap(),
+        );
         actor.observed_primary = Some(replication::InventoryItem {
             inventory_update_id: 1,
             gear_slot: 0,
@@ -417,4 +424,24 @@ fn exhausted_collapse_ordinal_keeps_damage_and_death_but_denies_an_ambiguous_xp_
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
             .any(|entry| entry["gameplay_denial"] == "human_kill_reward_invalid_collapse_ordinal")
     );
+}
+
+#[test]
+fn saved_armor_edit_does_not_remove_current_life_damage_authority() {
+    let mut engine = fixture();
+    let target = engine.peers.values_mut().next().unwrap();
+    let saved = target.reservation.character.loadouts.as_mut().unwrap();
+    // Removing armor is a structurally valid saved edit. It must not make a
+    // living target with already published armor immune to otherwise valid Hit.
+    saved.inventories[0][12] = None;
+    engine
+        .item_catalog
+        .validate_saved_item_bindings(saved)
+        .unwrap();
+    hit(&mut engine, 91, 1000).unwrap();
+    assert!(matches!(
+        victim(&engine).life,
+        CharacterLife::Incapacitated { generation: 4, .. }
+    ));
+    assert_eq!(kills(&engine).len(), 1);
 }

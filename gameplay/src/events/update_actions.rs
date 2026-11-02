@@ -426,6 +426,7 @@ pub(super) fn plan_respawn<W: Write>(
         health_quarter_points: respawn.damage.health_quarter_points,
     });
     plan.session.new_inventory_handle = loadout.as_ref().map(|l| l.handle);
+    plan.session.new_spawned_loadout = loadout.clone();
     plan.combat.observed_primary = loadout.as_ref().map(|l| l.primary);
     plan.combat.primary_equipped = loadout.as_ref().map(|l| l.primary_equipped);
     // Native invalid/empty inventory selection does not prevent

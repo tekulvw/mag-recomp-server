@@ -293,13 +293,7 @@ fn plan_grenade_blasts<W: Write>(
                 .client_position
                 .map(|p| p.0)
                 .or(active.tracking.sample.map(|p| p.position));
-            let kit = active.current_inventory_handle.and_then(|h| {
-                active.reservation.character.replication_loadout(
-                    &ctx.engine.item_catalog,
-                    h.inventory_index,
-                    active.wire_profile,
-                )
-            });
+            let kit = active.equipped_loadout();
             if active.mounted_seat.is_none()
                 && let (Some(feet), Some(kit)) = (position, kit)
                 && let Ok(armor) =
@@ -324,14 +318,10 @@ fn plan_grenade_blasts<W: Write>(
             .values()
             .filter(|p| p.ready_for_updates && p.mounted_seat.is_none())
         {
-            if let (Some((generation, _)), Some(sample), Some(handle)) = (
+            if let (Some((generation, _)), Some(sample), Some(kit)) = (
                 peer.life.damage_health(),
                 peer.tracking.sample,
-                peer.current_inventory_handle,
-            ) && let Some(kit) = peer.reservation.character.replication_loadout(
-                &ctx.engine.item_catalog,
-                handle.inventory_index,
-                peer.wire_profile,
+                peer.equipped_loadout(),
             ) {
                 let armor =
                     armor::ArmorProfile::from_loadout_with_catalog(&kit, &ctx.engine.item_catalog)?;

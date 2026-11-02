@@ -584,13 +584,8 @@ impl<W: Write> Engine<W> {
                     .current_inventory_handle
                     .ok_or("repair_inventory_unavailable")?;
                 let kit = active
-                    .reservation
-                    .character
-                    .loadout(
-                        &self.item_catalog,
-                        handle.inventory_index,
-                        active.wire_profile,
-                    )
+                    .equipped_loadout()
+                    .filter(|_| active.wire_profile.catalog_item_ids_valid())
                     .ok_or("repair_inventory_unavailable")?;
                 let observed = if active.primary_equipped {
                     active.observed_primary
