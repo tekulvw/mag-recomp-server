@@ -43,6 +43,7 @@ mod resources;
 mod world_tick;
 pub use resources::EngineResources;
 pub mod character_damage_rules;
+pub mod ground_vehicles;
 pub mod healing;
 pub mod item_catalog;
 mod loadout_refresh;
@@ -880,6 +881,7 @@ struct Active {
     objective_assigned: bool,
     objective_needs_clear: bool,
     emplacement_creation: Option<Vec<u8>>,
+    ground_vehicle_batch: usize,
     mounted_seat: Option<u8>,
     seat_transitions: Vec<Vec<u8>>,
     last_exit: Option<protocol::DismountSeat>,
@@ -944,6 +946,7 @@ pub struct Engine<W: Write> {
     collision_world: Option<collision::CollisionWorld>,
     navmesh_world: Option<std::sync::Arc<navmesh::NavMesh>>,
     spawn_catalog: Option<spawn_catalog::SpawnCatalog>,
+    ground_vehicles: Option<ground_vehicles::Catalog>,
     parachute_waves: std::collections::BTreeMap<(u16, Duration), usize>,
     objective_catalog: Option<objective_catalog::ObjectiveCatalog>,
     objective_world: Option<objective_control::ObjectiveWorld>,
@@ -1553,6 +1556,7 @@ impl<W: Write> Engine<W> {
                     objective_assigned: false,
                     objective_needs_clear: false,
                     emplacement_creation: None,
+                    ground_vehicle_batch: 0,
                     mounted_seat: None,
                     seat_transitions: Vec::new(),
                     last_exit: None,

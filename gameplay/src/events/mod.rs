@@ -144,6 +144,7 @@ struct ReplicationChanges {
     objective_target: Option<u16>,
     objective_count: usize,
     emplacement_creation: Option<Vec<u8>>,
+    ground_vehicle_creation: Option<Vec<u8>>,
     seat_transition: Option<Vec<u8>>,
     squad_spawn_delta: Option<Vec<u8>>,
 }
@@ -491,6 +492,7 @@ impl<W: Write> Engine<W> {
             .or(plan.replication.objective_assignment.as_ref())
             .or(plan.replication.objective_clear.as_ref())
             .or(plan.replication.emplacement_creation.as_ref())
+            .or(plan.replication.ground_vehicle_creation.as_ref())
             .or(plan.replication.seat_transition.as_ref())
             .or(plan.replication.damage_delta.as_ref())
             .or(plan.replication.projectile_delta.as_ref())
@@ -648,6 +650,9 @@ impl<W: Write> Engine<W> {
         }
         if plan.replication.emplacement_creation.is_some() {
             active.emplacement_creation = plan.replication.emplacement_creation;
+        }
+        if plan.replication.ground_vehicle_creation.is_some() {
+            active.ground_vehicle_batch += 1;
         }
         if let Some(delta) = plan.replication.seat_transition {
             active.seat_transitions.push(delta);

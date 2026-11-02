@@ -664,7 +664,7 @@ impl CharacterPosition {
         }
         Ok(())
     }
-    fn encode(&self, bits: &mut BitWriter) -> Result<(), &'static str> {
+    pub(crate) fn encode(&self, bits: &mut BitWriter) -> Result<(), &'static str> {
         self.validate()?;
         for (value, signed) in [(self.x, false), (self.y, true), (self.z, false)] {
             if signed {

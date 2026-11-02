@@ -504,6 +504,22 @@ fn plan_update_reply<W: Write>(
             })
             .cloned();
     } else if active.ready_for_updates
+        && active.initial_objects.is_some()
+        && history_available
+        && ctx
+            .engine
+            .ground_vehicles
+            .as_ref()
+            .is_some_and(|world| active.ground_vehicle_batch < world.batch_count())
+    {
+        let packet = ctx.engine.ground_vehicles.as_ref().unwrap().batch(
+            active.ground_vehicle_batch,
+            next_sequence,
+            now.as_millis() as u32,
+        )?;
+        plan.outgoing = Some(packet.clone());
+        plan.replication.ground_vehicle_creation = Some(packet);
+    } else if active.ready_for_updates
         && (active.pending_damage.is_some() || !grenade_queue.is_empty())
         && history_available
     {

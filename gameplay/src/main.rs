@@ -79,6 +79,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     let mut bot_names_path: Option<PathBuf> = None;
     let mut bot_fill_total: usize = 0;
     let mut spawn_path: Option<PathBuf> = None;
+    let mut ground_vehicles_path: Option<PathBuf> = None;
     let mut objective_path: Option<PathBuf> = None;
     let mut item_path: Option<PathBuf> = None;
     let mut blast_rules_path: Option<PathBuf> = None;
@@ -286,6 +287,13 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                         .into(),
                 );
             }
+            "--ground-vehicles" => {
+                ground_vehicles_path = Some(
+                    args.next()
+                        .ok_or_else(|| io::Error::other("--ground-vehicles requires a path"))?
+                        .into(),
+                );
+            }
             "--spawn-catalog" => {
                 spawn_path = Some(
                     args.next()
@@ -340,7 +348,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             }
             _ => {
                 return Err(io::Error::other(
-                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json] [--navmesh-world MESH.mag-nav] [--bot-fill-total N --bot-population POPULATION.json] [--bot-names /absolute/NAMES.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
+                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json] [--navmesh-world MESH.mag-nav] [--bot-fill-total N --bot-population POPULATION.json] [--bot-names /absolute/NAMES.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
                 ));
             }
         }
@@ -484,6 +492,23 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     let spawn_path = spawn_path
         .ok_or_else(|| io::Error::other("--spawn-catalog is required for gameplay startup"))?;
     let catalog = mag_gameplay::spawn_catalog::SpawnCatalog::load(&spawn_path)?;
+    if ground_vehicles_path
+        .as_ref()
+        .is_some_and(|path| !path.is_absolute())
+    {
+        return Err(io::Error::other(
+            "--ground-vehicles requires an explicit absolute path",
+        ));
+    }
+    if ground_vehicles_path.is_some() && application_id != Some(20231) {
+        return Err(io::Error::other(
+            "--ground-vehicles requires explicit retail application20231",
+        ));
+    }
+    let ground_vehicles = ground_vehicles_path
+        .as_ref()
+        .map(|path| mag_gameplay::ground_vehicles::Catalog::load(path, &catalog))
+        .transpose()?;
     if application_id.is_some()
         && collision_world
             .as_ref()
@@ -823,6 +848,11 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         .open(path)?;
     let mut engine =
         Engine::from_resources(writer, MAX_LOG, resources).with_skill_catalog(skill_catalog);
+    if let Some(vehicles) = ground_vehicles {
+        engine = engine
+            .with_ground_vehicles(vehicles)
+            .map_err(io::Error::other)?;
+    }
     if let Some(objectives) = objective_catalog {
         engine = engine
             .with_objective_catalog(objectives)
@@ -1712,6 +1742,41 @@ mod runtime_profile_tests {
         let files = SyntheticCatalogs::new();
         assert!(run(files.args()).is_ok());
         assert_eq!(std::fs::read_dir(&files.0).unwrap().count(), 9);
+    }
+
+    #[test]
+    fn ground_vehicle_cli_requires_explicit_qualified_retail_bindings() {
+        let files = SyntheticCatalogs::new();
+        let mut spawns = files.read("spawns.json");
+        spawns["match_profile"]["game_type"] = serde_json::json!(1);
+        spawns["maps"][0]["owner_faction"] = serde_json::json!(0);
+        spawns["maps"][0]["runtime_indices_verified"] = serde_json::json!(true);
+        spawns["maps"][0]["runtime_indices_basis"] = serde_json::json!("SYNTHETIC identity proof");
+        files.write("spawns.json", &spawns);
+        let digest = format!(
+            "{:x}",
+            Sha256::digest(std::fs::read(files.0.join("spawns.json")).unwrap())
+        );
+        files.write("vehicles.json", &serde_json::json!({"format":"mag_ground_vehicles","schema_version":1,
+            "source":{"spawn_catalog_sha256":digest,"native_elf_sha256":"a".repeat(64),
+                "native_binding_sha256":"b".repeat(64),"vehicle_properties_sha256":"c".repeat(64)},
+            "vehicles":[{"index":0,"spawn_point_index":0,"spawn_point_token":spawns["maps"][0]["locations"][0]["token"],
+                "vehicle_type_token":123,"faction":spawns["maps"][0]["owner_faction"],"team":1,"modifier":0,
+                "position":{"x":100.,"y":3.,"z":100.},"rotation":[0.,0.,0.,1.],"health_quarter_points":600}]}));
+        let mut args = files.args();
+        args.extend([
+            "--ground-vehicles".into(),
+            files.0.join("vehicles.json").display().to_string(),
+        ]);
+        assert!(run(args.clone()).is_ok());
+        spawns["maps"][0]["runtime_indices_verified"] = serde_json::json!(false);
+        files.write("spawns.json", &spawns);
+        assert!(
+            run(args)
+                .unwrap_err()
+                .to_string()
+                .contains("verified_spawn_pool")
+        );
     }
 
     #[test]
