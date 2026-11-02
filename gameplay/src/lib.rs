@@ -1,4 +1,5 @@
 //! Local admission and evidence sink. SCERT authentication remains in Horizon.
+pub mod acquisition_control;
 pub mod active_abilities;
 mod actor_collision;
 mod admission;

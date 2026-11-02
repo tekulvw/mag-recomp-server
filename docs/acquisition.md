@@ -52,3 +52,8 @@ Static vehicle creation and passenger insertion have source and synthetic-check
 coverage. Native playability, escort movement/arrival/destruction, objectives and
 results remain separate acceptance work. Keep source integration, native review
 and the maintainer's manual release action distinct.
+
+The [controller planning increment](acquisition-controller.md) loads external
+four-chain bindings and plans ordered conditional commands from explicit current
+objective observations. Native command application and event/ID integration are
+still required before it changes a live match.
