@@ -957,5 +957,7 @@ fn parachute_without_resolved_inventory_keeps_the_pending_wave_without_consumpti
     assert!(!actor.life.is_alive());
 }
 
+#[path = "acquisition_entry_tests.rs"]
+mod acquisition_entry;
 #[path = "startup_quorum_tests.rs"]
 mod startup_quorum;

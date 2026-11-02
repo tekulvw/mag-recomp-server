@@ -35,6 +35,18 @@ Test("committed loadout selection persistence", LoadoutSelectionChecks.Run);
 Test("optional finishing and revive reward catalog fields", ReviveRewardChecks.Run);
 Test("selected kit ownership and complete store preservation", LoadoutPreferenceStoreChecks.Run);
 
+Test("bounded retail Acquisition mode policy", () =>
+{
+    Check(LocalDmeHost.SupportedMaximumPlayers(20231, 1) == 64, "Retail Acquisition bound");
+    Check(LocalDmeHost.SupportedMaximumPlayers(20231, 0) == 64, "Retail Sabotage bound");
+    Check(LocalDmeHost.SupportedMaximumPlayers(20231, 3) == 64, "Retail Suppression bound");
+    Check(LocalDmeHost.SupportedMaximumPlayers(20231, 2) == 8, "Domination remains bounded separately");
+    Check(LocalDmeHost.SupportedMaximumPlayers(20230, 3) == 8, "Prototype bound");
+    Throws<ArgumentException>(() => LocalDmeHost.SupportedMaximumPlayers(20230, 1));
+    Throws<ArgumentException>(() => LocalDmeHost.SupportedMaximumPlayers(20230, 0));
+    Throws<ArgumentException>(() => LocalDmeHost.SupportedMaximumPlayers(20231, 4));
+});
+
 Test("startup team minima share bridge policy and advertised total", () =>
 {
     var policy = new MagMatchStartupPolicy(1, 8, new[] { 2, 1 });

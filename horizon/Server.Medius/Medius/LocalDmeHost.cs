@@ -58,16 +58,22 @@ namespace Server.Medius
         bool _ready; bool _started; bool _disposed;
         public Server.Dme.Models.World World { get; private set; }
         public bool IsReady { get { lock (_gate) return _ready && _worldStreamHealthy && !_disposed; } }
+        public static int SupportedMaximumPlayers(int applicationId, int gameType)
+        {
+            bool retail = applicationId == 20231;
+            if (gameType != 2 && gameType != 3 && !(retail && (gameType == 0 || gameType == 1)))
+                throw new ArgumentException("Local gameplay serves types2/3, plus retail Sabotage0 and bounded Acquisition1.");
+            return retail && (gameType == 0 || gameType == 1 || gameType == 3) ? 64 : 8;
+        }
         public LocalDmeHost(GameplayBridge bridge, LocalCharacterStore store)
         {
             _applicationId = Program.Settings.MagApplicationId;
             _startupPolicy = new MagMatchStartupPolicy(Program.Settings.MagMinimumPlayers, Program.Settings.MagMaximumPlayers, Program.Settings.MagMinimumPlayersPerTeam);
             _minimumPlayers = _startupPolicy.MinimumPlayers;
             _gameType = Program.Settings.MagGameType;
-            if (_gameType != 2 && _gameType != 3 && !(_applicationId == 20231 && _gameType == 0)) throw new ArgumentException("Local gameplay serves types2/3, plus original retail Sabotage type0.");
             _maximumPlayers = Program.Settings.MagMaximumPlayers;
-            int supportedMaximum = _applicationId == 20231 && (_gameType == 0 || _gameType == 3) ? 64 : 8;
-            if (_minimumPlayers < 1 || _maximumPlayers > supportedMaximum || _minimumPlayers > _maximumPlayers) throw new ArgumentException($"Local match limits must be 1..{supportedMaximum}; 64-player capacity requires retail Sabotage or Suppression.");
+            int supportedMaximum = SupportedMaximumPlayers(_applicationId, _gameType);
+            if (_minimumPlayers < 1 || _maximumPlayers > supportedMaximum || _minimumPlayers > _maximumPlayers) throw new ArgumentException($"Local match limits must be 1..{supportedMaximum}; 64-player capacity requires retail Sabotage, bounded Acquisition or Suppression.");
             var configuredFactions = Program.Settings.MagAllowedFactions ?? new[] { 0, 1, 2 };
             if (configuredFactions.Length == 0 || configuredFactions.Any(faction => faction < 0 || faction > 2) || configuredFactions.Distinct().Count() != configuredFactions.Length)
                 throw new ArgumentException("MagAllowedFactions requires distinct faction values0..2, or null for legacy availability.");

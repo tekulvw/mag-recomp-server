@@ -13,7 +13,9 @@ impl<W: Write> Engine<W> {
     }
     pub(super) fn admission_capacity_for(&self, application_id: u32) -> usize {
         let policy = self.match_profile();
-        if application_id == 20231 && matches!(policy.game_type, 0 | 3) && policy.auto_assign_teams
+        if application_id == 20231
+            && matches!(policy.game_type, 0 | 1 | 3)
+            && policy.auto_assign_teams
         {
             policy.team_capacity * 2
         } else {
