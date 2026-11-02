@@ -33,7 +33,7 @@ struct PlanningContext<'a, W: Write> {
     next_sequence: u32,
     history_available: bool,
     accepted_owner_route: bool,
-    accepted_objective_route: bool,
+    accepted_client_route: bool,
 }
 
 /// Changes are accumulated independently from authoritative state. Keeping the
@@ -299,7 +299,7 @@ impl<W: Write> Engine<W> {
                 next_sequence,
                 accepted_owner_route: matches!(event.transport, Transport::Udp)
                     && matches!(event.direction, Direction::ClientToServer),
-                accepted_objective_route: matches!(event.direction, Direction::ClientToServer),
+                accepted_client_route: matches!(event.direction, Direction::ClientToServer),
                 history_available: self.world_tick_enabled
                     || self.maximum_players > 1
                     || active.replication_history.len() < MAX_REPLICATION_HISTORY,

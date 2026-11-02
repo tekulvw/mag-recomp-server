@@ -793,3 +793,35 @@ fn full_owner_route_relays_downed_presentation_without_authority_then_filters_st
     );
     assert_eq!(actor(&engine, 0).owner_fields.state.unwrap().state, 1);
 }
+
+#[test]
+fn revive_accepts_both_authenticated_transports_but_never_server_originated_requests() {
+    for transport in [Transport::Tcp, Transport::Udp] {
+        let mut engine = two_actors(0.4);
+        down_patient(&mut engine, Duration::ZERO);
+        let bytes = request(0x0380_0000);
+        let input = events::EventInput {
+            reservation_id: "synthetic-reservation-0001".into(),
+            world_id: 1,
+            player_id: 1,
+            transport,
+            direction: Direction::ClientToServer,
+            rt_type: 0x3d,
+            plugin_id: Some(1),
+            payload_hex: protocol::encode_hex(&bytes),
+        };
+        let decoded = DecodedEvent::with_profile(&bytes, 1, engine.wire_profile);
+        engine
+            .handle_event(input, &decoded, Duration::from_secs(1), 1)
+            .unwrap();
+        assert!(
+            patient(&engine).life.is_alive(),
+            "authenticated transport {transport:?} was denied"
+        );
+    }
+    let invalid_direction = json!({"v":BRIDGE_VERSION,"op":"event","request_id":"invalid-direction",
+        "reservation_id":"synthetic-reservation-0001","world_id":1,"player_id":1,
+        "transport":"tcp","direction":"server_to_client","rt_type":61,"plugin_id":1,
+        "payload_hex":"021c03800000"});
+    assert!(parse_request(invalid_direction.to_string().as_bytes()).is_err());
+}

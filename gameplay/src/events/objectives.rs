@@ -23,7 +23,7 @@ pub(super) fn interaction<W: Write>(
     request: protocol::ObjectiveInteraction,
 ) -> Result<Value, &'static str> {
     use protocol::ObjectiveInteractionKind as Kind;
-    if matches!(request.kind, Kind::Ack | Kind::Nak) || !ctx.accepted_objective_route {
+    if matches!(request.kind, Kind::Ack | Kind::Nak) || !ctx.accepted_client_route {
         return Ok(
             json!({"type":"objective_interaction","action":request.kind as u8,
             "target_object_id":request.target_object_id,"accepted":false,
