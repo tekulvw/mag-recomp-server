@@ -2,6 +2,11 @@
 //! Native ApplyDamage quantizes remaining HP, not the damage amount.
 use crate::replication::CharacterDamage;
 use serde::{Deserialize, Serialize};
+/// Native incoming modifiers add in order and clamp only the completed sum.
+/// Keep this shared by armor resolution and state-bound falling damage.
+pub(crate) fn incoming_damage_scale(base: f32, general: f32, typed: f32) -> f32 {
+    ((base + general) + typed).max(0.0)
+}
 /// Native damage quantizes the remaining health, rather than rounding damage.
 /// Falling prediction and actual application share this exact f32 operation.
 pub(crate) fn remaining_health_quarter_points(

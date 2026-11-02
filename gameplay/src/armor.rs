@@ -155,7 +155,7 @@ impl ArmorProfile {
             crate::damage::DamageKind::Poison => self.chemical_taken,
             _ => 0.0,
         };
-        ((self.incoming_base + self.damage_taken) + resistance).max(0.0)
+        crate::damage::incoming_damage_scale(self.incoming_base, self.damage_taken, resistance)
     }
     /// Recorded arithmetic inputs; no damage is applied by this audit method.
     pub fn calculation(
