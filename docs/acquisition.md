@@ -57,3 +57,8 @@ The [controller planning increment](acquisition-controller.md) loads external
 four-chain bindings and plans ordered conditional commands from explicit current
 objective observations. Native command application and event/ID integration are
 still required before it changes a live match.
+
+[Qualified initial objective catalogs](acquisition-native-objectives.md) now
+support both platoons and all16squad bindings. The source-model path preserves
+pre-MissionStart constructor state and explicit empty orders; it does not enable
+interactive or post-script gameplay from initial-load evidence.
