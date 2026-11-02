@@ -30,6 +30,17 @@ required Acquisition milestone; these fallbacks do not complete entry support.**
 Vehicle creation, replication and vehicle-backed insertion need their own typed
 implementation and correctness evidence. A spawn record is not a vehicle entity.
 
-This projector change alone does not enable queue admission or establish native
-playability. Keep source integration, native review and the maintainer's manual
-release action distinct.
+Retail mode1 now has matching source admission policy in Horizon and Rust, within
+the existing64-player maximum. Explicit operator configuration is required; no
+running service configuration changes here. Prototype Acquisition remains
+unsupported and other prototype modes retain their eight-player bound.
+
+Synthetic checks cover64 pending reservations, four members in each of16 squads,
+all64 Ready snapshots, second-platoon spawn assignment, physical respawn at that
+squad's configured point, exact packet replay and late-join roster preservation.
+The existing generic squad addressing and spawn path already preserve both
+platoons; no native field layout is inferred from those checks.
+
+This source foundation does not establish native playability or fulfill required
+vehicle spawning. Keep source integration, native review and the maintainer's
+manual release action distinct.

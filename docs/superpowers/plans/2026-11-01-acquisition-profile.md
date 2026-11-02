@@ -43,13 +43,14 @@ readiness/TODO checkpoint in the private repository.
 **Interfaces:** Extend `build(..., attacking_faction=None)` with explicit
 Acquisition attacker policy; emit the existing mag_spawn_catalog v1 schema.
 
-- [ ] Write synthetic projection tests for retained unsupported points, two
+- [x] Write synthetic projection tests for retained unsupported points, two
   platoons, default fallbacks, explicit attacker and unchanged mode policy.
-- [ ] Run tests and confirm missing Acquisition behavior fails.
-- [ ] Implement selected GameType128 rules/map handling and projection.
-- [ ] Run Python checks/public guard; reproduce the original private profile
+- [x] Run tests and confirm missing Acquisition behavior fails.
+- [x] Implement selected GameType128 rules/map handling and projection.
+- [x] Run Python checks/public guard; reproduce the original private profile
   from explicit original archives and verify legacy projections unchanged.
-- [ ] Integrate the focused public PR after CI; checkpoint private evidence.
+- [x] Integrate the focused public PR after CI (PR34, c6c66fa); private evidence
+  retained with a maintained exact reproduction checker, checkpoint pending.
 
 ### Task2: Bounded admission and second-platoon spawning
 
@@ -59,9 +60,9 @@ Acquisition attacker policy; emit the existing mag_spawn_catalog v1 schema.
 **Interfaces:** Retail mode1 uses the configured maximum64; prototype stays8.
 Existing SquadAddress indices0..31 and configured wave policy remain authoritative.
 
-- [ ] Write critical mode/capacity and second-platoon lifecycle tests, run red.
-- [ ] Fix only demonstrated admission/replication assumptions.
-- [ ] Run affected Rust/Horizon suites, formatting, Clippy and public guard.
+- [x] Write critical mode/capacity and second-platoon lifecycle tests, run red.
+- [x] Fix only demonstrated admission/replication assumptions.
+- [x] Run affected Rust/Horizon suites, formatting, Clippy and public guard.
 - [ ] Integrate after checks and retain exact source/private evidence identities.
 
 ### Task3: Required vehicle spawning
