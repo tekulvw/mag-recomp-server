@@ -251,15 +251,23 @@ fn plan_owner_report<W: Write>(
             );
             if let Some(position) = fields.position {
                 reported_position = Some(position);
-                position_status = if !active.life.is_alive() {
-                    "not_alive"
-                } else if active.is_mounted() {
-                    "mounted"
-                } else if !active.tracking.accepts(h.sequence) {
-                    "stale"
-                } else {
-                    "accepted"
-                };
+                position_status =
+                    if !ctx.accepted_owner_route || h.client_index != 0 || h.nak_sequence != 0 {
+                        "unowned_route"
+                    } else if !active.life.is_alive() {
+                        "not_alive"
+                    } else if active.is_mounted() {
+                        "mounted"
+                    } else if h.sequence <= active.latest_owner_sequence {
+                        "stale"
+                    } else if active.tracking.correction_pending() {
+                        plan.session.queued_correction_position = Some((position, h.sequence));
+                        "correction_pending"
+                    } else if !active.tracking.accepts(h.sequence) {
+                        "stale"
+                    } else {
+                        "accepted"
+                    };
                 if position_status == "accepted" {
                     plan.session.client_position = Some((position, h.sequence));
                 }
@@ -514,7 +522,7 @@ fn plan_update_reply<W: Write>(
             .as_ref()
             .is_some_and(|world| active.ground_vehicle_batch < world.batch_count())
     {
-        let packet = ctx.engine.ground_vehicles.as_ref().unwrap().batch(
+        let packet = ctx.engine.current_ground_batch(
             active.ground_vehicle_batch,
             next_sequence,
             now.as_millis() as u32,

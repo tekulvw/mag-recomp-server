@@ -599,3 +599,427 @@ fn apc_same_vehicle_seat_switch_preserves_capacity_and_denies_exact_repeat() {
     assert!(ground_seat_event(&mut engine, true, 0x01000000, 8, 0, 104).is_empty());
     assert!(ground_seat_event(&mut engine, true, 0x01000001, 9, 0, 105).is_empty());
 }
+
+fn current_ground_fields(
+    wire: &[u8],
+    profile: wire_profile::WireProfile,
+) -> (u8, u16, u32, [u32; 3]) {
+    let mut bits = BitReader::with_profile(wire, profile);
+    bits.position = profile.header_bits();
+    assert_eq!(bits.read(1), Ok(1));
+    bits.read(16).unwrap();
+    let (mut state, mut health, mut attacker, mut position) = (0, 0, 0, [0; 3]);
+    for field in 0..30 {
+        if bits.read(1).unwrap() == 0 {
+            continue;
+        }
+        match field {
+            0 => {
+                bits.read(1).unwrap();
+            }
+            1 => {
+                bits.read(16).unwrap();
+            }
+            3 => {
+                bits.read(32).unwrap();
+            }
+            4 | 19 => {
+                bits.read(8).unwrap();
+            }
+            5 => state = bits.read(8).unwrap() as u8,
+            6 | 7 | 20 => {
+                bits.read(16).unwrap();
+            }
+            18 => {
+                bits.read(8).unwrap();
+                health = (bits.read(16).unwrap() & 0xfff) as u16;
+                attacker = bits.read(32).unwrap();
+                bits.read(32).unwrap();
+                bits.read(32).unwrap();
+            }
+            25 => {
+                position = [
+                    bits.read(16).unwrap(),
+                    bits.read(17).unwrap(),
+                    bits.read(16).unwrap(),
+                ]
+            }
+            26 => {
+                for _ in 0..4 {
+                    bits.read(11).unwrap();
+                }
+            }
+            _ => panic!("unexpected synthetic vehicle field {field}"),
+        }
+    }
+    (state, health, attacker, position)
+}
+#[test]
+fn current_ground_authority_preserves_catalog_and_late_join_reads_latest_pose_and_damage() {
+    use acquisition_ground_runtime::Pose;
+    let mut engine = configured();
+    let key = engine.ground_runtime.as_ref().unwrap().get(0).unwrap().key;
+    reserve(&mut engine, 0);
+    ready(engine.active.as_mut().unwrap());
+    let first = owner_update(&mut engine, 10, 0);
+    let first_wire = protocol::decode_hex(&first[0].payload_hex);
+    let sequence = ObjectUpdate::decode_with_profile(&first_wire, engine.wire_profile)
+        .unwrap()
+        .header
+        .sequence;
+    let pose = Pose {
+        position: CharacterPosition {
+            x: 144.,
+            y: 4.,
+            z: 160.,
+        },
+        rotation: [0., 0., 0., 1.],
+    };
+    engine
+        .ground_runtime
+        .as_mut()
+        .unwrap()
+        .force_pose(key, pose)
+        .unwrap();
+    engine
+        .ground_runtime
+        .as_mut()
+        .unwrap()
+        .apply_damage(key, 80, 0x03800005)
+        .unwrap();
+    assert_eq!(
+        engine.current_ground_vehicle(0).unwrap().position,
+        pose.position
+    );
+    assert_eq!(
+        engine
+            .ground_vehicles
+            .as_ref()
+            .unwrap()
+            .vehicle(0)
+            .unwrap()
+            .position
+            .x,
+        100.
+    );
+    assert_eq!(
+        protocol::decode_hex(&owner_update(&mut engine, 20, sequence)[0].payload_hex),
+        first_wire
+    );
+    reserve(&mut engine, 1);
+    ready(engine.active.as_mut().unwrap());
+    let late = owner_update(&mut engine, 30, 0);
+    assert_eq!(
+        current_ground_fields(
+            &protocol::decode_hex(&late[0].payload_hex),
+            engine.wire_profile
+        ),
+        (2, 520, 0x03800005, [4608, 128, 5120])
+    );
+}
+#[test]
+fn runtime_ground_packets_admit_lifecycle_states_without_relaxing_external_catalog() {
+    use acquisition_ground_runtime::{Capabilities, Destruction, Runtime};
+    for state in [4, 5, 7, 8] {
+        let mut engine = configured();
+        let creation = engine
+            .ground_vehicles
+            .as_ref()
+            .unwrap()
+            .vehicle(0)
+            .unwrap()
+            .clone();
+        let mut runtime = Runtime::from_creation(&creation, Some(7)).unwrap();
+        let key = runtime.get(0).unwrap().key;
+        runtime
+            .configure(
+                key,
+                Capabilities {
+                    destruction: Some(Destruction {
+                        damage: 40.,
+                        full_radius: 3.,
+                        half_radius: 2.,
+                    }),
+                    hulk_template: Some("synthetic-hulk".into()),
+                    delivered_inert_seconds: Some(2.),
+                },
+            )
+            .unwrap();
+        if matches!(state, 4 | 5) {
+            runtime.apply_lethal(key, 0x03800005, state == 5).unwrap();
+            runtime.update(key, 0., 20000).unwrap();
+        } else {
+            runtime.deliver(key).unwrap();
+            if state == 7 {
+                runtime.update(key, 2., 20000).unwrap();
+            }
+        }
+        engine.ground_runtime = Some(runtime);
+        let wire = engine.current_ground_batch(0, 2, 0).unwrap();
+        let fields = current_ground_fields(&wire, engine.wire_profile);
+        assert_eq!(fields.0, state);
+        assert_eq!(fields.1, if matches!(state, 4 | 5) { 0 } else { 600 });
+        let mut external = catalog(&engine);
+        external["vehicles"][0]["initial_state"] = json!(state);
+        assert!(
+            Catalog::from_json(
+                &external.to_string(),
+                engine.spawn_catalog.as_ref().unwrap()
+            )
+            .is_err()
+        );
+    }
+}
+#[test]
+fn current_ground_mount_distance_and_exit_follow_mutable_pose() {
+    let mut engine = apc_engine(1, true);
+    spawn_apc(&mut engine, 0, 1, 0, 100);
+    ground_seat_event(&mut engine, false, 0x01000000, 9, 0, 103);
+    let key = engine.ground_runtime.as_ref().unwrap().get(0).unwrap().key;
+    engine
+        .ground_runtime
+        .as_mut()
+        .unwrap()
+        .force_pose(
+            key,
+            acquisition_ground_runtime::Pose {
+                position: CharacterPosition {
+                    x: 500.,
+                    y: 3.,
+                    z: 100.,
+                },
+                rotation: [0., 0., 0., 1.],
+            },
+        )
+        .unwrap();
+    engine
+        .active
+        .as_mut()
+        .unwrap()
+        .tracking
+        .sample
+        .as_mut()
+        .unwrap()
+        .position
+        .x = 503.;
+    assert!(!ground_seat_event(&mut engine, true, 0x01000000, 8, 0, 104).is_empty());
+    ground_seat_event(&mut engine, false, 0x01000000, 8, 0, 105);
+    assert_eq!(
+        engine
+            .active
+            .as_ref()
+            .unwrap()
+            .tracking
+            .sample
+            .unwrap()
+            .position
+            .x,
+        503.
+    );
+}
+#[test]
+fn current_ground_passenger_spawn_and_manual_mount_reject_pending_death() {
+    let mut engine = apc_engine(1, true);
+    spawn_apc(&mut engine, 0, 1, 0, 100);
+    ground_seat_event(&mut engine, false, 0x01000000, 9, 0, 103);
+    let key = engine.ground_runtime.as_ref().unwrap().get(0).unwrap().key;
+    engine
+        .ground_runtime
+        .as_mut()
+        .unwrap()
+        .apply_lethal(key, u32::MAX, true)
+        .unwrap();
+    assert!(ground_seat_event(&mut engine, true, 0x01000000, 8, 0, 104).is_empty());
+    spawn_apc(&mut engine, 1, 1, 0, 110);
+    assert!(engine.active.as_ref().unwrap().ground_seat.is_none());
+    assert!(!engine.active.as_ref().unwrap().life.is_alive());
+}
+
+#[test]
+fn current_ground_mount_waits_for_respawn_world_registration() {
+    use acquisition_ground_runtime::{
+        Body, Capabilities, Destruction, Pose, QualifiedRespawn, Runtime,
+    };
+    let mut engine = apc_engine(1, true);
+    spawn_apc(&mut engine, 0, 1, 0, 100);
+    ground_seat_event(&mut engine, false, 0x01000000, 9, 0, 103);
+    let creation = engine.current_ground_vehicle(0).unwrap();
+    let mut runtime = Runtime::from_creation(&creation, Some(7)).unwrap();
+    let key = runtime.get(0).unwrap().key;
+    runtime
+        .configure(
+            key,
+            Capabilities {
+                destruction: Some(Destruction {
+                    damage: 40.,
+                    full_radius: 3.,
+                    half_radius: 2.,
+                }),
+                hulk_template: None,
+                delivered_inert_seconds: None,
+            },
+        )
+        .unwrap();
+    runtime.apply_lethal(key, u32::MAX, true).unwrap();
+    runtime.update(key, 0., 20000).unwrap();
+    runtime
+        .respawn_existing(
+            key,
+            QualifiedRespawn {
+                spawn_point_index: creation.spawn_point_index,
+                spawn_point_token: creation.spawn_point_token,
+                active: true,
+                pose: Pose {
+                    position: creation.position,
+                    rotation: creation.rotation,
+                },
+            },
+            false,
+        )
+        .unwrap();
+    assert_eq!(runtime.get(0).unwrap().state, 2);
+    assert_eq!(runtime.get(0).unwrap().body, Body::Inactive);
+    engine.ground_runtime = Some(runtime);
+    assert!(ground_seat_event(&mut engine, true, 0x01000000, 8, 0, 104).is_empty());
+    engine
+        .ground_runtime
+        .as_mut()
+        .unwrap()
+        .update(key, 0., 20000)
+        .unwrap();
+    assert!(!ground_seat_event(&mut engine, true, 0x01000000, 8, 0, 105).is_empty());
+}
+#[test]
+fn current_ground_passenger_spawn_uses_current_pose_and_no_missing_runtime_fallback() {
+    let mut engine = apc_engine(1, true);
+    let key = engine.ground_runtime.as_ref().unwrap().get(0).unwrap().key;
+    let pose = acquisition_ground_runtime::Pose {
+        position: CharacterPosition {
+            x: 450.,
+            y: 5.,
+            z: 160.,
+        },
+        rotation: [0., 0., 0., 1.],
+    };
+    engine
+        .ground_runtime
+        .as_mut()
+        .unwrap()
+        .force_pose(key, pose)
+        .unwrap();
+    spawn_apc(&mut engine, 0, 1, 0, 100);
+    assert_eq!(
+        engine
+            .active
+            .as_ref()
+            .unwrap()
+            .tracking
+            .sample
+            .unwrap()
+            .position,
+        pose.position
+    );
+    engine.ground_runtime = None;
+    assert!(engine.current_ground_vehicle(0).is_none());
+    assert_eq!(
+        engine.current_ground_batch(0, 2, 0),
+        Err("ground_vehicle_runtime_required")
+    );
+    assert!(!engine.ground_vehicle_creation_complete(1));
+}
+
+#[test]
+fn runtime_ground_delta_contains_only_requested_existing_object_fields() {
+    let mut engine = configured();
+    let key = engine.ground_runtime.as_ref().unwrap().get(0).unwrap().key;
+    let pose = acquisition_ground_runtime::Pose {
+        position: CharacterPosition {
+            x: 144.,
+            y: 4.,
+            z: 160.,
+        },
+        rotation: [0., 0., 0., 1.],
+    };
+    let runtime = engine.ground_runtime.as_mut().unwrap();
+    runtime.force_pose(key, pose).unwrap();
+    runtime.apply_lethal(key, 0x03800005, true).unwrap();
+    let mask = (1 << 5) | (1 << 18) | (1 << 25) | (1 << 26);
+    let wire = ground_vehicles::encode_runtime_delta(
+        engine.ground_vehicles.as_ref().unwrap(),
+        runtime,
+        &[(0, mask)],
+        2,
+        100,
+    )
+    .unwrap();
+    let mut bits = BitReader::with_profile(&wire, engine.wire_profile);
+    bits.position = engine.wire_profile.header_bits();
+    assert_eq!(bits.read(1), Ok(1));
+    assert_eq!(bits.read(16), Ok(0));
+    for field in 0..30 {
+        let expected = mask & (1 << field) != 0;
+        assert_eq!(bits.read(1), Ok(u32::from(expected)), "field{field}");
+        if !expected {
+            continue;
+        }
+        match field {
+            5 => assert_eq!(bits.read(8), Ok(2)), // Pending death does not synchronously change state.
+            18 => {
+                assert_eq!(bits.read(8), Ok(0));
+                assert_eq!(bits.read(16), Ok(0));
+                assert_eq!(bits.read(32), Ok(0x03800005));
+                assert_eq!(bits.read(32), Ok(u32::MAX));
+                assert_eq!(bits.read(32), Ok(0));
+            }
+            25 => {
+                assert_eq!(bits.read(16), Ok(4608));
+                assert_eq!(bits.read(17), Ok(128));
+                assert_eq!(bits.read(16), Ok(5120));
+            }
+            26 => {
+                for expected in [0, 0, 0, 256] {
+                    assert_eq!(bits.read(11), Ok(expected));
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+    assert_eq!(bits.read(1), Ok(0));
+    let damage_only = ground_vehicles::encode_runtime_delta(
+        engine.ground_vehicles.as_ref().unwrap(),
+        runtime,
+        &[(0, 1 << 18)],
+        2,
+        101,
+    )
+    .unwrap();
+    assert!(damage_only.len() < wire.len());
+    for bad in [
+        vec![(0, 1 << 0)],
+        vec![(0, 1 << 1)],
+        vec![(0, 0)],
+        vec![(31, mask)],
+        vec![(0, mask), (0, mask)],
+    ] {
+        assert!(
+            ground_vehicles::encode_runtime_delta(
+                engine.ground_vehicles.as_ref().unwrap(),
+                runtime,
+                &bad,
+                2,
+                100
+            )
+            .is_err()
+        );
+    }
+    let source = engine
+        .ground_vehicles
+        .as_ref()
+        .unwrap()
+        .vehicle(0)
+        .unwrap()
+        .clone();
+    let mut dead = source;
+    dead.health_quarter_points = 0;
+    assert!(ground_vehicles::encode(2, 100, &[dead]).is_err());
+}

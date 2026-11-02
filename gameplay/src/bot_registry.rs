@@ -105,6 +105,7 @@ pub(crate) struct BotRegistry {
     pub(super) firearm_cursor: u16,
     pub(super) delay_book: crate::bot_traffic_costs::Book,
 }
+#[derive(Clone)]
 pub(super) struct WorldBot {
     name_index: u16,
     pub(super) target: Target,
@@ -2302,10 +2303,10 @@ impl<W: Write> Engine<W> {
 }
 
 #[cfg(test)]
-mod identity_tests {
+pub(crate) mod identity_tests {
     use super::*;
     use crate::resources::tests::{retail_items, wire_profiles};
-    pub(super) fn engine(prefix: &str) -> Engine<Vec<u8>> {
+    pub(crate) fn engine(prefix: &str) -> Engine<Vec<u8>> {
         let mut proof = json!({"verified_binding":{"validated":true,"positions_compared":667,"blank_positions_compared":25,"blank_zero_empirically_verified":true}});
         for name in [
             "original_retail_elf_sha256",
@@ -2363,6 +2364,13 @@ mod identity_tests {
         let config:BotPopulation=serde_json::from_value(json!({"format":"mag_bot_population_v1","map_name":"synthetic_arena","firearms":{"enabled":false},"slots":[
             {"team":0,"position":{"x":2.,"y":0.,"z":2.}}, {"team":1,"position":{"x":6.,"y":0.,"z":2.}}]})).unwrap();
         engine.with_bot_population(config, 2).unwrap()
+    }
+    pub(crate) fn populated_engine(prefix: &str) -> Engine<Vec<u8>> {
+        let mut engine = engine(prefix);
+        engine
+            .reconcile_bot_population(Duration::ZERO, 1, &mut Default::default())
+            .unwrap();
+        engine
     }
     #[test]
     fn external_identities_reach_real_allocation_audit_and_client_snapshots() {
@@ -2453,3 +2461,106 @@ mod queued_grenade_reward_tests;
 #[cfg(test)]
 #[path = "healing_reward_relationship_tests.rs"]
 mod healing_reward_relationship_tests;
+
+/// Isolated snapshot of precisely the registry fields ordinary damage mutates.
+pub(crate) struct CharacterDamageCandidate {
+    bots: BTreeMap<u16, WorldBot>,
+    reservations: BTreeMap<u16, (crate::actor_collision::Bounds, Duration)>,
+}
+impl BotRegistry {
+    pub(crate) fn character_damage_candidate(&self) -> CharacterDamageCandidate {
+        CharacterDamageCandidate {
+            bots: self.bots.clone(),
+            reservations: self.reservations.clone(),
+        }
+    }
+    pub(crate) fn install_character_damage_candidate(&mut self, state: CharacterDamageCandidate) {
+        self.bots = state.bots;
+        self.reservations = state.reservations;
+    }
+}
+
+impl BotRegistry {
+    /// Owned force-position correction invalidates old navigation reservations.
+    /// The next normal bot tick resumes navigation from the corrected body.
+    pub(crate) fn correct_character_position(
+        &mut self,
+        id: u16,
+        generation: u32,
+        position: replication::CharacterPosition,
+        now: Duration,
+    ) -> Result<(), &'static str> {
+        position.validate()?;
+        let until = now
+            .checked_add(Duration::from_millis(250))
+            .ok_or("acquisition_move_time_overflow")?;
+        let bot = self
+            .bots
+            .get_mut(&id)
+            .ok_or("acquisition_character_missing")?;
+        let mut runtime = bot.target.runtime.ok_or("bot_runtime_missing")?;
+        if runtime.generation != generation || bot.health == 0 {
+            return Err("stale_acquisition_character_generation");
+        }
+        let point = [
+            f64::from(position.x),
+            f64::from(position.y),
+            f64::from(position.z),
+        ];
+        let mut motion = runtime
+            .physics_motion
+            .unwrap_or_else(|| bot_physics::Motion::new(point));
+        motion.position = point;
+        motion.blocked = false;
+        motion.grounded = false;
+        let mut navmesh = development_bot_movement::NavmeshRuntime::default();
+        if runtime.navmesh_state.fall.is_some() {
+            let mut fall = fall_damage::PhysicalTracker::default();
+            fall.reset(generation, motion)?;
+            navmesh.fall = Some(fall);
+        }
+        runtime.position = position;
+        runtime.physics_motion = Some(motion);
+        runtime.navmesh_state = navmesh;
+        runtime.navigation_waypoint = 0;
+        runtime.phase = BotPhase::Complete;
+        runtime.since = now;
+        runtime.last_update = now;
+        bot.target.position = position;
+        bot.target.runtime = Some(runtime);
+        bot.target.pending_move = None;
+        bot.task = Default::default();
+        bot.move_attempted = false;
+        bot.delay_episode = None;
+        bot.reconsider = None;
+        bot.reconsider_history.clear();
+        bot.traffic_yield = None;
+        bot.traffic_yield_cursor = 0;
+        bot.traffic_progress = None;
+        bot.holding_access = None;
+        bot.drop_queue_passage = None;
+        bot.drop_queue_since = None;
+        bot.drop_waiting = None;
+        bot.drop_permit = None;
+        bot.drop_committed = false;
+        bot.drop_holding_goal = None;
+        bot.drop_resume = false;
+        bot.drop_egress = false;
+        bot.drop_retreat = false;
+        bot.drop_retreat_preentry = false;
+        bot.drop_reroute = false;
+        bot.drop_resume_failure_at = None;
+        bot.drop_queue_approach.clear();
+        bot.holding_retry_at = now;
+        bot.drop_approach_ready = false;
+        bot.drop_holding_attempt = 0;
+        self.reservations.insert(
+            id,
+            (
+                actor_collision::Bounds::body(point, bot_physics::Body::default()),
+                until,
+            ),
+        );
+        Ok(())
+    }
+}

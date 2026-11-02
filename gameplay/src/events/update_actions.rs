@@ -383,10 +383,17 @@ pub(super) fn plan_respawn<W: Write>(
             plan.gameplay_denial = Some("ground_vehicle_creation_required");
             return Ok(());
         }
-        let Some(vehicle) = world.passenger_vehicle(point.index) else {
+        let Some(vehicle) = world
+            .passenger_vehicle(point.index)
+            .and_then(|binding| ctx.engine.current_ground_vehicle(binding.index))
+        else {
             plan.gameplay_denial = Some("passenger_spawn_binding_required");
             return Ok(());
         };
+        if !ctx.engine.ground_vehicle_is_operational(vehicle.index) {
+            plan.gameplay_denial = Some("ground_vehicle_not_operational");
+            return Ok(());
+        }
         if vehicle.team != active.team() || vehicle.faction != active.reservation.character.faction
         {
             plan.gameplay_denial = Some("passenger_vehicle_side_mismatch");
@@ -396,7 +403,7 @@ pub(super) fn plan_respawn<W: Write>(
             plan.gameplay_denial = Some("ground_exit_policy_required");
             return Ok(());
         }
-        let Some(seat) = ctx.engine.ground_passenger_seat(vehicle) else {
+        let Some(seat) = ctx.engine.ground_passenger_seat(&vehicle) else {
             plan.gameplay_denial = Some("ground_passenger_seats_full");
             return Ok(());
         };
@@ -414,14 +421,14 @@ pub(super) fn plan_respawn<W: Write>(
         return Ok(());
     }
     let generation = active.life.next_generation();
-    let mut spawn_position = ground_seat
-        .and_then(|seat| {
-            ctx.engine
-                .ground_vehicles
-                .as_ref()?
-                .vehicle(seat.vehicle_index)
-        })
-        .map_or(point.position, |vehicle| vehicle.position);
+    let mut spawn_position = if let Some(seat) = ground_seat {
+        ctx.engine
+            .current_ground_vehicle(seat.vehicle_index)
+            .ok_or("ground_vehicle_runtime_required")?
+            .position
+    } else {
+        point.position
+    };
     if matches!(point.kind, spawn_catalog::SpawnKind::Parachute) {
         let deadline = active
             .pending_spawn_deadline

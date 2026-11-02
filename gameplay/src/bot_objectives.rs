@@ -219,7 +219,7 @@ struct CandidateKey {
     candidate: usize,
     raw: [u32; 3],
 }
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(super) struct Task {
     pub(super) operator: bool,
     pub(super) objective: Option<u16>,

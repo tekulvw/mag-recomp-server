@@ -55,7 +55,7 @@ impl RuntimeBindings {
 }
 pub(crate) struct Resources {
     origin: std::sync::Arc<()>,
-    catalog: Catalog,
+    pub(crate) catalog: Catalog,
     bindings: RuntimeBindings,
 }
 impl Resources {
@@ -65,7 +65,10 @@ impl Resources {
     ) -> Result<(), &'static str> {
         registry.validate_dynamic_bodies(&self.catalog, &self.bindings)
     }
-    fn vehicle_template(&self, v: &ground_vehicles::Creation) -> Result<&str, &'static str> {
+    pub(crate) fn vehicle_template(
+        &self,
+        v: &ground_vehicles::Creation,
+    ) -> Result<&str, &'static str> {
         self.bindings
             .vehicles
             .iter()
@@ -98,6 +101,76 @@ fn vehicle_pose(v: &ground_vehicles::Creation) -> Pose {
     }
 }
 impl<W: Write> Engine<W> {
+    /// Query the actual current owned world for one allocated spawning chassis.
+    /// The caller supplies the current filter table and explicit sweep tuning.
+    /// This prepares collision results only; it does not publish corrections or
+    /// acknowledge the complete native respawn command before its consumers run.
+    pub fn acquisition_spawn_collisions(
+        &self,
+        source: acquisition_ground_runtime::Key,
+        root: &str,
+        rows: [u32; 32],
+        settings: acquisition_world::Settings,
+    ) -> Result<acquisition_world::SpawnResolution, &'static str> {
+        let runtime = self
+            .ground_runtime
+            .as_ref()
+            .and_then(|r| r.get(source.index))
+            .filter(|v| v.key == source)
+            .ok_or("stale_ground_vehicle_key")?;
+        let creation = self
+            .current_ground_vehicle(source.index)
+            .ok_or("ground_vehicle_runtime_required")?;
+        let statics = self
+            .collision_world
+            .as_ref()
+            .ok_or("world_cast_static_geometry_unavailable")?;
+        if self
+            .spawn_catalog
+            .as_ref()
+            .is_none_or(|s| s.map_name() != statics.metadata().map_name)
+        {
+            return Err("world_cast_map_mismatch");
+        }
+        let snapshot = self.dynamic_collision_snapshot(rows[6])?;
+        let filters = acquisition_world::Filters::owned_entities(&snapshot, statics, rows)?;
+        let mut world = acquisition_world::World::new(&snapshot, statics, filters, settings)?;
+        let target = Target {
+            key: TargetKey {
+                id: u64::from(source.object_id()),
+                generation: runtime.key.generation,
+            },
+            kind: TargetKind::GroundVehicle,
+            team: creation.team,
+        };
+        let key = acquisition_world::RootKey {
+            entity: target.key.id,
+            generation: target.key.generation,
+            root: root.to_owned(),
+        };
+        if !world.has_root(&key) {
+            let resources = self
+                .dynamic_body_resources
+                .as_ref()
+                .ok_or("dynamic_body_resources_unavailable")?;
+            world.add_allocated_spawn(
+                &resources.catalog,
+                resources.vehicle_template(&creation)?,
+                target,
+                vehicle_pose(&creation),
+                root,
+            )?;
+        }
+        let operational = self
+            .ground_runtime
+            .as_ref()
+            .ok_or("ground_vehicle_runtime_required")?
+            .vehicles()
+            .filter(|v| v.state == 2)
+            .map(|v| (u64::from(v.key.object_id()), v.key.generation))
+            .collect();
+        world.resolve_spawn(&key, &operational)
+    }
     /// Explicit external resources only. Configuration must precede admission;
     /// this does not install Acquisition callbacks or create any mine/vehicle.
     pub fn with_dynamic_collision_bodies(
@@ -129,9 +202,9 @@ impl<W: Write> Engine<W> {
     }
     /// Complete for the Engine's currently owned objects. Initial source inputs
     /// do not establish mutable native ground lifecycle or live mine authority.
-    /// Ground poses here are the current immutable Catalog authority: no accepted
-    /// vehicle-driving/physics mutation exists yet. Future mutable ground state
-    /// must replace this source, never continue using an initial pose silently.
+    /// Ground poses, incarnations and root membership come from the owned
+    /// mutable runtime; the catalog supplies immutable identity and geometry.
+    /// Client vehicle driving admission is a separate unfinished consumer.
     pub fn dynamic_collision_snapshot(
         &self,
         current_filter_row6: u32,
@@ -193,9 +266,7 @@ impl<W: Write> Engine<W> {
             };
             let position = if let Some(seat) = actor.ground_seat {
                 point(
-                    self.ground_vehicles
-                        .as_ref()
-                        .and_then(|v| v.vehicle(seat.vehicle_index))
+                    self.current_ground_vehicle(seat.vehicle_index)
                         .ok_or("dynamic_body_mount_vehicle_unavailable")?
                         .position,
                 )
@@ -216,12 +287,16 @@ impl<W: Write> Engine<W> {
                 dead,
             )?;
             if let Some(target) = &actor.development_target {
-                let position = target.runtime.map_or(target.position, |r| r.position);
+                let (position, generation) = target
+                    .runtime
+                    .map_or((point(target.position), target.generation), |r| {
+                        (r.physical_position(), r.generation)
+                    });
                 character(
                     target.object_index,
-                    target.generation,
+                    generation,
                     target.squad.team(),
-                    point(position),
+                    position,
                     actor.dummy_health == Some(0),
                 )?;
             } else if actor.dummy_created {
@@ -238,40 +313,48 @@ impl<W: Write> Engine<W> {
             }
         }
         for bot in self.bot_registry.bots.values() {
-            let position = bot
+            let runtime = bot
                 .target
                 .runtime
-                .map_or(bot.target.position, |r| r.position);
+                .ok_or("dynamic_body_bot_runtime_unavailable")?;
             character(
                 bot.target.object_index,
-                bot.target.generation,
+                runtime.generation,
                 bot.target.squad.team(),
-                point(position),
+                runtime.physical_position(),
                 bot.health == 0,
             )?;
         }
         if let Some(vehicles) = &self.ground_vehicles {
             for v in vehicles.creations() {
+                let runtime = self
+                    .ground_runtime
+                    .as_ref()
+                    .and_then(|r| r.get(v.index))
+                    .ok_or("dynamic_ground_authority_unavailable")?;
+                let current = self
+                    .current_ground_vehicle(v.index)
+                    .ok_or("dynamic_ground_authority_unavailable")?;
                 let target = Target {
                     key: TargetKey {
                         id: u64::from(v.object_id()),
-                        generation: 1,
+                        generation: runtime.key.generation,
                     },
                     kind: TargetKind::GroundVehicle,
                     team: v.team,
                 };
                 roster.push(target);
                 let template = resources.vehicle_template(v)?;
-                rows.push(if v.initial_state == 0 {
-                    resources.catalog.instantiate_inactive_ground(
-                        template,
-                        target,
-                        vehicle_pose(v),
-                    )?
-                } else {
-                    resources
+                rows.push(match &runtime.body {
+                    acquisition_ground_runtime::Body::Inactive => resources
                         .catalog
-                        .instantiate(template, target, vehicle_pose(v), false)?
+                        .instantiate_inactive_ground(template, target, vehicle_pose(&current))?,
+                    acquisition_ground_runtime::Body::Operational => resources
+                        .catalog
+                        .instantiate(template, target, vehicle_pose(&current), false)?,
+                    acquisition_ground_runtime::Body::Hulk { template } => resources
+                        .catalog
+                        .instantiate(template, target, vehicle_pose(&current), false)?,
                 });
             }
         }

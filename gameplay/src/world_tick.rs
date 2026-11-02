@@ -21,6 +21,7 @@ impl<W: Write> Engine<W> {
         let result = (|| {
             let mut messages = self.expire_world_peers(now, wall)?;
             self.tick_incapacitation(now, wall)?;
+            self.tick_acquisition_ground_registration(wall)?;
             messages.extend(self.tick_bots(now, wall)?);
             self.queue_team_wave_deadlines(now, wall)?;
             messages.extend(self.tick_bot_firearms(now, wall)?);

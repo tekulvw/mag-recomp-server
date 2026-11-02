@@ -40,11 +40,13 @@ the dead layer; incapacitated characters remain on the live layer. Mounted
 characters remain present and follow their ground vehicle's position. An
 unavailable authoritative pose or template fails the snapshot.
 
-Ground poses and registration currently come from the Engine's immutable ground
-catalog. State2 has operational roots; explicitly qualified state0 retains the
-allocated entity with no registered roots. There is no accepted mutable vehicle
-driving/death authority in this Engine yet. That future authority must replace
-the catalog pose/registration source. There is also no owned mine admission or
+Ground poses, health, incarnation and registration now come from the Engine's
+owned mutable ground runtime. The catalog supplies immutable source/model/seat
+policy. State2 can await registration after respawn; the ordinary registration
+phase adds roots, and state0 retains the allocated entity without roots. Late
+join, mount distance, passenger insertion and exits use current authority.
+Vehicle driving admission and complete death-effect application remain open.
+There is also no owned mine admission or
 mine registry: accepting mine templates does not create live mines.
 
 Snapshots carry Engine origin, world incarnation and recorded-event revision.
@@ -94,9 +96,11 @@ a separate optional damage request pointer. Attacker selection and fallback to
 occupant self precede teamkill compensation. This request preserves ordinary
 protection/modifier/armor handling and never forces health to zero.
 
-Full character consequences, mutable ground state/death/hulks, occupant
-application, mine lasting radial effects, FSP respawn/replication and objective
-assignment sweeps remain required. Native FSP activation reuses the existing
+The concrete [world and lifecycle consumers](acquisition-world-effects.md) now
+provide contact/sweep queries, staged ordinary character damage/corrections and
+existing-vehicle respawn. Complete ground death/hulk effects, mine lasting radial
+effects, FSP objective integration and assignment sweeps remain required.
+Native FSP activation reuses the existing
 Escort; it must not allocate another APC, fabricate a timer, or treat an
 intermediate state request as committed script execution. The complete atomic
 callback remains disabled until these consumers exist and are checked. See

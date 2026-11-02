@@ -196,6 +196,8 @@ impl<W: Write> Engine<W> {
             navmesh_world: None,
             spawn_catalog: Some(resources.spawn_catalog),
             ground_vehicles: None,
+            ground_runtime: None,
+            acquisition_effect_origin: std::sync::Arc::new(()),
             dynamic_body_resources: None,
             parachute_waves: Default::default(),
             objective_catalog: None,

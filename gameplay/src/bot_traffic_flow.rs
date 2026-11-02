@@ -2,6 +2,7 @@
 use crate::{actor_collision::ActorGrid, bot_physics::Body, navmesh, replication};
 use std::time::Duration;
 
+#[derive(Clone)]
 pub(super) struct Progress {
     pub generation: u32,
     pub objective: Option<u16>,
@@ -9,6 +10,7 @@ pub(super) struct Progress {
     pub position: replication::CharacterPosition,
     pub at: Duration,
 }
+#[derive(Clone)]
 pub(super) struct HoldingAccess {
     pub requester: u16,
     pub generation: u32,
@@ -16,6 +18,7 @@ pub(super) struct HoldingAccess {
     pub lane: Vec<[[f64; 3]; 2]>,
     pub until: Duration,
 }
+#[derive(Clone)]
 pub(super) struct Yield {
     pub requester: u16,
     pub generation: u32,

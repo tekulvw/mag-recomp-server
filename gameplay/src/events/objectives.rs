@@ -116,6 +116,9 @@ pub(super) fn interaction<W: Write>(
 
 impl<W: Write> Engine<W> {
     pub(crate) fn reset_objective_world(&mut self) {
+        if let Some(ground) = &mut self.ground_runtime {
+            ground.reset_for_new_world();
+        }
         self.retire_match_selection();
         self.reset_spawn_progression();
         self.objective_world = self.objective_catalog.as_ref().map(ObjectiveWorld::new);

@@ -223,3 +223,105 @@ impl<W: Write> Engine<W> {
         Ok(())
     }
 }
+
+/// Source-qualified world damage notice. Health/life mutation belongs to the
+/// consumer; this owns the pre-death recipients and literal application bytes.
+pub(crate) struct CharacterEffectNotice {
+    recipients: Vec<String>,
+    wire: [u8; protocol::RetailDeathNotification::ENCODED_LEN],
+}
+impl CharacterEffectNotice {
+    pub(crate) fn audit(&self) -> Value {
+        json!({"recipients":self.recipients,"payload_hex":protocol::encode_hex(&self.wire)})
+    }
+    pub(crate) fn commit<W: Write>(self, engine: &mut Engine<W>) {
+        for actor in engine.active.iter_mut().chain(engine.peers.values_mut()) {
+            if self.recipients.contains(&actor.reservation.id) {
+                if actor.pending_notifications.len() >= 128 {
+                    actor.replication_backlogged = true;
+                } else {
+                    actor
+                        .pending_notifications
+                        .push_back(match_flow::Publication::Application(self.wire.to_vec()));
+                }
+            }
+        }
+    }
+}
+pub(crate) struct CharacterEffectNoticeRequest {
+    pub world: u32,
+    pub victim: u16,
+    pub attacker: u32,
+    pub source_type: u32,
+    pub source_index: i32,
+    pub location: u8,
+    pub mounted: protocol::VictimWasMounted,
+}
+impl<W: Write> Engine<W> {
+    pub(crate) fn plan_character_effect_notice(
+        &self,
+        request: CharacterEffectNoticeRequest,
+    ) -> Result<CharacterEffectNotice, &'static str> {
+        let CharacterEffectNoticeRequest {
+            world,
+            victim,
+            attacker,
+            source_type,
+            source_index,
+            location,
+            mounted,
+        } = request;
+        if self.wire_profile.application_id() != 20231
+            || ![5, 10].contains(&source_type)
+            || source_index != -1
+        {
+            return Err("unsupported_character_effect_death_source");
+        }
+        let squad_for = |id: u32| {
+            self.active
+                .iter()
+                .chain(self.peers.values())
+                .find(|a| {
+                    a.reservation.world == world
+                        && (0x0380_0000 | u32::from(a.reservation.player)) == id
+                })
+                .map(|a| a.squad_catalog.squad_index())
+                .or_else(|| {
+                    (id & 0xffff_0000 == 0x0380_0000)
+                        .then(|| {
+                            self.bot_registry
+                                .bots
+                                .get(&(id as u16))
+                                .map(|b| b.target.squad.squad_index())
+                        })
+                        .flatten()
+                })
+        };
+        let victim_squad = squad_for(0x0380_0000 | u32::from(victim))
+            .ok_or("character_effect_death_victim_missing")?;
+        let attacker_squad = squad_for(attacker);
+        let wire = protocol::RetailDeathNotification {
+            attacker: attacker_squad.map(|_| attacker as u16),
+            defender: victim,
+            damage_source_type: source_type as u8,
+            damage_source_index: source_index,
+            head_region_hit: head_flag(self.item_catalog.retail_combat()?, location)?,
+            victim_was_mounted: mounted,
+        }
+        .encode()?;
+        let recipients = self
+            .active
+            .iter()
+            .chain(self.peers.values())
+            .filter(|a| {
+                a.reservation.world == world
+                    && a.ready_for_updates
+                    && a.initial_objects.is_some()
+                    && (a.squad_catalog.squad_index() == victim_squad
+                        || Some(a.squad_catalog.squad_index()) == attacker_squad)
+            })
+            .map(|a| a.reservation.id.clone())
+            .collect();
+        Ok(CharacterEffectNotice { recipients, wire })
+    }
+}
