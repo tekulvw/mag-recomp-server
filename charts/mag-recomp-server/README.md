@@ -183,3 +183,20 @@ The command is an operator example, not a chart hook. No deployment hooks, accou
 ### Optional bot identities
 
 Set `data.files.botNames` to a private JSON member in the verified bundle or data PVC to pass `--bot-names /data/<member>`. Empty keeps synthetic defaults. The gameplay image must contain the external identity loader (0.2.0 does not). See [operator bot identities](../../docs/bot-identities.md) for the schema and startup validation.
+
+## In-game NEWS from the selected images
+
+The Medius image embeds its own release changelog. A `prepare-news` init
+container uses the same gameplay image tag or digest as the gameplay
+Deployment and copies its bundled changelog into a small `emptyDir`, mounted
+read-only by Medius and MAPS. A gameplay image change also rolls those
+containers so independently deployed gameplay releases update NEWS. Older
+worker images without bundled notes remain supported and supply no gameplay
+section. Use immutable version tags or digests; changing the contents behind
+an unchanged moving tag does not trigger a rollout.
+
+NEWS contains only the latest Medius and gameplay changelog sections from
+those images. Chart changelogs and repository release feeds are never read.
+Publishing a release does not change NEWS on existing Pods; the selected
+server images must be deployed. A chart-only update with unchanged image
+pins retains the same notes and release-date timestamp.

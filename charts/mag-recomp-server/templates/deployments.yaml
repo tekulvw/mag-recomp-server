@@ -26,6 +26,9 @@ spec:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") $ | sha256sum }}
         runtime-revision: {{ $.Values.runtime.revision | quote }}
         data-revision: {{ $.Values.data.revision | quote }}
+        {{- if $medius }}
+        checksum/news-image: {{ include "mag.image" $.Values.images.gameplay | sha256sum }}
+        {{- end }}
     spec:
       automountServiceAccountToken: false
       securityContext:
@@ -49,6 +52,20 @@ spec:
       initContainers:
         {{- include "mag.dataInit" $ | nindent 8 }}
         {{- if $medius }}
+        - name: prepare-news
+          image: {{ include "mag.image" $.Values.images.gameplay }}
+          imagePullPolicy: {{ $.Values.images.gameplay.pullPolicy }}
+          command: [/bin/sh, -ec]
+          args:
+            - |
+              rm -f /news/gameplay-CHANGELOG.md
+              if [ -f /usr/share/mag-recomp-server/gameplay-CHANGELOG.md ]; then
+                cp /usr/share/mag-recomp-server/gameplay-CHANGELOG.md /news/gameplay-CHANGELOG.md
+              fi
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          resources: {{ toYaml $.Values.resources.init | nindent 12 }}
+          volumeMounts:
+            - {name: news, mountPath: /news}
         - name: prepare-config
           image: {{ include "mag.image" $.Values.images.python }}
           imagePullPolicy: {{ $.Values.images.python.pullPolicy }}
@@ -86,6 +103,7 @@ spec:
             - {name: MAG_AUTH_PORT, value: "10475"}
             - {name: MAG_LOBBY_PORT, value: "10478"}
             - {name: MAG_GAME_TCP_PORT, value: "10473"}
+            - {name: MAG_GAMEPLAY_NEWS_PATH, value: /news/gameplay-CHANGELOG.md}
             {{- if $main }}
             - {name: MAG_LOCAL_DME, value: "1"}
             - {name: MAG_GAMEPLAY_HOST, value: {{ printf "%s-gameplay" (include "mag.name" $root) | quote }}}
@@ -123,6 +141,7 @@ spec:
           securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
           resources: {{ toYaml (index $root.Values.resources $role) | nindent 12 }}
           volumeMounts:
+            - {name: news, mountPath: /news, readOnly: true}
             - {name: data, mountPath: /data, readOnly: true}
             - {name: accounts, mountPath: /accounts, readOnly: {{ not $main }}}
             - {name: config, mountPath: /config}
@@ -190,6 +209,8 @@ spec:
           emptyDir: {}
         {{- end }}
         {{- if $medius }}
+        - name: news
+          emptyDir: {sizeLimit: 2Mi}
         - name: accounts
           persistentVolumeClaim:
             claimName: {{ include "mag.accountClaim" $ }}

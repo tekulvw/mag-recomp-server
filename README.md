@@ -55,6 +55,9 @@ Stable releases publish full version tags such as `0.1.0`, a moving minor tag
 such as `0.1`, and `latest`. Images contain replacement server code and synthetic
 defaults; operators still provide their own permitted runtime resources.
 See [the release guide](docs/releasing.md) for setup, versioning and recovery.
+In-game NEWS uses the latest gameplay and Medius changelog sections bundled
+with the selected deployed images; chart releases are excluded and no release
+feed is queried at runtime. See [bundled NEWS](horizon/README.md#bundled-in-game-news).
 
 The Helm chart has a separate Release Please package at
 `charts/mag-recomp-server`, tagged `chart-v<VERSION>` and published to

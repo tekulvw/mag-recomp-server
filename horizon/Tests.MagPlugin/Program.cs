@@ -28,6 +28,9 @@ void Test(string name, Action action)
     passed++;
 }
 
+Test("bundled server NEWS formatting and bounds", ServerNewsChecks.Formatting);
+Test("bundled server NEWS and EULA wire responses", ServerNewsChecks.Run);
+
 Test("active Armory loadout refresh", ActiveLoadoutRefreshChecks.Run);
 Test("typed worker match profile bridge", MatchProfileBridgeChecks.Run);
 Test("retail waiting and cancellation wire", QueueWireChecks.Run);

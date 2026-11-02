@@ -4,6 +4,7 @@
 !**/*.cs
 !**/*.csproj
 !Horizon.Server.sln
+!CHANGELOG.md
 !LICENSE
 !HighResolutionTimer/LICENSE
 !licenses/
