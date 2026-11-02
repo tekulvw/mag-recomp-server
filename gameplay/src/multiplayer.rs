@@ -40,6 +40,7 @@ impl Active {
             self.last_exit = None;
             self.pending_spawn_deadline = None;
             self.mounted_seat = None;
+            self.ground_seat = None;
             CharacterLife::AwaitingRespawn { generation }
         } else {
             CharacterLife::Alive {
@@ -96,7 +97,7 @@ impl Active {
         }
         Ok(())
     }
-    fn snapshot(&self, now: Duration) -> Result<Vec<u8>, &'static str> {
+    pub(super) fn snapshot(&self, now: Duration) -> Result<Vec<u8>, &'static str> {
         let claimed = self.claimed.as_ref().ok_or("unclaimed_actor")?;
         let c = &self.reservation.character;
         let character = replication::CharacterCreation {
@@ -138,6 +139,8 @@ impl Active {
                         stance: 0,
                         user_data: [0; 3],
                     }
+                } else if let Some(seat) = self.ground_seat {
+                    seat.character_state()
                 } else if let Some(seat) = self.mounted_seat {
                     replication::CharacterState {
                         state: 14,
@@ -663,7 +666,7 @@ impl<W: Write> Engine<W> {
                     .damage_health()
                     .is_some_and(|(generation, _)| Some(generation) == before_alive_generation)
                     && a.ready_for_updates
-                    && a.mounted_seat.is_none()
+                    && !a.is_mounted()
             })
             && (fields.state.is_some()
                 || fields.position.is_some()
@@ -957,7 +960,14 @@ impl<W: Write> Engine<W> {
             .peers
             .values()
             .chain(self.active.iter())
-            .filter(|a| a.ready_for_updates && !a.pending_shared.is_empty())
+            .filter(|a| {
+                a.ready_for_updates
+                    && !a.pending_shared.is_empty()
+                    && self
+                        .ground_vehicles
+                        .as_ref()
+                        .is_none_or(|world| a.ground_vehicle_batch >= world.batch_count())
+            })
             .collect();
         ready.sort_unstable_by_key(|a| a.reservation.player);
         if !ready.is_empty() {

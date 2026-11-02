@@ -66,6 +66,8 @@ pub(super) fn object_update<W: Write>(
         "development_target_spawned":plan.combat.dummy_health.is_some() && plan.audit.bot_script.as_ref().is_none_or(|r|r["phase"]=="spawn" || r["phase"]=="respawn"),
         "team_wave_deadline_ms":plan.session.published_wave_deadline.map(|d|d.as_millis() as u32),
         "spawn_point_index":plan.audit.spawned_point,"spawn_mounted_seat":plan.session.new_mounted_seat.flatten(),
+        "spawn_ground_vehicle_index":plan.session.new_ground_seat.flatten().map(|s|s.vehicle_index),
+        "spawn_ground_passenger_seat":plan.session.new_ground_seat.flatten().map(|s|s.seat),
         "life_generation":if plan.replication.spawn_delta.is_some(){active.life.next_generation()}else{None},
         "equipped_inventory_index":plan.session.new_inventory_handle.map(|h|h.inventory_index),
         "replication_sequence":if plan.replication.spawn_delta.is_some() || plan.replication.wave_delta.is_some(){Some(next_sequence)}else{None}}),
@@ -251,7 +253,7 @@ fn plan_owner_report<W: Write>(
                 reported_position = Some(position);
                 position_status = if !active.life.is_alive() {
                     "not_alive"
-                } else if active.mounted_seat.is_some() {
+                } else if active.is_mounted() {
                     "mounted"
                 } else if !active.tracking.accepts(h.sequence) {
                     "stale"
@@ -296,7 +298,7 @@ fn plan_grenade_blasts<W: Write>(
                 .map(|p| p.0)
                 .or(active.tracking.sample.map(|p| p.position));
             let kit = active.equipped_loadout();
-            if active.mounted_seat.is_none()
+            if !active.is_mounted()
                 && let (Some(feet), Some(kit)) = (position, kit)
                 && let Ok(armor) =
                     armor::ArmorProfile::from_loadout_with_catalog(&kit, &ctx.engine.item_catalog)
@@ -323,7 +325,7 @@ fn plan_grenade_blasts<W: Write>(
             .engine
             .peers
             .values()
-            .filter(|p| p.ready_for_updates && p.mounted_seat.is_none())
+            .filter(|p| p.ready_for_updates && !p.is_mounted())
         {
             if let (Some((generation, _)), Some(sample), Some(kit)) = (
                 peer.life.damage_health(),

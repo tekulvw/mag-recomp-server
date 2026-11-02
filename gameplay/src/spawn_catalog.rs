@@ -14,6 +14,7 @@ pub enum SpawnKind {
     Insertion,
     Alternate,
     BunkerPassenger,
+    VehiclePassenger,
     OnFoot,
     Parachute,
     Unsupported,

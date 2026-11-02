@@ -18,6 +18,11 @@ fn vehicle(index: u16) -> Creation {
         },
         rotation: [0., 0., 0., 1.],
         health_quarter_points: 600,
+        passenger_exit_candidates: Vec::new(),
+        passenger_seats: Vec::new(),
+        maximum_occupancy: None,
+        maximum_mount_distance_m: None,
+        maximum_mount_position_age_ms: None,
     }
 }
 
@@ -137,6 +142,7 @@ fn retail_ground_vehicle_batches_preserve_separate_network_indices_and_budget() 
             vehicle_properties_sha256: "c".repeat(64),
         },
         vehicles: (0..32).map(vehicle).collect(),
+        passenger_spawns: Vec::new(),
     };
     assert_eq!(world.batch_count(), 2);
     for batch in 0..2 {

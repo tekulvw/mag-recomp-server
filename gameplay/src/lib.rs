@@ -43,6 +43,7 @@ mod resources;
 mod world_tick;
 pub use resources::EngineResources;
 pub mod character_damage_rules;
+mod ground_seats;
 pub mod ground_vehicles;
 pub mod healing;
 pub mod item_catalog;
@@ -906,6 +907,7 @@ struct Active {
     emplacement_creation: Option<Vec<u8>>,
     ground_vehicle_batch: usize,
     mounted_seat: Option<u8>,
+    ground_seat: Option<ground_seats::PassengerSeat>,
     seat_transitions: Vec<Vec<u8>>,
     last_exit: Option<protocol::DismountSeat>,
     match_clock_started: Option<Duration>,
@@ -1062,7 +1064,7 @@ impl<W: Write> Engine<W> {
                 .ok_or("unsupported_retail_bullet_inventory")?;
             kit.handle = handle;
             if request.gear_index == 2 {
-                if active.mounted_seat.is_some() {
+                if active.is_mounted() {
                     return Err("melee_requires_on_foot");
                 }
                 let attacker_yaw = active
@@ -1616,6 +1618,7 @@ impl<W: Write> Engine<W> {
                     emplacement_creation: None,
                     ground_vehicle_batch: 0,
                     mounted_seat: None,
+                    ground_seat: None,
                     seat_transitions: Vec::new(),
                     last_exit: None,
                     match_clock_started: None,
@@ -1748,7 +1751,7 @@ impl<W: Write> Engine<W> {
                 if generation != expected_generation {
                     return Err("damage_life_mismatch");
                 }
-                if active.mounted_seat.is_some() {
+                if active.is_mounted() {
                     return Err("mounted_damage_not_supported");
                 }
                 if !active.entered_game || !active.ready_for_updates {

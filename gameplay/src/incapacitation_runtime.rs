@@ -31,7 +31,7 @@ impl<W: Write> Engine<W> {
                     }
                 };
                 if damage.health_quarter_points == 0
-                    && victim.mounted_seat.is_none()
+                    && !victim.is_mounted()
                     && victim.wire_profile.application_id() == 20231
                     && let Some(rules) = &self.incapacitation_rules
                     && let Some(downed) = rules.admit(

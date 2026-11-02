@@ -76,6 +76,7 @@ struct SessionChanges {
     published_wave_deadline: Option<Duration>,
     cancel_pending_spawn: bool,
     new_mounted_seat: Option<Option<u8>>,
+    new_ground_seat: Option<Option<ground_seats::PassengerSeat>>,
     last_exit: Option<protocol::DismountSeat>,
     exit_yaw: Option<u16>,
     spawn_pose: Option<(replication::CharacterState, u16)>,
@@ -444,6 +445,10 @@ impl<W: Write> Engine<W> {
         for (id, life) in plan.combat.peer_lives {
             if let Some(peer) = self.peers.get_mut(&id) {
                 peer.life = life;
+                if !life.is_alive() {
+                    peer.ground_seat = None;
+                    peer.mounted_seat = None;
+                }
             }
         }
         if let Some(fields) = plan.session.new_turret_fields {
@@ -576,6 +581,10 @@ impl<W: Write> Engine<W> {
         }
         if let Some(life) = plan.combat.new_life {
             active.life = life;
+            if !life.is_alive() {
+                active.ground_seat = None;
+                active.mounted_seat = None;
+            }
             if !life.is_alive() || plan.replication.spawn_delta.is_some() {
                 active.revive_state_pending = false;
                 active.healing = None;
@@ -679,6 +688,21 @@ impl<W: Write> Engine<W> {
                 active.owner_fields.yaw = Some(yaw);
             }
         }
+        if let Some(seat) = plan.session.new_ground_seat {
+            active.ground_seat = seat;
+            active.last_exit = plan.session.last_exit;
+            active.owner_fields.state = Some(seat.map_or(
+                replication::CharacterState {
+                    state: 1,
+                    stance: 0,
+                    user_data: [0; 3],
+                },
+                ground_seats::PassengerSeat::character_state,
+            ));
+            if let Some(yaw) = plan.session.exit_yaw {
+                active.owner_fields.yaw = Some(yaw);
+            }
+        }
         if let Some(points) = plan.session.clock_points {
             active.last_clock_points = points;
         }
@@ -715,6 +739,7 @@ impl<W: Write> Engine<W> {
         active.entered_game |= plan.session.entered_game;
         if plan.session.server_position.is_some()
             || plan.session.new_mounted_seat.is_some()
+            || plan.session.new_ground_seat.is_some()
             || plan.combat.new_life.is_some_and(|life| !life.is_alive())
         {
             let generation = match active.life {

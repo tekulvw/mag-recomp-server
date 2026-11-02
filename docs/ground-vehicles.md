@@ -31,10 +31,15 @@ Initial delivery and late join each receive the configured vehicle snapshot.
 Creation batches use ordinary replication history, sequence and NAK replay.
 Batch progress commits only after successful evidence recording.
 
-This is static creation support. Driving, turret equipment/combat, damage/repair,
-occupancy, mounted insertion, destruction and moving exits remain separate typed
-implementation work. It does not enable a vehicle merely because its spawn row
-is present. Arulkum's profile still has unverified native spawn identities and
-therefore cannot enable this catalog yet. Vehicle spawning and APC-backed
-insertion remain required for complete Acquisition acceptance. No native game
-acceptance, deployment or release follows from synthetic checks.
+The [APC passenger insertion path](apc-insertion.md) adds explicit player-point
+bindings, per-vehicle passenger occupancy, mounted respawn, snapshots and qualified
+static exits. The maintained `project-retail-apc-insertion.py` joins initial-load
+spawn bindings to original faction properties and independently qualified exits.
+It supports each opposing attacker on each of the three Acquisition maps. Its
+initial-load proof concerns a fresh/reset compiled load before dynamic creation;
+it does not observe an existing process's pool occupancy. Vehicle network indices
+remain an explicit local allocation policy, separate from native spawn indices.
+
+Driving, turret equipment/combat, damage/repair, destruction and moving exits
+remain separate typed implementation work. A spawn row alone does not enable a
+vehicle. Native game acceptance, deployment and a release require their own review.

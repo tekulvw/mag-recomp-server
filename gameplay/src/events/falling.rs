@@ -19,7 +19,7 @@ pub(super) fn plan_report<W: Write>(
         || header.sequence <= active.latest_owner_sequence
         || !active.ready_for_updates
         || !active.entered_game
-        || active.mounted_seat.is_some()
+        || active.is_mounted()
         || (fields.state.is_none() && fields.position.is_none())
     {
         return Ok(());

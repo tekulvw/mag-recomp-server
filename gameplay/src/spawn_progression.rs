@@ -98,6 +98,10 @@ impl<W: Write> Engine<W> {
             catalog.reset_runtime();
         }
         for actor in self.peers.values_mut().chain(self.active.iter_mut()) {
+            if actor.ground_seat.take().is_some() {
+                actor.last_exit = None;
+                actor.owner_fields.state = None;
+            }
             std::sync::Arc::make_mut(&mut actor.squad_catalog).reset_runtime();
             actor.squad_spawn = actor.squad_catalog.default_spawn();
             // Personal selections referencing a retired forward point must not survive.

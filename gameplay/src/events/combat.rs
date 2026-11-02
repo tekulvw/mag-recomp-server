@@ -20,7 +20,7 @@ pub(super) fn hit<W: Write>(
     let peer_target = ctx.engine.peers.values().find(|p| {
         0x03800000 | u32::from(p.reservation.player) == request.defender
             && p.ready_for_updates
-            && p.mounted_seat.is_none()
+            && !p.is_mounted()
     });
     let registry_target = ctx.engine.bot_combat_snapshots().into_iter().find(|b| {
         ctx.engine.is_registry_bot(b.object_index)
@@ -70,7 +70,7 @@ pub(super) fn hit<W: Write>(
     } else if !active.entered_game
         || !active.ready_for_updates
         || !active.life.is_alive()
-        || active.mounted_seat.is_some_and(|seat| seat != 0)
+        || (active.ground_seat.is_some() || active.mounted_seat.is_some_and(|seat| seat != 0))
     {
         plan.gameplay_denial = Some("bullet_requires_living_armed_shooter");
     } else if target_health.is_none() {
@@ -81,7 +81,7 @@ pub(super) fn hit<W: Write>(
         let resolved = (|| {
             let profile = ctx.engine.bullet_profile(active, &request)?;
             ordinary_retail_firearm =
-                matches!(profile, CharacterHitProfile::Retail(_)) && active.mounted_seat.is_none();
+                matches!(profile, CharacterHitProfile::Retail(_)) && !active.is_mounted();
             profile_item = Some(profile.item_id());
             damage_kind = Some(profile.kind());
             let distance = request
@@ -337,7 +337,7 @@ pub(super) fn fire_grenade<W: Write>(
     let grenade = grenade_item.and_then(|id| ctx.engine.item_catalog.grenade(id).ok());
     if !owned {
         plan.gameplay_denial = Some("unowned_projectile_shooter");
-    } else if !eligible || active.mounted_seat.is_some() {
+    } else if !eligible || active.is_mounted() {
         plan.gameplay_denial = Some("projectile_requires_living_on_foot_character");
     } else if request.ammo_index != 4 || request.projectile_index >= 3 || grenade.is_none() {
         plan.gameplay_denial = Some("unsupported_projectile_item_or_slot");
@@ -450,7 +450,7 @@ pub(super) fn heal<W: Write>(
     let mut accepted = false;
     if !active.entered_game || !active.ready_for_updates || !active.life.is_alive() {
         plan.gameplay_denial = Some("healing_requires_living_character");
-    } else if active.mounted_seat.is_some() {
+    } else if active.is_mounted() {
         plan.gameplay_denial = Some("mounted_healing_not_supported");
     } else if now < active.next_heal_allowed {
         plan.gameplay_denial = Some("healing_cooldown");
@@ -482,7 +482,7 @@ pub(super) fn heal<W: Write>(
             if target.team() != active.team()
                 || !target.entered_game
                 || !target.ready_for_updates
-                || target.mounted_seat.is_some()
+                || target.is_mounted()
             {
                 continue;
             }
@@ -580,7 +580,7 @@ pub(super) fn kill_self<W: Write>(
     {
         // Mounted death also needs vehicle-occupancy cleanup. Keep
         // that untraced transition nonfatal and explicitly bounded.
-        if active.mounted_seat.is_some() {
+        if active.is_mounted() {
             plan.gameplay_denial = Some("mounted_death_not_supported");
         } else if !history_available {
             plan.gameplay_denial = Some("replication_history_limit");

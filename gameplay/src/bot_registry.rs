@@ -555,6 +555,7 @@ impl<W: Write> Engine<W> {
                                 s.kind,
                                 spawn_catalog::SpawnKind::Unsupported
                                     | spawn_catalog::SpawnKind::BunkerPassenger
+                                    | spawn_catalog::SpawnKind::VehiclePassenger
                             )
                     })
                     .ok_or("bot_spawn_binding_inactive")?;
@@ -618,7 +619,7 @@ impl<W: Write> Engine<W> {
                 && a.initial_objects.is_some()
                 && a.spawn_delta.is_some()
                 && a.life.is_alive()
-                && a.mounted_seat.is_none()
+                && !a.is_mounted()
                 && now.saturating_sub(a.last_event) < IDLE_TIMEOUT
         }) {
             if let Some(sample) = a.tracking.sample {
@@ -867,10 +868,7 @@ impl<W: Write> Engine<W> {
         // Thereafter its world-owned lives/routes continue through human death.
         if self.bot_registry.bots.is_empty()
             && !self.peers.values().chain(self.active.iter()).any(|a| {
-                a.entered_game
-                    && a.ready_for_updates
-                    && a.life.is_alive()
-                    && a.mounted_seat.is_none()
+                a.entered_game && a.ready_for_updates && a.life.is_alive() && !a.is_mounted()
             })
         {
             return Ok(Vec::new());
