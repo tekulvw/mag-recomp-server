@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/tekulvw/mag-recomp-server/compare/chart-v0.4.0...chart-v0.4.1) (2026-11-04)
+
+
+### Bug Fixes
+
+* **gameplay:** rotate evidence logs with time-based retention ([#52](https://github.com/tekulvw/mag-recomp-server/issues/52)) ([d202178](https://github.com/tekulvw/mag-recomp-server/commit/d202178d14ddde656aa0d8aba7670bc1ddceb7a9))
+
 ## [0.4.0](https://github.com/tekulvw/mag-recomp-server/compare/chart-v0.3.0...chart-v0.4.0) (2026-11-04)
 
 

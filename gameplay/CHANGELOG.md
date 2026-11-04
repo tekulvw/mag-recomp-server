@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.1](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.4.0...gameplay-v0.4.1) (2026-11-04)
+
+
+### Bug Fixes
+
+* **gameplay:** range objective interactions by authored trigger boxes ([e80be93](https://github.com/tekulvw/mag-recomp-server/commit/e80be93f05ab1314a8f7aa6cfae7301d71bf5a1b))
+* **gameplay:** rotate evidence logs with time-based retention ([#52](https://github.com/tekulvw/mag-recomp-server/issues/52)) ([d202178](https://github.com/tekulvw/mag-recomp-server/commit/d202178d14ddde656aa0d8aba7670bc1ddceb7a9))
+
 ## [0.4.0](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.3.0...gameplay-v0.4.0) (2026-11-04)
 
 
