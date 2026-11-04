@@ -75,6 +75,7 @@ pub mod match_profiles;
 mod multiplayer;
 pub mod objective_catalog;
 mod objective_control;
+pub mod objective_range;
 pub mod owner_update;
 pub mod player_tracking;
 pub mod progression;

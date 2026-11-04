@@ -84,6 +84,38 @@ def interactions(graph, maximum_distance):
     return result
 
 
+def attach_trigger_volumes(graph, rules, volumes):
+    """Replace the development sphere with authored trigger boxes.
+
+    volumes is extract-retail-objective-volumes.py output. Each qualifying rule
+    must receive exactly the boxes of the triggers the authored graph links to it.
+    """
+    require(volumes.get('format') == 'mag_retail_objective_trigger_volumes'
+            and volumes.get('schema_version') == 1 and volumes.get('application_id') == 20231
+            and volumes.get('volume_semantics') == 'oriented_box_half_scale',
+            'wrong trigger volume catalog identity')
+    maps = [m for m in volumes['maps'] if m['map'] == graph['map']['map']]
+    require(len(maps) == 1, 'trigger volume catalog lacks this map')
+    by_objective = {token(o['objective_token']): o['triggers'] for o in maps[0]['objectives']}
+    linked = {}
+    for row in graph['trigger_links']:
+        linked.setdefault(token(row['objective_instance_token']), set()).add(token(row['trigger_instance_token']))
+    for name, rule in rules.items():
+        kind, body = next(iter(rule.items()))
+        triggers = by_objective.get(name, [])
+        require({token(t['trigger_token']) for t in triggers} == linked.get(name, set())
+                and len(triggers) == body['trigger_count'], 'trigger volumes do not match linked triggers')
+        body['trigger_volumes'] = [{
+            'centre': [float32(v, 'trigger box centre') for v in t['box']['centre']],
+            'axes': [[float32(v, 'trigger box axis') for v in row] for row in t['box']['axes']],
+            'half_extents': [float32(v, 'trigger box half-extent') for v in t['box']['half_extents']],
+        } for t in triggers]
+        require(all(h > 0 for box in body['trigger_volumes'] for h in box['half_extents']),
+                'trigger box half-extents must be positive')
+        body['distance_policy'] = 'authored_trigger_box'
+    return rules
+
+
 def reward_rules(graph):
     """Keep authored reward classification on disk, including unlinked proxies.
 
@@ -290,6 +322,10 @@ def produce(args):
     objectives, triggers = _api['authored_entities'](graph)
     interaction_by_token = (interactions(graph, getattr(args, 'interaction_radius_m', 5.0))
                             if getattr(args, 'include_interactions', False) else {})
+    if getattr(args, 'trigger_volumes', None) is not None:
+        require(getattr(args, 'include_interactions', False), 'trigger volumes require --include-interactions')
+        volumes, _ = load(args.trigger_volumes)
+        interaction_by_token = attach_trigger_volumes(graph, interaction_by_token, volumes)
     scoring_by_token = scoring(graph) if getattr(args, 'include_interactions', False) else {}
     reward_by_token = reward_rules(graph) if getattr(args, 'include_interactions', False) else {}
     map_name = graph['map']['map']
@@ -405,6 +441,8 @@ def main():
                         help='Explicit local post-match delay override, 1..60000ms; requires --include-interactions')
     parser.add_argument('--interaction-radius-m', type=float, default=5.0,
                         help='Development point-distance limit in metres; not recovered original range (default: 5.0)')
+    parser.add_argument('--trigger-volumes', type=Path,
+                        help='extract-retail-objective-volumes.py output; replaces the point distance with authored trigger boxes')
     args = parser.parse_args()
     try:
         emit(args, produce(args), [args.catalog, args.bindings, args.startup_proof, args.rules, HELPER, Path(__file__)])

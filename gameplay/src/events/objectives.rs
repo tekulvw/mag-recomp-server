@@ -383,19 +383,21 @@ impl<W: Write> Engine<W> {
                     if !r.physics_motion.is_some_and(|m| m.grounded) || r.navmesh_state.on_player {
                         continue;
                     }
-                    let Some((kind, center, radius)) = crate::bot_objectives::operator_action(
+                    let Some((kind, range)) = crate::bot_objectives::operator_action(
                         object,
                         world.state(index).unwrap(),
                         actor.team,
                     ) else {
                         continue;
                     };
-                    let d2 = (actor.position.x - center[0]).powi(2)
-                        + (actor.position.y - center[1]).powi(2)
-                        + (actor.position.z - center[2]).powi(2);
-                    if d2 > radius * radius {
+                    if !range.contains(actor.position) {
                         continue;
                     }
+                    let anchor = range.anchor();
+                    let anchor_distance = ((f64::from(actor.position.x) - anchor[0]).powi(2)
+                        + (f64::from(actor.position.y) - anchor[1]).powi(2)
+                        + (f64::from(actor.position.z) - anchor[2]).powi(2))
+                    .sqrt();
                     let outcome = world.interact(
                         protocol::ObjectiveInteraction {
                             target_object_id: 0x0c80_0000 | u32::from(index),
@@ -412,7 +414,7 @@ impl<W: Write> Engine<W> {
                     if outcome.accepted {
                         holding.push(id);
                     }
-                    receipts.push(json!({"op":"bot_objective_action","object_index":id,"generation":actor.generation,"objective":index,"action":kind as u8,"accepted":outcome.accepted,"reason":outcome.reason,"team":actor.team,"position":actor.position,"distance_m":d2.sqrt(),"maximum_distance_m":radius,"timestamp_ms":now.as_millis() as u64}));
+                    receipts.push(json!({"op":"bot_objective_action","object_index":id,"generation":actor.generation,"objective":index,"action":kind as u8,"accepted":outcome.accepted,"reason":outcome.reason,"team":actor.team,"position":actor.position,"distance_m":anchor_distance,"range_policy":range.policy(),"maximum_distance_m":range.maximum_distance_m,"timestamp_ms":now.as_millis() as u64}));
                 }
             }
         }
