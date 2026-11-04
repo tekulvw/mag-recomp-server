@@ -4,7 +4,7 @@ The public repository distributes extraction **source code**, synthetic test inp
 
 Python tools require Python 3.11 or newer and its standard library. Native game execution, RPCS3, Ghidra and Lua are not needed for the direct archive/literal parsers. Some **external prerequisites** were originally established through native analysis or qualified captures: their acquisition is not included here. Ghidra installations, project databases, DWARF tooling, a decrypted executable or normalized exports may be needed to establish those independently. Merely possessing an archive does not establish runtime pool IDs, numeric wire bindings, native damage rules or accepted gameplay behavior.
 
-The full [machine-readable catalog manifest](../tools/extraction/catalog-manifest.json) inventories all **53** known JSON filenames with a command, inputs, dependencies, status and limitation. “Direct” means an included parser can regenerate the stated data from explicit source inputs or a preceding included catalog. “External proof/export” means an included projector works only after the operator supplies a separately qualified input. “Gap” means the complete regeneration pipeline is not included. The inventory distinguishes these cases; it is not a claim of complete retail setup from a disc alone.
+The full [machine-readable catalog manifest](../tools/extraction/catalog-manifest.json) inventories all **54** known JSON filenames with a command, inputs, dependencies, status and limitation. “Direct” means an included parser can regenerate the stated data from explicit source inputs or a preceding included catalog. “External proof/export” means an included projector works only after the operator supplies a separately qualified input. “Gap” means the complete regeneration pipeline is not included. The inventory distinguishes these cases; it is not a claim of complete retail setup from a disc alone.
 
 ## Direct retail archive extraction
 
@@ -17,6 +17,7 @@ python3 tools/extraction/extract-retail-maps.py --disc DISC --game-archive GAME 
 python3 tools/extraction/extract-retail-spawns.py --disc DISC --game-archive GAME --output SPAWN_METADATA_DIRECTORY
 python3 tools/extraction/build-retail-spawn-catalog.py --disc DISC --game-archive GAME --map MAP_NAME --active TEAM/PLATOON/SQUAD --output SPAWNS
 python3 tools/extraction/project-retail-sabotage-objectives.py --disc DISC --game-archive GAME --output OBJECTIVE_METADATA
+python3 tools/extraction/extract-retail-objective-volumes.py --disc DISC [--game-archive GAME] --output OBJECTIVE_VOLUMES
 python3 tools/extraction/project-retail-abilities.py --rules RULES --output ABILITIES
 python3 tools/extraction/extract-retail-mediation-profile.py --elf RETAIL_ELF --output MEDIATION_PROFILE
 ```
@@ -24,6 +25,8 @@ python3 tools/extraction/extract-retail-mediation-profile.py --elf RETAIL_ELF --
 `DISC` contains `PS3_GAME/USRDIR/run/mag/ps3/levels/*.psarc`; `GAME` is the externally decrypted global `game.psarc`. `ITEMS` contains namespace-qualified authored identities. It is **not** a complete numeric runtime item binding: retail faction lists restart their local ordinals. The runtime needs qualified numeric bindings and appropriate bootstrap data for those features. Those upstream binding/bootstrap steps remain gaps in this release.
 
 The spawn builder supports Suppression and SVER Sabotage entry. Pass the exact authored map name and an explicit team/platoon/squad selection. It preserves authored coordinates before terrain snapping and marks runtime indices unverified. Objectives remain disabled in its match policy. The all-map metadata extractor does not turn authored bunker exit candidates into grounded, collision-safe exits. Unknown objective fields stay typed/raw rather than acquiring guessed meanings. The objective metadata projector inventories a bounded subset of script calls/conditions without executing Lua or reconstructing general branch semantics.
+
+The objective volume extractor reads every level archive and emits each objective trigger's authored oriented box; see [objective trigger volumes](objective-trigger-volumes.md) for the box semantics and what remains unestablished.
 
 The mediation profile extracts a protocol word through ELF load mappings. Its disabled character-catalog grants are explicit policy. These tools do not decrypt SELF/PSARC inputs or obtain game files.
 

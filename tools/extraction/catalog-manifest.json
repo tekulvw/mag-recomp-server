@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "scope": "All 53 catalog filenames known to this source import; presence in this inventory does not mean every file is required by every runtime mode.",
+  "scope": "All 54 catalog filenames known to this source import; presence in this inventory does not mean every file is required by every runtime mode.",
   "status_definitions": {
     "direct": "Included parser/projector reads explicit original data or an included earlier catalog; no unpublished evidence input.",
     "direct-with-policy": "Included projector also requires explicit local operator policy.",
@@ -322,6 +322,16 @@
       "inputs": "Independent native semantic evidence and original authored data where applicable",
       "dependencies": [],
       "limitations": "No public native-analysis/projection pipeline is supplied for this output. Existing source contains specialized analysis but depends on unpublished proof inputs or embedded native witnesses; do not substitute guesses."
+    },
+    {
+      "output": "retail-objective-trigger-volumes.json",
+      "status": "direct",
+      "command": "extract-retail-objective-volumes.py --disc DISC [--game-archive GAME] --output OUTPUT",
+      "inputs": "Original retail disc directory; optional decrypted game.psarc for map mode/faction labels",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Authored oriented trigger boxes for every map; the client prompt reference point/padding, approach-angle gate and native trigger-index order are not established."
     },
     {
       "output": "retail-progression.json",
