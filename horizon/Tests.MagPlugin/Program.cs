@@ -41,6 +41,7 @@ Test("committed loadout selection persistence", LoadoutSelectionChecks.Run);
 
 Test("optional finishing and revive reward catalog fields", ReviveRewardChecks.Run);
 Test("selected kit ownership and complete store preservation", LoadoutPreferenceStoreChecks.Run);
+Test("account-bound NP identity creation and persistence", NpIdentityChecks.Run);
 
 Test("bounded retail Acquisition mode policy", () =>
 {

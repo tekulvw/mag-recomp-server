@@ -261,7 +261,7 @@ namespace Server.Medius
             (c.Experience == null || c.Experience >= 0) && (c.Level == null || c.Level >= 1) &&
             (c.OwnedSkills == null || c.OwnedSkills.Length == 5) && (c.UnlockedItems == null || c.UnlockedItems.Length == 24) &&
             c.LastUsedLoadout < 5 && (c.Loadouts == null || (c.Loadouts.Length == 5 && c.Loadouts.All(ValidLoadout))) &&
-            c.UniverseId == 26 && c.NpId != null && c.NpId.Length == 36 && c.NpId.All(b => b == 0) &&
+            c.UniverseId == 26 && MagDevelopmentAccountPolicy.ValidNpId(c.NpId, schema == 1 ? null : c.Account) &&
             (schema == 1 ? c.Id == 1 && c.Name == "Player" : MagDevelopmentAccountPolicy.ValidAccount(c.Account));
         private static bool ValidLoadout(StoredLoadout row) => row?.Items != null && row.Items.Length == 22 && row.Items.All(id => id >= -1 && id < 4096);
         public IReadOnlyList<StoredCharacter> ReadForAccount(string account) => MagDevelopmentAccountPolicy.ValidAccount(account)
@@ -273,8 +273,10 @@ namespace Server.Medius
         {
             if (request == null || !MagDevelopmentAccountPolicy.HasZeroRsa(request) || !ValidName(request.AccountName) || !MagDevelopmentAccountPolicy.ValidAccount(account))
                 return Outcome(MagNetResult.NameInvalid, "invalid-local-name-or-header");
-            if (request.Faction > 2 || request.UniverseId != 26 || request.NpId == null || request.NpId.Length != 36 || request.NpId.Any(b => b != 0))
+            if (request.Faction > 2 || request.UniverseId != 26)
                 return Outcome(MagNetResult.Error, "unsupported-local-profile-fields");
+            if (!MagDevelopmentAccountPolicy.ValidNpId(request.NpId, account))
+                return Outcome(MagNetResult.Error, "np-id-account-mismatch");
             string path = ValidPath(); Directory.CreateDirectory(Path.GetDirectoryName(path));
             using var lease = AcquireLock(path + ".lock");
             var all = ReadAll().ToList();
