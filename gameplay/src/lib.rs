@@ -86,6 +86,7 @@ pub mod replication;
 pub mod retail_armory;
 pub mod retail_combat;
 pub mod retail_melee;
+pub mod rotating_log;
 mod score_clock;
 pub mod skill_catalog;
 pub mod spawn_catalog;

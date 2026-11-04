@@ -95,6 +95,22 @@ class ChartTests(unittest.TestCase):
         for filename in ('../names.json', '/names.json', 'bad name.json'):
             render({'data': {'files': {'botNames': filename}}}, ok=False)
 
+    def test_optional_gameplay_log_rotation(self):
+        args = gameplay_arguments(render({'logs': {'rotation': {'segmentBytes': 67108864, 'retentionSeconds': 21600}}}))
+        self.assertEqual(args[args.index('--log-segment-bytes') + 1], '67108864')
+        self.assertEqual(args[args.index('--log-retention-s') + 1], '21600')
+        segment_only = gameplay_arguments(render({'logs': {'rotation': {'segmentBytes': 1048576}}}))
+        self.assertIn('--log-segment-bytes', segment_only)
+        self.assertNotIn('--log-retention-s', segment_only)
+        default = gameplay_arguments(render())
+        self.assertNotIn('--log-segment-bytes', default)
+        self.assertNotIn('--log-retention-s', default)
+        self.assertIn('requires logs.rotation.segmentBytes',
+                      render({'logs': {'rotation': {'retentionSeconds': 60}}}, ok=False))
+        render({'logs': {'rotation': {'segmentBytes': 1024}}}, ok=False)
+        for flag in ('--log-segment-bytes', '--log-retention-s'):
+            render({'data': {'gameplayExtraArgs': [flag, '60']}}, ok=False)
+
     def test_default_retail_startup_contract(self):
         docs = render()
         service = next(d for d in docs if d['kind'] == 'Service' and d['metadata']['name'].endswith('-medius'))

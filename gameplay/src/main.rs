@@ -62,6 +62,28 @@ fn validate_item_catalog_links(items: &Path, linked: &[(&str, &Path, &str)]) -> 
     Ok(())
 }
 
+type LogWriter = Box<dyn std::io::Write + Send>;
+
+/// Open a NEW log file, segmented when a rotation policy is configured.
+fn open_log(
+    path: &std::path::Path,
+    rotation: Option<mag_gameplay::rotating_log::RotationPolicy>,
+) -> io::Result<LogWriter> {
+    Ok(match rotation {
+        Some(policy) => Box::new(mag_gameplay::rotating_log::RotatingLog::create(
+            path.to_path_buf(),
+            policy,
+        )?),
+        None => Box::new(
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)?,
+        ),
+    })
+}
+
 fn main() -> io::Result<()> {
     run(std::env::args().skip(1))
 }
@@ -71,6 +93,8 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     let mut validate_catalogs = false;
     let mut bind = SocketAddr::from(([127, 0, 0, 1], 31000));
     let mut log: Option<PathBuf> = None;
+    let mut log_segment_bytes: Option<u64> = None;
+    let mut log_retention_s: Option<u64> = None;
     let mut telemetry_path: Option<PathBuf> = None;
     let mut tick_budget_us = None;
     let mut collision_path: Option<PathBuf> = None;
@@ -366,9 +390,27 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                         .into(),
                 )
             }
+            "--log-segment-bytes" => {
+                log_segment_bytes = Some(
+                    args.next()
+                        .ok_or_else(|| {
+                            io::Error::other("--log-segment-bytes requires a byte count")
+                        })?
+                        .parse()
+                        .map_err(|_| io::Error::other("invalid --log-segment-bytes"))?,
+                );
+            }
+            "--log-retention-s" => {
+                log_retention_s = Some(
+                    args.next()
+                        .ok_or_else(|| io::Error::other("--log-retention-s requires seconds"))?
+                        .parse()
+                        .map_err(|_| io::Error::other("invalid --log-retention-s"))?,
+                );
+            }
             _ => {
                 return Err(io::Error::other(
-                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--match-profiles /absolute/MATCH_PROFILES.json] [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--dynamic-bodies /absolute/BODIES.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json] [--navmesh-world MESH.mag-nav] [--bot-fill-total N --bot-population POPULATION.json] [--bot-names /absolute/NAMES.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
+                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--match-profiles /absolute/MATCH_PROFILES.json] [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--dynamic-bodies /absolute/BODIES.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json] [--navmesh-world MESH.mag-nav] [--bot-fill-total N --bot-population POPULATION.json] [--bot-names /absolute/NAMES.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS] [--log-segment-bytes BYTES [--log-retention-s SECONDS]]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
                 ));
             }
         }
@@ -431,7 +473,12 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         None
     };
     if let Some((start, end)) = collision_query {
-        if log.is_some() || telemetry_path.is_some() || tick_budget_us.is_some() {
+        if log.is_some()
+            || telemetry_path.is_some()
+            || tick_budget_us.is_some()
+            || log_segment_bytes.is_some()
+            || log_retention_s.is_some()
+        {
             return Err(io::Error::other(
                 "--collision-query is standalone; omit --log and telemetry flags",
             ));
@@ -449,6 +496,21 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         );
         return Ok(());
     }
+    if log_retention_s.is_some() && log_segment_bytes.is_none() {
+        return Err(io::Error::other(
+            "--log-retention-s requires --log-segment-bytes",
+        ));
+    }
+    let rotation = log_segment_bytes
+        .map(|segment_bytes| {
+            mag_gameplay::rotating_log::RotationPolicy {
+                segment_bytes,
+                retention: log_retention_s.map(Duration::from_secs),
+            }
+            .validate()
+            .map_err(io::Error::other)
+        })
+        .transpose()?;
     if tick_budget_us.is_some() && telemetry_path.is_none() {
         return Err(io::Error::other(
             "--tick-budget-ms requires --tick-telemetry",
@@ -898,9 +960,9 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     }
     resources = resources.with_bot_names(bot_names);
     if validate_catalogs {
-        if log.is_some() || telemetry_path.is_some() {
+        if log.is_some() || telemetry_path.is_some() || rotation.is_some() {
             return Err(io::Error::other(
-                "--validate-catalogs does not open logs; omit --log and --tick-telemetry",
+                "--validate-catalogs does not open logs; omit --log, --tick-telemetry and log rotation flags",
             ));
         }
         println!(
@@ -912,24 +974,19 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     let path = log.ok_or_else(|| {
         io::Error::other("--log is required; existing logs are never overwritten")
     })?;
+    // Rotation removes the whole-file cap; retention, not a byte ceiling, then bounds disk use.
+    let max_log = if rotation.is_some() {
+        u64::MAX
+    } else {
+        MAX_LOG
+    };
     let telemetry = telemetry_path
         .as_ref()
-        .map(|path| {
-            OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(path)
-                .map(|writer| TickRecorder::start(writer, MAX_LOG))
-        })
+        .map(|path| open_log(path, rotation).map(|writer| TickRecorder::start(writer, max_log)))
         .transpose()?;
-    let writer = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)?;
+    let writer = open_log(&path, rotation)?;
     let mut engine =
-        Engine::from_resources(writer, MAX_LOG, resources).with_skill_catalog(skill_catalog);
+        Engine::from_resources(writer, max_log, resources).with_skill_catalog(skill_catalog);
     if let Some(vehicles) = ground_vehicles {
         engine = engine
             .with_ground_vehicles(vehicles)
@@ -1088,7 +1145,7 @@ impl ConnectionFailure {
 
 fn serve(
     mut stream: TcpStream,
-    engine: Arc<Mutex<Engine<std::fs::File>>>,
+    engine: Arc<Mutex<Engine<LogWriter>>>,
     started: Instant,
     telemetry: Option<TickRecorder>,
     tick_budget_us: Option<u64>,
@@ -1208,7 +1265,7 @@ fn write_response(stream: &mut TcpStream, response: &Response) -> Result<(), Con
 fn serve_subscription(
     mut stream: TcpStream,
     line: &[u8],
-    engine: Arc<Mutex<Engine<std::fs::File>>>,
+    engine: Arc<Mutex<Engine<LogWriter>>>,
     shared: SharedSubscriber,
     slot: ConnectionSlot,
 ) -> Result<(), ConnectionFailure> {
@@ -1383,7 +1440,7 @@ impl Drop for SubscriptionOwner {
 }
 
 fn spawn_world_scheduler(
-    engine: Arc<Mutex<Engine<std::fs::File>>>,
+    engine: Arc<Mutex<Engine<LogWriter>>>,
     subscriber: SharedSubscriber,
     started: Instant,
     telemetry: Option<TickRecorder>,
@@ -2234,6 +2291,32 @@ mod runtime_profile_tests {
         );
         assert!(!files.0.join("runtime.log").exists());
         assert!(!files.0.join("ticks.log").exists());
+    }
+
+    #[test]
+    fn log_rotation_flags_are_validated_before_any_log_opens() {
+        let files = SyntheticCatalogs::new();
+        let with = |extra: &[&str]| {
+            let mut args = files.args();
+            args.extend(extra.iter().map(|value| value.to_string()));
+            run(args).unwrap_err().to_string()
+        };
+        assert!(with(&["--log-retention-s", "3600"]).contains("requires --log-segment-bytes"));
+        assert!(with(&["--log-segment-bytes", "1024"]).contains("log_segment_bytes_too_small"));
+        assert!(
+            with(&["--log-segment-bytes", "1048576", "--log-retention-s", "0"])
+                .contains("log_retention_must_be_positive")
+        );
+        assert!(with(&["--log-segment-bytes", "x"]).contains("invalid --log-segment-bytes"));
+        assert!(
+            with(&[
+                "--log-segment-bytes",
+                "1048576",
+                "--log-retention-s",
+                "3600"
+            ])
+            .contains("does not open logs")
+        );
     }
 
     #[test]
