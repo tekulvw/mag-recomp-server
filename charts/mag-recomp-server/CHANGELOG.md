@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/tekulvw/mag-recomp-server/compare/chart-v0.3.0...chart-v0.4.0) (2026-11-04)
+
+
+### Features
+
+* bundle deployed server changelogs into in-game NEWS ([#42](https://github.com/tekulvw/mag-recomp-server/issues/42)) ([afb360e](https://github.com/tekulvw/mag-recomp-server/commit/afb360edf93156ad9f3c6842794cfab534ce3ace))
+
 ## [0.3.0](https://github.com/tekulvw/mag-recomp-server/compare/chart-v0.2.0...chart-v0.3.0) (2026-10-31)
 
 
