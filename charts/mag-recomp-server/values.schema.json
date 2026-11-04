@@ -557,6 +557,20 @@
         "sizeLimit": {
           "type": "string",
           "minLength": 1
+        },
+        "rotation": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "segmentBytes": {
+              "type": ["integer", "null"],
+              "minimum": 65536
+            },
+            "retentionSeconds": {
+              "type": ["integer", "null"],
+              "minimum": 1
+            }
+          }
         }
       }
     },

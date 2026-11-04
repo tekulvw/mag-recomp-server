@@ -103,6 +103,13 @@ resources:
     limits: {memory: 1Gi}
 logs:
   sizeLimit: 2Gi
+  # Optional gameplay event-log and tick-telemetry rotation (gameplay images that
+  # support --log-segment-bytes). Without it a full 64 MiB log stops gameplay.
+  # Retention bounds disk use by age only; keep segment rate x retention well
+  # below sizeLimit.
+  rotation:
+    segmentBytes: null
+    retentionSeconds: null
 
 # Optional targeted forwarding resolver. No original hostnames are guessed.
 dns:

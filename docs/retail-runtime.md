@@ -50,6 +50,21 @@ scheduler, and does not create gameplay or telemetry logs. Omit `--log` and
 `event: "catalogs_validated"` and identifies its scope as schema and profile
 validation, without claiming client acceptance.
 
+## Event log rotation and retention
+
+Gameplay records every accepted action in its `--log` evidence file and refuses
+actions it cannot record. Without rotation that file is capped at 64 MiB; once
+it is full, gameplay rejects every client event and Medius ends the affected
+sessions. `--log-segment-bytes BYTES` (at least 65536) removes that cap: the log,
+and `--tick-telemetry` when enabled, continue in numbered segments
+(`events.jsonl.000001`, ...), rotating only between whole records. Every segment
+is created new; existing files are never overwritten. `--log-retention-s
+SECONDS` additionally deletes closed segments once they have been closed that
+long; the active segment is never deleted. Sequence numbers continue across
+segments, so retention gaps are visible. Retention bounds disk use by age, not
+size: choose it so the expected log rate over that period fits the log volume.
+Both flags are rejected with `--validate-catalogs` and `--collision-query`.
+
 Do not combine the validator with `--collision-query`; diagnostic queries are a
 separate command. When an explicit application selects an optional collision
 world, its map must match the selected spawn catalog in both offline validation
