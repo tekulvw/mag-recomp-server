@@ -492,10 +492,7 @@ fn emit_objective_reward(
 }
 
 fn demolition_in_range(actor: ObjectiveActor, rule: &ObjectiveDemolitionRule) -> bool {
-    let dx = actor.position.x - rule.position[0];
-    let dy = actor.position.y - rule.position[1];
-    let dz = actor.position.z - rule.position[2];
-    dx * dx + dy * dy + dz * dz <= rule.maximum_distance_m * rule.maximum_distance_m
+    rule.range().contains(actor.position)
 }
 
 fn armed_state(object: &mut Objective, now: Duration) {
@@ -711,10 +708,7 @@ fn wire_time(time: Duration) -> u32 {
     time.as_millis() as u32
 }
 fn in_range(actor: ObjectiveActor, rule: &ObjectiveInteractionRule) -> bool {
-    let dx = actor.position.x - rule.position[0];
-    let dy = actor.position.y - rule.position[1];
-    let dz = actor.position.z - rule.position[2];
-    dx * dx + dy * dy + dz * dz <= rule.maximum_distance_m * rule.maximum_distance_m
+    rule.range().contains(actor.position)
 }
 fn cancel(object: &mut Objective, now: Duration) {
     object.state.state_actor = ObjectiveStateActor {
@@ -725,4 +719,73 @@ fn cancel(object: &mut Objective, now: Duration) {
     object.state.expiration_time_ms = 0;
     object.state.deactivation_time_ms = 0;
     object.operation = None;
+}
+
+#[cfg(test)]
+mod trigger_box_tests {
+    use super::*;
+    use serde_json::json;
+
+    // Invented catalog: one capture objective with one authored 5 x 2 x 2 box.
+    fn world() -> ObjectiveWorld {
+        let catalog = json!({"schema_version":1,"format":"mag_retail_objective_catalog","application_id":20231,
+            "protocol":crate::protocol::ProtocolInfo::RETAIL_PROTOCOL,"game_type":0,"map_name":"synthetic_arena",
+            "entity_family":12,"network_type":12,
+            "source":{"authored_catalog_sha256":"0".repeat(64),"binding_capture_sha256":"1".repeat(64),
+                "startup_proof_sha256":"2".repeat(64),"source_image_sha256":"3".repeat(64),
+                "capture_qualification":"bounded_concurrent_token_slot_capture"},
+            "objects":[{"token":"0x0000000a","object_index":10,"initial_state":1,
+                "interaction":{"owner_team":1,"activate_ms":10,"complete_ms":20,"deactivate_ms":10,
+                    "can_deactivate":true,"position":[100.,3.,100.],"trigger_count":1,
+                    "maximum_distance_m":5.,"distance_policy":"authored_trigger_box",
+                    "trigger_volumes":[{"centre":[100.,3.,100.],"axes":[[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]],
+                        "half_extents":[2.5,1.,1.]}]}}],
+            "squads":(0..2).flat_map(|team| (0..4).map(move |slot| json!({"team":team,
+                "squad_index":team*16+slot,"initial_objective_index":10,
+                "authored_objectives":[{"object_index":10,"order":1}]}))).collect::<Vec<_>>()});
+        ObjectiveWorld::new(&ObjectiveCatalog::from_json(&catalog.to_string()).unwrap())
+    }
+    fn activate(world: &mut ObjectiveWorld, z: f32) -> InteractionOutcome {
+        world.interact(
+            ObjectiveInteraction {
+                target_object_id: 0x0c80_000a,
+                kind: ObjectiveInteractionKind::Activate,
+                actor_index: 7,
+                trigger_index: 0,
+            },
+            ObjectiveActor {
+                player: 7,
+                team: 0,
+                generation: 1,
+                position: CharacterPosition { x: 100., y: 2.5, z },
+            },
+            Duration::from_secs(1),
+        )
+    }
+
+    #[test]
+    fn authored_box_rejects_requests_the_development_sphere_accepted() {
+        let mut far = world();
+        let outcome = activate(&mut far, 104.);
+        assert!(!outcome.accepted);
+        assert_eq!(outcome.reason, "objective_out_of_range");
+        let mut near = world();
+        assert!(activate(&mut near, 101.2).accepted);
+    }
+
+    #[test]
+    fn authored_box_policy_requires_matching_volumes() {
+        let mut value: serde_json::Value = serde_json::from_str(
+            &json!({"centre":[0.,0.,0.],"axes":[[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]],"half_extents":[1.,1.,1.]}).to_string(),
+        )
+        .unwrap();
+        value["half_extents"][0] = json!(-1.);
+        let bad: crate::objective_range::TriggerBox = serde_json::from_value(value).unwrap();
+        assert!(!crate::objective_range::ObjectiveRange::validate(
+            crate::objective_range::AUTHORED_TRIGGER_BOX,
+            5.,
+            1,
+            &[bad]
+        ));
+    }
 }

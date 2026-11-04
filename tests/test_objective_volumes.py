@@ -98,5 +98,55 @@ class ObjectiveVolumeTests(unittest.TestCase):
             VOLUMES['project_level'](graph, instances, classes, HELPERS['euler_basis'])
 
 
+RUNTIME = runpy.run_path(str(EXTRACTION / 'project-retail-objective-runtime.py'))
+APPLY = runpy.run_path(str(EXTRACTION / 'apply-objective-trigger-volumes.py'))
+UNIT = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+
+
+def volume_catalog(triggers=('0x0000b002',), map_name='invented_map'):
+    return {'schema_version': 1, 'format': 'mag_retail_objective_trigger_volumes', 'application_id': 20231,
+            'volume_semantics': 'oriented_box_half_scale',
+            'maps': [{'map': map_name, 'objectives': [{'objective_token': '0x0000b001', 'triggers': [
+                {'trigger_token': t, 'box': {'centre': [1.0, 2.0, 3.0], 'axes': UNIT, 'half_extents': [2.0, 1.0, 0.5]}}
+                for t in triggers]}]}]}
+
+
+def graph():
+    return {'map': {'map': 'invented_map'},
+            'trigger_links': [{'objective_instance_token': '0x0000b001', 'trigger_instance_token': '0x0000b002'}]}
+
+
+def rules(trigger_count=1):
+    return {'0x0000b001': {'interaction': {'trigger_count': trigger_count, 'maximum_distance_m': 5.0,
+                                           'distance_policy': 'development_point_distance'}}}
+
+
+class TriggerVolumeAttachTests(unittest.TestCase):
+    def test_attaches_linked_boxes_and_switches_policy(self):
+        body = RUNTIME['attach_trigger_volumes'](graph(), rules(), volume_catalog())['0x0000b001']['interaction']
+        self.assertEqual(body['distance_policy'], 'authored_trigger_box')
+        self.assertEqual(body['trigger_volumes'], [{'centre': [1.0, 2.0, 3.0], 'axes': UNIT, 'half_extents': [2.0, 1.0, 0.5]}])
+
+    def test_rejects_mismatched_triggers_counts_and_maps(self):
+        with self.assertRaisesRegex(ValueError, 'do not match linked triggers'):
+            RUNTIME['attach_trigger_volumes'](graph(), rules(), volume_catalog(triggers=('0x0000b003',)))
+        with self.assertRaisesRegex(ValueError, 'do not match linked triggers'):
+            RUNTIME['attach_trigger_volumes'](graph(), rules(trigger_count=2), volume_catalog())
+        with self.assertRaisesRegex(ValueError, 'lacks this map'):
+            RUNTIME['attach_trigger_volumes'](graph(), rules(), volume_catalog(map_name='other_map'))
+        bad = volume_catalog()
+        bad['volume_semantics'] = 'sphere'
+        with self.assertRaisesRegex(ValueError, 'identity'):
+            RUNTIME['attach_trigger_volumes'](graph(), rules(), bad)
+
+    def test_overlay_requires_the_runtime_catalog_source_metadata(self):
+        runtime = {'format': 'mag_retail_objective_catalog', 'schema_version': 1, 'map_name': 'invented_map',
+                   'source': {'authored_catalog_sha256': 'a' * 64},
+                   'objects': [{'token': '0x0000B001', 'object_index': 0, **rules()['0x0000b001']}]}
+        out = APPLY['apply'](runtime, graph(), 'a' * 64, volume_catalog())
+        self.assertEqual(out['objects'][0]['interaction']['distance_policy'], 'authored_trigger_box')
+        with self.assertRaisesRegex(ValueError, 'not the runtime catalog source'):
+            APPLY['apply'](runtime, graph(), 'b' * 64, volume_catalog())
+
 if __name__ == '__main__':
     unittest.main()

@@ -41,6 +41,7 @@ python3 tools/extraction/project-retail-leadership-passives.py --rules RULES --n
 python3 tools/extraction/project-retail-leadership-role-policy.py --rules RULES --default-record LOCAL_RECORD --output ROLE_POLICY
 python3 tools/extraction/extract-retail-armory.py --catalog-dir EXTERNAL_CATALOG_DIRECTORY --output ARMORY
 python3 tools/extraction/project-retail-objective-runtime.py --catalog OBJECTIVE_METADATA --bindings TOKEN_SLOT_BINDINGS --startup-proof STARTUP_WITNESS --rules RULES --output OBJECTIVE_RUNTIME
+python3 tools/extraction/apply-objective-trigger-volumes.py --runtime-catalog OBJECTIVE_RUNTIME --catalog OBJECTIVE_METADATA --trigger-volumes OBJECTIVE_VOLUMES --output OBJECTIVE_RUNTIME_WITH_BOXES
 ```
 
 `STRUCTURE_NATIVE_RULES` is the externally verified `native_rules` object used by the structure loader, including health-condition thresholds, dead/rebuild thresholds and provenance. Its constants cannot be recovered from the selected authored resource tables. The combined skill/structure command requires this object for the structure output; it does not substitute prototype constants for retail.

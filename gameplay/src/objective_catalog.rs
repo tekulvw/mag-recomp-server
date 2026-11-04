@@ -94,6 +94,9 @@ pub(crate) struct ObjectiveInteractionRule {
     pub(crate) trigger_count: u8,
     pub(crate) maximum_distance_m: f32,
     pub(crate) distance_policy: String,
+    /// Authored trigger boxes, one per linked trigger, for `authored_trigger_box`.
+    #[serde(default)]
+    pub(crate) trigger_volumes: Vec<crate::objective_range::TriggerBox>,
 }
 /// Structural demolition timing and capability from authored retail properties.
 /// Score values remain configuration; this type alone does not apply score effects.
@@ -111,6 +114,27 @@ pub(crate) struct ObjectiveDemolitionRule {
     pub(crate) trigger_count: u8,
     pub(crate) maximum_distance_m: f32,
     pub(crate) distance_policy: String,
+    /// Authored trigger boxes, one per linked trigger, for `authored_trigger_box`.
+    #[serde(default)]
+    pub(crate) trigger_volumes: Vec<crate::objective_range::TriggerBox>,
+}
+impl ObjectiveInteractionRule {
+    pub(crate) fn range(&self) -> crate::objective_range::ObjectiveRange<'_> {
+        crate::objective_range::ObjectiveRange {
+            position: self.position,
+            maximum_distance_m: self.maximum_distance_m,
+            volumes: &self.trigger_volumes,
+        }
+    }
+}
+impl ObjectiveDemolitionRule {
+    pub(crate) fn range(&self) -> crate::objective_range::ObjectiveRange<'_> {
+        crate::objective_range::ObjectiveRange {
+            position: self.position,
+            maximum_distance_m: self.maximum_distance_m,
+            volumes: &self.trigger_volumes,
+        }
+    }
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -289,9 +313,12 @@ impl ObjectiveCatalog {
                     || rule.deactivate_ms == 0
                     || rule.trigger_count == 0
                     || rule.position.iter().any(|value| !value.is_finite())
-                    || !rule.maximum_distance_m.is_finite()
-                    || rule.maximum_distance_m <= 0.0
-                    || rule.distance_policy != "development_point_distance"
+                    || !crate::objective_range::ObjectiveRange::validate(
+                        &rule.distance_policy,
+                        rule.maximum_distance_m,
+                        rule.trigger_count,
+                        &rule.trigger_volumes,
+                    )
                 {
                     return Err("invalid_objective_interaction_rule");
                 }
@@ -306,9 +333,12 @@ impl ObjectiveCatalog {
                         .any(|duration| *duration == 0 || *duration > 3_600_000)
                     || rule.trigger_count == 0
                     || rule.position.iter().any(|value| !value.is_finite())
-                    || !rule.maximum_distance_m.is_finite()
-                    || rule.maximum_distance_m <= 0.0
-                    || rule.distance_policy != "development_point_distance"
+                    || !crate::objective_range::ObjectiveRange::validate(
+                        &rule.distance_policy,
+                        rule.maximum_distance_m,
+                        rule.trigger_count,
+                        &rule.trigger_volumes,
+                    )
                 {
                     return Err("invalid_objective_demolition_rule");
                 }

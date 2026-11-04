@@ -284,7 +284,10 @@ pub(super) fn operator_action(
     object: &objective_catalog::Objective,
     state: replication::ObjectiveState,
     team: u8,
-) -> Option<(protocol::ObjectiveInteractionKind, [f32; 3], f32)> {
+) -> Option<(
+    protocol::ObjectiveInteractionKind,
+    crate::objective_range::ObjectiveRange<'_>,
+)> {
     use protocol::ObjectiveInteractionKind::{Activate, Deactivate};
     use replication::ObjectiveState::{Activated, Activating, Deactivated, Deactivating};
     if let Some(r) = &object.demolition {
@@ -296,14 +299,11 @@ pub(super) fn operator_action(
         } else {
             return None;
         };
-        Some((kind, r.position, r.maximum_distance_m))
+        Some((kind, r.range()))
     } else {
         let r = object.interaction.as_ref()?;
-        (team != r.owner_team && matches!(state, Deactivated | Activating)).then_some((
-            Activate,
-            r.position,
-            r.maximum_distance_m,
-        ))
+        (team != r.owner_team && matches!(state, Deactivated | Activating))
+            .then_some((Activate, r.range()))
     }
 }
 fn operator_safe(bot: &crate::bot_registry::WorldBot) -> bool {
@@ -380,15 +380,11 @@ fn supported_operator(
     world: Option<&collision::CollisionWorld>,
     map: &str,
     raw: replication::CharacterPosition,
-    center: [f32; 3],
-    radius: f32,
+    range: crate::objective_range::ObjectiveRange<'_>,
 ) -> Result<replication::CharacterPosition, &'static str> {
-    // Restrict support discovery to this trigger's vertical sphere slice.
-    // A generic +8m ray can hit a roof above the action instead of its floor.
-    let horizontal = f64::from(raw.x - center[0]).powi(2) + f64::from(raw.z - center[2]).powi(2);
-    let vertical = (f64::from(radius).powi(2) - horizontal).max(0.).sqrt();
-    let up = (f64::from(center[1]) + vertical - f64::from(raw.y)).max(0.);
-    let down = (f64::from(raw.y) - f64::from(center[1]) + vertical).max(0.);
+    // Restrict support discovery to the trigger's own vertical span so a generic
+    // upward ray cannot land on a roof above the action instead of its floor.
+    let (up, down) = range.support_window(point(raw));
     supported_interval(world, map, raw, up, down)
 }
 fn supported_interval(
@@ -1921,8 +1917,7 @@ impl<W: Write> Engine<W> {
                     {
                         continue;
                     }
-                    let Some((_, center, _)) =
-                        operator_action(object, state, bot.target.squad.team())
+                    let Some((_, range)) = operator_action(object, state, bot.target.squad.team())
                     else {
                         continue;
                     };
@@ -1948,11 +1943,7 @@ impl<W: Write> Engine<W> {
                         || (bot.task.operator
                             && bot.task.objective == Some(index)
                             && bot.task.generation == r.generation);
-                    choices.push((
-                        !stable,
-                        distance(r.position, position(center.map(f64::from))),
-                        id,
-                    ));
+                    choices.push((!stable, distance(r.position, position(range.anchor())), id));
                 }
                 choices.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)).then(a.2.cmp(&b.2)));
                 if let Some((_, _, id)) = choices.first() {
@@ -2299,16 +2290,9 @@ impl<W: Write> Engine<W> {
             };
             let mut offset = policy.candidate_offsets_m[index];
             offset[1] += sector;
-            let mut raw = if let Some((_, center, radius)) = operator_rule {
-                // Generic concentric approaches; grounding is checked again against the
-                // actual 3D trigger radius before accepting the physical route.
-                let angle = (candidate_attempt % 8) as f64 * std::f64::consts::FRAC_PI_4;
-                let radial = f64::from(radius) * [0.55, 0.25, 0.8][candidate_attempt / 8 % 3];
-                position([
-                    f64::from(center[0]) + radial * angle.cos(),
-                    f64::from(center[1]) + 0.5,
-                    f64::from(center[2]) + radial * angle.sin(),
-                ])
+            let mut raw = if let Some((_, range)) = operator_rule {
+                // Grounding and the range itself are checked again before the route is accepted.
+                position(range.approach(candidate_attempt))
             } else {
                 role_candidate(center, anchor, role, offset)
             };
@@ -2353,14 +2337,8 @@ impl<W: Write> Engine<W> {
                 self.bot_registry
                     .director
                     .candidate_support(key, policy.cache_limit, || {
-                        if !recovering && let Some((_, center, radius)) = operator_rule {
-                            supported_operator(
-                                self.collision_world.as_ref(),
-                                &map,
-                                raw,
-                                center,
-                                radius,
-                            )
+                        if !recovering && let Some((_, range)) = operator_rule {
+                            supported_operator(self.collision_world.as_ref(), &map, raw, range)
                         } else {
                             supported(self.collision_world.as_ref(), &map, raw, &policy)
                         }
@@ -2394,8 +2372,8 @@ impl<W: Write> Engine<W> {
             let result = (|| {
                 let goal = static_goal?;
                 if !recovering
-                    && let Some((_, center, radius)) = operator_rule
-                    && distance(goal, position(center.map(f64::from))) > f64::from(radius) * 0.95
+                    && let Some((_, range)) = operator_rule
+                    && !range.contains_planned(point(goal))
                 {
                     return Err("bot_operator_approach_out_of_range");
                 }

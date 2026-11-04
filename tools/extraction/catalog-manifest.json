@@ -433,7 +433,7 @@
     {
       "output": "retail-sver-sab-local-objective-interactions.json",
       "status": "external-proof",
-      "command": "project-retail-objective-runtime.py --catalog CATALOG --bindings BINDINGS --startup-proof STARTUP --rules RULES --include-interactions --local-end-game-delay-ms MS --output OUTPUT",
+      "command": "project-retail-objective-runtime.py --catalog CATALOG --bindings BINDINGS --startup-proof STARTUP --rules RULES --include-interactions --local-end-game-delay-ms MS [--trigger-volumes OBJECTIVE_VOLUMES] --output OUTPUT",
       "inputs": "Same objective inputs and explicit local timing policy",
       "dependencies": [
         "Python 3.11+ standard library"
@@ -443,12 +443,12 @@
     {
       "output": "retail-sver-sab-objective-interactions.json",
       "status": "external-proof",
-      "command": "project-retail-objective-runtime.py --catalog CATALOG --bindings BINDINGS --startup-proof STARTUP --rules RULES --include-interactions --output OUTPUT",
+      "command": "project-retail-objective-runtime.py --catalog CATALOG --bindings BINDINGS --startup-proof STARTUP --rules RULES --include-interactions [--trigger-volumes OBJECTIVE_VOLUMES] --output OUTPUT",
       "inputs": "Same inputs as objective runtime projection",
       "dependencies": [
         "Python 3.11+ standard library"
       ],
-      "limitations": "Interaction policy also uses --interaction-radius-m; default is explicit local tool policy, not an extracted game balance."
+      "limitations": "Without --trigger-volumes the range is the --interaction-radius-m development sphere, not an extracted game value; with it, authored trigger boxes replace the sphere."
     },
     {
       "output": "retail-sver-sab-objective-runtime.json",

@@ -59,6 +59,31 @@ Triggers are listed in level-file order. Arrival, secure-and-hold and
 structural-demolition objectives are all included; the runtime decides which
 ones it uses.
 
+## Runtime use
+
+`project-retail-objective-runtime.py --include-interactions --trigger-volumes OBJECTIVE_VOLUMES`
+attaches each interaction or demolition rule's boxes as `trigger_volumes` and
+sets `distance_policy: "authored_trigger_box"`. The linked trigger tokens in the
+authored objective metadata must match the volume catalog exactly, with one box
+per `trigger_count`. For a catalog that was already projected, apply the same
+step without re-running the projection:
+
+```sh
+python3 tools/extraction/apply-objective-trigger-volumes.py --runtime-catalog OBJECTIVE_RUNTIME --catalog OBJECTIVE_METADATA --trigger-volumes OBJECTIVE_VOLUMES --output OBJECTIVE_RUNTIME_WITH_BOXES
+```
+
+`OBJECTIVE_METADATA` must be the exact file recorded in the runtime catalog's
+`source.authored_catalog_sha256`.
+
+Under `authored_trigger_box` the gameplay server accepts an activation, defuse
+or continued hold when the actor's body column, from the tracked feet position
+up to the default body height, overlaps any of the objective's boxes grown by
+the default body radius. That padding is server policy standing in for the
+client's physics overlap. Bots choose standing points inside a box, grounded
+within the box's vertical span, and only act once the same check passes.
+`maximum_distance_m` is ignored under this policy. Catalogs that keep
+`development_point_distance` behave exactly as before.
+
 ## Not established
 
 - The character reference point and padding the original client uses before it
