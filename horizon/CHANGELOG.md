@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.2.0...medius-v0.2.1) (2026-11-04)
+
+
+### Bug Fixes
+
+* **medius:** accept NP identities bound to the authenticated account ([#47](https://github.com/tekulvw/mag-recomp-server/issues/47)) ([218c81e](https://github.com/tekulvw/mag-recomp-server/commit/218c81e77b335e2bffa59d7cd46b11dc8e6d96cd))
+
 ## [0.2.0](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.1.0...medius-v0.2.0) (2026-11-04)
 
 
