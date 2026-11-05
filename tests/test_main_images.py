@@ -20,6 +20,12 @@ def workflow():
 
 
 class MainImagesTests(unittest.TestCase):
+    def test_source_checks_run_once_per_event(self):
+        spec = yaml.load((ROOT / '.github/workflows/check.yml').read_text(), Loader=yaml.BaseLoader)
+        # main pushes reach check.yml through main-images.yml; its own push
+        # trigger would duplicate every PR-branch and main run.
+        self.assertEqual(set(spec['on']), {'pull_request', 'workflow_call'})
+
     def test_only_checked_main_builds_can_publish(self):
         spec = workflow()
         self.assertEqual(set(spec['on']), {'push', 'workflow_dispatch'})

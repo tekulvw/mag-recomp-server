@@ -1,6 +1,8 @@
 name: Public source checks
+# Pull requests check PR branches. main is checked by main-images.yml and
+# release tags by release-please.yml, both through workflow_call, so a push
+# trigger here would only run the same checks twice.
 on:
-  push:
   pull_request:
   workflow_call:
     inputs:
