@@ -92,6 +92,27 @@ class DataBundleTests(unittest.TestCase):
         self.unpack(archive, ok=False)
         self.assertEqual((target / "sentinel").read_text(), "preserve")
 
+    def test_replace_existing_clears_previous_output_without_following_links(self):
+        archive = self.pack()
+        output = self.unpack(archive)
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "keep.json").write_text("{}")
+        nested = output / "stale" / "deeper"
+        nested.mkdir(parents=True)
+        (nested / "old.json").write_text("{}")
+        (nested / "old.json").chmod(0o444)
+        (output / "link").symlink_to(outside, target_is_directory=True)
+        # A Pod restarted in place reruns unpack over its earlier result.
+        self.unpack(archive, ok=False)
+        self.unpack(archive, True, "--replace-existing")
+        self.assertEqual(sorted(p.name for p in output.iterdir()), [MANIFEST, "catalog.json"])
+        self.assertEqual((outside / "keep.json").read_text(), "{}")
+        # A failed verification still leaves nothing behind.
+        self.cli("unpack", "--archive", archive, "--sha256", "0" * 64,
+                 "--output-dir", output, "--replace-existing", ok=False)
+        self.assertEqual(list(output.iterdir()), [])
+
     def test_invalid_json_and_secret_data_are_rejected(self):
         for value in ['{"a":1,"a":2}', '{"a":NaN}', '{"a":1e999}',
                       '{"password":"synthetic"}', json.dumps({"x": "-----BEGIN " + "PRIVATE KEY-----"}), '{']:

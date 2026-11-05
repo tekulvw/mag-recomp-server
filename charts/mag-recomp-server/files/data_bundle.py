@@ -226,10 +226,24 @@ def exact_read(handle, size):
     return data
 
 
+def clear_directory(output):
+    """Remove every entry under output without following symlinks."""
+    with os.scandir(output) as entries:
+        for entry in entries:
+            if entry.is_dir(follow_symlinks=False):
+                shutil.rmtree(entry.path)
+            else:
+                os.unlink(entry.path)
+
+
 def unpack(args):
     require(re.fullmatch(r"[0-9a-fA-F]{64}", args.sha256), "invalid archive SHA-256")
     output = no_symlink_path(args.output_dir)
     require(output.is_dir(), "output directory must already exist")
+    if args.replace_existing:
+        # Only for a directory this program owns, such as a Pod's emptyDir: a
+        # restarted Pod reruns its init containers over the previous result.
+        clear_directory(output)
     require(not any(output.iterdir()), "output directory must be empty")
     with open_regular(args.archive) as archive:
         checksum, _ = digest_file(archive, args.max_archive_bytes)
@@ -315,6 +329,8 @@ def main(argv=None):
             sub.add_argument("--archive", type=Path, required=True)
             sub.add_argument("--sha256", required=True)
             sub.add_argument("--output-dir", type=Path, required=True)
+            sub.add_argument("--replace-existing", action="store_true",
+                             help="delete the output directory's contents before verifying")
     args = parser.parse_args(argv)
     try:
         (pack if args.command == "pack" else unpack)(args)
