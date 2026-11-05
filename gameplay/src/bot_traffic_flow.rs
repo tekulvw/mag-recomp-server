@@ -186,10 +186,113 @@ pub(super) fn lanes_conflict(a: &[[[f64; 3]; 2]], b: &[[[f64; 3]; 2]], budget: &
     false
 }
 
+/// Two certified passages exclude each other for their whole service only when
+/// bodies on their actual launch pads, trajectories or landings can meet.
+/// The coarse protected AABB (a square entry buffer plus the whole flight box)
+/// is deliberately not used: parallel drops off one ledge whose swept bodies
+/// never touch remain independent exits and may be served concurrently.
+pub(super) fn passages_exclusive(
+    a: &navmesh::DropLink,
+    b: &navmesh::DropLink,
+    entry_buffer_m: f64,
+) -> bool {
+    let body = Body::default();
+    let path = |link: &navmesh::DropLink| -> Vec<[[f64; 3]; 2]> {
+        let points: Vec<_> = std::iter::once(link.launch)
+            .chain(link.trajectory.iter().map(|m| m.position))
+            .chain(std::iter::once(link.landing))
+            .collect();
+        points.windows(2).map(|w| [w[0], w[1]]).collect()
+    };
+    // A launch pad is where a committing body stands before departure. Its
+    // approach direction is route-specific, so the full square is retained.
+    let on_pad = |link: &navmesh::DropLink, p: [f64; 3]| {
+        let reach = entry_buffer_m + body.radius;
+        (p[0] - link.launch[0]).abs() <= reach
+            && (p[2] - link.launch[2]).abs() <= reach
+            && (p[1] - link.launch[1]).abs() < body.height
+    };
+    let (pa, pb) = (path(a), path(b));
+    let mut budget = usize::MAX;
+    lanes_conflict(&pa, &pb, &mut budget)
+        || pb.iter().flatten().any(|&p| on_pad(a, p))
+        || pa.iter().flatten().any(|&p| on_pad(b, p))
+}
+
+/// Unordered exclusive passage pairs, computed once per loaded navmesh.
+pub(super) fn exclusive_pairs(
+    links: &[navmesh::DropLink],
+    entry_buffer_m: f64,
+) -> std::collections::BTreeSet<(u32, u32)> {
+    let mut pairs = std::collections::BTreeSet::new();
+    for (i, a) in links.iter().enumerate() {
+        for b in &links[i + 1..] {
+            if passages_exclusive(a, b, entry_buffer_m) {
+                pairs.insert((a.id.min(b.id), a.id.max(b.id)));
+            }
+        }
+    }
+    pairs
+}
+
+#[cfg(test)]
+pub(super) fn synthetic_link(id: u32, launch: [f64; 3], landing: [f64; 3]) -> navmesh::DropLink {
+    // SYNTHETIC: straight interpolated flight, not a certified game trace.
+    let trajectory = (1..=20)
+        .map(|i| {
+            let t = f64::from(i) / 20.;
+            let mut m = crate::bot_physics::Motion::new(std::array::from_fn(|axis| {
+                launch[axis] + (landing[axis] - launch[axis]) * t
+            }));
+            m.grounded = i == 20;
+            m
+        })
+        .collect();
+    navmesh::DropLink {
+        id,
+        world_sha256: "0".repeat(64),
+        launch,
+        landing,
+        speed: crate::retail_movement::WALK_FORWARD_MPS,
+        max_drop_height: launch[1] - landing[1],
+        trajectory,
+        trajectory_sha256: String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::actor_collision::Bounds;
+    #[test]
+    fn parallel_drops_off_one_ledge_are_independent_but_crossing_drops_exclude() {
+        // Two drops whose 1.5 m launch squares make their protected AABBs touch,
+        // while their bodies stay about 2.6 m apart for the whole flight.
+        let a = synthetic_link(1, [0., 4., 0.], [0., 1.5, 5.]);
+        let b = synthetic_link(2, [3., 4., -4.], [2.6, 1.5, 4.5]);
+        let buffer = 1.5;
+        let protected = |l: &navmesh::DropLink| {
+            crate::development_bot_movement::protected_drop_bounds(l, buffer)
+        };
+        assert!(
+            (0..3).all(|i| protected(&a).min[i] <= protected(&b).max[i]
+                && protected(&a).max[i] >= protected(&b).min[i]),
+            "fixture must reproduce the coarse-AABB overlap"
+        );
+        assert!(!passages_exclusive(&a, &b, buffer));
+        let crossing = synthetic_link(3, [-3., 4., 2.], [3., 1.5, 2.]);
+        assert!(passages_exclusive(&a, &crossing, buffer));
+        // A flight passing over another passage's launch pad excludes it.
+        let over_pad = synthetic_link(4, [1., 4.2, -3.], [1., 1.5, 3.]);
+        assert!(passages_exclusive(&a, &over_pad, buffer));
+        // Same horizontal path on a separate floor is independent.
+        let lower = synthetic_link(5, [0., 0., 0.], [0., -2.5, 5.]);
+        assert!(!passages_exclusive(&a, &lower, buffer));
+        assert_eq!(
+            exclusive_pairs(&[a, b, crossing, over_pad, lower], buffer),
+            std::collections::BTreeSet::from([(1, 3), (1, 4), (2, 3), (3, 4)])
+        );
+    }
     #[test]
     fn traffic_geometry_is_rotation_translation_and_floor_independent() {
         for angle in [0., std::f64::consts::FRAC_PI_3] {

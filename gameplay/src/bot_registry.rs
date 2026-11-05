@@ -100,6 +100,9 @@ pub(crate) struct BotRegistry {
     collision_evidence: Option<String>,
     pub(super) director: crate::bot_objectives::Director,
     drop_queues: BTreeMap<u32, PassageQueue>,
+    /// Last physical clearance per passage; with convoys several services
+    /// overlap, so the delay book records inter-clearance headway instead.
+    passage_last_clear: BTreeMap<u32, Duration>,
     pub(super) failed_passages: BTreeMap<u32, Duration>,
     pub(super) traffic_cursor: u16,
     pub(super) firearm_cursor: u16,
@@ -165,11 +168,42 @@ struct PassageOwner {
 #[derive(Default)]
 struct PassageQueue {
     owner: Option<PassageOwner>,
+    /// Earlier owners already in certified flight or landed but not yet clear.
+    /// They keep their permit; the next ticket may approach behind them.
+    departing: Vec<PassageOwner>,
     waiting: std::collections::VecDeque<PassageLife>,
     probe_cursor: usize,
 }
+impl PassageQueue {
+    fn holders(&self) -> impl Iterator<Item = &PassageOwner> {
+        self.owner.iter().chain(&self.departing)
+    }
+}
 fn intersects(a: crate::actor_collision::Bounds, b: crate::actor_collision::Bounds) -> bool {
     (0..3).all(|i| a.min[i] <= b.max[i] && a.max[i] >= b.min[i])
+}
+/// A body still on (or just above) a passage's launch pad has not left it.
+fn on_launch_pad(p: [f64; 3], launch: [f64; 3], entry_buffer_m: f64) -> bool {
+    let body = bot_physics::Body::default();
+    let reach = entry_buffer_m + body.radius;
+    (p[0] - launch[0]).abs() <= reach
+        && (p[2] - launch[2]).abs() <= reach
+        && (p[1] - launch[1]).abs() < body.height
+}
+/// Whether an earlier convoy member still occupies the landing a follower
+/// would arrive at. Followers never enter a certificate until it is vacated.
+fn landing_occupied(p: [f64; 3], supported: bool, landing: [f64; 3], gap_m: f64) -> bool {
+    !supported
+        || ((p[0] - landing[0]).hypot(p[2] - landing[2]) < gap_m
+            && (p[1] - landing[1]).abs() < bot_physics::Body::default().height)
+}
+fn runtime_landing_occupied(runtime: BotRuntime, landing: [f64; 3], gap_m: f64) -> bool {
+    landing_occupied(
+        runtime.physical_position(),
+        runtime.physics_motion.is_some_and(|m| m.grounded) && !runtime.navmesh_state.on_player,
+        landing,
+        gap_m,
+    )
 }
 fn blocked_preentry_can_yield(
     runtime: BotRuntime,
@@ -227,7 +261,7 @@ impl BotRegistry {
     pub(super) fn traffic_protected(&self, exclude: u16) -> Vec<crate::actor_collision::Bounds> {
         self.drop_queues
             .values()
-            .filter_map(|q| q.owner.as_ref())
+            .flat_map(|q| q.holders())
             .filter(|o| o.life.id != exclude)
             .map(|o| o.passage.protected_bounds)
             .collect()
@@ -273,7 +307,7 @@ impl BotRegistry {
         let owners: BTreeMap<_, _> = self
             .drop_queues
             .iter()
-            .filter_map(|(&passage, q)| q.owner.as_ref().map(|o| (o.life.id, passage)))
+            .flat_map(|(&passage, q)| q.holders().map(move |o| (o.life.id, passage)))
             .collect();
         self.bots
             .iter()
@@ -1247,7 +1281,7 @@ impl<W: Write> Engine<W> {
             .bot_registry
             .drop_queues
             .values()
-            .filter_map(|q| q.owner.as_ref().map(|o| o.life.id))
+            .flat_map(|q| q.holders().map(|o| o.life.id))
             .collect();
         let mesh = self.navmesh_world.clone();
         for b in self.bot_registry.bots.values_mut() {
@@ -1368,28 +1402,28 @@ impl<W: Write> Engine<W> {
         let actors = self.actor_grid(now)?;
         let mut traffic_budget = policy.drop_traffic_query_budget;
         let mut yield_requests = BTreeSet::new();
+        let exclusive = self.passage_exclusions(&policy);
         let mut queues = std::mem::take(&mut self.bot_registry.drop_queues);
         for passage in passages.values() {
             queues.entry(passage.id).or_default();
         }
-        let mut active_access: BTreeMap<_, _> = queues
+        // Passages with any holder (owner or departing convoy member), with the
+        // owner's uncommitted approach lane that crossing queues must keep open.
+        let mut active_access: BTreeMap<u32, Vec<[[f64; 3]; 2]>> = queues
             .iter()
-            .filter_map(|(&id, q)| {
-                q.owner.as_ref().map(|o| {
-                    (
-                        id,
-                        (
-                            o.passage.protected_bounds,
-                            if o.cert_started {
-                                Vec::new()
-                            } else {
-                                self.bot_registry.bots[&o.life.id]
-                                    .drop_queue_approach
-                                    .clone()
-                            },
-                        ),
-                    )
-                })
+            .filter(|(_, q)| q.holders().next().is_some())
+            .map(|(&id, q)| {
+                (
+                    id,
+                    q.owner
+                        .as_ref()
+                        .filter(|o| !o.cert_started)
+                        .map_or_else(Vec::new, |o| {
+                            self.bot_registry.bots[&o.life.id]
+                                .drop_queue_approach
+                                .clone()
+                        }),
+                )
             })
             .collect();
         // Give every passage a bounded work share, even when an earlier queue
@@ -1420,8 +1454,15 @@ impl<W: Write> Engine<W> {
                 }) && passages.get(&life.id).is_some_and(|p| p.id == drop_id)
             });
             let mut rotate = None;
-            let mut released_clear = None;
-            if let Some(owner) = q.owner.as_mut() {
+            let mut released_clear = BTreeSet::new();
+            let holders: Vec<(PassageOwner, bool)> = q
+                .departing
+                .drain(..)
+                .map(|o| (o, false))
+                .chain(q.owner.take().map(|o| (o, true)))
+                .collect();
+            for (mut held, primary) in holders {
+                let owner = &mut held;
                 let b = self.bot_registry.bots.get_mut(&owner.life.id).filter(|b| {
                     b.health > 0 && b.target.runtime.unwrap().generation == owner.life.generation
                 });
@@ -1485,7 +1526,7 @@ impl<W: Write> Engine<W> {
                         } else {
                             "aborted_retreat_clear"
                         });
-                        released_clear = Some(owner.life.id);
+                        released_clear.insert(owner.life.id);
                     } else if !owner.cert_started && b.drop_reroute && safe_outside {
                         release = Some("reroute_before_entry");
                     } else if owner.cert_started
@@ -1498,7 +1539,7 @@ impl<W: Write> Engine<W> {
                         && (status.is_none() || owner.passage.phase == DropPhase::Cleared)
                     {
                         release = Some("cleared");
-                        released_clear = Some(owner.life.id);
+                        released_clear.insert(owner.life.id);
                     } else if !owner.cert_started
                         && safe_outside
                         && !passages
@@ -1550,7 +1591,17 @@ impl<W: Write> Engine<W> {
                         let free_departure = (p[0] - owner.passage.landing[0])
                             .hypot(p[2] - owner.passage.landing[2])
                             / retail_movement::WALK_FORWARD_MPS;
-                        if let Some(sample) = e.sample(key, now, free_departure) {
+                        if let Some(mut sample) = e.sample(key, now, free_departure) {
+                            // Convoy services overlap: the passage's capacity is the
+                            // interval between clearances, not one body's service.
+                            if let (Some(&last), Some(granted)) = (
+                                self.bot_registry.passage_last_clear.get(&drop_id),
+                                e.granted,
+                            ) && last >= granted
+                            {
+                                sample.service_s =
+                                    sample.service_s.min(now.saturating_sub(last).as_secs_f64());
+                            }
                             self.bot_registry.delay_book.record(
                                 drop_id,
                                 now,
@@ -1565,7 +1616,10 @@ impl<W: Write> Engine<W> {
                             receipts.push(json!({"op":"bot_drop_delay_sample","timestamp_ms":now.as_millis()as u64,"object_index":owner.life.id,"generation":owner.life.generation,"drop_id":drop_id,"sample":sample,"assigned_ms":e.assigned.as_millis()as u64,"queued_ms":e.queued.map(|t|t.as_millis()as u64),"granted_ms":e.granted.map(|t|t.as_millis()as u64),"entered_ms":e.entered.map(|t|t.as_millis()as u64),"landed_ms":e.landed.map(|t|t.as_millis()as u64),"free_approach_s":e.free_approach_s,"free_traversal_s":e.free_traversal_s,"free_departure_s":free_departure,"estimate":self.bot_registry.delay_book.estimate(drop_id,now,policy.drop_congestion_headway_s,&policy.drop_delay)}));
                         }
                     }
-                    receipts.push(json!({"op":"bot_drop_admission","timestamp_ms":now.as_millis()as u64,"drop_id":drop_id,"object_index":owner.life.id,"generation":owner.life.generation,"action":"released","reason":reason,"actual_position":r.map(|r|r.position),"actual_component":actual_component,"launch_component":launch_component,"left_spawn_component":actual_component.is_some() && actual_component!=launch_component}));
+                    receipts.push(json!({"op":"bot_drop_admission","timestamp_ms":now.as_millis()as u64,"drop_id":drop_id,"object_index":owner.life.id,"generation":owner.life.generation,"action":"released","reason":reason,"convoy_member":!primary,"actual_position":r.map(|r|r.position),"actual_component":actual_component,"launch_component":launch_component,"left_spawn_component":actual_component.is_some() && actual_component!=launch_component}));
+                    if reason == "cleared" {
+                        self.bot_registry.passage_last_clear.insert(drop_id, now);
+                    }
                     if let Some(b) = self.bot_registry.bots.get_mut(&owner.life.id)
                         && (reason == "cleared"
                             || recovery
@@ -1591,9 +1645,18 @@ impl<W: Write> Engine<W> {
                         }
                         b.drop_retreat_preentry = false;
                     }
-                    q.owner = None;
-                    active_access.remove(&drop_id);
+                    continue;
                 }
+                if primary {
+                    q.owner = Some(held);
+                } else {
+                    q.departing.push(held);
+                }
+            }
+            if q.holders().next().is_none() {
+                active_access.remove(&drop_id);
+            } else if q.owner.as_ref().is_none_or(|o| o.cert_started) {
+                active_access.insert(drop_id, Vec::new());
             }
             q.waiting.retain(|life| {
                 let Some(b) = self.bot_registry.bots.get_mut(&life.id) else { return false; };
@@ -1612,7 +1675,7 @@ impl<W: Write> Engine<W> {
                 .iter()
                 .filter(|&(id, p)| {
                     p.id == drop_id
-                        && released_clear != Some(*id)
+                        && !released_clear.contains(id)
                         && !self.bot_registry.bots[id].drop_reroute
                         && !self.bot_registry.bots[id].drop_retreat_preentry
                         && p.phase == DropPhase::Approaching
@@ -1702,6 +1765,31 @@ impl<W: Write> Engine<W> {
                     .phase = BotPhase::Complete;
                 q.waiting.push_back(life);
             }
+            // Convoy: once the owner has physically left the launch pad in
+            // certified flight, it keeps its permit as a departing member and the
+            // next ticket may approach. A follower still enters only after the
+            // shared landing is vacated (see the permit assignment below).
+            if let Some(o) = q.owner.as_ref()
+                && policy.drop_convoy_limit > 0
+                && q.departing.len() < policy.drop_convoy_limit
+                && o.cert_started
+                && self
+                    .bot_registry
+                    .bots
+                    .get(&o.life.id)
+                    .and_then(|b| b.target.runtime)
+                    .is_some_and(|r| {
+                        !on_launch_pad(
+                            r.physical_position(),
+                            o.passage.launch,
+                            policy.drop_entry_buffer_m,
+                        )
+                    })
+            {
+                let o = q.owner.take().unwrap();
+                receipts.push(json!({"op":"bot_drop_admission","timestamp_ms":now.as_millis()as u64,"drop_id":drop_id,"object_index":o.life.id,"generation":o.life.generation,"action":"convoy_departing","departing":q.departing.len()+1,"queue_length":q.waiting.len()}));
+                q.departing.push(o);
+            }
             if q.owner.is_none() {
                 // A fresh run cannot normally find an already traversing actor,
                 // but never revoke in-flight physics if admission starts mid-step.
@@ -1709,7 +1797,8 @@ impl<W: Write> Engine<W> {
                     .iter()
                     .find(|(id, p)| {
                         p.id == drop_id
-                            && released_clear != Some(**id)
+                            && !released_clear.contains(*id)
+                            && !q.departing.iter().any(|d| d.life.id == **id)
                             && matches!(p.phase, DropPhase::Traversing | DropPhase::Landed)
                     })
                     .map(|(&id, _)| PassageLife {
@@ -1753,9 +1842,9 @@ impl<W: Write> Engine<W> {
                     if !ready {
                         return false;
                     }
-                    if active_access.iter().any(|(&other, (bounds, lane))| {
+                    if active_access.iter().any(|(&other, lane)| {
                         other != drop_id
-                            && (intersects(*bounds, b.drop_queue_passage.unwrap().protected_bounds)
+                            && (exclusive.contains(&(other.min(drop_id), other.max(drop_id)))
                                 || crate::bot_traffic_flow::lanes_conflict(
                                     &b.drop_queue_approach,
                                     lane,
@@ -1809,14 +1898,11 @@ impl<W: Write> Engine<W> {
                         );
                     active_access.insert(
                         drop_id,
-                        (
-                            p.protected_bounds,
-                            if matches!(p.phase, DropPhase::Traversing | DropPhase::Landed) {
-                                Vec::new()
-                            } else {
-                                b.drop_queue_approach.clone()
-                            },
-                        ),
+                        if matches!(p.phase, DropPhase::Traversing | DropPhase::Landed) {
+                            Vec::new()
+                        } else {
+                            b.drop_queue_approach.clone()
+                        },
                     );
                     q.owner = Some(PassageOwner {
                         life,
@@ -1829,10 +1915,35 @@ impl<W: Write> Engine<W> {
                     receipts.push(json!({"op":"bot_drop_admission","timestamp_ms":now.as_millis()as u64,"drop_id":drop_id,"object_index":life.id,"generation":life.generation,"action":"granted","queue_length":q.waiting.len()}));
                 }
             }
+            let landing_busy = q.departing.iter().any(|d| {
+                self.bot_registry
+                    .bots
+                    .get(&d.life.id)
+                    .and_then(|b| b.target.runtime)
+                    .is_some_and(|r| {
+                        runtime_landing_occupied(
+                            r,
+                            d.passage.landing,
+                            policy.drop_convoy_landing_gap_m,
+                        )
+                    })
+            });
+            for d in &q.departing {
+                if let Some(b) = self.bot_registry.bots.get_mut(&d.life.id) {
+                    b.drop_permit = Some(drop_id);
+                    b.drop_committed = d.entered;
+                    b.drop_egress = b
+                        .target
+                        .registry_aborted_drop(policy.drop_entry_buffer_m)
+                        .is_some();
+                }
+            }
             if let Some(owner) = &q.owner
                 && let Some(b) = self.bot_registry.bots.get_mut(&owner.life.id)
             {
-                b.drop_permit = Some(drop_id);
+                // A follower walks up behind a departing member but its permit
+                // to enter the certificate waits for the landing to be vacated.
+                b.drop_permit = (owner.entered || !landing_busy).then_some(drop_id);
                 b.drop_committed = owner.entered;
                 b.drop_egress = b
                     .target
@@ -1885,7 +1996,7 @@ impl<W: Write> Engine<W> {
         // planning and normal collision movement; never rewrite the actual pose.
         let owner_ids: BTreeSet<_> = queues
             .values()
-            .filter_map(|q| q.owner.as_ref().map(|o| o.life.id))
+            .flat_map(|q| q.holders().map(|o| o.life.id))
             .collect();
         for id in yield_requests {
             if owner_ids.contains(&id) {
@@ -1906,7 +2017,7 @@ impl<W: Write> Engine<W> {
                 receipts.push(json!({"op":"bot_traffic_yield","timestamp_ms":now.as_millis()as u64,"object_index":id,"drop_id":b.drop_waiting,"action":"yield_requested","reason":"blocks_approach"}));
             }
         }
-        queues.retain(|_, q| q.owner.is_some() || !q.waiting.is_empty());
+        queues.retain(|_, q| q.holders().next().is_some() || !q.waiting.is_empty());
         self.bot_registry.drop_queues = queues;
         self.tick_local_traffic(now, &policy, &actors, &mut receipts)?;
         for receipt in receipts {
@@ -2296,6 +2407,7 @@ impl<W: Write> Engine<W> {
         self.bot_registry.reservations.clear();
         self.bot_registry.director = Default::default();
         self.bot_registry.drop_queues.clear();
+        self.bot_registry.passage_last_clear.clear();
         self.bot_registry.delay_book = Default::default();
         self.bot_registry.collision_evidence = None;
         self.bot_registry.firearm_cursor = 0;
@@ -2451,6 +2563,37 @@ pub(crate) mod identity_tests {
                     .all(|r| names.contains(r["name"].as_str().unwrap()))
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod convoy_tests {
+    use super::*;
+    #[test]
+    fn convoy_member_departs_only_off_the_pad_and_followers_wait_for_a_vacated_landing() {
+        let launch = [10., 5., 10.];
+        let buffer = 1.5;
+        // Standing at the edge or still at launch height just past it: not departed.
+        assert!(on_launch_pad([10., 5., 10.], launch, buffer));
+        assert!(on_launch_pad([11.8, 5.2, 10.], launch, buffer));
+        // Fallen below the launch body height or carried beyond the pad: departed.
+        assert!(!on_launch_pad([11., 3.0, 10.], launch, buffer));
+        assert!(!on_launch_pad([12.2, 5., 10.], launch, buffer));
+        let landing = [14., 1., 10.];
+        let gap = 1.0;
+        // In flight (unsupported) always occupies the landing.
+        assert!(landing_occupied([12., 3., 10.], false, landing, gap));
+        // Landed and still within the gap: occupied.
+        assert!(landing_occupied([14.5, 1., 10.], true, landing, gap));
+        // Landed and a body diameter plus margin away: vacated.
+        assert!(!landing_occupied([15.1, 1., 10.], true, landing, gap));
+        // A different floor above the landing does not occupy it.
+        assert!(!landing_occupied([14., 4., 10.], true, landing, gap));
+        assert!(
+            crate::bot_objectives::ObjectivePolicy::bundled().drop_convoy_landing_gap_m
+                > 2. * bot_physics::Body::default().radius,
+            "the bundled gap must keep two bodies from overlapping at the landing"
+        );
     }
 }
 

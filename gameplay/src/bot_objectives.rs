@@ -75,6 +75,43 @@ fn default_holding_stall() -> u64 {
         .as_u64()
         .unwrap()
 }
+fn default_drop_crossing_share() -> f64 {
+    drop_policy_default("drop_crossing_share").as_f64().unwrap()
+}
+fn default_drop_convoy_limit() -> usize {
+    drop_policy_default("drop_convoy_limit").as_u64().unwrap() as usize
+}
+fn default_drop_convoy_landing_gap_m() -> f64 {
+    drop_policy_default("drop_convoy_landing_gap_m")
+        .as_f64()
+        .unwrap()
+}
+fn default_drop_holding_vertical_m() -> f64 {
+    drop_policy_default("drop_holding_vertical_m")
+        .as_f64()
+        .unwrap()
+}
+fn default_drop_holding_scan() -> usize {
+    drop_policy_default("drop_holding_scan").as_u64().unwrap() as usize
+}
+fn default_wave_backlog() -> usize {
+    drop_policy_default("wave_backlog").as_u64().unwrap() as usize
+}
+fn default_wave_route_queries_per_tick() -> usize {
+    drop_policy_default("wave_route_queries_per_tick")
+        .as_u64()
+        .unwrap() as usize
+}
+fn default_wave_candidate_checks_per_tick() -> usize {
+    drop_policy_default("wave_candidate_checks_per_tick")
+        .as_u64()
+        .unwrap() as usize
+}
+fn default_wave_planning_slice_us() -> u64 {
+    drop_policy_default("wave_planning_slice_us")
+        .as_u64()
+        .unwrap()
+}
 /// Disk-backed local policy; a population may override the complete policy object.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -107,6 +144,24 @@ pub struct ObjectivePolicy {
     pub(super) drop_clearance_m: f64,
     #[serde(default = "default_preentry_stall")]
     pub(super) drop_preentry_stall_ms: u64,
+    #[serde(default = "default_drop_crossing_share")]
+    pub(super) drop_crossing_share: f64,
+    #[serde(default = "default_drop_convoy_limit")]
+    pub(super) drop_convoy_limit: usize,
+    #[serde(default = "default_drop_convoy_landing_gap_m")]
+    pub(super) drop_convoy_landing_gap_m: f64,
+    #[serde(default = "default_drop_holding_vertical_m")]
+    pub(super) drop_holding_vertical_m: f64,
+    #[serde(default = "default_drop_holding_scan")]
+    pub(super) drop_holding_scan: usize,
+    #[serde(default = "default_wave_backlog")]
+    pub(super) wave_backlog: usize,
+    #[serde(default = "default_wave_route_queries_per_tick")]
+    pub(super) wave_route_queries_per_tick: usize,
+    #[serde(default = "default_wave_candidate_checks_per_tick")]
+    pub(super) wave_candidate_checks_per_tick: usize,
+    #[serde(default = "default_wave_planning_slice_us")]
+    pub(super) wave_planning_slice_us: u64,
     planning_slice_us: u64,
     pub(super) candidate_checks_per_tick: usize,
     pub(super) route_queries_per_tick: usize,
@@ -145,6 +200,15 @@ impl ObjectivePolicy {
             || !(0.7..=4.).contains(&self.drop_clearance_m)
             || !(1000..=30000).contains(&self.drop_preentry_stall_ms)
             || !(100..=10000).contains(&self.planning_slice_us)
+            || !(0. ..=1.).contains(&self.drop_crossing_share)
+            || self.drop_convoy_limit > 8
+            || !(0.75..=4.).contains(&self.drop_convoy_landing_gap_m)
+            || !(0.5..=8.).contains(&self.drop_holding_vertical_m)
+            || !(1..=64).contains(&self.drop_holding_scan)
+            || !(1..=256).contains(&self.wave_backlog)
+            || !(1..=16).contains(&self.wave_route_queries_per_tick)
+            || !(1..=64).contains(&self.wave_candidate_checks_per_tick)
+            || !(100..=20000).contains(&self.wave_planning_slice_us)
             || !(1..=32).contains(&self.candidate_checks_per_tick)
             || !(1..=4).contains(&self.route_queries_per_tick)
             || !(1..=8).contains(&self.fresh_route_share)
@@ -195,10 +259,31 @@ struct DropCostGeometry {
     revision: u64,
     entry_buffer: f64,
     signature: Option<u64>,
-    bounds: BTreeMap<u32, crate::actor_collision::Bounds>,
+    exclusive: std::sync::Arc<std::collections::BTreeSet<(u32, u32)>>,
     related: std::sync::Arc<crate::bot_traffic_costs::Relations>,
     rebuild_us: u64,
     quotes: u32,
+}
+impl DropCostGeometry {
+    /// Per-navmesh static state: refreshed only when the mesh or buffer changes.
+    fn refresh_static(&mut self, mesh: &std::sync::Arc<navmesh::NavMesh>, entry_buffer: f64) {
+        if self.entry_buffer == entry_buffer
+            && self
+                .mesh
+                .upgrade()
+                .is_some_and(|old| std::sync::Arc::ptr_eq(&old, mesh))
+        {
+            return;
+        }
+        self.mesh = std::sync::Arc::downgrade(mesh);
+        self.entry_buffer = entry_buffer;
+        self.at = None;
+        self.signature = None;
+        self.exclusive = std::sync::Arc::new(crate::bot_traffic_flow::exclusive_pairs(
+            &mesh.artifact().drop_links,
+            entry_buffer,
+        ));
+    }
 }
 #[derive(Default)]
 pub(super) struct Director {
@@ -210,6 +295,9 @@ pub(super) struct Director {
     cache_world: Option<String>,
     cache: BTreeMap<CandidateKey, Result<replication::CharacterPosition, &'static str>>,
     holding_cache: BTreeMap<(u32, [u32; 3]), Result<replication::CharacterPosition, &'static str>>,
+    /// Queue staging support, sampled in a narrow vertical window around the
+    /// launch floor (kept apart from retreat/egress support sampling).
+    staging_cache: BTreeMap<(u32, [u32; 3]), Result<replication::CharacterPosition, &'static str>>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct CandidateKey {
@@ -503,7 +591,7 @@ impl<W: Write> Engine<W> {
         let Some(mesh) = &self.navmesh_world else {
             return BTreeMap::new();
         };
-        let (related, bounds) = {
+        let related = {
             use std::hash::{Hash, Hasher};
             let mut fingerprint = std::collections::hash_map::DefaultHasher::new();
             for (&actor, b) in &self.bot_registry.bots {
@@ -520,31 +608,7 @@ impl<W: Write> Engine<W> {
             }
             let signature = fingerprint.finish();
             let mut cache = self.bot_registry.director.cost_geometry.borrow_mut();
-            if cache.entry_buffer != policy.drop_entry_buffer_m
-                || !cache
-                    .mesh
-                    .upgrade()
-                    .is_some_and(|old| std::sync::Arc::ptr_eq(&old, mesh))
-            {
-                cache.mesh = std::sync::Arc::downgrade(mesh);
-                cache.entry_buffer = policy.drop_entry_buffer_m;
-                cache.at = None;
-                cache.signature = None;
-                cache.bounds = mesh
-                    .artifact()
-                    .drop_links
-                    .iter()
-                    .map(|link| {
-                        (
-                            link.id,
-                            development_bot_movement::protected_drop_bounds(
-                                link,
-                                policy.drop_entry_buffer_m,
-                            ),
-                        )
-                    })
-                    .collect();
-            }
+            cache.refresh_static(mesh, policy.drop_entry_buffer_m);
             if cache.at != Some(now) {
                 cache.at = Some(now);
                 cache.rebuild_us = 0;
@@ -580,7 +644,6 @@ impl<W: Write> Engine<W> {
                         );
                         crate::bot_traffic_costs::Passage {
                             id: link.id,
-                            protected: cache.bounds[&link.id],
                             approaches,
                             slots: 0,
                             owner_remaining: None,
@@ -597,6 +660,8 @@ impl<W: Write> Engine<W> {
                 let mut budget = policy.drop_traffic_query_budget;
                 cache.related = std::sync::Arc::new(crate::bot_traffic_costs::relations(
                     &geometry,
+                    &cache.exclusive,
+                    policy.drop_crossing_share,
                     &mut budget,
                 ));
                 cache.signature = Some(signature);
@@ -604,7 +669,7 @@ impl<W: Write> Engine<W> {
                 cache.rebuild_us += began.elapsed().as_micros() as u64;
             }
             cache.quotes += 1;
-            (cache.related.clone(), cache.bounds.clone())
+            cache.related.clone()
         };
         // Reservations, owner progress and decaying estimates stay current for
         // every actor, including routes assigned earlier in the same batch.
@@ -621,7 +686,6 @@ impl<W: Write> Engine<W> {
                 );
                 crate::bot_traffic_costs::Passage {
                     id: link.id,
-                    protected: bounds[&link.id],
                     approaches: Vec::new(),
                     slots: reservations.iter().filter(|(_, p)| *p == link.id).count(),
                     owner_remaining: self.bot_registry.owner_remaining(
@@ -641,6 +705,19 @@ impl<W: Write> Engine<W> {
             })
             .collect();
         crate::bot_traffic_costs::costs_with_relations(&passages, &related)
+    }
+    /// Static exclusive passage pairs for the loaded navmesh (see
+    /// `bot_traffic_flow::passages_exclusive`), shared by costing and admission.
+    pub(super) fn passage_exclusions(
+        &self,
+        policy: &ObjectivePolicy,
+    ) -> std::sync::Arc<std::collections::BTreeSet<(u32, u32)>> {
+        let Some(mesh) = &self.navmesh_world else {
+            return Default::default();
+        };
+        let mut cache = self.bot_registry.director.cost_geometry.borrow_mut();
+        cache.refresh_static(mesh, policy.drop_entry_buffer_m);
+        cache.exclusive.clone()
     }
     fn drop_route_costs(
         &self,
@@ -1401,6 +1478,127 @@ impl<W: Write> Engine<W> {
         receipts.push(json!({"op":"bot_traffic_yield","timestamp_ms":now.as_millis()as u64,"object_index":id,"requester":requester,"action":if resume{"resume"}else{"stage"},"result":result}));
         Ok(())
     }
+    /// Queue staging around a launch: walk the candidate ring from `attempt`,
+    /// rejecting with cheap static checks (in front of the ledge, support
+    /// outside the launch floor's vertical window, a different navmesh
+    /// component, protected/lane/occupied) before a route query is spent.
+    /// Returns the first acceptable spot and how many candidates were skipped.
+    #[allow(clippy::too_many_arguments)]
+    fn scan_holding_candidate(
+        &mut self,
+        id: u16,
+        passage: development_bot_movement::DropPassage,
+        attempt: usize,
+        map: &str,
+        policy: &ObjectivePolicy,
+        actors: &crate::actor_collision::ActorGrid,
+        lanes: &[Vec<[[f64; 3]; 2]>],
+        protected: &[crate::actor_collision::Bounds],
+        started: &Instant,
+    ) -> (Result<replication::CharacterPosition, &'static str>, usize) {
+        let body = bot_physics::Body::default();
+        let launch = passage.launch;
+        let forward = {
+            let d = [
+                passage.landing[0] - launch[0],
+                passage.landing[2] - launch[2],
+            ];
+            let len = d[0].hypot(d[1]);
+            (len > 0.01).then(|| [d[0] / len, d[1] / len])
+        };
+        let mesh = self.navmesh_world.clone();
+        let own = self.bot_registry.bots[&id]
+            .target
+            .runtime
+            .unwrap()
+            .physical_position();
+        let source = mesh
+            .as_ref()
+            .and_then(|m| m.component_id(own).or_else(|_| m.component_id(launch)).ok());
+        let mut last = "holding_no_candidate";
+        for k in 0..policy.drop_holding_scan {
+            if k > 0 && started.elapsed().as_micros() >= u128::from(policy.planning_slice_us) {
+                return (Err(last), k - 1);
+            }
+            let index = (attempt + k) % policy.drop_holding_candidate_limit;
+            let offset = holding_offset(index, policy.drop_holding_grid_m);
+            // Spots past the ledge are below it or in the air: never usable.
+            if forward.is_some_and(|f| {
+                offset[0] * f[0] + offset[1] * f[1] > 0.5 * policy.drop_holding_grid_m
+            }) {
+                last = "holding_beyond_launch";
+                continue;
+            }
+            let raw = position([
+                launch[0] + offset[0],
+                launch[1] + 0.5,
+                launch[2] + offset[1],
+            ]);
+            let key = (
+                passage.id,
+                [raw.x.to_bits(), raw.y.to_bits(), raw.z.to_bits()],
+            );
+            let support = if let Some(g) = self.bot_registry.director.staging_cache.get(&key) {
+                *g
+            } else {
+                let g = supported_interval(
+                    self.collision_world.as_ref(),
+                    map,
+                    raw,
+                    policy.drop_holding_vertical_m,
+                    policy.drop_holding_vertical_m,
+                );
+                if self.bot_registry.director.staging_cache.len() >= policy.cache_limit {
+                    self.bot_registry.director.staging_cache.pop_first();
+                }
+                self.bot_registry.director.staging_cache.insert(key, g);
+                g
+            };
+            let goal = match support {
+                Ok(goal) => goal,
+                Err(e) => {
+                    last = e;
+                    continue;
+                }
+            };
+            if let (Some(m), Some(source)) = (&mesh, source)
+                && m.component_id(point(goal)).ok() != Some(source)
+            {
+                last = "holding_component";
+                continue;
+            }
+            let bounds = crate::actor_collision::Bounds::body(point(goal), body);
+            if boxes_intersect(bounds, passage.protected_bounds) {
+                last = "holding_protected";
+                continue;
+            }
+            if protected.iter().any(|b| boxes_intersect(bounds, *b))
+                || lanes.iter().any(|lane| {
+                    crate::bot_traffic_flow::in_lane(
+                        point(goal),
+                        lane,
+                        policy.reservation_spacing_m,
+                    )
+                })
+            {
+                last = "holding_approach";
+                continue;
+            }
+            let reserved = self.bot_registry.bots.iter().any(|(&other, b)| {
+                other != id
+                    && b.drop_holding_goal
+                        .into_iter()
+                        .chain(b.task.goal)
+                        .any(|g| distance(g, goal) < policy.reservation_spacing_m)
+            });
+            match actors.occupied(id, point(goal), body) {
+                Ok(false) if !reserved => return (Ok(goal), k),
+                Ok(_) => last = "holding_occupied",
+                Err(e) => last = e,
+            }
+        }
+        (Err(last), policy.drop_holding_scan.saturating_sub(1))
+    }
     #[allow(clippy::too_many_arguments)]
     pub(super) fn plan_drop_holding(
         &mut self,
@@ -1456,6 +1654,7 @@ impl<W: Write> Engine<W> {
         let attempt = b.drop_holding_attempt;
         let role_sprint = self.bot_registry.config.as_ref().unwrap().slots[b.slot].sprint;
         let map = self.map_name().to_owned();
+        let mut skipped = 0;
         let goal = if prepare {
             Ok(position(passage.launch))
         } else if resume && !physical_exit {
@@ -1463,6 +1662,12 @@ impl<W: Write> Engine<W> {
                 .role_goal
                 .or(b.task.goal)
                 .ok_or("bot_drop_resume_goal_missing")
+        } else if !physical_exit && !local_rejoin {
+            let (goal, scanned) = self.scan_holding_candidate(
+                id, passage, attempt, &map, policy, actors, &lanes, &protected, started,
+            );
+            skipped = scanned;
+            goal
         } else {
             let origin = if physical_exit || local_rejoin {
                 point(b.target.runtime.unwrap().position)
@@ -1804,7 +2009,7 @@ impl<W: Write> Engine<W> {
                 .bots
                 .get_mut(&id)
                 .unwrap()
-                .drop_holding_attempt += 1;
+                .drop_holding_attempt += 1 + skipped;
         }
         if prepare && result.is_err() && !matches!(result, Err("bot_planning_slice_yield")) {
             let b = self.bot_registry.bots.get_mut(&id).unwrap();
@@ -2058,6 +2263,38 @@ impl<W: Write> Engine<W> {
                 continue;
             }
         }
+        // A spawn wave puts dozens of bots on the planner at once: each needs a
+        // first route and then a queue staging spot. Under that backlog the
+        // shared per-tick budget is raised so the wave leaves together instead
+        // of being routed a few bots per tick.
+        let backlog = self
+            .bot_registry
+            .bots
+            .values()
+            .filter(|b| {
+                b.health > 0
+                    && b.target.runtime.is_some_and(|r| {
+                        r.physics_motion.is_some_and(|m| m.grounded) && !r.navmesh_state.on_player
+                    })
+                    && ((b.task.objective.is_some() && !b.task.routed)
+                        || (b.drop_waiting.is_some() && b.drop_holding_goal.is_none()))
+            })
+            .count();
+        let wave = backlog >= policy.wave_backlog;
+        let policy = if wave {
+            ObjectivePolicy {
+                route_queries_per_tick: policy
+                    .route_queries_per_tick
+                    .max(policy.wave_route_queries_per_tick),
+                candidate_checks_per_tick: policy
+                    .candidate_checks_per_tick
+                    .max(policy.wave_candidate_checks_per_tick),
+                planning_slice_us: policy.planning_slice_us.max(policy.wave_planning_slice_us),
+                ..policy
+            }
+        } else {
+            policy
+        };
         let mut candidates = 0;
         let mut queries = 0;
         let mut cache_hits = 0;
@@ -2518,7 +2755,7 @@ impl<W: Write> Engine<W> {
                 let cache = self.bot_registry.director.cost_geometry.borrow();
                 json!({"rebuild_us":if cache.at==Some(now){cache.rebuild_us}else{0},"quotes":if cache.at==Some(now){cache.quotes}else{0}})
             };
-            receipts.push(json!({"op":"bot_planning_slice","timestamp_ms":now.as_millis()as u64,"candidate_checks":candidates,"route_queries":queries,"cached_candidates":cache_hits,"cost_geometry":geometry,"elapsed_us":started.elapsed().as_micros()as u64,"soft_budget_us":policy.planning_slice_us}));
+            receipts.push(json!({"op":"bot_planning_slice","timestamp_ms":now.as_millis()as u64,"candidate_checks":candidates,"route_queries":queries,"cached_candidates":cache_hits,"cost_geometry":geometry,"elapsed_us":started.elapsed().as_micros()as u64,"soft_budget_us":policy.planning_slice_us,"wave":wave,"backlog":backlog}));
         }
         for receipt in receipts {
             self.record(receipt, wall)?;
