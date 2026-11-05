@@ -20,7 +20,7 @@ permissions: {}
 
 jobs:
   publish:
-    runs-on: ubuntu-24.04
+    runs-on: mag-recomp-server
     permissions:
       contents: read
       packages: write

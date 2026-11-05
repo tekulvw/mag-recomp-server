@@ -25,7 +25,7 @@ jobs:
 
   build-images:
     needs: checks
-    runs-on: ubuntu-24.04
+    runs-on: mag-recomp-server
     permissions:
       contents: read
       packages: write
@@ -73,7 +73,7 @@ jobs:
 
   promote-main:
     needs: build-images
-    runs-on: ubuntu-24.04
+    runs-on: mag-recomp-server
     permissions:
       contents: read
       packages: write
@@ -86,6 +86,9 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
+      - name: Install the GitHub CLI on a self-hosted runner
+        if: runner.environment == 'self-hosted'
+        run: command -v gh >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends gh; }
       - name: Promote current main images
         env:
           GH_TOKEN: ${{ github.token }}
