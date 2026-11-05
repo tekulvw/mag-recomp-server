@@ -299,6 +299,7 @@ class ChartTests(unittest.TestCase):
             self.assertIn('verify-data', init)
             self.assertEqual(init['fetch-data']['envFrom'], [{'secretRef': {'name': 'object-store'}}])
             self.assertIn('a'*64, init['verify-data']['args'])
+            self.assertEqual(init['verify-data']['args'][-1], '--replace-existing')
         scripts = next(d for d in docs if d['kind'] == 'ConfigMap' and 'data_bundle.py' in d.get('data', {}))
         self.assertIn('unpack', scripts['data']['data_bundle.py'])
 

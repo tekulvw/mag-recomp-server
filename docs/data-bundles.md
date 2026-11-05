@@ -126,19 +126,25 @@ program shipped in `charts/mag-recomp-server/files/data_bundle.py`:
 python3 /scripts/data_bundle.py unpack \
   --archive /download/bundle.tar.gz \
   --sha256 REPLACE_WITH_SHA256 \
-  --output-dir /catalogs
+  --output-dir /catalogs \
+  --replace-existing
 ```
 
-`/catalogs` is an already mounted, empty directory. Verification leaves that
+`/catalogs` is an already mounted Pod emptyDir. Verification leaves that
 mount root in place. It hashes the entire compressed archive before reading
 tar contents, then stages all files under a temporary child directory. Only
 after every file passes validation are the staged children promoted into the
-volume. Files and the internal `.mag-data-manifest.json` become mode 0444. An
-existing nonempty output, including a previously completed bundle, fails; use a
-fresh Pod/emptyDir for a different catalog version. The container startup order
+volume. Files and the internal `.mag-data-manifest.json` become mode 0444. Without
+`--replace-existing`, an existing nonempty output, including a previously
+completed bundle, fails. The chart passes `--replace-existing` because the
+emptyDir belongs to the Pod: when a node restarts a Pod in place (for example
+after a reboot shorter than the eviction timeout), the Pod keeps its emptyDir
+and reruns its init containers, so the previous result is deleted, without
+following symlinks, and the archive is verified again from scratch. A different
+catalog version still rolls out as a new Pod. The container startup order
 keeps applications from observing promotion in progress. An interrupted or
-failed promotion must never be accepted as a complete bundle: recreate the Pod
-if it leaves a nonempty volume. The init containers must be the only writers.
+failed promotion must never be accepted as a complete bundle; the next init run
+clears it, or recreate the Pod. The init containers must be the only writers.
 
 Manifest schema `mag-data-bundle`, version `1`, contains an exact file list with
 per-file byte size and SHA-256, `data_revision`, `source_hash` and

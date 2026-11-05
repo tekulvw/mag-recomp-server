@@ -79,7 +79,7 @@ exec:
   image: {{ include "mag.image" .Values.images.python }}
   imagePullPolicy: {{ .Values.images.python.pullPolicy }}
   command: [python3, /scripts/data_bundle.py]
-  args: [unpack, --archive, /download/bundle.tar.gz, --sha256, {{ .Values.data.s3.sha256 | quote }}, --output-dir, /catalogs]
+  args: [unpack, --archive, /download/bundle.tar.gz, --sha256, {{ .Values.data.s3.sha256 | quote }}, --output-dir, /catalogs, --replace-existing]
   securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
   resources: {{ toYaml .Values.resources.init | nindent 4 }}
   volumeMounts:
