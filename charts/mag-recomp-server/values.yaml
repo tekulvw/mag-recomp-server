@@ -43,6 +43,9 @@ runtime:
   gameType: 3
   minimumPlayers: 1
   maximumPlayers: 8
+  # Optional first spawn-wave delay override in ms (1-120000): one value for both
+  # teams or [team0, team1]. Unset keeps the spawn catalog's authored delay.
+  initialSpawnDelayMs: null
 accounts:
   existingClaim: ""
   size: 1Gi

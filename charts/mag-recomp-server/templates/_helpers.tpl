@@ -99,7 +99,7 @@ exec:
 {{- if and $rotation.retentionSeconds (not $rotation.segmentBytes) -}}
 {{- fail "logs.rotation.retentionSeconds requires logs.rotation.segmentBytes" -}}
 {{- end -}}
-{{- $managed := list "--bot-names" "--application-id" "--bind" "--log" "--log-segment-bytes" "--log-retention-s" "--item-catalog" "--spawn-catalog" "--wire-profiles" "--skill-catalog" "--validate-catalogs" -}}
+{{- $managed := list "--bot-names" "--application-id" "--bind" "--log" "--log-segment-bytes" "--log-retention-s" "--item-catalog" "--spawn-catalog" "--wire-profiles" "--skill-catalog" "--validate-catalogs" "--initial-spawn-delay-ms" -}}
 {{- if $retail -}}
 {{- $managed = concat $managed (list "--character-blast-rules" "--bootstrap-loadouts" "--retail-combat-metadata" "--retail-armory-catalog" "--fall-damage-rules" "--structure-catalog" "--bunker-catalog" "--bunker-exit-policy") -}}
 {{- end -}}

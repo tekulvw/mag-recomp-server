@@ -84,6 +84,18 @@ fn open_log(
     })
 }
 
+/// One delay for both teams, or "TEAM0,TEAM1". Range checks happen in the catalog.
+fn parse_team_delays(value: &str) -> Option<[u32; 2]> {
+    let parts: Vec<u32> = value
+        .split(',')
+        .map(|part| part.trim().parse().ok())
+        .collect::<Option<_>>()?;
+    match parts.as_slice() {
+        [both] => Some([*both, *both]),
+        [team0, team1] => Some([*team0, *team1]),
+        _ => None,
+    }
+}
 fn main() -> io::Result<()> {
     run(std::env::args().skip(1))
 }
@@ -102,6 +114,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     let mut bot_population_path: Option<PathBuf> = None;
     let mut bot_names_path: Option<PathBuf> = None;
     let mut bot_fill_total: usize = 0;
+    let mut initial_spawn_delay_ms: Option<[u32; 2]> = None;
     let mut match_profiles_path: Option<PathBuf> = None;
     let mut spawn_path: Option<PathBuf> = None;
     let mut ground_vehicles_path: Option<PathBuf> = None;
@@ -158,6 +171,14 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                         .ok_or_else(|| io::Error::other("--bot-population requires a path"))?
                         .into(),
                 );
+            }
+            "--initial-spawn-delay-ms" => {
+                let value = args.next().ok_or_else(|| {
+                    io::Error::other("--initial-spawn-delay-ms requires milliseconds")
+                })?;
+                initial_spawn_delay_ms = Some(parse_team_delays(&value).ok_or_else(|| {
+                    io::Error::other("invalid --initial-spawn-delay-ms (use N or TEAM0,TEAM1)")
+                })?);
             }
             "--bot-fill-total" => {
                 bot_fill_total = args
@@ -595,6 +616,13 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     let spawn_path = spawn_path
         .ok_or_else(|| io::Error::other("--spawn-catalog is required for gameplay startup"))?;
     let catalog = mag_gameplay::spawn_catalog::SpawnCatalog::load(&spawn_path)?;
+    let catalog = match initial_spawn_delay_ms {
+        Some(delay) => catalog
+            .with_initial_spawn_delay_ms(delay)
+            .map_err(io::Error::other)?,
+        None => catalog,
+    };
+    let effective_initial_spawn_delay_ms = catalog.match_profile().initial_spawn_delay_ms;
     if ground_vehicles_path
         .as_ref()
         .is_some_and(|path| !path.is_absolute())
@@ -1069,7 +1097,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     );
     println!(
         "{}",
-        serde_json::json!({"event":"listening","application_id":application_id.unwrap_or(20230),"match_profiles":match_profiles_path,"profile_selection":if application_id.is_some(){"explicit"}else{"legacy"},"protocol":mag_gameplay::BRIDGE_VERSION,"address":listener.local_addr()?.to_string(),"collision":collision_info,"spawn_catalog":spawn_path,"objective_catalog":objective_info,"item_catalog":item_path,"character_blast_rules":blast_rules_path,"retail_combat_metadata":retail_metadata,"bootstrap_loadouts":bootstrap_loadouts_path,"fall_damage_rules":fall_rules_path,"incapacitation_rules":incapacitation_rules_path,"character_damage_rules":character_damage_rules_path,"skill_catalog":skill_path,"retail_armory_catalog":retail_armory_path,"leadership_passives":leadership_passives_path,"leadership_role_policy":leadership_role_policy_path,"bunkers":bunker_info,"tick_telemetry":telemetry_path,"tick_budget_us":tick_budget_us,"scheduler":"independent_50ms_when_subscribed","bot_fill_total":bot_fill_total,"bot_population":bot_population_path,"bot_names":bot_names_path,"bot_names_count":bot_names_count,"development_dummy_position":actual_dummy_position})
+        serde_json::json!({"event":"listening","application_id":application_id.unwrap_or(20230),"match_profiles":match_profiles_path,"profile_selection":if application_id.is_some(){"explicit"}else{"legacy"},"protocol":mag_gameplay::BRIDGE_VERSION,"address":listener.local_addr()?.to_string(),"collision":collision_info,"spawn_catalog":spawn_path,"objective_catalog":objective_info,"item_catalog":item_path,"character_blast_rules":blast_rules_path,"retail_combat_metadata":retail_metadata,"bootstrap_loadouts":bootstrap_loadouts_path,"fall_damage_rules":fall_rules_path,"incapacitation_rules":incapacitation_rules_path,"character_damage_rules":character_damage_rules_path,"skill_catalog":skill_path,"retail_armory_catalog":retail_armory_path,"leadership_passives":leadership_passives_path,"leadership_role_policy":leadership_role_policy_path,"bunkers":bunker_info,"tick_telemetry":telemetry_path,"tick_budget_us":tick_budget_us,"scheduler":"independent_50ms_when_subscribed","bot_fill_total":bot_fill_total,"initial_spawn_delay_ms":effective_initial_spawn_delay_ms,"initial_spawn_delay_source":if initial_spawn_delay_ms.is_some(){"override"}else{"catalog"},"bot_population":bot_population_path,"bot_names":bot_names_path,"bot_names_count":bot_names_count,"development_dummy_position":actual_dummy_position})
     );
     for connection in listener.incoming() {
         let stream = connection?;
@@ -2386,5 +2414,19 @@ mod runtime_profile_tests {
         .is_err();
         std::fs::remove_dir_all(temporary).unwrap();
         assert!(matched && mismatched && missing);
+    }
+}
+
+#[cfg(test)]
+mod initial_spawn_delay_flag_tests {
+    use super::parse_team_delays;
+
+    #[test]
+    fn one_value_applies_to_both_teams_and_pairs_are_per_team() {
+        assert_eq!(parse_team_delays("10000"), Some([10000, 10000]));
+        assert_eq!(parse_team_delays("10000,15000"), Some([10000, 15000]));
+        for invalid in ["", "x", "10000,", "1,2,3", "-5", "10000;15000"] {
+            assert_eq!(parse_team_delays(invalid), None, "{invalid:?}");
+        }
     }
 }

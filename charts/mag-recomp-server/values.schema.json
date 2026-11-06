@@ -246,6 +246,13 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 8
+        },
+        "initialSpawnDelayMs": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "integer", "minimum": 1, "maximum": 120000},
+            {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 120000}, "minItems": 2, "maxItems": 2}
+          ]
         }
       },
       "required": [

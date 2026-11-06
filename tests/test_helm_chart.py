@@ -111,6 +111,18 @@ class ChartTests(unittest.TestCase):
         for flag in ('--log-segment-bytes', '--log-retention-s'):
             render({'data': {'gameplayExtraArgs': [flag, '60']}}, ok=False)
 
+    def test_optional_initial_spawn_delay_override(self):
+        default = gameplay_arguments(render())
+        self.assertNotIn('--initial-spawn-delay-ms', default)
+        both = gameplay_arguments(render({'runtime': {'initialSpawnDelayMs': 10000}}))
+        self.assertEqual(both[both.index('--initial-spawn-delay-ms') + 1], '10000')
+        per_team = gameplay_arguments(render({'runtime': {'initialSpawnDelayMs': [10000, 15000]}}))
+        self.assertEqual(per_team[per_team.index('--initial-spawn-delay-ms') + 1], '10000,15000')
+        for invalid in (0, 120001, [10000], [10000, 0], [1, 2, 3], '10000'):
+            render({'runtime': {'initialSpawnDelayMs': invalid}}, ok=False)
+        self.assertIn('chart-managed', render(
+            {'data': {'gameplayExtraArgs': ['--initial-spawn-delay-ms', '10000']}}, ok=False))
+
     def test_default_retail_startup_contract(self):
         docs = render()
         service = next(d for d in docs if d['kind'] == 'Service' and d['metadata']['name'].endswith('-medius'))
