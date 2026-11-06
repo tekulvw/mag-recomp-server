@@ -296,7 +296,7 @@ namespace Server.Medius
             // Operator maintenance runs offline against the store; it starts no listeners.
             if (args.Length > 0 && args[0] == "admin")
             {
-                Environment.ExitCode = MagAdminCli.Main(args.Skip(1).ToArray());
+                Environment.ExitCode = MagAdminCli.RunCommandLine(args.Skip(1).ToArray());
                 return;
             }
 

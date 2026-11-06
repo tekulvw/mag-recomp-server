@@ -26,8 +26,11 @@ namespace Server.Medius
 account has a live login (session markers in $MAG_ACTIVE_ACCOUNTS_DIR, default /tmp), and lowering
 a level is refused. Applied changes first copy the store to .maintenance-backups/ beside it.";
 
-        /// <summary>Process entry for <c>Server.Medius.dll admin …</c>; loads configuration like the server.</summary>
-        public static int Main(string[] args)
+        /// <summary>
+        /// Command line for <c>Server.Medius.dll admin …</c>; loads configuration like the server.
+        /// Deliberately not named Main: a synchronous Main would replace Program's async entry point.
+        /// </summary>
+        public static int RunCommandLine(string[] args)
         {
             string config = "/config/main";
             var rest = new List<string>();

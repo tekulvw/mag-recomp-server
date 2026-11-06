@@ -37,6 +37,7 @@ Test("retail waiting and cancellation wire", QueueWireChecks.Run);
 Test("faction matchmaking fairness and role selection", FactionMatchmakingChecks.Run);
 Test("pending human queue ownership and cancellation", PendingHumanQueueChecks.Run);
 Test("mag-admin raises levels safely and honours live logins", AdminCliChecks.Run);
+Test("medius starts through Program.Main, not the admin CLI", MediusEntryPointChecks.Run);
 Test("unsupported join requests name their rejection", JoinRejectionChecks.Run);
 Test("refused gameplay admission names its release reason", AdmissionFailureChecks.Run);
 Test("rejected gameplay release cannot hold admission forever", RejectedReleaseChecks.Run);
