@@ -748,6 +748,14 @@ impl<W: Write> Engine<W> {
                 self.queue_roster(now)?;
             }
         }
+        // A reserve is a control request. Horizon's bridge codec accepts reliable
+        // messages only on event and release replies and rejects any other reply
+        // that carries them as malformed, which refused a second human's join
+        // whenever another ready human had packets queued. Leave peers' queues to
+        // the world stream or their next event instead of piggybacking on admission.
+        if incoming_human.is_some() {
+            return Ok(messages);
+        }
         if !self.world_tick_enabled {
             self.queue_team_wave_deadlines(now, wall)?;
             messages.extend(self.tick_objectives(now, wall)?);
