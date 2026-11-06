@@ -133,17 +133,31 @@ pub(crate) fn reserve(engine: &mut Engine<Vec<u8>>, player: u16) {
     reserve_faction(engine, player, 1);
 }
 fn reserve_faction(engine: &mut Engine<Vec<u8>>, player: u16, faction: u8) {
+    let response = reserve_identity(
+        engine,
+        player,
+        faction,
+        &format!("synthetic-reservation-{player:04}"),
+    );
+    assert!(response.ok, "{:?}", response.error);
+}
+fn reserve_identity(
+    engine: &mut Engine<Vec<u8>>,
+    player: u16,
+    faction: u8,
+    reservation_id: &str,
+) -> Response {
     let mut saved = loadouts::SavedLoadouts {
         selected_index: 0,
         update_ids: [1; 5],
         inventories: [[None; 22]; 5],
     };
     saved.inventories[0][0] = Some(2);
-    let response = engine.handle(
+    engine.handle(
         Request::Reserve {
             v: BRIDGE_VERSION,
             request_id: format!("synthetic-reserve-{player}"),
-            reservation_id: format!("synthetic-reservation-{player:04}"),
+            reservation_id: reservation_id.into(),
             world_id: 1,
             player_id: player,
             account_id: u32::from(player) + 1,
@@ -157,8 +171,7 @@ fn reserve_faction(engine: &mut Engine<Vec<u8>>, player: u16, faction: u8) {
         },
         Duration::ZERO,
         1,
-    );
-    assert!(response.ok, "{:?}", response.error);
+    )
 }
 fn actors(engine: &mut Engine<Vec<u8>>) -> impl Iterator<Item = &mut Active> {
     engine.peers.values_mut().chain(engine.active.iter_mut())
@@ -961,6 +974,8 @@ fn parachute_without_resolved_inventory_keeps_the_pending_wave_without_consumpti
 mod acquisition_entry;
 #[path = "ground_vehicle_runtime_tests.rs"]
 mod ground_vehicle_runtime;
+#[path = "reservation_eviction_tests.rs"]
+mod reservation_eviction;
 #[path = "startup_quorum_tests.rs"]
 mod startup_quorum;
 
