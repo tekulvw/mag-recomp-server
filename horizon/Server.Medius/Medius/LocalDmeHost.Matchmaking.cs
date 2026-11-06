@@ -67,11 +67,10 @@ namespace Server.Medius
         public void QueueJoin(MagMlsSession session,MagJoinGameRequest request,
             Action<MagPluginClientMessage> send,Func<bool> connected,Action<MagCharacterRecord> notify=null)
         {
-            if(!UsesFactionMatchmaking||session==null||request is not MagRetailJoinGameRequest retail||retail.PartyId!=0||
-                session.ApplicationId!=20231||session.State!=MagMlsSession.SessionState.Ready||session.IsExpired(DateTime.UtcNow)||
-                session.AccountId==0||session.CharacterId==0||!MagDevelopmentAccountPolicy.ValidAccount(session.AuthenticatedAccount)||
-                request.Preference!=1||request.ClientType!=0||!_matchProfiles.Any(p=>(uint)p.GameType==request.Value)||!IsReady||!connected())
-            {send(JoinResponse(request.TransactionId,2));return;}
+            var rejection=!UsesFactionMatchmaking?"faction_matchmaking_disabled":
+                JoinRequestRejection(request,true,mode=>_matchProfiles.Any(p=>(uint)p.GameType==mode))??JoinSessionRejection(session)??
+                (!connected()?"lobby_disconnected":null);
+            if(rejection!=null){LogJoinRejection(rejection,request);send(JoinResponse(request.TransactionId,2));return;}
             try
             {
                 var character=_store.ReadForAccount(session.AuthenticatedAccount).SingleOrDefault(c=>c.Id==session.CharacterId);
