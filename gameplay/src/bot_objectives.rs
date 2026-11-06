@@ -102,6 +102,11 @@ fn default_wave_candidate_checks_per_tick() -> usize {
         .as_u64()
         .unwrap() as usize
 }
+fn default_drop_holding_progress_stall_ms() -> u64 {
+    drop_policy_default("drop_holding_progress_stall_ms")
+        .as_u64()
+        .unwrap()
+}
 fn default_spawn_exit_goal_weight() -> f64 {
     drop_policy_default("spawn_exit_goal_weight")
         .as_f64()
@@ -160,6 +165,10 @@ pub struct ObjectivePolicy {
     pub(super) wave_candidate_checks_per_tick: usize,
     #[serde(default = "default_wave_planning_slice_us")]
     pub(super) wave_planning_slice_us: u64,
+    /// A bot walking to its holding spot that makes no 0.5 m progress for
+    /// this long (body-blocked) is restaged without waiting for the full stall.
+    #[serde(default = "default_drop_holding_progress_stall_ms")]
+    pub(super) drop_holding_progress_stall_ms: u64,
     /// Weight of the remaining distance to the goal when choosing the first
     /// drop out of a spawn: 0 picks the fastest exit, 1 the shortest route.
     #[serde(default = "default_spawn_exit_goal_weight")]
@@ -211,6 +220,7 @@ impl ObjectivePolicy {
             || !(1..=64).contains(&self.wave_candidate_checks_per_tick)
             || !(100..=20000).contains(&self.wave_planning_slice_us)
             || !(0. ..=1.).contains(&self.spawn_exit_goal_weight)
+            || !(1000..=30000).contains(&self.drop_holding_progress_stall_ms)
             || !(1..=32).contains(&self.candidate_checks_per_tick)
             || !(1..=4).contains(&self.route_queries_per_tick)
             || !(1..=8).contains(&self.fresh_route_share)
@@ -1577,6 +1587,21 @@ impl<W: Write> Engine<W> {
                 last = "holding_component";
                 continue;
             }
+            // Never send a bot through another body to reach its spot: two
+            // waiters swapping sides in a one-body corridor deadlock.
+            let mut sweep_budget = 512;
+            if !matches!(
+                crate::bot_traffic_flow::approach_blocker(
+                    actors,
+                    id,
+                    &[[own, point(goal)]],
+                    &mut sweep_budget,
+                ),
+                Ok(None)
+            ) {
+                last = "holding_path_blocked";
+                continue;
+            }
             let bounds = crate::actor_collision::Bounds::body(point(goal), body);
             if boxes_intersect(bounds, passage.protected_bounds) {
                 last = "holding_protected";
@@ -2366,7 +2391,13 @@ impl<W: Write> Engine<W> {
                             .is_some_and(|g| distance(g, r.position) > policy.arrival_m)
                             && (!matches!(r.phase, BotPhase::Relocating)
                                 || now.saturating_sub(r.since)
-                                    > Duration::from_millis(policy.drop_holding_stall_ms))))
+                                    > Duration::from_millis(policy.drop_holding_stall_ms)
+                                || b.holding_progress.is_some_and(|(_, _, since)| {
+                                    now.saturating_sub(since)
+                                        >= Duration::from_millis(
+                                            policy.drop_holding_progress_stall_ms,
+                                        )
+                                }))))
                     || b.drop_resume
                     || b.drop_egress
                     || b.drop_retreat

@@ -130,6 +130,12 @@ pub(super) struct WorldBot {
     pub(super) drop_holding_goal: Option<replication::CharacterPosition>,
     pub(super) drop_holding_attempt: usize,
     pub(super) holding_retry_at: Duration,
+    /// (holding goal, last position with progress, when) while walking to it.
+    pub(super) holding_progress: Option<(
+        replication::CharacterPosition,
+        replication::CharacterPosition,
+        Duration,
+    )>,
     pub(super) drop_resume: bool,
     pub(super) drop_egress: bool,
     pub(super) drop_retreat: bool,
@@ -1399,6 +1405,20 @@ impl<W: Write> Engine<W> {
             .collect();
         for (&id, b) in &mut self.bot_registry.bots {
             let r = b.target.runtime.unwrap();
+            // Progress toward a holding spot; a body-blocked walk restages early.
+            match b.drop_holding_goal {
+                Some(goal)
+                    if distance(goal, r.position) > policy.arrival_m
+                        && matches!(r.phase, BotPhase::Relocating) =>
+                {
+                    if b.holding_progress.is_none_or(|(g, p, _)| {
+                        distance(g, goal) > 0.01 || distance(p, r.position) >= 0.5
+                    }) {
+                        b.holding_progress = Some((goal, r.position, now));
+                    }
+                }
+                _ => b.holding_progress = None,
+            }
             let key = passages.get(&id).map(|p| crate::bot_traffic_costs::Key {
                 generation: r.generation,
                 objective: b.task.objective,
@@ -2384,6 +2404,7 @@ impl<W: Write> Engine<W> {
                     drop_holding_goal: None,
                     drop_holding_attempt: 0,
                     holding_retry_at: Duration::ZERO,
+                    holding_progress: None,
                     drop_resume: false,
                     drop_egress: false,
                     drop_retreat: false,
