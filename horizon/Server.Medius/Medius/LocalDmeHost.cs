@@ -66,6 +66,13 @@ namespace Server.Medius
         /// <summary>Next attempt for a definitively rejected release, or null once it must be abandoned.</summary>
         public static DateTime? NextRejectedReleaseAttempt(DateTime firstRejectedUtc, DateTime nowUtc) =>
             nowUtc - firstRejectedUtc >= RejectedReleaseAbandonAfter ? null : nowUtc + RejectedReleaseRetryInterval;
+        /// <summary>Release reason for a join whose gameplay reserve was not accepted, or accepted while Horizon was not ready.</summary>
+        public static string AdmissionFailureReason(GameplayBridgeResponse reply, bool ready)
+        {
+            if (reply == null) return "admission_unanswered";
+            if (reply.Ok != true) return reply.IsTransientFailure ? "admission_unavailable" : "admission_rejected";
+            return ready ? "admission_accepted" : "admission_not_ready";
+        }
         public static int SupportedMaximumPlayers(int applicationId, int gameType)
         {
             bool retail = applicationId == 20231;
@@ -186,7 +193,15 @@ namespace Server.Medius
                 if (admittedRouted) await SettleLoadoutSelectionsAsync(admittedReply);
                 await SettleRewardsAsync(admittedReply);
                 bool admitted = admittedReply?.Ok == true;
-                if (!admitted || !IsReady) { await ReleaseAsync(reservation); return failure; }
+                bool ready; bool readyFlag; bool streamHealthy; lock (_gate) { readyFlag = _ready; streamHealthy = _worldStreamHealthy; ready = readyFlag && streamHealthy && !_disposed; }
+                if (!admitted || !ready)
+                {
+                    // Gameplay may record the reservation before a later step of its reserve
+                    // fails, so name the cause here instead of the default transport_closed.
+                    reservation.ReleaseReason = AdmissionFailureReason(admittedReply, ready);
+                    Logger.Warn($"Gameplay admission refused: player={client.DmeId} reason={reservation.ReleaseReason} error={admittedReply?.Error ?? "none"} failure={admittedReply?.Failure.ToString() ?? "Unavailable"} elapsed_ms={admittedReply?.ElapsedMilliseconds ?? -1} ready={readyFlag} world_stream={streamHealthy}");
+                    await ReleaseAsync(reservation); return failure;
+                }
                 lock (_gate) { if (!Current(reservation) || reservation.Invalidated || !_worldStreamHealthy) { reservation.Invalidated = true; reservation.ReleaseReason = "world_stream_gap"; return failure; } reservation.Accepted = true; }
                 // Reconcile once after admission, closing saves committed between
                 // the initial store read and registration/reserve acknowledgement.
