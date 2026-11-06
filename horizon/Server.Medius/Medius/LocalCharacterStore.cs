@@ -130,6 +130,25 @@ namespace Server.Medius
             PreviousLevel = PreviousLevel, SkillPoints = SkillPoints, ExperienceAwarded = ExperienceAwarded,
             MatchExperience = MatchExperience, MatchFraction = MatchFraction };
     }
+    /// <summary>Planned or applied operator level change; Refused carries a reason and no write.</summary>
+    public sealed class AdminLevelChange
+    {
+        public bool Refusal { get; private set; }
+        public bool Applied { get; internal set; }
+        public string Reason { get; internal set; }
+        public string Account { get; internal set; }
+        public uint CharacterId { get; internal set; }
+        public string Name { get; internal set; }
+        public byte PreviousLevel { get; internal set; }
+        public int PreviousExperience { get; internal set; }
+        public byte PreviousSkillPoints { get; internal set; }
+        public byte Level { get; internal set; }
+        public int Experience { get; internal set; }
+        public byte SkillPoints { get; internal set; }
+        public string BackupPath { get; internal set; }
+        internal static AdminLevelChange Refused(string reason, MagCharacterRecord current = null) => new AdminLevelChange {
+            Refusal = true, Reason = reason, PreviousLevel = current?.Level ?? 0, Level = current?.Level ?? 0 };
+    }
     public interface ICharacterStoreCommitter { void WriteAtomically(string path, byte[] contents); }
 
     /// <summary>Linux local-filesystem commit: flush file, atomic rename, then sync directory.
@@ -513,6 +532,45 @@ namespace Server.Medius
             // The flag is the durable receipt. A failed/uncertain save never returns a success
             // snapshot; after a rename the next request observes it and cannot reward twice.
             return new TrainingCompletionOutcome { Result = MagNetResult.Success, Reason = "training-completed", NewlyCompleted = true, Record = character.ToRecord() };
+        }
+        /// <summary>
+        /// Operator maintenance: raise one account's character to a level exactly as earned progression
+        /// would, setting XP to the level threshold and granting the skill points of each level gained.
+        /// Runs under the store lock; with <paramref name="apply"/> it first copies the current store
+        /// into <paramref name="backupDirectory"/>. Lowering is refused because spent points cannot be
+        /// reconciled.
+        /// </summary>
+        public AdminLevelChange RaiseLevelForAdmin(string account, byte level, bool apply, string backupDirectory)
+        {
+            var catalog = ProgressionCatalog;
+            if (catalog == null) return AdminLevelChange.Refused("progression-catalog-unavailable");
+            if (!MagDevelopmentAccountPolicy.ValidAccount(account)) return AdminLevelChange.Refused("invalid-account");
+            if (level < 1 || level > catalog.MaximumLevel) return AdminLevelChange.Refused("level-out-of-range");
+            string path = ValidPath();
+            using var lease = AcquireLock(path + ".lock");
+            var document = ReadDocument();
+            var character = document.Characters.SingleOrDefault(c => c.Account == account);
+            if (character == null) return AdminLevelChange.Refused("account-not-found");
+            var before = character.ToRecord();
+            if (level < before.Level) return AdminLevelChange.Refused("lowering-unsupported", before);
+            var change = new AdminLevelChange { Account = account, CharacterId = character.Id, Name = character.Name,
+                PreviousLevel = before.Level, PreviousExperience = (int)before.Experience, PreviousSkillPoints = before.SkillPoints,
+                Level = level, Experience = level == before.Level ? (int)before.Experience : catalog.ThresholdForLevel(level),
+                SkillPoints = catalog.PointsAfterGain(before.SkillPoints, before.Level, level) };
+            if (change.Level == change.PreviousLevel) { change.Reason = "unchanged"; return change; }
+            if (!apply) { change.Reason = "dry-run"; return change; }
+            if (string.IsNullOrWhiteSpace(backupDirectory) || !Path.IsPathFullyQualified(backupDirectory))
+                return AdminLevelChange.Refused("backup-directory-required", before);
+            byte[] current = File.ReadAllBytes(path);
+            string digest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(current)).ToLowerInvariant();
+            Directory.CreateDirectory(backupDirectory);
+            change.BackupPath = Path.Combine(backupDirectory, $"characters.before-admin-set-level-{account}-{level}-{digest.Substring(0, 12)}.json");
+            using (var backup = new FileStream(change.BackupPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            { backup.Write(current); backup.Flush(true); }
+            character.Experience = change.Experience; character.Level = change.Level; character.SkillPoints = change.SkillPoints;
+            Commit(path, document.Characters, document);
+            change.Applied = true; change.Reason = "applied";
+            return change;
         }
         private void Commit(string path, List<StoredCharacter> all, Document document = null)
         {

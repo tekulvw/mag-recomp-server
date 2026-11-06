@@ -58,7 +58,7 @@ namespace Server.Medius
             SkillCatalog = Settings.EnableMagCharacterCatalogs || (Settings.MagApplicationId == 20231 && SkillCatalog?.ApplicationId == 20231) ? SkillCatalog : null,
             ProgressionCatalog = Settings.MagApplicationId == 20231 || Settings.EnableMagCharacterCatalogs ? ProgressionCatalog : null,
             InitialSkillPoints = Settings.EnableMagCharacterCatalogs ? InitialSkillPoints : (byte)0 };
-        private static void LoadCharacterCatalog()
+        internal static void LoadCharacterCatalog()
         {
             string trainingCatalog = Environment.GetEnvironmentVariable("MAG_TRAINING_COMPLETION_CATALOG");
             TrainingCompletionCatalog = string.IsNullOrEmpty(trainingCatalog) ? null : MagTrainingCompletionCatalog.Load(trainingCatalog);
@@ -227,10 +227,21 @@ namespace Server.Medius
             }
         }
 
+        // Each medius container (main/maps) publishes its account leases for mag-admin in the same Pod.
+        static void PublishActiveAccounts()
+        {
+            string directory = Environment.GetEnvironmentVariable("MAG_ACTIVE_ACCOUNTS_DIR") ?? "/tmp";
+            if (!Path.IsPathFullyQualified(directory) || !Directory.Exists(directory)) return;
+            string role = new DirectoryInfo(CONFIG_DIRECTIORY).Name.ToLowerInvariant();
+            if (role.Length == 0 || role.Length > 32 || !role.All(c => (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) role = "default";
+            MagLoginTickets.PublishActiveAccountsTo(Path.Combine(directory, MagActiveAccounts.FilePrefix + role + ".json"), DateTime.UtcNow);
+        }
+
         static async Task StartServerAsync()
         {
             int waitMs = sleepMS;
             LoadCharacterCatalog();
+            PublishActiveAccounts();
 
             if (Environment.GetEnvironmentVariable("MAG_LOCAL_DME") == "1")
             {
@@ -282,6 +293,13 @@ namespace Server.Medius
 
         public static async Task Main(string[] args)
         {
+            // Operator maintenance runs offline against the store; it starts no listeners.
+            if (args.Length > 0 && args[0] == "admin")
+            {
+                Environment.ExitCode = MagAdminCli.Main(args.Skip(1).ToArray());
+                return;
+            }
+
             // get path to config directory from first argument
             if (args.Length > 0)
                 CONFIG_DIRECTIORY = args[0];

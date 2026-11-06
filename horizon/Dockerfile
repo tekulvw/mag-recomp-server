@@ -26,5 +26,8 @@ FROM mcr.microsoft.com/dotnet/runtime:10.0@sha256:b89586dc17781f25531909993658aa
 COPY --from=publish /out /app
 COPY LICENSE /licenses/horizon-LICENSE
 COPY HighResolutionTimer/LICENSE /licenses/HighResolutionTimer-LICENSE
+# Operator maintenance CLI (kubectl exec … -- mag-admin …); see docs/admin-cli.md.
+RUN printf '#!/bin/sh\nexec dotnet /app/medius/Server.Medius.dll admin "$@"\n' > /usr/local/bin/mag-admin \
+    && chmod 0755 /usr/local/bin/mag-admin
 WORKDIR /app/medius
 ENTRYPOINT ["dotnet", "Server.Medius.dll"]
