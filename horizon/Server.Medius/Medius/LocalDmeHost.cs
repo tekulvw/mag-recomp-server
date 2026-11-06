@@ -73,6 +73,28 @@ namespace Server.Medius
             if (reply.Ok != true) return reply.IsTransientFailure ? "admission_unavailable" : "admission_rejected";
             return ready ? "admission_accepted" : "admission_not_ready";
         }
+        /// <summary>First reason a join request's own fields are unsupported here, or null.</summary>
+        public static string JoinRequestRejection(MagJoinGameRequest request, bool retailApplication, Func<uint, bool> modeIsCurrent)
+        {
+            if ((request is MagRetailJoinGameRequest) != retailApplication) return "request_application_mismatch";
+            if (request is MagRetailJoinGameRequest retail && retail.PartyId != 0) return "party_join_unsupported";
+            if (request.Preference != 1) return "preference_unsupported";
+            if (!modeIsCurrent(request.Value)) return "mode_not_current";
+            if (request.ClientType != 0) return "client_type_unsupported";
+            return null;
+        }
+        string JoinSessionRejection(MagMlsSession session)
+        {
+            if (session == null || session.ApplicationId != _applicationId) return "session_application_mismatch";
+            if (session.State != MagMlsSession.SessionState.Ready) return "session_not_ready";
+            if (session.IsExpired(DateTime.UtcNow)) return "session_expired";
+            if (session.AccountId == 0 || session.CharacterId == 0) return "session_without_character";
+            if (!MagDevelopmentAccountPolicy.ValidAccount(session.AuthenticatedAccount)) return "account_not_allowed";
+            if (!IsReady) return "host_not_ready";
+            return null;
+        }
+        static void LogJoinRejection(string reason, MagJoinGameRequest request) =>
+            Logger.Warn($"Gameplay join rejected: reason={reason} preference={request.Preference} value={request.Value} client_type={request.ClientType} party={(request as MagRetailJoinGameRequest)?.PartyId.ToString() ?? "none"}");
         public static int SupportedMaximumPlayers(int applicationId, int gameType)
         {
             bool retail = applicationId == 20231;
@@ -154,10 +176,9 @@ namespace Server.Medius
         public async Task<MagJoinGameResponse> JoinAsync(MagMlsSession session, MagJoinGameRequest request, Action<MagCharacterRecord> notify = null)
         {
             var failure = JoinResponse(request.TransactionId, 2);
-            if ((request is MagRetailJoinGameRequest) != (_applicationId == 20231)) return failure;
             // Party membership/admission is not implemented. Do not silently turn a party request into a solo join.
-            if (request is MagRetailJoinGameRequest retail && retail.PartyId != 0) return failure;
-            if (session.ApplicationId != _applicationId || session.State != MagMlsSession.SessionState.Ready || session.IsExpired(DateTime.UtcNow) || session.AccountId == 0 || session.CharacterId == 0 || !MagDevelopmentAccountPolicy.ValidAccount(session.AuthenticatedAccount) || request.Preference != 1 || !RequestedModeIsCurrent(request.Value) || request.ClientType != 0 || !IsReady) return failure;
+            var rejection = JoinRequestRejection(request, _applicationId == 20231, RequestedModeIsCurrent) ?? JoinSessionRejection(session);
+            if (rejection != null) { LogJoinRejection(rejection, request); return failure; }
             await _admission.WaitAsync();
             try
             {
