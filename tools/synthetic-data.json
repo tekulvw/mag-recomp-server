@@ -1,7 +1,7 @@
 {
   "gameplay/data/synthetic-bot-objective-policy.json": {
     "source": "Independently authored synthetic validator example; not extracted game data. See gameplay/data/SYNTHETIC.md.",
-    "sha256": "968fff9f714dbbd0231cacecd20e3f19f727961561caaebb4ff6928205f23261"
+    "sha256": "013d638b2e16580d475f381c352222e7fe9fb213979b69eb7e89e6301d135bd1"
   },
   "gameplay/data/synthetic-movement-metadata.json": {
     "source": "Independently authored synthetic validator example; not extracted game data. See gameplay/data/SYNTHETIC.md.",

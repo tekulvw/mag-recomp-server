@@ -104,6 +104,7 @@ struct Label {
     parent: Option<usize>,
     via: Option<usize>,
 }
+#[allow(clippy::too_many_arguments)]
 fn choose_links_with_costs(
     links: &[(i32, i32, &DropLink)],
     start: (i32, Point),
@@ -112,8 +113,9 @@ fn choose_links_with_costs(
     hp: u16,
     penalties: &BTreeMap<u32, f64>,
     first_drop: Option<u32>,
+    exit_goal_weight: f64,
 ) -> Result<Vec<usize>, Error> {
-    if hp == 0 || links.len() > 64 {
+    if hp == 0 || links.len() > 64 || !(0. ..=1.).contains(&exit_goal_weight) {
         return err("navmesh_invalid_drop_request");
     }
     if penalties
@@ -190,10 +192,19 @@ fn choose_links_with_costs(
                 parent: Some(index),
                 via: Some(edge),
             });
-            let suffix = goals
-                .iter()
-                .map(|(_, goal)| (link.landing[0] - goal[0]).hypot(link.landing[2] - goal[2]))
-                .fold(f64::INFINITY, f64::min);
+            // Leaving the start component (a spawn) is ranked by how soon the
+            // bot is out: approach, queue penalty and flight. The remaining
+            // distance to the goal only counts with the configured weight.
+            let weight = if label.node == links.len() {
+                exit_goal_weight
+            } else {
+                1.
+            };
+            let suffix = weight
+                * goals
+                    .iter()
+                    .map(|(_, goal)| (link.landing[0] - goal[0]).hypot(link.landing[2] - goal[2]))
+                    .fold(f64::INFINITY, f64::min);
             queue.push(Reverse((
                 hp - remaining,
                 cost.saturating_add((suffix * 1000.).ceil() as u64),
@@ -239,6 +250,25 @@ impl NavMesh {
         penalties: &BTreeMap<u32, f64>,
         first_drop: Option<u32>,
     ) -> Result<Route, Error> {
+        self.route_with_drop_costs_weighted(
+            start, goal, radius, rules, hp, penalties, first_drop, 1.,
+        )
+    }
+    /// As `route_with_drop_costs`, with the first drop out of the start
+    /// component chosen by `exit_goal_weight` (0: fastest exit only, 1: whole
+    /// route).
+    #[allow(clippy::too_many_arguments)]
+    pub fn route_with_drop_costs_weighted(
+        &self,
+        start: Point,
+        goal: Point,
+        radius: f64,
+        rules: &Rules,
+        hp: u16,
+        penalties: &BTreeMap<u32, f64>,
+        first_drop: Option<u32>,
+        exit_goal_weight: f64,
+    ) -> Result<Route, Error> {
         let began = Instant::now();
         if !valid_point(goal) || !radius.is_finite() || !(0.05..=5.).contains(&radius) {
             return err("navmesh_invalid_request");
@@ -261,8 +291,16 @@ impl NavMesh {
                 ))
             })
             .collect::<Result<_, Error>>()?;
-        let selected =
-            choose_links_with_costs(&links, source, &goals, rules, hp, penalties, first_drop)?;
+        let selected = choose_links_with_costs(
+            &links,
+            source,
+            &goals,
+            rules,
+            hp,
+            penalties,
+            first_drop,
+            exit_goal_weight,
+        )?;
         let mut route = Route {
             format: "mag_navmesh_route_v1".into(),
             status: Status::Complete,
@@ -339,5 +377,71 @@ impl NavMesh {
         route.query_us = began.elapsed().as_micros().min(u64::MAX as u128) as u64;
         route.predicted_remaining_health = Some(remaining);
         Ok(route)
+    }
+}
+
+#[cfg(test)]
+mod exit_weight_tests {
+    use super::*;
+
+    fn link(id: u32, launch: Point, landing: Point) -> DropLink {
+        DropLink {
+            id,
+            world_sha256: String::new(),
+            launch,
+            landing,
+            speed: 4.5,
+            max_drop_height: 1.,
+            trajectory: Vec::new(),
+            trajectory_sha256: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_spawn_exit_is_chosen_by_how_soon_the_bot_is_out_unless_weighted_to_the_goal() {
+        // SYNTHETIC rules: no drop here is high enough to hurt.
+        let rules = Rules {
+            schema_version: 1,
+            source_build: "synthetic".into(),
+            application_id: 20231,
+            min_height: 50.,
+            damage_factor: 1.,
+            minimum_damage_exclusive: 0.,
+            jump_fall_state: 0,
+            damage_type: 5,
+            damage_source_type: 1,
+        };
+        // Link 1 is the nearest way out but lands far from the goal; link 2 is
+        // a longer walk whose landing is close to the goal.
+        let near_exit = link(1, [3., 10., 0.], [3., 0., -40.]);
+        let near_goal = link(2, [20., 10., 0.], [60., 0., 0.]);
+        let links = [(1, 2, &near_exit), (1, 2, &near_goal)];
+        let start = (1, [0., 10., 0.]);
+        let goals = [(2, [100., 0., 0.])];
+        let choose = |weight, penalties: &BTreeMap<u32, f64>| {
+            choose_links_with_costs(&links, start, &goals, &rules, 400, penalties, None, weight)
+                .unwrap()
+                .iter()
+                .map(|&i| links[i].2.id)
+                .collect::<Vec<_>>()
+        };
+        let free = BTreeMap::new();
+        assert_eq!(
+            choose(1., &free),
+            [2],
+            "whole-route cost prefers the landing by the goal"
+        );
+        assert_eq!(
+            choose(0., &free),
+            [1],
+            "exit-first takes the nearest way out"
+        );
+        // A queue on the nearest exit makes the other one faster to leave by.
+        let queued = BTreeMap::from([(1, 30.)]);
+        assert_eq!(choose(0., &queued), [2]);
+        assert!(
+            choose_links_with_costs(&links, start, &goals, &rules, 400, &free, None, 1.5).is_err(),
+            "weights outside 0..=1 are rejected"
+        );
     }
 }

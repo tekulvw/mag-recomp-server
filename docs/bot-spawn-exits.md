@@ -27,6 +27,17 @@ used for this: parallel drops off one ledge whose bodies never touch are
 independent exits. Set `drop_crossing_share` to `1.0` to restore the former
 full pooling of crossing approaches.
 
+### Exit first, then the goal
+
+While a bot is still in its spawn (the start component of a route that needs
+a drop), the first drop is chosen by how soon the bot is out: the walk to the
+launch, the passage's queue penalty and the flight. The remaining distance to
+the goal counts only with weight `spawn_exit_goal_weight` (default `0`, the
+fastest exit; `1` restores choosing by the whole route). Later drops and
+ground routes always use the whole route. Reconsideration of a queued bot
+compares candidate routes the same way, so a bot is not pulled back to a
+congested exit just because its landing is nearer the objective.
+
 ## Convoys on one passage
 
 A passage used to admit one bot at a time from approach until it had landed
