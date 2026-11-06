@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.2.4...medius-v0.3.0) (2026-11-06)
+
+
+### Features
+
+* **medius:** add mag-admin for account and character maintenance ([#70](https://github.com/tekulvw/mag-recomp-server/issues/70)) ([ddb2572](https://github.com/tekulvw/mag-recomp-server/commit/ddb2572e6745cda3d62d4754da0775b3aaf6f340))
+
 ## [0.2.4](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.2.3...medius-v0.2.4) (2026-11-06)
 
 
