@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.2.1...medius-v0.2.2) (2026-11-06)
+
+
+### Bug Fixes
+
+* **medius:** stop rejected gameplay releases from blocking rejoin ([#57](https://github.com/tekulvw/mag-recomp-server/issues/57)) ([f306c13](https://github.com/tekulvw/mag-recomp-server/commit/f306c13bcad8b9683dcff819d5518582a94e169c))
+
 ## [0.2.1](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.2.0...medius-v0.2.1) (2026-11-04)
 
 

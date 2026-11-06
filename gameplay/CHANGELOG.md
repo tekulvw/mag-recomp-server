@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.0](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.4.1...gameplay-v0.5.0) (2026-11-06)
+
+
+### Features
+
+* **gameplay:** spread spawn waves over every exit and share drop passages ([#56](https://github.com/tekulvw/mag-recomp-server/issues/56)) ([1bc1be3](https://github.com/tekulvw/mag-recomp-server/commit/1bc1be3de86001a0e3d5803ee395e41ccfe4ed93))
+
+
+### Bug Fixes
+
+* **medius:** stop rejected gameplay releases from blocking rejoin ([#57](https://github.com/tekulvw/mag-recomp-server/issues/57)) ([f306c13](https://github.com/tekulvw/mag-recomp-server/commit/f306c13bcad8b9683dcff819d5518582a94e169c))
+
 ## [0.4.1](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.4.0...gameplay-v0.4.1) (2026-11-04)
 
 

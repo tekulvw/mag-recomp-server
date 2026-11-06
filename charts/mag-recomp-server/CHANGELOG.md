@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2](https://github.com/tekulvw/mag-recomp-server/compare/chart-v0.4.1...chart-v0.4.2) (2026-11-06)
+
+
+### Bug Fixes
+
+* **chart:** re-verify the data bundle when a Pod restarts in place ([#53](https://github.com/tekulvw/mag-recomp-server/issues/53)) ([94abfe5](https://github.com/tekulvw/mag-recomp-server/commit/94abfe56039def651fce997d79af139cd8046cd6))
+
 ## [0.4.1](https://github.com/tekulvw/mag-recomp-server/compare/chart-v0.4.0...chart-v0.4.1) (2026-11-04)
 
 
