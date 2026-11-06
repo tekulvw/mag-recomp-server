@@ -134,7 +134,6 @@ pub(super) fn forecast(
 }
 pub(super) struct Passage {
     pub id: u32,
-    pub protected: crate::actor_collision::Bounds,
     pub approaches: Vec<Vec<[[f64; 3]; 2]>>,
     pub slots: usize,
     pub owner_remaining: Option<f64>,
@@ -152,11 +151,25 @@ pub(super) struct Cost {
     pub total_s: f64,
     pub related: Vec<u32>,
 }
-pub(super) type Relations = BTreeMap<u32, Vec<u32>>;
 fn intersects(a: crate::actor_collision::Bounds, b: crate::actor_collision::Bounds) -> bool {
     (0..3).all(|axis| a.min[axis] <= b.max[axis] && a.max[axis] >= b.min[axis])
 }
-pub(super) fn relations(passages: &[Passage], budget: &mut usize) -> Relations {
+/// Each passage's related passages with the share of their reserved service
+/// that delays it. A passage always relates to itself with share 1.
+pub(super) type Relations = BTreeMap<u32, Vec<(u32, f64)>>;
+/// `exclusive` holds passages whose swept bodies meet (see
+/// `bot_traffic_flow::passages_exclusive`); they cannot be served concurrently,
+/// so their whole queues are shared. Passages whose ground approaches merely
+/// cross only interfere while an approach is being walked, so each adds
+/// `crossing_share` of the other's queue. Pooling crossing approaches in full
+/// made every crossing neighbour look exactly as busy as the busiest exit and
+/// hid usable, slightly longer exits from the route search.
+pub(super) fn relations(
+    passages: &[Passage],
+    exclusive: &std::collections::BTreeSet<(u32, u32)>,
+    crossing_share: f64,
+    budget: &mut usize,
+) -> Relations {
     let body = crate::bot_physics::Body {
         radius: crate::bot_physics::Body::default().radius * std::f64::consts::SQRT_2,
         ..Default::default()
@@ -175,11 +188,13 @@ pub(super) fn relations(passages: &[Passage], budget: &mut usize) -> Relations {
                 .collect()
         })
         .collect();
-    let mut result: Relations = passages.iter().map(|p| (p.id, vec![p.id])).collect();
+    let mut result: Relations = passages.iter().map(|p| (p.id, vec![(p.id, 1.)])).collect();
     for (i, p) in passages.iter().enumerate() {
         for (j, other) in passages.iter().enumerate().skip(i + 1) {
-            let overlap = intersects(p.protected, other.protected)
-                || p.approaches.iter().enumerate().any(|(a, lane)| {
+            let share = if exclusive.contains(&(p.id.min(other.id), p.id.max(other.id))) {
+                1.
+            } else if crossing_share > 0.
+                && p.approaches.iter().enumerate().any(|(a, lane)| {
                     other.approaches.iter().enumerate().any(|(b, other_lane)| {
                         *budget > 0
                             && envelopes[i][a]
@@ -187,15 +202,18 @@ pub(super) fn relations(passages: &[Passage], budget: &mut usize) -> Relations {
                                 .is_some_and(|(a, b)| intersects(a, b))
                             && crate::bot_traffic_flow::lanes_conflict(lane, other_lane, budget)
                     })
-                });
-            if overlap {
-                result.get_mut(&p.id).unwrap().push(other.id);
-                result.get_mut(&other.id).unwrap().push(p.id);
-            }
+                })
+            {
+                crossing_share
+            } else {
+                continue;
+            };
+            result.get_mut(&p.id).unwrap().push((other.id, share));
+            result.get_mut(&other.id).unwrap().push((p.id, share));
         }
     }
     for related in result.values_mut() {
-        related.sort_unstable();
+        related.sort_unstable_by_key(|(id, _)| *id);
     }
     result
 }
@@ -211,7 +229,7 @@ pub(super) fn costs_with_relations(
                 cooldown_s: p.cooldown_s,
                 ..Default::default()
             };
-            for &related in &relations[&p.id] {
+            for &(related, share) in &relations[&p.id] {
                 let other = indexed[&related];
                 cost.related.push(related);
                 cost.reserved_slots += other.slots;
@@ -219,13 +237,16 @@ pub(super) fn costs_with_relations(
                     cost.active_owner_slots += 1;
                     cost.active_owner_remaining_s += remaining;
                 }
-                cost.queued_service_s += forecast(
-                    other.slots,
-                    other.estimate.service_s,
-                    0.,
-                    other.owner_remaining,
-                );
-                cost.own_excess_s = cost.own_excess_s.max(other.estimate.own_excess_s);
+                cost.queued_service_s += share
+                    * forecast(
+                        other.slots,
+                        other.estimate.service_s,
+                        0.,
+                        other.owner_remaining,
+                    );
+                if share >= 1. {
+                    cost.own_excess_s = cost.own_excess_s.max(other.estimate.own_excess_s);
+                }
             }
             cost.total_s = cost.queued_service_s + cost.own_excess_s + cost.cooldown_s;
             (p.id, cost)
@@ -233,8 +254,16 @@ pub(super) fn costs_with_relations(
         .collect()
 }
 #[cfg(test)]
-fn costs(passages: &[Passage], budget: &mut usize) -> BTreeMap<u32, Cost> {
-    costs_with_relations(passages, &relations(passages, budget))
+fn costs(
+    passages: &[Passage],
+    exclusive: &std::collections::BTreeSet<(u32, u32)>,
+    crossing_share: f64,
+    budget: &mut usize,
+) -> BTreeMap<u32, Cost> {
+    costs_with_relations(
+        passages,
+        &relations(passages, exclusive, crossing_share, budget),
+    )
 }
 #[derive(Clone)]
 pub(super) struct Reconsideration {
@@ -393,10 +422,9 @@ mod tests {
         assert!(a >= Duration::from_millis(p.reconsider_ms));
     }
     #[test]
-    fn intersecting_approaches_share_unique_direct_demand_without_transitive_double_counting() {
-        let make = |id, position, lane, slots, excess| Passage {
+    fn crossing_approaches_add_a_share_while_exclusive_passages_pool_their_queues() {
+        let make = |id, lane, slots, excess| Passage {
             id,
-            protected: crate::actor_collision::Bounds::body(position, Default::default()),
             approaches: vec![lane],
             slots,
             owner_remaining: None,
@@ -407,28 +435,102 @@ mod tests {
             },
             cooldown_s: 0.,
         };
-        let a = make(9, [20., 0., 0.], vec![[[-4., 0., 0.], [4., 0., 0.]]], 1, 2.);
-        let b = make(
-            10,
-            [40., 0., 0.],
-            vec![[[0., 0., -4.], [0., 0., 8.]]],
-            1,
-            3.,
-        );
-        let c = make(
-            11,
-            [60., 0., 0.],
-            vec![[[-4., 0., 8.], [4., 0., 8.]]],
-            1,
-            5.,
-        );
-        let quotes = costs(&[a, b, c], &mut 8192);
+        let passages = || {
+            [
+                make(9, vec![[[-4., 0., 0.], [4., 0., 0.]]], 1, 2.),
+                make(10, vec![[[0., 0., -4.], [0., 0., 8.]]], 1, 3.),
+                make(11, vec![[[-4., 0., 8.], [4., 0., 8.]]], 1, 5.),
+            ]
+        };
+        let none = std::collections::BTreeSet::new();
+        let quotes = costs(&passages(), &none, 0.25, &mut 8192);
         assert_eq!(quotes[&9].related, vec![9, 10]);
         assert_eq!(quotes[&9].reserved_slots, 2);
         assert_eq!(
-            quotes[&9].total_s, 11.,
-            "two unique4s slots + maximum shared3s excess, no transitive queue"
+            quotes[&9].total_s, 7.,
+            "own 4 s slot + a quarter of the crossing 4 s slot + own 2 s excess; \
+             no transitive queue and no excess borrowed from a crossing passage"
         );
+        let quotes = costs(&passages(), &none, 0., &mut 8192);
+        assert_eq!(quotes[&9].related, vec![9]);
+        assert_eq!(quotes[&9].total_s, 6.);
+        let exclusive = std::collections::BTreeSet::from([(9, 11)]);
+        let quotes = costs(&passages(), &exclusive, 0.25, &mut 8192);
+        assert_eq!(quotes[&9].related, vec![9, 10, 11]);
+        assert_eq!(
+            quotes[&9].total_s, 14.,
+            "own 4 s + exclusive 4 s + 1 s crossing share + the larger exclusive 5 s excess"
+        );
+        assert_eq!(quotes[&11].total_s, 4. + 4. + 1. + 5.);
+    }
+    /// SYNTHETIC first spawn wave: 16 bots leave one spawn through three exits
+    /// that add 0 m, 6 m and 14 m of walking. Exits 1 and 2 have crossing ground
+    /// approaches but separate flights. Each bot takes the cheapest route given
+    /// the reservations of the bots routed before it, as the planner does.
+    fn first_wave(
+        exclusive: &std::collections::BTreeSet<(u32, u32)>,
+        crossing_share: f64,
+    ) -> (BTreeMap<u32, usize>, f64) {
+        let service = 4.;
+        let speed = crate::retail_movement::WALK_FORWARD_MPS;
+        let exits = [(1u32, 0.), (2, 6.), (3, 14.)];
+        let lane = |id: u32| match id {
+            1 => vec![[[-4., 0., 0.], [4., 0., 0.]]],
+            2 => vec![[[0., 0., -4.], [0., 0., 4.]]],
+            _ => vec![[[40., 0., 0.], [48., 0., 0.]]],
+        };
+        let mut slots: BTreeMap<u32, usize> = exits.iter().map(|(id, _)| (*id, 0)).collect();
+        for _ in 0..16 {
+            let passages: Vec<_> = exits
+                .iter()
+                .map(|&(id, _)| Passage {
+                    id,
+                    approaches: vec![lane(id)],
+                    slots: slots[&id],
+                    owner_remaining: None,
+                    estimate: Estimate {
+                        service_s: service,
+                        own_excess_s: 0.,
+                        samples: 0,
+                    },
+                    cooldown_s: 0.,
+                })
+                .collect();
+            let quotes = costs(&passages, exclusive, crossing_share, &mut 8192);
+            let (choice, _) = exits
+                .iter()
+                .map(|&(id, extra)| (id, extra + quotes[&id].total_s * speed))
+                .min_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)))
+                .unwrap();
+            *slots.get_mut(&choice).unwrap() += 1;
+        }
+        let makespan = exits
+            .iter()
+            .filter(|(id, _)| slots[id] > 0)
+            .map(|&(id, extra)| extra / speed + slots[&id] as f64 * service)
+            .fold(0., f64::max);
+        (slots, makespan)
+    }
+    #[test]
+    fn a_first_wave_uses_every_independent_exit_including_longer_ones() {
+        let none = std::collections::BTreeSet::new();
+        // The former model pooled crossing approaches in full: exit 2 always
+        // looked exactly as busy as exit 1 and, being longer, was never chosen.
+        let (pooled, pooled_makespan) = first_wave(&none, 1.);
+        assert_eq!(pooled[&2], 0, "full pooling hides the 6 m longer exit");
+        let bundled = super::super::bot_objectives::ObjectivePolicy::bundled();
+        let (spread, makespan) = first_wave(&none, bundled.drop_crossing_share);
+        assert!(
+            spread.values().all(|n| *n >= 4),
+            "every independent exit carries part of the wave: {spread:?}"
+        );
+        assert!(
+            makespan + 4. < pooled_makespan,
+            "the wave clears sooner ({makespan:.1} s vs {pooled_makespan:.1} s)"
+        );
+        // Genuinely exclusive flights still share one queue.
+        let (exclusive, _) = first_wave(&std::collections::BTreeSet::from([(1, 2)]), 0.25);
+        assert_eq!(exclusive[&1] + exclusive[&2], pooled[&1] + pooled[&2]);
     }
     #[test]
     fn measured_cost_replaces_owner_slot_without_double_charging_queue_wait() {
