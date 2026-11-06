@@ -117,3 +117,14 @@ internal static class AdminCliChecks
 
     record MagRecord(byte Level, uint Experience, byte SkillPoints);
 }
+
+// The server must start through Program.Main; a synchronous Main elsewhere would replace it.
+internal static class MediusEntryPointChecks
+{
+    public static void Run()
+    {
+        var entry = typeof(Server.Medius.Program).Assembly.EntryPoint;
+        if (entry == null || entry.DeclaringType != typeof(Server.Medius.Program))
+            throw new Exception($"Server.Medius entry point is {entry?.DeclaringType?.FullName}.{entry?.Name}, not Program.Main");
+    }
+}
