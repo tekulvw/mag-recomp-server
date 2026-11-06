@@ -103,6 +103,7 @@ fn main() -> io::Result<()> {
 fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     let mut application_id: Option<u32> = None;
     let mut validate_catalogs = false;
+    let mut headless_sim_seconds: Option<u64> = None;
     let mut bind = SocketAddr::from(([127, 0, 0, 1], 31000));
     let mut log: Option<PathBuf> = None;
     let mut log_segment_bytes: Option<u64> = None;
@@ -158,6 +159,14 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                 })?)?);
             }
             "--validate-catalogs" => validate_catalogs = true,
+            "--headless-sim-seconds" => {
+                headless_sim_seconds = Some(
+                    args.next()
+                        .ok_or_else(|| io::Error::other("--headless-sim-seconds requires N"))?
+                        .parse::<u64>()
+                        .map_err(|_| io::Error::other("invalid --headless-sim-seconds"))?,
+                );
+            }
             "--bot-names" => {
                 bot_names_path = Some(
                     args.next()
@@ -1082,6 +1091,41 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         engine = engine
             .with_match_profiles(registry)
             .map_err(io::Error::other)?;
+    }
+    if let Some(seconds) = headless_sim_seconds {
+        // LOCAL DIAGNOSTIC: virtual-time match with one never-spawning observer.
+        let faction: u8 = std::env::var("MAG_SIM_FACTION")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let wall0 = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let began = Instant::now();
+        engine.enable_world_ticks();
+        engine
+            .headless_sim_join(Duration::ZERO, wall0, faction)
+            .map_err(io::Error::other)?;
+        let step = Duration::from_millis(50);
+        let mut now = step;
+        let mut errors = 0u64;
+        while now <= Duration::from_secs(seconds) {
+            engine.headless_sim_keepalive(now);
+            let r = engine.tick_world(now, wall0 + now.as_secs(), "headless-sim".into());
+            if !r.ok {
+                errors += 1;
+                if errors <= 5 {
+                    eprintln!("tick {} error {:?}", now.as_millis(), r.error);
+                }
+            }
+            now += step;
+        }
+        eprintln!(
+            "{}",
+            serde_json::json!({"event":"headless_sim_done","simulated_s":seconds,"wall_ms":began.elapsed().as_millis(),"tick_errors":errors})
+        );
+        return Ok(());
     }
     let engine = Arc::new(Mutex::new(engine));
     let listener = TcpListener::bind(bind)?;

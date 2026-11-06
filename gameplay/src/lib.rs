@@ -91,6 +91,7 @@ mod score_clock;
 pub mod skill_catalog;
 pub mod spawn_catalog;
 mod spawn_progression;
+mod headless_sim;
 pub mod structure_catalog;
 pub mod structures;
 pub mod telemetry;
