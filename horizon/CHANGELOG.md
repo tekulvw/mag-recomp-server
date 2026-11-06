@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.3.0...medius-v0.3.1) (2026-11-06)
+
+
+### Bug Fixes
+
+* **medius:** keep Program.Main as the server entry point ([#72](https://github.com/tekulvw/mag-recomp-server/issues/72)) ([075e9e7](https://github.com/tekulvw/mag-recomp-server/commit/075e9e7a2d543710acbb1e2b7e1cf0025d63916a))
+
 ## [0.3.0](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.2.4...medius-v0.3.0) (2026-11-06)
 
 
