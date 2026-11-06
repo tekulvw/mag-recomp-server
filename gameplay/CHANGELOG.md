@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.2](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.5.1...gameplay-v0.5.2) (2026-11-06)
+
+
+### Bug Fixes
+
+* **gameplay:** stop reserve replies carrying peers' queued packets ([#62](https://github.com/tekulvw/mag-recomp-server/issues/62)) ([5819cda](https://github.com/tekulvw/mag-recomp-server/commit/5819cda4a98edf7ebb4fea00076a3b894a5504b6))
+
 ## [0.5.1](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.5.0...gameplay-v0.5.1) (2026-11-06)
 
 
