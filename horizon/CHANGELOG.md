@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.4](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.2.3...medius-v0.2.4) (2026-11-06)
+
+
+### Bug Fixes
+
+* **medius:** name and log rejected join requests ([#65](https://github.com/tekulvw/mag-recomp-server/issues/65)) ([7adc12d](https://github.com/tekulvw/mag-recomp-server/commit/7adc12da1a96a0487c14d4a762dcd2962829bfbf))
+
 ## [0.2.3](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.2.2...medius-v0.2.3) (2026-11-06)
 
 
