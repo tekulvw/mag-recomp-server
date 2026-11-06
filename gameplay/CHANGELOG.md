@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.0](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.6.0...gameplay-v0.7.0) (2026-11-06)
+
+
+### Features
+
+* **gameplay:** headless bot match simulation and spawn exit diagnostics ([#68](https://github.com/tekulvw/mag-recomp-server/issues/68)) ([c54f142](https://github.com/tekulvw/mag-recomp-server/commit/c54f14266fedce0e9b01c6bd7d3f05603e7aa4ce))
+* **gameplay:** route spawned bots to the fastest exit before their goal ([#67](https://github.com/tekulvw/mag-recomp-server/issues/67)) ([5c8487b](https://github.com/tekulvw/mag-recomp-server/commit/5c8487b27d79082b073635239f45c054407276bd))
+
 ## [0.6.0](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.5.2...gameplay-v0.6.0) (2026-11-06)
 
 
