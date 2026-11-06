@@ -86,11 +86,6 @@ fn default_drop_convoy_landing_gap_m() -> f64 {
         .as_f64()
         .unwrap()
 }
-fn default_drop_holding_vertical_m() -> f64 {
-    drop_policy_default("drop_holding_vertical_m")
-        .as_f64()
-        .unwrap()
-}
 fn default_drop_holding_scan() -> usize {
     drop_policy_default("drop_holding_scan").as_u64().unwrap() as usize
 }
@@ -150,8 +145,6 @@ pub struct ObjectivePolicy {
     pub(super) drop_convoy_limit: usize,
     #[serde(default = "default_drop_convoy_landing_gap_m")]
     pub(super) drop_convoy_landing_gap_m: f64,
-    #[serde(default = "default_drop_holding_vertical_m")]
-    pub(super) drop_holding_vertical_m: f64,
     #[serde(default = "default_drop_holding_scan")]
     pub(super) drop_holding_scan: usize,
     #[serde(default = "default_wave_backlog")]
@@ -203,7 +196,6 @@ impl ObjectivePolicy {
             || !(0. ..=1.).contains(&self.drop_crossing_share)
             || self.drop_convoy_limit > 8
             || !(0.75..=4.).contains(&self.drop_convoy_landing_gap_m)
-            || !(0.5..=8.).contains(&self.drop_holding_vertical_m)
             || !(1..=64).contains(&self.drop_holding_scan)
             || !(1..=256).contains(&self.wave_backlog)
             || !(1..=16).contains(&self.wave_route_queries_per_tick)
@@ -1541,12 +1533,15 @@ impl<W: Write> Engine<W> {
             let support = if let Some(g) = self.bot_registry.director.staging_cache.get(&key) {
                 *g
             } else {
+                // The same ground search as every other spot: a spawn floor
+                // below the launch is a valid staging area. Other floors are
+                // excluded by the navmesh component check, not by height.
                 let g = supported_interval(
                     self.collision_world.as_ref(),
                     map,
                     raw,
-                    policy.drop_holding_vertical_m,
-                    policy.drop_holding_vertical_m,
+                    policy.ground_search_m,
+                    policy.ground_search_m,
                 );
                 if self.bot_registry.director.staging_cache.len() >= policy.cache_limit {
                     self.bot_registry.director.staging_cache.pop_first();

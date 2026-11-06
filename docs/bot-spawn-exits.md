@@ -41,13 +41,20 @@ restores single occupancy.
 A follower that has already entered is not recalled if a departing member then
 stops on the landing; the existing aborted-drop recovery applies in that case.
 
+A departing member never takes a new ticket for the passage it holds. Once it
+has walked out of the passage its live status no longer names the drop and the
+registry falls back to its queue-time snapshot; queueing it again would freeze
+it beside the landing, keep the landing occupied and stall every follower.
+
 ## Queue staging and planning budget
 
 Queued bots wait on staging spots around the launch. Candidates are scanned
-with cheap checks before any route query: spots in front of the ledge, support
-outside `drop_holding_vertical_m` of the launch floor, a different navmesh
-component, protected boxes, approach lanes and occupied spots are skipped. Up
-to `drop_holding_scan` candidates are checked per attempt.
+with cheap checks before any route query: spots in front of the ledge, spots
+without ground within `ground_search_m`, a different navmesh component,
+protected boxes, approach lanes and occupied spots are skipped. Up to
+`drop_holding_scan` candidates are checked per attempt. A spawn floor below the
+launch level is a valid staging area; only the navmesh component decides
+whether a spot belongs to the launch side.
 
 When at least `wave_backlog` grounded bots are waiting for a first route or a
 staging spot, the planner uses `wave_route_queries_per_tick`,
