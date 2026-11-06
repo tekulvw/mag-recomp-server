@@ -88,4 +88,31 @@ impl<W: Write> Engine<W> {
             }
         }
     }
+    /// Record every live bot's position and drop state (`sim_bot_snapshot`).
+    #[doc(hidden)]
+    pub fn headless_sim_snapshot(&mut self, now: Duration, wall: u64) -> Result<(), &'static str> {
+        let bots: Vec<_> = self
+            .bot_registry
+            .bots
+            .iter()
+            .filter(|(_, b)| b.health > 0)
+            .filter_map(|(&id, b)| {
+                let r = b.target.runtime?;
+                let p = r.physical_position();
+                Some(json!({
+                    "id": id,
+                    "p": [(p[0] * 10.).round() / 10., (p[1] * 10.).round() / 10., (p[2] * 10.).round() / 10.],
+                    "complete": matches!(r.phase, crate::development_target::BotPhase::Complete),
+                    "waiting": b.drop_waiting,
+                    "permit": b.drop_permit,
+                    "holding": b.drop_holding_goal.map(|g| [g.x, g.y, g.z]),
+                    "goal": b.task.goal.map(|g| [g.x, g.y, g.z]),
+                }))
+            })
+            .collect();
+        self.record(
+            json!({"op":"sim_bot_snapshot","timestamp_ms":now.as_millis() as u64,"bots":bots}),
+            wall,
+        )
+    }
 }
