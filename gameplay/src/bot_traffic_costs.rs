@@ -296,6 +296,48 @@ pub(super) fn route_seconds(
             .sum::<f64>())
         / crate::retail_movement::WALK_FORWARD_MPS
 }
+/// Seconds until the route's first drop has landed (its approach, queue cost
+/// and flight), plus `goal_weight` times the remainder. A weight of 1 equals
+/// `route_seconds`; 0 ranks routes purely by how soon they leave a spawn.
+pub(super) fn route_exit_seconds(
+    route: &crate::navmesh::Route,
+    cursor: usize,
+    actual: [f64; 3],
+    costs: &BTreeMap<u32, f64>,
+    goal_weight: f64,
+) -> f64 {
+    let mut from = actual;
+    let (mut exit, mut rest) = (0., 0.);
+    let mut first = None;
+    let mut out = false;
+    let mut later = std::collections::BTreeSet::new();
+    for i in cursor..route.waypoints.len() {
+        let to = route.waypoints[i];
+        let d = (to[0] - from[0]).hypot(to[2] - from[2]);
+        if out {
+            rest += d;
+        } else {
+            exit += d;
+        }
+        from = to;
+        if let Some(id) = route.waypoint_drop_ids[i] {
+            if first.is_none() {
+                first = Some(id);
+            } else if first != Some(id) {
+                later.insert(id);
+            }
+        }
+        if !out && route.waypoint_kinds[i] == crate::navmesh::WaypointKind::DropEnd {
+            out = true;
+        }
+    }
+    let Some(first) = first else {
+        return route_seconds(route, cursor, actual, costs);
+    };
+    let cost = |id: u32| costs.get(&id).copied().unwrap_or(0.);
+    (exit + cost(first) + goal_weight * (rest + later.into_iter().map(cost).sum::<f64>()))
+        / crate::retail_movement::WALK_FORWARD_MPS
+}
 pub(super) fn worthwhile(
     old: f64,
     new: f64,

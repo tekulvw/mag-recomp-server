@@ -781,6 +781,7 @@ impl Target {
             goal_tolerance,
             &std::collections::BTreeMap::new(),
             None,
+            1.,
         )
     }
     #[allow(clippy::too_many_arguments)]
@@ -795,6 +796,7 @@ impl Target {
         goal_tolerance: Option<f64>,
         penalties: &std::collections::BTreeMap<u32, f64>,
         first_drop: Option<u32>,
+        exit_goal_weight: f64,
     ) -> Result<(), &'static str> {
         let runtime = self.runtime.ok_or("bot_not_spawned")?;
         movement.validate()?;
@@ -809,6 +811,7 @@ impl Target {
             first_drop,
             Some(192.),
             goal_tolerance,
+            exit_goal_weight,
         )?;
         movement.destination =
             character_position(navigation.navmesh.as_ref().unwrap().1.projected_goal);
@@ -2025,6 +2028,7 @@ impl NavigationMove {
             None,
             None,
             None,
+            1.,
         )
     }
     #[allow(clippy::too_many_arguments)]
@@ -2039,12 +2043,13 @@ impl NavigationMove {
         first_drop: Option<u32>,
         segment_limit: Option<f64>,
         goal_tolerance: Option<f64>,
+        exit_goal_weight: f64,
     ) -> Result<Self, &'static str> {
         if mesh.artifact().map_name != map_name {
             return Err("bot_navmesh_map_mismatch");
         }
         let route = if let Some(rules) = rules {
-            mesh.route_with_drop_costs(
+            mesh.route_with_drop_costs_weighted(
                 point(start),
                 point(movement.destination),
                 5.0,
@@ -2052,6 +2057,7 @@ impl NavigationMove {
                 health,
                 penalties,
                 first_drop,
+                exit_goal_weight,
             )
         } else if mesh.artifact().drop_links.is_empty() {
             mesh.route(point(start), point(movement.destination), 5.0)

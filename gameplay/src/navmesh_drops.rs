@@ -112,8 +112,9 @@ fn choose_links_with_costs(
     hp: u16,
     penalties: &BTreeMap<u32, f64>,
     first_drop: Option<u32>,
+    exit_goal_weight: f64,
 ) -> Result<Vec<usize>, Error> {
-    if hp == 0 || links.len() > 64 {
+    if hp == 0 || links.len() > 64 || !(0. ..=1.).contains(&exit_goal_weight) {
         return err("navmesh_invalid_drop_request");
     }
     if penalties
@@ -190,10 +191,19 @@ fn choose_links_with_costs(
                 parent: Some(index),
                 via: Some(edge),
             });
-            let suffix = goals
-                .iter()
-                .map(|(_, goal)| (link.landing[0] - goal[0]).hypot(link.landing[2] - goal[2]))
-                .fold(f64::INFINITY, f64::min);
+            // Leaving the start component (a spawn) is ranked by how soon the
+            // bot is out: approach, queue penalty and flight. The remaining
+            // distance to the goal only counts with the configured weight.
+            let weight = if label.node == links.len() {
+                exit_goal_weight
+            } else {
+                1.
+            };
+            let suffix = weight
+                * goals
+                    .iter()
+                    .map(|(_, goal)| (link.landing[0] - goal[0]).hypot(link.landing[2] - goal[2]))
+                    .fold(f64::INFINITY, f64::min);
             queue.push(Reverse((
                 hp - remaining,
                 cost.saturating_add((suffix * 1000.).ceil() as u64),
@@ -239,6 +249,23 @@ impl NavMesh {
         penalties: &BTreeMap<u32, f64>,
         first_drop: Option<u32>,
     ) -> Result<Route, Error> {
+        self.route_with_drop_costs_weighted(start, goal, radius, rules, hp, penalties, first_drop, 1.)
+    }
+    /// As `route_with_drop_costs`, with the first drop out of the start
+    /// component chosen by `exit_goal_weight` (0: fastest exit only, 1: whole
+    /// route).
+    #[allow(clippy::too_many_arguments)]
+    pub fn route_with_drop_costs_weighted(
+        &self,
+        start: Point,
+        goal: Point,
+        radius: f64,
+        rules: &Rules,
+        hp: u16,
+        penalties: &BTreeMap<u32, f64>,
+        first_drop: Option<u32>,
+        exit_goal_weight: f64,
+    ) -> Result<Route, Error> {
         let began = Instant::now();
         if !valid_point(goal) || !radius.is_finite() || !(0.05..=5.).contains(&radius) {
             return err("navmesh_invalid_request");
@@ -262,7 +289,16 @@ impl NavMesh {
             })
             .collect::<Result<_, Error>>()?;
         let selected =
-            choose_links_with_costs(&links, source, &goals, rules, hp, penalties, first_drop)?;
+            choose_links_with_costs(
+                &links,
+                source,
+                &goals,
+                rules,
+                hp,
+                penalties,
+                first_drop,
+                exit_goal_weight,
+            )?;
         let mut route = Route {
             format: "mag_navmesh_route_v1".into(),
             status: Status::Complete,

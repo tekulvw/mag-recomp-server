@@ -27,6 +27,7 @@
   "drop_convoy_limit": 3,
   "drop_convoy_landing_gap_m": 1.0,
   "drop_holding_scan": 16,
+  "spawn_exit_goal_weight": 0.0,
   "planning_slice_us": 1000,
   "candidate_checks_per_tick": 4,
   "route_queries_per_tick": 1,

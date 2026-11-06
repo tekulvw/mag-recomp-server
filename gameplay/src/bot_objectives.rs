@@ -102,6 +102,11 @@ fn default_wave_candidate_checks_per_tick() -> usize {
         .as_u64()
         .unwrap() as usize
 }
+fn default_spawn_exit_goal_weight() -> f64 {
+    drop_policy_default("spawn_exit_goal_weight")
+        .as_f64()
+        .unwrap()
+}
 fn default_wave_planning_slice_us() -> u64 {
     drop_policy_default("wave_planning_slice_us")
         .as_u64()
@@ -155,6 +160,10 @@ pub struct ObjectivePolicy {
     pub(super) wave_candidate_checks_per_tick: usize,
     #[serde(default = "default_wave_planning_slice_us")]
     pub(super) wave_planning_slice_us: u64,
+    /// Weight of the remaining distance to the goal when choosing the first
+    /// drop out of a spawn: 0 picks the fastest exit, 1 the shortest route.
+    #[serde(default = "default_spawn_exit_goal_weight")]
+    pub(super) spawn_exit_goal_weight: f64,
     planning_slice_us: u64,
     pub(super) candidate_checks_per_tick: usize,
     pub(super) route_queries_per_tick: usize,
@@ -201,6 +210,7 @@ impl ObjectivePolicy {
             || !(1..=16).contains(&self.wave_route_queries_per_tick)
             || !(1..=64).contains(&self.wave_candidate_checks_per_tick)
             || !(100..=20000).contains(&self.wave_planning_slice_us)
+            || !(0. ..=1.).contains(&self.spawn_exit_goal_weight)
             || !(1..=32).contains(&self.candidate_checks_per_tick)
             || !(1..=4).contains(&self.route_queries_per_tick)
             || !(1..=8).contains(&self.fresh_route_share)
@@ -840,6 +850,7 @@ impl<W: Write> Engine<W> {
             Some(0.3),
             &costs,
             baseline_query.then_some(passage.id),
+            policy.spawn_exit_goal_weight,
         );
         b.reconsider_at =
             crate::bot_traffic_costs::next_reconsideration(now, id, &policy.drop_delay);
@@ -865,8 +876,11 @@ impl<W: Write> Engine<W> {
         }
         let baseline = baseline.unwrap();
         let candidate = b.target.registry_route().unwrap();
-        let old_s = crate::bot_traffic_costs::route_seconds(&baseline, 0, origin, &costs);
-        let new_s = crate::bot_traffic_costs::route_seconds(candidate, 0, origin, &costs);
+        let weight = policy.spawn_exit_goal_weight;
+        let old_s =
+            crate::bot_traffic_costs::route_exit_seconds(&baseline, 0, origin, &costs, weight);
+        let new_s =
+            crate::bot_traffic_costs::route_exit_seconds(candidate, 0, origin, &costs, weight);
         let old_hp = baseline.predicted_remaining_health;
         let new_hp = candidate.predicted_remaining_health;
         let next = b
@@ -1393,6 +1407,7 @@ impl<W: Write> Engine<W> {
                 Some(0.3),
                 &BTreeMap::new(),
                 None,
+                policy.spawn_exit_goal_weight,
             );
             let rejection = result.err().or_else(|| {
                 if resume {
@@ -1910,6 +1925,7 @@ impl<W: Write> Engine<W> {
                     Some(0.3),
                     &reroute_costs,
                     (resume && !reroute && !prepare).then_some(passage.id),
+                    policy.spawn_exit_goal_weight,
                 )
             };
             let safe = result.is_ok()
@@ -2702,6 +2718,7 @@ impl<W: Write> Engine<W> {
                         Some(0.3),
                         &drop_costs,
                         None,
+                        policy.spawn_exit_goal_weight,
                     )
                 };
                 query_us = query_started.elapsed().as_micros() as u64;
