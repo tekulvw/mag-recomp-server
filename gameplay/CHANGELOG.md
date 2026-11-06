@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.5.2...gameplay-v0.6.0) (2026-11-06)
+
+
+### Features
+
+* **gameplay:** add a bounded first spawn-wave delay override ([#64](https://github.com/tekulvw/mag-recomp-server/issues/64)) ([1e2d95e](https://github.com/tekulvw/mag-recomp-server/commit/1e2d95ecbb0800137d6093b5d173517316614775))
+
 ## [0.5.2](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.5.1...gameplay-v0.5.2) (2026-11-06)
 
 
