@@ -845,11 +845,16 @@ impl<W: Write> Engine<W> {
         Err("bot_not_found")
     }
     pub(super) fn broadcast_bot_packet(&mut self, packet: Vec<u8>) {
+        // Bot deltas go only to recipients that tick_bots also snapshots. A client
+        // that is loading (not ready_for_updates) is not drained, and it receives
+        // one fresh snapshot per bot once it is ready again, so queuing deltas for
+        // it would only fill its bounded reliable queue until a populated world
+        // evicted it as replication_backlogged within seconds of joining.
         for recipient in self
             .peers
             .values_mut()
             .chain(self.active.iter_mut())
-            .filter(|a| a.initial_objects.is_some())
+            .filter(|a| a.initial_objects.is_some() && a.ready_for_updates)
         {
             recipient.queue_shared(packet.clone());
         }
@@ -2669,6 +2674,10 @@ mod convoy_tests {
         assert_eq!(q.waiting, [fresh]);
     }
 }
+
+#[cfg(test)]
+#[path = "multi_human_join_tests.rs"]
+mod multi_human_join_tests;
 
 #[cfg(test)]
 #[path = "queued_grenade_reward_tests.rs"]
