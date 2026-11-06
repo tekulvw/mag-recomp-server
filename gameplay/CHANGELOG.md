@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.1](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.5.0...gameplay-v0.5.1) (2026-11-06)
+
+
+### Bug Fixes
+
+* **gameplay:** keep loading humans from being evicted by bot traffic ([#61](https://github.com/tekulvw/mag-recomp-server/issues/61)) ([ebc1b21](https://github.com/tekulvw/mag-recomp-server/commit/ebc1b21c6c6fb47df3d71d03a43c57e57756862d))
+* **gameplay:** stop landed convoy members re-queueing and restore spawn-floor staging ([#59](https://github.com/tekulvw/mag-recomp-server/issues/59)) ([2fa9096](https://github.com/tekulvw/mag-recomp-server/commit/2fa90960a11fa83866697dcd0d0818de28a023d0))
+
 ## [0.5.0](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.4.1...gameplay-v0.5.0) (2026-11-06)
 
 

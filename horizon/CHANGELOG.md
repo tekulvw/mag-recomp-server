@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.3](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.2.2...medius-v0.2.3) (2026-11-06)
+
+
+### Bug Fixes
+
+* **medius:** name and log refused gameplay admissions ([#58](https://github.com/tekulvw/mag-recomp-server/issues/58)) ([4bb41e8](https://github.com/tekulvw/mag-recomp-server/commit/4bb41e8befee7324caffd427bc3ce0ee3345ece9))
+
 ## [0.2.2](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.2.1...medius-v0.2.2) (2026-11-06)
 
 
