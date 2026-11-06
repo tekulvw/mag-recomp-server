@@ -1842,13 +1842,7 @@ impl<W: Write> Engine<W> {
                         json!({"op":"released","reservation_id":reservation_id}),
                         wall_secs,
                     )?;
-                    self.released_reservations.insert(reservation_id.clone());
-                    self.release_order.push_back(reservation_id);
-                    while self.match_profiles.is_none() && self.release_order.len() > 512 {
-                        if let Some(old) = self.release_order.pop_front() {
-                            self.released_reservations.remove(&old);
-                        }
-                    }
+                    self.retire_reservation_id(&reservation_id);
                     let removed = self.active.take().unwrap();
                     self.remember_round_participant(&removed);
                     if self.peers.is_empty() {

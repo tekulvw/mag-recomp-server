@@ -204,6 +204,18 @@ pub(crate) fn participant_key(reservation: &crate::Reservation) -> Option<Partic
     ))
 }
 impl<W: Write> Engine<W> {
+    /// Retire a departed reservation id so a later Horizon release replays as
+    /// acknowledged. Without match profiles the set is bounded to 512 ids.
+    pub(crate) fn retire_reservation_id(&mut self, reservation_id: &str) {
+        if self.released_reservations.insert(reservation_id.to_owned()) {
+            self.release_order.push_back(reservation_id.to_owned());
+        }
+        while self.match_profiles.is_none() && self.release_order.len() > 512 {
+            if let Some(old) = self.release_order.pop_front() {
+                self.released_reservations.remove(&old);
+            }
+        }
+    }
     pub(crate) fn remember_round_participant(&mut self, actor: &Active) {
         if self.match_profiles.is_some()
             && self

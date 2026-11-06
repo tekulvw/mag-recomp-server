@@ -20,7 +20,7 @@ namespace Server.Medius
     public sealed partial class LocalDmeHost : Server.Dme.ILocalGameplaySink, IAsyncDisposable
     {
         sealed class Reservation { public string Id; public uint AccountId; public string Account; public uint CharacterId; public Action<MagCharacterRecord> Notify; public DmeClient Client; public DateTime Deadline; public byte Faction; public bool Accepted; public bool Claimed; public bool Invalidated; public string ReleaseReason; public string TerminalMatchId; }
-        sealed class PendingRelease { public Reservation Reservation; public string RequestId; public DateTime NextAttempt; }
+        sealed class PendingRelease { public Reservation Reservation; public string RequestId; public DateTime NextAttempt; public DateTime? FirstRejected; }
         static readonly IInternalLogger Logger = InternalLoggerFactory.GetInstance<LocalDmeHost>();
         readonly int _applicationId;
         readonly int _minimumPlayers;
@@ -58,6 +58,14 @@ namespace Server.Medius
         bool _ready; bool _started; bool _disposed;
         public Server.Dme.Models.World World { get; private set; }
         public bool IsReady { get { lock (_gate) return _ready && _worldStreamHealthy && !_disposed; } }
+        // Rust evicts a reservation that has sent no event for its 120 s idle timeout.
+        // Horizon stops forwarding events once it releases, so after this grace a
+        // definitively rejected release cannot still name a live Rust reservation.
+        public static readonly TimeSpan RejectedReleaseRetryInterval = TimeSpan.FromSeconds(15);
+        public static readonly TimeSpan RejectedReleaseAbandonAfter = TimeSpan.FromSeconds(150);
+        /// <summary>Next attempt for a definitively rejected release, or null once it must be abandoned.</summary>
+        public static DateTime? NextRejectedReleaseAttempt(DateTime firstRejectedUtc, DateTime nowUtc) =>
+            nowUtc - firstRejectedUtc >= RejectedReleaseAbandonAfter ? null : nowUtc + RejectedReleaseRetryInterval;
         public static int SupportedMaximumPlayers(int applicationId, int gameType)
         {
             bool retail = applicationId == 20231;
@@ -535,10 +543,31 @@ namespace Server.Medius
                     if (routed) _pendingReleases.Remove(pending.Reservation.Id);
                     else
                     {
-                        bool retry = reply == null || reply.IsTransientFailure;
-                        pending.NextAttempt = retry ? DateTime.UtcNow.AddSeconds(1) : DateTime.MaxValue;
+                        var now = DateTime.UtcNow;
+                        bool transient = reply == null || reply.IsTransientFailure;
                         _rewardRetry = true;
-                        Logger.Warn($"Gameplay release acknowledgement pending: player={pending.Reservation.Client.DmeId} retry={retry} failure={reply?.Failure.ToString() ?? "Unavailable"}");
+                        if (transient)
+                        {
+                            pending.NextAttempt = now.AddSeconds(1);
+                            Logger.Warn($"Gameplay release acknowledgement pending: player={pending.Reservation.Client.DmeId} retry=True failure={reply?.Failure.ToString() ?? "Unavailable"}");
+                        }
+                        else
+                        {
+                            // Rust answered but did not acknowledge (for example a reservation it
+                            // already evicted). Never hold the account's admission forever.
+                            pending.FirstRejected ??= now;
+                            var next = NextRejectedReleaseAttempt(pending.FirstRejected.Value, now);
+                            if (next == null)
+                            {
+                                _pendingReleases.Remove(pending.Reservation.Id);
+                                Logger.Warn($"Gameplay release abandoned after rejection grace: player={pending.Reservation.Client.DmeId} error={reply.Error ?? "none"} failure={reply.Failure}");
+                            }
+                            else
+                            {
+                                pending.NextAttempt = next.Value;
+                                Logger.Warn($"Gameplay release acknowledgement pending: player={pending.Reservation.Client.DmeId} retry=Rejected error={reply.Error ?? "none"} failure={reply.Failure} next_s={(int)RejectedReleaseRetryInterval.TotalSeconds}");
+                            }
+                        }
                     }
                 }
                 if (routed) await SettleLoadoutSelectionsAsync(reply);

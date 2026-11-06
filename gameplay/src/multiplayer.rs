@@ -785,6 +785,11 @@ impl<W: Write> Engine<W> {
                 "expired"
             };
             self.record(json!({"op":op,"reservation_id":id}), wall)?;
+            // Horizon learns of this eviction only through its next bridge call.
+            // Retiring the identity makes its later release replay as acknowledged
+            // instead of failing as an identity mismatch while other peers remain,
+            // which would otherwise leave the account's release pending in Horizon.
+            self.retire_reservation_id(&id);
             let removed = self
                 .peers
                 .remove(&id)
