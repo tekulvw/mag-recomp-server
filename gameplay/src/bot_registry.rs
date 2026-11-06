@@ -178,6 +178,19 @@ impl PassageQueue {
     fn holders(&self) -> impl Iterator<Item = &PassageOwner> {
         self.owner.iter().chain(&self.departing)
     }
+    /// Whether a ready bot may take a new ticket. Any holder is excluded, not
+    /// only the owner: a departing convoy member that has landed and walked
+    /// out of the passage falls back to its queue-time snapshot (an
+    /// approaching phase), and queueing it again would freeze it beside the
+    /// landing and block every follower behind it.
+    fn issues_ticket(&self, life: PassageLife) -> bool {
+        !self.holders().any(|o| o.life == life) && !self.waiting.contains(&life)
+    }
+    /// A holder never also waits for the passage it holds.
+    fn retire_held_tickets(&mut self) {
+        let held: Vec<_> = self.holders().map(|o| o.life).collect();
+        self.waiting.retain(|life| !held.contains(life));
+    }
 }
 fn intersects(a: crate::actor_collision::Bounds, b: crate::actor_collision::Bounds) -> bool {
     (0..3).all(|i| a.min[i] <= b.max[i] && a.max[i] >= b.min[i])
@@ -1653,6 +1666,7 @@ impl<W: Write> Engine<W> {
                     q.departing.push(held);
                 }
             }
+            q.retire_held_tickets();
             if q.holders().next().is_none() {
                 active_access.remove(&drop_id);
             } else if q.owner.as_ref().is_none_or(|o| o.cert_started) {
@@ -1709,10 +1723,7 @@ impl<W: Write> Engine<W> {
                         .unwrap()
                         .generation,
                 };
-                if q.owner.as_ref().is_some_and(|o| o.life == life)
-                    || q.waiting.contains(&life)
-                    || rotate == Some(life)
-                {
+                if !q.issues_ticket(life) || rotate == Some(life) {
                     continue;
                 }
                 q.waiting.push_back(life);
@@ -2594,6 +2605,68 @@ mod convoy_tests {
                 > 2. * bot_physics::Body::default().radius,
             "the bundled gap must keep two bodies from overlapping at the landing"
         );
+    }
+
+    fn holder(id: u16) -> PassageOwner {
+        let at = [80., 123., 173.];
+        PassageOwner {
+            life: PassageLife { id, generation: 1 },
+            // Queue-time snapshot: still reads as an approach from 10.9 m.
+            passage: DropPassage {
+                id: 1,
+                launch: at,
+                landing: [80., 119., 169.],
+                protected_bounds: crate::actor_collision::Bounds::body(
+                    at,
+                    bot_physics::Body::default(),
+                ),
+                phase: DropPhase::Approaching,
+                distance_to_launch: 10.88,
+                route_distance_to_launch: 10.88,
+            },
+            last_position: replication::CharacterPosition {
+                x: 79.7,
+                y: 119.,
+                z: 169.4,
+            },
+            progress_at: Duration::ZERO,
+            entered: true,
+            cert_started: true,
+        }
+    }
+
+    #[test]
+    fn a_landed_departing_member_is_never_queued_again_behind_its_own_convoy() {
+        let departed = PassageLife {
+            id: 16,
+            generation: 1,
+        };
+        let follower = PassageLife {
+            id: 40,
+            generation: 1,
+        };
+        let fresh = PassageLife {
+            id: 56,
+            generation: 1,
+        };
+        let mut q = PassageQueue {
+            owner: Some(holder(follower.id)),
+            departing: vec![holder(departed.id)],
+            ..Default::default()
+        };
+        assert!(
+            !q.issues_ticket(departed),
+            "a departing member must not take a ticket for the passage it holds"
+        );
+        assert!(!q.issues_ticket(follower), "nor may the owner");
+        assert!(q.issues_ticket(fresh));
+        q.waiting.push_back(fresh);
+        assert!(!q.issues_ticket(fresh), "one ticket per bot");
+        // State left by the live 0.5.0 defect heals on the next tick.
+        q.waiting.push_front(departed);
+        q.waiting.push_back(follower);
+        q.retire_held_tickets();
+        assert_eq!(q.waiting, [fresh]);
     }
 }
 
