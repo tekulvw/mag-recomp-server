@@ -1533,8 +1533,12 @@ impl<W: Write> Engine<W> {
             .as_ref()
             .and_then(|m| m.component_id(own).or_else(|_| m.component_id(launch)).ok());
         let mut last = "holding_no_candidate";
+        let mut fallback = None;
         for k in 0..policy.drop_holding_scan {
             if k > 0 && started.elapsed().as_micros() >= u128::from(policy.planning_slice_us) {
+                if let Some((goal, k)) = fallback {
+                    return (Ok(goal), k);
+                }
                 return (Err(last), k - 1);
             }
             let index = (attempt + k) % policy.drop_holding_candidate_limit;
@@ -1587,21 +1591,6 @@ impl<W: Write> Engine<W> {
                 last = "holding_component";
                 continue;
             }
-            // Never send a bot through another body to reach its spot: two
-            // waiters swapping sides in a one-body corridor deadlock.
-            let mut sweep_budget = 512;
-            if !matches!(
-                crate::bot_traffic_flow::approach_blocker(
-                    actors,
-                    id,
-                    &[[own, point(goal)]],
-                    &mut sweep_budget,
-                ),
-                Ok(None)
-            ) {
-                last = "holding_path_blocked";
-                continue;
-            }
             let bounds = crate::actor_collision::Bounds::body(point(goal), body);
             if boxes_intersect(bounds, passage.protected_bounds) {
                 last = "holding_protected";
@@ -1627,10 +1616,32 @@ impl<W: Write> Engine<W> {
                         .any(|g| distance(g, goal) < policy.reservation_spacing_m)
             });
             match actors.occupied(id, point(goal), body) {
-                Ok(false) if !reserved => return (Ok(goal), k),
+                Ok(false) if !reserved => {
+                    // Prefer a spot the bot can reach without walking through
+                    // another body (two waiters swapping sides in a one-body
+                    // corridor deadlock). In a crowd every path may cross
+                    // someone; then the first otherwise valid spot is used.
+                    let mut sweep_budget = 512;
+                    if matches!(
+                        crate::bot_traffic_flow::approach_blocker(
+                            actors,
+                            id,
+                            &[[own, point(goal)]],
+                            &mut sweep_budget,
+                        ),
+                        Ok(None)
+                    ) {
+                        return (Ok(goal), k);
+                    }
+                    fallback.get_or_insert((goal, k));
+                    last = "holding_path_blocked";
+                }
                 Ok(_) => last = "holding_occupied",
                 Err(e) => last = e,
             }
+        }
+        if let Some((goal, k)) = fallback {
+            return (Ok(goal), k);
         }
         (Err(last), policy.drop_holding_scan.saturating_sub(1))
     }

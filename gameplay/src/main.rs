@@ -1113,7 +1113,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         let mut errors = 0u64;
         while now <= Duration::from_secs(seconds) {
             engine.headless_sim_keepalive(now);
-            if snapshots && now.as_millis() % 500 == 0 {
+            if snapshots && now.as_millis().is_multiple_of(500) {
                 engine
                     .headless_sim_snapshot(now, wall0 + now.as_secs())
                     .map_err(io::Error::other)?;
