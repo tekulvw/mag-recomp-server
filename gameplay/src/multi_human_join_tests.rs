@@ -117,3 +117,42 @@ fn loading_second_human_is_not_evicted_by_bot_traffic_and_resyncs_when_ready() {
         "a ready human is snapshotted every current bot"
     );
 }
+
+#[test]
+fn second_human_reserve_reply_carries_no_peer_messages() {
+    // Horizon parses reserve replies as control replies, which must not carry
+    // reliable messages; a piggybacked peer packet made it refuse the admission.
+    let mut engine = populated_engine("Synthetic Reserve Reply");
+    engine.maximum_players = 8;
+    assert!(reserve(&mut engine, 0, A, Duration::ZERO).ok);
+    ready(actor(&mut engine, A).unwrap());
+    for ms in (50..1000).step_by(50) {
+        tick(&mut engine, Duration::from_millis(ms));
+    }
+    let bot = *engine.bot_registry.bots.keys().next().unwrap();
+    let queued = engine.bot_registry.bots[&bot]
+        .snapshot(Duration::from_millis(1000), engine.wire_profile)
+        .unwrap();
+    actor(&mut engine, A).unwrap().queue_shared(queued.clone());
+
+    let admitted = reserve(&mut engine, 1, B, Duration::from_millis(1000));
+    assert!(admitted.ok, "{:?}", admitted.error);
+    assert!(
+        admitted.messages.is_empty(),
+        "a reserve reply must not carry another recipient's reliable packets"
+    );
+    assert!(
+        actor(&mut engine, A)
+            .unwrap()
+            .pending_shared
+            .iter()
+            .any(|packet| *packet == queued),
+        "the peer's packet stays queued for the world stream"
+    );
+
+    // The next world tick delivers it to A as usual.
+    engine.enable_world_ticks();
+    let streamed = engine.tick_world(Duration::from_millis(1050), 1, "synthetic-tick".into());
+    assert!(streamed.ok, "{:?}", streamed.error);
+    assert!(streamed.messages.iter().any(|m| m.player_id == 0));
+}
