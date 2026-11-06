@@ -193,3 +193,48 @@ fn synthetic_spawn_schema_preserves_identity_and_rejects_broken_links() {
     value["active"]["available"] = json!([1]);
     assert!(SpawnCatalog::load(&SyntheticFile::new(&value).0).is_err());
 }
+
+#[test]
+fn synthetic_spawn_catalog_initial_delay_override_is_bounded_and_isolated() {
+    let value = json!({"format":"mag_spawn_catalog","schema_version":1,"source":"SYNTHETIC schema example",
+    "active":{"map_name":"synthetic_arena","squad_index":0,"default_spawn":0,"available":[0]},
+    "match_profile":{"spawn_wave_ms":[20000,20000],"initial_spawn_delay_ms":[35000,20000]},
+    "maps":[{"name":"synthetic_arena","spawn_count":1,"locations":[
+        {"index":0,"token":1,"kind":"on_foot","position":{"x":10.,"y":2.,"z":12.}}
+    ]}]});
+    let load = || SpawnCatalog::load(&SyntheticFile::new(&value).0).unwrap();
+    let authored = load().match_profile();
+    assert_eq!(authored.initial_spawn_delay_ms, [35000, 20000]);
+    let overridden = load()
+        .with_initial_spawn_delay_ms([10000, 10000])
+        .unwrap()
+        .match_profile();
+    assert_eq!(overridden.initial_spawn_delay_ms, [10000, 10000]);
+    assert_eq!(
+        overridden,
+        mag_gameplay::spawn_catalog::MatchProfile {
+            initial_spawn_delay_ms: [10000, 10000],
+            ..authored
+        },
+        "only the first-wave delay changes; respawn waves and the rest stay authored"
+    );
+    for invalid in [[0, 10000], [10000, 120_001]] {
+        assert!(load().with_initial_spawn_delay_ms(invalid).is_err());
+    }
+    // A catalog without an authored match profile gains only the delay.
+    let mut bare = value.clone();
+    bare.as_object_mut().unwrap().remove("match_profile");
+    let bare = SpawnCatalog::load(&SyntheticFile::new(&bare).0).unwrap();
+    let defaults = bare.match_profile();
+    let bare = bare
+        .with_initial_spawn_delay_ms([10000, 10000])
+        .unwrap()
+        .match_profile();
+    assert_eq!(
+        bare,
+        mag_gameplay::spawn_catalog::MatchProfile {
+            initial_spawn_delay_ms: [10000, 10000],
+            ..defaults
+        }
+    );
+}

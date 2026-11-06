@@ -213,6 +213,18 @@ impl SpawnCatalog {
         value.source_sha256 = Some(format!("{:x}", Sha256::digest(bytes)));
         Ok(value)
     }
+    /// Operator override for each team's first spawn-wave delay, bounded like the
+    /// authored policy. Every other match-profile field keeps its catalog value.
+    pub fn with_initial_spawn_delay_ms(mut self, delay_ms: [u32; 2]) -> Result<Self, &'static str> {
+        if delay_ms.iter().any(|ms| !(1..=120_000).contains(ms)) {
+            return Err("invalid_initial_spawn_delay_override");
+        }
+        let mut file = self.match_profile.take().unwrap_or_default();
+        file.initial_spawn_delay_ms = Some(delay_ms);
+        self.match_profile = Some(file);
+        self.validate()?;
+        Ok(self)
+    }
     pub fn source_sha256(&self) -> Option<&str> {
         self.source_sha256.as_deref()
     }
