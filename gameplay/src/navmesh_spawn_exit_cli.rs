@@ -22,6 +22,28 @@ struct Parameters {
     heading_offsets_radians: Vec<f64>,
     #[serde(default = "default_distances")]
     landing_distances: Vec<f64>,
+    #[serde(default = "default_min_radius")]
+    min_radius_steps: i32,
+    #[serde(default = "default_spacing")]
+    min_launch_spacing_m: f64,
+    #[serde(default = "default_group_limit")]
+    max_links_per_group: usize,
+    /// Reject a candidate only when it physically excludes an accepted link
+    /// (as runtime admission does) instead of by coarse box overlap.
+    #[serde(default)]
+    precise_overlap: bool,
+    /// Largest predicted fall damage a certified exit may cost (0: none).
+    #[serde(default)]
+    max_health_loss_quarter_points: u16,
+}
+fn default_min_radius() -> i32 {
+    3
+}
+fn default_spacing() -> f64 {
+    5.
+}
+fn default_group_limit() -> usize {
+    4
 }
 fn default_radius() -> i32 {
     15
@@ -40,6 +62,9 @@ struct Group {
     spawn: Point,
     goal: Point,
     new_id_base: u32,
+    /// Probe around this point instead of the original link's launch.
+    #[serde(default)]
+    seed: Option<Point>,
 }
 fn supported(t: &WorldTerrain<'_>, probe: Point, b: Body) -> Result<Point, String> {
     t.require_horizontal_coverage(probe, probe, b)
@@ -287,6 +312,13 @@ pub fn run(
     {
         return Err("invalid robustness slices".into());
     }
+    if !(1..=40).contains(&config.min_radius_steps)
+        || config.min_radius_steps > config.max_radius_steps
+        || !(0.5..=20.).contains(&config.min_launch_spacing_m)
+        || !(2..=24).contains(&config.max_links_per_group)
+    {
+        return Err("invalid search spacing".into());
+    }
     if !(3..=40).contains(&config.max_radius_steps)
         || config.heading_offsets_radians.is_empty()
         || config.heading_offsets_radians.len() > 64
@@ -328,22 +360,27 @@ pub fn run(
         let mut failures = BTreeMap::<String, usize>::new();
         let mut attempts = 0;
         let mut evidence = vec![];
-        'scan: for radius in 3_i32..=config.max_radius_steps {
+        let center = parameter.seed.unwrap_or(original.launch);
+        'scan: for radius in config.min_radius_steps..=config.max_radius_steps {
             for ix in -radius..=radius {
                 for iz in -radius..=radius {
                     if ix.abs() != radius && iz.abs() != radius {
                         continue;
                     }
                     let probe = [
-                        original.launch[0] + ix as f64 * 1.5,
-                        original.launch[1],
-                        original.launch[2] + iz as f64 * 1.5,
+                        center[0] + ix as f64 * 1.5,
+                        center[1],
+                        center[2] + iz as f64 * 1.5,
                     ];
-                    if group.iter().any(|l| xz(probe, l.launch) < 5.0) {
+                    if group
+                        .iter()
+                        .any(|l| xz(probe, l.launch) < config.min_launch_spacing_m)
+                    {
                         continue;
                     }
                     attempts += 1;
                     let Ok(launch) = supported(&t, probe, body) else {
+                        *failures.entry("probe_unsupported".into()).or_default() += 1;
                         continue;
                     };
                     if mesh
@@ -351,6 +388,9 @@ pub fn run(
                         .map(|r| r.status != Status::Complete)
                         .unwrap_or(true)
                     {
+                        *failures
+                            .entry("probe_no_route_from_spawn".into())
+                            .or_default() += 1;
                         continue;
                     }
                     let base = (original.landing[2] - original.launch[2])
@@ -364,20 +404,32 @@ pub fn run(
                                 launch[2] + distance * theta.sin(),
                             ];
                             let Some(g) = t.sample_ground(probe, 3., 15.).ok().flatten() else {
+                                *failures.entry("landing_no_ground".into()).or_default() += 1;
                                 continue;
                             };
                             let Ok(landing) = supported(&t, g.position, body) else {
+                                *failures.entry("landing_unsupported".into()).or_default() += 1;
                                 continue;
                             };
                             if landing[1] >= launch[1] - 0.1 {
+                                *failures.entry("landing_not_lower".into()).or_default() += 1;
                                 continue;
                             }
-                            let Ok(suffix) = mesh.route(landing, goal, 5.) else {
-                                continue;
-                            };
-                            if suffix.status != Status::Complete {
+                            let complete = mesh
+                                .route(landing, goal, 5.)
+                                .map(|r| r.status == Status::Complete);
+                            if complete != Ok(true) {
+                                *failures
+                                    .entry(format!(
+                                        "landing_no_route_to_goal@{:.0},{:.0},{:.0}",
+                                        (landing[0] / 8.).round() * 8.,
+                                        landing[1].round(),
+                                        (landing[2] / 8.).round() * 8.
+                                    ))
+                                    .or_default() += 1;
                                 continue;
                             }
+                            let suffix = mesh.route(landing, goal, 5.)?;
                             let id = parameter
                                 .new_id_base
                                 .checked_add(group.len() as u32)
@@ -394,10 +446,11 @@ pub fn run(
                                     continue;
                                 }
                             };
-                            if rules
-                                .predict_drop(link.max_drop_height as f32, health)?
-                                .remaining_health_quarter_points
-                                != health
+                            if health.saturating_sub(
+                                rules
+                                    .predict_drop(link.max_drop_height as f32, health)?
+                                    .remaining_health_quarter_points,
+                            ) > config.max_health_loss_quarter_points
                             {
                                 *failures
                                     .entry("drop_predicts_health_loss".into())
@@ -405,6 +458,11 @@ pub fn run(
                                 continue;
                             }
                             if group.iter().any(|other| {
+                                if config.precise_overlap {
+                                    return mag_gameplay::drop_passages_exclusive(
+                                        other, &link, 1.5,
+                                    );
+                                }
                                 let (a, b) = protected_bounds(other);
                                 let (c, d) = protected_bounds(&link);
                                 (0..3).all(|k| a[k] < d[k] && b[k] > c[k])
@@ -457,7 +515,7 @@ pub fn run(
                             }
                             all.push(link.clone());
                             group.push(link);
-                            if group.len() >= 4 {
+                            if group.len() >= config.max_links_per_group {
                                 break 'scan;
                             }
                             continue 'scan;
@@ -483,7 +541,7 @@ pub fn run(
     fs::write(
         out.join("provenance.json"),
         serde_json::to_vec_pretty(
-            &json!({"format":"mag_spawn_exit_search_v1","world_sha256":hash,"input_mesh_sha256":navmesh::sha256(&fs::read(mesh_path)?),"parameters_sha256":navmesh::sha256(&fs::read(parameters)?),"output_mesh_sha256":navmesh::sha256(&fs::read(out.join("world-alternatives.mag-nav"))?),"speed_m_s":4.5,"fall_rules_sha256":navmesh::sha256(&fs::read(fall_rules)?),"health_quarter_points":health,"accepted_health_policy":"no predicted loss under supplied actual fall rules","maximum_launch_ring_m":config.max_radius_steps as f64*1.5,"production_follower_acceptance":"not established by discovery"}),
+            &json!({"format":"mag_spawn_exit_search_v1","world_sha256":hash,"input_mesh_sha256":navmesh::sha256(&fs::read(mesh_path)?),"parameters_sha256":navmesh::sha256(&fs::read(parameters)?),"output_mesh_sha256":navmesh::sha256(&fs::read(out.join("world-alternatives.mag-nav"))?),"speed_m_s":4.5,"fall_rules_sha256":navmesh::sha256(&fs::read(fall_rules)?),"health_quarter_points":health,"accepted_health_policy":format!("predicted loss <= {} quarter points under supplied actual fall rules", config.max_health_loss_quarter_points),"maximum_launch_ring_m":config.max_radius_steps as f64*1.5,"production_follower_acceptance":"not established by discovery"}),
         )?,
     )?;
     Ok(())

@@ -58,9 +58,20 @@ use event_decode::DecodedEvent;
 mod resources;
 mod world_tick;
 pub use resources::EngineResources;
+/// Whether two certified drops can never be served at the same time (their
+/// launch pads, flights or landings can meet). Used by offline exit search.
+#[doc(hidden)]
+pub fn drop_passages_exclusive(
+    a: &navmesh::DropLink,
+    b: &navmesh::DropLink,
+    entry_buffer_m: f64,
+) -> bool {
+    bot_traffic_flow::passages_exclusive(a, b, entry_buffer_m)
+}
 pub mod character_damage_rules;
 mod ground_seats;
 pub mod ground_vehicles;
+mod headless_sim;
 pub mod healing;
 pub mod item_catalog;
 mod loadout_refresh;
