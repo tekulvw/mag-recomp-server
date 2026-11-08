@@ -131,11 +131,7 @@ pub(super) struct WorldBot {
     pub(super) drop_holding_attempt: usize,
     pub(super) holding_retry_at: Duration,
     /// (holding goal, last position with progress, when) while walking to it.
-    pub(super) holding_progress: Option<(
-        replication::CharacterPosition,
-        replication::CharacterPosition,
-        Duration,
-    )>,
+    pub(super) holding_progress: Option<HoldingProgress>,
     pub(super) drop_resume: bool,
     pub(super) drop_egress: bool,
     pub(super) drop_retreat: bool,
@@ -215,6 +211,30 @@ fn landing_occupied(p: [f64; 3], supported: bool, landing: [f64; 3], gap_m: f64)
     !supported
         || ((p[0] - landing[0]).hypot(p[2] - landing[2]) < gap_m
             && (p[1] - landing[1]).abs() < bot_physics::Body::default().height)
+}
+type HoldingProgress = (
+    replication::CharacterPosition,
+    replication::CharacterPosition,
+    Duration,
+);
+/// Tracks the last time a bot walking to its holding spot made 0.5 m of
+/// progress. Cleared when it has no spot, has arrived or is not walking; reset
+/// when the spot changes. The restage rule compares the time to the policy.
+fn next_holding_progress(
+    previous: Option<HoldingProgress>,
+    goal: Option<replication::CharacterPosition>,
+    position: replication::CharacterPosition,
+    relocating: bool,
+    arrival_m: f64,
+    now: Duration,
+) -> Option<HoldingProgress> {
+    let goal = goal.filter(|g| relocating && distance(*g, position) > arrival_m)?;
+    match previous {
+        Some((g, p, since)) if distance(g, goal) <= 0.01 && distance(p, position) < 0.5 => {
+            Some((g, p, since))
+        }
+        _ => Some((goal, position, now)),
+    }
 }
 fn runtime_landing_occupied(runtime: BotRuntime, landing: [f64; 3], gap_m: f64) -> bool {
     landing_occupied(
@@ -1406,19 +1426,14 @@ impl<W: Write> Engine<W> {
         for (&id, b) in &mut self.bot_registry.bots {
             let r = b.target.runtime.unwrap();
             // Progress toward a holding spot; a body-blocked walk restages early.
-            match b.drop_holding_goal {
-                Some(goal)
-                    if distance(goal, r.position) > policy.arrival_m
-                        && matches!(r.phase, BotPhase::Relocating) =>
-                {
-                    if b.holding_progress.is_none_or(|(g, p, _)| {
-                        distance(g, goal) > 0.01 || distance(p, r.position) >= 0.5
-                    }) {
-                        b.holding_progress = Some((goal, r.position, now));
-                    }
-                }
-                _ => b.holding_progress = None,
-            }
+            b.holding_progress = next_holding_progress(
+                b.holding_progress,
+                b.drop_holding_goal,
+                r.position,
+                matches!(r.phase, BotPhase::Relocating),
+                policy.arrival_m,
+                now,
+            );
             let key = passages.get(&id).map(|p| crate::bot_traffic_costs::Key {
                 generation: r.generation,
                 objective: b.task.objective,
@@ -2693,6 +2708,39 @@ mod convoy_tests {
         q.waiting.push_back(follower);
         q.retire_held_tickets();
         assert_eq!(q.waiting, [fresh]);
+    }
+
+    #[test]
+    fn a_body_blocked_walk_to_a_holding_spot_stops_accruing_progress() {
+        let at = |x: f32, z: f32| replication::CharacterPosition { x, y: 0., z };
+        let spot = at(10., 0.);
+        let s = Duration::from_secs;
+        // Walking: progress is stamped when the walk starts.
+        let p = next_holding_progress(None, Some(spot), at(0., 0.), true, 0.6, s(1));
+        assert_eq!(p.map(|p| p.2), Some(s(1)));
+        // Blocked: less than 0.5 m moved, the original stamp is kept.
+        let blocked = next_holding_progress(p, Some(spot), at(0.3, 0.), true, 0.6, s(4));
+        assert_eq!(
+            blocked.map(|p| p.2),
+            Some(s(1)),
+            "no progress keeps the old time"
+        );
+        // Moving again: 0.5 m or more restamps.
+        let moving = next_holding_progress(blocked, Some(spot), at(0.6, 0.), true, 0.6, s(5));
+        assert_eq!(moving.map(|p| p.2), Some(s(5)));
+        // A new spot starts a new walk.
+        let respot =
+            next_holding_progress(blocked, Some(at(-5., 0.)), at(0.3, 0.), true, 0.6, s(6));
+        assert_eq!(respot.map(|p| p.2), Some(s(6)));
+        // Arrived, not walking or no spot: nothing to track.
+        assert!(next_holding_progress(p, Some(spot), at(9.8, 0.), true, 0.6, s(7)).is_none());
+        assert!(next_holding_progress(p, Some(spot), at(1., 0.), false, 0.6, s(7)).is_none());
+        assert!(next_holding_progress(p, None, at(1., 0.), true, 0.6, s(7)).is_none());
+        assert!(
+            crate::bot_objectives::ObjectivePolicy::bundled().drop_holding_progress_stall_ms
+                < crate::bot_objectives::ObjectivePolicy::bundled().drop_holding_stall_ms,
+            "a body-blocked walk must restage sooner than the full holding stall"
+        );
     }
 }
 
