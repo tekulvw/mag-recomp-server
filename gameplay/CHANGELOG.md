@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.1](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.7.0...gameplay-v0.7.1) (2026-11-08)
+
+
+### Bug Fixes
+
+* **gameplay:** check seeded exit candidates against every drop on the spawn island ([#75](https://github.com/tekulvw/mag-recomp-server/issues/75)) ([1f21d24](https://github.com/tekulvw/mag-recomp-server/commit/1f21d24cccb0053f79b1894e837953009b30514c))
+* **gameplay:** stop queued bots deadlocking while walking to holding spots ([#74](https://github.com/tekulvw/mag-recomp-server/issues/74)) ([bb4e558](https://github.com/tekulvw/mag-recomp-server/commit/bb4e55866d3bf6b6882de6733539e93a3bbfac20))
+
 ## [0.7.0](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.6.0...gameplay-v0.7.0) (2026-11-06)
 
 
