@@ -357,6 +357,19 @@ pub fn run(
         let goal = parameter.goal;
         let squad = &parameter.label;
         let mut group = vec![original.clone()];
+        // A seeded search covers the whole spawn island: new exits must also
+        // be spaced from, and physically independent of, every existing drop
+        // that launches from the same navmesh component as the spawn.
+        if parameter.seed.is_some() {
+            let island = mesh.component_id(spawn)?;
+            group.extend(
+                old.iter()
+                    .filter(|l| {
+                        l.id != original.id && mesh.component_id(l.launch).ok() == Some(island)
+                    })
+                    .cloned(),
+            );
+        }
         let mut failures = BTreeMap::<String, usize>::new();
         let mut attempts = 0;
         let mut evidence = vec![];
