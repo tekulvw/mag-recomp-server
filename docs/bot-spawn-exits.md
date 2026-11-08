@@ -67,6 +67,14 @@ protected boxes, approach lanes and occupied spots are skipped. Up to
 launch level is a valid staging area; only the navmesh component decides
 whether a spot belongs to the launch side.
 
+Among valid spots the scan prefers one the bot can reach without walking
+through another body; in a crowd where every path crosses someone it falls
+back to the first otherwise valid spot. A bot walking to its spot that makes
+less than 0.5 m of progress for `drop_holding_progress_stall_ms` (default
+3000) is restaged without waiting for the full `drop_holding_stall_ms`. Both
+rules prevent two waiters that must swap sides in a one-body corridor from
+blocking each other until the full stall, repeatedly.
+
 When at least `wave_backlog` grounded bots are waiting for a first route or a
 staging spot, the planner uses `wave_route_queries_per_tick`,
 `wave_candidate_checks_per_tick` and `wave_planning_slice_us` (each only ever

@@ -1107,11 +1107,17 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         engine
             .headless_sim_join(Duration::ZERO, wall0, faction)
             .map_err(io::Error::other)?;
+        let snapshots = std::env::var("MAG_SIM_SNAPSHOTS").is_ok_and(|v| v == "1");
         let step = Duration::from_millis(50);
         let mut now = step;
         let mut errors = 0u64;
         while now <= Duration::from_secs(seconds) {
             engine.headless_sim_keepalive(now);
+            if snapshots && now.as_millis().is_multiple_of(500) {
+                engine
+                    .headless_sim_snapshot(now, wall0 + now.as_secs())
+                    .map_err(io::Error::other)?;
+            }
             let r = engine.tick_world(now, wall0 + now.as_secs(), "headless-sim".into());
             if !r.ok {
                 errors += 1;
