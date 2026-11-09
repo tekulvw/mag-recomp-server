@@ -58,14 +58,14 @@ internal static class StartingLevelChecks
             var same = Create(directory, catalog, 1, "same");
             Check(same.Level == 1 && same.Experience == 0 && same.SkillPoints == 1, "Starting level equal to the catalog start is a no-op");
 
-            Check(Program.ParseStartingLevel(null, catalog) == null && Program.ParseStartingLevel(" ", catalog) == null, "Unset parses to null");
-            Check(Program.ParseStartingLevel("3", catalog) == 3, "Valid level parses");
+            Check(Server.Medius.Program.ParseStartingLevel(null, catalog) == null && Server.Medius.Program.ParseStartingLevel(" ", catalog) == null, "Unset parses to null");
+            Check(Server.Medius.Program.ParseStartingLevel("3", catalog) == 3, "Valid level parses");
             foreach (var bad in new[] { "0", "5", "x", "-1", "300" })
             {
-                bool threw = false; try { Program.ParseStartingLevel(bad, catalog); } catch (InvalidDataException) { threw = true; }
+                bool threw = false; try { Server.Medius.Program.ParseStartingLevel(bad, catalog); } catch (InvalidDataException) { threw = true; }
                 Check(threw, "Invalid MAG_STARTING_LEVEL must fail startup: " + bad);
             }
-            bool needsCatalog = false; try { Program.ParseStartingLevel("3", null); } catch (InvalidDataException) { needsCatalog = true; }
+            bool needsCatalog = false; try { Server.Medius.Program.ParseStartingLevel("3", null); } catch (InvalidDataException) { needsCatalog = true; }
             Check(needsCatalog, "A starting level without a progression catalog must fail startup");
         }
         finally { Directory.Delete(directory, true); }
