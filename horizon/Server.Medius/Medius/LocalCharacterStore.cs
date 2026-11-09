@@ -228,6 +228,9 @@ namespace Server.Medius
         public const int MaximumRewardReceipts = 4096;
         // Explicit local development policy, supplied by the caller; authored starter data grants no blanket unlock.
         public byte InitialSkillPoints { get; set; }
+        // Operator policy: new characters start at this level as if they had earned it
+        // (threshold XP and every gained level's skill points). Null keeps the catalog default.
+        public byte? StartingLevel { get; set; }
         private readonly ICharacterStoreCommitter _committer;
         public LocalCharacterStore(string path) : this(path, new AtomicCharacterStoreCommitter()) { }
         public LocalCharacterStore(string path, ICharacterStoreCommitter committer)
@@ -314,7 +317,16 @@ namespace Server.Medius
                 uint next = all.Count == 0 ? 1u : checked(all.Max(c => c.Id) + 1u);
                 var created = new StoredCharacter { Account = account, Id = next, Name = request.AccountName, Faction = request.Faction,
                     HeadId = request.HeadId, VoiceId = request.VoiceId, UniverseId = request.UniverseId, NpId = (byte[])request.NpId.Clone() };
-                if (ProgressionCatalog != null) { created.Experience = ProgressionCatalog.InitialExperience; created.Level = ProgressionCatalog.InitialLevel; created.SkillPoints = ProgressionCatalog.InitialSkillPoints; }
+                if (ProgressionCatalog != null)
+                {
+                    var catalog = ProgressionCatalog;
+                    created.Experience = catalog.InitialExperience; created.Level = catalog.InitialLevel; created.SkillPoints = catalog.InitialSkillPoints;
+                    if (StartingLevel is byte start && start > catalog.InitialLevel && start <= catalog.MaximumLevel)
+                    {
+                        created.Experience = catalog.ThresholdForLevel(start); created.Level = start;
+                        created.SkillPoints = catalog.PointsAfterGain(catalog.InitialSkillPoints, catalog.InitialLevel, start);
+                    }
+                }
                 all.Add(created);
             }
             // Recommit exact retries too: recover a prior uncertain directory sync before success.

@@ -46,6 +46,10 @@ runtime:
   # Optional first spawn-wave delay override in ms (1-120000): one value for both
   # teams or [team0, team1]. Unset keeps the spawn catalog's authored delay.
   initialSpawnDelayMs: null
+  # Optional level for newly created characters (MAG_STARTING_LEVEL). They start
+  # as if they had earned it: the level's XP threshold and the skill points of
+  # every gained level. Unset keeps the progression catalog's StartingLevel.
+  startingLevel: null
 accounts:
   existingClaim: ""
   size: 1Gi
