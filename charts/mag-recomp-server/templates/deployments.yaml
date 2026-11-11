@@ -119,6 +119,9 @@ spec:
             - {name: {{ $env }}, value: {{ printf "/data/%s" . | quote }}}
             {{- end }}
             {{- end }}
+            {{- with $root.Values.runtime.startingLevel }}
+            - {name: MAG_STARTING_LEVEL, value: {{ . | int | toString | quote }}}
+            {{- end }}
           ports:
             {{- if $main }}
             - {name: auth, containerPort: 10475, protocol: TCP}
