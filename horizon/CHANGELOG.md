@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.3.1...medius-v0.4.0) (2026-11-11)
+
+
+### Features
+
+* **medius:** optional starting level for new characters ([#77](https://github.com/tekulvw/mag-recomp-server/issues/77)) ([c93929d](https://github.com/tekulvw/mag-recomp-server/commit/c93929d05e4cb5c0efd163ac275e5327f131ea94))
+
 ## [0.3.1](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.3.0...medius-v0.3.1) (2026-11-06)
 
 
