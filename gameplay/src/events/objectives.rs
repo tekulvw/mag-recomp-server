@@ -116,6 +116,12 @@ pub(super) fn interaction<W: Write>(
 
 impl<W: Write> Engine<W> {
     pub(crate) fn reset_objective_world(&mut self) {
+        if let Some(gameplay) = &mut self.acquisition_gameplay {
+            gameplay.reset();
+        }
+        if let Some(round) = &mut self.acquisition_round {
+            round.reset();
+        }
         if let Some(ground) = &mut self.ground_runtime {
             ground.reset_for_new_world();
         }
@@ -277,6 +283,9 @@ impl<W: Write> Engine<W> {
         now: Duration,
         wall: u64,
     ) -> Result<Vec<OutboundMessage>, &'static str> {
+        if self.acquisition_gameplay.is_some() {
+            return self.tick_acquisition_objectives(now, wall);
+        }
         if self.match_terminal.is_some() || !self.match_started {
             return Ok(Vec::new());
         }
@@ -516,7 +525,12 @@ impl<W: Write> Engine<W> {
     }
 }
 
-fn exit_message(active: &Active, index: u16, player: u16, trigger: u8) -> OutboundMessage {
+pub(crate) fn exit_message(
+    active: &Active,
+    index: u16,
+    player: u16,
+    trigger: u8,
+) -> OutboundMessage {
     let notification = protocol::ObjectiveInteraction {
         target_object_id: 0x0c80_0000 | u32::from(index),
         kind: protocol::ObjectiveInteractionKind::ActivatingOnExit,
@@ -538,6 +552,9 @@ impl<W: Write> Engine<W> {
         now: Duration,
         wall: u64,
     ) -> Result<Vec<OutboundMessage>, &'static str> {
+        if self.acquisition_round.is_some() {
+            return self.tick_acquisition_round(now, wall);
+        }
         if self
             .objective_catalog
             .as_ref()

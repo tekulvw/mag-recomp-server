@@ -36,6 +36,7 @@ impl ObjectiveSource {
                     && self.initial_load_scope.as_deref()
                         == Some("pre_mission_start_before_dynamic_creation")
             }
+            "native_source_gameplay" => game_type == 1 && self.initial_load_scope.is_none(),
             _ => false,
         }
     }
@@ -309,7 +310,8 @@ impl ObjectiveCatalog {
             if let Some(rule) = &object.interaction {
                 if rule.owner_team > 1
                     || rule.activate_ms == 0
-                    || rule.complete_ms == 0
+                    || (rule.complete_ms == 0
+                        && self.source.capture_qualification != "native_source_gameplay")
                     || rule.deactivate_ms == 0
                     || rule.trigger_count == 0
                     || rule.position.iter().any(|value| !value.is_finite())
@@ -466,6 +468,30 @@ impl ObjectiveCatalog {
     }
     pub fn object_count(&self) -> usize {
         self.objects.len()
+    }
+    pub(crate) fn binding(&self, token: u32) -> Option<(u16, u8)> {
+        self.objects
+            .iter()
+            .find(|o| {
+                o.token
+                    .strip_prefix("0x")
+                    .and_then(|v| u32::from_str_radix(v, 16).ok())
+                    == Some(token)
+            })
+            .map(|o| (o.object_index, o.initial_state))
+    }
+    pub(crate) fn authored_orders(
+        &self,
+        squad_index: u16,
+    ) -> Option<impl Iterator<Item = (u16, u32)> + '_> {
+        self.squads
+            .iter()
+            .find(|s| s.squad_index == squad_index)
+            .map(|s| {
+                s.authored_objectives
+                    .iter()
+                    .map(|o| (o.object_index, o.order))
+            })
     }
     pub fn initial_assignment(&self, squad_index: u16) -> Result<u16, &'static str> {
         self.squads

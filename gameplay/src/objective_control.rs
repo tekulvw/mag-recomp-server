@@ -142,6 +142,23 @@ impl ObjectiveWorld {
             .map(|object| object.state.state_actor.state)
     }
 
+    /// Apply a validated entry to the isolated Acquisition world. A controller
+    /// transition cancels any old capture/fuse operation on that objective.
+    pub(crate) fn install_acquisition_delta(
+        &mut self,
+        delta: ObjectiveControlDelta,
+    ) -> Result<(), &'static str> {
+        let object = self
+            .objects
+            .get_mut(&delta.object_index)
+            .ok_or("unknown_acquisition_gameplay_objective")?;
+        object.state = delta;
+        object.operation = None;
+        object.fuse = None;
+        self.pristine = false;
+        Ok(())
+    }
+
     /// Explicit development fixture: plant without impersonating a human actor.
     /// Normal defuse and fuse ticking own all subsequent transitions.
     pub fn development_arm(

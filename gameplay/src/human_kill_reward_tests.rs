@@ -7,6 +7,22 @@ fn combat_items() -> Arc<item_catalog::ItemCatalog> {
     combat_items_with_grenade(false)
 }
 fn combat_items_with_grenade(grenade: bool) -> Arc<item_catalog::ItemCatalog> {
+    combat_fixture_items(grenade, 0.0, 0.0)
+}
+
+pub(crate) fn combat_items_for_ground_test(vehicle_hp: f32) -> Arc<item_catalog::ItemCatalog> {
+    combat_fixture_items(false, vehicle_hp, 0.0)
+}
+
+pub(crate) fn grenade_items_for_ground_test(vehicle_hp: f32) -> Arc<item_catalog::ItemCatalog> {
+    combat_fixture_items(true, 0.0, vehicle_hp)
+}
+
+fn combat_fixture_items(
+    grenade: bool,
+    vehicle_hp: f32,
+    grenade_vehicle_hp: f32,
+) -> Arc<item_catalog::ItemCatalog> {
     let items = item_catalog::ItemCatalog::from_value_for_application(json!({
         "schema_version":2,"application_id":20231,
         "items":{
@@ -33,7 +49,7 @@ fn combat_items_with_grenade(grenade: bool) -> Arc<item_catalog::ItemCatalog> {
         "provenance":{},
         "bullets":{"2":{"authored_ref":"FactionItemList0:2","name":"synthetic_rifle","definition":{},"source":{},"item_source":{},
             "ammo":{"group":"hitscan_ammo","name":"synthetic_bullet","source":{},"ammo_token_candidate":77,"ammo_token_verified_for_retail":false},
-            "damage":{"character":40.0,"characterAPierce":0.0,"characterARedux":0.0,"vehicle":0.0,"vehicleAPierce":0.0,"vehicleARedux":0.0,"objective":0.0,"objectiveAPierce":0.0,"objectiveARedux":0.0,"mine":0.0},
+            "damage":{"character":40.0,"characterAPierce":0.0,"characterARedux":0.0,"vehicle":vehicle_hp,"vehicleAPierce":0.0,"vehicleARedux":0.0,"objective":0.0,"objectiveAPierce":0.0,"objectiveARedux":0.0,"mine":0.0},
             "effective_range":20.0,"max_range":80.0,"magazine_capacity":9,"initial_magazine_count":2}},
         "armor":{"3":{"authored_ref":"FactionItemList0:3","name":"synthetic_armor","definition":{},"source":{},"item_source":{},"armor_type":1,"rating":0.0,"prevention":0.0,"coverage":[0.0,0.0,0.0,0.0],"armor_type_source":{}}},
         "body":(0..16).map(|location|json!({"location":location,"armor_area":1,"multiplier":1.0,"incapacitated_multiplier":1.0,"source":{}})).collect::<Vec<_>>(),
@@ -51,7 +67,7 @@ fn combat_items_with_grenade(grenade: bool) -> Arc<item_catalog::ItemCatalog> {
             "ammo":{"group":"projectile_ammo","name":"synthetic_frag_ammo","source":{},
                 "ammo_token_candidate":91,"ammo_token_verified_for_retail":false},
             "damage":{"character":20.0,"characterAPierce":0.0,"characterARedux":0.0,
-                "vehicle":0.0,"vehicleAPierce":0.0,"vehicleARedux":0.0,"objective":0.0,
+                "vehicle":grenade_vehicle_hp,"vehicleAPierce":0.0,"vehicleARedux":0.0,"objective":0.0,
                 "objectiveAPierce":0.0,"objectiveARedux":0.0,"mine":0.0},
             "full_radius":8.0,"half_radius":4.0,"fuse_ms":100,"authored_lifetime_ms":2000,
             "initial_count":1,"effective_range":4.0,"max_range":8.0,

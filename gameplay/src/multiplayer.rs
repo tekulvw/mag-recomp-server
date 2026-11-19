@@ -480,7 +480,13 @@ impl<W: Write> Engine<W> {
             .active
             .as_ref()
             .is_some_and(|a| a.emplacement_creation.is_some());
-        let removed = if matches!(&request, Request::Release { .. }) {
+        let is_release = matches!(&request, Request::Release { .. });
+        let released_driver = self
+            .active
+            .as_ref()
+            .filter(|_| is_release)
+            .and_then(|actor| self.ground_driver_seat_index(actor));
+        let removed = if is_release {
             self.active
                 .as_ref()
                 .filter(|a| a.initial_objects.is_some())
@@ -502,8 +508,10 @@ impl<W: Write> Engine<W> {
             Request::Reserve { player_id, .. } => Some(*player_id),
             _ => None,
         };
-        let is_release = matches!(&request, Request::Release { .. });
         let mut messages = self.apply(request, decoded, now, wall)?;
+        if let Some(index) = released_driver {
+            self.queue_ground_driver_revocation(index, now)?;
+        }
         if development_demolition {
             return Ok(messages);
         }
@@ -810,6 +818,9 @@ impl<W: Write> Engine<W> {
                 })
                 .unwrap();
             self.remember_round_participant(&removed);
+            if let Some(index) = self.ground_driver_seat_index(&removed) {
+                self.queue_ground_driver_revocation(index, now)?;
+            }
             if self
                 .alpha_turret_reporter
                 .as_ref()

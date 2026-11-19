@@ -44,6 +44,7 @@ struct Source {
     navmesh_world: Option<PathBuf>,
     ground_vehicles: Option<PathBuf>,
     character_damage_rules: Option<PathBuf>,
+    acquisition_gameplay: Option<PathBuf>,
 }
 #[derive(Clone)]
 struct Loaded {
@@ -54,6 +55,7 @@ struct Loaded {
     navmesh: Option<Arc<navmesh::NavMesh>>,
     vehicles: Option<ground_vehicles::Catalog>,
     damage: Option<character_damage_rules::Rules>,
+    acquisition: Option<Arc<acquisition_gameplay_engine::Setup>>,
 }
 pub struct Registry {
     profiles: BTreeMap<String, Loaded>,
@@ -66,6 +68,9 @@ impl Registry {
     ) -> Result<(), &'static str> {
         for profile in self.profiles.values() {
             bindings.validate_for(catalog, profile.vehicles.as_ref())?;
+            if let Some(setup) = &profile.acquisition {
+                setup.validate_ground_hulk_templates(catalog)?;
+            }
         }
         Ok(())
     }
@@ -99,6 +104,7 @@ impl Registry {
                 source.navmesh_world.as_ref(),
                 source.ground_vehicles.as_ref(),
                 source.character_damage_rules.as_ref(),
+                source.acquisition_gameplay.as_ref(),
             ]
             .into_iter()
             .flatten()
@@ -199,11 +205,56 @@ impl Registry {
                 .as_ref()
                 .map(|p| ground_vehicles::Catalog::load(p, &spawns))
                 .transpose()?;
+            let acquisition = if let Some(path) = source.acquisition_gameplay {
+                let world = collision.as_ref().ok_or_else(|| {
+                    io::Error::other("acquisition_gameplay_requires_collision_world")
+                })?;
+                if world.stats().triangles == 0 {
+                    return Err(io::Error::other(
+                        "acquisition_gameplay_requires_nonempty_collision_world",
+                    ));
+                }
+                let catalog = objectives
+                    .as_ref()
+                    .ok_or_else(|| io::Error::other("acquisition_gameplay_requires_objectives"))?;
+                let ground = vehicles.as_ref().ok_or_else(|| {
+                    io::Error::other("acquisition_gameplay_requires_ground_vehicles")
+                })?;
+                let runtime = acquisition_ground_runtime::Runtime::from_catalog(ground)
+                    .map_err(io::Error::other)?;
+                let setup = acquisition_gameplay_config::Configuration::load(path)?
+                    .build(&spawns, catalog, &runtime)?;
+                setup
+                    .validate_ground_drivers(ground)
+                    .map_err(io::Error::other)?;
+                if let Some(policy) = &setup.ground_damage {
+                    for creation in ground.creations() {
+                        policy
+                            .validate_vehicle(creation)
+                            .map_err(io::Error::other)?;
+                    }
+                }
+                Some(Arc::new(setup))
+            } else {
+                if objectives.as_ref().is_some_and(|catalog| {
+                    catalog.source().capture_qualification == "native_source_gameplay"
+                }) {
+                    return Err(io::Error::other(
+                        "acquisition_gameplay_configuration_required",
+                    ));
+                }
+                None
+            };
             let damage = source
                 .character_damage_rules
                 .as_ref()
                 .map(character_damage_rules::Rules::load)
                 .transpose()?;
+            if acquisition.is_some() && damage.is_none() {
+                return Err(io::Error::other(
+                    "acquisition_gameplay_requires_character_damage_rules",
+                ));
+            }
             if let Some(rules) = &damage {
                 rules
                     .validate_match(20231, &spawns)
@@ -227,6 +278,7 @@ impl Registry {
                     navmesh,
                     vehicles,
                     damage,
+                    acquisition,
                 },
             );
         }
@@ -240,6 +292,9 @@ impl Registry {
         if wire.application_id() != 20231 || items.application_id() != 20231 {
             return Err("match_profiles_require_explicit_retail_application");
         }
+        if self.has_acquisition_gameplay() {
+            items.retail_combat()?;
+        }
         for loaded in self.profiles.values() {
             objective_catalog::validate_configuration(
                 loaded.objectives.as_ref(),
@@ -252,6 +307,31 @@ impl Registry {
         }
         Ok(())
     }
+    /// Validate the map-specific static exclusion input for every enabled
+    /// Acquisition world before a worker advertises the registry.
+    pub fn validate_acquisition_static_partitions(
+        &self,
+        partitions: &[static_collision_partition::Partition],
+    ) -> Result<(), &'static str> {
+        for profile in self.profiles.values() {
+            let Some(setup) = &profile.acquisition else {
+                continue;
+            };
+            let partition = partitions
+                .iter()
+                .find(|p| p.map_name() == profile.spawns.map_name())
+                .ok_or("match_profile_acquisition_static_partition_missing")?;
+            partition.require_excluded(6, &setup.filter_rows)?;
+        }
+        Ok(())
+    }
+
+    pub fn has_acquisition_gameplay(&self) -> bool {
+        self.profiles
+            .values()
+            .any(|profile| profile.acquisition.is_some())
+    }
+
     pub fn summaries(&self) -> Vec<Summary> {
         self.profiles.values().map(|p| p.summary.clone()).collect()
     }
@@ -269,6 +349,7 @@ impl<W: Write> Engine<W> {
             || self.active.is_some()
             || !self.peers.is_empty()
             || self.match_profiles.is_some()
+            || self.acquisition_gameplay.is_some()
         {
             return Err("match_profiles_require_idle_explicit_retail_engine");
         }
@@ -348,11 +429,26 @@ impl<W: Write> Engine<W> {
             .objectives
             .as_ref()
             .map(objective_control::ObjectiveWorld::new);
-        let ground_runtime = loaded
+        let acquisition_round = loaded
+            .acquisition
+            .as_ref()
+            .map(|setup| acquisition_round::Round::new(setup.rules));
+        let acquisition_gameplay = loaded
+            .acquisition
+            .map(acquisition_gameplay_engine::Runtime::from_setup);
+        let mut ground_runtime = loaded
             .vehicles
             .as_ref()
             .map(acquisition_ground_runtime::Runtime::from_catalog)
             .transpose()?;
+        if let Some(runtime) = &acquisition_gameplay {
+            acquisition_gameplay_config::configure_ground(
+                ground_runtime
+                    .as_mut()
+                    .ok_or("acquisition_gameplay_requires_ground_vehicles")?,
+                &runtime.setup.ground_capabilities,
+            )?;
+        }
         self.record(
             json!({"op":"match_profile_selected","selected_match":selected}),
             wall,
@@ -367,6 +463,8 @@ impl<W: Write> Engine<W> {
         self.navmesh_world = loaded.navmesh;
         self.ground_vehicles = loaded.vehicles;
         self.ground_runtime = ground_runtime;
+        self.acquisition_gameplay = acquisition_gameplay;
+        self.acquisition_round = acquisition_round;
         self.character_damage_rules = loaded.damage;
         self.development_dummy_position = self
             .spawn_catalog
@@ -482,6 +580,155 @@ mod tests {
             1,
         )
     }
+    fn add_gameplay_profile<W: Write>(engine: &mut Engine<W>) {
+        let sample = crate::spawn_progression::tests::dynamic_bodies::acquisition_gameplay_tests::capture_fixture();
+        let spawns = sample.spawn_catalog.unwrap();
+        let policy = spawns.match_profile();
+        engine.match_profiles.as_mut().unwrap().profiles.insert(
+            "acquisition-world".into(),
+            Loaded {
+                summary: Summary {
+                    profile_id: "acquisition-world".into(),
+                    game_type: 1,
+                    attacking_faction: policy.attacking_faction,
+                    defending_faction: policy.defending_faction,
+                    team_capacity: policy.team_capacity,
+                    maximum_players: policy.team_capacity * 2,
+                },
+                spawns,
+                objectives: sample.objective_catalog,
+                collision: sample.collision_world,
+                navmesh: sample.navmesh_world,
+                vehicles: sample.ground_vehicles,
+                damage: None,
+                acquisition: Some(sample.acquisition_gameplay.unwrap().setup),
+            },
+        );
+    }
+
+    #[test]
+    fn acquisition_registry_requires_retail_combat_authority() {
+        let files = Files::new();
+        let mut engine = engine(&files, Vec::new(), 100_000);
+        assert!(engine.item_catalog.retail_combat().is_err());
+        assert!(
+            engine
+                .match_profiles
+                .as_ref()
+                .unwrap()
+                .validate_runtime(&engine.item_catalog, engine.wire_profile)
+                .is_ok()
+        );
+        add_gameplay_profile(&mut engine);
+        assert_eq!(
+            engine
+                .match_profiles
+                .as_ref()
+                .unwrap()
+                .validate_runtime(&engine.item_catalog, engine.wire_profile),
+            Err("retail_combat_unavailable")
+        );
+    }
+
+    #[test]
+    fn acquisition_selection_replays_current_formation_and_resets_a_fresh_formation() {
+        let files = Files::new();
+        let mut engine = engine(&files, Vec::new(), 100_000);
+        add_gameplay_profile(&mut engine);
+        assert!(
+            engine
+                .match_profiles
+                .as_ref()
+                .unwrap()
+                .has_acquisition_gameplay()
+        );
+        assert!(select(&mut engine, "acquisition-1", "acquisition-world").ok);
+        let runtime = engine.acquisition_gameplay.as_mut().unwrap();
+        runtime
+            .state
+            .request_state(100, replication::ObjectiveState::Locked)
+            .unwrap();
+        let round = engine.acquisition_round.as_mut().unwrap();
+        let before = round.points();
+        round
+            .apply_score(acquisition_round::ScoreIntent {
+                team: 1,
+                delta: -200,
+            })
+            .unwrap();
+        assert_eq!(round.points()[1], before[1] - 200);
+
+        assert!(select(&mut engine, "acquisition-1", "acquisition-world").ok);
+        assert_eq!(
+            engine.acquisition_round.as_ref().unwrap().points()[1],
+            before[1] - 200
+        );
+        assert_eq!(
+            engine
+                .acquisition_gameplay
+                .as_ref()
+                .unwrap()
+                .state
+                .pending_transitions()
+                .count(),
+            1
+        );
+
+        assert!(select(&mut engine, "acquisition-2", "acquisition-world").ok);
+        assert_eq!(engine.acquisition_round.as_ref().unwrap().points(), before);
+        assert_eq!(
+            engine
+                .acquisition_gameplay
+                .as_ref()
+                .unwrap()
+                .state
+                .pending_transitions()
+                .count(),
+            0
+        );
+        assert!(
+            engine
+                .ground_runtime
+                .as_ref()
+                .unwrap()
+                .get(4)
+                .is_some_and(|v| v.state == 0)
+        );
+
+        assert!(select(&mut engine, "sabotage-1", "p-0-0-1").ok);
+        assert!(engine.acquisition_gameplay.is_none() && engine.acquisition_round.is_none());
+    }
+
+    #[test]
+    fn failed_profile_selection_preserves_existing_acquisition_authority() {
+        let files = Files::new();
+        let mut engine = engine(&files, Vec::new(), 100_000);
+        add_gameplay_profile(&mut engine);
+        assert!(select(&mut engine, "acquisition-1", "acquisition-world").ok);
+        let round = engine.acquisition_round.as_mut().unwrap();
+        round
+            .apply_score(acquisition_round::ScoreIntent {
+                team: 1,
+                delta: -400,
+            })
+            .unwrap();
+        let committed = round.clone();
+        let old_setup = Arc::clone(&engine.acquisition_gameplay.as_ref().unwrap().setup);
+        let old_ground = engine.ground_runtime.clone();
+        let old_selected = engine.selected_match.clone();
+        engine.max_log = engine.written;
+
+        let response = select(&mut engine, "failed-switch", "p-0-0-1");
+        assert_eq!(response.error.as_deref(), Some("log_limit_reached"));
+        assert_eq!(engine.selected_match, old_selected);
+        assert_eq!(engine.acquisition_round.as_ref(), Some(&committed));
+        assert_eq!(engine.ground_runtime, old_ground);
+        assert!(Arc::ptr_eq(
+            &engine.acquisition_gameplay.as_ref().unwrap().setup,
+            &old_setup
+        ));
+    }
+
     #[test]
     fn all_six_ordered_pairings_per_mode_are_preloaded_and_advertised() {
         let files = Files::new();

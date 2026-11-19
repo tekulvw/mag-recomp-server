@@ -466,6 +466,58 @@ impl Snapshot {
     pub fn root_count(&self) -> usize {
         self.bodies.len()
     }
+    /// Positive raw24 ray witnesses in the current owned dynamic roster. The
+    /// ignored vehicle excludes all of its registered roots, not other actors.
+    /// This says nothing about unconfigured native/static partitions.
+    pub(crate) fn positive_ray_hit(
+        &self,
+        start: [f64; 3],
+        end: [f64; 3],
+        ignored: u64,
+        rows: [u32; 32],
+        limits: QueryLimits,
+    ) -> Result<bool, &'static str> {
+        Pose::at(start).validate()?;
+        Pose::at(end).validate()?;
+        if start == end
+            || !(1..=256).contains(&limits.max_iterations)
+            || limits.max_support_points == 0
+            || limits.max_support_points > 100_000_000
+            || !limits.boundary_epsilon.is_finite()
+            || limits.boundary_epsilon <= 0.
+            || limits.boundary_epsilon > 0.01
+        {
+            return Err("invalid_dynamic_ray");
+        }
+        let point = Geometry::Box {
+            half_extents: [0.; 3],
+            radius: 0.,
+        };
+        let mut budget = limits.max_support_points;
+        for body in &self.bodies {
+            if body.target.key.id == ignored || rows[24] & (1 << body.layer) == 0 {
+                continue;
+            }
+            if let Some((fraction, _)) = geometry::sweep(
+                &point,
+                Pose::at(start),
+                end,
+                &body.shape,
+                body.pose,
+                geometry::SweepLimits {
+                    tolerance: limits.boundary_epsilon,
+                    extra: 0.,
+                    query: limits,
+                },
+                &mut budget,
+            )? && fraction > 0.
+                && fraction < 1.
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
     /// Returns all supported registered roots in supplied snapshot traversal
     /// order. No partial result is released on geometry/budget/boundary errors.
     /// This order is explicit replacement authority, not native broadphase parity.

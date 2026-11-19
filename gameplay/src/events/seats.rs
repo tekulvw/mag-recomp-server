@@ -161,13 +161,23 @@ fn ground_mount<W: Write>(
     let active = ctx.active;
     let current_vehicle = ctx.engine.current_ground_vehicle(request.vehicle_id as u16);
     let vehicle = current_vehicle.as_ref();
+    let driver = ctx.engine.ground_driver_seat(request.vehicle_id as u16);
+    let takes_driver = driver.is_some_and(|d| u32::from(d.seat) == request.seat_id);
+    let leaves_driver = active.ground_seat.is_some_and(|seat| {
+        seat.vehicle_index == request.vehicle_id as u16
+            && driver.is_some_and(|d| d.seat == seat.seat)
+    });
     let same_vehicle_switch = active.ground_seat.is_some_and(|seat| {
         seat.vehicle_index == request.vehicle_id as u16 && u32::from(seat.seat) != request.seat_id
     });
-    let denial = if request.character_id != (0x03800000 | u32::from(active.reservation.player))
+    let denial = if (takes_driver || leaves_driver)
+        && (!ctx.accepted_client_route || ctx.engine.match_terminal.is_some())
+    {
+        Some("ground_driver_mount_not_allowed")
+    } else if request.character_id != (0x03800000 | u32::from(active.reservation.player))
         || vehicle.is_none_or(|v| {
             v.object_id() != request.vehicle_id
-                || !v.passenger_seats.contains(&(request.seat_id as u8))
+                || (!takes_driver && !v.passenger_seats.contains(&(request.seat_id as u8)))
         })
         || request.seat_id >= 16
     {
@@ -205,7 +215,7 @@ fn ground_mount<W: Write>(
         })
     {
         Some("ground_passenger_seat_occupied")
-    } else if !same_vehicle_switch && ctx.engine.ground_passenger_seat(vehicle.unwrap()).is_none() {
+    } else if !same_vehicle_switch && ctx.engine.ground_occupancy_full(vehicle.unwrap()) {
         Some("ground_passenger_seats_full")
     } else if !same_vehicle_switch
         && let Err(code) = ground_seats::authorize_mount_position(active, vehicle.unwrap(), ctx.now)
@@ -223,12 +233,29 @@ fn ground_mount<W: Write>(
             vehicle_index: vehicle.unwrap().index,
             seat: request.seat_id as u8,
         };
+        let authority = if takes_driver {
+            // In this server the authenticated reservation slot is also the
+            // assigned connection client index.
+            let mut runtime = ctx
+                .engine
+                .ground_runtime
+                .clone()
+                .ok_or("ground_vehicle_runtime_required")?;
+            runtime.begin_driver(seat.vehicle_index, ctx.now.as_millis() as u64)?;
+            plan.ground_runtime = Some(runtime);
+            Some((seat.vehicle_index, active.reservation.player))
+        } else if leaves_driver {
+            Some((seat.vehicle_index, ground_vehicles::SERVER_OWNER))
+        } else {
+            None
+        };
         let packet = ground_seats::transition(
             ctx.next_sequence,
             ctx.now.as_millis() as u32,
             active.reservation.player,
             seat.character_state(),
             None,
+            authority,
             ctx.engine.wire_profile,
         )?;
         plan.outgoing = Some(packet.clone());
@@ -249,7 +276,13 @@ fn ground_dismount<W: Write>(
         (0x01000000 | u32::from(seat.vehicle_index)) == request.vehicle_id
             && u32::from(seat.seat) == request.seat_id
     });
-    if request.character_id != (0x03800000 | u32::from(active.reservation.player)) {
+    let driver = ctx
+        .engine
+        .ground_driver_seat(request.vehicle_id as u16)
+        .filter(|d| u32::from(d.seat) == request.seat_id);
+    if driver.is_some() && !ctx.accepted_client_route {
+        plan.gameplay_denial = Some("ground_driver_dismount_not_allowed");
+    } else if request.character_id != (0x03800000 | u32::from(active.reservation.player)) {
         plan.gameplay_denial = Some("invalid_ground_exit_target");
     } else if !active.entered_game || !active.ready_for_updates || !active.life.is_alive() {
         plan.gameplay_denial = Some("ground_exit_requires_living_actor");
@@ -261,39 +294,40 @@ fn ground_dismount<W: Write>(
         }
     } else if !ctx.history_available {
         plan.gameplay_denial = Some("replication_history_limit");
-    } else if let Some(policy) = ctx
-        .engine
-        .current_ground_vehicle(request.vehicle_id as u16)
-        .and_then(|vehicle| vehicle.exit_policy())
-    {
-        // Ground candidate generation follows the externally qualified native
-        // order. Camera facing determines final yaw, never candidate position.
-        let mut exit = policy.exit(u32::MAX)?;
-        if request.camera_yaw <= 360 {
-            exit.packed_yaw = request.packed_yaw();
-        }
-        let state = replication::CharacterState {
-            state: 1,
-            stance: 0,
-            user_data: [0; 3],
-        };
-        let packet = ground_seats::transition(
-            ctx.next_sequence,
-            ctx.now.as_millis() as u32,
-            active.reservation.player,
-            state,
-            Some(exit),
-            ctx.engine.wire_profile,
-        )?;
-        plan.outgoing = Some(packet.clone());
-        plan.replication.seat_transition = Some(packet);
-        plan.session.new_ground_seat = Some(None);
-        plan.session.last_exit = Some(request);
-        plan.session.exit_yaw = Some(exit.packed_yaw);
-        plan.session.server_position =
-            Some((exit.position, player_tracking::PositionOrigin::ServerExit));
     } else {
-        plan.gameplay_denial = Some("ground_exit_policy_required");
+        let exit = ctx
+            .engine
+            .current_ground_vehicle(request.vehicle_id as u16)
+            .ok_or("ground_exit_policy_required")
+            .and_then(|vehicle| ctx.engine.ground_exit(&vehicle, active.reservation.player));
+        if let Ok(mut exit) = exit {
+            if request.camera_yaw <= 360 {
+                exit.packed_yaw = request.packed_yaw();
+            }
+            let state = replication::CharacterState {
+                state: 1,
+                stance: 0,
+                user_data: [0; 3],
+            };
+            let packet = ground_seats::transition(
+                ctx.next_sequence,
+                ctx.now.as_millis() as u32,
+                active.reservation.player,
+                state,
+                Some(exit),
+                driver.map(|d| (d.vehicle_index, ground_vehicles::SERVER_OWNER)),
+                ctx.engine.wire_profile,
+            )?;
+            plan.outgoing = Some(packet.clone());
+            plan.replication.seat_transition = Some(packet);
+            plan.session.new_ground_seat = Some(None);
+            plan.session.last_exit = Some(request);
+            plan.session.exit_yaw = Some(exit.packed_yaw);
+            plan.session.server_position =
+                Some((exit.position, player_tracking::PositionOrigin::ServerExit));
+        } else {
+            plan.gameplay_denial = exit.err();
+        }
     }
     Ok(
         json!({"type":"dismount_seat","vehicle_id":request.vehicle_id,"seat_id":request.seat_id,"transition_sent":plan.replication.seat_transition.is_some()}),

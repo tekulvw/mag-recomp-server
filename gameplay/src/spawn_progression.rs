@@ -3,7 +3,7 @@ use super::*;
 
 #[cfg(test)]
 #[path = "spawn_progression_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 #[cfg(test)]
 pub(super) use tests::{dispatch, engine, ready, reserve};
 

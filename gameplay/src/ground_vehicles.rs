@@ -1,5 +1,7 @@
 //! Retail type1 ground-vehicle creation from explicit external bindings.
-use crate::replication::{BitWriter, CharacterPosition, UpdateHeader, VehicleDamage};
+use crate::replication::{
+    BitReader, BitWriter, CharacterPosition, ObjectUpdate, UpdateHeader, VehicleDamage,
+};
 use serde::Deserialize;
 use std::collections::BTreeSet;
 use std::{
@@ -7,6 +9,198 @@ use std::{
     io::{self, Read},
     path::Path,
 };
+
+#[path = "acquisition_arrival_static.rs"]
+pub mod arrival_static;
+
+pub(crate) const SERVER_OWNER: u16 = 0x105;
+
+/// Sparse dynamics from a retail type1 owner report. Rotation components are
+/// decoded at their wire precision. The authority layer must validate and
+/// normalize a rotation before applying it to the simulation.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct OwnerDynamics {
+    pub index: u16,
+    pub position: Option<CharacterPosition>,
+    pub rotation_xyzw: Option<[f32; 4]>,
+    pub brake: Option<bool>,
+    pub throttle: Option<f32>,
+    pub smoke_screen: Option<bool>,
+}
+
+impl OwnerDynamics {
+    pub(crate) fn has_changes(self) -> bool {
+        self.position.is_some()
+            || self.rotation_xyzw.is_some()
+            || self.brake.is_some()
+            || self.throttle.is_some()
+            || self.smoke_screen.is_some()
+    }
+
+    pub(crate) fn encode_relay(
+        self,
+        profile: crate::wire_profile::WireProfile,
+        timestamp_ms: u32,
+    ) -> Result<Vec<u8>, &'static str> {
+        let mut bits = BitWriter::with_profile(profile);
+        UpdateHeader {
+            sequence: 1,
+            nak_sequence: 0,
+            client_index: 0,
+            object_type_mask: 1 << 1,
+            timestamp_ms,
+        }
+        .encode(&mut bits)?;
+        bits.write(1, 1)?;
+        bits.write(self.index.into(), 16)?;
+        bits.write(0, 25)?;
+        bits.write(u32::from(self.position.is_some()), 1)?;
+        if let Some(position) = self.position {
+            position.encode(&mut bits)?;
+        }
+        bits.write(u32::from(self.rotation_xyzw.is_some()), 1)?;
+        if let Some(quaternion) = self.rotation_xyzw {
+            for value in quaternion {
+                write_signed_fixed(&mut bits, value, 10)?;
+            }
+        }
+        write_optional_bool(&mut bits, self.brake)?;
+        bits.write(u32::from(self.throttle.is_some()), 1)?;
+        if let Some(throttle) = self.throttle {
+            write_signed_fixed(&mut bits, throttle, 9)?;
+        }
+        write_optional_bool(&mut bits, self.smoke_screen)?;
+        bits.write(0, 1)?;
+        Ok(bits.finish())
+    }
+
+    /// Decode a standalone type1 report for offline qualification.
+    pub fn decode(
+        update: &ObjectUpdate<'_>,
+        profile: crate::wire_profile::WireProfile,
+    ) -> Result<Vec<Self>, &'static str> {
+        update.validate_profile(profile)?;
+        if update.header.object_type_mask != 1 << 1 {
+            return Err("expected_ground_vehicle_owner_list");
+        }
+        let mut bits = BitReader::with_profile(update.wire, profile);
+        bits.position = profile.header_bits();
+        let reports = Self::decode_list(&mut bits)?;
+        let remaining = update.wire.len() * 8 - bits.position;
+        if remaining >= 8 || bits.read(remaining)? != 0 {
+            return Err("trailing_client_update_bits");
+        }
+        Ok(reports)
+    }
+
+    pub(crate) fn decode_list(bits: &mut BitReader<'_>) -> Result<Vec<Self>, &'static str> {
+        if bits.profile.application_id() != 20231 {
+            return Err("unsupported_client_object_type");
+        }
+        let mut reports = Vec::new();
+        let mut seen = 0u32;
+        while bits.read(1)? != 0 {
+            let index = bits.read(16)? as u16;
+            if index >= 32 {
+                return Err("ground_vehicle_owner_index_out_of_range");
+            }
+            let id = 1 << index;
+            if seen & id != 0 {
+                return Err("duplicate_ground_vehicle_owner_update");
+            }
+            seen |= id;
+            if bits.read(25)? != 0 {
+                return Err("unsupported_client_ground_vehicle_field");
+            }
+            let mut report = Self {
+                index,
+                ..Self::default()
+            };
+            if bits.read(1)? != 0 {
+                let x = bits.read(16)? as f32 / 32.;
+                let y = read_signed_fixed(bits, 16, 32.)?;
+                let z = bits.read(16)? as f32 / 32.;
+                report.position = Some(CharacterPosition { x, y, z });
+            }
+            if bits.read(1)? != 0 {
+                let mut rotation = [0.; 4];
+                for value in &mut rotation {
+                    *value = read_signed_fixed(bits, 10, 256.)?;
+                }
+                report.rotation_xyzw = Some(rotation);
+            }
+            if bits.read(1)? != 0 {
+                report.brake = Some(bits.read(1)? != 0);
+            }
+            if bits.read(1)? != 0 {
+                report.throttle = Some(read_signed_fixed(bits, 9, 256.)?);
+            }
+            if bits.read(1)? != 0 {
+                report.smoke_screen = Some(bits.read(1)? != 0);
+            }
+            reports.push(report);
+        }
+        Ok(reports)
+    }
+}
+
+pub(crate) fn write_owner_field(
+    bits: &mut BitWriter,
+    index: u16,
+    owner: u16,
+) -> Result<(), &'static str> {
+    bits.write(1, 1)?;
+    bits.write(index.into(), 16)?;
+    bits.write(1, 2)?; // Active field absent, owner field present.
+    bits.write(owner.into(), 16)?;
+    bits.write(0, 29) // Remaining 28 fields and end of type1 list.
+}
+
+pub(crate) fn encode_owner_field(
+    profile: crate::wire_profile::WireProfile,
+    timestamp_ms: u32,
+    index: u16,
+    owner: u16,
+) -> Result<Vec<u8>, &'static str> {
+    let mut bits = BitWriter::with_profile(profile);
+    UpdateHeader {
+        sequence: 1,
+        nak_sequence: 0,
+        client_index: 0,
+        object_type_mask: 1 << 1,
+        timestamp_ms,
+    }
+    .encode(&mut bits)?;
+    write_owner_field(&mut bits, index, owner)?;
+    Ok(bits.finish())
+}
+
+fn write_signed_fixed(
+    bits: &mut BitWriter,
+    value: f32,
+    magnitude_bits: usize,
+) -> Result<(), &'static str> {
+    bits.write(u32::from(value.is_sign_negative()), 1)?;
+    bits.write((value.abs() * 256.) as u32, magnitude_bits)
+}
+
+fn write_optional_bool(bits: &mut BitWriter, value: Option<bool>) -> Result<(), &'static str> {
+    bits.write(u32::from(value.is_some()), 1)?;
+    if let Some(value) = value {
+        bits.write(u32::from(value), 1)?;
+    }
+    Ok(())
+}
+
+fn read_signed_fixed(
+    bits: &mut BitReader<'_>,
+    magnitude_bits: usize,
+    scale: f32,
+) -> Result<f32, &'static str> {
+    let negative = bits.read(1)? != 0;
+    let magnitude = bits.read(magnitude_bits)? as f32 / scale;
+    Ok(if negative { -magnitude } else { magnitude })
+}
 
 /// A source-qualified world transform and two distinct native pool identities.
 /// No authored row ordinal is implicitly converted to either index.
@@ -76,6 +270,15 @@ pub struct VehicleSource {
     pub authored_active: bool,
     pub team: u8,
 }
+/// Operator seat and movement budget for a source-qualified Escort.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DriverSeat {
+    pub vehicle_index: u16,
+    pub seat: u8,
+    pub maximum_speed_mps: f32,
+}
+
 /// Explicit qualified external bindings. No default vehicles or native IDs.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -88,6 +291,8 @@ pub struct Catalog {
     passenger_spawns: Vec<PassengerSpawn>,
     #[serde(default)]
     vehicle_sources: Vec<VehicleSource>,
+    #[serde(default)]
+    driver_seats: Vec<DriverSeat>,
 }
 impl Catalog {
     pub fn load(
@@ -158,9 +363,27 @@ impl Catalog {
             let vehicle = self
                 .vehicle(source.vehicle_index)
                 .ok_or("unknown_vehicle_source_identity")?;
-            if source.vehicle_index < 4
-                || !matches!(source.spawn_type, 7 | 9)
-                || source.user_class != 1
+            let source_kind_valid = match (
+                source.vehicle_index < 4,
+                source.spawn_type,
+                source.user_class,
+            ) {
+                (true, 3, 0) => {
+                    source.team == 0
+                        && source.authored_active
+                        && self.is_existing_apc_source(vehicle)
+                        && spawns.point(source.spawn_point_index).is_some_and(|point| {
+                            point.active
+                                && matches!(
+                                    point.kind,
+                                    crate::spawn_catalog::SpawnKind::VehiclePassenger
+                                )
+                        })
+                }
+                (false, 7 | 9, 1) => true,
+                _ => false,
+            };
+            if !source_kind_valid
                 || source.source_family != 35
                 || source.spawn_point_index != vehicle.spawn_point_index
                 || source.spawn_point_token != vehicle.spawn_point_token
@@ -172,10 +395,30 @@ impl Catalog {
                 return Err("invalid_native_vehicle_source");
             }
         }
+        let mut drivers = BTreeSet::new();
+        for driver in &self.driver_seats {
+            let vehicle = self
+                .vehicle(driver.vehicle_index)
+                .ok_or("unknown_ground_driver_vehicle")?;
+            if !drivers.insert(driver.vehicle_index)
+                || driver.seat >= 16
+                || !driver.maximum_speed_mps.is_finite()
+                || driver.maximum_speed_mps <= 0.
+                || vehicle.passenger_seats.contains(&driver.seat)
+                || vehicle.maximum_mount_distance_m.is_none()
+                || vehicle.maximum_mount_position_age_ms.is_none()
+                || vehicle.exit_policy().is_none()
+                || source_points
+                    .get(&driver.vehicle_index)
+                    .is_none_or(|s| s.spawn_type != 9)
+            {
+                return Err("invalid_ground_driver_policy");
+            }
+        }
         let mut ids = BTreeSet::new();
         let mut points = BTreeSet::new();
         for v in &self.vehicles {
-            v.validate()?;
+            v.validate(drivers.contains(&v.index))?;
             let point = spawns
                 .point(v.spawn_point_index)
                 .ok_or("unknown_ground_vehicle_spawn")?;
@@ -245,10 +488,34 @@ impl Catalog {
         }
         Ok(())
     }
+    pub(crate) fn driver_seat(&self, index: u16) -> Option<DriverSeat> {
+        self.driver_seats
+            .iter()
+            .copied()
+            .find(|seat| seat.vehicle_index == index)
+    }
+
     pub(crate) fn vehicle_source(&self, index: u16) -> Option<&VehicleSource> {
         self.vehicle_sources
             .iter()
             .find(|source| source.vehicle_index == index)
+    }
+    fn is_existing_apc_source(&self, creation: &Creation) -> bool {
+        creation.index < 4
+            && creation.team == 0
+            && creation.initial_state == 2
+            && self.passenger_spawns.iter().any(|binding| {
+                binding.vehicle_index == creation.index
+                    && binding.spawn_point_index == creation.spawn_point_index
+                    && binding.spawn_point_token == creation.spawn_point_token
+            })
+    }
+    pub(crate) fn source_spawn_type(&self, creation: &Creation) -> Option<u8> {
+        self.vehicle_source(creation.index)
+            .map(|source| source.spawn_type)
+            // A legacy source catalog may qualify the exact APC point through
+            // its validated passenger binding without a vehicle_sources row.
+            .or_else(|| self.is_existing_apc_source(creation).then_some(3))
     }
     pub(crate) fn creations(&self) -> impl Iterator<Item = &Creation> {
         self.vehicles.iter()
@@ -285,6 +552,72 @@ impl Catalog {
 
 impl<W: io::Write> crate::Engine<W> {
     /// Current owned authority layered on immutable creation resources.
+    pub(crate) fn ground_driver_enabled(&self) -> bool {
+        self.ground_vehicles
+            .as_ref()
+            .is_some_and(|catalog| !catalog.driver_seats.is_empty())
+    }
+
+    pub(crate) fn ground_driver_seat(&self, index: u16) -> Option<DriverSeat> {
+        self.ground_vehicles.as_ref()?.driver_seat(index)
+    }
+
+    pub(crate) fn ground_driver_seat_index(&self, actor: &crate::Active) -> Option<u16> {
+        let seat = actor.ground_seat?;
+        (self.ground_driver_seat(seat.vehicle_index)?.seat == seat.seat)
+            .then_some(seat.vehicle_index)
+    }
+
+    pub(crate) fn active_ground_drivers(&self) -> Vec<(u16, u16)> {
+        self.peers
+            .values()
+            .chain(self.active.iter())
+            .filter_map(|actor| {
+                let index = self.ground_driver_seat_index(actor)?;
+                self.ground_driver_authority(actor, index)
+                    .then_some((index, actor.reservation.player))
+            })
+            .collect()
+    }
+
+    pub(crate) fn queue_ground_driver_revocation(
+        &mut self,
+        index: u16,
+        now: std::time::Duration,
+    ) -> Result<(), &'static str> {
+        let packet = encode_owner_field(
+            self.wire_profile,
+            now.as_millis() as u32,
+            index,
+            SERVER_OWNER,
+        )?;
+        for recipient in self
+            .peers
+            .values_mut()
+            .chain(self.active.iter_mut())
+            .filter(|actor| actor.initial_objects.is_some())
+        {
+            recipient.queue_shared(packet.clone());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn ground_driver_authority(&self, actor: &crate::Active, index: u16) -> bool {
+        actor.life.is_alive()
+            && actor.entered_game
+            && actor.ready_for_updates
+            && self.ground_driver_seat_index(actor) == Some(index)
+            && self.ground_vehicle_is_operational(index)
+    }
+
+    pub(crate) fn ground_driver_owner(&self, index: u16) -> Option<u16> {
+        self.peers
+            .values()
+            .chain(self.active.iter())
+            .find(|actor| self.ground_driver_authority(actor, index))
+            .map(|actor| actor.reservation.player)
+    }
+
     pub(crate) fn current_ground_vehicle(&self, index: u16) -> Option<Creation> {
         let mut creation = self.ground_vehicles.as_ref()?.vehicle(index)?.clone();
         let current = self.ground_runtime.as_ref()?.get(index)?;
@@ -344,7 +677,13 @@ impl<W: io::Write> crate::Engine<W> {
             let current = runtime
                 .get(vehicle.index)
                 .ok_or("ground_vehicle_runtime_required")?;
-            vehicle.encode_fields_with_damage(bits, vehicle.damage(current.last_attacker))
+            vehicle.encode_fields_with_damage(
+                bits,
+                current.damage_wire(),
+                self.ground_driver_owner(vehicle.index)
+                    .unwrap_or(SERVER_OWNER),
+                current.driver_controls,
+            )
         })
     }
     pub fn with_ground_vehicles(mut self, catalog: Catalog) -> Result<Self, &'static str> {
@@ -383,10 +722,11 @@ impl Creation {
             }
         })
     }
-    fn validate(&self) -> Result<(), &'static str> {
+    fn validate(&self, driver_bound: bool) -> Result<(), &'static str> {
         self.validate_common()?;
         if !matches!(self.initial_state, 0 | 2)
-            || (self.initial_state == 0 && (self.index < 4 || !self.passenger_seats.is_empty()))
+            || (self.initial_state == 0
+                && (self.index < 4 || (!driver_bound && !self.passenger_seats.is_empty())))
             || self.health_quarter_points == 0
         {
             return Err("invalid_ground_vehicle_creation");
@@ -395,7 +735,7 @@ impl Creation {
     }
     fn validate_runtime(&self) -> Result<(), &'static str> {
         self.validate_common()?;
-        if !matches!(self.initial_state, 0 | 2 | 4 | 5 | 7 | 8) {
+        if !matches!(self.initial_state, 0 | 2 | 3 | 4 | 5 | 6 | 7 | 8) {
             return Err("invalid_ground_vehicle_runtime_state");
         }
         Ok(())
@@ -444,8 +784,13 @@ impl Creation {
         Ok(())
     }
     fn encode_fields(&self, bits: &mut BitWriter) -> Result<(), &'static str> {
-        self.validate()?;
-        self.encode_fields_with_damage(bits, self.damage(u32::MAX))
+        self.validate(false)?;
+        self.encode_fields_with_damage(
+            bits,
+            self.damage(u32::MAX),
+            SERVER_OWNER,
+            Default::default(),
+        )
     }
     fn damage(&self, last_attacker: u32) -> VehicleDamage {
         VehicleDamage {
@@ -461,17 +806,25 @@ impl Creation {
         &self,
         bits: &mut BitWriter,
         damage: VehicleDamage,
+        owner: u16,
+        controls: crate::acquisition_ground_runtime::DriverControls,
     ) -> Result<(), &'static str> {
         let fields = [0, 1, 3, 4, 5, 6, 7, 18, 19, 20, 25, 26]
             .into_iter()
             .fold(0, |mask, field| mask | (1 << field));
-        self.encode_masked_fields(bits, damage, fields)
+        let fields = fields
+            | (u32::from(controls.brake.is_some()) << 27)
+            | (u32::from(controls.throttle.is_some()) << 28)
+            | (u32::from(controls.smoke_screen.is_some()) << 29);
+        self.encode_masked_fields(bits, damage, fields, owner, controls)
     }
     fn encode_masked_fields(
         &self,
         bits: &mut BitWriter,
         damage: VehicleDamage,
         mask: u32,
+        owner: u16,
+        controls: crate::acquisition_ground_runtime::DriverControls,
     ) -> Result<(), &'static str> {
         bits.write(1, 1)?;
         bits.write(self.index.into(), 16)?;
@@ -483,7 +836,7 @@ impl Creation {
             }
             match field {
                 0 => bits.write(1, 1)?,
-                1 => bits.write(0x105, 16)?,
+                1 => bits.write(owner.into(), 16)?,
                 3 => bits.write(self.vehicle_type_token, 32)?,
                 4 => bits.write(u32::from((self.modifier << 2) | self.faction), 8)?,
                 5 => bits.write(u32::from(self.initial_state), 8)?,
@@ -501,6 +854,16 @@ impl Creation {
                         bits.write(((magnitude - integer as f32) * 256.) as u32, 8)?;
                     }
                 }
+                27 => bits.write(u32::from(controls.brake.ok_or("missing_ground_brake")?), 1)?,
+                28 => write_signed_fixed(
+                    bits,
+                    controls.throttle.ok_or("missing_ground_throttle")?,
+                    9,
+                )?,
+                29 => bits.write(
+                    u32::from(controls.smoke_screen.ok_or("missing_ground_smoke")?),
+                    1,
+                )?,
                 _ => (),
             }
         }
@@ -529,14 +892,21 @@ pub(crate) fn encode_runtime_delta(
     sequence: u32,
     timestamp_ms: u32,
 ) -> Result<Vec<u8>, &'static str> {
-    let allowed = (1 << 5) | (1 << 18) | (1 << 25) | (1 << 26);
+    let allowed = (1 << 1) | (1 << 5) | (1 << 18) | (1 << 25) | (1 << 26);
     if changes.is_empty() || changes.len() > 32 {
         return Err("invalid_ground_vehicle_delta");
     }
     let mut masks = std::collections::BTreeMap::new();
     let mut vehicles = Vec::with_capacity(changes.len());
     for &(index, mask) in changes {
-        if mask == 0 || mask & !allowed != 0 {
+        if mask == 0
+            || mask & !allowed != 0
+            || (mask & (1 << 1) != 0
+                && !catalog
+                    .driver_seats
+                    .iter()
+                    .any(|driver| driver.vehicle_index == index))
+        {
             return Err("unsupported_ground_vehicle_delta_fields");
         }
         if masks.insert(index, mask).is_some() {
@@ -565,8 +935,10 @@ pub(crate) fn encode_runtime_delta(
             .ok_or("ground_vehicle_runtime_required")?;
         vehicle.encode_masked_fields(
             bits,
-            vehicle.damage(current.last_attacker),
+            current.damage_wire(),
             masks[&vehicle.index],
+            SERVER_OWNER,
+            Default::default(),
         )
     })
 }

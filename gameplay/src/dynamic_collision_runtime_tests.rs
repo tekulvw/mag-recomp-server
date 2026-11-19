@@ -1,6 +1,8 @@
 //! Actual Engine roster collection using invented external shape resources.
 use super::*;
 use crate::{dynamic_collision::*, dynamic_collision_runtime::RuntimeBindings};
+#[path = "acquisition_gameplay_engine_tests.rs"]
+pub(crate) mod acquisition_gameplay_tests;
 #[path = "../tests/support/dynamic_collision_fixture.rs"]
 mod support;
 fn configured() -> Engine<Vec<u8>> {
@@ -14,6 +16,146 @@ fn configured() -> Engine<Vec<u8>> {
         },
     )
     .unwrap()
+}
+
+fn ground_volume() -> crate::acquisition_volume_effects::VolumeRequest {
+    crate::acquisition_volume_effects::VolumeRequest {
+        query: QueryBox {
+            pose: Pose::at([100., 2.5, 100.]),
+            half_extents: [2.; 3],
+            radius: 0.05,
+        },
+        arguments: crate::acquisition_volume_damage::Arguments {
+            player_damage: 0.,
+            ground_vehicle_damage: -1.,
+            mine_damage: 0.,
+            apply_to_team: -1,
+        },
+        row6: 1 << 22,
+        limits: QueryLimits::default(),
+        now: Duration::from_millis(100),
+    }
+}
+
+#[test]
+fn acquisition_gameplay_requires_explicit_backend_configuration() {
+    let mut e = with_vehicle(false);
+    reserve(&mut e, 0);
+    assert!(matches!(
+        e.tick_acquisition_objectives(Duration::from_millis(100), 1),
+        Err("acquisition_gameplay_unavailable")
+    ));
+}
+
+#[test]
+fn arrival_dynamic_ray_uses_current_roots_filter_and_exact_source_exclusion() {
+    let mut e = with_vehicle(false);
+    reserve(&mut e, 0);
+    let snapshot = e.dynamic_collision_snapshot(0).unwrap();
+    let mut rows = [0; 32];
+    rows[24] = 1 << 22;
+    let start = [100., 0., 100.];
+    let end = [100., 6., 100.];
+    assert!(
+        snapshot
+            .positive_ray_hit(start, end, u64::MAX, rows, Default::default())
+            .unwrap()
+    );
+    assert!(
+        !snapshot
+            .positive_ray_hit(start, end, 0x01000000, rows, Default::default())
+            .unwrap()
+    );
+    rows[24] = 0;
+    assert!(
+        !snapshot
+            .positive_ray_hit(start, end, u64::MAX, rows, Default::default())
+            .unwrap()
+    );
+    rows[24] = 1 << 22;
+    let limits = QueryLimits {
+        max_support_points: 1,
+        ..Default::default()
+    };
+    assert!(
+        snapshot
+            .positive_ray_hit(start, end, u64::MAX, rows, limits)
+            .is_err()
+    );
+}
+
+#[test]
+fn real_volume_stages_both_ground_roots_and_installs_only_after_record() {
+    let mut e = with_vehicle(false);
+    reserve(&mut e, 0);
+    let before = e.ground_runtime.clone();
+    let mut native = Default::default();
+    let prepared = e
+        .prepare_acquisition_volume(ground_volume(), &native)
+        .unwrap();
+    assert_eq!(e.ground_runtime, before);
+    assert_eq!(prepared.audit()["pairs"].as_array().unwrap().len(), 2);
+    let written = e.written;
+    e.record_acquisition_volume(prepared, &mut native, 1)
+        .unwrap();
+    assert!(e.written > written);
+    let vehicle = e.ground_runtime.as_ref().unwrap().get(0).unwrap();
+    assert_eq!(vehicle.health_quarter_points, 0);
+    assert!(vehicle.pending_death && vehicle.vaporize_on_death);
+    // The later vehicle Update owns death, occupant handling and removal.
+    assert_eq!(vehicle.state, 2);
+    assert_eq!(
+        vehicle.body,
+        crate::acquisition_ground_runtime::Body::Operational
+    );
+}
+
+#[test]
+fn volume_record_failure_and_changed_ground_preserve_live_authority() {
+    let mut e = with_vehicle(false);
+    reserve(&mut e, 0);
+    let mut native = Default::default();
+    let before = e.ground_runtime.clone();
+    let prepared = e
+        .prepare_acquisition_volume(ground_volume(), &native)
+        .unwrap();
+    e.max_log = e.written;
+    assert!(
+        e.record_acquisition_volume(prepared, &mut native, 1)
+            .is_err()
+    );
+    assert_eq!(e.ground_runtime, before);
+
+    let mut e = with_vehicle(false);
+    reserve(&mut e, 0);
+    let prepared = e
+        .prepare_acquisition_volume(ground_volume(), &native)
+        .unwrap();
+    let runtime = e.ground_runtime.as_mut().unwrap();
+    let key = runtime.get(0).unwrap().key;
+    runtime.apply_damage(key, 1, u32::MAX).unwrap();
+    let changed = e.ground_runtime.clone();
+    assert!(matches!(
+        e.record_acquisition_volume(prepared, &mut native, 1),
+        Err("stale_acquisition_ground_candidate")
+    ));
+    assert_eq!(e.ground_runtime, changed);
+}
+
+#[test]
+fn volume_query_failure_never_installs_partial_damage() {
+    let mut e = with_vehicle(false);
+    reserve(&mut e, 0);
+    let before = e.ground_runtime.clone();
+    let written = e.written;
+    let mut request = ground_volume();
+    request.limits.max_support_points = 1;
+    assert!(
+        e.prepare_acquisition_volume(request, &Default::default())
+            .is_err()
+    );
+    assert_eq!(e.ground_runtime, before);
+    assert_eq!(e.written, written);
 }
 #[test]
 fn actual_roster_retains_initial_dead_and_moved_human_body_and_rejects_stale_context() {

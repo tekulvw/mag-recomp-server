@@ -810,7 +810,7 @@ fn revive_accepts_both_authenticated_transports_but_never_server_originated_requ
             plugin_id: Some(1),
             payload_hex: protocol::encode_hex(&bytes),
         };
-        let decoded = DecodedEvent::with_profile(&bytes, 1, engine.wire_profile);
+        let decoded = DecodedEvent::with_profile(&bytes, 1, engine.wire_profile, false);
         engine
             .handle_event(input, &decoded, Duration::from_secs(1), 1)
             .unwrap();

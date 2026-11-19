@@ -6,6 +6,25 @@ pub(super) fn hit<W: Write>(
     plan: &mut EventPlan,
     request: bullet_hit::NetMessageHit,
 ) -> Result<Value, &'static str> {
+    if ctx.engine.acquisition_gameplay.is_some() && request.defender >> 24 == 1 {
+        let result = if ctx.accepted_owner_route {
+            ctx.engine
+                .prepare_acquisition_ground_hit(ctx.active, &request, ctx.now)
+        } else {
+            Err("ground_hit_requires_native_client_route")
+        };
+        return Ok(match result {
+            Ok(hit) => {
+                plan.ground_runtime = Some(hit.after);
+                plan.ground_damage_relay = hit.packet;
+                hit.audit
+            }
+            Err(code) => {
+                plan.gameplay_denial = Some(code);
+                json!({"type":"ground_bullet_hit","target_id":request.defender,"client_data":request.client_data})
+            }
+        });
+    }
     let active = ctx.active;
     let now = ctx.now;
     let next_sequence = ctx.next_sequence;
@@ -326,8 +345,12 @@ pub(super) fn fire_grenade<W: Write>(
     let bytes = ctx.decoded.bytes;
     let owned = request.shooter_id == (0x03800000 | u32::from(active.reservation.player))
         && request.shooter_client_index == active.reservation.player;
-    let eligible =
-        active.entered_game && active.ready_for_updates && active.life.is_alive() && owned;
+    let qualified_route = ctx.engine.acquisition_gameplay.is_none() || ctx.accepted_client_route;
+    let eligible = qualified_route
+        && active.entered_game
+        && active.ready_for_updates
+        && active.life.is_alive()
+        && owned;
     let mut created = false;
     let kit = active.equipped_loadout();
     let grenade_item = kit
@@ -335,7 +358,9 @@ pub(super) fn fire_grenade<W: Write>(
         .and_then(|k| k.inventories.get(k.handle.inventory_index as usize))
         .and_then(|i| i.slots[4]);
     let grenade = grenade_item.and_then(|id| ctx.engine.item_catalog.grenade(id).ok());
-    if !owned {
+    if !qualified_route {
+        plan.gameplay_denial = Some("grenade_requires_native_client_route");
+    } else if !owned {
         plan.gameplay_denial = Some("unowned_projectile_shooter");
     } else if !eligible || active.is_mounted() {
         plan.gameplay_denial = Some("projectile_requires_living_on_foot_character");

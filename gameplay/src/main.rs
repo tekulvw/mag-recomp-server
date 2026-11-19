@@ -100,6 +100,19 @@ fn main() -> io::Result<()> {
     run(std::env::args().skip(1))
 }
 
+fn validate_acquisition_static_partition(
+    map_name: &str,
+    partitions: &[mag_gameplay::static_collision_partition::Partition],
+    filter_rows: &[u32; 32],
+) -> io::Result<()> {
+    partitions
+        .iter()
+        .find(|partition| partition.map_name() == map_name)
+        .ok_or_else(|| io::Error::other("acquisition_gameplay_requires_static_partition"))?
+        .require_excluded(6, filter_rows)
+        .map_err(io::Error::other)
+}
+
 fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     let mut application_id: Option<u32> = None;
     let mut validate_catalogs = false;
@@ -121,6 +134,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     let mut ground_vehicles_path: Option<PathBuf> = None;
     let mut dynamic_bodies_path: Option<PathBuf> = None;
     let mut static_partition_paths: Vec<PathBuf> = Vec::new();
+    let mut acquisition_gameplay_path: Option<PathBuf> = None;
     let mut objective_path: Option<PathBuf> = None;
     let mut item_path: Option<PathBuf> = None;
     let mut blast_rules_path: Option<PathBuf> = None;
@@ -145,6 +159,19 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--acquisition-gameplay" => {
+                let path = PathBuf::from(args.next().ok_or_else(|| {
+                    io::Error::other(
+                        "--acquisition-gameplay requires an absolute configuration path",
+                    )
+                })?);
+                if !path.is_absolute() {
+                    return Err(io::Error::other(
+                        "--acquisition-gameplay requires an absolute configuration path",
+                    ));
+                }
+                acquisition_gameplay_path = Some(path);
+            }
             "--match-profiles" => {
                 match_profiles_path = Some(
                     args.next()
@@ -453,7 +480,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             }
             _ => {
                 return Err(io::Error::other(
-                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--match-profiles /absolute/MATCH_PROFILES.json] [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--dynamic-bodies /absolute/BODIES.json] [--static-partition /absolute/PARTITION.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json] [--navmesh-world MESH.mag-nav] [--bot-fill-total N --bot-population POPULATION.json] [--bot-names /absolute/NAMES.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS] [--log-segment-bytes BYTES [--log-retention-s SECONDS]]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
+                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--match-profiles /absolute/MATCH_PROFILES.json] [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--dynamic-bodies /absolute/BODIES.json] [--static-partition /absolute/PARTITION.json] [--acquisition-gameplay /absolute/GAMEPLAY.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json] [--navmesh-world MESH.mag-nav] [--bot-fill-total N --bot-population POPULATION.json] [--bot-names /absolute/NAMES.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS] [--log-segment-bytes BYTES [--log-retention-s SECONDS]]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
                 ));
             }
         }
@@ -737,6 +764,67 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     catalog
         .validate_objectives(objective_catalog.as_ref())
         .map_err(io::Error::other)?;
+    let acquisition_setup = if let Some(path) = &acquisition_gameplay_path {
+        if application_id != Some(20231) || catalog.match_profile().game_type != 1 {
+            return Err(io::Error::other(
+                "Acquisition gameplay requires retail mode1",
+            ));
+        }
+        if match_profiles_path.is_some() {
+            return Err(io::Error::other(
+                "configure Acquisition gameplay inside each match profile",
+            ));
+        }
+        let world = collision_world
+            .as_ref()
+            .ok_or_else(|| io::Error::other("acquisition_gameplay_requires_collision_world"))?;
+        if character_damage_rules_path.is_none() {
+            return Err(io::Error::other(
+                "acquisition_gameplay_requires_character_damage_rules",
+            ));
+        }
+        if world.stats().triangles == 0 {
+            return Err(io::Error::other(
+                "acquisition_gameplay_requires_nonempty_collision_world",
+            ));
+        }
+        let (body_catalog, _) = dynamic_bodies
+            .as_ref()
+            .ok_or_else(|| io::Error::other("acquisition_gameplay_requires_dynamic_bodies"))?;
+        let vehicles = ground_vehicles
+            .as_ref()
+            .ok_or_else(|| io::Error::other("Acquisition gameplay requires ground vehicles"))?;
+        let objectives = objective_catalog.as_ref().ok_or_else(|| {
+            io::Error::other("Acquisition gameplay requires an objective catalog")
+        })?;
+        let runtime = mag_gameplay::acquisition_ground_runtime::Runtime::from_catalog(vehicles)
+            .map_err(io::Error::other)?;
+        let setup = mag_gameplay::acquisition_gameplay_config::Configuration::load(path)?
+            .build(&catalog, objectives, &runtime)?;
+        validate_acquisition_static_partition(
+            catalog.map_name(),
+            &static_partitions,
+            &setup.filter_rows,
+        )?;
+        setup
+            .validate_ground_drivers(vehicles)
+            .map_err(io::Error::other)?;
+        setup
+            .validate_ground_hulk_templates(body_catalog)
+            .map_err(io::Error::other)?;
+        Some(setup)
+    } else {
+        if match_profiles_path.is_none()
+            && objective_catalog
+                .as_ref()
+                .is_some_and(|o| o.source().capture_qualification == "native_source_gameplay")
+        {
+            return Err(io::Error::other(
+                "source gameplay objectives require --acquisition-gameplay",
+            ));
+        }
+        None
+    };
     let objective_info = objective_catalog.as_ref().map(|objectives| serde_json::json!({"path":objective_path,"object_count":objectives.object_count(),"source":objectives.source()}));
     let item_path = item_path
         .ok_or_else(|| io::Error::other("--item-catalog is required for gameplay startup"))?;
@@ -1002,6 +1090,16 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         .map(mag_gameplay::match_profiles::Registry::load)
         .transpose()?;
     if let Some(registry) = &match_profiles {
+        if registry.has_acquisition_gameplay() {
+            if dynamic_bodies.is_none() {
+                return Err(io::Error::other(
+                    "Acquisition match profiles require dynamic bodies",
+                ));
+            }
+            registry
+                .validate_acquisition_static_partitions(&static_partitions)
+                .map_err(io::Error::other)?;
+        }
         registry
             .validate_runtime(
                 &item_catalog,
@@ -1040,7 +1138,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         }
         println!(
             "{}",
-            serde_json::json!({"event":"catalogs_validated","application_id":application_id,"skill_application_id":skill_catalog.application_id(),"bunkers":bunker_info,"fall_damage_enabled":fall_rules.is_some(),"incapacitation_enabled":incapacitation_rules.is_some(),"character_damage_rules_enabled":character_damage_rules.is_some(),"dynamic_body_catalog_validated":dynamic_bodies.is_some(),"static_partitions_validated":static_partitions.len(),"scope":"schema_and_profile_validation_not_client_acceptance"})
+            serde_json::json!({"event":"catalogs_validated","application_id":application_id,"skill_application_id":skill_catalog.application_id(),"bunkers":bunker_info,"fall_damage_enabled":fall_rules.is_some(),"incapacitation_enabled":incapacitation_rules.is_some(),"character_damage_rules_enabled":character_damage_rules.is_some(),"dynamic_body_catalog_validated":dynamic_bodies.is_some(),"static_partitions_validated":static_partitions.len(),"acquisition_gameplay_validated":acquisition_setup.is_some(),"scope":"schema_and_profile_validation_not_client_acceptance"})
         );
         return Ok(());
     }
@@ -1078,6 +1176,11 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     if let Some(objectives) = objective_catalog {
         engine = engine
             .with_objective_catalog(objectives)
+            .map_err(io::Error::other)?;
+    }
+    if let Some(setup) = acquisition_setup {
+        engine = engine
+            .with_acquisition_gameplay(setup)
             .map_err(io::Error::other)?;
     }
     if let Some(rules) = character_damage_rules {
@@ -2017,6 +2120,31 @@ mod runtime_profile_tests {
     }
 
     #[test]
+    fn acquisition_gameplay_cli_rejects_incomplete_mode_before_opening_files() {
+        let files = SyntheticCatalogs::new();
+        let mut relative = files.args();
+        relative.extend(["--acquisition-gameplay".into(), "config.json".into()]);
+        assert!(
+            run(relative)
+                .unwrap_err()
+                .to_string()
+                .contains("--acquisition-gameplay requires an absolute")
+        );
+        let mut wrong_mode = files.args();
+        wrong_mode.extend([
+            "--acquisition-gameplay".into(),
+            files.0.join("gameplay.json").display().to_string(),
+        ]);
+        assert!(
+            run(wrong_mode)
+                .unwrap_err()
+                .to_string()
+                .contains("Acquisition gameplay requires retail mode1")
+        );
+        assert_eq!(std::fs::read_dir(&files.0).unwrap().count(), 9);
+    }
+
+    #[test]
     fn ground_vehicle_cli_requires_explicit_qualified_retail_bindings() {
         let files = SyntheticCatalogs::new();
         let mut spawns = files.read("spawns.json");
@@ -2086,6 +2214,47 @@ mod runtime_profile_tests {
         assert_eq!(std::fs::read_dir(&files.0).unwrap().count(), 10);
     }
     #[test]
+    fn standalone_acquisition_rejects_missing_character_resources_before_opening_log() {
+        let files = SyntheticCatalogs::new();
+        let mut spawns = files.read("spawns.json");
+        spawns["match_profile"]["game_type"] = serde_json::json!(1);
+        files.write("spawns.json", &spawns);
+        let log = files.0.join("should-not-exist.jsonl");
+        let mut args = files.args();
+        args.retain(|arg| arg != "--validate-catalogs");
+        args.extend([
+            "--acquisition-gameplay".into(),
+            files.0.join("gameplay.json").display().to_string(),
+            "--log".into(),
+            log.display().to_string(),
+        ]);
+        assert_eq!(
+            run(args.clone()).unwrap_err().to_string(),
+            "acquisition_gameplay_requires_collision_world"
+        );
+        files.write(
+            "world.json",
+            &serde_json::json!({
+                "format":"mag_collision_world",
+                "schema_version":1,
+                "coordinate_space":"world",
+                "metadata":{"map_name":spawns["maps"][0]["name"],"build":"fixture",
+                    "coverage":"provisional","provenance":["synthetic"],"unknowns":[]},
+                "instances":[]
+            }),
+        );
+        args.extend([
+            "--collision-world".into(),
+            files.0.join("world.json").display().to_string(),
+        ]);
+        assert_eq!(
+            run(args).unwrap_err().to_string(),
+            "acquisition_gameplay_requires_character_damage_rules"
+        );
+        assert!(!log.exists());
+    }
+
+    #[test]
     fn static_partition_cli_is_explicit_bounded_and_map_checked_before_logs() {
         let files = SyntheticCatalogs::new();
         let mut spawns = files.read("spawns.json");
@@ -2093,6 +2262,27 @@ mod runtime_profile_tests {
         files.write("spawns.json", &spawns);
         let mut partition = serde_json::json!({"format":"mag_static_filter_partition","schema_version":1,"map_name":spawns["maps"][0]["name"],"scope":"initial_compiled_collision_and_type1_terrain","source":{"native_binding_sha256":"a".repeat(64),"root_inventory_sha256":"b".repeat(64),"level_archive_sha256":"c".repeat(64),"compiled_catalog_sha256":"d".repeat(64)},"root_count":1,"root_filters":[{"filter_info":9,"root_count":1}]});
         files.write("partition.json", &partition);
+        let selected = mag_gameplay::static_collision_partition::Partition::load(
+            files.0.join("partition.json"),
+        )
+        .unwrap();
+        let mut rows = [0; 32];
+        assert!(
+            validate_acquisition_static_partition(
+                "synthetic_arena",
+                std::slice::from_ref(&selected),
+                &rows,
+            )
+            .is_ok()
+        );
+        rows[6] |= 1 << 9;
+        rows[9] |= 1 << 6;
+        assert_eq!(
+            validate_acquisition_static_partition("synthetic_arena", &[selected], &rows)
+                .unwrap_err()
+                .to_string(),
+            "static_partition_not_excluded"
+        );
         let args = || {
             let mut v = files.args();
             v.extend([

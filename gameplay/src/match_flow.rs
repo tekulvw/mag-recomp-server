@@ -25,11 +25,35 @@ pub(crate) struct Round {
     last_bleed: Option<i16>,
     pub outcome: Option<Outcome>,
 }
+#[derive(Clone, Copy)]
+pub(crate) enum ScorePublication {
+    Sabotage { objective_effect: bool },
+    Acquisition { before_bleed: [i16; 2] },
+}
+
 pub(crate) enum Publication {
     Application(Vec<u8>),
     Replication(Vec<u8>),
 }
 impl Active {
+    fn queue_round_score(
+        &mut self,
+        team: usize,
+        points: i16,
+        reason: protocol::ScoreChangeReason,
+        profile: wire_profile::WireProfile,
+    ) -> Result<(), &'static str> {
+        self.queue_round(Publication::Application(
+            protocol::ScoreChange {
+                team: team as u8,
+                points,
+                reason,
+            }
+            .encode_with_profile(profile)?,
+        ));
+        Ok(())
+    }
+
     fn queue_round(&mut self, publication: Publication) {
         if self.pending_notifications.len() >= 128 {
             self.replication_backlogged = true;
@@ -40,6 +64,14 @@ impl Active {
 }
 impl<W: Write> Engine<W> {
     pub(crate) fn round_combat_allowed(&self, now: Duration) -> bool {
+        if let Some(round) = &self.acquisition_round {
+            use acquisition_round::Phase;
+            return match round.phase() {
+                Phase::Playing => true,
+                Phase::Ending { deadline_ms } => (now.as_millis() as u32) < deadline_ms,
+                Phase::Finished => false,
+            };
+        }
         self.round
             .outcome
             .as_ref()
@@ -153,8 +185,6 @@ impl<W: Write> Engine<W> {
         }
         next.scores = Some(scores);
         let beginning = self.round.outcome.is_none() && next.outcome.is_some();
-        let finishing = next.outcome.as_ref().is_some_and(|o| o.finalized)
-            && !self.round.outcome.as_ref().is_some_and(|o| o.finalized);
         let mut rewards = Vec::new();
         if beginning {
             let end = next.outcome.as_ref().unwrap();
@@ -208,34 +238,52 @@ impl<W: Write> Engine<W> {
                         ));
                     }
                 }
-                let kind = match (actor.team() == end.winner, end.major) {
-                    (true, true) => progression::RewardKind::MatchMajorVictory,
-                    (true, false) => progression::RewardKind::MatchMinorVictory,
-                    (false, true) => progression::RewardKind::MatchMajorDefeat,
-                    (false, false) => progression::RewardKind::MatchMinorDefeat,
-                };
-                rewards.push(recipient.event(
-                    format!(
-                        "match-result-{:016x}-{}",
-                        self.round_number, actor.reservation.id
-                    ),
-                    kind,
-                    1,
-                ));
+                rewards.push(self.match_result_reward(actor, &recipient, end));
             }
         }
-        self.check_reward_capacity(&rewards)?;
-        let changed =
-            self.round.scores != next.scores || !effects.is_empty() || beginning || finishing;
-        if changed {
-            self.record(json!({"op":"match_round_tick","rewards":rewards,"scores":scores,"objective_effects":effects,"timestamp_ms":now.as_millis() as u32,
-                "winner":next.outcome.as_ref().map(|o|o.winner),"major_victory":next.outcome.as_ref().map(|o|o.major),
-                "end_time_ms":next.outcome.as_ref().map(|o|o.deadline.as_millis() as u32),"postgame":next.outcome.as_ref().is_some_and(|o|o.finalized)}),wall)?;
-        }
-        self.round = next;
-        self.commit_rewards(rewards);
+        let objective_effect = !effects.is_empty();
+        self.commit_round_update(next, rewards, effects, now, wall)?;
         self.score_clock = clock;
-        if beginning {
+        self.publish_round_update(now, ScorePublication::Sabotage { objective_effect })
+    }
+
+    pub(crate) fn match_result_reward(
+        &self,
+        actor: &Active,
+        recipient: &progression::RewardRecipient,
+        end: &Outcome,
+    ) -> progression::RewardEvent {
+        let kind = match (actor.team() == end.winner, end.major) {
+            (true, true) => progression::RewardKind::MatchMajorVictory,
+            (true, false) => progression::RewardKind::MatchMinorVictory,
+            (false, true) => progression::RewardKind::MatchMajorDefeat,
+            (false, false) => progression::RewardKind::MatchMinorDefeat,
+        };
+        recipient.event(
+            format!(
+                "match-result-{:016x}-{}",
+                self.round_number, actor.reservation.id
+            ),
+            kind,
+            1,
+        )
+    }
+
+    pub(crate) fn commit_round_update(
+        &mut self,
+        next: Round,
+        rewards: Vec<progression::RewardEvent>,
+        effects: Vec<Value>,
+        now: Duration,
+        wall: u64,
+    ) -> Result<(), &'static str> {
+        let start = next
+            .outcome
+            .as_ref()
+            .filter(|_| self.round.outcome.is_none());
+        let finishing = next.outcome.as_ref().is_some_and(|o| o.finalized)
+            && !self.round.outcome.as_ref().is_some_and(|o| o.finalized);
+        let notice = if let Some(outcome) = start {
             let world = self
                 .active
                 .as_ref()
@@ -243,8 +291,7 @@ impl<W: Write> Engine<W> {
                 .ok_or("no_round_members")?
                 .reservation
                 .world;
-            let outcome = self.round.outcome.as_ref().unwrap();
-            let notice = MatchTerminal {
+            Some(MatchTerminal {
                 world_id: world,
                 match_id: format!("world-{world}-round-{:016x}", self.round_number),
                 reason: if outcome.winner == 0 {
@@ -259,13 +306,38 @@ impl<W: Write> Engine<W> {
                     .chain(self.active.iter())
                     .map(|a| a.reservation.id.clone())
                     .collect(),
-            };
+            })
+        } else {
+            None
+        };
+        self.check_reward_capacity(&rewards)?;
+        let changed = self.round.scores != next.scores
+            || !effects.is_empty()
+            || notice.is_some()
+            || finishing;
+        if changed {
+            self.record(json!({"op":"match_round_tick","rewards":rewards,"scores":next.scores,"objective_effects":effects,"timestamp_ms":now.as_millis() as u32,
+                "winner":next.outcome.as_ref().map(|o|o.winner),"major_victory":next.outcome.as_ref().map(|o|o.major),
+                "end_time_ms":next.outcome.as_ref().map(|o|o.deadline.as_millis() as u32),"postgame":next.outcome.as_ref().is_some_and(|o|o.finalized)}),wall)?;
+        }
+        if let Some(notice) = notice {
             self.record(json!({"op":"match_terminal","match_terminal":notice}), wall)?;
             self.match_terminal = Some(notice);
             for actor in self.peers.values_mut().chain(self.active.iter_mut()) {
                 actor.pending_spawn_deadline = None;
             }
         }
+        self.round = next;
+        self.commit_rewards(rewards);
+        Ok(())
+    }
+
+    pub(crate) fn publish_round_update(
+        &mut self,
+        now: Duration,
+        publication: ScorePublication,
+    ) -> Result<Vec<OutboundMessage>, &'static str> {
+        let scores = self.round.scores.ok_or("round_scores_unavailable")?;
         let rewards_settled = self.pending_rewards.is_empty();
         let needs_stats = self.round.outcome.is_some()
             && rewards_settled
@@ -315,27 +387,51 @@ impl<W: Write> Engine<W> {
             .chain(self.active.iter_mut())
             .filter(|a| a.initial_objects.is_some() && a.ready_for_updates)
         {
-            if recipient.round_scores != Some(scores) {
-                for team in [0_u8, 1] {
-                    let reason = if !effects.is_empty() {
-                        protocol::ScoreChangeReason::PrimaryObjective
-                    } else if recipient.round_scores.is_none() {
-                        protocol::ScoreChangeReason::Initial
-                    } else {
-                        protocol::ScoreChangeReason::TimedBleed
-                    };
-                    recipient.queue_round(Publication::Application(
-                        protocol::ScoreChange {
-                            team,
-                            points: scores[usize::from(team)],
-                            reason,
+            use protocol::ScoreChangeReason::{Initial, PrimaryObjective, TimedBleed};
+            match (publication, recipient.round_scores) {
+                (ScorePublication::Acquisition { before_bleed }, Some(previous)) => {
+                    // Objective entries commit before this score-bleed update.
+                    // Preserve both notices if the same team changed twice.
+                    for (team, points) in before_bleed.into_iter().enumerate() {
+                        if previous[team] != points {
+                            recipient.queue_round_score(
+                                team,
+                                points,
+                                PrimaryObjective,
+                                self.wire_profile,
+                            )?;
                         }
-                        .encode_with_profile(self.wire_profile)?,
-                    ));
+                    }
+                    for (team, points) in scores.into_iter().enumerate() {
+                        if before_bleed[team] != points {
+                            recipient.queue_round_score(
+                                team,
+                                points,
+                                TimedBleed,
+                                self.wire_profile,
+                            )?;
+                        }
+                    }
                 }
-                recipient.round_scores = Some(scores);
-                recipient.last_clock_points = scores[0];
+                _ if recipient.round_scores != Some(scores) => {
+                    let reason = match (publication, recipient.round_scores) {
+                        (
+                            ScorePublication::Sabotage {
+                                objective_effect: true,
+                            },
+                            _,
+                        ) => PrimaryObjective,
+                        (_, None) => Initial,
+                        _ => TimedBleed,
+                    };
+                    for (team, points) in scores.into_iter().enumerate() {
+                        recipient.queue_round_score(team, points, reason, self.wire_profile)?;
+                    }
+                }
+                _ => {}
             }
+            recipient.round_scores = Some(scores);
+            recipient.last_clock_points = scores[0];
             if let Some(end) = &outcome {
                 if !recipient.end_announced {
                     recipient.queue_round(Publication::Replication(

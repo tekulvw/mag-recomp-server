@@ -3,12 +3,23 @@ pub mod acquisition_atomic;
 pub mod acquisition_character_effects;
 pub mod acquisition_control;
 pub mod acquisition_damage_metadata;
+mod acquisition_delivery;
+pub mod acquisition_gameplay;
+pub mod acquisition_gameplay_config;
+pub mod acquisition_gameplay_engine;
+pub mod acquisition_ground_damage;
+mod acquisition_ground_effects;
 pub mod acquisition_ground_runtime;
+mod acquisition_match_flow;
 pub mod acquisition_objective_runtime;
+pub mod acquisition_round;
 pub mod acquisition_score_rate;
 pub mod acquisition_spawn_blockers;
 pub mod acquisition_spawn_effects;
+mod acquisition_vehicle_wave_effects;
+pub mod acquisition_vehicle_waves;
 pub mod acquisition_volume_damage;
+pub mod acquisition_volume_effects;
 pub mod acquisition_volume_geometry;
 pub mod acquisition_world;
 pub mod active_abilities;
@@ -1009,6 +1020,8 @@ pub struct Engine<W: Write> {
     spawn_catalog: Option<spawn_catalog::SpawnCatalog>,
     ground_vehicles: Option<ground_vehicles::Catalog>,
     ground_runtime: Option<acquisition_ground_runtime::Runtime>,
+    acquisition_round: Option<acquisition_round::Round>,
+    acquisition_gameplay: Option<acquisition_gameplay_engine::Runtime>,
     acquisition_effect_origin: std::sync::Arc<()>,
     acquisition_static_partitions:
         std::collections::BTreeMap<String, std::sync::Arc<static_collision_partition::Partition>>,
@@ -1209,6 +1222,13 @@ impl<W: Write> Engine<W> {
     }
 
     fn initial_objective_index(&self, squad: u16) -> Result<u16, &'static str> {
+        if let Some(gameplay) = &self.acquisition_gameplay {
+            return gameplay
+                .state
+                .squad(squad)
+                .map(|s| s.assignment.primary_index)
+                .ok_or("objective_squad_not_configured");
+        }
         match &self.objective_catalog {
             Some(catalog) => {
                 if let Some(world) = &self.objective_world {
@@ -1320,6 +1340,7 @@ impl<W: Write> Engine<W> {
                 &bytes,
                 *player_id,
                 self.wire_profile,
+                self.ground_driver_enabled(),
             )),
             _ => None,
         };

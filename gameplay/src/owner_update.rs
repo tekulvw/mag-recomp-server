@@ -4,6 +4,7 @@
 //! current living, exclusive gunner proof before mutation. Empty selected lists
 //! confer no authority and may include registered types not otherwise supported.
 use crate::{
+    ground_vehicles::OwnerDynamics,
     player_tracking::ClientCharacterFields,
     projectile::ProjectileOwnerUpdate,
     replication::{BitReader, ObjectUpdate},
@@ -18,6 +19,7 @@ pub(crate) enum OwnerUpdateError {
     UnsupportedObjectType,
     UnsupportedProjectileField,
     UnsupportedTurretField,
+    UnsupportedGroundVehicleField,
     Invalid(&'static str),
 }
 impl OwnerUpdateError {
@@ -27,6 +29,7 @@ impl OwnerUpdateError {
             Self::UnsupportedObjectType => "unsupported_client_object_type",
             Self::UnsupportedProjectileField => "unsupported_client_projectile_field",
             Self::UnsupportedTurretField => "unsupported_client_turret_field",
+            Self::UnsupportedGroundVehicleField => "unsupported_client_ground_vehicle_field",
             Self::Invalid(code) => code,
         }
     }
@@ -38,6 +41,7 @@ impl From<&'static str> for OwnerUpdateError {
             "unsupported_client_object_type" => Self::UnsupportedObjectType,
             "unsupported_client_projectile_field" => Self::UnsupportedProjectileField,
             "unsupported_client_turret_field" => Self::UnsupportedTurretField,
+            "unsupported_client_ground_vehicle_field" => Self::UnsupportedGroundVehicleField,
             code => Self::Invalid(code),
         }
     }
@@ -46,6 +50,7 @@ impl From<&'static str> for OwnerUpdateError {
 #[derive(Clone, Debug, Default)]
 pub struct TypedOwnerUpdateFields {
     pub character: Option<ClientCharacterFields>,
+    pub ground_vehicles: Vec<OwnerDynamics>,
     pub turret: Option<ClientTurretFields>,
     pub projectiles: Vec<ProjectileOwnerUpdate>,
 }
@@ -54,9 +59,15 @@ impl TypedOwnerUpdateFields {
         update: &ObjectUpdate<'_>,
         expected_character_index: u16,
         profile: crate::wire_profile::WireProfile,
+        allow_ground_owner: bool,
     ) -> Result<Self, OwnerUpdateError> {
-        Self::decode_with_profile(update, expected_character_index, profile)
-            .map_err(OwnerUpdateError::from)
+        Self::decode_with_ground_ownership(
+            update,
+            expected_character_index,
+            profile,
+            allow_ground_owner,
+        )
+        .map_err(OwnerUpdateError::from)
     }
 
     pub fn decode(
@@ -74,6 +85,15 @@ impl TypedOwnerUpdateFields {
         expected_character_index: u16,
         profile: crate::wire_profile::WireProfile,
     ) -> Result<Self, &'static str> {
+        Self::decode_with_ground_ownership(update, expected_character_index, profile, false)
+    }
+
+    fn decode_with_ground_ownership(
+        update: &ObjectUpdate<'_>,
+        expected_character_index: u16,
+        profile: crate::wire_profile::WireProfile,
+        allow_ground_owner: bool,
+    ) -> Result<Self, &'static str> {
         update.validate_profile(profile)?;
         let mut bits = BitReader::with_profile(update.wire, profile);
         bits.position = profile.header_bits();
@@ -82,6 +102,10 @@ impl TypedOwnerUpdateFields {
         // An unknown type is safe only when its list explicitly contains no object.
         for object_type in 0..profile.object_type_bits() {
             if update.header.object_type_mask & (1 << object_type) == 0 {
+                continue;
+            }
+            if object_type == 1 && allow_ground_owner && profile.application_id() == 20231 {
+                fields.ground_vehicles = OwnerDynamics::decode_list(&mut bits)?;
                 continue;
             }
             if object_type == 13 {

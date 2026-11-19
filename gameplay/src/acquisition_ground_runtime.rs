@@ -120,6 +120,7 @@ pub enum Effect {
         template: String,
     },
     SpawnDelaySet(u32),
+    QueueRespawn,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct LifecycleEvent {
@@ -129,13 +130,19 @@ pub struct LifecycleEvent {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Vehicle {
     pub key: Key,
+    pub(crate) vehicle_type_token: u32,
+    pub(crate) faction: u8,
     pub pose: Pose,
-    /// Retail numeric values: allocated0, operational2, dead4, vaporized5,
+    /// Retail numeric values: allocated0, operational2, dying3, dead4, vaporized5,
     /// inert7, delivered8. Intermediate1/6 are retained by respawn guards.
     pub state: u8,
     pub state_age_seconds: f32,
     pub health_quarter_points: u16,
     pub maximum_health_quarter_points: u16,
+    health_hp: f32,
+    damage_location_and_type: u8,
+    damage_user_data: u32,
+    damage_source_object: u32,
     pub last_attacker: u32,
     pub damage_changed: bool,
     pub vaporize_on_death: bool,
@@ -153,11 +160,73 @@ pub struct Vehicle {
     pub source_spawn_point_index: u16,
     pub source_spawn_point_token: u32,
     capabilities: Capabilities,
+    driver_position_at_ms: Option<u64>,
+    driver_position_credit_m: f64,
+    pub(crate) driver_controls: DriverControls,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct DriverControls {
+    pub brake: Option<bool>,
+    pub throttle: Option<f32>,
+    pub smoke_screen: Option<bool>,
+}
+
 impl Vehicle {
     pub fn is_dead(&self) -> bool {
         self.health_quarter_points == 0
     }
+    fn health_percent(&self) -> f32 {
+        let max_hp = f32::from(self.maximum_health_quarter_points) / 4.0;
+        (self.health_hp / max_hp) * 100.0
+    }
+
+    pub(crate) fn is_dying(&self) -> bool {
+        !self.is_dead() && self.health_percent() < 15.0
+    }
+
+    pub(crate) fn damage_wire(&self) -> crate::replication::VehicleDamage {
+        let conditions = if self.damage_location_and_type == 0 {
+            // Existing untyped health effects publish their supplied health and
+            // attacker with no resolved damage-model condition metadata.
+            0
+        } else {
+            let percent = self.health_percent();
+            u8::from(percent < 70.0)
+                | (u8::from(percent < 40.0) << 1)
+                | (u8::from(percent < 15.0) << 2)
+                | (u8::from(self.is_dead()) << 3)
+        };
+        crate::replication::VehicleDamage {
+            last_location_and_type: self.damage_location_and_type,
+            health_quarter_points: self.health_quarter_points,
+            conditions,
+            last_attacker: self.last_attacker,
+            last_source_object: self.damage_source_object,
+            last_user_data: self.damage_user_data,
+        }
+    }
+
+    fn set_damage_health(
+        &mut self,
+        health_hp: f32,
+        attacker: u32,
+        location_and_type: u8,
+        user_data: u32,
+    ) -> LifecycleEvent {
+        self.health_hp = health_hp;
+        self.health_quarter_points = (health_hp * 4.0).trunc() as u16;
+        self.last_attacker = attacker;
+        self.damage_location_and_type = location_and_type;
+        self.damage_user_data = user_data;
+        self.damage_source_object = u32::MAX;
+        self.damage_changed = true;
+        self.pending_death = self.is_dead();
+        self.event(Effect::DamageChanged {
+            health_quarter_points: self.health_quarter_points,
+            last_attacker: attacker,
+        })
+    }
+
     fn event(&self, effect: Effect) -> LifecycleEvent {
         LifecycleEvent {
             vehicle: self.key,
@@ -176,7 +245,7 @@ impl Runtime {
     pub fn from_catalog(catalog: &ground_vehicles::Catalog) -> Result<Self, &'static str> {
         let mut runtime = Self::default();
         for creation in catalog.creations() {
-            let spawn_type = catalog.vehicle_source(creation.index).map(|v| v.spawn_type);
+            let spawn_type = catalog.source_spawn_type(creation);
             runtime.insert_creation(creation, spawn_type)?;
         }
         Ok(runtime)
@@ -205,7 +274,7 @@ impl Runtime {
             || !matches!(creation.initial_state, 0 | 2)
             || creation.health_quarter_points == 0
             || creation.health_quarter_points >= 4096
-            || source_spawn_type.is_some_and(|v| !(4..=9).contains(&v))
+            || source_spawn_type.is_some_and(|v| !(3..=9).contains(&v))
             || self.vehicles.contains_key(&creation.index)
         {
             return Err("invalid_ground_lifecycle_creation");
@@ -215,11 +284,17 @@ impl Runtime {
                 index: creation.index,
                 generation: 1,
             },
+            vehicle_type_token: creation.vehicle_type_token,
+            faction: creation.faction,
             pose,
             state: creation.initial_state,
             state_age_seconds: 0.,
             health_quarter_points: creation.health_quarter_points,
             maximum_health_quarter_points: creation.health_quarter_points,
+            health_hp: f32::from(creation.health_quarter_points) / 4.0,
+            damage_location_and_type: 0,
+            damage_user_data: 0,
+            damage_source_object: u32::MAX,
             last_attacker: u32::MAX,
             damage_changed: false,
             vaporize_on_death: false,
@@ -231,7 +306,7 @@ impl Runtime {
             },
             associated_objective: None,
             spawn_cycle_enabled: false,
-            spawning: false,
+            spawning: true,
             spawn_counter: 0,
             spawn_delay_counter: 0,
             next_spawn_timestamp_ms: 0,
@@ -241,6 +316,9 @@ impl Runtime {
             source_spawn_point_index: creation.spawn_point_index,
             source_spawn_point_token: creation.spawn_point_token,
             capabilities: Capabilities::default(),
+            driver_position_at_ms: None,
+            driver_position_credit_m: 0.,
+            driver_controls: DriverControls::default(),
         };
         self.initial.insert(creation.index, vehicle.clone());
         self.vehicles.insert(creation.index, vehicle);
@@ -300,6 +378,83 @@ impl Runtime {
     pub(crate) fn reset_for_new_world(&mut self) {
         self.vehicles = self.initial.clone();
     }
+    pub(crate) fn begin_driver(&mut self, index: u16, now_ms: u64) -> Result<(), &'static str> {
+        let key = self.get(index).ok_or("unknown_ground_vehicle")?.key;
+        self.mutate(key, |vehicle| {
+            vehicle.driver_position_at_ms = Some(now_ms);
+            vehicle.driver_position_credit_m = 1. / 16.;
+            Ok(())
+        })
+    }
+
+    /// Validate bounds before applying a sparse report to an isolated candidate.
+    /// The caller supplies the authenticated, currently seated Escort driver.
+    pub(crate) fn apply_driver_dynamics(
+        &mut self,
+        report: ground_vehicles::OwnerDynamics,
+        policy: ground_vehicles::DriverSeat,
+        now_ms: u64,
+    ) -> Result<(), &'static str> {
+        let key = self.get(report.index).ok_or("unknown_ground_vehicle")?.key;
+        self.mutate(key, |vehicle| {
+            if vehicle.state != 2 || vehicle.is_dead() || vehicle.body != Body::Operational {
+                return Err("ground_vehicle_not_operational");
+            }
+            if let Some(position) = report.position {
+                let elapsed = now_ms
+                    .checked_sub(
+                        vehicle
+                            .driver_position_at_ms
+                            .ok_or("ground_driver_grant_required")?,
+                    )
+                    .ok_or("stale_ground_vehicle_pose_time")?;
+                let previous = vehicle.pose.position;
+                let squared = [
+                    position.x - previous.x,
+                    position.y - previous.y,
+                    position.z - previous.z,
+                ]
+                .iter()
+                .map(|v| f64::from(*v).powi(2))
+                .sum::<f64>();
+                // A fixed-point cell allows axis truncation. Cap time credit so an
+                // idle connection cannot accumulate an unbounded position jump.
+                let speed = f64::from(policy.maximum_speed_mps);
+                let credit = (vehicle.driver_position_credit_m
+                    + speed * elapsed.min(1000) as f64 / 1000.)
+                    .min(speed + 1. / 16.);
+                if squared > credit * credit {
+                    return Err("ground_vehicle_owner_pose_out_of_range");
+                }
+                vehicle.driver_position_credit_m = (credit - squared.sqrt()).max(0.);
+                vehicle.pose.position = position;
+                vehicle.driver_position_at_ms = Some(now_ms);
+            }
+            if let Some(quaternion) = report.rotation_xyzw {
+                let norm_squared = quaternion.iter().map(|value| value * value).sum::<f32>();
+                if !norm_squared.is_finite() || (norm_squared - 1.).abs() > 0.02 {
+                    return Err("invalid_ground_vehicle_owner_rotation");
+                }
+                let norm = norm_squared.sqrt();
+                vehicle.pose.rotation = quaternion.map(|value| value / norm);
+            }
+            if report.throttle.is_some_and(|value| value.abs() > 1.) {
+                return Err("invalid_ground_vehicle_owner_throttle");
+            }
+            vehicle.pose.validate()?;
+            if let Some(brake) = report.brake {
+                vehicle.driver_controls.brake = Some(brake);
+            }
+            if let Some(throttle) = report.throttle {
+                vehicle.driver_controls.throttle = Some(throttle);
+            }
+            if let Some(smoke_screen) = report.smoke_screen {
+                vehicle.driver_controls.smoke_screen = Some(smoke_screen);
+            }
+            Ok(())
+        })
+    }
+
     /// Accepted authoritative movement only. This is a pose setter, not driving,
     /// collision integration, or admission of client-supplied physics.
     pub fn force_pose(
@@ -362,13 +517,18 @@ impl Runtime {
             let direct = matches!(v.state, 0 | 1 | 4 | 5 | 6);
             if direct || (!initial && v.is_dead()) {
                 v.pose = source.pose;
+                v.driver_position_at_ms = None;
+                v.driver_position_credit_m = 0.;
+                v.driver_controls = DriverControls::default();
                 events.push(v.event(Effect::ForcePosition(v.pose.position)));
                 events.push(v.event(Effect::ForceRotation(v.pose.rotation)));
                 if !initial {
-                    v.health_quarter_points = v.maximum_health_quarter_points;
-                    v.last_attacker = u32::MAX;
-                    v.damage_changed = true;
-                    v.pending_death = false;
+                    v.set_damage_health(
+                        f32::from(v.maximum_health_quarter_points) / 4.0,
+                        u32::MAX,
+                        0,
+                        0,
+                    );
                     events.push(v.event(Effect::DamageReset));
                 }
                 v.vaporize_on_death = false;
@@ -398,16 +558,132 @@ impl Runtime {
             if v.is_dead() || quarter_points == 0 {
                 return Ok(vec![]);
             }
-            v.health_quarter_points = v.health_quarter_points.saturating_sub(quarter_points);
-            v.last_attacker = attacker;
-            v.damage_changed = true;
-            v.pending_death = v.is_dead();
-            Ok(vec![v.event(Effect::DamageChanged {
-                health_quarter_points: v.health_quarter_points,
-                last_attacker: v.last_attacker,
-            })])
+            let hp = (v.health_hp - f32::from(quarter_points) / 4.0).max(0.0);
+            Ok(vec![v.set_damage_health(hp, attacker, 0, 0)])
         })
     }
+
+    /// Retail ordinary damage retains float HP and applies the model's
+    /// sub-one-HP dead floor before the network quarter-unit projection.
+    pub(crate) fn apply_bullet_damage(
+        &mut self,
+        key: Key,
+        amount_hp: f32,
+        attacker: u32,
+        location: u8,
+        user_data: u32,
+    ) -> Result<Vec<LifecycleEvent>, &'static str> {
+        if location > 15 {
+            return Err("invalid_acquisition_ground_hit_location");
+        }
+        self.apply_weapon_damage(key, amount_hp, attacker, 0x10 | location, user_data)
+    }
+
+    pub(crate) fn apply_grenade_damage(
+        &mut self,
+        key: Key,
+        amount_hp: f32,
+        attacker: u32,
+        source_object: u32,
+    ) -> Result<Vec<LifecycleEvent>, &'static str> {
+        let events = self.apply_explosion_damage(key, amount_hp, attacker)?;
+        if !events.is_empty() {
+            self.vehicles
+                .get_mut(&key.index)
+                .unwrap()
+                .damage_source_object = source_object;
+        }
+        Ok(events)
+    }
+
+    /// Discard the staged input from a driver who lost authority in this event.
+    /// The independently accepted damage in the same candidate is preserved.
+    pub(crate) fn discard_driver_input(&mut self, before: &Self, index: u16) {
+        let (Some(candidate), Some(original)) = (self.vehicles.get_mut(&index), before.get(index))
+        else {
+            return;
+        };
+        candidate.pose = original.pose;
+        candidate.driver_position_at_ms = original.driver_position_at_ms;
+        candidate.driver_position_credit_m = original.driver_position_credit_m;
+        candidate.driver_controls = original.driver_controls;
+    }
+
+    pub(crate) fn apply_explosion_damage(
+        &mut self,
+        key: Key,
+        amount_hp: f32,
+        attacker: u32,
+    ) -> Result<Vec<LifecycleEvent>, &'static str> {
+        self.apply_weapon_damage(key, amount_hp, attacker, 0xa0, 0)
+    }
+
+    fn apply_weapon_damage(
+        &mut self,
+        key: Key,
+        amount_hp: f32,
+        attacker: u32,
+        location_and_type: u8,
+        user_data: u32,
+    ) -> Result<Vec<LifecycleEvent>, &'static str> {
+        if !amount_hp.is_finite() || amount_hp < 0.0 {
+            return Err("invalid_acquisition_ground_weapon_damage");
+        }
+        self.mutate(key, |v| {
+            if v.state != 2
+                || v.body != Body::Operational
+                || v.is_dead()
+                || v.is_dying()
+                || amount_hp == 0.0
+            {
+                return Ok(vec![]);
+            }
+            let remaining = v.health_hp - amount_hp;
+            let hp = if remaining < 1.0 { 0.0 } else { remaining };
+            if hp == v.health_hp {
+                return Ok(vec![]);
+            }
+            Ok(vec![v.set_damage_health(
+                hp,
+                attacker,
+                location_and_type,
+                user_data,
+            )])
+        })
+    }
+
+    pub(crate) fn critical_decay(
+        &mut self,
+        key: Key,
+        loss_percent_per_second: f32,
+        dt: f32,
+    ) -> Result<Vec<LifecycleEvent>, &'static str> {
+        if !dt.is_finite() || dt < 0.0 || !(0.0..=100.0).contains(&loss_percent_per_second) {
+            return Err("invalid_acquisition_ground_critical_delta");
+        }
+        self.mutate(key, |v| {
+            if !matches!(v.state, 2 | 3) || v.body != Body::Operational || !v.is_dying() {
+                return Ok(vec![]);
+            }
+            let max_hp = f32::from(v.maximum_health_quarter_points) / 4.0;
+            let loss = ((loss_percent_per_second * 0.01) * max_hp) * dt;
+            let remaining = v.health_hp - loss;
+            let hp = if remaining < 1.0 { 0.0 } else { remaining };
+            if hp == v.health_hp {
+                return Ok(vec![]);
+            }
+            let source = v.damage_source_object;
+            let event = v.set_damage_health(
+                hp,
+                v.last_attacker,
+                v.damage_location_and_type,
+                v.damage_user_data,
+            );
+            v.damage_source_object = source;
+            Ok(vec![event])
+        })
+    }
+
     pub fn apply_lethal(
         &mut self,
         key: Key,
@@ -417,14 +693,7 @@ impl Runtime {
         self.mutate(key, |v| {
             let mut events = vec![];
             if !v.is_dead() {
-                v.health_quarter_points = 0;
-                v.last_attacker = attacker;
-                v.damage_changed = true;
-                v.pending_death = true;
-                events.push(v.event(Effect::DamageChanged {
-                    health_quarter_points: 0,
-                    last_attacker: attacker,
-                }));
+                events.push(v.set_damage_health(0.0, attacker, 0, 0));
             }
             v.vaporize_on_death = vaporize;
             Ok(events)
@@ -445,6 +714,23 @@ impl Runtime {
             Ok(vec![v.event(Effect::StateChanged(8))])
         })
     }
+    /// Commit state6 after the manager admits this existing APC or MotorPool
+    /// vehicle to its team queue. No FSP association or health changes occur.
+    pub fn admit_queued_respawn(&mut self, key: Key) -> Result<Vec<LifecycleEvent>, &'static str> {
+        self.mutate(key, |vehicle| {
+            if !matches!(vehicle.source_spawn_type, Some(3 | 7))
+                || vehicle.body == Body::Operational
+                || vehicle.spawn_delay_counter != 0
+                || !matches!(vehicle.state, 4 | 5)
+            {
+                return Err("ground_vehicle_not_ready_for_spawn_queue");
+            }
+            vehicle.state = 6;
+            vehicle.state_age_seconds = 0.;
+            Ok(vec![vehicle.event(Effect::StateChanged(6))])
+        })
+    }
+
     /// Base state update precedes ground teardown. For type9, destruction only
     /// requests objective deactivation; this does not enter the objective state.
     /// No generic reinforcement timer is synthesized for an Escort. The caller
@@ -499,6 +785,11 @@ impl Runtime {
                 }));
                 events.push(v.event(Effect::DestructionExplosion(destruction)));
             }
+            if v.state == 2 && v.body == Body::Operational && v.is_dying() {
+                v.state = 3;
+                v.state_age_seconds = 0.;
+                events.push(v.event(Effect::StateChanged(3)));
+            }
             if v.inert_seconds > 0. {
                 v.inert_seconds -= dt;
                 if v.inert_seconds <= 0. && v.state != 7 {
@@ -550,13 +841,13 @@ impl Runtime {
                 v.body = Body::Operational;
                 events.push(v.event(Effect::AddPhysics));
             }
-            if matches!(v.state, 4 | 5)
-                && v.body != Body::Operational
-                && v.spawn_cycle_enabled
-                && v.spawn_delay_counter == 0
-                && v.source_spawn_type != Some(9)
+            if matches!(v.state, 4 | 5) && v.body != Body::Operational && v.spawn_delay_counter == 0
             {
-                return Err("ground_generic_requeue_unavailable");
+                if matches!(v.source_spawn_type, Some(3 | 7)) {
+                    events.push(v.event(Effect::QueueRespawn));
+                } else if v.source_spawn_type != Some(9) && v.spawn_cycle_enabled {
+                    return Err("ground_generic_requeue_unavailable");
+                }
             }
             Ok(events)
         })

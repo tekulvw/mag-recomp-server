@@ -12,8 +12,9 @@ fn runtime(state: u8) -> Runtime {
     runtime_with_source(state, 9)
 }
 fn runtime_with_source(state: u8, source_type: u8) -> Runtime {
+    let index = if source_type == 3 { 0 } else { 4 };
     let creation: Creation = serde_json::from_value(serde_json::json!({
-        "index":4,"spawn_point_index":12,"spawn_point_token":99,
+        "index":index,"spawn_point_index":12,"spawn_point_token":99,
         "vehicle_type_token":5,"faction":0,"team":0,"modifier":0,
         "position":{"x":2.,"y":4.,"z":8.},"rotation":[0.,0.,0.,1.],
         "health_quarter_points":800,"initial_state":state
@@ -272,4 +273,40 @@ fn delivery_rejects_hidden_or_dead_authority_even_with_timer_properties() {
         r.deliver(key),
         Err("ground_delivery_requires_operational_vehicle")
     );
+}
+
+#[test]
+fn apc_and_motor_pool_requeue_by_native_counter_and_enter_state_six_until_wave() {
+    for source_type in [3, 7] {
+        let mut runtime = runtime_with_source(2, source_type);
+        let index = if source_type == 3 { 0 } else { 4 };
+        let key = runtime.get(index).unwrap().key;
+        runtime.configure(key, capabilities()).unwrap();
+        let initial = runtime.get(index).unwrap();
+        assert!(initial.spawning);
+        assert!(!initial.spawn_cycle_enabled);
+        runtime.apply_lethal(key, 2, false).unwrap();
+
+        let death = runtime.update(key, 0.01, 20_000).unwrap();
+        assert!(!death.iter().any(|e| e.effect == Effect::QueueRespawn));
+        assert_eq!(runtime.get(index).unwrap().spawn_delay_counter, 1);
+        assert!(runtime.update(key, 0.01, 20_000).unwrap().is_empty());
+        let due = runtime.update(key, 0.01, 40_000).unwrap();
+        assert_eq!(effects(&due), vec![&Effect::QueueRespawn]);
+        let queued = runtime.admit_queued_respawn(key).unwrap();
+        assert_eq!(effects(&queued), vec![&Effect::StateChanged(6)]);
+        assert_eq!(runtime.get(index).unwrap().state_age_seconds, 0.0);
+        assert!(runtime.update(key, 0.01, 40_000).unwrap().is_empty());
+
+        runtime.respawn_existing(key, source(), false).unwrap();
+        let vehicle = runtime.get(index).unwrap();
+        assert_eq!(vehicle.state, 2);
+        assert_eq!(
+            vehicle.health_quarter_points,
+            vehicle.maximum_health_quarter_points
+        );
+        assert_eq!(vehicle.associated_objective, None);
+        assert!(vehicle.spawning);
+        assert!(!vehicle.spawn_cycle_enabled);
+    }
 }

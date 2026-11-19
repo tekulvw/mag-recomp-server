@@ -710,3 +710,41 @@ fn bot_force_position_updates_physical_body_and_cancels_obsolete_navigation_in_c
     assert!(bot.drop_waiting.is_none());
     assert!(bot.target.pending_move.is_none());
 }
+
+#[test]
+fn vehicle_explosion_is_ordinary_protection_checked_damage_with_native_wire_metadata() {
+    let mut engine = crate::human_kill_reward_tests::fixture();
+    let t = target(&engine, true);
+    let request = Request::VehicleExplosion {
+        raw_hp: 12.,
+        from_direction: [1., 0., -1.],
+        attacker: t.character_id,
+    };
+    let now = Duration::from_secs(1);
+    let protected = engine
+        .plan_acquisition_character_effect(t, request, native(1, false), now)
+        .unwrap();
+    assert_eq!(protected.outcome(), Outcome::Protected);
+    assert_eq!(protected.native_after().invulnerability, Some(1));
+    assert_eq!(protected.audit()["damage_type"], 10);
+    assert_eq!(protected.audit()["damage_source_type"], 5);
+    assert_eq!(protected.audit()["damage_source_index"], -1);
+    assert_eq!(protected.audit()["location"], 1);
+    assert_eq!(protected.audit()["from_direction"], json!([0., -1., 0.]));
+    assert_eq!(protected.audit()["user_data"], (90 << 20) | (512 + 90));
+
+    let mut unprotected = states(t, native(0, false));
+    let effect = engine
+        .prepare_acquisition_character_effects(&[(t, request)], &unprotected, now)
+        .unwrap();
+    assert_eq!(effect.audit()[0]["outcome"], "Applied");
+    assert!(actor(&engine, t).life.is_alive());
+    engine
+        .install_acquisition_character_effects(effect, &mut unprotected)
+        .unwrap();
+    let actor = actor(&engine, t);
+    assert!(actor.life.is_alive());
+    assert_eq!(actor.last_damage.last_location_and_type, 0xa1);
+    assert_eq!(actor.last_damage.last_source_object, u32::MAX);
+    assert_eq!(actor.last_damage.last_user_data, (90 << 20) | (512 + 90));
+}

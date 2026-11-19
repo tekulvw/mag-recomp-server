@@ -15,12 +15,18 @@ impl<'a> DecodedEvent<'a> {
         bytes: &'a [u8],
         player: u16,
         profile: crate::wire_profile::WireProfile,
+        allow_ground_owner: bool,
     ) -> Self {
         let message = protocol::GameMessage::decode_with_profile(bytes, profile);
         let owner_fields = match &message {
-            Ok(protocol::GameMessage::ObjectUpdate(update)) => Some(
-                TypedOwnerUpdateFields::decode_checked_with_profile(update, player, profile),
-            ),
+            Ok(protocol::GameMessage::ObjectUpdate(update)) => {
+                Some(TypedOwnerUpdateFields::decode_checked_with_profile(
+                    update,
+                    player,
+                    profile,
+                    allow_ground_owner,
+                ))
+            }
             _ => None,
         };
         Self {

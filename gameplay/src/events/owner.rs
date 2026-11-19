@@ -47,10 +47,10 @@ pub(super) fn object_update<W: Write>(
             plan.session.clock_points = Some(remaining);
         }
     }
-    Ok(
-        json!({"type":"object_update","sequence":h.sequence,"nak_sequence":h.nak_sequence,
+    let mut audit = json!({"type":"object_update","sequence":h.sequence,"nak_sequence":h.nak_sequence,
         "client_index":h.client_index,"object_type_mask":h.object_type_mask,"timestamp_ms":h.timestamp_ms,
         "body_supported":body_supported,
+        "ground_dynamics_accepted":plan.ground_dynamics_relay.is_some(),
         "reported_position":reported_position,"position_status":position_status,"owner_fields":owner_fields,
         "fall_damage":plan.audit.falling_damage,
         "applied_damage":plan.audit.applied_damage,"applied_healing":plan.audit.applied_healing,
@@ -70,8 +70,48 @@ pub(super) fn object_update<W: Write>(
         "spawn_ground_passenger_seat":plan.session.new_ground_seat.flatten().map(|s|s.seat),
         "life_generation":if plan.replication.spawn_delta.is_some(){active.life.next_generation()}else{None},
         "equipped_inventory_index":plan.session.new_inventory_handle.map(|h|h.inventory_index),
-        "replication_sequence":if plan.replication.spawn_delta.is_some() || plan.replication.wave_delta.is_some(){Some(next_sequence)}else{None}}),
-    )
+        "replication_sequence":if plan.replication.spawn_delta.is_some() || plan.replication.wave_delta.is_some(){Some(next_sequence)}else{None}});
+    if !plan.audit.ground_grenade_checks.is_empty() {
+        audit["ground_grenade_checks"] = json!(plan.audit.ground_grenade_checks);
+    }
+    Ok(audit)
+}
+
+fn stage_ground_dynamics<W: Write>(
+    ctx: &PlanningContext<'_, W>,
+    plan: &mut EventPlan,
+    reports: &[ground_vehicles::OwnerDynamics],
+) -> Result<(), &'static str> {
+    let mut changes = reports
+        .iter()
+        .copied()
+        .filter(|report| report.has_changes());
+    let Some(report) = changes.next() else {
+        return Ok(());
+    };
+    if changes.next().is_some()
+        || !ctx.accepted_owner_route
+        || ctx.engine.match_terminal.is_some()
+        || !ctx.engine.ground_driver_authority(ctx.active, report.index)
+        || ctx.engine.ground_driver_owner(report.index) != Some(ctx.active.reservation.player)
+    {
+        return Err("unowned_ground_vehicle_update");
+    }
+    let driver = ctx
+        .engine
+        .ground_driver_seat(report.index)
+        .ok_or("ground_driver_policy_required")?;
+    let mut runtime = ctx
+        .engine
+        .ground_runtime
+        .clone()
+        .ok_or("ground_vehicle_runtime_required")?;
+    let now_ms = ctx.now.as_millis() as u64;
+    runtime.apply_driver_dynamics(report, driver, now_ms)?;
+    let relay = report.encode_relay(ctx.engine.wire_profile, now_ms as u32)?;
+    plan.ground_runtime = Some(runtime);
+    plan.ground_dynamics_relay = Some((report.index, relay));
+    Ok(())
 }
 
 struct OwnerReport {
@@ -111,6 +151,14 @@ fn plan_owner_report<W: Write>(
                     Err(code) => plan.gameplay_denial = Some(code),
                 }
             }
+            if !report.ground_vehicles.is_empty()
+                && h.client_index == 0
+                && h.nak_sequence == 0
+                && h.sequence > active.latest_owner_sequence
+                && let Err(code) = stage_ground_dynamics(ctx, plan, &report.ground_vehicles)
+            {
+                plan.gameplay_denial = Some(code);
+            }
             let mut fields = report.character.unwrap_or_default();
             fields.projectiles = report.projectiles;
             fields
@@ -124,7 +172,8 @@ fn plan_owner_report<W: Write>(
             error @ (owner_update::OwnerUpdateError::UnsupportedCharacterField
             | owner_update::OwnerUpdateError::UnsupportedObjectType
             | owner_update::OwnerUpdateError::UnsupportedProjectileField
-            | owner_update::OwnerUpdateError::UnsupportedTurretField),
+            | owner_update::OwnerUpdateError::UnsupportedTurretField
+            | owner_update::OwnerUpdateError::UnsupportedGroundVehicleField),
         ) => {
             // Coverage gaps discard the whole body without disconnecting.
             plan.gameplay_denial.get_or_insert(error.code());
@@ -133,7 +182,11 @@ fn plan_owner_report<W: Write>(
         }
         Err(owner_update::OwnerUpdateError::Invalid(code)) => plan.rejection = Some(code),
         Ok(fields) => {
-            if h.client_index == 0 && h.nak_sequence == 0 {
+            // Acquisition projectile authority includes both the reports that
+            // seed terminal state and the update that consumes that terminal.
+            let qualified_owner_route =
+                ctx.engine.acquisition_gameplay.is_none() || ctx.accepted_owner_route;
+            if h.client_index == 0 && h.nak_sequence == 0 && qualified_owner_route {
                 plan.session.new_owner_sequence =
                     Some(active.latest_owner_sequence.max(h.sequence));
                 if h.sequence > active.latest_owner_sequence && active.life.is_alive() {
@@ -292,6 +345,41 @@ fn plan_grenade_blasts<W: Write>(
     let attacker = 0x0380_0000 | u32::from(active.reservation.player);
     let world = active.reservation.world;
     let mut grenade_queue = active.grenade_damage.clone();
+    if ctx.accepted_owner_route
+        && body_supported
+        && plan.rejection.is_none()
+        && h.nak_sequence == 0
+        && h.client_index == 0
+        && ctx.engine.round_combat_allowed(ctx.now)
+        && ctx
+            .engine
+            .acquisition_gameplay
+            .as_ref()
+            .is_some_and(|g| g.setup.ground_damage.is_some())
+        && plan.audit.projectile_terminals.iter().any(|terminal| {
+            terminal.reason == projectile::ProjectileTerminalReason::ReportedDetonation
+                && terminal.position.is_some()
+        })
+    {
+        let motion_staged = plan.ground_runtime.is_some();
+        let mut candidate = plan
+            .ground_runtime
+            .take()
+            .or_else(|| ctx.engine.ground_runtime.clone())
+            .ok_or("ground_vehicle_runtime_required")?;
+        let (packet, audit) = ctx.engine.stage_ground_grenade_damage(
+            &mut candidate,
+            active,
+            &plan.audit.projectile_terminals,
+            ctx.now,
+        )?;
+        if motion_staged || packet.is_some() {
+            plan.ground_runtime = Some(candidate);
+        }
+        plan.ground_damage_relay = packet;
+        plan.audit.ground_grenade_checks = audit;
+    }
+
     if ctx.engine.development_grenade_radius
         && body_supported
         && plan.rejection.is_none()

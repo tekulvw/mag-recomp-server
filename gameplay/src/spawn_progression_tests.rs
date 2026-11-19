@@ -253,7 +253,12 @@ pub(crate) fn dispatch(
         plugin_id: Some(1),
         payload_hex: protocol::encode_hex(bytes),
     };
-    let decoded = DecodedEvent::with_profile(bytes, actor.reservation.player, engine.wire_profile);
+    let decoded = DecodedEvent::with_profile(
+        bytes,
+        actor.reservation.player,
+        engine.wire_profile,
+        engine.ground_driver_enabled(),
+    );
     engine.handle_event(input, &decoded, Duration::from_millis(now_ms), 1)
 }
 fn owner_update(engine: &mut Engine<Vec<u8>>, now_ms: u64, nak: u32) -> Vec<OutboundMessage> {
@@ -980,4 +985,4 @@ mod reservation_eviction;
 mod startup_quorum;
 
 #[path = "dynamic_collision_runtime_tests.rs"]
-mod dynamic_bodies;
+pub(crate) mod dynamic_bodies;
