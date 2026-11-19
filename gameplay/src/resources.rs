@@ -198,6 +198,7 @@ impl<W: Write> Engine<W> {
             ground_vehicles: None,
             ground_runtime: None,
             acquisition_effect_origin: std::sync::Arc::new(()),
+            acquisition_static_partitions: Default::default(),
             dynamic_body_resources: None,
             parachute_waves: Default::default(),
             objective_catalog: None,

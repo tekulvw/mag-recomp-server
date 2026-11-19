@@ -424,3 +424,84 @@ fn bot_body_uses_current_life_and_integrator_pose_after_respawn() {
     assert_eq!(hits[0].target.key.id, u64::from(0x03800000 | u32::from(id)));
     assert_eq!(hits[0].target.key.generation, 7);
 }
+
+fn static_partition(map: &str) -> crate::static_collision_partition::Partition {
+    crate::static_collision_partition::Partition::from_json(&json!({"format":"mag_static_filter_partition","schema_version":1,"map_name":map,"scope":"initial_compiled_collision_and_type1_terrain","source":{"native_binding_sha256":"a".repeat(64),"root_inventory_sha256":"b".repeat(64),"level_archive_sha256":"c".repeat(64),"compiled_catalog_sha256":"d".repeat(64)},"root_count":1,"root_filters":[{"filter_info":9,"root_count":1}]}).to_string()).unwrap()
+}
+#[test]
+fn engine_root_exclusion_is_map_bound_and_stages_real_respawn_without_fake_geometry() {
+    let mut e = with_vehicle(true);
+    let map = e.spawn_catalog.as_ref().unwrap().map_name().to_owned();
+    e = e
+        .with_acquisition_static_partitions(vec![static_partition(&map)])
+        .unwrap();
+    reserve(&mut e, 0);
+    let actor = e.active.as_mut().unwrap();
+    ready(actor);
+    actor.life = CharacterLife::Alive {
+        generation: 1,
+        health_quarter_points: 400,
+    };
+    actor.tracking.server_position(
+        CharacterPosition {
+            x: 101.45,
+            y: 3.,
+            z: 100.,
+        },
+        player_tracking::PositionOrigin::ServerSpawn,
+        0,
+    );
+    let current = e.current_ground_vehicle(4).unwrap();
+    let source = crate::acquisition_ground_runtime::Key {
+        index: 4,
+        generation: 1,
+    };
+    let point = crate::acquisition_ground_runtime::QualifiedRespawn {
+        spawn_point_index: current.spawn_point_index,
+        spawn_point_token: current.spawn_point_token,
+        active: true,
+        pose: crate::acquisition_ground_runtime::Pose {
+            position: current.position,
+            rotation: current.rotation,
+        },
+    };
+    let mut rows = [0; 32];
+    rows[6] = (1 << 6) | (1 << 21) | (1 << 22);
+    rows[21] = 1 << 6;
+    let request = || crate::acquisition_spawn_effects::RespawnRequest {
+        source,
+        point,
+        initial: false,
+        physics: Default::default(),
+        filter_rows: rows,
+        now: Duration::from_millis(10),
+    };
+    let mut native = Default::default();
+    let prepared = e
+        .prepare_existing_acquisition_respawn(request(), &native)
+        .unwrap();
+    assert_eq!(
+        prepared.audit()["query_source"]["kind"],
+        "root_excluded_initial_partition"
+    );
+    assert!(e.collision_world.is_none());
+    e.record_existing_acquisition_respawn(prepared, &mut native, 1)
+        .unwrap();
+    assert!(
+        e.active
+            .as_ref()
+            .unwrap()
+            .tracking
+            .sample
+            .unwrap()
+            .position
+            .x
+            > 101.5
+    );
+    assert_eq!(e.ground_runtime.as_ref().unwrap().get(4).unwrap().state, 2);
+    assert!(
+        with_vehicle(true)
+            .with_acquisition_static_partitions(vec![static_partition("wrong-map")])
+            .is_err()
+    );
+}
