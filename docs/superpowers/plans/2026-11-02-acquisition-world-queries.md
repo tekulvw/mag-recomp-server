@@ -22,9 +22,10 @@ first playable Acquisition loop. Rust2024; no new dependencies. Spec:
   final recipient sequence binding and staged rollback.
 - [x] Integrate existing-vehicle respawn, per-pair push/damage/filter effects and
   source counters in one recorded Engine transaction; register roots on Update.
-- [ ] Qualify actual static FSP query regions/root filters/child policies;
-  complete objective integration/driving/destruction/scoring consumers for the
-  first playable mode. Old APC exit witnesses do not cover FSP centers.
+- [x] Qualify initial compiled/terrain root rejection for all three maps;
+  filtered respawn queries need no geometry/child data for rejected roots.
+- [ ] Complete objective integration/driving/destruction/scoring consumers for
+  the first playable mode. Other enabled world queries still need their data.
 - [x] Run affected/full checks, private source/resource consumers and boundary
   verification. Reconcile main, integrate green source PR, checkpoint private
   evidence/TODO; preserve released pin/data and manual releases.

@@ -120,6 +120,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     let mut spawn_path: Option<PathBuf> = None;
     let mut ground_vehicles_path: Option<PathBuf> = None;
     let mut dynamic_bodies_path: Option<PathBuf> = None;
+    let mut static_partition_paths: Vec<PathBuf> = Vec::new();
     let mut objective_path: Option<PathBuf> = None;
     let mut item_path: Option<PathBuf> = None;
     let mut blast_rules_path: Option<PathBuf> = None;
@@ -361,6 +362,18 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                         .into(),
                 );
             }
+            "--static-partition" => {
+                if static_partition_paths.len() >= 64 {
+                    return Err(io::Error::other("static_partition_limit"));
+                }
+                static_partition_paths.push(
+                    args.next()
+                        .ok_or_else(|| {
+                            io::Error::other("--static-partition requires an absolute path")
+                        })?
+                        .into(),
+                );
+            }
             "--ground-vehicles" => {
                 ground_vehicles_path = Some(
                     args.next()
@@ -440,7 +453,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             }
             _ => {
                 return Err(io::Error::other(
-                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--match-profiles /absolute/MATCH_PROFILES.json] [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--dynamic-bodies /absolute/BODIES.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json] [--navmesh-world MESH.mag-nav] [--bot-fill-total N --bot-population POPULATION.json] [--bot-names /absolute/NAMES.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS] [--log-segment-bytes BYTES [--log-retention-s SECONDS]]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
+                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--match-profiles /absolute/MATCH_PROFILES.json] [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--dynamic-bodies /absolute/BODIES.json] [--static-partition /absolute/PARTITION.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json] [--navmesh-world MESH.mag-nav] [--bot-fill-total N --bot-population POPULATION.json] [--bot-names /absolute/NAMES.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS] [--log-segment-bytes BYTES [--log-retention-s SECONDS]]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
                 ));
             }
         }
@@ -673,6 +686,29 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             Ok((bodies, bindings))
         })
         .transpose()?;
+    let static_partitions = static_partition_paths
+        .iter()
+        .map(|path| -> io::Result<_> {
+            if !path.is_absolute() {
+                return Err(io::Error::other(
+                    "--static-partition requires an absolute path",
+                ));
+            }
+            if application_id != Some(20231) || catalog.match_profile().game_type != 1 {
+                return Err(io::Error::other(
+                    "static partitions require retail Acquisition",
+                ));
+            }
+            mag_gameplay::static_collision_partition::Partition::load(path)
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    if !static_partitions.is_empty() {
+        mag_gameplay::static_collision_partition::Partition::validate_collection(
+            &static_partitions,
+            catalog.map_name(),
+        )
+        .map_err(io::Error::other)?;
+    }
     if application_id.is_some()
         && collision_world
             .as_ref()
@@ -1004,7 +1040,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         }
         println!(
             "{}",
-            serde_json::json!({"event":"catalogs_validated","application_id":application_id,"skill_application_id":skill_catalog.application_id(),"bunkers":bunker_info,"fall_damage_enabled":fall_rules.is_some(),"incapacitation_enabled":incapacitation_rules.is_some(),"character_damage_rules_enabled":character_damage_rules.is_some(),"dynamic_body_catalog_validated":dynamic_bodies.is_some(),"scope":"schema_and_profile_validation_not_client_acceptance"})
+            serde_json::json!({"event":"catalogs_validated","application_id":application_id,"skill_application_id":skill_catalog.application_id(),"bunkers":bunker_info,"fall_damage_enabled":fall_rules.is_some(),"incapacitation_enabled":incapacitation_rules.is_some(),"character_damage_rules_enabled":character_damage_rules.is_some(),"dynamic_body_catalog_validated":dynamic_bodies.is_some(),"static_partitions_validated":static_partitions.len(),"scope":"schema_and_profile_validation_not_client_acceptance"})
         );
         return Ok(());
     }
@@ -1032,6 +1068,11 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     if let Some((catalog, bindings)) = dynamic_bodies {
         engine = engine
             .with_dynamic_collision_bodies(catalog, bindings)
+            .map_err(io::Error::other)?;
+    }
+    if !static_partitions.is_empty() {
+        engine = engine
+            .with_acquisition_static_partitions(static_partitions)
             .map_err(io::Error::other)?;
     }
     if let Some(objectives) = objective_catalog {
@@ -2042,6 +2083,44 @@ mod runtime_profile_tests {
         let mut relative = files.args();
         relative.extend(["--dynamic-bodies".to_owned(), "bodies.json".to_owned()]);
         assert!(run(relative).unwrap_err().to_string().contains("absolute"));
+        assert_eq!(std::fs::read_dir(&files.0).unwrap().count(), 10);
+    }
+    #[test]
+    fn static_partition_cli_is_explicit_bounded_and_map_checked_before_logs() {
+        let files = SyntheticCatalogs::new();
+        let mut spawns = files.read("spawns.json");
+        spawns["match_profile"]["game_type"] = serde_json::json!(1);
+        files.write("spawns.json", &spawns);
+        let mut partition = serde_json::json!({"format":"mag_static_filter_partition","schema_version":1,"map_name":spawns["maps"][0]["name"],"scope":"initial_compiled_collision_and_type1_terrain","source":{"native_binding_sha256":"a".repeat(64),"root_inventory_sha256":"b".repeat(64),"level_archive_sha256":"c".repeat(64),"compiled_catalog_sha256":"d".repeat(64)},"root_count":1,"root_filters":[{"filter_info":9,"root_count":1}]});
+        files.write("partition.json", &partition);
+        let args = || {
+            let mut v = files.args();
+            v.extend([
+                "--static-partition".to_owned(),
+                files.0.join("partition.json").display().to_string(),
+            ]);
+            v
+        };
+        assert!(run(args()).is_ok());
+        let mut duplicate = args();
+        duplicate.extend([
+            "--static-partition".to_owned(),
+            files.0.join("partition.json").display().to_string(),
+        ]);
+        assert!(
+            run(duplicate)
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate_static_partition_map")
+        );
+        partition["map_name"] = serde_json::json!("wrong-map");
+        files.write("partition.json", &partition);
+        assert!(
+            run(args())
+                .unwrap_err()
+                .to_string()
+                .contains("static_partition_base_map_missing")
+        );
         assert_eq!(std::fs::read_dir(&files.0).unwrap().count(), 10);
     }
 

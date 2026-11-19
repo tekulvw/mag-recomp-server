@@ -47,6 +47,7 @@ pub mod leadership_passives;
 pub mod leadership_runtime;
 pub mod navmesh;
 pub mod retail_movement;
+pub mod static_collision_partition;
 pub use development_bot_movement::{BotMove, BotMoveMode};
 mod development_target;
 pub use development_target::BotScript;
@@ -1009,6 +1010,8 @@ pub struct Engine<W: Write> {
     ground_vehicles: Option<ground_vehicles::Catalog>,
     ground_runtime: Option<acquisition_ground_runtime::Runtime>,
     acquisition_effect_origin: std::sync::Arc<()>,
+    acquisition_static_partitions:
+        std::collections::BTreeMap<String, std::sync::Arc<static_collision_partition::Partition>>,
     dynamic_body_resources: Option<dynamic_collision_runtime::Resources>,
     parachute_waves: std::collections::BTreeMap<(u16, Duration), usize>,
     objective_catalog: Option<objective_catalog::ObjectiveCatalog>,

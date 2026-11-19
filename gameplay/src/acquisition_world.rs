@@ -5,6 +5,7 @@ use crate::{
     acquisition_volume_damage::{Target, TargetKind},
     collision::CollisionWorld,
     dynamic_collision::{self, Body, Catalog, Geometry, Pose, QueryLimits, Snapshot},
+    static_collision_partition::Partition,
 };
 use dynamic_collision::geometry::{self, Point};
 use std::collections::BTreeMap;
@@ -41,6 +42,21 @@ impl Filters {
     ) -> Result<Self, &'static str> {
         statics.static_query_radius()?;
         let reserved = statics.static_groups();
+        Self::owned_with_groups(snapshot, rows, &reserved)
+    }
+    pub fn owned_entities_for_partition(
+        snapshot: &Snapshot,
+        partition: &Partition,
+        rows: [u32; 32],
+    ) -> Result<Self, &'static str> {
+        partition.require_excluded(6, &rows)?;
+        Self::owned_with_groups(snapshot, rows, &Default::default())
+    }
+    fn owned_with_groups(
+        snapshot: &Snapshot,
+        rows: [u32; 32],
+        reserved: &std::collections::BTreeSet<u32>,
+    ) -> Result<Self, &'static str> {
         let mut groups = BTreeMap::new();
         let mut roots = BTreeMap::new();
         let mut next = 1u32;
@@ -97,13 +113,17 @@ impl Default for Settings {
 }
 pub struct World<'a> {
     snapshot: &'a Snapshot,
-    statics: &'a CollisionWorld,
+    statics: StaticInput<'a>,
     filters: Filters,
     settings: Settings,
     static_radius: f64,
     budget: usize,
     moved: BTreeMap<(u64, u32), Point>,
     allocated: BTreeMap<RootKey, Body>,
+}
+enum StaticInput<'a> {
+    Geometry(&'a CollisionWorld),
+    Excluded(&'a Partition),
 }
 #[derive(Clone, Debug)]
 pub struct SpawnResolution {
@@ -117,6 +137,39 @@ impl<'a> World<'a> {
         statics: &'a CollisionWorld,
         filters: Filters,
         settings: Settings,
+    ) -> Result<Self, &'static str> {
+        let static_radius = statics.static_query_radius()?;
+        Self::build(
+            snapshot,
+            StaticInput::Geometry(statics),
+            filters,
+            settings,
+            static_radius,
+        )
+    }
+    /// Only the declared immutable initial source partition is summarized.
+    /// Every actual caster/current table is rechecked before skipping its roots.
+    pub fn with_excluded_statics(
+        snapshot: &'a Snapshot,
+        partition: &'a Partition,
+        filters: Filters,
+        settings: Settings,
+    ) -> Result<Self, &'static str> {
+        partition.require_excluded(6, &filters.rows)?;
+        Self::build(
+            snapshot,
+            StaticInput::Excluded(partition),
+            filters,
+            settings,
+            0.,
+        )
+    }
+    fn build(
+        snapshot: &'a Snapshot,
+        statics: StaticInput<'a>,
+        filters: Filters,
+        settings: Settings,
+        static_radius: f64,
     ) -> Result<Self, &'static str> {
         let limits = settings.query_limits;
         if !settings.contact_tolerance.is_finite()
@@ -142,7 +195,6 @@ impl<'a> World<'a> {
         {
             return Err("world_query_dynamic_filter_coverage_mismatch");
         }
-        let static_radius = statics.static_query_radius()?;
         Ok(Self {
             snapshot,
             statics,
@@ -405,29 +457,37 @@ impl<'a> World<'a> {
         });
         let mut nearest: Option<(f64, Point)> = None;
         let settings = self.settings;
-        for row in self.statics.static_triangles(min, max, &mut self.budget)? {
-            if !Filters::allows(&self.filters.rows, own_filter, row.properties.filter_info) {
-                continue;
+        match self.statics {
+            StaticInput::Excluded(partition) => {
+                partition.require_excluded(own_filter, &self.filters.rows)?
             }
-            let obstacle = Geometry::Triangle {
-                vertices: row.vertices,
-                radius: row.properties.convex_radius,
-            };
-            if let Some(hit) = geometry::sweep(
-                &shape,
-                pose,
-                target,
-                &obstacle,
-                Pose::at([0.; 3]),
-                geometry::SweepLimits {
-                    tolerance: settings.contact_tolerance,
-                    extra: settings.max_extra_penetration,
-                    query: settings.query_limits,
-                },
-                &mut self.budget,
-            )? && nearest.is_none_or(|v| hit.0 < v.0)
-            {
-                nearest = Some(hit);
+            StaticInput::Geometry(statics) => {
+                for row in statics.static_triangles(min, max, &mut self.budget)? {
+                    if !Filters::allows(&self.filters.rows, own_filter, row.properties.filter_info)
+                    {
+                        continue;
+                    }
+                    let obstacle = Geometry::Triangle {
+                        vertices: row.vertices,
+                        radius: row.properties.convex_radius,
+                    };
+                    if let Some(hit) = geometry::sweep(
+                        &shape,
+                        pose,
+                        target,
+                        &obstacle,
+                        Pose::at([0.; 3]),
+                        geometry::SweepLimits {
+                            tolerance: settings.contact_tolerance,
+                            extra: settings.max_extra_penetration,
+                            query: settings.query_limits,
+                        },
+                        &mut self.budget,
+                    )? && nearest.is_none_or(|v| hit.0 < v.0)
+                    {
+                        nearest = Some(hit);
+                    }
+                }
             }
         }
         for body in self.snapshot.bodies() {

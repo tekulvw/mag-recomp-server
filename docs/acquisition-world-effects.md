@@ -25,6 +25,31 @@ files. A body query requires complete static coverage or a verified physics
 region containing its entire swept bounds, including margins. Missing root
 filters, child policy, margins or regional coverage return an error.
 
+There is a second, filter-only path for a source-bound initial compiled/type1
+terrain partition. A strict `mag_static_filter_partition` input binds its map,
+source/native/inventory hashes, complete root count and full-filter counts. It
+does not assert native-full-world or later-state completeness. The provider
+checks the **actual current table and full query filter** against every declared
+root filter before skipping that partition. A rejected root cannot enter child
+narrowphase, so that query needs no child filter, pose, radius or triangle data.
+An enabled or changed filter returns an error; it never becomes no-hit.
+
+Private source regeneration establishes this rejection for the initial compiled
+and terrain roots of all three Acquisition maps under the relevant initial
+character/dead-character query rows. This avoids making full terrain physics
+reconstruction a prerequisite for those respawn queries. Owned dynamic/entity
+roots remain independently enumerated and queried. Newly created static roots
+or changed static filters require an updated partition or complete geometry;
+the summary must not be retained as a claim about an independently changing
+native world. Other query filters, such as an enabled Arrival ray, still need
+their own geometry and behavior.
+
+Use repeatable `--static-partition /absolute/PARTITION.json` inputs to install
+map-indexed summaries before admission. Offline `--validate-catalogs` rejects
+duplicates, invalid provenance/scope/counts and a missing base map before opening
+logs/listeners. These are trusted extraction inputs, not proof certificates just
+because a SHA256-shaped string is present.
+
 `acquisition_world::Filters` supplies the current full32-row table and every
 dynamic root's full filter word. Same nonzero system groups use subgroup/exclude
 comparisons instead of the layer table. Owned replacement grouping assigns one
@@ -93,12 +118,13 @@ Prioritize capture/unlock, Escort movement/delivery/destruction, scoring and
 match end. Exact solver bits, native traversal order and quaternion low bits are
 fidelity limits rather than additional gameplay gates.
 
-Concrete remaining requirements include qualified static FSP query inputs,
-objective capture/entry integration, vehicle driving admission, full destruction
+Concrete remaining requirements include objective capture/entry integration,
+vehicle driving admission, full destruction
 explosion/occupant/FSP/hulk consumers, scoring/results and global assignments.
-The old private APC-exit witnesses do not cover FSP source centers and cannot
-certify those query regions. Do not promote provisional metadata or invent root
-filters to enable callbacks. Mines require owned admission and lasting effects
+The old private APC-exit witnesses do not cover FSP source centers. The separate
+initial-root rejection proof qualifies the filtered partition without pretending
+those witnesses establish geometry there. Do not promote provisional metadata
+or invent filters to enable other queries. Mines require owned admission and lasting effects
 before they can be enabled.
 
 No game/deployment acceptance follows from synthetic or offline checks. Releases

@@ -121,20 +121,9 @@ impl<W: Write> Engine<W> {
         let creation = self
             .current_ground_vehicle(source.index)
             .ok_or("ground_vehicle_runtime_required")?;
-        let statics = self
-            .collision_world
-            .as_ref()
-            .ok_or("world_cast_static_geometry_unavailable")?;
-        if self
-            .spawn_catalog
-            .as_ref()
-            .is_none_or(|s| s.map_name() != statics.metadata().map_name)
-        {
-            return Err("world_cast_map_mismatch");
-        }
+        let statics = crate::static_collision_partition::StaticResources::for_engine(self)?;
         let snapshot = self.dynamic_collision_snapshot(rows[6])?;
-        let filters = acquisition_world::Filters::owned_entities(&snapshot, statics, rows)?;
-        let mut world = acquisition_world::World::new(&snapshot, statics, filters, settings)?;
+        let mut world = statics.world(&snapshot, rows, settings)?;
         let target = Target {
             key: TargetKey {
                 id: u64::from(source.object_id()),

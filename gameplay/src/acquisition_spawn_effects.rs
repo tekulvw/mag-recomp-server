@@ -3,7 +3,7 @@
 use crate::{
     acquisition_character_effects::{self as character, NativeState},
     acquisition_ground_runtime::{self as ground, Effect},
-    acquisition_world::{Filters, RootKey, Settings, World},
+    acquisition_world::{RootKey, Settings},
     dynamic_collision::Pose,
     *,
 };
@@ -15,6 +15,12 @@ pub struct PreparedRespawn {
     characters: character::Candidate,
     audit: Value,
     packet: Option<Vec<u8>>,
+}
+struct Clearance {
+    source: ground::Key,
+    physics: Settings,
+    filter_rows: [u32; 32],
+    now: Duration,
 }
 pub struct RespawnRequest {
     pub source: ground::Key,
@@ -89,6 +95,11 @@ impl<W: Write> Engine<W> {
         let mut after = before.clone();
         let events = after.respawn_existing(source, point, initial)?;
         let clear = events.iter().any(|e| e.effect == Effect::KillSpawnBlockers);
+        let query_source = if clear {
+            Some(crate::static_collision_partition::StaticResources::for_engine(self)?.audit())
+        } else {
+            None
+        };
         // Ground state is temporarily owned workspace just like the character
         // capsule. Every normal error restores it before returning.
         self.ground_runtime = Some(after);
@@ -105,63 +116,20 @@ impl<W: Write> Engine<W> {
                 *changes.entry(event.vehicle.index).or_default() |= field;
             }
         }
-        let characters=self.prepare_acquisition_character_callback(native,now,|engine,native| {
-            if !clear {return Ok((vec![],vec![]));}
-            let mut audit=Vec::new();let mut messages=Vec::new();
-            let current=engine.current_ground_vehicle(source.index).ok_or("ground_vehicle_runtime_required")?;
-            let statics=engine.collision_world.clone().ok_or("world_cast_static_geometry_unavailable")?;
-            if engine.spawn_catalog.as_ref().is_none_or(|s|s.map_name()!=statics.metadata().map_name) {return Err("world_cast_map_mismatch");}
-            let snapshot=engine.dynamic_collision_snapshot(filter_rows[6])?;
-            let filters=Filters::owned_entities(&snapshot,&statics,filter_rows)?;
-            let mut world=World::new(&snapshot,&statics,filters,physics)?;
-            let world_id=snapshot.context().0.world_id;
-            let target=acquisition_volume_damage::Target{key:acquisition_volume_damage::TargetKey{id:u64::from(source.object_id()),generation:source.generation},kind:acquisition_volume_damage::TargetKind::GroundVehicle,team:current.team};
-            let root=RootKey{entity:target.key.id,generation:source.generation,root:"chassis".into()};
-            if !world.has_root(&root) {
-                let resources=engine.dynamic_body_resources.as_ref().ok_or("dynamic_body_resources_unavailable")?;
-                let transform=vehicle_exit::BunkerTransform{position:current.position,rotation_xyzw:current.rotation};
-                let columns=[[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]].map(|v|transform.rotate(v));
-                let pose=Pose{translation:[current.position.x.into(),current.position.y.into(),current.position.z.into()],rotation:std::array::from_fn(|i|std::array::from_fn(|j|columns[j][i].into()))};
-                world.add_allocated_spawn(&resources.catalog,resources.vehicle_template(&current)?,target,pose,"chassis")?;
-            }
-            let pairs=world.spawn_pairs(&root)?;
-            let mut published=BTreeMap::new();
-            for (key,target) in pairs {
-                if target.key.id==u64::from(source.object_id()) {continue;}
-                match target.kind {
-                    acquisition_volume_damage::TargetKind::Character=>{
-                        let resolved=acquisition_spawn_blockers::resolve_character(&mut world.character(key,root.clone())?)?;
-                        let victim=character::Target{character_id:u32::try_from(target.key.id).map_err(|_|"invalid_acquisition_character_identity")?,generation:target.key.generation,world:world_id};
-                        if let Some((_,_,p))=world.moved_positions().find(|(id,g,_)|*id==target.key.id && *g==target.key.generation)
-                            && published.get(&target.key.id)!=Some(&p) {
-                                let position=replication::CharacterPosition{x:p[0] as f32,y:p[1] as f32,z:p[2] as f32};
-                                audit.push(engine.apply_acquisition_character_move(victim,position,now)?);published.insert(target.key.id,p);
-                        }
-                        if !resolved {
-                            let vector=engine.acquisition_character_position(victim)?;
-                            let state=native.get_mut(&victim.character_id).ok_or("acquisition_character_native_state_missing")?;
-                            let plan=engine.plan_acquisition_character_effect(victim,character::Request::VolumeLethal{victim_vector:vector},*state,now)?;
-                            audit.push(plan.audit().clone());messages.extend(engine.commit_acquisition_character_effect(plan,state)?);
-                        }
-                        let dead=engine.acquisition_character_is_dead(victim)?;
-                        world.character_dead(target,dead)?;
-                    },
-                    acquisition_volume_damage::TargetKind::GroundVehicle=>{
-                        let index=u16::try_from(target.key.id&0xffff).map_err(|_|"invalid_ground_vehicle_identity")?;
-                        let runtime=engine.ground_runtime.as_mut().ok_or("ground_vehicle_runtime_required")?;
-                        let current=runtime.get(index).filter(|v|v.key.generation==target.key.generation).ok_or("stale_ground_vehicle_key")?;
-                        let vehicle_key=current.key;
-                        if current.state==2 && world.contact_between(&key,&root)?.signed_distance < -0.1_f32 {
-                            let effects=runtime.apply_lethal(vehicle_key,u32::MAX,true)?;
-                            if !effects.is_empty() {*changes.entry(index).or_default()|=1<<18;}
-                            audit.push(json!({"ground_lethal":index,"generation":vehicle_key.generation,"vaporize":true}));
-                        }
-                    },
-                    _=>return Err("world_query_spawn_target_unsupported"),
+        let clearance = Clearance {
+            source,
+            physics,
+            filter_rows,
+            now,
+        };
+        let characters =
+            self.prepare_acquisition_character_callback(native, now, |engine, native| {
+                if clear {
+                    engine.stage_respawn_clearance(clearance, native, &mut changes)
+                } else {
+                    Ok((vec![], vec![]))
                 }
-            }
-            Ok((audit,messages))
-        });
+            });
         let after = self
             .ground_runtime
             .replace(before.clone())
@@ -182,6 +150,8 @@ impl<W: Write> Engine<W> {
             )?)
         };
         let audit = json!({"op":"acquisition_existing_vehicle_respawn","source_index":source.index,"source_generation":source.generation,"initial":initial,
+            "query_source":query_source,"filter_rows":filter_rows,"contact_tolerance":physics.contact_tolerance,"max_extra_penetration":physics.max_extra_penetration,
+            "query_limits":{"max_support_points":physics.query_limits.max_support_points,"max_iterations":physics.query_limits.max_iterations,"boundary_epsilon":physics.query_limits.boundary_epsilon},
             "source_events":events.iter().map(|e|json!({"index":e.vehicle.index,"generation":e.vehicle.generation,"effect":format!("{:?}",e.effect)})).collect::<Vec<_>>(),
             "character_effects":characters.audit(),"ground_update":packet.as_ref().map(|p|protocol::encode_hex(p))});
         Ok(PreparedRespawn {
@@ -191,6 +161,143 @@ impl<W: Write> Engine<W> {
             audit,
             packet,
         })
+    }
+
+    fn stage_respawn_clearance(
+        &mut self,
+        input: Clearance,
+        native: &mut BTreeMap<u32, NativeState>,
+        changes: &mut BTreeMap<u16, u32>,
+    ) -> Result<(Vec<Value>, Vec<OutboundMessage>), &'static str> {
+        let Clearance {
+            source,
+            physics,
+            filter_rows,
+            now,
+        } = input;
+        let mut audit = Vec::new();
+        let mut messages = Vec::new();
+        let current = self
+            .current_ground_vehicle(source.index)
+            .ok_or("ground_vehicle_runtime_required")?;
+        let statics = crate::static_collision_partition::StaticResources::for_engine(self)?;
+        let snapshot = self.dynamic_collision_snapshot(filter_rows[6])?;
+        let mut world = statics.world(&snapshot, filter_rows, physics)?;
+        let world_id = snapshot.context().0.world_id;
+        let target = acquisition_volume_damage::Target {
+            key: acquisition_volume_damage::TargetKey {
+                id: u64::from(source.object_id()),
+                generation: source.generation,
+            },
+            kind: acquisition_volume_damage::TargetKind::GroundVehicle,
+            team: current.team,
+        };
+        let root = RootKey {
+            entity: target.key.id,
+            generation: source.generation,
+            root: "chassis".into(),
+        };
+        if !world.has_root(&root) {
+            let resources = self
+                .dynamic_body_resources
+                .as_ref()
+                .ok_or("dynamic_body_resources_unavailable")?;
+            let transform = vehicle_exit::BunkerTransform {
+                position: current.position,
+                rotation_xyzw: current.rotation,
+            };
+            let columns = [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]].map(|v| transform.rotate(v));
+            let pose = Pose {
+                translation: [
+                    current.position.x.into(),
+                    current.position.y.into(),
+                    current.position.z.into(),
+                ],
+                rotation: std::array::from_fn(|i| std::array::from_fn(|j| columns[j][i].into())),
+            };
+            world.add_allocated_spawn(
+                &resources.catalog,
+                resources.vehicle_template(&current)?,
+                target,
+                pose,
+                "chassis",
+            )?;
+        }
+        let pairs = world.spawn_pairs(&root)?;
+        let mut published = BTreeMap::new();
+        for (key, target) in pairs {
+            if target.key.id == u64::from(source.object_id()) {
+                continue;
+            }
+            match target.kind {
+                acquisition_volume_damage::TargetKind::Character => {
+                    let resolved = acquisition_spawn_blockers::resolve_character(
+                        &mut world.character(key, root.clone())?,
+                    )?;
+                    let victim = character::Target {
+                        character_id: u32::try_from(target.key.id)
+                            .map_err(|_| "invalid_acquisition_character_identity")?,
+                        generation: target.key.generation,
+                        world: world_id,
+                    };
+                    if let Some((_, _, p)) = world
+                        .moved_positions()
+                        .find(|(id, g, _)| *id == target.key.id && *g == target.key.generation)
+                        && published.get(&target.key.id) != Some(&p)
+                    {
+                        let position = replication::CharacterPosition {
+                            x: p[0] as f32,
+                            y: p[1] as f32,
+                            z: p[2] as f32,
+                        };
+                        audit.push(self.apply_acquisition_character_move(victim, position, now)?);
+                        published.insert(target.key.id, p);
+                    }
+                    if !resolved {
+                        let vector = self.acquisition_character_position(victim)?;
+                        let state = native
+                            .get_mut(&victim.character_id)
+                            .ok_or("acquisition_character_native_state_missing")?;
+                        let plan = self.plan_acquisition_character_effect(
+                            victim,
+                            character::Request::VolumeLethal {
+                                victim_vector: vector,
+                            },
+                            *state,
+                            now,
+                        )?;
+                        audit.push(plan.audit().clone());
+                        messages.extend(self.commit_acquisition_character_effect(plan, state)?);
+                    }
+                    let dead = self.acquisition_character_is_dead(victim)?;
+                    world.character_dead(target, dead)?;
+                }
+                acquisition_volume_damage::TargetKind::GroundVehicle => {
+                    let index = u16::try_from(target.key.id & 0xffff)
+                        .map_err(|_| "invalid_ground_vehicle_identity")?;
+                    let runtime = self
+                        .ground_runtime
+                        .as_mut()
+                        .ok_or("ground_vehicle_runtime_required")?;
+                    let current = runtime
+                        .get(index)
+                        .filter(|v| v.key.generation == target.key.generation)
+                        .ok_or("stale_ground_vehicle_key")?;
+                    let vehicle_key = current.key;
+                    if current.state == 2
+                        && world.contact_between(&key, &root)?.signed_distance < -0.1_f32
+                    {
+                        let effects = runtime.apply_lethal(vehicle_key, u32::MAX, true)?;
+                        if !effects.is_empty() {
+                            *changes.entry(index).or_default() |= 1 << 18;
+                        }
+                        audit.push(json!({"ground_lethal":index,"generation":vehicle_key.generation,"vaporize":true}));
+                    }
+                }
+                _ => return Err("world_query_spawn_target_unsupported"),
+            }
+        }
+        Ok((audit, messages))
     }
 
     pub fn record_existing_acquisition_respawn(
