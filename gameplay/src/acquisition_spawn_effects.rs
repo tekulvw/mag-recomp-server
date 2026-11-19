@@ -16,11 +16,11 @@ pub struct PreparedRespawn {
     audit: Value,
     packet: Option<Vec<u8>>,
 }
-struct Clearance {
-    source: ground::Key,
-    physics: Settings,
-    filter_rows: [u32; 32],
-    now: Duration,
+pub(crate) struct Clearance {
+    pub(crate) source: ground::Key,
+    pub(crate) physics: Settings,
+    pub(crate) filter_rows: [u32; 32],
+    pub(crate) now: Duration,
 }
 pub struct RespawnRequest {
     pub source: ground::Key,
@@ -163,7 +163,7 @@ impl<W: Write> Engine<W> {
         })
     }
 
-    fn stage_respawn_clearance(
+    pub(crate) fn stage_respawn_clearance(
         &mut self,
         input: Clearance,
         native: &mut BTreeMap<u32, NativeState>,
@@ -351,7 +351,7 @@ impl<W: Write> Engine<W> {
         }
         Ok(bot.health == 0)
     }
-    fn acquisition_character_position(
+    pub(crate) fn acquisition_character_position(
         &self,
         target: character::Target,
     ) -> Result<[f32; 3], &'static str> {

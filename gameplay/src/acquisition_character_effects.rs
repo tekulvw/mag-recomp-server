@@ -29,6 +29,12 @@ pub enum Request {
         last_attacker: u32,
         vehicle_vector: [f32; 3],
     },
+    /// A qualified radial target after geometry, seat visibility and falloff.
+    VehicleExplosion {
+        raw_hp: f32,
+        from_direction: [f32; 3],
+        attacker: u32,
+    },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -92,6 +98,23 @@ impl Plan {
         self.native_after
     }
 }
+/// The callback passes normalized displacement to the direction encoder with
+/// exponent 7. Each axis uses 9 magnitude bits and one sign bit.
+fn explosion_direction_user_data(vector: [f32; 3]) -> Result<u32, &'static str> {
+    let length = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if !length.is_finite() {
+        return Err("invalid_acquisition_explosion_direction");
+    }
+    if length == 0. {
+        return Ok(0);
+    }
+    let [x, y, z] = vector.map(|axis| {
+        let magnitude = ((128. * (axis / length)).abs() as u32).min(511);
+        magnitude | (u32::from(axis < 0.) << 9)
+    });
+    Ok((x << 20) | (y << 10) | z)
+}
+
 impl<W: Write> Engine<W> {
     fn acquisition_character_snapshot(&self, target: Target) -> Result<Snapshot, &'static str> {
         if target.character_id & 0xffff_0000 != 0x0380_0000 || target.generation == 0 {
@@ -167,8 +190,17 @@ impl<W: Write> Engine<W> {
         let initial_invulnerability = native
             .invulnerability
             .ok_or("acquisition_character_invulnerability_missing")?;
-        let (raw, kind, attacker, source_type, source_index, from_direction, bypass) = match request
-        {
+        let (
+            raw,
+            kind,
+            wire_damage_type,
+            attacker,
+            source_type,
+            source_index,
+            from_direction,
+            user_data,
+            bypass,
+        ) = match request {
             Request::VolumeLethal { victim_vector } => {
                 let damage = metadata::Metadata::from_symbols(
                     "DamageType.ExternalKinetic",
@@ -187,10 +219,12 @@ impl<W: Write> Engine<W> {
                         hit_location: damage.location,
                     },
                     damage::DamageKind::ExternalKinetic,
+                    damage.damage_type,
                     damage.attacker,
                     damage.source_type,
                     damage.source_index,
                     damage.from_direction,
+                    damage.user_data,
                     damage.clear_invulnerability,
                 )
             }
@@ -226,10 +260,37 @@ impl<W: Write> Engine<W> {
                         hit_location: damage.location,
                     },
                     damage::DamageKind::Explosive,
+                    damage.damage_type,
                     damage.attacker,
                     damage.source_type,
                     damage.source_index,
                     damage.from_direction,
+                    damage.user_data,
+                    false,
+                )
+            }
+            Request::VehicleExplosion {
+                raw_hp,
+                from_direction,
+                attacker,
+            } => {
+                if !raw_hp.is_finite() || raw_hp <= 0. {
+                    return Err("invalid_acquisition_explosion_damage");
+                }
+                (
+                    armor::RawCharacterDamage {
+                        amount_hp: raw_hp,
+                        armor_rating_redux: 0.,
+                        armor_prevention_redux: 0.,
+                        hit_location: 1,
+                    },
+                    damage::DamageKind::Explosive,
+                    10,
+                    attacker,
+                    5,
+                    -1,
+                    [0., -1., 0.],
+                    explosion_direction_user_data(from_direction)?,
                     false,
                 )
             }
@@ -263,9 +324,9 @@ impl<W: Write> Engine<W> {
         // every pair in the caller's outer audit, including ignored duplicates.
         let mut audit = json!({"on_character_hit":true,"character_id":target.character_id,
             "generation":target.generation,"world":target.world,"raw_amount_hp":raw.amount_hp,
-            "damage_type":match kind { damage::DamageKind::ExternalKinetic => 5, _ => 2 },
+            "damage_type":wire_damage_type,
             "damage_source_type":source_type,"damage_source_index":source_index,
-            "attacker":attacker,"source_object":u32::MAX,"location":raw.hit_location,"user_data":0,
+            "attacker":attacker,"source_object":u32::MAX,"location":raw.hit_location,"user_data":user_data,
             "from_direction":from_direction,"invulnerability_before":initial_invulnerability,
             "invulnerability_during":native_during.invulnerability,"invulnerability_after":native_after.invulnerability});
         let human = plan.expected.reservation.as_ref().and_then(|id| {
@@ -323,11 +384,7 @@ impl<W: Write> Engine<W> {
                 // amounts beyond the external command's1000 limit. Reuse the
                 // shared remaining-HP quantizer; never force terminal health.
                 let mut damage = replication::CharacterDamage {
-                    last_location_and_type: (match kind {
-                        damage::DamageKind::ExternalKinetic => 5,
-                        _ => 2,
-                    } << 4)
-                        | raw.hit_location,
+                    last_location_and_type: (wire_damage_type << 4) | raw.hit_location,
                     health_quarter_points: damage::remaining_health_quarter_points(
                         plan.expected.health,
                         amount,
@@ -335,7 +392,7 @@ impl<W: Write> Engine<W> {
                     conditions: 0,
                     last_attacker: attacker,
                     last_source_object: u32::MAX,
-                    last_user_data: 0,
+                    last_user_data: user_data,
                 };
                 if let Some(victim) = human {
                     let (model, life) = self.plan_human_damage(victim, amount, damage, now)?;
@@ -637,6 +694,9 @@ pub struct Candidate {
 impl Candidate {
     pub fn audit(&self) -> &[Value] {
         &self.audit
+    }
+    pub(crate) fn messages(&self) -> &[OutboundMessage] {
+        &self.messages
     }
     pub fn native_states(&self) -> &NativeMap {
         &self.native

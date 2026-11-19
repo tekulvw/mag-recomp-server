@@ -2,9 +2,10 @@
 
 The world provider performs actual convex contacts and capsule sweeps against
 static triangles and current dynamic roots. Existing-vehicle respawn and
-ordinary character effects now have concrete Engine transactions. The full
-objective callback remains uninstalled; this source checkpoint is not a claim
-that Acquisition matches can run to completion.
+ordinary character effects have concrete Engine transactions. The opt-in
+[Acquisition gameplay backend](acquisition-gameplay.md) connects them to the
+controller, vehicle lifecycle and match completion/requeue. Native live-match
+acceptance remains separate from source checks.
 
 ## Query inputs and behavior
 
@@ -118,9 +119,10 @@ Prioritize capture/unlock, Escort movement/delivery/destruction, scoring and
 match end. Exact solver bits, native traversal order and quaternion low bits are
 fidelity limits rather than additional gameplay gates.
 
-Concrete remaining requirements include objective capture/entry integration,
-vehicle driving admission, full destruction
-explosion/occupant/FSP/hulk consumers, scoring/results and global assignments.
+The gameplay backend now consumes objective entry, vehicle driving, ordinary
+damage/destruction, FSP/occupant/hulk changes, assignments and scoring/results.
+Its explicit fidelity limits and unavailable secondary features are documented
+in the gameplay guide.
 The old private APC-exit witnesses do not cover FSP source centers. The separate
 initial-root rejection proof qualifies the filtered partition without pretending
 those witnesses establish geometry there. Do not promote provisional metadata

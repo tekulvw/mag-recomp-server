@@ -109,3 +109,36 @@ fn initial_load_evidence_remains_pre_mission_start_and_noninteractive() {
         json!({"team":0,"interval_ms":1000,"points":1,"pause_objective":17,"pause_state":7});
     assert!(ObjectiveCatalog::from_json(&bad.to_string()).is_err());
 }
+
+#[test]
+fn acquisition_source_gameplay_accepts_authored_zero_completion_delay_only_in_that_scope() {
+    let mut value = fixture(1, true);
+    value["objects"][0]["interaction"] = json!({
+        "owner_team": 1,
+        "activate_ms": 3000,
+        "complete_ms": 0,
+        "deactivate_ms": 3000,
+        "can_deactivate": false,
+        "position": [0, 0, 0],
+        "trigger_count": 1,
+        "maximum_distance_m": 1,
+        "distance_policy": "authored_trigger_box",
+        "trigger_volumes": [{
+            "centre": [0, 0, 0],
+            "axes": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+            "half_extents": [2, 2, 2]
+        }]
+    });
+    assert!(ObjectiveCatalog::from_json(&value.to_string()).is_err());
+    value["source"]["capture_qualification"] = json!("native_source_gameplay");
+    let catalog = ObjectiveCatalog::from_json(&value.to_string()).unwrap();
+    assert!(
+        catalog
+            .snapshot(1, 0)
+            .objectives
+            .iter()
+            .all(|item| { item.state_actor.state == ObjectiveState::Inactive })
+    );
+    value["source"]["initial_load_scope"] = json!("pre_mission_start_before_dynamic_creation");
+    assert!(ObjectiveCatalog::from_json(&value.to_string()).is_err());
+}

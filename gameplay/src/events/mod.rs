@@ -8,6 +8,7 @@ mod control;
 mod corrections;
 mod falling;
 mod objectives;
+pub(crate) use objectives::exit_message as objective_hold_exit;
 mod owner;
 mod resuscitate;
 mod seats;
@@ -46,6 +47,9 @@ struct PlanningContext<'a, W: Write> {
 struct EventPlan {
     session: SessionChanges,
     objective_world: Option<objective_control::ObjectiveWorld>,
+    ground_runtime: Option<acquisition_ground_runtime::Runtime>,
+    ground_dynamics_relay: Option<(u16, Vec<u8>)>,
+    ground_damage_relay: Option<Vec<u8>>,
     combat: CombatChanges,
     leadership: leadership_runtime::LeadershipPlan,
     statistics: statistics::StatisticsPlan,
@@ -165,6 +169,7 @@ struct EventAudit {
     projectile_reports: Vec<Value>,
     projectile_terminals: Vec<projectile::ProjectileTerminal>,
     grenade_blast_checks: Vec<blast_visibility::GrenadeBlastCheck>,
+    ground_grenade_checks: Vec<Value>,
     applied_damage: Option<Value>,
     falling_damage: Option<fall_damage::FallDamage>,
     spawned_point: Option<u16>,
@@ -397,6 +402,8 @@ impl<W: Write> Engine<W> {
         mut plan: EventPlan,
         now: Duration,
     ) -> Result<Vec<OutboundMessage>, &'static str> {
+        let previously_driving = self.active_ground_drivers();
+        let seating_transition = plan.replication.seat_transition.is_some();
         if let Some(clock) = plan.session.new_team_wave {
             let team = self.active.as_ref().ok_or("no_reservation")?.team();
             self.team_waves[usize::from(team)] = Some(clock);
@@ -810,6 +817,105 @@ impl<W: Write> Engine<W> {
             active.loadout_selection_revision = receipt.revision;
             active.pending_loadout_selection = Some(receipt);
         }
+        if let Some(mut runtime) = plan.ground_runtime {
+            let accepts = plan
+                .ground_dynamics_relay
+                .as_ref()
+                .is_none_or(|(index, _)| {
+                    self.active
+                        .as_ref()
+                        .is_some_and(|actor| self.ground_driver_authority(actor, *index))
+                });
+            if !accepts
+                && let Some((index, _)) = &plan.ground_dynamics_relay
+                && let Some(before) = &self.ground_runtime
+            {
+                runtime.discard_driver_input(before, *index);
+            }
+            if accepts || plan.ground_damage_relay.is_some() {
+                self.ground_runtime = Some(runtime);
+                if let Some(packet) = plan.ground_damage_relay {
+                    self.broadcast_bot_packet(packet);
+                }
+                if let Some((_, relay)) = plan.ground_dynamics_relay.filter(|_| accepts) {
+                    for peer in self
+                        .peers
+                        .values_mut()
+                        .filter(|peer| peer.initial_objects.is_some())
+                    {
+                        peer.queue_shared(relay.clone());
+                    }
+                }
+            }
+        }
+        // Manual seat transitions already carry the same-frame vehicle
+        // ownership correction. Incapacitation clears it with a shared delta.
+        if !seating_transition {
+            for (index, owner) in previously_driving {
+                if self.ground_driver_owner(index) != Some(owner) {
+                    self.queue_ground_driver_revocation(index, now)?;
+                }
+            }
+        }
         Ok(plan.messages)
+    }
+}
+
+#[cfg(test)]
+mod ground_grenade_commit_tests {
+    use super::*;
+
+    #[test]
+    fn accepted_ground_grenade_survives_same_event_driver_death_without_driver_motion() {
+        let mut engine = crate::spawn_progression::tests::dynamic_bodies::acquisition_gameplay_tests::ground_grenade_driver_fixture();
+        let active = engine.active.as_ref().unwrap();
+        assert!(engine.ground_driver_authority(active, 4));
+        let player = active.reservation.player;
+        let event = EventInput {
+            reservation_id: active.reservation.id.clone(),
+            world_id: active.reservation.world,
+            player_id: player,
+            transport: Transport::Udp,
+            direction: Direction::ClientToServer,
+            rt_type: 0x3d,
+            plugin_id: Some(1),
+            payload_hex: String::new(),
+        };
+        let now = Duration::from_millis(3400);
+        let initial = engine.ground_runtime.as_ref().unwrap();
+        let truck = initial.get(4).unwrap();
+        let original_pose = truck.pose;
+        let mut candidate = initial.clone();
+        let destination = crate::acquisition_ground_runtime::Pose {
+            position: replication::CharacterPosition {
+                x: original_pose.position.x + 1.0,
+                ..original_pose.position
+            },
+            ..original_pose
+        };
+        candidate.force_pose(truck.key, destination).unwrap();
+        let terminals = [projectile::ProjectileTerminal {
+            item_id: 4,
+            slot: 0,
+            generation: 1,
+            position: Some(original_pose.position),
+            reason: projectile::ProjectileTerminalReason::ReportedDetonation,
+        }];
+        let (packet, _) = engine
+            .stage_ground_grenade_damage(&mut candidate, active, &terminals, now)
+            .unwrap();
+        assert!(packet.is_some());
+        let mut plan = EventPlan::new(active);
+        plan.ground_runtime = Some(candidate);
+        plan.ground_damage_relay = packet;
+        // An independently resolved same-event death disqualifies driver input.
+        plan.ground_dynamics_relay = Some((4, vec![0]));
+        plan.combat.new_life = Some(CharacterLife::AwaitingRespawn { generation: 1 });
+        let decoded = DecodedEvent::with_profile(&[], player, engine.wire_profile, true);
+        engine.commit_event(&event, &decoded, plan, now).unwrap();
+        let truck = engine.ground_runtime.as_ref().unwrap().get(4).unwrap();
+        assert!(truck.pending_death);
+        assert_eq!(truck.pose, original_pose);
+        assert!(engine.active.as_ref().unwrap().ground_seat.is_none());
     }
 }

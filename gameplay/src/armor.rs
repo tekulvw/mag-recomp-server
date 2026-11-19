@@ -240,6 +240,10 @@ impl GrenadeProfile {
     }
 
     pub fn raw_amount(self, distance: f32) -> Result<f32, &'static str> {
+        Ok(self.parameters.damage.character * self.radius_scale(distance)?)
+    }
+
+    pub(crate) fn radius_scale(self, distance: f32) -> Result<f32, &'static str> {
         if !distance.is_finite() || distance < 0.0 {
             return Err("invalid_explosion_distance");
         }
@@ -255,7 +259,7 @@ impl GrenadeProfile {
         } else {
             0.0
         };
-        Ok(self.parameters.damage.character * scale)
+        Ok(scale)
     }
 
     pub fn native_damage_type(self) -> u8 {

@@ -1023,3 +1023,265 @@ fn runtime_ground_delta_contains_only_requested_existing_object_fields() {
     dead.health_quarter_points = 0;
     assert!(ground_vehicles::encode(2, 100, &[dead]).is_err());
 }
+
+fn escort_driver_engine() -> Engine<Vec<u8>> {
+    let mut engine = acquisition_entry::acquisition()
+        .with_match_limits(1, 64)
+        .unwrap();
+    let mut spawn_input = acquisition_entry::acquisition_spawns();
+    spawn_input["maps"][0]["spawn_count"] = json!(17);
+    spawn_input["maps"][0]["locations"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "index":16,"token":1016,"kind":"unsupported","active":false,
+            "position":{"x":100.,"y":3.,"z":100.}
+        }));
+    engine.spawn_catalog = Some(spawns(spawn_input).unwrap());
+    let mut input = catalog(&engine);
+    input["source"]["creation_scope"] = json!("native_vehicle_source_points");
+    let vehicle = &mut input["vehicles"][0];
+    vehicle["index"] = json!(4);
+    vehicle["spawn_point_index"] = json!(16);
+    vehicle["spawn_point_token"] = json!(1016);
+    vehicle["initial_state"] = json!(0);
+    vehicle["maximum_mount_distance_m"] = json!(10.);
+    vehicle["maximum_mount_position_age_ms"] = json!(1000);
+    vehicle["passenger_seats"] = json!([2, 3]);
+    vehicle["maximum_occupancy"] = json!(2);
+    vehicle["passenger_exit_candidates"] =
+        json!([{"ranking_offset":[1.,0.,0.],"position_offset":[3.,0.,0.]}]);
+    input["vehicle_sources"] = json!([{
+        "vehicle_index":4,"spawn_point_index":16,"spawn_point_token":1016,
+        "vehicle_type_token":12345,"spawn_type":9,"user_class":1,
+        "source_family":35,"authored_active":false,"team":0
+    }]);
+    input["driver_seats"] = json!([{"vehicle_index":4,"seat":0,"maximum_speed_mps":20.}]);
+    let catalog =
+        Catalog::from_json(&input.to_string(), engine.spawn_catalog.as_ref().unwrap()).unwrap();
+    let source = catalog.vehicle(4).unwrap();
+    let pose = acquisition_ground_runtime::Pose {
+        position: source.position,
+        rotation: source.rotation,
+    };
+    engine = engine.with_ground_vehicles(catalog).unwrap();
+    static NEXT_EXIT_FIXTURE: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT_EXIT_FIXTURE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let world_path =
+        std::env::temp_dir().join(format!("escort-exit-{}-{n}.json", std::process::id()));
+    let world = json!({
+        "format":"mag_collision_world","schema_version":1,"coordinate_space":"world",
+        "metadata":{"map_name":engine.spawn_catalog.as_ref().unwrap().map_name(),"build":"synthetic",
+                    "provenance":["synthetic"],"coverage":"provisional","unknowns":[]},
+        "instances":[{"id":"invented-floor","vertices_xyz":[[80.,2.,80.],[80.,2.,120.],[120.,2.,80.],[120.,2.,120.]],
+                      "triangles":[[0,1,2],[1,2,3]]}]
+    });
+    std::fs::write(&world_path, world.to_string()).unwrap();
+    let world = collision::CollisionWorld::load(&world_path, Default::default()).unwrap();
+    std::fs::remove_file(world_path).unwrap();
+    engine = engine.with_collision_world(world);
+    let runtime = engine.ground_runtime.as_mut().unwrap();
+    let key = runtime.get(4).unwrap().key;
+    runtime
+        .respawn_existing(
+            key,
+            acquisition_ground_runtime::QualifiedRespawn {
+                spawn_point_index: 16,
+                spawn_point_token: 1016,
+                pose,
+                active: true,
+            },
+            false,
+        )
+        .unwrap();
+    runtime.update(key, 0., 0).unwrap();
+
+    reserve_faction(&mut engine, 3, 1);
+    let actor = engine.active.as_mut().unwrap();
+    ready(actor);
+    actor.life = CharacterLife::Alive {
+        generation: 1,
+        health_quarter_points: 400,
+    };
+    owner_update(&mut engine, 10, 0);
+    engine
+}
+
+fn escort_driver_relay(
+    profile: wire_profile::WireProfile,
+    sequence: u32,
+    position_x: u32,
+) -> Vec<u8> {
+    let mut bits = replication::BitWriter::with_profile(profile);
+    replication::UpdateHeader {
+        sequence,
+        nak_sequence: 0,
+        client_index: 0,
+        object_type_mask: 1 << 1,
+        timestamp_ms: 0,
+    }
+    .encode(&mut bits)
+    .unwrap();
+    for (value, width) in [
+        (1, 1),
+        (4, 16),
+        (0, 25),
+        (1, 1),
+        (position_x, 16),
+        (96, 17),
+        (3200, 16),
+        (0, 1),
+        (1, 1),
+        (1, 1),
+        (0, 2),
+        (0, 1),
+    ] {
+        bits.write(value, width).unwrap();
+    }
+    bits.finish()
+}
+
+#[test]
+fn escort_driver_grant_moves_vehicle_and_dismount_revokes_authority() {
+    let mut engine = escort_driver_engine();
+    let frames = ground_seat_event(&mut engine, true, 0x01000004, 0, 3, 20);
+    let profile = engine.wire_profile;
+    let grant = frames
+        .iter()
+        .find_map(|frame| {
+            let wire = protocol::decode_hex(&frame.payload_hex);
+            let update = ObjectUpdate::decode_with_profile(&wire, profile).ok()?;
+            (update.header.object_type_mask == (1 << 1 | 1 << 3)).then_some(wire)
+        })
+        .expect("atomic owner and character state grant");
+    let mut bits = BitReader::with_profile(&grant, profile);
+    bits.position = profile.header_bits();
+    assert_eq!(bits.read(1), Ok(1));
+    assert_eq!(bits.read(16), Ok(4));
+    assert_eq!(bits.read(2), Ok(1)); // Field0 absent, field1 present.
+    assert_eq!(bits.read(16), Ok(3));
+
+    let report = |sequence, position| escort_driver_relay(profile, sequence, position);
+    dispatch(&mut engine, &report(20, 3232), 120).unwrap();
+    assert_eq!(engine.current_ground_vehicle(4).unwrap().position.x, 101.);
+    dispatch(&mut engine, &report(19, 3248), 140).unwrap();
+    assert_eq!(engine.current_ground_vehicle(4).unwrap().position.x, 101.);
+    dispatch(&mut engine, &report(21, 6400), 160).unwrap();
+    assert_eq!(engine.current_ground_vehicle(4).unwrap().position.x, 101.);
+    let end = ground_seat_event(&mut engine, false, 0x01000004, 0, 3, 180);
+    assert_eq!(
+        engine
+            .active
+            .as_ref()
+            .unwrap()
+            .tracking
+            .sample
+            .unwrap()
+            .position
+            .y,
+        2.09375
+    );
+
+    let revoke = protocol::decode_hex(&end[0].payload_hex);
+    let mut bits = BitReader::with_profile(&revoke, profile);
+    bits.position = profile.header_bits();
+    assert_eq!(bits.read(19), Ok((1 << 18) | (4 << 2) | 1));
+    assert_eq!(bits.read(16), Ok(0x105));
+    dispatch(&mut engine, &report(22, 3248), 220).unwrap();
+    assert_eq!(engine.current_ground_vehicle(4).unwrap().position.x, 101.);
+}
+
+#[test]
+fn escort_driver_switch_and_release_revoke_without_releasing_passengers() {
+    let mut engine = escort_driver_engine();
+    assert!(!ground_seat_event(&mut engine, true, 0x01000004, 2, 3, 20).is_empty());
+    let profile = engine.wire_profile;
+    let before = engine.current_ground_vehicle(4).unwrap().position;
+    dispatch(&mut engine, &escort_driver_relay(profile, 4, 3232), 60).unwrap();
+    assert_eq!(engine.current_ground_vehicle(4).unwrap().position, before);
+    assert!(!ground_seat_event(&mut engine, true, 0x01000004, 0, 3, 70).is_empty());
+    assert_eq!(engine.ground_driver_owner(4), Some(3));
+    assert!(!ground_seat_event(&mut engine, true, 0x01000004, 2, 3, 80).is_empty());
+    assert_eq!(engine.ground_driver_owner(4), None);
+    assert_eq!(engine.active.as_ref().unwrap().ground_seat.unwrap().seat, 2);
+    assert!(!ground_seat_event(&mut engine, true, 0x01000004, 0, 3, 100).is_empty());
+
+    reserve_faction(&mut engine, 4, 1);
+    let passenger = engine.active.as_mut().unwrap();
+    ready(passenger);
+    passenger.life = CharacterLife::Alive {
+        generation: 1,
+        health_quarter_points: 400,
+    };
+    owner_update(&mut engine, 110, 0);
+    assert!(ground_seat_event(&mut engine, true, 0x01000004, 0, 4, 120).is_empty());
+    assert!(!ground_seat_event(&mut engine, true, 0x01000004, 3, 4, 130).is_empty());
+
+    let release = engine.handle(
+        Request::Release {
+            v: BRIDGE_VERSION,
+            request_id: "synthetic-driver-release".into(),
+            reservation_id: "synthetic-reservation-0003".into(),
+        },
+        Duration::from_millis(140),
+        1,
+    );
+    assert!(release.ok, "{:?}", release.error);
+    assert_eq!(engine.ground_driver_owner(4), None);
+    assert_eq!(
+        engine.peers["synthetic-reservation-0004"]
+            .ground_seat
+            .unwrap()
+            .seat,
+        3
+    );
+    assert!(release.messages.iter().any(|frame| {
+        let wire = protocol::decode_hex(&frame.payload_hex);
+        let Ok(update) = ObjectUpdate::decode_with_profile(&wire, profile) else {
+            return false;
+        };
+        if update.header.object_type_mask != 1 << 1 {
+            return false;
+        }
+        let mut bits = BitReader::with_profile(&wire, profile);
+        bits.position = profile.header_bits();
+        bits.read(19) == Ok((1 << 18) | (4 << 2) | 1) && bits.read(16) == Ok(0x105)
+    }));
+}
+
+#[test]
+fn escort_driver_pose_rolls_back_on_record_failure_and_rejects_new_pending_death() {
+    let mut engine = escort_driver_engine();
+    ground_seat_event(&mut engine, true, 0x01000004, 0, 3, 20);
+    let profile = engine.wire_profile;
+    let report = escort_driver_relay(profile, 20, 3232);
+    let before = engine.ground_runtime.clone();
+    engine.max_log = engine.written;
+    assert!(dispatch(&mut engine, &report, 120).is_err());
+    assert_eq!(engine.ground_runtime, before);
+
+    let mut engine = escort_driver_engine();
+    ground_seat_event(&mut engine, true, 0x01000004, 0, 3, 20);
+    let runtime = engine.ground_runtime.as_mut().unwrap();
+    let key = runtime.get(4).unwrap().key;
+    runtime.apply_lethal(key, u32::MAX, false).unwrap();
+    dispatch(&mut engine, &report, 120).unwrap();
+    assert_eq!(engine.current_ground_vehicle(4).unwrap().position.x, 100.);
+    assert_eq!(engine.ground_driver_owner(4), None);
+}
+
+#[test]
+fn escort_dismount_without_supported_current_floor_keeps_driver_and_vehicle_owner() {
+    let mut engine = escort_driver_engine();
+    assert!(!ground_seat_event(&mut engine, true, 0x01000004, 0, 3, 20).is_empty());
+    let runtime = engine.ground_runtime.as_mut().unwrap();
+    let mut pose = runtime.get(4).unwrap().pose;
+    pose.position.y = 10.;
+    runtime
+        .force_pose(runtime.get(4).unwrap().key, pose)
+        .unwrap();
+    assert!(ground_seat_event(&mut engine, false, 0x01000004, 0, 3, 30).is_empty());
+    assert_eq!(engine.ground_driver_owner(4), Some(3));
+    assert!(engine.active.as_ref().unwrap().ground_seat.is_some());
+}

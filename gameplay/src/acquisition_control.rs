@@ -69,21 +69,21 @@ struct Source {
     script_sha256: String,
     graph_proof_sha256: String,
 }
-#[derive(Clone, Copy, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
-enum Stage {
+pub enum Stage {
     A,
     B,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Chain {
-    platoon: u8,
-    stage: Stage,
-    capture_token: u32,
-    arrival_token: u32,
-    vehicle_spawn_token: u32,
-    volume_token: u32,
+pub struct Chain {
+    pub platoon: u8,
+    pub stage: Stage,
+    pub capture_token: u32,
+    pub arrival_token: u32,
+    pub vehicle_spawn_token: u32,
+    pub volume_token: u32,
 }
 #[derive(Clone, Copy, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -157,12 +157,27 @@ impl Catalog {
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
     }
+    pub(crate) fn validate_for(&self, spawns: &SpawnCatalog) -> Result<(), &'static str> {
+        self.definition.validate(spawns)
+    }
     pub fn objective_tokens(&self) -> impl Iterator<Item = u32> + '_ {
         self.definition
             .chains
             .iter()
             .flat_map(|c| [c.capture_token, c.arrival_token])
     }
+    pub fn chains(&self) -> &[Chain] {
+        &self.definition.chains
+    }
+
+    /// Authoritative token joins in source chain order.
+    pub fn capture_spawn_bindings(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
+        self.definition
+            .chains
+            .iter()
+            .map(|chain| (chain.capture_token, chain.vehicle_spawn_token))
+    }
+
     /// Evaluate all ordered groups against an explicit complete current-state
     /// snapshot. First matching branch wins in each group. Repeating a snapshot
     /// repeats its intents without changing authoritative state. Applying them
