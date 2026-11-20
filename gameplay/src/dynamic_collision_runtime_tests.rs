@@ -3,8 +3,7 @@ use super::*;
 use crate::{dynamic_collision::*, dynamic_collision_runtime::RuntimeBindings};
 #[path = "acquisition_gameplay_engine_tests.rs"]
 pub(crate) mod acquisition_gameplay_tests;
-#[path = "../tests/support/dynamic_collision_fixture.rs"]
-mod support;
+use crate::synthetic_dynamic_collision as support;
 fn configured() -> Engine<Vec<u8>> {
     let e = acquisition_entry::acquisition();
     let catalog = Catalog::from_json(&support::fixture().to_string()).unwrap();

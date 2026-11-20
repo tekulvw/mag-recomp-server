@@ -281,82 +281,18 @@ impl<W: Write> Engine<W> {
                     .map(|owner| (d.object_index, owner))
             })
             .collect();
-        let mut actors: BTreeMap<_, _> = self
-            .active
-            .iter()
-            .chain(self.peers.values())
-            .filter_map(|a| {
-                let CharacterLife::Alive { generation, .. } = a.life else {
-                    return None;
-                };
-                if !a.entered_game || !a.ready_for_updates || a.is_mounted() {
-                    return None;
-                }
-                Some((
-                    a.reservation.player,
-                    ObjectiveActor {
-                        player: a.reservation.player,
-                        team: a.team(),
-                        generation,
-                        position: a.tracking.sample.as_ref()?.position,
-                    },
-                ))
-            })
-            .collect();
-        for (&id, bot) in &self.bot_registry.bots {
-            if let Some(r) = bot.target.runtime
-                && bot.health > 0
-            {
-                actors.insert(
-                    id,
-                    ObjectiveActor {
-                        player: id,
-                        team: bot.target.squad.team(),
-                        generation: r.generation,
-                        position: r.position,
-                    },
-                );
-            }
-        }
-        let mut changed: BTreeMap<u16, ObjectiveControlDelta> = world
-            .tick(now, &actors)
-            .into_iter()
-            .map(|d| (d.object_index, d))
-            .collect();
+        let mut changed: BTreeMap<u16, ObjectiveControlDelta> = BTreeMap::new();
         let mut entry_actors = BTreeMap::new();
-        for (token, object) in runtime.state.objectives().collect::<Vec<_>>() {
-            if let Some(delta) = changed.get(&object.replication.object_index) {
-                entry_actors.insert(token, delta.state_actor.actor_index);
-            }
-        }
-        let observations: Vec<_> = runtime
-            .state
-            .objectives()
-            .filter_map(|(token, object)| {
-                changed
-                    .get(&object.replication.object_index)
-                    .map(|&delta| (token, delta))
-            })
-            .collect();
-        for (token, delta) in observations {
-            if matches!(
-                delta.state_actor.state,
-                ObjectiveState::Completed | ObjectiveState::Deactivated
-            ) {
-                runtime
-                    .state
-                    .request_state(token, delta.state_actor.state)?;
-            } else {
-                runtime
-                    .state
-                    .request_state(token, delta.state_actor.state)?;
-                runtime.state.commit_state(
-                    token,
-                    delta.state_actor.state,
-                    delta.state_actor.actor_index,
-                    delta.state_actor.change_time_ms,
-                )?;
-            }
+        let abilities_enabled = self.active_abilities.is_some();
+        if !abilities_enabled {
+            stage_objective_observations(
+                self,
+                &mut runtime,
+                &mut world,
+                now,
+                &mut changed,
+                &mut entry_actors,
+            )?;
         }
         let starting = !runtime.started;
         if starting {
@@ -393,6 +329,23 @@ impl<W: Write> Engine<W> {
             let (rows, output) = engine.stage_acquisition_deliveries(&mut runtime, &mut ground, now, &mut ground_changes, &mut entry_actors)?;
             audit.extend(rows);
             messages.extend(output);
+            if engine.active_abilities.is_some() {
+                let previous = engine.ground_runtime.replace(ground.clone());
+                let sequences = crate::domination_structural_world::SequenceCollisionState::default();
+                let costs = BTreeMap::new();
+                let result = engine.stage_active_ability_update(now, native, crate::domination_structural_world::BlastCollision {
+                    filter_rows: &setup.filter_rows, limits: setup.physics.query_limits,
+                    sequences: &sequences, material_costs: &costs, terrain_materials: None,
+                }, setup.ground_damage.as_ref());
+                ground = std::mem::replace(&mut engine.ground_runtime, previous).ok_or("ground_vehicle_runtime_required")?;
+                let commit = result?;
+                audit.extend(commit.audit); messages.extend(commit.messages);
+                for index in commit.changed_ground { *ground_changes.entry(index).or_default() |= 1 << 18; }
+                if !commit.helo_doses.is_empty() { return Err("acquisition_unexpected_helo_strike_target"); }
+            }
+            if abilities_enabled {
+                stage_objective_observations(engine, &mut runtime, &mut world, now, &mut changed, &mut entry_actors)?;
+            }
             *native = engine.owned_acquisition_characters();
             for _ in 0..256 {
                 let next = runtime.state.pending_transitions().min_by_key(|(token, _)| runtime.state.objective(*token).unwrap().replication.object_index);
@@ -511,4 +464,93 @@ impl<W: Write> Engine<W> {
         }
         Ok(messages)
     }
+}
+
+// Keep the established objective phase for default-off worlds; the opted-in
+// native pass calls this after squad/platoon effects have changed actor state.
+fn stage_objective_observations<W: Write>(
+    engine: &Engine<W>,
+    runtime: &mut Runtime,
+    world: &mut objective_control::ObjectiveWorld,
+    now: Duration,
+    changed: &mut BTreeMap<u16, ObjectiveControlDelta>,
+    entry_actors: &mut BTreeMap<u32, u16>,
+) -> Result<(), &'static str> {
+    let mut actors: BTreeMap<_, _> = engine
+        .active
+        .iter()
+        .chain(engine.peers.values())
+        .filter_map(|a| {
+            let CharacterLife::Alive { generation, .. } = a.life else {
+                return None;
+            };
+            if !a.entered_game || !a.ready_for_updates || a.is_mounted() {
+                return None;
+            }
+            Some((
+                a.reservation.player,
+                ObjectiveActor {
+                    player: a.reservation.player,
+                    team: a.team(),
+                    generation,
+                    position: a.tracking.sample.as_ref()?.position,
+                },
+            ))
+        })
+        .collect();
+    for (&id, bot) in &engine.bot_registry.bots {
+        if let Some(r) = bot.target.runtime
+            && bot.health > 0
+        {
+            actors.insert(
+                id,
+                ObjectiveActor {
+                    player: id,
+                    team: bot.target.squad.team(),
+                    generation: r.generation,
+                    position: r.position,
+                },
+            );
+        }
+    }
+    *changed = world
+        .tick(now, &actors)
+        .into_iter()
+        .map(|d| (d.object_index, d))
+        .collect();
+    for (token, object) in runtime.state.objectives().collect::<Vec<_>>() {
+        if let Some(delta) = changed.get(&object.replication.object_index) {
+            entry_actors.insert(token, delta.state_actor.actor_index);
+        }
+    }
+    let observations: Vec<_> = runtime
+        .state
+        .objectives()
+        .filter_map(|(token, object)| {
+            changed
+                .get(&object.replication.object_index)
+                .map(|&delta| (token, delta))
+        })
+        .collect();
+    for (token, delta) in observations {
+        if matches!(
+            delta.state_actor.state,
+            ObjectiveState::Completed | ObjectiveState::Deactivated
+        ) {
+            runtime
+                .state
+                .request_state(token, delta.state_actor.state)?;
+        } else {
+            runtime
+                .state
+                .request_state(token, delta.state_actor.state)?;
+            runtime.state.commit_state(
+                token,
+                delta.state_actor.state,
+                delta.state_actor.actor_index,
+                delta.state_actor.change_time_ms,
+            )?;
+        }
+    }
+    Ok(())
 }

@@ -116,6 +116,9 @@ pub(super) fn interaction<W: Write>(
 
 impl<W: Write> Engine<W> {
     pub(crate) fn reset_objective_world(&mut self) {
+        if let Some(runtime) = &mut self.active_abilities {
+            runtime.reset();
+        }
         if let Some(gameplay) = &mut self.domination_gameplay {
             gameplay.reset();
         }

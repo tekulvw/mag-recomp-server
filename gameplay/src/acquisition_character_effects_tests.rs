@@ -790,3 +790,47 @@ fn structural_effects_preserve_objective_attribution_and_burning_self_source() {
     assert_ne!(actor(&engine, t).last_damage.health_quarter_points, 400);
     assert_eq!(actor(&engine, t).last_damage.last_attacker, t.character_id);
 }
+
+#[test]
+fn air_strike_preserves_protection_and_uses_ordinary_enemy_death_attribution() {
+    let mut engine = crate::human_kill_reward_tests::enable_incoming_base(
+        crate::human_kill_reward_tests::fixture(),
+        0.25,
+    );
+    let victim = target(&engine, true);
+    let attacker = target(&engine, false);
+    let request = Request::AirStrikeExplosion {
+        raw_hp: 1000.,
+        from_direction: [1., 0., -1.],
+        attacker: attacker.character_id,
+    };
+    let now = Duration::from_secs(1);
+    let protected = engine
+        .plan_acquisition_character_effect(victim, request, native(2, false), now)
+        .unwrap();
+    assert_eq!(protected.outcome(), Outcome::Protected);
+    assert_eq!(protected.native_after().invulnerability, Some(2));
+
+    let mut unprotected = states(victim, native(0, false));
+    let candidate = engine
+        .prepare_acquisition_character_effects(&[(victim, request)], &unprotected, now)
+        .unwrap();
+    assert_eq!(candidate.audit()[0]["from_direction"], json!([0., -1., 0.]));
+    assert_eq!(candidate.audit()[0]["outcome"], "Applied");
+    assert!(actor(&engine, victim).life.is_alive());
+    engine
+        .install_acquisition_character_effects(candidate, &mut unprotected)
+        .unwrap();
+
+    let dead = actor(&engine, victim);
+    assert_eq!(dead.last_damage.last_location_and_type, 0xa1);
+    assert_eq!(dead.last_damage.last_source_object, u32::MAX);
+    assert_eq!(dead.last_damage.last_user_data, (90 << 20) | (512 + 90));
+    assert_eq!(dead.last_damage.last_attacker, attacker.character_id);
+    assert_eq!(&notice(dead)[6..11], &[4, 255, 255, 255, 255]);
+    assert_eq!(
+        actor(&engine, attacker).reward_statistics.get(&10),
+        Some(&1)
+    );
+    assert_eq!(engine.pending_reward_batch().len(), 1);
+}

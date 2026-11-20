@@ -65,12 +65,17 @@ pub enum BlastSource {
     Ground { body_id: u32 },
     Helo { body_id: u32 },
     HeloGrenade,
+    AirStrike,
 }
 
 impl BlastSource {
+    fn supported_mode(self, game_type: i8) -> bool {
+        game_type == 2 || (game_type == 1 && matches!(self, Self::AirStrike))
+    }
+
     fn vehicle_body(self) -> Option<u32> {
         match self {
-            Self::Structural { .. } | Self::HeloGrenade => None,
+            Self::Structural { .. } | Self::HeloGrenade | Self::AirStrike => None,
             Self::Hospital { body_id } | Self::Ground { body_id } | Self::Helo { body_id } => {
                 Some(body_id)
             }
@@ -109,9 +114,72 @@ struct BlastRay {
     end: [f64; 3],
     excludes: [Option<u64>; 2],
     penetration: f32,
+    source: BlastSource,
 }
 
 impl BlastCollision<'_> {
+    fn strike_impact(
+        &self,
+        scene: &collision::CollisionWorld,
+        snapshot: &dynamic_collision::Snapshot,
+        [x, z]: [f32; 2],
+        [min_y, max_y]: [f32; 2],
+    ) -> Result<Option<[f32; 3]>, &'static str> {
+        let top = max_y + 100.;
+        let bottom = min_y - 100.;
+        if min_y > max_y || top <= bottom || ![x, z, top, bottom].iter().all(|v| v.is_finite()) {
+            return Err("invalid_air_strike_vertical_bounds");
+        }
+        let start = [x, top, z].map(f64::from);
+        let end = [x, bottom, z].map(f64::from);
+        let row = self.filter_rows[19];
+        let mut mesh_budget = 1_000_000;
+        let mut hits = scene
+            .filtered_material_ray_hits(start, end, row, &mut mesh_budget)
+            .map_err(|_| "air_strike_static_impact_ray_failed")?;
+        self.sequences.filtered_ray_hits(
+            start,
+            end,
+            row,
+            [None; 2],
+            &mut mesh_budget,
+            &mut hits,
+        )?;
+        let mut first = hits.iter().map(|hit| hit.fraction).min_by(f64::total_cmp);
+        let mut shape_budget = self.limits.max_support_points;
+        let point = Geometry::Box {
+            half_extents: [0.; 3],
+            radius: 0.,
+        };
+        for body in snapshot
+            .bodies()
+            .iter()
+            .filter(|body| row & (1 << body.layer) != 0)
+        {
+            if let Some((fraction, _)) = geometry::sweep(
+                &point,
+                Pose::at(start),
+                end,
+                &body.shape,
+                body.pose,
+                geometry::SweepLimits {
+                    tolerance: self.limits.boundary_epsilon,
+                    extra: 0.,
+                    query: self.limits,
+                },
+                &mut shape_budget,
+            )? && fraction > 0.
+                && fraction < first.unwrap_or(1.)
+            {
+                first = Some(fraction);
+            }
+        }
+        Ok(first.map(|t| {
+            let t = t as f32;
+            [x, t.mul_add(bottom, (1. - t) * top) + 0.5, z]
+        }))
+    }
+
     fn clear_path(
         &self,
         scene: &collision::CollisionWorld,
@@ -124,13 +192,22 @@ impl BlastCollision<'_> {
             end,
             excludes,
             penetration,
+            source,
         } = ray;
         if start == end {
             return Ok(true);
         }
-        let mut hits = scene
-            .material_ray_hits(start, end, budget)
-            .map_err(|_| "domination_structural_blast_static_query_failed")?;
+        let zero_penetration_strike = matches!(source, BlastSource::AirStrike);
+        let row = self.filter_rows[24];
+        let mut hits = if zero_penetration_strike {
+            scene.filtered_material_ray_hits(start, end, row, budget)
+        } else {
+            scene.material_ray_hits(start, end, budget)
+        }
+        .map_err(|_| "domination_structural_blast_static_query_failed")?;
+        if zero_penetration_strike && !hits.is_empty() {
+            return Ok(false);
+        }
         for hit in hits.iter_mut().filter(|hit| hit.terrain) {
             let terrain = self
                 .terrain_materials
@@ -139,16 +216,21 @@ impl BlastCollision<'_> {
             let z = (start[2] + (end[2] - start[2]) * hit.fraction) as f32;
             hit.material_index = Some(terrain.sample(x, z)?);
         }
-        self.sequences.material_ray_hits(
-            start,
-            end,
-            self.filter_rows[24],
-            excludes,
-            budget,
-            &mut hits,
-        )?;
-        if !can_penetrate(&mut hits, penetration, self.material_costs)? {
-            return Ok(false);
+        if zero_penetration_strike {
+            // The retail callback blocks on a null or impenetrable material,
+            // and on every material whose cost is at least the remaining power.
+            // All qualified costs are -1 or nonnegative; AirStrike power is zero.
+            self.sequences
+                .filtered_ray_hits(start, end, row, excludes, budget, &mut hits)?;
+            if !hits.is_empty() {
+                return Ok(false);
+            }
+        } else {
+            self.sequences
+                .material_ray_hits(start, end, row, excludes, budget, &mut hits)?;
+            if !can_penetrate(&mut hits, penetration, self.material_costs)? {
+                return Ok(false);
+            }
         }
         if !snapshot.positive_ray_hit_ignoring(
             start,
@@ -158,6 +240,9 @@ impl BlastCollision<'_> {
             self.limits,
         )? {
             return Ok(true);
+        }
+        if zero_penetration_strike {
+            return Ok(false);
         }
         // The row24 collector leaves fallback off for primitive ground roots.
         // Their null material blocks damage. Refuse unqualified eligible roots.
@@ -218,6 +303,39 @@ impl AreaDamageState {
 }
 
 impl<W: Write> Engine<W> {
+    /// Resolve a sampled bomblet against the current world. The vertical
+    /// bounds are from the authored level header. A successful cast supplies
+    /// the sole origin of this blast; a qualified miss spends the slot.
+    pub fn collect_air_strike_blast(
+        &self,
+        attacker: u32,
+        xz: [f32; 2],
+        vertical_bounds: [f32; 2],
+        mut blast: InstantaneousBlast,
+        collision: BlastCollision<'_>,
+    ) -> Result<Option<DamageWork>, &'static str> {
+        if !BlastSource::AirStrike.supported_mode(self.match_profile().game_type)
+            || !blast.origins.is_empty()
+            || blast.material_penetration != 0.
+        {
+            return Err("invalid_air_strike_blast_context");
+        }
+        let scene = self
+            .collision_world
+            .as_ref()
+            .filter(|scene| {
+                scene.stats().triangles != 0 && scene.metadata().map_name == self.map_name()
+            })
+            .ok_or("air_strike_static_collision_required")?;
+        let snapshot = self.dynamic_collision_snapshot(collision.filter_rows[6])?;
+        let Some(origin) = collision.strike_impact(scene, &snapshot, xz, vertical_bounds)? else {
+            return Ok(None);
+        };
+        blast.origins.push(origin);
+        self.collect_domination_blast(BlastSource::AirStrike, attacker, blast, collision)
+            .map(Some)
+    }
+
     /// Collect radial pairs through current Engine bodies and the source-bound world.
     pub fn collect_domination_blast(
         &self,
@@ -228,7 +346,8 @@ impl<W: Write> Engine<W> {
     ) -> Result<DamageWork, &'static str> {
         let filter_rows = collision.filter_rows;
         let limits = collision.limits;
-        if self.match_profile().game_type != 2
+        if !source.supported_mode(self.match_profile().game_type)
+            || (matches!(source, BlastSource::AirStrike) && blast.material_penetration != 0.)
             || matches!(
                 source,
                 BlastSource::Structural { objective_id: 0 }
@@ -316,6 +435,7 @@ impl<W: Write> Engine<W> {
                             Some(body.target.key.id),
                         ],
                         penetration: blast.material_penetration,
+                        source,
                     },
                     &mut static_budget,
                 )? {
@@ -351,6 +471,7 @@ impl<W: Write> Engine<W> {
                             end: surface.pose.translation,
                             excludes: [source.vehicle_body().map(u64::from), Some(target_id)],
                             penetration: blast.material_penetration,
+                            source,
                         },
                         &mut static_budget,
                     )? {
@@ -497,7 +618,18 @@ impl<W: Write> Engine<W> {
         work: &[DamageWork],
         ground_policy: Option<&acquisition_ground_damage::Policy>,
     ) -> Result<DamageCommit, &'static str> {
-        if self.match_profile().game_type != 2 || work.len() > 128 {
+        let game_type = self.match_profile().game_type;
+        if !matches!(game_type, 1 | 2)
+            || work.len() > 128
+            || work.iter().any(|operation| match operation {
+                DamageWork::Area(_) => game_type != 2,
+                DamageWork::Blast { source, blast, .. } => {
+                    !source.supported_mode(game_type)
+                        || (matches!(source, BlastSource::AirStrike)
+                            && blast.material_penetration != 0.)
+                }
+            })
+        {
             return Err("invalid_domination_structural_damage_context");
         }
         if state.round != Some(self.round_number) {
@@ -705,6 +837,7 @@ impl<W: Write> Engine<W> {
                             index,
                             world,
                             attacker,
+                            source_team: None,
                             damage: item_catalog::TargetDamageParameters {
                                 amount: blast.damage,
                                 armor_pierce: 0.,
@@ -735,6 +868,11 @@ impl<W: Write> Engine<W> {
                     attacker,
                 },
                 BlastSource::HeloGrenade => return Err("invalid_domination_helo_grenade_target"),
+                BlastSource::AirStrike => character::Request::AirStrikeExplosion {
+                    raw_hp,
+                    from_direction,
+                    attacker,
+                },
             };
             output.apply(self, target, request)?;
         }
@@ -1553,6 +1691,52 @@ impl SequenceCollisionState {
         Ok(false)
     }
 
+    fn filtered_ray_hits(
+        &self,
+        start: [f64; 3],
+        end: [f64; 3],
+        row: u32,
+        excludes: [Option<u64>; 2],
+        budget: &mut usize,
+        hits: &mut Vec<collision::MaterialRayHit>,
+    ) -> Result<(), &'static str> {
+        for surface in self.active.values().flatten() {
+            hits.extend(
+                surface
+                    .mesh
+                    .filtered_material_ray_hits(
+                        surface.local(start),
+                        surface.local(end),
+                        row,
+                        budget,
+                    )
+                    .map_err(|_| "air_strike_sequence_filter_query_failed")?,
+            );
+        }
+        let fixed_layer = [
+            (&self.hulks, 17, 0x0d80_0000u64),
+            (&self.hospitals, 22, 0x0d80_0000),
+            (&self.helos, 22, 0x0280_0000),
+        ];
+        for (surfaces, layer, family) in fixed_layer {
+            if row & (1 << layer) == 0 {
+                continue;
+            }
+            for (&index, surface) in surfaces {
+                if excludes.contains(&Some(family | u64::from(index))) {
+                    continue;
+                }
+                hits.extend(
+                    surface
+                        .mesh
+                        .material_ray_hits(surface.local(start), surface.local(end), budget)
+                        .map_err(|_| "air_strike_overlay_ray_failed")?,
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn material_ray_hits(
         &self,
         start: [f64; 3],
@@ -1609,6 +1793,145 @@ impl SequenceCollisionState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn air_strike_is_the_only_blast_admitted_in_acquisition() {
+        assert!(BlastSource::AirStrike.supported_mode(1));
+        assert!(BlastSource::AirStrike.supported_mode(2));
+        assert!(!BlastSource::AirStrike.supported_mode(0));
+        assert!(!BlastSource::Structural { objective_id: 1 }.supported_mode(1));
+        assert!(!BlastSource::Ground { body_id: 1 }.supported_mode(1));
+    }
+
+    #[test]
+    fn zero_penetration_air_strike_blocks_on_unlabelled_terrain() {
+        let payload = json!({
+            "format":"mag_collision_world", "schema_version":1, "coordinate_space":"world",
+            "metadata":{"map_name":"synthetic","build":"synthetic","coverage":"provisional",
+                "provenance":["synthetic"],"unknowns":[]},
+            "instances":[{"id":"unlabelled_terrain", "terrain_material":true,
+                "collision":{"filter_info":9,"convex_radius":0.,"child_filter_policy":"uniform","provenance":"synthetic"},
+                "vertices_xyz":[[0.,0.,0.],[3.,0.,0.],[0.,0.,3.]],"triangles":[[0,1,2]]}]
+        });
+        let scene = collision::CollisionWorld::from_bytes(
+            &serde_json::to_vec(&payload).unwrap(),
+            Default::default(),
+        )
+        .unwrap();
+        let snapshot = dynamic_collision::Snapshot::capture(
+            crate::acquisition_atomic::WorldKey {
+                world_id: 1,
+                incarnation: 1,
+            },
+            0,
+            &[],
+            vec![],
+            0,
+        )
+        .unwrap();
+        let mut rows = [0; 32];
+        rows[24] = 1 << 9;
+        let collision = BlastCollision {
+            filter_rows: &rows,
+            limits: Default::default(),
+            sequences: &SequenceCollisionState::default(),
+            material_costs: &BTreeMap::new(),
+            terrain_materials: None,
+        };
+        let ray = BlastRay {
+            start: [1., 1., 1.],
+            end: [1., -1., 1.],
+            excludes: [None; 2],
+            penetration: 0.,
+            source: BlastSource::AirStrike,
+        };
+        assert_eq!(
+            collision.clear_path(&scene, &snapshot, ray, &mut 100),
+            Ok(false)
+        );
+        let old_source = BlastRay {
+            source: BlastSource::Structural { objective_id: 1 },
+            ..ray
+        };
+        assert_eq!(
+            collision.clear_path(&scene, &snapshot, old_source, &mut 100),
+            Err("domination_terrain_material_grid_required"),
+        );
+    }
+
+    #[test]
+    fn cluster_impact_uses_nearest_eligible_live_surface_then_elevates_hit() {
+        let payload = json!({
+            "format":"mag_collision_world", "schema_version":1, "coordinate_space":"world",
+            "metadata":{"map_name":"synthetic","build":"synthetic","coverage":"complete",
+                "provenance":["synthetic"],"unknowns":[]},
+            "instances":[
+                {"id":"ground","vertices_xyz":[[0.,1.,0.],[3.,1.,0.],[0.,1.,3.]],"triangles":[[0,1,2]],
+                "collision":{"filter_info":9,"convex_radius":0.,"child_filter_policy":"uniform","provenance":"synthetic"}},
+                {"id":"filtered","vertices_xyz":[[0.,4.,0.],[3.,4.,0.],[0.,4.,3.]],"triangles":[[0,1,2]],
+                "collision":{"filter_info":9,"ray_child_filter_info":22,"convex_radius":0.,"child_filter_policy":"uniform","provenance":"synthetic"}}
+            ]
+        });
+        let scene = collision::CollisionWorld::from_bytes(
+            &serde_json::to_vec(&payload).unwrap(),
+            Default::default(),
+        )
+        .unwrap();
+        let snapshot = dynamic_collision::Snapshot::capture(
+            crate::acquisition_atomic::WorldKey {
+                world_id: 1,
+                incarnation: 1,
+            },
+            0,
+            &[],
+            vec![],
+            0,
+        )
+        .unwrap();
+        let mut sequences = SequenceCollisionState::default();
+        sequences.hulks.insert(
+            1,
+            SequenceSurface {
+                pose: Pose::at([0., 1., 0.]),
+                mesh: scene.clone(),
+            },
+        );
+        let mut rows = [0; 32];
+        rows[19] = (1 << 9) | (1 << 17);
+        let context = BlastCollision {
+            filter_rows: &rows,
+            limits: Default::default(),
+            sequences: &sequences,
+            material_costs: &BTreeMap::new(),
+            terrain_materials: None,
+        };
+        let static_only = BlastCollision {
+            sequences: &SequenceCollisionState::default(),
+            ..context
+        };
+        let static_hit = static_only
+            .strike_impact(&scene, &snapshot, [1., 1.], [0., 8.])
+            .unwrap()
+            .unwrap();
+        assert!((static_hit[1] - 1.5).abs() < 0.00002);
+
+        // The known layer-17 overlay contributes both triangles at its live pose.
+        let hit = context
+            .strike_impact(&scene, &snapshot, [1., 1.], [0., 8.])
+            .unwrap();
+        let hit = hit.unwrap();
+        assert_eq!([hit[0], hit[2]], [1., 1.]);
+        assert!((hit[1] - 5.5).abs() < 0.00002);
+        let miss = context
+            .strike_impact(&scene, &snapshot, [8., 8.], [0., 8.])
+            .unwrap();
+        assert_eq!(miss, None);
+        assert!(
+            context
+                .strike_impact(&scene, &snapshot, [1., 1.], [8., 0.])
+                .is_err()
+        );
+    }
 
     #[test]
     fn blast_material_budget_depletes_only_on_front_faces() {

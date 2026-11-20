@@ -66,11 +66,11 @@ its exact source hash, matching map and coverage validation. Vehicles and
 character damage rules retain their existing exact spawn-source hash checks.
 Item catalogs, bootstrap equipment, combat/skill data and the map-independent
 falling/incapacitation rules remain global. Bootstrap faction coverage is checked
-for every loaded profile. Unswitchable bot population, leadership, bunker and
-development-dummy combinations are rejected in registry mode. Per-profile
-Domination hospitals are supported; global bunker arguments remain rejected.
-The remaining unsupported extras' map-scoped
-state must be explicitly implemented before those combinations can be supported.
+for every loaded profile. Registry workers can use the native schema-2 squad
+election policy with `--leadership-passives` and `--leadership-role-policy`.
+Registry mode rejects development role bindings, global bot population, global
+bunker arguments and development dummy settings. Per-profile Domination
+hospitals are supported.
 
 An interactive Domination profile additionally supplies `domination_round` and
 `domination_gameplay`, ground vehicles, character damage rules and collision.
@@ -79,6 +79,42 @@ each map. Startup preloads and validates the complete backend before advertising
 the profile; selection installs a fresh clone and an exact formation retry keeps
 the current world. See [Domination configuration](domination-runtime.md) for the
 explicit backend inputs and current insertion scope.
+
+## Active squad commands
+
+An interactive Acquisition or Domination profile can opt in with an
+`active_abilities` path in its profile row. A fixed Acquisition worker can
+supply the manifest with `--active-abilities`. Both paths require an explicit
+retail worker, a native squad election policy without development bindings, a
+connected gameplay provider, and the matching objective and collision inputs.
+These settings enable the ClusterBomb and Sensor implementations where the
+native mode and role make them available. Profiles that omit this path have no
+active command setup.
+
+The setup manifest uses absolute paths to external files.
+
+```json
+{
+  "format": "mag_active_abilities_v1",
+  "rules": "/operator/rules/ability-rules.json",
+  "effects": "/operator/rules/ability-effects.json",
+  "map_bindings": "/operator/worlds/synthetic-map/ability-map-bindings.json",
+  "static_ray_receipt": "/operator/worlds/synthetic-map/static-ray-receipt.json"
+}
+```
+
+The effects projector reads a supplied retail game archive. The static-ray
+projector adds root and child filter metadata to a collision assembly and emits
+a receipt containing the world hash and authored Y bounds. Use the projected
+world as the profile's `collision_world` and the receipt as
+`static_ray_receipt`. The ability map bindings identify the exact gameplay
+objective catalog and level source. Startup checks those identities against
+the loaded world and objective files. Generate the binding for the exact worker
+catalog and retail map. [Map binding projection](active-ability-map-bindings.md)
+
+Rebuild any attached navmesh against the
+projected world hash. A new formation constructs a fresh command runtime from
+the preloaded setup, while a repeated identical selection preserves it.
 
 ## Bridge contract
 

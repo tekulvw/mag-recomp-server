@@ -50,6 +50,7 @@ struct EventPlan {
     objective_world: Option<objective_control::ObjectiveWorld>,
     ground_runtime: Option<acquisition_ground_runtime::Runtime>,
     helo_runtime: Option<domination_helo::FleetRuntime>,
+    active_ability_runtime: Option<crate::active_ability_engine::Runtime>,
     helo_damage_relay: Vec<Vec<u8>>,
     ground_dynamics_relay: Option<(u16, Vec<u8>)>,
     ground_damage_relay: Option<Vec<u8>>,
@@ -205,7 +206,8 @@ fn plan_message<W: Write>(
             | protocol::GameMessage::KillSelf(_)
             | protocol::GameMessage::MountSeat(_)
             | protocol::GameMessage::DismountSeat(_)
-            | protocol::GameMessage::Repair(_))
+            | protocol::GameMessage::Repair(_)
+            | protocol::GameMessage::CommandAbility(_))
     );
     if ctx.engine.match_terminal.is_some()
         && (spawn_or_selection || (combat && !ctx.engine.round_combat_allowed(ctx.now)))
@@ -423,6 +425,13 @@ impl<W: Write> Engine<W> {
             plan.combat.new_rewards.clear();
         }
         self.check_reward_capacity(&plan.combat.new_rewards)?;
+        let gameplay_denial = plan.gameplay_denial.or_else(|| {
+            if decoded_log["type"] == "command_ability" && decoded_log["accepted"] == false {
+                decoded_log["reason"].as_str()
+            } else {
+                None
+            }
+        });
         self.record(
             json!({
                 "op": "event",
@@ -444,7 +453,7 @@ impl<W: Write> Engine<W> {
                 "messages": plan.messages,
                 "rewards": plan.combat.new_rewards,
                 "rejection": plan.rejection,
-                "gameplay_denial": plan.gameplay_denial,
+                "gameplay_denial": gameplay_denial,
                 "clock_points": plan.session.clock_points,
                 "representation": if event.rt_type == 0x3d {
                     "plugin_application"
@@ -957,6 +966,9 @@ impl<W: Write> Engine<W> {
                     self.queue_ground_driver_revocation(index, now)?;
                 }
             }
+        }
+        if let Some(runtime) = plan.active_ability_runtime {
+            self.active_abilities = Some(runtime);
         }
         Ok(plan.messages)
     }

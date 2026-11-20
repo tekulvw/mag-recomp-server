@@ -42,6 +42,12 @@ pub enum Request {
         attacker: u32,
         objective_id: u32,
     },
+    /// A leadership strike target after radial falloff and occlusion.
+    AirStrikeExplosion {
+        raw_hp: f32,
+        from_direction: [f32; 3],
+        attacker: u32,
+    },
     /// A qualified target in the Structural objective's periodic damage scan.
     StructuralArea {
         raw_hp: f32,
@@ -302,6 +308,11 @@ impl<W: Write> Engine<W> {
                 from_direction,
                 attacker,
                 ..
+            }
+            | Request::AirStrikeExplosion {
+                raw_hp,
+                from_direction,
+                attacker,
             } => {
                 if !raw_hp.is_finite() || raw_hp <= 0. {
                     return Err("invalid_acquisition_explosion_damage");
@@ -316,7 +327,11 @@ impl<W: Write> Engine<W> {
                     damage::DamageKind::Explosive,
                     10,
                     attacker,
-                    if source_object == u32::MAX { 5 } else { 6 },
+                    match request {
+                        Request::AirStrikeExplosion { .. } => 4,
+                        Request::StructuralExplosion { .. } => 6,
+                        _ => 5,
+                    },
                     -1,
                     [0., -1., 0.],
                     explosion_direction_user_data(from_direction)?,
@@ -651,6 +666,7 @@ actor_effect_state! {
     published_wave_deadline: Option<Duration>,
 }
 struct EffectState {
+    active_abilities: Option<active_ability_engine::Runtime>,
     actors: std::collections::BTreeMap<String, ActorEffects>,
     bots: bot_registry::CharacterDamageCandidate,
     rewards: std::collections::BTreeMap<String, progression::RewardEvent>,
@@ -659,6 +675,7 @@ struct EffectState {
 impl EffectState {
     fn capture<W: Write>(engine: &Engine<W>) -> Self {
         Self {
+            active_abilities: engine.active_abilities.clone(),
             actors: engine
                 .active
                 .iter()
@@ -680,6 +697,7 @@ impl EffectState {
         ids == self.actors.keys().map(String::as_str).collect()
     }
     fn install<W: Write>(mut self, engine: &mut Engine<W>) {
+        engine.active_abilities = self.active_abilities;
         for actor in engine.active.iter_mut().chain(engine.peers.values_mut()) {
             self.actors
                 .remove(&actor.reservation.id)
