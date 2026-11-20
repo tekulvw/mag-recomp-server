@@ -949,6 +949,12 @@ fn stage_objective_observations<W: Write>(
 pub(crate) mod test_support {
     use super::*;
 
+    pub(crate) fn structural_fixture(
+        runtime: &mut Runtime,
+    ) -> &mut crate::acquisition_structural::Runtime {
+        runtime.structural.as_mut().unwrap()
+    }
+
     pub(crate) fn install_structural_fixture(
         runtime: &mut Runtime,
         setup: crate::acquisition_structural::Setup,

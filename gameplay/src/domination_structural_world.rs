@@ -18,6 +18,10 @@ const CHARACTERS_PER_UPDATE: u16 = 16;
 const CHARACTER_FAMILY_CAPACITY: u16 = 256;
 const AREA_DAMAGE_COOLDOWN: Duration = Duration::from_secs(1);
 
+#[cfg(test)]
+#[path = "structural_area_mount_tests.rs"]
+mod mount_tests;
+
 #[derive(Clone, Default)]
 pub struct AreaDamageState {
     round: Option<u64>,
@@ -855,6 +859,9 @@ impl<W: Write> Engine<W> {
             if state.cooling_down(slot, target.generation, output.now) {
                 continue;
             }
+            if self.structural_area_hidden_ground_seat(target)? {
+                continue;
+            }
             let position = self.structural_area_position(target)?;
             let (displacement, distance_squared) = separation(update.objective_position, position)?;
             if distance_squared >= radius * radius {
@@ -927,6 +934,59 @@ impl<W: Write> Engine<W> {
         }))
     }
 
+    /// Retail skips a resolved, occupied hidden seat before its radius test.
+    /// Ground seat authority is server-owned; visibility comes from its source
+    /// catalog, independently of vehicle kind or the actor's cached position.
+    fn structural_area_hidden_ground_seat(
+        &self,
+        target: character::Target,
+    ) -> Result<bool, &'static str> {
+        let Some(actor) = self.active.iter().chain(self.peers.values()).find(|actor| {
+            actor.reservation.world == target.world
+                && actor.reservation.player == target.character_id as u16
+        }) else {
+            return Ok(false);
+        };
+        let Some(seat) = actor.ground_seat else {
+            return Ok(false);
+        };
+        let catalog = self
+            .ground_vehicles
+            .as_ref()
+            .ok_or("structural_area_ground_catalog_required")?;
+        let vehicle = catalog
+            .vehicle(seat.vehicle_index)
+            .ok_or("structural_area_ground_vehicle_missing")?;
+        if !vehicle.passenger_seats.contains(&seat.seat)
+            && !catalog
+                .driver_seat(seat.vehicle_index)
+                .is_some_and(|driver| driver.seat == seat.seat)
+        {
+            return Err("structural_area_ground_seat_unbound");
+        }
+        if self
+            .ground_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.get(seat.vehicle_index))
+            .is_none()
+            || self
+                .active
+                .iter()
+                .chain(self.peers.values())
+                .filter(|other| {
+                    other.reservation.world == target.world && other.ground_seat == Some(seat)
+                })
+                .count()
+                != 1
+        {
+            return Err("structural_area_ground_occupant_unbound");
+        }
+        catalog
+            .seat_occupant_visible(seat.vehicle_index, seat.seat)
+            .map(|visible| !visible)
+            .ok_or("structural_area_ground_seat_visibility_required")
+    }
+
     fn structural_area_position(
         &self,
         target: character::Target,
@@ -943,10 +1003,12 @@ impl<W: Write> Engine<W> {
                 let position = Self::domination_helo_passenger_position(actor)?;
                 return Ok([position.x, position.y, position.z]);
             }
-            if actor.is_mounted() {
+            if actor.is_mounted() && actor.ground_seat.is_none() {
                 return Err("domination_structural_area_mount_pose_unqualified");
             }
         }
+        // The native mounted character update copies the associated ground
+        // vehicle's root into the character position sampled by this callback.
         self.acquisition_character_position(target)
     }
 

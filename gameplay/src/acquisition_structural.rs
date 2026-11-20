@@ -728,7 +728,11 @@ impl Runtime {
                     .then_some((ObjectiveState::Deactivated, u16::MAX))
             });
             if world.native_class(index) == Some(NativeClass::Structural) {
-                if let Some((state, actor)) = request {
+                if let Some((state, actor)) = request
+                    && world.state(index) != Some(state)
+                {
+                    // MotorPool hooks can request an already-current state.
+                    // Preserve that no-op instead of clearing a pending strike.
                     let source = (actor != u16::MAX)
                         .then(|| crate::acquisition_gameplay_engine::objective_actors(frame.engine))
                         .and_then(|actors| actors.get(&actor).copied())

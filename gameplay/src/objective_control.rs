@@ -1109,6 +1109,18 @@ fn stage_native_interaction(
     {
         return InteractionOutcome::denied("objective_active_trigger_mismatch");
     }
+    if matches!(
+        (request.kind, object.state.state_actor.state),
+        (Activate, ObjectiveState::Activating) | (Deactivate, ObjectiveState::Deactivating)
+    ) && object
+        .operation
+        .as_ref()
+        .is_some_and(|operation| operation.trigger_index != request.trigger_index)
+    {
+        // A duplicate may preserve an existing hold, but cannot acknowledge a
+        // different box while the operation still observes its original one.
+        return InteractionOutcome::denied("objective_active_trigger_mismatch");
+    }
     let was_repaired = mode.was_repaired;
     let Some(adjusted) = adjusted_demolition_rule(rule, request.kind, modifier) else {
         return InteractionOutcome::denied("invalid_demolition_modifier");

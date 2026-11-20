@@ -204,6 +204,28 @@ fn native_precision_consumes_each_intermediate_entry_in_order() {
 }
 
 #[test]
+fn redundant_queued_state_does_not_cancel_a_pending_precision_strike() {
+    let mut engine = connected_tests::fixture();
+    // MotorPool callbacks can queue the child's current state. Like the
+    // legacy provider, that no-op must leave a separately staged strike alone.
+    crate::acquisition_gameplay_engine::test_support::structural_fixture(
+        engine.acquisition_gameplay.as_mut().unwrap(),
+    )
+    .queued
+    .insert(INDEX, (ObjectiveState::Deactivated, u16::MAX));
+    assert!(
+        engine
+            .objective_world
+            .as_mut()
+            .unwrap()
+            .stage_precision_strike(INDEX, None)
+            .unwrap()
+    );
+    tick(&mut engine, 100).unwrap();
+    assert_eq!(state(&engine), ObjectiveState::Completed);
+}
+
+#[test]
 fn repairable_native_rows_require_a_tool_source() {
     let engine = connected_tests::fixture();
     let objectives = engine.objective_catalog.as_ref().unwrap();
