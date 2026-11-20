@@ -49,16 +49,21 @@ def original_rules(settings, mode_enum):
     points = [rules[f'StartingPointsTeam{team}'] for team in (0, 1)]
     waves = [rules[f'SpawnIntervalTeam{team}'] for team in (0, 1)]
     initial = [rules[f'SpawnInitialDelayTeam{team}'] for team in (0, 1)]
-    if (mode_enum not in ('GameTypeFactionExercise', 'GameType64', 'GameType128')
-            or any(type(value) is not int or not 0 <= value < 2**32 for value in points + waves + initial)
+    death_cost = ([rules[f'PointsLostPerDeathTeam{team}'] for team in (0, 1)]
+                  if mode_enum == 'GameType256' else [])
+    if (mode_enum not in ('GameTypeFactionExercise', 'GameType64', 'GameType128', 'GameType256')
+            or any(type(value) is not int or not 0 <= value < 2**32
+                   for value in points + waves + initial + death_cost)
             or any(value <= 0 for value in points + waves)
             or type(creation.get('m_minPlayers')) is not int
             or type(creation.get('m_maxPlayers')) is not int
             or not 0 <= creation['m_minPlayers'] <= creation['m_maxPlayers'] <= 256):
         raise SystemExit('Unsupported or malformed authored mode rules')
     profile = {'maximum_points': points, 'spawn_wave_ms': waves}
-    if mode_enum in ('GameType64', 'GameType128'):
+    if mode_enum in ('GameType64', 'GameType128', 'GameType256'):
         profile['initial_spawn_delay_ms'] = initial
+    if death_cost:
+        profile['points_lost_per_death'] = death_cost
     return profile, {
         'member': '/run/mag/ps3/settings/gameproperties.zpr',
         'sha256': sha(settings),

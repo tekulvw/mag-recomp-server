@@ -74,7 +74,7 @@ def objective_graph(data, helpers):
             'scope': 'All version7 Objective*Properties records and directly linked InstanceProperties records; script-created objects and runtime IDs unresolved'}
 
 
-def extract(disc, game_archive):
+def extract(disc, game_archive, *, mode=None):
     x = runpy.run_path(str(TOOLS / 'extract-retail-spawns.py'))
     h = runpy.run_path(str(TOOLS / 'retail_map_helpers.py'))
     game = game_archive.read_bytes()
@@ -99,6 +99,13 @@ def extract(disc, game_archive):
     paths = sorted((disc / 'PS3_GAME/USRDIR/run/mag/ps3/levels').glob('*.psarc'))
     if not paths:
         raise ValueError('No original retail level archives found')
+    if mode is not None:
+        expected = {name for name, row in by_name.items() if row['mode_enum'] == mode}
+        missing = expected - {path.stem for path in paths}
+        if not expected or missing:
+            raise ValueError(f'Incomplete {mode} map set. Missing archives: {sorted(missing)}')
+        paths = [path for path in paths if path.stem in expected]
+        by_name = {name: by_name[name] for name in expected}
     maps = []
     for path in paths:
         if path.stem not in by_name:
