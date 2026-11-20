@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Project the native squad and platoon leader election policy from extracted retail rules.
+"""Project the native squad, platoon and Company leadership election policy from extracted retail rules.
 
 Weights come from scripts/mag_squad_matchmaking_properties.zpr as retained by
 extract-retail-rules.py. The default record is local configuration for a
@@ -25,7 +25,7 @@ def weight(table, key):
     require(type(value) in (int, float) and math.isfinite(value) and value >= 0, f'invalid authored {key}')
     return float(value)
 
-def project(raw, default_record, *, squad_only=False):
+def project(raw, default_record, *, squad_only=False, platoon_only=False):
     require(raw.get('schema_version') == 1 and raw.get('application_id') == 20231, 'wrong rules schema/application')
     resource = raw['resources'][MEMBER]
     table = resource['parameters']['MagSquadMatchmakingConfigSPropertyTable']
@@ -43,6 +43,12 @@ def project(raw, default_record, *, squad_only=False):
             'level_weight': weight(table, 'PlatoonLeader_LevelWeight'),
             'mslc_weight': weight(table, 'PlatoonLeader_MSLCWeight'),
         }
+        if not platoon_only:
+            policy['schema_version'] = 4
+            policy['company_election'] = {
+                'level_weight': weight(table, 'TeamLeader_LevelWeight'),
+                'mslc_weight': weight(table, 'TeamLeader_MSLCWeight'),
+            }
     return policy
 
 def encoded(value): return (json.dumps(value, indent=2, allow_nan=False) + '\n').encode()
@@ -53,13 +59,15 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--default-record', type=Path, required=True, help='explicit local leadership fallback policy JSON')
     parser.add_argument('--check', action='store_true')
-    parser.add_argument('--squad-only', action='store_true', help='preserve the legacy schema 2 projection')
+    tier = parser.add_mutually_exclusive_group()
+    tier.add_argument('--squad-only', action='store_true', help='preserve the legacy schema 2 projection')
+    tier.add_argument('--platoon-only', action='store_true', help='preserve the schema 3 platoon projection')
     args = parser.parse_args()
     record = json.loads(args.default_record.read_text())
     require(set(record) == {'leadership_level', 'nominations', 'matches_since_last_command'}, 'unexpected fallback policy fields')
     require(all(type(v) is int and 0 <= v <= 2**32-1 for v in record.values()), 'invalid fallback policy values')
     require(args.output.resolve() not in {args.rules.resolve(), args.default_record.resolve()}, 'output would replace input')
-    output = encoded(project(json.loads(args.rules.read_text()), record, squad_only=args.squad_only))
+    output = encoded(project(json.loads(args.rules.read_text()), record, squad_only=args.squad_only, platoon_only=args.platoon_only))
     if args.check:
         require(args.output.read_bytes() == output, 'role policy projection differs')
     else:
