@@ -81,6 +81,7 @@ mod incapacitation_runtime;
 #[cfg(test)]
 mod incapacitation_tests;
 pub mod leadership_passives;
+pub mod leadership_progression;
 pub mod leadership_runtime;
 pub mod navmesh;
 #[cfg(test)]
@@ -209,6 +210,9 @@ pub struct Character {
     pub progression: Option<progression::ProgressionSnapshot>,
     #[serde(default)]
     pub leadership: Option<leadership_runtime::LeadershipRecord>,
+    /// Horizon advertises complete authored leadership settlement data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leadership_progression_enabled: Option<bool>,
 }
 fn deserialize_skills<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -384,6 +388,10 @@ pub enum Request {
         reward_id: String,
         progression: progression::ProgressionSnapshot,
         match_experience: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        leadership: Option<leadership_runtime::LeadershipRecord>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        match_leadership_points: Option<u32>,
     },
     DevelopmentSpawnTarget {
         v: u8,
@@ -724,6 +732,8 @@ impl Request {
                 reward_id,
                 progression,
                 match_experience,
+                leadership,
+                match_leadership_points,
                 ..
             } => {
                 if !identifier(reservation_id, 16) {
@@ -738,6 +748,7 @@ impl Request {
                     return Err("invalid_reward_id");
                 }
                 progression.validate()?;
+                leadership_progression::validate_snapshot(*leadership, *match_leadership_points)?;
                 if *match_experience > i32::MAX as u32 {
                     return Err("invalid_match_experience");
                 }
@@ -2077,3 +2088,6 @@ mod synthetic_dynamic_collision;
 
 #[cfg(test)]
 mod leadership_auto_repair_tests;
+
+#[cfg(test)]
+mod leadership_progression_tests;

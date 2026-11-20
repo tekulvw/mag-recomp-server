@@ -263,14 +263,16 @@ impl<W: Write> Engine<W> {
             (false, true) => progression::RewardKind::MatchMajorDefeat,
             (false, false) => progression::RewardKind::MatchMinorDefeat,
         };
-        recipient.event(
+        let mut reward = recipient.event(
             format!(
                 "match-result-{:016x}-{}",
                 self.round_number, actor.reservation.id
             ),
             kind,
             1,
-        )
+        );
+        reward.leadership = self.leadership_reward_context(actor);
+        reward
     }
 
     pub(crate) fn commit_round_update(

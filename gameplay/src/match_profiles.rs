@@ -1871,6 +1871,7 @@ mod tests {
             character_id: 4,
             kind: progression::RewardKind::EnemyKilled,
             units: 1,
+            leadership: None,
         };
         engine.reward_order.push_back(reward.reward_id.clone());
         engine

@@ -738,7 +738,9 @@ impl CharacterLevelUpdate {
     ) -> Result<Vec<u8>, &'static str> {
         if self.object_index == u16::MAX
             || self.sequence == 0
-            || !(1..=40).contains(&self.mag_info.level)
+            // The wire field is a byte. Horizon validates the selected
+            // application's authored level table; retail extends past 40.
+            || self.mag_info.level == 0
         {
             return Err("invalid_level_delta");
         }

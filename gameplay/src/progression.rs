@@ -88,6 +88,8 @@ pub struct RewardEvent {
     pub character_id: u32,
     pub kind: RewardKind,
     pub units: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leadership: Option<crate::leadership_progression::AwardContext>,
 }
 #[derive(Clone, Debug)]
 pub(crate) struct RewardRecipient {
@@ -156,6 +158,7 @@ impl RewardRecipient {
             character_id: self.character_id,
             kind,
             units,
+            leadership: None,
         }
     }
 }
@@ -178,6 +181,8 @@ pub(crate) struct CommittedReward {
     pub player_id: u16,
     pub progression: ProgressionSnapshot,
     pub match_experience: u32,
+    pub leadership: Option<crate::leadership_runtime::LeadershipRecord>,
+    pub match_leadership_points: Option<u32>,
 }
 /// A new round remains distinct even if an abandoned reservation ID is reused.
 pub(crate) fn round_identity(reservation: &crate::Reservation, ordinal: u64) -> String {
@@ -254,6 +259,14 @@ impl<W: Write> Engine<W> {
         &self,
         rewards: &[RewardEvent],
     ) -> Result<(), &'static str> {
+        for reward in rewards {
+            if let Some(context) = reward.leadership {
+                context.validate()?;
+                if !reward.kind.is_match_result() || reward.units != 1 {
+                    return Err("leadership_reward_requires_match_result");
+                }
+            }
+        }
         let additional = rewards
             .iter()
             .filter(|r| {
@@ -295,12 +308,15 @@ impl<W: Write> Engine<W> {
             reward_id,
             progression,
             match_experience,
+            leadership,
+            match_leadership_points,
             ..
         } = request
         else {
             return Err("wrong_progression_operation");
         };
         progression.validate()?;
+        crate::leadership_progression::validate_snapshot(leadership, match_leadership_points)?;
         if match_experience > i32::MAX as u32 {
             return Err("invalid_match_experience");
         }
@@ -310,6 +326,8 @@ impl<W: Write> Engine<W> {
             player_id,
             progression,
             match_experience,
+            leadership,
+            match_leadership_points,
         };
         if let Some(previous) = self.committed_rewards.get(&reward_id) {
             return if previous == &receipt {
@@ -329,32 +347,50 @@ impl<W: Write> Engine<W> {
         {
             return Err("reward_identity_mismatch");
         }
+        if pending.leadership.is_some() {
+            if !pending.kind.is_match_result()
+                || leadership.is_none()
+                || match_leadership_points.is_none()
+            {
+                return Err("leadership_result_snapshot_required");
+            }
+        } else if match_leadership_points.is_some() {
+            return Err("unexpected_match_leadership_points");
+        }
         let same_round = self.reward_match_id.as_deref() == Some(pending.match_id.as_str());
         let key = (
             pending.world_id,
             pending.account_id.clone(),
             pending.character_id,
         );
-        let actor = self.active.iter().chain(self.peers.values()).find(|actor| {
-            same_round
-                && actor.reward_match_id == pending.match_id
-                && participant_key(&actor.reservation).as_ref() == Some(&key)
-        });
+        // Account state can advance while its terminal receipt is deferred
+        // into another round. Match totals remain scoped independently below.
+        let actor = self
+            .active
+            .iter()
+            .chain(self.peers.values())
+            .find(|actor| participant_key(&actor.reservation).as_ref() == Some(&key));
+        let actor_in_round =
+            actor.is_some_and(|actor| same_round && actor.reward_match_id == pending.match_id);
         let recipient_id = actor.map(|a| a.reservation.id.clone());
         let recipient_player = actor.map_or(player_id, |a| a.reservation.player);
-        let mut participation = if let Some(actor) = actor {
+        let mut participation = if let Some(actor) = actor.filter(|_| actor_in_round) {
             RoundParticipation {
                 match_experience: actor.match_experience,
                 statistics: actor.reward_statistics.clone(),
             }
-        } else {
+        } else if same_round {
             self.round_participants
                 .get(&key)
                 .cloned()
                 .unwrap_or_default()
+        } else {
+            RoundParticipation::default()
         };
         let match_total = match_experience.max(participation.match_experience);
-        let statistic_update = if let Some(stat) = pending.kind.statistic() {
+        let statistic_update = if !same_round {
+            None
+        } else if let Some(stat) = pending.kind.statistic() {
             Some((
                 stat,
                 participation
@@ -372,6 +408,12 @@ impl<W: Write> Engine<W> {
         } else {
             None
         };
+        let mut statistic_updates: Vec<_> = statistic_update.into_iter().collect();
+        if let Some(points) = match_leadership_points
+            && same_round
+        {
+            statistic_updates.push((7, points as i32));
+        }
         let mut messages = Vec::new();
         let mut level_packet = None;
         let mut updated = None;
@@ -386,10 +428,12 @@ impl<W: Write> Engine<W> {
                 old
             };
             let mut stats = Vec::new();
-            if let Some((stat, value)) = statistic_update {
-                stats.push(protocol::StatValue { stat, value });
+            if actor_in_round {
+                for &(stat, value) in &statistic_updates {
+                    stats.push(protocol::StatValue { stat, value });
+                }
             }
-            if match_total != actor.match_experience {
+            if actor_in_round && match_total != actor.match_experience {
                 stats.insert(
                     0,
                     protocol::StatValue {
@@ -412,18 +456,36 @@ impl<W: Write> Engine<W> {
                     payload_hex: protocol::encode_hex(&wire),
                 });
             }
-            if state.level > old.level && actor.initial_objects.is_some() {
+            let leadership_update = self.committed_leadership(actor, leadership);
+            let changed_leadership = leadership_update.is_some_and(|update| {
+                update.record.leadership_level != actor.leadership_level
+                    || update.nominations != actor.nominations
+            });
+            if (state.level > old.level || changed_leadership) && actor.initial_objects.is_some() {
+                let mut mag_info = actor.mag_info(state.level);
+                if let Some(update) = leadership_update {
+                    mag_info.leadership_level = update.record.leadership_level;
+                    mag_info.nominations = update.nominations;
+                }
                 level_packet = Some(
                     replication::CharacterLevelUpdate {
                         sequence: 1,
                         timestamp_ms: now.as_millis() as u32,
                         object_index: recipient_player,
-                        mag_info: actor.mag_info(state.level),
+                        mag_info,
                     }
                     .encode_with_profile(self.wire_profile)?,
                 );
             }
-            updated = Some((state, match_total));
+            updated = Some((
+                state,
+                if actor_in_round {
+                    match_total
+                } else {
+                    actor.match_experience
+                },
+                leadership_update,
+            ));
         }
         // Stage the level delta in each recipient's own reliable sequence space
         // before recording the receipt. A recording failure releases neither the
@@ -451,8 +513,8 @@ impl<W: Write> Engine<W> {
                 level_publications.push((actor.reservation.id.clone(), wire));
             }
         }
-        self.record(json!({"op":"progression_committed","reward_id":reward_id,"reservation_id":reservation_id,"progression":progression,"match_experience":match_experience,"messages":messages}),wall)?;
-        if let Some((state, match_total)) = updated {
+        self.record(json!({"op":"progression_committed","reward_id":reward_id,"reservation_id":reservation_id,"progression":progression,"match_experience":match_experience,"leadership":leadership,"match_leadership_points":match_leadership_points,"messages":messages}),wall)?;
+        if let Some((state, match_total, leadership_update)) = updated {
             let reservation_id = recipient_id.as_ref().unwrap();
             let actor = if self
                 .active
@@ -465,8 +527,13 @@ impl<W: Write> Engine<W> {
             };
             actor.reservation.character.progression = Some(state);
             actor.match_experience = match_total;
-            if let Some((stat, value)) = statistic_update {
-                actor.reward_statistics.insert(stat, value);
+            if let Some(update) = leadership_update {
+                actor.install_committed_leadership(update);
+            }
+            if actor_in_round {
+                for &(stat, value) in &statistic_updates {
+                    actor.reward_statistics.insert(stat, value);
+                }
             }
         }
         for (id, wire) in level_publications {
@@ -489,7 +556,7 @@ impl<W: Write> Engine<W> {
         }
         if same_round {
             participation.match_experience = match_total;
-            if let Some((stat, value)) = statistic_update {
+            for &(stat, value) in &statistic_updates {
                 participation.statistics.insert(stat, value);
             }
             self.round_participants.insert(key, participation);
