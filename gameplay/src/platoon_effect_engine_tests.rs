@@ -23,9 +23,17 @@ fn command_engine(rules: EffectRules) -> Engine<Vec<u8>> {
             mode.platoon = vec![rules.ability()];
         }
     }
+    let side = if rules.ability() == Ability::PrecisionStrike {
+        Side::Attacker
+    } else {
+        Side::Defender
+    };
     setup
         .effects
-        .push((Side::Defender, 1, rules.ability(), rules));
+        .iter_mut()
+        .find(|row| row.0 == side && row.1 == 1 && row.2 == rules.ability())
+        .unwrap()
+        .3 = rules;
 
     let geometry = configured()
         .with_dynamic_collision_bodies(

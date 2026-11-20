@@ -28,6 +28,8 @@ pub mod active_ability_effects;
 pub mod active_ability_engine;
 #[cfg(test)]
 mod active_ability_engine_tests;
+mod active_ability_gas_world;
+pub mod active_ability_precision;
 #[cfg(test)]
 mod active_ability_publication_tests;
 pub mod active_ability_sensor;
@@ -80,6 +82,12 @@ mod incapacitation_tests;
 pub mod leadership_passives;
 pub mod leadership_runtime;
 pub mod navmesh;
+#[cfg(test)]
+mod platoon_ability_engine_tests;
+#[cfg(test)]
+mod platoon_ability_publication_tests;
+#[cfg(test)]
+mod platoon_effect_engine_tests;
 pub mod retail_movement;
 pub mod static_collision_partition;
 pub mod structure_damage;

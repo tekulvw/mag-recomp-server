@@ -356,6 +356,18 @@ impl<W: Write> Engine<W> {
         if policy.has_development_bindings() && !self.development_control {
             return Err("leadership_bindings_require_development_control");
         }
+        if policy.supports_platoon_election()
+            && (self
+                .active_abilities
+                .as_ref()
+                .is_some_and(|runtime| !runtime.setup.has_platoon_effects())
+                || self
+                    .match_profiles
+                    .as_ref()
+                    .is_some_and(match_profiles::Registry::has_squad_only_abilities))
+        {
+            return Err("platoon_leadership_requires_complete_active_abilities");
+        }
         self.leadership = Some(LeadershipRuntime {
             catalog,
             policy,

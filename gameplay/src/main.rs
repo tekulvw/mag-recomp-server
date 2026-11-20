@@ -1158,6 +1158,32 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             )
         })
         .transpose()?;
+    let supports_platoon = leadership
+        .as_ref()
+        .is_some_and(|(_, policy)| policy.supports_platoon_election());
+    let needs_platoon = active_abilities
+        .as_ref()
+        .is_some_and(|setup| setup.has_platoon_effects())
+        || match_profiles
+            .as_ref()
+            .is_some_and(|profiles| profiles.has_platoon_abilities());
+    if needs_platoon && !supports_platoon {
+        return Err(io::Error::other(
+            "active_abilities_require_native_platoon_leadership",
+        ));
+    }
+    if supports_platoon
+        && (active_abilities
+            .as_ref()
+            .is_some_and(|setup| !setup.has_platoon_effects())
+            || match_profiles
+                .as_ref()
+                .is_some_and(|profiles| profiles.has_squad_only_abilities()))
+    {
+        return Err(io::Error::other(
+            "platoon_leadership_requires_complete_active_abilities",
+        ));
+    }
     if let Some(registry) = &match_profiles {
         if leadership.is_some() && !native_leadership {
             return Err(io::Error::other(

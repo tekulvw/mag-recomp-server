@@ -114,6 +114,7 @@ fn setup() -> Setup {
         }],
         effects,
         damage_triggers: Vec::new(),
+        precision_targets: Vec::new(),
     }
 }
 

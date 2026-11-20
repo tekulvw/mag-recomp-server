@@ -1,16 +1,19 @@
 # Leadership active abilities
 
 Workers configured for source-backed Acquisition or Domination gameplay enable
-squad ClusterBomb and Sensor by default. The server validates the external ability
+the mode's supported squad and platoon command effects by default. The server validates the external ability
 inputs before it can accept a match. Authenticated command requests use the normal
 Engine event, world tick, damage and reliable replication paths. Source checks
 are independent of native-client gameplay acceptance.
 
 ## Supported scope
 
-The held native squad leader can issue a command for that exact squad. A command
-uses the server clock and the round-owned unit timers; replacing the leader does
-not reset either timer. A dead character cannot execute. Availability follows the
+The held native squad leader can issue a command for that exact squad. The held
+platoon leader addresses the canonical first squad of that platoon, as the retail
+client does. Neither a client-supplied address nor a saved leadership level grants
+command authority. A command uses the server clock and the round-owned unit timers;
+squad and platoon instances have distinct individual timers and share the platoon
+gate. Replacing the leader does not reset those timers. A dead character cannot execute. Availability follows the
 retail mode switch and authored lists: Sabotage grants no command abilities,
 Acquisition uses its attacker128 lists for both sides, and Domination uses its
 side-specific256 lists. The local admission cap does not select a different list.
@@ -40,9 +43,42 @@ re-reading one cached sample cannot establish speed. Detection lasts five second
 and is replicated through native Character fields. These replacement worlds have
 no satellite-jammer producer. Adding one requires its native suppression predicate.
 
-Platoon/OIC execution, other command effects and strategic abilities remain
-unsupported. Native availability is retained for diagnostics and future consumers;
-receiving an unsupported request does not report an accepted activation.
+Native platoon election fills vacancies before squad election. It scans the actual
+squad/member order, applies the projected platoon weights and nomination bit, and
+keeps the first candidate on equal scores. A squad leader can be promoted; that
+promotion vacates the squad role and allows its replacement in the same recorded
+reconciliation. Withdrawal, departure and transfer remove stale authority. Saved
+records and account progression are not modified by holding a role.
+
+Precision Strike admits only an enemy Structural demolition objective from the
+qualified map inventory. At its due time it resolves the sealed native target ID
+again and requests Completed through the normal objective state/callback path.
+It does not apply generic blast damage or make hospitals eligible targets.
+Domination runs the Structural entry callbacks for each intermediate state and
+publishes the final state once. Acquisition's qualified targets are outside its
+secure/arrival callback roster: their Structural state and normal network update
+are supported, while a general Acquisition Structural explosion/sequence provider
+remains separate work.
+
+Guided Artillery emits a single point blast at the accepted location, using its
+vehicle damage channel and its own overlap/cover rules. It does not apply that
+channel's amount to characters or objective structures. Strafing Run derives its
+three paths from the canonical squad's first authored Alternate spawn, retaining
+native pass timing, direction changes, scatter and vertical impact casts.
+
+Gas Bombardment combines separately scheduled bomblets with a persistent chemical
+damage volume. The volume uses native half-second pulses, per-life damage admission
+shared across overlapping clouds, chemical modifiers and source attribution. Gas
+passes through cover; it does not bypass temporary protection or turn a reused
+player slot into the original attacker. If the original gas source no longer
+resolves, its receiver uses the native unresolved-source damage base.
+The current shared collision collector excludes mounted characters. Exact damage
+to an exposed vehicle occupant requires the retail seat-visibility binding and
+remains unqualified; the vehicle itself still uses its supported damage path.
+
+OIC and strategic execution remain unsupported. Unsupported requests are denied
+without reporting an accepted activation. Authored mode/side lists still determine
+which of the implemented effects belongs to a squad or platoon.
 
 ## Configuration and extraction
 
@@ -50,7 +86,9 @@ Place `<map_name>--active-abilities.json` beside the Acquisition or Domination
 gameplay configuration. `map_name` is the selected spawn catalog's map name.
 Each setup requires its matching collision world and objective catalog. Workers
 must supply `--leadership-passives` and `--leadership-role-policy` for native
-squad election without development bindings. Startup fails if any required
+squad and platoon election without development bindings. Full effect setups require
+the projected schema-3 role policy; the local fallback record still controls only
+characters whose saved record is absent, and is not an account grant. Startup fails if any required
 input is missing or invalid.
 
 To use a different absolute manifest path, pass `--active-abilities` on a fixed
@@ -70,7 +108,15 @@ An ability manifest has this shape, with all paths absolute:
 ```
 
 Use `tools/extraction/project-retail-active-ability-effects.py` with the original
-retail rules archive to extract effect tuning. The static-ray projector binds the
+retail rules archive to extract schema-2 effect tuning and its six source members.
+The complete inventory has 33 rows: six side/faction rows for each effect except
+Precision Strike, whose three faction rows are shared by both sides. Reproject map
+bindings as schema 3 to include the explicit precision-target inventory alongside
+the damage-trigger inventory. Legacy squad-only inputs retain their narrower
+capabilities with the squad-only role policy. They cannot be paired with platoon
+election, including inside a mixed registry; reproject every affected profile
+before using the full platoon policy. Missing platoon data is never supplied
+implicitly. The static-ray projector binds the
 existing complete source geometry projection to native root and child filters and
 records the exact scene hash. Map bindings require the original level archive and
 qualified objective allocation/pose catalogs. The populated catalogs and original
@@ -92,7 +138,7 @@ independent native movement simulation.
 
 Command candidates are installed only after durable event recording. Timed effects
 are captured with the enclosing world transaction, including actor damage, rewards,
-scan cursors and timers. An unavailable collision prerequisite rejects that
+scan cursors, persistent gas volumes, per-life pulse admission and timers. An unavailable collision prerequisite rejects that
 candidate and leaves the pending sample available for a later qualified retry.
 
 Each recipient receives platoon creation before later ability deltas. Ability data

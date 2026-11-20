@@ -445,6 +445,23 @@ impl Registry {
         Ok(())
     }
 
+    pub fn has_platoon_abilities(&self) -> bool {
+        self.profiles.values().any(|profile| {
+            profile
+                .active_abilities
+                .as_ref()
+                .is_some_and(|setup| setup.has_platoon_effects())
+        })
+    }
+    pub fn has_squad_only_abilities(&self) -> bool {
+        self.profiles.values().any(|profile| {
+            profile
+                .active_abilities
+                .as_ref()
+                .is_some_and(|setup| !setup.has_platoon_effects())
+        })
+    }
+
     pub fn has_active_abilities(&self) -> bool {
         self.profiles
             .values()
@@ -517,6 +534,16 @@ impl<W: Write> Engine<W> {
             || self.development_dummy
         {
             return Err("match_profiles_unsupported_world_extras");
+        }
+        let supports_platoon = self
+            .leadership
+            .as_ref()
+            .is_some_and(|leadership| leadership.supports_platoon_election());
+        if registry.has_platoon_abilities() && !supports_platoon {
+            return Err("active_abilities_require_native_platoon_leadership");
+        }
+        if registry.has_squad_only_abilities() && supports_platoon {
+            return Err("platoon_leadership_requires_complete_active_abilities");
         }
         if registry.has_active_abilities()
             && !self
@@ -798,6 +825,47 @@ mod tests {
                 .with_leadership_passives(leadership_catalog(), native_leadership_policy())
                 .unwrap()
                 .native_leader_election()
+        );
+    }
+
+    #[test]
+    fn registry_legacy_active_abilities_reject_platoon_election_in_both_builder_orders() {
+        const ERROR: &str = "platoon_leadership_requires_complete_active_abilities";
+        let files = Files::new();
+        let legacy_registry = || {
+            let mut registry = files.registry();
+            let profile = registry.profiles.get_mut("p-1-0-1").unwrap();
+            let mut setup = crate::active_ability_engine_tests::configured()
+                .active_abilities
+                .unwrap()
+                .setup;
+            Arc::make_mut(&mut setup).map_name = profile.spawns.map_name().to_owned();
+            profile.active_abilities = Some(setup);
+            registry
+        };
+        assert_eq!(
+            base_engine(&files, Vec::new(), 100_000)
+                .with_leadership_passives(
+                    leadership_catalog(),
+                    platoon_leadership_policy().unwrap()
+                )
+                .unwrap()
+                .with_match_profiles(legacy_registry())
+                .err(),
+            Some(ERROR)
+        );
+        assert_eq!(
+            base_engine(&files, Vec::new(), 100_000)
+                .with_leadership_passives(leadership_catalog(), native_leadership_policy())
+                .unwrap()
+                .with_match_profiles(legacy_registry())
+                .unwrap()
+                .with_leadership_passives(
+                    leadership_catalog(),
+                    platoon_leadership_policy().unwrap()
+                )
+                .err(),
+            Some(ERROR)
         );
     }
 

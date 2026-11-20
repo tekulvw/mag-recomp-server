@@ -59,8 +59,14 @@ pub struct Setup {
     pub objectives: Vec<SensorObjective>,
     pub effects: Vec<(Side, u8, Ability, EffectRules)>,
     pub damage_triggers: Vec<crate::structure_damage_world::Rule>,
+    pub precision_targets: Vec<crate::active_ability_precision::PrecisionTarget>,
 }
 impl Setup {
+    pub fn has_platoon_effects(&self) -> bool {
+        self.effects
+            .iter()
+            .any(|(_, _, ability, _)| !matches!(ability, Ability::ClusterBomb | Ability::Sensor))
+    }
     pub fn validate(&self) -> Result<(), &'static str> {
         self.rules.validate()?;
         crate::structure_damage_world::World::new(&self.damage_triggers)?;
@@ -94,6 +100,14 @@ impl Setup {
         {
             return Err("invalid_active_ability_map_binding");
         }
+        let mut targets = BTreeSet::new();
+        if self
+            .precision_targets
+            .iter()
+            .any(|target| target.team > 1 || !targets.insert(target.object_index))
+        {
+            return Err("invalid_precision_target_binding");
+        }
         let mut seen = BTreeSet::new();
         for &(side, faction, ability, rules) in &self.effects {
             if faction > 2 || !seen.insert((side == Side::Defender, faction, ability.code())) {
@@ -101,7 +115,33 @@ impl Setup {
             }
             Effect::new(ability, side, 0, true, [0.; 3], rules)?;
         }
-        if seen.len() != 12 {
+        let full = self
+            .effects
+            .iter()
+            .any(|(_, _, ability, _)| !matches!(ability, Ability::ClusterBomb | Ability::Sensor));
+        for side in [false, true] {
+            for faction in 0..3 {
+                for ability in [
+                    Ability::ClusterBomb,
+                    Ability::Sensor,
+                    Ability::PrecisionStrike,
+                    Ability::GuidedArtillery,
+                    Ability::GasBombardment,
+                    Ability::StrafingRun,
+                ] {
+                    if !full && !matches!(ability, Ability::ClusterBomb | Ability::Sensor) {
+                        continue;
+                    }
+                    if side && ability == Ability::PrecisionStrike {
+                        continue;
+                    }
+                    if !seen.contains(&(side, faction, ability.code())) {
+                        return Err("incomplete_active_ability_effects");
+                    }
+                }
+            }
+        }
+        if seen.len() != if full { 33 } else { 12 } {
             return Err("incomplete_active_ability_effects");
         }
         Ok(())
@@ -123,6 +163,7 @@ impl Setup {
             version: 1,
             publications: BTreeMap::new(),
             area: AreaDamageState::default(),
+            gas: crate::active_ability_gas_world::GasWorld::default(),
         })
     }
 }
@@ -141,9 +182,15 @@ struct Running {
 }
 #[derive(Clone, Debug, Default)]
 struct Published {
-    platoons: BTreeMap<u16, u16>,
+    platoons: BTreeMap<u16, PublishedPlatoon>,
     squads: BTreeMap<u16, Unit>,
     detections: BTreeMap<u16, bool>,
+}
+#[derive(Clone, Debug, PartialEq)]
+struct PublishedPlatoon {
+    enabled: u16,
+    leader: u16,
+    unit: Unit,
 }
 #[derive(Clone, Debug)]
 struct Motion {
@@ -169,8 +216,8 @@ pub(crate) struct Runtime {
     pub(crate) setup: Arc<Setup>,
     structures: crate::structure_damage_world::World,
     cooldowns: NativeCooldowns,
-    units: BTreeMap<u16, Unit>,
-    effects: BTreeMap<(u16, u16), Running>,
+    units: BTreeMap<NativeAbilityScope, Unit>,
+    effects: BTreeMap<(NativeAbilityScope, u16), Running>,
     aaa_intercepts: BTreeMap<u16, u32>,
     surveillance: BTreeMap<u16, ObjectiveSurveillance>,
     histories: BTreeMap<u16, Motion>,
@@ -179,6 +226,7 @@ pub(crate) struct Runtime {
     version: u64,
     publications: BTreeMap<String, Published>,
     area: AreaDamageState,
+    gas: crate::active_ability_gas_world::GasWorld,
 }
 impl Runtime {
     pub(crate) fn reset(&mut self) {
@@ -236,6 +284,17 @@ impl<W: Write> Engine<W> {
         {
             return Err("active_abilities_require_native_leadership");
         }
+        let supports_platoon = self
+            .leadership
+            .as_ref()
+            .is_some_and(|leadership| leadership.supports_platoon_election());
+        let has_platoon_effects = setup.has_platoon_effects();
+        if has_platoon_effects && !supports_platoon {
+            return Err("active_abilities_require_native_platoon_leadership");
+        }
+        if !has_platoon_effects && supports_platoon {
+            return Err("platoon_leadership_requires_complete_active_abilities");
+        }
         if !setup.damage_triggers.is_empty() && self.match_profile().game_type != 2 {
             return Err("structure_damage_requires_native_domination_objective_lifecycle");
         }
@@ -264,17 +323,29 @@ impl<W: Write> Engine<W> {
         if !actor.entered_game || !actor.ready_for_updates || actor.initial_objects.is_none() {
             return denied("command_actor_not_created");
         }
-        if self.command_leadership_role(actor) != Some(CommandRole::SquadLeader) {
+        let Some(role) = self.command_leadership_role(actor) else {
             return denied("command_requires_native_squad_leader");
-        }
+        };
         if matches!(actor.life, CharacterLife::AwaitingRespawn { .. }) {
             return denied("command_character_dead");
         }
         let squad = actor.squad_catalog.squad_index();
         let platoon = squad / 4;
-        if request.squad_index != squad {
-            return denied("command_wrong_squad");
-        }
+        let scope = match role {
+            CommandRole::SquadLeader => {
+                if request.squad_index != squad {
+                    return denied("command_wrong_squad");
+                }
+                NativeAbilityScope::Squad(squad)
+            }
+            CommandRole::PlatoonLeader => {
+                // The retail client addresses a platoon via its canonical first squad.
+                if request.squad_index != platoon * 4 {
+                    return denied("command_wrong_platoon");
+                }
+                NativeAbilityScope::Platoon(platoon)
+            }
+        };
         let side = if actor.team() == 0 {
             Side::Attacker
         } else {
@@ -282,30 +353,39 @@ impl<W: Write> Engine<W> {
         };
         let mask = native_ability_mask(request.ability).unwrap_or(0);
         if mask == 0
-            || next.available(
-                self.match_profile().game_type as u16,
-                side,
-                CommandRole::SquadLeader,
-            ) & mask
-                == 0
+            || next.available(self.match_profile().game_type as u16, side, role) & mask == 0
         {
             return denied("command_unavailable_in_mode");
         }
-        if !matches!(request.ability, Ability::ClusterBomb | Ability::Sensor) {
+        // Every admitted command must have verified authored effect rules.
+        let rules = next
+            .setup
+            .effects
+            .iter()
+            .find(|(s, f, a, _)| {
+                (*s == side || request.ability == Ability::PrecisionStrike)
+                    && *f == actor.reservation.character.faction
+                    && *a == request.ability
+            })
+            .map(|r| r.3);
+        let Some(rules) = rules else {
             return denied("command_effect_not_implemented");
-        }
-        if (request.ability == Ability::ClusterBomb || side == Side::Attacker)
+        };
+        if (request.ability != Ability::Sensor || side == Side::Attacker)
             && !next.setup.boundary.contains(request.position)
         {
             return denied("command_target_outside_level");
         }
+        if request.ability == Ability::PrecisionStrike
+            && !self.precision_target_allowed(request.target_id, actor.team())?
+        {
+            return denied("command_invalid_precision_target");
+        }
         let now_ms = now.as_millis() as u32;
-        if next.cooldowns.remaining_ms(
-            NativeAbilityScope::Squad(squad),
-            request.ability,
-            now_ms,
-            0.,
-        )? != 0
+        if next
+            .cooldowns
+            .remaining_ms(scope, request.ability, now_ms, 0.)?
+            != 0
         {
             return denied("command_cooldown");
         }
@@ -345,16 +425,7 @@ impl<W: Write> Engine<W> {
         } else if !enabled {
             return denied("command_disabled_by_platoon");
         }
-        let rules = next
-            .setup
-            .effects
-            .iter()
-            .find(|(s, f, a, _)| {
-                *s == side && *f == actor.reservation.character.faction && *a == request.ability
-            })
-            .map(|r| r.3)
-            .ok_or("active_ability_effect_rules_missing")?;
-        let key = (squad, request.ability.code());
+        let key = (scope, request.ability.code());
         let effect = match next.effects.get(&key) {
             Some(old) => old.effect.rearm(
                 request.ability,
@@ -396,17 +467,17 @@ impl<W: Write> Engine<W> {
                 platoon,
             },
         );
-        let unit = next.units.entry(squad).or_default();
+        let unit = next.units.entry(scope).or_default();
         unit.data[usize::from(request.ability.code() - 1)] = Some(NativeAbilityData {
             position: request.position,
-            squad_index: squad,
+            squad_index: request.squad_index,
             activate_time_ms: now_ms,
             enabled_at_start: success,
             target_id: request.target_id,
         });
         unit.active |= mask;
         next.cooldowns.record(
-            NativeAbilityScope::Squad(squad),
+            scope,
             request.ability,
             now_ms,
             if success {
@@ -425,6 +496,96 @@ impl<W: Write> Engine<W> {
             None,
         ))
     }
+    fn command_source(&self, running: &Running) -> (u32, Option<crate::structure_damage::Source>) {
+        let actor = self.active.iter().chain(self.peers.values()).find(|a| {
+            a.reservation.player == running.invoker
+                && a.reservation.id == running.reservation
+                && a.reservation.world == running.world
+        });
+        let Some(actor) = actor else {
+            return (u32::MAX, None);
+        };
+        let generation = match actor.life {
+            CharacterLife::AwaitingFirstSpawn => 0,
+            CharacterLife::Alive { generation, .. }
+            | CharacterLife::Incapacitated { generation, .. }
+            | CharacterLife::AwaitingRespawn { generation } => generation,
+        };
+        (
+            0x0380_0000 | u32::from(running.invoker),
+            Some(crate::structure_damage::Source {
+                player: running.invoker,
+                generation,
+            }),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn stage_command_blast(
+        &mut self,
+        runtime: &mut Runtime,
+        running: &Running,
+        native: &mut BTreeMap<u32, acquisition_character_effects::NativeState>,
+        now: Duration,
+        work: domination_structural_world::DamageWork,
+        collision: BlastCollision<'_>,
+        ground_policy: Option<&acquisition_ground_damage::Policy>,
+        objectives: Option<&mut objective_control::ObjectiveWorld>,
+    ) -> Result<domination_structural_world::DamageCommit, &'static str> {
+        use domination_structural_world::{BlastSource, DamageWork};
+        let DamageWork::Blast { source, blast, .. } = &work else {
+            return Err("command_requires_blast_work");
+        };
+        let raw_damage = blast.damage;
+        let structure_hits = if runtime.structures.has_targets()
+            && matches!(
+                source,
+                BlastSource::AirStrike | BlastSource::CommandBomblet(_)
+            ) {
+            if (collision.filter_rows[19] | collision.filter_rows[24]) & (1 << 6) != 0 {
+                return Err("structure_phantom_raycast_filter_unqualified");
+            }
+            runtime.structures.collect_with_scale(
+                blast,
+                collision.filter_rows[6],
+                collision.limits,
+                |distance| source.scale(blast, distance),
+            )?
+        } else {
+            Vec::new()
+        };
+        let attacker = self.command_source(running).0;
+        let team = u8::from(running.platoon >= 4);
+        let previous = self
+            .active_ability_damage_team
+            .replace((attacker, running.world, team));
+        let result = (|| {
+            let mut commit = self.stage_domination_damage_with_ground(
+                &mut runtime.area,
+                native,
+                now,
+                &[work],
+                ground_policy,
+            )?;
+            if !structure_hits.is_empty() {
+                commit.audit.extend(self.stage_structure_strike(
+                    &mut runtime.structures,
+                    objectives,
+                    &structure_hits,
+                    raw_damage,
+                    attacker,
+                    now,
+                )?);
+            }
+            for dose in &mut commit.helo_doses {
+                dose.source_team = Some(team);
+            }
+            Ok(commit)
+        })();
+        self.active_ability_damage_team = previous;
+        result
+    }
+
     fn ability_targets(&self, runtime: &mut Runtime, now: Duration) -> Vec<Target> {
         let mut targets = Vec::new();
         for actor in self.active.iter().chain(self.peers.values()) {
@@ -493,6 +654,7 @@ impl<W: Write> Engine<W> {
     }
     /// Invoked after native ground/character/wave work and before objective updates.
     /// The surrounding world callback records or restores this whole candidate.
+    #[cfg(test)]
     pub(crate) fn stage_active_ability_update(
         &mut self,
         now: Duration,
@@ -503,7 +665,7 @@ impl<W: Write> Engine<W> {
         let mut objectives = self
             .active_abilities
             .as_ref()
-            .filter(|r| r.structures.has_targets())
+            .filter(|r| r.structures.has_targets() || !r.setup.precision_targets.is_empty())
             .and_then(|_| self.objective_world.clone());
         let has_world = objectives.is_some();
         let result = self.stage_active_ability_update_in_world(
@@ -559,92 +721,165 @@ impl<W: Write> Engine<W> {
             if !self.match_started || self.match_terminal.is_some() {
                 return Ok(());
             }
+            let (gas_audit, gas_messages) = runtime.gas.stage(self, native, now, collision)?;
+            result.audit.extend(gas_audit);
+            result.messages.extend(gas_messages);
             let keys: Vec<_> = runtime.effects.keys().copied().collect();
             for key in keys {
                 let mut running = runtime.effects[&key].clone();
                 if running.effect.is_complete() {
                     continue;
                 }
-                let (next, work) = running.effect.prepare_tick(now.as_millis() as u32)?;
+                let unit = runtime
+                    .units
+                    .get(&key.0)
+                    .ok_or("active_ability_unit_missing")?;
+                let data =
+                    unit.data[usize::from(key.1 - 1)].ok_or("active_ability_data_missing")?;
+                let origin = self
+                    .spawn_catalog
+                    .as_ref()
+                    .and_then(|catalog| {
+                        catalog.selected_squad(data.squad_index).and_then(|squad| {
+                            squad
+                                .available
+                                .iter()
+                                .filter_map(|index| catalog.point(*index))
+                                .find(|point| {
+                                    matches!(point.kind, spawn_catalog::SpawnKind::Alternate)
+                                })
+                        })
+                    })
+                    .map(|point| [point.position.x, point.position.y, point.position.z]);
+                let (next, work) = running
+                    .effect
+                    .prepare_tick_with_platoon(now.as_millis() as u32, origin)?;
                 running.effect = next;
                 match work {
                     Work::ClusterSample(sample) => {
-                        // A cached native leader ID must never credit a replacement occupant.
-                        let owned = self.active.iter().chain(self.peers.values()).any(|a| {
-                            a.reservation.player == running.invoker
-                                && a.reservation.id == running.reservation
-                        });
-                        let attacker = if owned {
-                            0x0380_0000 | u32::from(running.invoker)
-                        } else {
-                            u32::MAX
-                        };
-                        let b = sample.blast;
-                        let team = u8::from(running.platoon >= 4);
-                        let world = running.world;
-                        let previous_team = self
-                            .active_ability_damage_team
-                            .replace((attacker, world, team));
-                        let strike = (|| {
-                            if let Some(work) = self.collect_air_strike_blast(
-                                attacker,
-                                sample.xz,
-                                runtime.setup.vertical_bounds,
-                                InstantaneousBlast {
-                                    origins: Vec::new(),
-                                    damage: b.damage,
-                                    inner_radius: b.inner_radius,
-                                    outer_radius: b.outer_radius,
-                                    material_penetration: 0.,
-                                },
+                        let attacker = self.command_source(&running).0;
+                        if let Some(work) = self.collect_air_strike_blast(
+                            attacker,
+                            sample.xz,
+                            runtime.setup.vertical_bounds,
+                            InstantaneousBlast {
+                                origins: Vec::new(),
+                                damage: sample.blast.damage,
+                                inner_radius: sample.blast.inner_radius,
+                                outer_radius: sample.blast.outer_radius,
+                                material_penetration: 0.,
+                            },
+                            collision,
+                        )? {
+                            let mut commit = self.stage_command_blast(
+                                &mut runtime,
+                                &running,
+                                native,
+                                now,
+                                work,
                                 collision,
-                            )? {
-                                let domination_structural_world::DamageWork::Blast {
-                                    blast, ..
-                                } = &work
-                                else {
-                                    return Err("structure_strike_requires_blast");
-                                };
-                                if runtime.structures.has_targets()
-                                    && (collision.filter_rows[19] | collision.filter_rows[24])
-                                        & (1 << 6)
-                                        != 0
-                                {
-                                    return Err("structure_phantom_raycast_filter_unqualified");
-                                }
-                                let structure_hits = runtime.structures.collect(
-                                    blast,
-                                    collision.filter_rows[6],
-                                    collision.limits,
-                                )?;
-                                let raw_damage = blast.damage;
-                                let mut commit = self.stage_domination_damage_with_ground(
-                                    &mut runtime.area,
-                                    native,
-                                    now,
-                                    &[work],
-                                    ground_policy,
-                                )?;
-                                result.audit.extend(self.stage_structure_strike(
-                                    &mut runtime.structures,
-                                    objectives.as_deref_mut(),
-                                    &structure_hits,
-                                    raw_damage,
+                                ground_policy,
+                                objectives.as_deref_mut(),
+                            )?;
+                            result.audit.append(&mut commit.audit);
+                            result.messages.append(&mut commit.messages);
+                            result.changed_ground.append(&mut commit.changed_ground);
+                            result.helo_doses.append(&mut commit.helo_doses);
+                        }
+                    }
+                    Work::PrecisionStrike => {
+                        let world = objectives
+                            .as_deref_mut()
+                            .ok_or("precision_objective_world_required")?;
+                        let source = self.command_source(&running).1;
+                        let changed = self.stage_precision_strike(world, data.target_id, source)?;
+                        result.audit.push(
+                            json!({"op":"precision_strike_target","target_id":data.target_id,
+                            "source":source.map(|s|s.player),"staged":changed}),
+                        );
+                    }
+                    Work::GuidedArtillery { origin, radius } => {
+                        let attacker = self.command_source(&running).0;
+                        let work = self
+                            .collect_guided_artillery_blast(attacker, origin, radius, collision)?;
+                        let mut commit = self.stage_command_blast(
+                            &mut runtime,
+                            &running,
+                            native,
+                            now,
+                            work,
+                            collision,
+                            ground_policy,
+                            objectives.as_deref_mut(),
+                        )?;
+                        result.audit.append(&mut commit.audit);
+                        result.messages.append(&mut commit.messages);
+                        result.changed_ground.append(&mut commit.changed_ground);
+                        result.helo_doses.append(&mut commit.helo_doses);
+                    }
+                    Work::GasBombardment { volume, bomblet } => {
+                        let attacker = self.command_source(&running).0;
+                        if let Some(volume) = volume {
+                            runtime.gas.register(
+                                volume,
+                                crate::active_ability_gas_world::GasSource {
                                     attacker,
-                                    now,
-                                )?);
-                                for dose in &mut commit.helo_doses {
-                                    dose.source_team = Some(team);
-                                }
-                                result.audit.extend(commit.audit);
-                                result.messages.extend(commit.messages);
-                                result.changed_ground.extend(commit.changed_ground);
-                                result.helo_doses.extend(commit.helo_doses);
-                            }
-                            Ok(())
-                        })();
-                        self.active_ability_damage_team = previous_team;
-                        strike?;
+                                    world: running.world,
+                                    team: u8::from(running.platoon >= 4),
+                                    reservation: running.reservation.clone(),
+                                },
+                                now,
+                            )?;
+                        }
+                        if let Some(sample) = bomblet
+                            && let Some(work) = self.collect_command_bomblet(
+                                attacker,
+                                sample,
+                                runtime.setup.vertical_bounds,
+                                true,
+                                collision,
+                            )?
+                        {
+                            let mut commit = self.stage_command_blast(
+                                &mut runtime,
+                                &running,
+                                native,
+                                now,
+                                work,
+                                collision,
+                                ground_policy,
+                                objectives.as_deref_mut(),
+                            )?;
+                            result.audit.append(&mut commit.audit);
+                            result.messages.append(&mut commit.messages);
+                            result.changed_ground.append(&mut commit.changed_ground);
+                            result.helo_doses.append(&mut commit.helo_doses);
+                        }
+                    }
+                    Work::StrafingRun(sample) => {
+                        let attacker = self.command_source(&running).0;
+                        if let Some(work) = self.collect_command_bomblet(
+                            attacker,
+                            sample,
+                            [-1000., 1000.],
+                            false,
+                            collision,
+                        )? {
+                            let mut commit = self.stage_command_blast(
+                                &mut runtime,
+                                &running,
+                                native,
+                                now,
+                                work,
+                                collision,
+                                ground_policy,
+                                objectives.as_deref_mut(),
+                            )?;
+                            result.audit.append(&mut commit.audit);
+                            result.messages.append(&mut commit.messages);
+                            result.changed_ground.append(&mut commit.changed_ground);
+                            result.helo_doses.append(&mut commit.helo_doses);
+                        }
                     }
                     Work::ScanSquad(scan) => {
                         for target in targets.iter().filter(|t| t.squad == scan.slot) {
@@ -751,6 +986,10 @@ impl<W: Write> Engine<W> {
             .iter()
             .filter(|a| a.initial_objects.is_some())
             .map(|a| a.squad_catalog.squad_index())
+            .chain(next.units.keys().filter_map(|scope| match scope {
+                NativeAbilityScope::Squad(index) => Some(*index),
+                NativeAbilityScope::Platoon(_) => None,
+            }))
             .collect();
         let enabled = self
             .domination_gameplay
@@ -773,7 +1012,15 @@ impl<W: Write> Engine<W> {
             let mut squad_updates = Vec::new();
             let mut detections = Vec::new();
             for platoon in 0..8 {
-                let value = enabled[usize::from(platoon)];
+                let value = PublishedPlatoon {
+                    enabled: enabled[usize::from(platoon)],
+                    leader: self.platoon_leader_index(platoon),
+                    unit: next
+                        .units
+                        .get(&NativeAbilityScope::Platoon(platoon))
+                        .cloned()
+                        .unwrap_or_default(),
+                };
                 if published.platoons.get(&platoon) == Some(&value) {
                     continue;
                 }
@@ -786,8 +1033,7 @@ impl<W: Write> Engine<W> {
                 if !published.platoons.contains_key(&platoon) {
                     update.active = Some(true);
                     update.owner_index = Some(0x105);
-                    update.leader_index = Some(u16::MAX);
-                    update.active_mask = Some(0);
+
                     update.available_mask = Some(next.available(
                         self.match_profile().game_type as u16,
                         side,
@@ -795,12 +1041,41 @@ impl<W: Write> Engine<W> {
                     ));
                     update.shadow_modifier_percent = Some(0);
                 }
-                update.enabled_mask = Some(value);
+                update.leader_index = Some(value.leader);
+                update.data = value.unit.data;
+                update.active_mask = Some(value.unit.active);
+                update.enabled_mask = Some(value.enabled);
                 platoon_updates.push(update);
                 published.platoons.insert(platoon, value);
             }
-            for &squad in &squads {
-                let unit = next.units.get(&squad).cloned().unwrap_or_default();
+            // A vacated squad can still have an active Unit or a previously
+            // published mask. Publish only to recipients with that native object.
+            let candidates: BTreeSet<_> = squads
+                .iter()
+                .chain(published.squads.keys())
+                .copied()
+                .collect();
+            let catalog = &actor.squad_catalog;
+            let selected_squad = catalog.squad_index();
+            let auto_assign = catalog.match_profile().auto_assign_teams;
+            for squad in candidates {
+                let registered = if catalog.map_pool().squads.is_empty() {
+                    squad == selected_squad
+                } else {
+                    catalog.selected_squad(squad).is_some_and(|binding| {
+                        auto_assign
+                            || (u16::from(binding.team) == selected_squad / 16
+                                && u16::from(binding.platoon) == (selected_squad % 16) / 4)
+                    })
+                };
+                if !registered {
+                    continue;
+                }
+                let unit = next
+                    .units
+                    .get(&NativeAbilityScope::Squad(squad))
+                    .cloned()
+                    .unwrap_or_default();
                 if published.squads.get(&squad) == Some(&unit) {
                     continue;
                 }
