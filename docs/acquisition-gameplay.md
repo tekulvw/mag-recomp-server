@@ -30,6 +30,42 @@ configuration. Startup checks run before logs/listeners; registry checks run
 before profile advertisement/selection. `--validate-catalogs` performs offline
 configuration checks without opening logs or serving a match.
 
+## Structural objective assets
+
+New source-projected profiles can include the `structural` member in their
+Acquisition gameplay configuration. Paths resolve relative to that configuration
+file.
+
+```json
+{
+  "structural": {
+    "bindings": "structural-bindings.json",
+    "effects": "structural-effects.json",
+    "collision_assets": "structural-collision",
+    "terrain_index": "terrain-materials.json",
+    "terrain_materials": "terrain-materials.bin"
+  }
+}
+```
+
+Use `project-retail-acquisition-structural.py` with the selected map's original
+disc, metadata, objective and spawn catalogs, and shared game archive. Use
+`--mode GameType128` on `project-retail-domination-structural-effects.py` and
+`project-retail-domination-terrain-materials.py` to prepare the matching effects,
+collision assets and terrain materials. Keep the projected inputs outside the
+public checkout. When `structural` is present, its linked inputs and original
+motor-pool allocations must validate before the profile loads. Existing
+configurations can omit this member.
+
+The provider runs the sourced startup entries and consumes Precision transitions
+in family-12 order. It applies linked insertion points, motor-pool hooks,
+tactical command availability, Structural explosions and area damage, and
+sequence collision. Committed sequence state is included in late-join
+replication. Bound native infantry spawn types 4, 5 and 8 use the authored
+category-zero point for local character insertion until their physical routes
+are qualified. Ordinary demolition and repair interactions for these structures
+also lack runtime coverage.
+
 ## Owned gameplay
 
 The objective tick clones objective, ground, character, round and vehicle-wave

@@ -363,6 +363,7 @@ fn acquisition_setup_fixture(
             arrival_static,
             ground_capabilities,
             vehicle_reinforcement_intervals_ms,
+            structural: None,
             ground_damage,
         },
     )
@@ -1059,4 +1060,101 @@ fn ground_grenade_allows_client_tcp_launch_and_rejects_server_direction_at_ingre
     grenade_packet_on_route(&mut e, &wire, Transport::Tcp, 3250).unwrap();
     assert_eq!(e.active.as_ref().unwrap().grenade_remaining, 0);
     assert!(e.active.as_ref().unwrap().projectiles.get(0).is_some());
+}
+
+#[test]
+fn acquisition_precision_produces_original_structural_entries_in_order() {
+    let mut engine = capture_fixture();
+    let world = engine.objective_world.as_mut().unwrap();
+    assert!(world.stage_precision_strike(120, None).unwrap());
+    let mut entries = Vec::new();
+    let updates = world
+        .advance_acquisition_precision_entries(Duration::from_millis(400), |entry, _| {
+            entries.push((
+                entry.previous,
+                entry.delta.state_actor.state,
+                entry.requires_authored_explosion(),
+            ));
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(
+        entries,
+        [
+            (
+                ObjectiveState::Deactivated,
+                ObjectiveState::Activating,
+                false
+            ),
+            (ObjectiveState::Activating, ObjectiveState::Activated, false),
+            (ObjectiveState::Activated, ObjectiveState::Completed, true),
+        ],
+    );
+}
+
+#[test]
+fn acquisition_structural_spawn_candidate_updates_actor_and_shared_availability() {
+    let mut engine = capture_fixture();
+    reserve(&mut engine, 0);
+    let actor = engine.active.as_ref().unwrap();
+    let squad = actor.squad_catalog.squad_index();
+    let old_default = actor.squad_spawn;
+    let current = engine.spawn_catalog.as_ref().unwrap();
+    let mut next = current.clone();
+    let destination = (0..16).find(|&index| index != old_default).unwrap();
+    next.set_runtime_squad_default(squad, destination).unwrap();
+    next.set_runtime_point_active(
+        old_default,
+        current.point(old_default).unwrap().token,
+        false,
+    )
+    .unwrap();
+    let mut shared = Vec::new();
+    let writes = engine
+        .prepare_runtime_spawn_publication(current, &next, 400, &mut shared)
+        .unwrap();
+    assert_eq!(engine.active.as_ref().unwrap().squad_spawn, old_default);
+    assert_eq!(shared.len(), 2);
+    engine.install_runtime_spawn_publication(&writes);
+    let actor = engine.active.as_ref().unwrap();
+    assert_eq!(actor.squad_spawn, destination);
+    assert!(actor.squad_catalog.alpha(destination).is_some());
+    assert!(actor.squad_catalog.alpha(old_default).is_none());
+}
+
+#[test]
+fn acquisition_structural_native_spawn_retains_supported_local_category_zero() {
+    let mut engine = capture_fixture();
+    reserve(&mut engine, 0);
+    let actor = engine.active.as_ref().unwrap();
+    let squad = actor.squad_catalog.squad_index();
+    let fallback = actor.squad_spawn;
+    let current = engine.spawn_catalog.as_ref().unwrap();
+    let mut next = current.clone();
+    let mut fallbacks = [u16::MAX; 32];
+    for (index, fallback) in fallbacks.iter_mut().enumerate() {
+        if let Some(binding) = current.selected_squad(index as u16) {
+            *fallback = binding.default_spawn;
+        }
+    }
+    let native_point = 16;
+    assert!(next.set_runtime_squad_default(squad, native_point).is_err());
+    next.configure_acquisition_structural_spawn_scope([native_point].into(), fallbacks)
+        .unwrap();
+    next.set_runtime_point_active(native_point, next.point(native_point).unwrap().token, true)
+        .unwrap();
+    next.set_runtime_squad_default(squad, native_point).unwrap();
+    let mut shared = Vec::new();
+    let writes = engine
+        .prepare_runtime_spawn_publication(current, &next, 400, &mut shared)
+        .unwrap();
+    assert_eq!(next.default_for_squad(squad), Some(native_point));
+    assert!(next.point_active(native_point));
+    assert_eq!(shared.len(), 1);
+    engine.install_runtime_spawn_publication(&writes);
+    let actor = engine.active.as_ref().unwrap();
+    assert_eq!(actor.squad_spawn, fallback);
+    assert_eq!(actor.selected_spawn.unwrap().spawn_point_index, fallback);
+    assert!(actor.squad_catalog.alpha(native_point).is_none());
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Project source-bound Domination Structural sequence and blast inputs without running assets."""
+"""Project source-bound retail Structural sequence and blast inputs without running assets."""
 
 import argparse
 import hashlib
@@ -188,15 +188,27 @@ def penetration_costs(main, game, header_parser):
     return result
 
 
-def project(archive_path, metadata_path, collision_output=None, main_archive=None, game_archive=None):
+def qualified_objective_classes(metadata, row, mode):
+    require(row['map']['mode_enum'] == mode
+            and metadata.get('mode_enum', mode) == mode, 'Wrong authored mode')
+    classes = {'ObjectiveDemolitionStructuralProperties'}
+    if mode == 'GameType256':
+        classes.add('ObjectiveSecureAndHoldProperties')
+    elif mode != 'GameType128':
+        raise ValueError('Unsupported Structural projection mode')
+    return classes
+
+
+def project(archive_path, metadata_path, collision_output=None, main_archive=None,
+            game_archive=None, *, mode='GameType256'):
     metadata_raw = metadata_path.read_bytes()
     metadata = json.loads(metadata_raw)
-    require(metadata['mode_enum'] == 'GameType256', 'Wrong authored mode')
     raw = archive_path.read_bytes()
     archive_digest = sha(raw)
     matches = [row for row in metadata['maps'] if row['source']['archive_sha256'] == archive_digest]
     require(len(matches) == 1, 'No unique source archive match')
     row, = matches
+    classes = qualified_objective_classes(metadata, row, mode)
     builder = runpy.run_path(str(TOOLS / 'build-retail-spawn-catalog.py'))
     archive = builder['extractor']().Psarc(raw)
     source = row['source']
@@ -219,9 +231,9 @@ def project(archive_path, metadata_path, collision_output=None, main_archive=Non
     projected = {}
     definitions = {}
     for definition in graph['definitions']:
-        structural = definition['class_name'] == 'ObjectiveDemolitionStructuralProperties'
-        if not structural and definition['class_name'] != 'ObjectiveSecureAndHoldProperties':
+        if definition['class_name'] not in classes:
             continue
+        structural = definition['class_name'] == 'ObjectiveDemolitionStructuralProperties'
         fields = definition['fields']
         require(fields['SequenceOwnerObjective']['raw_hex'] == '00000000',
                 'Linked sequence owner requires a separate root pose')
@@ -455,6 +467,7 @@ def main():
     for name in ('level-archive', 'metadata', 'output'):
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--collision-output', type=Path)
+    parser.add_argument('--mode', choices=('GameType128', 'GameType256'), default='GameType256')
     parser.add_argument('--main-archive', type=Path)
     parser.add_argument('--game-archive', type=Path)
     args = parser.parse_args()
@@ -466,7 +479,7 @@ def main():
     if len(outputs) == 2 and any(a.is_relative_to(b) for a, b in (outputs, outputs[::-1])):
         parser.error('Projection and collision output paths must be distinct and separate')
     result = project(args.level_archive, args.metadata, args.collision_output,
-                     args.main_archive, args.game_archive)
+                     args.main_archive, args.game_archive, mode=args.mode)
     with args.output.open('x') as file:
         file.write(json.dumps(result, indent=2, allow_nan=False) + '\n')
 

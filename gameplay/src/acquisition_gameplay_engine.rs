@@ -29,6 +29,7 @@ pub struct Setup {
     pub ground_capabilities: Vec<(u16, acquisition_ground_runtime::Capabilities)>,
     pub ground_damage: Option<acquisition_ground_damage::Policy>,
     pub vehicle_reinforcement_intervals_ms: [u32; 2],
+    pub structural: Option<crate::acquisition_structural::Setup>,
 }
 
 impl Setup {
@@ -89,22 +90,38 @@ pub(crate) struct Runtime {
     started: bool,
     pub(crate) last_ground_update: Option<Duration>,
     pub(crate) vehicle_waves: Option<acquisition_vehicle_waves::VehicleWaves>,
+    structural: Option<crate::acquisition_structural::Runtime>,
 }
 impl Runtime {
     pub(crate) fn from_setup(setup: Arc<Setup>) -> Self {
         Self {
             state: setup.state.clone(),
+            structural: setup
+                .structural
+                .clone()
+                .map(crate::acquisition_structural::Runtime::new),
             setup,
             started: false,
             last_ground_update: None,
             vehicle_waves: None,
         }
     }
+    pub(crate) fn current_structural_sequences(&self) -> Vec<replication::ObjectiveSequenceDelta> {
+        self.structural
+            .as_ref()
+            .map_or_else(Vec::new, crate::acquisition_structural::Runtime::sequences)
+    }
+
     pub(crate) fn reset(&mut self) {
         self.state = self.setup.state.clone();
         self.started = false;
         self.last_ground_update = None;
         self.vehicle_waves = None;
+        self.structural = self
+            .setup
+            .structural
+            .clone()
+            .map(crate::acquisition_structural::Runtime::new);
     }
 }
 
@@ -196,14 +213,7 @@ impl<W: Write> Engine<W> {
             &setup.ground_capabilities,
         )?;
         self.acquisition_round = Some(Round::new(setup.rules));
-        let state = setup.state.clone();
-        self.acquisition_gameplay = Some(Runtime {
-            setup: Arc::new(setup),
-            state,
-            started: false,
-            last_ground_update: None,
-            vehicle_waves: None,
-        });
+        self.acquisition_gameplay = Some(Runtime::from_setup(Arc::new(setup)));
         Ok(self)
     }
 
@@ -316,6 +326,16 @@ impl<W: Write> Engine<W> {
         }
         let mut ground_changes = BTreeMap::new();
         let mut transition_packets = Vec::new();
+        let mut sequence_deltas = BTreeMap::new();
+        let mut structural_spawns = if runtime.structural.is_some() {
+            Some(
+                self.spawn_catalog
+                    .clone()
+                    .ok_or("acquisition_structural_spawn_catalog_required")?,
+            )
+        } else {
+            None
+        };
         let mut native = self.owned_acquisition_characters();
         let characters = self.prepare_acquisition_character_callback(&native, now, |engine, native| {
             let mut audit = Vec::new();
@@ -333,10 +353,13 @@ impl<W: Write> Engine<W> {
                 let previous = engine.ground_runtime.replace(ground.clone());
                 let sequences = crate::domination_structural_world::SequenceCollisionState::default();
                 let costs = BTreeMap::new();
-                let result = engine.stage_active_ability_update_in_world(now, native, crate::domination_structural_world::BlastCollision {
-                    filter_rows: &setup.filter_rows, limits: setup.physics.query_limits,
-                    sequences: &sequences, material_costs: &costs, terrain_materials: None,
-                }, setup.ground_damage.as_ref(), Some(&mut world));
+                let collision = runtime.structural.as_ref().map_or(
+                    crate::domination_structural_world::BlastCollision {
+                        filter_rows: &setup.filter_rows, limits: setup.physics.query_limits,
+                        sequences: &sequences, material_costs: &costs, terrain_materials: None,
+                    }, |structural| structural.blast_collision(&setup.filter_rows, setup.physics));
+                let result = engine.stage_active_ability_update_in_world(now, native,
+                    collision, setup.ground_damage.as_ref(), Some(&mut world));
                 ground = std::mem::replace(&mut engine.ground_runtime, previous).ok_or("ground_vehicle_runtime_required")?;
                 let commit = result?;
                 audit.extend(commit.audit); messages.extend(commit.messages);
@@ -346,8 +369,26 @@ impl<W: Write> Engine<W> {
             if abilities_enabled {
                 stage_objective_observations(engine, &mut runtime, &mut world, now, &mut changed, &mut entry_actors)?;
             }
-            for delta in world.advance_acquisition_precision(now) {
-                changed.insert(delta.object_index, delta);
+            if let Some(structural) = &mut runtime.structural {
+                let mut frame = crate::acquisition_structural::Frame {
+                    engine,
+                    ground: &mut ground,
+                    spawns: structural_spawns.as_mut().ok_or("acquisition_structural_spawn_catalog_required")?,
+                    native,
+                    ground_changes: &mut ground_changes,
+                    audit: &mut audit,
+                    messages: &mut messages,
+                    sequences: &mut sequence_deltas,
+                    filter_rows: &setup.filter_rows,
+                    physics: setup.physics,
+                    ground_policy: setup.ground_damage.as_ref(),
+                    now,
+                };
+                changed.extend(structural.stage_world(&mut world, &mut frame, starting)?);
+            } else {
+                for delta in world.advance_acquisition_precision_entries(now, |_, _| Ok(()))? {
+                    changed.insert(delta.object_index, delta);
+                }
             }
             *native = engine.owned_acquisition_characters();
             for _ in 0..256 {
@@ -445,17 +486,54 @@ impl<W: Write> Engine<W> {
             )
         };
         let ground_packet = self.encode_ground_changes(&ground, &ground_changes, now)?;
+        let sequence_packets = replication::ObjectiveSequenceDelta::encode_batches(
+            &sequence_deltas.into_values().collect::<Vec<_>>(),
+            now.as_millis() as u32,
+            self.wire_profile,
+        )?;
+        let mut spawn_packets = Vec::new();
+        let spawn_writes = if let Some(next) = &structural_spawns {
+            self.prepare_runtime_spawn_publication(
+                self.spawn_catalog
+                    .as_ref()
+                    .ok_or("acquisition_structural_spawn_catalog_required")?,
+                next,
+                now.as_millis() as u32,
+                &mut spawn_packets,
+            )?
+        } else {
+            Vec::new()
+        };
         self.check_acquisition_character_effects(&characters, &native)?;
-        self.record(json!({"op":"acquisition_objective_tick","timestamp_ms":now.as_millis() as u64,"startup":starting,"controller_sha256":setup.controller.fingerprint(),"effects":characters.audit(),"messages":characters.messages(),"scores":round.points(),"objective_updates":transition_packets.iter().map(|p| protocol::encode_hex(p)).collect::<Vec<_>>(),"objectives":changed.values().map(|d|json!({"index":d.object_index,"state":d.state_actor.state as u8})).collect::<Vec<_>>()}), wall)?;
+        self.record(json!({
+            "op":"acquisition_objective_tick", "timestamp_ms":now.as_millis() as u64,
+            "startup":starting, "controller_sha256":setup.controller.fingerprint(),
+            "effects":characters.audit(), "messages":characters.messages(), "scores":round.points(),
+            "objective_updates":transition_packets.iter().map(|p| protocol::encode_hex(p)).collect::<Vec<_>>(),
+            "objectives":changed.values().map(|d|json!({"index":d.object_index,"state":d.state_actor.state as u8})).collect::<Vec<_>>(),
+            "spawn_updates":spawn_packets.iter().map(|p| protocol::encode_hex(p)).collect::<Vec<_>>(),
+            "personal_spawn_updates":spawn_writes.iter().filter_map(|write| write.packet.as_ref().map(|p|
+                json!({"player":write.player, "payload_hex":protocol::encode_hex(p)}))).collect::<Vec<_>>(),
+        }), wall)?;
         let messages = self.install_character_effects_after_record(characters, &mut native);
         self.ground_runtime = Some(ground);
         self.objective_world = Some(world);
         self.acquisition_round = Some(round);
         self.acquisition_gameplay = Some(runtime);
+        if let Some(spawns) = structural_spawns {
+            self.spawn_catalog = Some(spawns);
+        }
+        self.install_runtime_spawn_publication(&spawn_writes);
+        for packet in spawn_packets {
+            self.broadcast_bot_packet(packet);
+        }
         for packet in transition_packets {
             self.broadcast_bot_packet(packet);
         }
         if let Some(packet) = packet {
+            self.broadcast_bot_packet(packet);
+        }
+        for packet in sequence_packets {
             self.broadcast_bot_packet(packet);
         }
         if let Some(packet) = ground_packet {

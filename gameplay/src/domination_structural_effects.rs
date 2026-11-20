@@ -388,6 +388,19 @@ impl Catalog {
         Ok(&self.definitions[&self.placement(objective_token)?.definition_token])
     }
 
+    pub(crate) fn placed_objectives(&self) -> impl Iterator<Item = u32> + '_ {
+        self.placements.iter().map(|row| {
+            u32::from_str_radix(&row.objective_token[2..], 16).expect("validated objective token")
+        })
+    }
+
+    pub(crate) fn source_is(&self, map: &str, metadata: &str, archive: &str, clv: &str) -> bool {
+        self.map == map
+            && self.metadata_sha256 == metadata
+            && self.level_archive_sha256 == archive
+            && self.level_clv_sha256 == clv
+    }
+
     pub fn objective_pose(&self, objective_token: u32) -> Result<Pose, &'static str> {
         Ok(self.placement(objective_token)?.pose)
     }

@@ -679,14 +679,19 @@ fn plan_update_reply<W: Write>(
                 .filter(|w| !w.is_pristine())
             {
                 let snapshot = world.snapshot(next_sequence, timestamp);
-                if let Some(gameplay) = &ctx.engine.domination_gameplay {
-                    plan.replication.domination_sequence_batches =
-                        replication::ObjectiveSequenceDelta::encode_batches(
-                            &gameplay.current_sequences(),
-                            timestamp,
-                            ctx.engine.wire_profile,
-                        )?;
-                }
+                let sequences = if let Some(gameplay) = &ctx.engine.domination_gameplay {
+                    gameplay.current_sequences()
+                } else if let Some(gameplay) = &ctx.engine.acquisition_gameplay {
+                    gameplay.current_structural_sequences()
+                } else {
+                    Vec::new()
+                };
+                plan.replication.domination_sequence_batches =
+                    replication::ObjectiveSequenceDelta::encode_batches(
+                        &sequences,
+                        timestamp,
+                        ctx.engine.wire_profile,
+                    )?;
                 snapshot.encode_with_profile(ctx.engine.wire_profile)?
             } else {
                 catalog

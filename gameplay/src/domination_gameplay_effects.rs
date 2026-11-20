@@ -232,6 +232,25 @@ impl Structural {
         })
     }
 
+    pub(crate) fn from_acquisition_catalog(
+        catalog: Catalog,
+        objectives: &ObjectiveCatalog,
+    ) -> Result<Self, &'static str> {
+        let mut tokens = BTreeMap::new();
+        for token in catalog.placed_objectives() {
+            let (index, _) = objectives
+                .binding(token)
+                .ok_or("acquisition_structural_effect_objective_mismatch")?;
+            catalog.blast_properties(token)?;
+            tokens.insert(index, (token, NativeClass::Structural));
+        }
+        Ok(Self {
+            catalog,
+            tokens,
+            selected: BTreeMap::new(),
+        })
+    }
+
     fn validate_entry(
         &self,
         objective_token: u32,

@@ -193,10 +193,10 @@ pub struct SpawnCatalog {
     runtime_inactive: BTreeSet<u16>,
     #[serde(skip)]
     runtime_squads: BTreeMap<u16, RuntimeSquadSpawns>,
-    /// Explicit Domination scope only. These native squad defaults may name a
-    /// disabled insertion. Human selection remains on the sourced category0.
+    /// Native defaults whose insertion route has no supported consumer.
+    /// The local spawn choice uses the source-bound category-zero point.
     #[serde(skip)]
-    domination_helo_scope: Option<(BTreeSet<u16>, [u16; 32])>,
+    unselectable_native_spawns: Option<(BTreeSet<u16>, [u16; 32])>,
 }
 impl SpawnCatalog {
     pub fn load(path: impl AsRef<Path>) -> io::Result<Self> {
@@ -519,7 +519,7 @@ impl SpawnCatalog {
         source: &crate::domination_helo::FleetSource,
     ) -> Result<(), &'static str> {
         if self.match_profile().game_type != 2
-            || self.domination_helo_scope.is_some()
+            || self.unselectable_native_spawns.is_some()
             || source.carriers.len() != 4
         {
             return Err("invalid_domination_helo_scope");
@@ -573,12 +573,39 @@ impl SpawnCatalog {
         {
             return Err("invalid_domination_core_helo_scope");
         }
-        self.domination_helo_scope = Some((disabled, fallbacks));
+        self.unselectable_native_spawns = Some((disabled, fallbacks));
+        Ok(())
+    }
+
+    pub(crate) fn configure_acquisition_structural_spawn_scope(
+        &mut self,
+        points: BTreeSet<u16>,
+        fallbacks: [u16; 32],
+    ) -> Result<(), &'static str> {
+        if self.match_profile().game_type != 1
+            || !self.map_pool().runtime_indices_verified
+            || points.is_empty()
+            || points.iter().any(|&index| {
+                self.point(index)
+                    .is_none_or(|point| !matches!(point.kind, SpawnKind::Unsupported))
+            })
+            || fallbacks.iter().enumerate().any(|(squad, &index)| {
+                self.selected_squad(squad as u16).is_some_and(|binding| {
+                    !binding.available.contains(&index)
+                        || self
+                            .point(index)
+                            .is_none_or(|point| matches!(point.kind, SpawnKind::Unsupported))
+                })
+            })
+        {
+            return Err("invalid_acquisition_structural_spawn_scope");
+        }
+        self.unselectable_native_spawns = Some((points, fallbacks));
         Ok(())
     }
 
     fn locally_selectable_default(&self, squad: u16, raw: u16) -> u16 {
-        let Some((disabled, fallbacks)) = &self.domination_helo_scope else {
+        let Some((disabled, fallbacks)) = &self.unselectable_native_spawns else {
             return raw;
         };
         if disabled.contains(&raw) {
@@ -646,13 +673,13 @@ impl SpawnCatalog {
         squad: u16,
         index: u16,
     ) -> Result<(), &'static str> {
-        let scoped_helo = self
-            .domination_helo_scope
+        let unselectable = self
+            .unselectable_native_spawns
             .as_ref()
             .is_some_and(|(disabled, _)| disabled.contains(&index));
         if self
             .point(index)
-            .is_none_or(|point| matches!(point.kind, SpawnKind::Unsupported) && !scoped_helo)
+            .is_none_or(|point| matches!(point.kind, SpawnKind::Unsupported) && !unselectable)
         {
             return Err("unsupported_runtime_squad_spawn");
         }
@@ -660,7 +687,7 @@ impl SpawnCatalog {
             .available_for_squad(squad)
             .ok_or("unknown_squad")?
             .to_vec();
-        if !scoped_helo && !available.contains(&index) {
+        if !unselectable && !available.contains(&index) {
             if available.len() >= 8 {
                 return Err("runtime_squad_spawn_capacity");
             }

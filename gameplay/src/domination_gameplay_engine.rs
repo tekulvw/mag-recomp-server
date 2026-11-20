@@ -972,12 +972,8 @@ impl<W: std::io::Write> crate::Engine<W> {
         let time = now.as_millis() as u32;
         let mut shared = candidate.objective_packets(time, self.wire_profile)?;
         shared.extend(packets);
-        let spawn_writes = self.prepare_domination_spawn_publication(
-            &spawns,
-            &candidate.spawns,
-            time,
-            &mut shared,
-        )?;
+        let spawn_writes =
+            self.prepare_runtime_spawn_publication(&spawns, &candidate.spawns, time, &mut shared)?;
         self.check_acquisition_character_effects(&characters, &native)?;
         self.record(
             serde_json::json!({
@@ -999,6 +995,18 @@ impl<W: std::io::Write> crate::Engine<W> {
         self.domination_round = Some(candidate.round);
         *runtime = candidate.runtime;
         install(self);
+        self.install_runtime_spawn_publication(&spawn_writes);
+        for actor in self.peers.values_mut().chain(self.active.iter_mut()) {
+            if actor.initial_objects.is_some() {
+                for packet in &shared {
+                    actor.queue_shared(packet.clone());
+                }
+            }
+        }
+        Ok(messages)
+    }
+
+    pub(crate) fn install_runtime_spawn_publication(&mut self, spawn_writes: &[SpawnWrite]) {
         for actor in self.peers.values_mut().chain(self.active.iter_mut()) {
             if let Some(write) = spawn_writes
                 .iter()
@@ -1015,16 +1023,10 @@ impl<W: std::io::Write> crate::Engine<W> {
                     actor.queue_shared(packet.clone());
                 }
             }
-            if actor.initial_objects.is_some() {
-                for packet in &shared {
-                    actor.queue_shared(packet.clone());
-                }
-            }
         }
-        Ok(messages)
     }
 
-    fn prepare_domination_spawn_publication(
+    pub(crate) fn prepare_runtime_spawn_publication(
         &self,
         current: &SpawnCatalog,
         next: &SpawnCatalog,
@@ -1034,10 +1036,13 @@ impl<W: std::io::Write> crate::Engine<W> {
         use crate::replication::{
             CharacterSpawnAssignment, SpawnAvailability, SquadSpawnAssignment,
         };
-        let old_availability =
-            SpawnAvailability::encode_domination_update(1, time, current, self.wire_profile)?;
-        let new_availability =
-            SpawnAvailability::encode_domination_update(1, time, next, self.wire_profile)?;
+        let encode = if current.match_profile().game_type == 1 {
+            SpawnAvailability::encode_update_with_profile
+        } else {
+            SpawnAvailability::encode_domination_update
+        };
+        let old_availability = encode(1, time, current, self.wire_profile)?;
+        let new_availability = encode(1, time, next, self.wire_profile)?;
         let availability_changed = old_availability != new_availability;
         if availability_changed {
             shared.push(new_availability);
@@ -1113,10 +1118,10 @@ impl<W: std::io::Write> crate::Engine<W> {
     }
 }
 
-struct SpawnWrite {
-    player: u16,
+pub(crate) struct SpawnWrite {
+    pub(crate) player: u16,
     catalog: Arc<SpawnCatalog>,
     default: u16,
     selection: Option<crate::protocol::CharacterSpawnSelection>,
-    packet: Option<Vec<u8>>,
+    pub(crate) packet: Option<Vec<u8>>,
 }
