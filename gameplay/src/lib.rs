@@ -164,6 +164,7 @@ pub mod skill_catalog;
 pub mod spawn_catalog;
 mod spawn_progression;
 pub mod structure_catalog;
+mod structural_repair_authority;
 pub mod structures;
 pub mod telemetry;
 pub mod turret;
