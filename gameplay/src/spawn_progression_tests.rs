@@ -1003,3 +1003,114 @@ fn retail_domination_owner_updates_do_not_run_the_prototype_countdown() {
     owner_update(&mut engine, 2100, 1);
     assert_eq!(engine.active.as_ref().unwrap().last_clock_points, before);
 }
+
+fn manual_squad_spawn_request(point: u16) -> [u8; 5] {
+    let [hi, lo] = point.to_be_bytes();
+    [0x02, 0x18, hi, lo, 0x91]
+}
+
+#[test]
+fn native_squad_spawn_requires_current_held_leader_in_domination() {
+    let mut engine = crate::strategic_engine_tests::fixture();
+    let mut input = spawn_json();
+    input["match_profile"]["game_type"] = json!(2);
+    input["maps"][0]["spawn_count"] = json!(7);
+    input["maps"][0]["locations"].as_array_mut().unwrap().push(
+        json!({"index":6,"token":106,"kind":"on_foot","position":{"x":125.,"y":3.,"z":103.}}),
+    );
+    input["maps"][0]["squads"][4]["available"] = json!([0, 1, 6]);
+    let supported = spawns(input).unwrap().for_squad(16).unwrap();
+    for actor in actors(&mut engine).filter(|actor| actor.reservation.player < 3) {
+        actor.squad_catalog = Arc::new(supported.clone());
+    }
+    let request = manual_squad_spawn_request(1);
+    for slot in 0..2 {
+        focus(&mut engine, slot);
+        assert!(dispatch(&mut engine, &request, 501).unwrap().is_empty());
+        assert_eq!(engine.squad_spawn_for(16), Some(0));
+    }
+
+    focus(&mut engine, 2);
+    let actor = engine.active.as_mut().unwrap();
+    actor.emplacement_creation = None;
+    let held_reservation = actor.reservation.id.clone();
+    actor.reservation.id = "synthetic-replacement-reservation".into();
+    assert!(dispatch(&mut engine, &request, 502).unwrap().is_empty());
+    assert_eq!(engine.squad_spawn_for(16), Some(0));
+    engine.active.as_mut().unwrap().reservation.id = held_reservation;
+
+    let max_log = engine.max_log;
+    engine.max_log = engine.written;
+    assert_eq!(
+        dispatch(&mut engine, &request, 503).unwrap_err(),
+        "log_limit_reached"
+    );
+    assert_eq!(engine.squad_spawn_for(16), Some(0));
+    engine.max_log = max_log;
+    engine.failed = false;
+
+    let override_actor = actors(&mut engine)
+        .find(|actor| actor.reservation.player == 1)
+        .unwrap();
+    override_actor.squad_catalog = Arc::new(supported);
+    override_actor.selected_spawn = Some(protocol::CharacterSpawnSelection {
+        spawn_point_index: 6,
+    });
+    assert!(!dispatch(&mut engine, &request, 504).unwrap().is_empty());
+    for actor in actors(&mut engine).filter(|actor| actor.reservation.player < 3) {
+        assert_eq!(actor.squad_spawn, 1);
+        assert_eq!(actor.squad_catalog.default_spawn(), 1);
+        assert_eq!(
+            actor.selected_spawn.unwrap().spawn_point_index,
+            if actor.reservation.player == 1 { 6 } else { 1 }
+        );
+    }
+
+    engine.active.as_mut().unwrap().nominations = 0;
+    engine.reconcile_squad_leaders().unwrap();
+    assert_eq!(engine.squad_leader_index(16, &[u16::MAX; 8]), u16::MAX);
+    assert!(
+        dispatch(&mut engine, &manual_squad_spawn_request(0), 505)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(engine.squad_spawn_for(16), Some(1));
+}
+
+#[test]
+fn native_acquisition_squad_spawn_uses_generic_creation_and_supported_points() {
+    let (catalog, policy) = crate::platoon_ability_engine_tests::platoon_leadership();
+    let mut input = spawn_json();
+    input["match_profile"]["game_type"] = json!(1);
+    input["match_profile"]["has_objectives"] = json!(false);
+    input["maps"][0]["forward_spawns"] = json!([]);
+    let supported = spawns(input).unwrap();
+    let mut engine = engine()
+        .with_spawn_catalog(supported.clone())
+        .with_leadership_passives(catalog, policy)
+        .unwrap();
+    engine.objective_catalog = None;
+    engine.objective_world = None;
+    reserve(&mut engine, 0);
+    reserve(&mut engine, 1);
+    for actor in actors(&mut engine) {
+        ready(actor);
+        actor.squad_catalog = Arc::new(supported.clone());
+        actor.emplacement_creation = None;
+        actor.nominations = u8::from(actor.reservation.player == 1);
+    }
+    engine.match_started = true;
+    engine.reconcile_squad_leaders().unwrap();
+    focus(&mut engine, 1);
+    assert!(
+        dispatch(&mut engine, &manual_squad_spawn_request(2), 500)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !dispatch(&mut engine, &manual_squad_spawn_request(1), 501)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(engine.squad_spawn_for(0), Some(1));
+}

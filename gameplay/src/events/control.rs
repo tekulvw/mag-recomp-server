@@ -222,19 +222,21 @@ pub(super) fn squad_spawn_selection<W: Write>(
     let now = ctx.now;
     let next_sequence = ctx.next_sequence;
     let history_available = ctx.history_available;
-    // The current squad leader may choose its authored shared point.
-    let accepted = active.entered_game
+    let squad = active.squad_catalog.squad_index();
+    let leader = if ctx.engine.native_leader_election() {
+        ctx.engine.held_squad_order_leader(active)
+    } else {
+        ctx.engine.squad_members(squad, None)[0] == active.reservation.player
+    };
+    let accepted = ctx.accepted_client_route
+        && active.entered_game
         && active.ready_for_updates
-        && active.emplacement_creation.is_some()
+        && active.initial_objects.is_some()
         && active
             .squad_catalog
-            .as_ref()
             .alpha(request.spawn_point_index)
             .is_some()
-        && ctx
-            .engine
-            .squad_members(active.squad_catalog.squad_index(), None)[0]
-            == active.reservation.player
+        && leader
         && history_available;
     if accepted && request.spawn_point_index != active.squad_spawn {
         let follows = active
