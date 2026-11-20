@@ -716,6 +716,7 @@ impl<W: Write> Engine<W> {
         self.world_epoch = None;
         self.match_epoch = None;
         self.last_world_tick = None;
+        self.automatic_repair = Default::default();
         self.alpha_turret = Default::default();
         self.alpha_turret_reporter = None;
         self.minimum_players = 2;

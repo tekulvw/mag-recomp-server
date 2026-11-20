@@ -20,6 +20,34 @@ pub(crate) fn capture_fixture() -> Engine<Vec<u8>> {
     configured_capture_fixture(None, None)
 }
 
+pub(crate) fn automatic_repair_fixture(
+    catalog: crate::leadership_passives::LeadershipCatalog,
+    policy: crate::leadership_runtime::RolePolicy,
+) -> Engine<Vec<u8>> {
+    let mut engine = capture_fixture()
+        .with_development_control()
+        .with_leadership_passives(catalog, policy)
+        .unwrap();
+    start_capture(&mut engine, 0, 100);
+    engine
+        .tick_acquisition_objectives(Duration::from_millis(3200), 2)
+        .unwrap();
+    engine.tick_acquisition_ground_registration(2).unwrap();
+    let actor = engine.active.as_mut().unwrap();
+    actor.ground_seat = Some(crate::ground_seats::PassengerSeat {
+        vehicle_index: 4,
+        seat: 0,
+    });
+    actor.ground_vehicle_batch = 1;
+    actor.owner_fields.state = Some(crate::replication::CharacterState {
+        state: 14,
+        stance: 0,
+        user_data: [1, 4, 0],
+    });
+    engine.enable_world_ticks();
+    engine
+}
+
 fn configured_capture_fixture(
     ground_damage: Option<crate::acquisition_ground_damage::Policy>,
     arrival_static: Option<ground_vehicles::arrival_static::ArrivalStatic>,

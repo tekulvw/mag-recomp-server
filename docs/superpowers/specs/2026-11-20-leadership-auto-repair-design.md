@@ -1,0 +1,9 @@
+# Leadership vehicle AutoRepair
+
+Implement the next gameplay TODO using the qualified retail automatic-effect and Ground Heal paths. An authenticated, living, ready occupant of an operational, noncritical Acquisition Escort receives effective AutoRepair from existing leadership planning. The current authoritative seat selects the vehicle. No repair kit, client repair packet or reward grant is involved.
+
+Use the monotonic world scheduler and per-life float accumulators. Reset on absent qualified association or near-zero effective modifier; accumulate elapsed update time, trigger strictly after 1.5 seconds, subtract once and retain remainder. A valid associated vehicle declining a due heal still consumes the interval. A later valid vehicle association does not invent a target-change timer reset. Preserve loaded modifier/maxHP, exact float HP, prior damage metadata and current field18 publication. Update real health conditions after repair even when earlier damage was untyped. Timer, effective leadership, vehicle health and publication must install only after recording succeeds.
+
+Start with source-type9 Escorts whose ordinary damage/lifecycle path is already qualified. Other ground source types, hospitals, aircraft, critical/dead/rebuild states and automatic character healing remain separate. Native builder transient source-field provenance remains unknown; preserving prior published source metadata is an explicit bounded policy. The original stuck recovery gate has no supported producer in this server; do not invent a hit cooldown.
+
+Reuse existing ground runtime mutation and replication. Do not use manual Structural repair authority, client traffic for timing, or fabricate damage attribution. No native run, service, deployment or release belongs to this increment. Releases are manual and the released gitlink remains unchanged. Source integration follows the focused public PR and private main checkpoint workflow.
