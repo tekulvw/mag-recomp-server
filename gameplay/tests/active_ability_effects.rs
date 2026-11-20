@@ -214,3 +214,171 @@ fn repeated_activations_keep_the_original_instance_progress_where_native_does() 
         Work::ScanSquad(scan) if scan.slot == 17
     ));
 }
+
+#[test]
+fn platoon_guided_consumption_survives_failure_and_resets_on_success() {
+    use mag_gameplay::active_ability_effects::GuidedArtilleryRules;
+
+    let rules = EffectRules::GuidedArtillery(GuidedArtilleryRules {
+        delay_ms: 100,
+        damage_delay_ms: 10,
+        effective_radius: 20.,
+    });
+    let ability = Ability::GuidedArtillery;
+    let origin = [2., 3., 4.];
+    let state = Effect::new(ability, Side::Defender, 1000, true, origin, rules).unwrap();
+    assert_eq!(state.prepare_tick(1109).unwrap().1, Work::Idle);
+    let (state, work) = state.prepare_tick(1110).unwrap();
+    assert_eq!(
+        work,
+        Work::GuidedArtillery {
+            origin,
+            radius: 20.
+        }
+    );
+    assert!(state.is_complete());
+    let failed = state
+        .rearm(ability, Side::Defender, 1200, false, origin, rules)
+        .unwrap();
+    let (failed, work) = failed.prepare_tick(1310).unwrap();
+    assert_eq!(work, Work::Complete);
+    let next = failed
+        .rearm(ability, Side::Defender, 1400, true, origin, rules)
+        .unwrap();
+    assert_eq!(
+        next.prepare_tick(1510).unwrap().1,
+        Work::GuidedArtillery {
+            origin,
+            radius: 20.
+        }
+    );
+    let initial = Effect::new(ability, Side::Defender, 1200, false, origin, rules).unwrap();
+    assert_eq!(
+        initial.prepare_tick(1310).unwrap().1,
+        Work::GuidedArtillery {
+            origin,
+            radius: 20.
+        }
+    );
+}
+
+#[test]
+fn platoon_precision_waits_past_due_and_calls_once() {
+    use mag_gameplay::active_ability_effects::PrecisionStrikeRules;
+
+    let ability = Ability::PrecisionStrike;
+    let rules = EffectRules::PrecisionStrike(PrecisionStrikeRules { delay_ms: 90 });
+    let state = Effect::new(ability, Side::Attacker, 20, true, [0.; 3], rules).unwrap();
+    assert_eq!(state.prepare_tick(110).unwrap().1, Work::Idle);
+    let (state, work) = state.prepare_tick(111).unwrap();
+    assert_eq!(work, Work::PrecisionStrike);
+    assert_eq!(state.prepare_tick(112).unwrap().1, Work::Complete);
+    let failed = state
+        .rearm(ability, Side::Attacker, 120, false, [0.; 3], rules)
+        .unwrap();
+    assert_eq!(failed.prepare_tick(211).unwrap().1, Work::Complete);
+}
+
+#[test]
+fn platoon_gas_produces_one_volume_and_inclusive_bomblet_slots() {
+    use mag_gameplay::active_ability_effects::{BlastFalloff, GasBombardmentRules};
+
+    let rules = EffectRules::GasBombardment(GasBombardmentRules {
+        delay_ms: 100,
+        damage_delay_ms: 0,
+        duration_ms: 300,
+        interval_ms: 20,
+        num_bomblets: 2,
+        bomblet_damage: 10.,
+        bomblet: BlastFalloff {
+            outer_radius: 5.,
+            outer_scale: 1.,
+            inner_radius: 2.,
+            inner_scale: 0.5,
+        },
+        gas_damage_per_second: 30.,
+        gas: BlastFalloff {
+            outer_radius: 20.,
+            outer_scale: 1.,
+            inner_radius: 20.,
+            inner_scale: 0.75,
+        },
+    });
+    let mut state = Effect::new(
+        Ability::GasBombardment,
+        Side::Attacker,
+        0,
+        true,
+        [0.; 3],
+        rules,
+    )
+    .unwrap();
+    assert_eq!(state.prepare_tick(99).unwrap().1, Work::Idle);
+    for i in 0..3 {
+        let (next, work) = state.prepare_tick(140).unwrap();
+        let Work::GasBombardment { volume, bomblet } = work else {
+            panic!("{work:?}")
+        };
+        assert_eq!(volume.is_some(), i == 0);
+        assert!(bomblet.is_some());
+        state = next;
+    }
+    assert_eq!(state.prepare_tick(141).unwrap().1, Work::Idle);
+    assert_eq!(state.prepare_tick(400).unwrap().1, Work::Complete);
+    let failed = Effect::new(
+        Ability::GasBombardment,
+        Side::Attacker,
+        0,
+        false,
+        [0.; 3],
+        rules,
+    )
+    .unwrap();
+    assert!(matches!(
+        failed.prepare_tick(100).unwrap().1,
+        Work::GasBombardment {
+            volume: Some(_),
+            bomblet: None
+        }
+    ));
+}
+
+#[test]
+fn platoon_strafe_uses_pass_duration_and_actual_elapsed_fraction() {
+    use mag_gameplay::active_ability_effects::{BlastFalloff, StrafingRunRules};
+
+    let rules = EffectRules::StrafingRun(StrafingRunRules {
+        delay_ms: 100,
+        damage_delay_ms: 10,
+        duration_ms: 80,
+        interval_ms: 15,
+        strafe_length: 120.,
+        deviation_radius: 0.,
+        bomblet_damage: 40.,
+        bomblet: BlastFalloff {
+            outer_radius: 20.,
+            outer_scale: 0.,
+            inner_radius: 5.,
+            inner_scale: 0.5,
+        },
+    });
+    let ability = Ability::StrafingRun;
+    let spawn = Some([-10., 0., 0.]);
+    let state = Effect::new(ability, Side::Attacker, 0, true, [0.; 3], rules).unwrap();
+    let (state, _) = state.prepare_tick_with_platoon(10, spawn).unwrap();
+    let (state, work) = state.prepare_tick_with_platoon(100, None).unwrap();
+    assert_eq!(work, Work::Idle);
+    let (state, work) = state.prepare_tick(101).unwrap();
+    assert_eq!(work, Work::Idle);
+    let (state, work) = state.prepare_tick(110).unwrap();
+    let Work::StrafingRun(first) = work else {
+        panic!("{work:?}")
+    };
+    assert!((first.xz[0] - 58.5).abs() < 0.001);
+    let (state, _) = state.prepare_tick_with_platoon(190, spawn).unwrap();
+    let (state, _) = state.prepare_tick_with_platoon(370, spawn).unwrap();
+    assert_eq!(
+        state.prepare_tick_with_platoon(550, spawn).unwrap().1,
+        Work::Complete
+    );
+}

@@ -7,6 +7,14 @@ use crate::active_ability_sensor::{
 };
 use serde::{Deserialize, Serialize};
 
+#[path = "active_ability_platoon.rs"]
+mod platoon;
+use platoon::PlatoonSchedule;
+pub use platoon::{
+    BlastFalloff, GasBombardmentRules, GasVolume, GuidedArtilleryRules, PrecisionStrikeRules,
+    StrafingRunRules,
+};
+
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClusterRules {
@@ -27,6 +35,34 @@ pub struct ClusterRules {
 pub enum EffectRules {
     Cluster(ClusterRules),
     Sensor(SensorRules),
+    PrecisionStrike(PrecisionStrikeRules),
+    GuidedArtillery(GuidedArtilleryRules),
+    GasBombardment(GasBombardmentRules),
+    StrafingRun(StrafingRunRules),
+}
+
+impl EffectRules {
+    pub fn ability(self) -> Ability {
+        match self {
+            Self::Cluster(_) => Ability::ClusterBomb,
+            Self::Sensor(_) => Ability::Sensor,
+            Self::PrecisionStrike(_) => Ability::PrecisionStrike,
+            Self::GuidedArtillery(_) => Ability::GuidedArtillery,
+            Self::GasBombardment(_) => Ability::GasBombardment,
+            Self::StrafingRun(_) => Ability::StrafingRun,
+        }
+    }
+
+    pub fn delay_ms(self) -> u32 {
+        match self {
+            Self::Cluster(rules) => rules.delay_ms,
+            Self::Sensor(rules) => rules.delay_ms,
+            Self::PrecisionStrike(rules) => rules.delay_ms,
+            Self::GuidedArtillery(rules) => rules.delay_ms,
+            Self::GasBombardment(rules) => rules.delay_ms,
+            Self::StrafingRun(rules) => rules.delay_ms,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -47,9 +83,25 @@ pub struct ClusterSample {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BombletSample {
+    pub xz: [f32; 2],
+    pub blast: ClusterBlast,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Work {
     Idle,
     ClusterSample(ClusterSample),
+    PrecisionStrike,
+    GuidedArtillery {
+        origin: [f32; 3],
+        radius: f32,
+    },
+    GasBombardment {
+        volume: Option<GasVolume>,
+        bomblet: Option<BombletSample>,
+    },
+    StrafingRun(BombletSample),
     ScanSquad(SquadScan),
     ClearSurveillance,
     Complete,
@@ -57,6 +109,7 @@ pub enum Work {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Schedule {
+    Platoon(PlatoonSchedule),
     Cluster {
         first_ms: u32,
         interval_ms: u32,
@@ -170,6 +223,9 @@ impl Effect {
                     },
                 }
             }
+            (ability, rules) if rules.ability() == ability => {
+                Schedule::Platoon(PlatoonSchedule::new(activate_ms, rules)?)
+            }
             _ => return Err("unsupported_command_effect"),
         };
         Ok(Self {
@@ -219,6 +275,9 @@ impl Effect {
                 Schedule::AttackerSensor { slot, .. },
             ) => *slot = previous,
             (Schedule::DefenderSensor { .. }, Schedule::DefenderSensor { .. }) => {}
+            (Schedule::Platoon(previous), Schedule::Platoon(schedule)) => {
+                schedule.retain(previous, successful)?;
+            }
             _ => return Err("command_effect_instance_mismatch"),
         }
         Ok(next)
@@ -241,6 +300,19 @@ impl Effect {
     /// Prepare one native manager update from the retained state. The caller
     /// installs the returned state only after the corresponding work commits.
     pub fn prepare_tick(&self, now_ms: u32) -> Result<(Self, Work), &'static str> {
+        self.prepare_tick_with_platoon(now_ms, None)
+    }
+
+    /// The optional position is the first category-1 spawn of the squad
+    /// recorded in AbilityData. Strafing samples it once per pass.
+    pub fn prepare_tick_with_platoon(
+        &self,
+        now_ms: u32,
+        alternate_spawn: Option<[f32; 3]>,
+    ) -> Result<(Self, Work), &'static str> {
+        if alternate_spawn.is_some_and(|point| !point.into_iter().all(f32::is_finite)) {
+            return Err("invalid_strafe_alternate_spawn");
+        }
         if now_ms < self.now_ms {
             return Err("command_effect_time_regressed");
         }
@@ -249,6 +321,17 @@ impl Effect {
             return Ok((next, Work::Complete));
         }
         let work = match &mut next.schedule {
+            Schedule::Platoon(schedule) => {
+                let (complete, work) = schedule.tick(
+                    now_ms,
+                    now_ms - self.now_ms,
+                    self.successful,
+                    self.origin,
+                    alternate_spawn,
+                );
+                next.complete = complete;
+                work
+            }
             Schedule::Cluster { count, ordinal, .. } if *ordinal >= *count => {
                 next.complete = true;
                 Work::Complete
