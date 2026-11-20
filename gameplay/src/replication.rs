@@ -1293,6 +1293,69 @@ impl SquadObjectiveAssignment {
         Ok(bits.finish())
     }
 }
+/// Current squad orders or changed order fields for an already created type-8 object.
+#[derive(Clone, Copy, Debug)]
+pub struct SquadOrders {
+    pub sequence: u32,
+    pub timestamp_ms: u32,
+    pub squad_index: u16,
+    pub tagged_object: Option<u32>,
+    pub waypoint_position: Option<CharacterPosition>,
+    pub waypoint_active: Option<bool>,
+}
+
+impl SquadOrders {
+    pub fn encode_with_profile(
+        &self,
+        profile: crate::wire_profile::WireProfile,
+    ) -> Result<Vec<u8>, &'static str> {
+        SquadAddress::from_index(self.squad_index)?;
+        if self.sequence <= 1
+            || (self.tagged_object.is_none()
+                && self.waypoint_position.is_none()
+                && self.waypoint_active.is_none())
+        {
+            return Err("invalid_squad_orders_delta");
+        }
+        let mut bits = BitWriter::with_profile(profile);
+        UpdateHeader {
+            sequence: self.sequence,
+            nak_sequence: 0,
+            client_index: 0,
+            object_type_mask: 1 << 8,
+            timestamp_ms: self.timestamp_ms,
+        }
+        .encode(&mut bits)?;
+        bits.write(1, 1)?;
+        bits.write(self.squad_index.into(), 16)?;
+        for field in 0..26 {
+            match field {
+                13 => {
+                    bits.write(u32::from(self.tagged_object.is_some()), 1)?;
+                    if let Some(tagged_object) = self.tagged_object {
+                        bits.write(tagged_object, 32)?;
+                    }
+                }
+                14 => {
+                    bits.write(u32::from(self.waypoint_position.is_some()), 1)?;
+                    if let Some(waypoint_position) = self.waypoint_position {
+                        waypoint_position.encode(&mut bits)?;
+                    }
+                }
+                15 => {
+                    bits.write(u32::from(self.waypoint_active.is_some()), 1)?;
+                    if let Some(waypoint_active) = self.waypoint_active {
+                        bits.write(u32::from(waypoint_active), 1)?;
+                    }
+                }
+                _ => bits.write(0, 1)?,
+            }
+        }
+        bits.write(0, 1)?;
+        Ok(bits.finish())
+    }
+}
+
 /// State changes for already map-created type12 objects. The default encoder
 /// changes only field2; optional sequence playback adds fields9/10 together.
 /// Active/owner are omitted, preserving map entities.
@@ -2375,3 +2438,74 @@ mod objective_sequence_tests {
 #[cfg(test)]
 #[path = "bunker_replication_tests.rs"]
 mod bunker_replication_tests;
+
+#[cfg(test)]
+mod squad_order_wire_tests {
+    use super::*;
+
+    #[test]
+    fn squad_order_wire_delta_writes_fields_13_to_15_without_primary() {
+        let orders = SquadOrders {
+            sequence: 37,
+            timestamp_ms: 900,
+            squad_index: 16,
+            tagged_object: Some(0x0c80_1234),
+            waypoint_position: Some(CharacterPosition {
+                x: 1.5,
+                y: -2.25,
+                z: 3.125,
+            }),
+            waypoint_active: Some(true),
+        };
+        let profiles = crate::wire_profile::WireProfileCatalog::embedded();
+        for id in [20230, 20231] {
+            let profile = profiles.profile(id).unwrap();
+            for delta in [
+                orders,
+                SquadOrders {
+                    tagged_object: None,
+                    waypoint_position: None,
+                    waypoint_active: Some(false),
+                    ..orders
+                },
+            ] {
+                let wire = delta.encode_with_profile(profile).unwrap();
+                let update = ObjectUpdate::decode_with_profile(&wire, profile).unwrap();
+                assert_eq!(update.header.sequence, 37);
+                assert_eq!(update.header.timestamp_ms, 900);
+                assert_eq!(update.header.object_type_mask, 1 << 8);
+                let mut bits = BitReader::with_profile(&wire, profile);
+                bits.position = profile.header_bits();
+                assert_eq!(bits.read(1).unwrap(), 1);
+                assert_eq!(bits.read(16).unwrap(), 16);
+                for field in 0..26 {
+                    let present = bits.read(1).unwrap();
+                    match (field, present) {
+                        (13, 1) => assert_eq!(bits.read(32).unwrap(), 0x0c80_1234),
+                        (14, 1) => {
+                            for (width, value) in
+                                [(11, 1), (5, 16), (1, 1), (11, 2), (5, 8), (11, 3), (5, 4)]
+                            {
+                                assert_eq!(bits.read(width).unwrap(), value);
+                            }
+                        }
+                        (15, 1) => {
+                            assert_eq!(
+                                bits.read(1).unwrap(),
+                                u32::from(delta.waypoint_active.unwrap())
+                            );
+                        }
+                        _ => assert_eq!(present, 0),
+                    }
+                    if field == 13 || field == 14 {
+                        assert_eq!(present, u32::from(delta.tagged_object.is_some()));
+                    }
+                    if field == 15 {
+                        assert_eq!(present, 1);
+                    }
+                }
+                assert_eq!(bits.read(1).unwrap(), 0);
+            }
+        }
+    }
+}

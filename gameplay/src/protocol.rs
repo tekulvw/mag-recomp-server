@@ -123,6 +123,18 @@ pub struct SquadSpawnSelection {
     pub spawn_point_index: u16,
     pub alt_insertion_index: u8,
 }
+/// A packed object identity, or all ones to clear the current manual tag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TaggedObject {
+    pub target_id: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SquadWaypoint {
+    pub position: crate::replication::CharacterPosition,
+    pub clear: bool,
+}
+
 /// Native confirmation carries no body; physical respawn follows through replication.
 #[derive(Clone, Debug)]
 pub struct ConfirmRespawn;
@@ -457,6 +469,8 @@ pub enum GameMessage<'a> {
     EnterGame(EnterGame),
     CharacterSpawnSelection(CharacterSpawnSelection),
     SquadSpawnSelection(SquadSpawnSelection),
+    TaggedObject(TaggedObject),
+    SquadWaypoint(SquadWaypoint),
     ChangePlayerSquad(ChangePlayerSquad),
     ChangePlayerNominations(ChangePlayerNominations),
     ConfirmRespawn(ConfirmRespawn),
@@ -544,6 +558,22 @@ impl<'a> GameMessage<'a> {
                 crate::active_abilities::StrategicRequest::parse(bytes)?,
             )),
             0x0204 => Err("server_only_stat_update"),
+            0x0206 => {
+                let target_id = r.u32()?;
+                r.finish()?;
+                Ok(Self::TaggedObject(TaggedObject { target_id }))
+            }
+            0x021a => {
+                let position = crate::replication::CharacterPosition {
+                    x: f32::from_bits(r.u32()?),
+                    y: f32::from_bits(r.u32()?),
+                    z: f32::from_bits(r.u32()?),
+                };
+                // The high bit is the boolean. The remaining bits pad the message byte.
+                let clear = r.take(1)?[0] & 0x80 != 0;
+                r.finish()?;
+                Ok(Self::SquadWaypoint(SquadWaypoint { position, clear }))
+            }
             0x0003 => {
                 let np_identity = r.take(36)?;
                 let clan = r.string()?;
@@ -880,5 +910,55 @@ mod resuscitate_dispatch_tests {
         let mut trailing = packet.to_vec();
         trailing.push(0);
         assert!(GameMessage::decode_with_profile(&trailing, profile).is_err());
+    }
+}
+
+#[cfg(test)]
+mod squad_order_wire_tests {
+    use super::*;
+
+    #[test]
+    fn squad_order_wire_requests_have_exact_payloads() {
+        let profile = crate::wire_profile::WireProfileCatalog::embedded()
+            .profile(20231)
+            .unwrap();
+        fn decode(
+            wire: &[u8],
+            profile: crate::wire_profile::WireProfile,
+        ) -> Result<GameMessage<'_>, &'static str> {
+            GameMessage::decode_with_profile(wire, profile)
+        }
+        assert!(matches!(
+            decode(&[0x02, 0x06, 0x0c, 0x80, 0x12, 0x34], profile).unwrap(),
+            GameMessage::TaggedObject(TaggedObject {
+                target_id: 0x0c80_1234
+            })
+        ));
+        assert!(matches!(
+            decode(&[0x02, 0x06, 0xff, 0xff, 0xff, 0xff], profile).unwrap(),
+            GameMessage::TaggedObject(TaggedObject {
+                target_id: u32::MAX
+            })
+        ));
+        let mut waypoint = vec![0x02, 0x1a];
+        for coordinate in [1.5f32, -2.25, 3.125] {
+            waypoint.extend(coordinate.to_be_bytes());
+        }
+        waypoint.push(0);
+        assert!(matches!(
+            decode(&waypoint, profile).unwrap(),
+            GameMessage::SquadWaypoint(SquadWaypoint { position, clear: false })
+                if (position.x, position.y, position.z) == (1.5, -2.25, 3.125)
+        ));
+        waypoint[14] = 0x80;
+        assert!(matches!(
+            decode(&waypoint, profile).unwrap(),
+            GameMessage::SquadWaypoint(SquadWaypoint { clear: true, .. })
+        ));
+        assert!(decode(&waypoint[..14], profile).is_err());
+        waypoint.push(0);
+        assert!(decode(&waypoint, profile).is_err());
+        assert!(decode(&[0x02, 0x06, 0xff, 0xff, 0xff], profile).is_err());
+        assert!(decode(&[0x02, 0x06, 0xff, 0xff, 0xff, 0xff, 0], profile).is_err());
     }
 }
