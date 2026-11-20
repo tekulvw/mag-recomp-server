@@ -85,6 +85,11 @@ can issue an available strategic using the server clock. Sabotage and Acquisitio
 do not gain OIC authority from the policy. See [OIC strategics](oic-strategic-abilities.md)
 for effects, publication and reinforcement semantics.
 
+Configured squad leaders can also assign and cancel manual FRAGO tags and map
+waypoints through the shared mode assignment path; see
+[manual squad orders](squad-manual-orders.md). Leadership loss clears those
+orders without resetting their shared set timestamp.
+
 ## Configuration and extraction
 
 Place `<map_name>--active-abilities.json` beside the Acquisition or Domination

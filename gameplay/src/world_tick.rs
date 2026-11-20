@@ -28,6 +28,7 @@ impl<W: Write> Engine<W> {
             messages.extend(self.tick_bot_firearms(now, wall)?);
             self.tick_bot_healing(now, wall)?;
             messages.extend(self.tick_objectives(now, wall)?);
+            self.queue_squad_orders(now, wall)?;
             self.queue_active_ability_state(now, wall)?;
             messages.extend(self.tick_match_clock(now, wall)?);
             self.queue_projectile_publications(now)?;

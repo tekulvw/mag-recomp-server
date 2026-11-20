@@ -187,6 +187,14 @@ impl SquadRoster {
         &self,
         profile: crate::wire_profile::WireProfile,
     ) -> Result<Vec<u8>, &'static str> {
+        self.encode_with_order_state(profile, None)
+    }
+    /// Publish leader replacement and its retained order state in one update.
+    pub(crate) fn encode_with_order_state(
+        &self,
+        profile: crate::wire_profile::WireProfile,
+        orders: Option<(u32, bool)>,
+    ) -> Result<Vec<u8>, &'static str> {
         SquadAddress::from_index(self.squad)?;
         if self.leader != u16::MAX && !self.members.contains(&self.leader) {
             return Err("inconsistent_squad_leader");
@@ -203,9 +211,10 @@ impl SquadRoster {
         b.write(1, 1)?;
         b.write(self.squad.into(), 16)?;
         for field in 0..26 {
-            let present = (2..=10).contains(&field);
+            let present =
+                (2..=10).contains(&field) || (orders.is_some() && [13, 15].contains(&field));
             b.write(u32::from(present), 1)?;
-            if present {
+            if (2..=10).contains(&field) {
                 b.write(
                     if field == 10 {
                         self.leader
@@ -215,6 +224,14 @@ impl SquadRoster {
                     .into(),
                     16,
                 )?;
+            }
+            if let Some((tag, active)) = orders {
+                if field == 13 {
+                    b.write(tag, 32)?;
+                }
+                if field == 15 {
+                    b.write(u32::from(active), 1)?;
+                }
             }
         }
         b.write(0, 1)?;

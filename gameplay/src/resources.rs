@@ -166,6 +166,7 @@ impl<W: Write> Engine<W> {
             skill_catalog: None,
             leadership: None,
             active_abilities: None,
+            squad_orders: None,
             active_ability_damage_team: None,
             fall_damage_rules: None,
             incapacitation_rules: None,

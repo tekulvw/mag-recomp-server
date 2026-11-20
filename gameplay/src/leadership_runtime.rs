@@ -363,6 +363,15 @@ impl Active {
     }
 }
 impl<W: Write> Engine<W> {
+    pub(crate) fn held_squad_order_leader(&self, actor: &Active) -> bool {
+        self.leadership.as_ref().is_some_and(|runtime| {
+            runtime.policy.native().is_some()
+                && runtime
+                    .squad_leaders
+                    .get(&actor.squad_catalog.squad_index())
+                    .is_some_and(|leader| leader.matches(actor, 1))
+        })
+    }
     /// Explicit opt-in. Bindings keyed by authenticated numeric account and saved
     /// character identity require development control before installation.
     pub fn with_leadership_passives(
@@ -642,16 +651,23 @@ impl<W: Write> Engine<W> {
             leadership_changes("platoon_index", &runtime.platoon_leaders, &platoon_leaders);
         let company_changes =
             leadership_changes("company_index", &runtime.company_leaders, &company_leaders);
+        let removed: Vec<_> = runtime
+            .squad_leaders
+            .iter()
+            .filter(|(squad, leader)| squad_leaders.get(squad) != Some(leader))
+            .map(|(&squad, _)| squad)
+            .collect();
+        let order_cleanup = self.plan_removed_squad_orders(&removed)?;
         if !company_changes.is_empty() || !platoon_changes.is_empty() {
             self.record(
                 json!({"op":"leadership_roles_changed","squad_changes":changes,
                     "platoon_changes":platoon_changes,"company_changes":company_changes,
-                    "match_started":self.match_started}),
+                    "match_started":self.match_started,"squad_orders_cleared":removed}),
                 self.last_wall_secs,
             )?;
         } else if !changes.is_empty() {
             self.record(
-                json!({"op":"squad_leaders_changed","changes":changes,"match_started":self.match_started}),
+                json!({"op":"squad_leaders_changed","changes":changes,"match_started":self.match_started,"squad_orders_cleared":removed}),
                 self.last_wall_secs,
             )?;
         }
@@ -659,6 +675,9 @@ impl<W: Write> Engine<W> {
         runtime.squad_leaders = squad_leaders;
         runtime.platoon_leaders = platoon_leaders;
         runtime.company_leaders = company_leaders;
+        if let Some(candidate) = order_cleanup {
+            self.install_squad_order_candidate(candidate);
+        }
         Ok(())
     }
     pub(crate) fn plan_leadership(&self, now: Duration) -> Result<LeadershipPlan, &'static str> {

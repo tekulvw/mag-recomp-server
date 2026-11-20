@@ -390,6 +390,7 @@ impl<W: Write> Engine<W> {
             }
             if !self.world_tick_enabled {
                 messages.extend(self.tick_objectives(now, wall)?);
+                self.queue_squad_orders(now, wall)?;
                 messages.extend(self.tick_match_clock(now, wall)?);
                 self.queue_projectile_publications(now)?;
             }
@@ -805,6 +806,7 @@ impl<W: Write> Engine<W> {
         if !self.world_tick_enabled {
             self.queue_team_wave_deadlines(now, wall)?;
             messages.extend(self.tick_objectives(now, wall)?);
+            self.queue_squad_orders(now, wall)?;
             messages.extend(self.tick_match_clock(now, wall)?);
             self.queue_projectile_publications(now)?;
         }
@@ -1268,7 +1270,10 @@ impl<W: Write> Engine<W> {
                 members: squad.members,
                 leader: squad.leader_index,
             }
-            .encode_with_profile(self.wire_profile)?;
+            .encode_with_order_state(
+                self.wire_profile,
+                self.squad_roster_orders(squad.object_index),
+            )?;
             self.last_published_rosters
                 .insert(squad.object_index, published);
             for actor in self

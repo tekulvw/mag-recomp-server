@@ -66,7 +66,7 @@ fn oic_leadership() -> (
     (catalog, policy)
 }
 
-fn fixture() -> Engine<Vec<u8>> {
+pub(crate) fn fixture() -> Engine<Vec<u8>> {
     let mut engine = configured_platoon_engine();
     let mut setup = engine
         .active_abilities
