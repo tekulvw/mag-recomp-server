@@ -92,6 +92,21 @@ def range_fields(position, boxes):
                 distance_policy='authored_trigger_box', trigger_volumes=boxes)
 
 
+def structural_repair(raw, owner):
+    return dict(owner_team=owner, can_repair=valid_bool(raw['CanRepair'], 'CanRepair'),
+                repair_ms=integer(raw['TimeToRepairMs'], 3_600_000),
+                minimum_repair_ms=integer(raw['MinTimeToRepairMs'], 3_600_000))
+
+
+def structural_demolition(raw, geometry, score):
+    times = {key: integer(raw[source], 3_600_000) for key, source in (
+        ('arm_ms', 'TimeToArmMs'), ('detonate_ms', 'TimeToDetonateMs'), ('defuse_ms', 'TimeToDefuseMs')
+    )}
+    require(all(times.values()), 'Invalid Structural action durations')
+    return dict(**geometry, **score, **times,
+                can_defuse=valid_bool(raw['CanDeactivate'], 'CanDeactivate'))
+
+
 def bind_one(obj, definition, instance, intent, boxes):
     cls = definition['class_name']
     raw = fields(definition)
@@ -111,15 +126,13 @@ def bind_one(obj, definition, instance, intent, boxes):
                  deactivation_score=integer(raw['DeactivationScoreValue'], 32767))
     result = dict(**obj, native_class=CLASS[cls], scoring=score)
     if cls == STRUCTURAL:
-        result['repair'] = dict(owner_team=owner, can_repair=valid_bool(raw['CanRepair'], 'CanRepair'),
-                                repair_ms=integer(raw['TimeToRepairMs'], 3_600_000),
-                                minimum_repair_ms=integer(raw['MinTimeToRepairMs'], 3_600_000))
+        result['repair'] = structural_repair(raw, owner)
     if not boxes:
         return result
     pos = {row['name']: row['value'] for row in instance['fields']}
     geometry = range_fields([pos['Translate' + axis] for axis in 'XYZ'], boxes)
-    can_deactivate = valid_bool(raw['CanDeactivate'], 'CanDeactivate')
     if cls == SECURE:
+        can_deactivate = valid_bool(raw['CanDeactivate'], 'CanDeactivate')
         result['interaction'] = dict(**geometry, owner_team=owner, can_deactivate=can_deactivate,
             activate_ms=integer(raw['TimeToActivateMs'], 3_600_000),
             complete_ms=integer(raw['TimeToCompleteMs'], 3_600_000),
@@ -127,11 +140,7 @@ def bind_one(obj, definition, instance, intent, boxes):
         require(result['interaction']['activate_ms'] and result['interaction']['deactivate_ms'],
                 'Invalid SecureAndHold action durations')
     else:
-        times = {key: integer(raw[source], 3_600_000) for key, source in (
-            ('arm_ms', 'TimeToArmMs'), ('detonate_ms', 'TimeToDetonateMs'), ('defuse_ms', 'TimeToDefuseMs')
-        )}
-        require(all(times.values()), 'Invalid Structural action durations')
-        result['demolition'] = dict(**geometry, **score, **times, can_defuse=can_deactivate)
+        result['demolition'] = structural_demolition(raw, geometry, score)
     return result
 
 
