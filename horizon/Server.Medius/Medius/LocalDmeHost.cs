@@ -192,29 +192,47 @@ namespace Server.Medius
                 PendingRelease pending;
                 lock (_gate) pending = _pendingReleases.Values.FirstOrDefault(r => r.Reservation.Account == session.AuthenticatedAccount);
                 if (pending != null) await RetryReleaseAsync(pending);
-                // The local DME hosts one shared round. Keep results available to the
-                // remaining cohort and wait for its releases before starting another.
-                lock (_gate) if (_reservations.Values.Any(r => r.TerminalMatchId != null) || _pendingReleases.Values.Any(r => r.Reservation.TerminalMatchId != null || r.Reservation.Account == session.AuthenticatedAccount)) return JoinResponse(request.TransactionId, 6);
-                lock (_gate) if (_rewardOwners.Count >= 4096 || _reservations.Count >= _maximumPlayers || _reservations.Values.Any(r => r.AccountId == session.AccountId)) return JoinResponse(request.TransactionId, 6);
-                StoredCharacter character;
-                try { character = _store.ReadForAccount(session.AuthenticatedAccount).SingleOrDefault(c => c.Id == session.CharacterId); }
-                catch (Exception e) when (e is IOException || e is InvalidDataException || e is UnauthorizedAccessException) { return failure; }
-                if (character == null) return failure;
-                if (UsesFactionMatchmaking ? character.Faction!=_formedProfile.AttackingFaction&&character.Faction!=_formedProfile.DefendingFaction : !_allowedFactions.Contains(character.Faction)) return JoinResponse(request.TransactionId, 4);
-                var record = character.ToRecord();
-                GameplayAdmissionLoadouts admissionLoadouts;
-                try { admissionLoadouts = GameplayLoadoutAdmission.Project(character, record, _store.LoadoutCatalog); }
-                catch (InvalidDataException) { return failure; }
-                var allocation = await World.OnJoinGameRequest(new MediusServerJoinGameRequest { ConnectInfo = new NetConnectionInfo { SessionKey = session.SessionKey } });
-                if (allocation.Confirmation != MGCL_ERROR_CODE.MGCL_SUCCESS || !World.Clients.TryGetValue(allocation.DmeClientIndex, out var client)) return failure;
-                client.ApplicationId = _applicationId;
-                var reservation = new Reservation { Id = Id(), AccountId = character.Id, Account = session.AuthenticatedAccount, CharacterId = character.Id, Faction = character.Faction, Notify = notify, Client = client, Deadline = DateTime.UtcNow.AddSeconds(30) };
-                lock (_gate) { _reservations.Add(reservation.Id, reservation); _rewardOwners.Add(reservation.Id, reservation); }
-                var admittedReply = await _bridge.RequestControlAsync(new { v = 2, request_id = Id(), op = "reserve", reservation_id = reservation.Id,
-                    world_id = (uint)World.WorldId, player_id = (ushort)client.DmeId, account_id = character.Id, session_key = client.SessionKey, access_key = client.Token,
-                    character = new { loadout_account_id = reservation.Account, leadership = character.Leadership == null ? null : new GameplayLeadershipRecord(character.Leadership), account_id = _store.ProgressionCatalog == null ? null : reservation.Account, progression = _store.ProgressionCatalog == null ? null : new { experience = record.Experience, level = record.Level, skill_points = record.SkillPoints }, skills = record.Skills, character_id = record.AccountId, name = record.Name, faction = record.Faction, head = record.HeadId, voice = record.VoiceId, universe_id = record.UniverseId,
-                        loadouts = admissionLoadouts } });
-                bool admittedRouted; lock (_gate) admittedRouted = Route(admittedReply);
+                Reservation reservation;
+                DmeClient client;
+                GameplayBridgeResponse admittedReply;
+                bool admittedRouted;
+                // A reward must either precede the snapshot read or reach the reserved actor by ACK.
+                // Release and reply settlement below can themselves settle rewards and require this gate.
+                await _rewardSettlement.WaitAsync();
+                try
+                {
+                    // The shared round stays available to its current results cohort until release.
+                    lock (_gate) if (_reservations.Values.Any(r => r.TerminalMatchId != null) || _pendingReleases.Values.Any(r => r.Reservation.TerminalMatchId != null || r.Reservation.Account == session.AuthenticatedAccount)) return JoinResponse(request.TransactionId, 6);
+                    lock (_gate) if (_rewardOwners.Count >= 4096 || _reservations.Count >= _maximumPlayers || _reservations.Values.Any(r => r.AccountId == session.AccountId)) return JoinResponse(request.TransactionId, 6);
+                    StoredCharacter character;
+                    try { character = _store.ReadForAccount(session.AuthenticatedAccount).SingleOrDefault(c => c.Id == session.CharacterId); }
+                    catch (Exception e) when (e is IOException || e is InvalidDataException || e is UnauthorizedAccessException) { return failure; }
+                    if (character == null) return failure;
+                    if (UsesFactionMatchmaking ? character.Faction!=_formedProfile.AttackingFaction&&character.Faction!=_formedProfile.DefendingFaction : !_allowedFactions.Contains(character.Faction)) return JoinResponse(request.TransactionId, 4);
+                    var record = character.ToRecord();
+                    GameplayAdmissionLoadouts admissionLoadouts;
+                    try { admissionLoadouts = GameplayLoadoutAdmission.Project(character, record, _store.LoadoutCatalog); }
+                    catch (InvalidDataException) { return failure; }
+                    var allocation = await World.OnJoinGameRequest(new MediusServerJoinGameRequest { ConnectInfo = new NetConnectionInfo { SessionKey = session.SessionKey } });
+                    if (allocation.Confirmation != MGCL_ERROR_CODE.MGCL_SUCCESS || !World.Clients.TryGetValue(allocation.DmeClientIndex, out client)) return failure;
+                    client.ApplicationId = _applicationId;
+                    reservation = new Reservation { Id = Id(), AccountId = character.Id, Account = session.AuthenticatedAccount, CharacterId = character.Id, Faction = character.Faction, Notify = notify, Client = client, Deadline = DateTime.UtcNow.AddSeconds(30) };
+                    lock (_gate) { _reservations.Add(reservation.Id, reservation); _rewardOwners.Add(reservation.Id, reservation); }
+                    var progressionCatalog = _store.ProgressionCatalog;
+                    admittedReply = await _bridge.RequestControlAsync(new { v = 2, request_id = Id(), op = "reserve", reservation_id = reservation.Id,
+                        world_id = (uint)World.WorldId, player_id = (ushort)client.DmeId, account_id = character.Id, session_key = client.SessionKey, access_key = client.Token,
+                        character = new {
+                            loadout_account_id = reservation.Account,
+                            leadership = character.Leadership == null ? null : new GameplayLeadershipRecord(character.Leadership),
+                            leadership_progression_enabled = progressionCatalog?.InitialLeadershipPoints.HasValue == true,
+                            account_id = progressionCatalog == null ? null : reservation.Account,
+                            progression = progressionCatalog == null ? null : new { experience = record.Experience, level = record.Level, skill_points = record.SkillPoints },
+                            skills = record.Skills, character_id = record.AccountId, name = record.Name, faction = record.Faction, head = record.HeadId, voice = record.VoiceId,
+                            universe_id = record.UniverseId, loadouts = admissionLoadouts
+                        } });
+                    lock (_gate) admittedRouted = Route(admittedReply);
+                }
+                finally { _rewardSettlement.Release(); }
                 if (admittedRouted) await SettleLoadoutSelectionsAsync(admittedReply);
                 await SettleRewardsAsync(admittedReply);
                 bool admitted = admittedReply?.Ok == true;

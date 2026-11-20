@@ -4,7 +4,7 @@ using RT.Models.MAG;
 using Server.Medius;
 
 // Deliberately synthetic points, character levels and account records.
-internal static class LeadershipProgressionChecks
+internal static partial class LeadershipProgressionChecks
 {
     private static void Check(bool condition, string message)
     {

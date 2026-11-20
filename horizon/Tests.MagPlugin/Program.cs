@@ -51,6 +51,8 @@ Test("leadership authored creation and ordinary XP promotion", LeadershipProgres
 Test("leadership optional authored table validation", LeadershipProgressionChecks.CatalogValidation);
 Test("leadership terminal award retention and compatibility floor", LeadershipProgressionChecks.DurableSettlement);
 Test("leadership final context requires an authored catalog", LeadershipProgressionChecks.MissingCatalogRetry);
+Test("leadership admission capability follows the catalog", LeadershipProgressionChecks.AdmissionCapability);
+Test("leadership reconnect admission serializes reward settlement", LeadershipProgressionChecks.AdmissionRewardRace);
 Test("leadership commit failure, retry, and overflow", LeadershipProgressionChecks.FailedCommit);
 Test("selected kit ownership and complete store preservation", LoadoutPreferenceStoreChecks.Run);
 Test("account-bound NP identity creation and persistence", NpIdentityChecks.Run);
