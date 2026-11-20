@@ -142,6 +142,99 @@ fn apc_passenger_catalog_accepts_explicit_spawn_binding_and_exit_offsets() {
     assert!(Catalog::from_json(&value.to_string(), engine.spawn_catalog.as_ref().unwrap()).is_ok());
 }
 
+fn area_vehicle_setup() -> (Engine<Vec<u8>>, Value) {
+    let mut engine = acquisition_entry::acquisition();
+    let mut source = apc_spawn_json(1);
+    source["maps"][0]["locations"][1]["kind"] = json!("on_foot");
+    engine.spawn_catalog = Some(spawns(source).unwrap());
+    let mut value = catalog(&engine);
+    value["vehicles"][0]["passenger_seats"] = json!([2, 3]);
+    value["vehicles"][0]["maximum_occupancy"] = json!(2);
+    value["passenger_spawns"] =
+        json!([{ "spawn_point_index":0, "spawn_point_token":1000, "vehicle_index":0 }]);
+    value["vehicles"][0]["passenger_exit_candidates"] =
+        json!([{ "ranking_offset":[1.,0.,0.], "position_offset":[3.,0.,0.] }]);
+    (engine, value)
+}
+
+fn area_vehicle_visibility(first: bool, second: bool) -> Value {
+    json!({
+        "archive_sha256":"1".repeat(64),"registry_member_sha256":"2".repeat(64),
+        "vehicles":[{"vehicle_index":0,"properties_member_sha256":"3".repeat(64),
+                     "seats":[{"seat":2,"occupant_visible":first},
+                              {"seat":3,"occupant_visible":second}]}]
+    })
+}
+
+pub(crate) fn area_vehicle_fixture(exposure: Option<bool>) -> Engine<Vec<u8>> {
+    let (engine, mut value) = area_vehicle_setup();
+    if let Some(exposure) = exposure {
+        value["source"]["creation_scope"] = json!("native_vehicle_source_points");
+        value["seat_visibility"] = area_vehicle_visibility(exposure, exposure);
+    }
+    let spawns = engine.spawn_catalog.as_ref().unwrap();
+    let vehicles = Catalog::from_json(&value.to_string(), spawns).unwrap();
+    let mut engine = engine.with_ground_vehicles(vehicles).unwrap();
+    reserve(&mut engine, 0);
+    let actor = engine.active.as_mut().unwrap();
+    ready(actor);
+    actor.life = CharacterLife::Alive {
+        generation: 1,
+        health_quarter_points: 400,
+    };
+    actor.ground_seat = Some(ground_seats::PassengerSeat {
+        vehicle_index: 0,
+        seat: 2,
+    });
+    actor.tracking.server_position(
+        CharacterPosition {
+            x: 2.,
+            y: 3.,
+            z: 2.,
+        },
+        player_tracking::PositionOrigin::ServerSpawn,
+        0,
+    );
+    engine
+}
+
+#[test]
+fn ground_vehicle_catalog_validates_complete_source_seat_visibility() {
+    let (engine, mut value) = area_vehicle_setup();
+    let spawns = engine.spawn_catalog.as_ref().unwrap();
+    let legacy = Catalog::from_json(&value.to_string(), spawns).unwrap();
+    assert_eq!(legacy.seat_occupant_visible(0, 2), None);
+    value["source"]["creation_scope"] = json!("native_vehicle_source_points");
+    value["seat_visibility"] = area_vehicle_visibility(false, true);
+    let qualified = Catalog::from_json(&value.to_string(), spawns).unwrap();
+    assert_eq!(qualified.seat_occupant_visible(0, 2), Some(false));
+    assert_eq!(qualified.seat_occupant_visible(0, 3), Some(true));
+    assert_eq!(qualified.seat_occupant_visible(0, 4), None);
+    assert_eq!(qualified.seat_occupant_visible(1, 2), None);
+    for (field, bad) in [
+        ("properties_member_sha256", json!("bad digest")),
+        ("vehicle_index", json!(1)),
+        ("seats", json!([{"seat":2,"occupant_visible":false}])),
+        (
+            "seats",
+            json!([{"seat":2,"occupant_visible":false},{"seat":2,"occupant_visible":true}]),
+        ),
+        (
+            "seats",
+            json!([{"seat":2,"occupant_visible":false},{"seat":4,"occupant_visible":true}]),
+        ),
+    ] {
+        let mut bad_value = value.clone();
+        bad_value["seat_visibility"]["vehicles"][0][field] = bad;
+        assert!(
+            Catalog::from_json(&bad_value.to_string(), spawns).is_err(),
+            "{field}"
+        );
+    }
+    value["seat_visibility"]["vehicles"] = json!([]);
+    assert!(Catalog::from_json(&value.to_string(), spawns).is_err());
+}
+
 fn apc_spawn_json(faction: u8) -> Value {
     let mut value = spawn_json();
     value["active"]["available"] = json!([0, 1]);

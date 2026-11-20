@@ -57,8 +57,8 @@ It does not apply generic blast damage or make hospitals eligible targets.
 Both modes run the qualified Structural entry callbacks for each intermediate
 state and publish the final state once. Acquisition profiles with the optional
 Structural provider also apply sourced explosions, periodic area damage,
-sequence collision, tactical availability and linked spawn changes. Ordinary
-demolition and repair interactions for those structures remain separate work;
+sequence collision, tactical availability and linked spawn changes. V2 bindings
+also enable ordinary demolition, defuse and equipped-tool repair interactions;
 see [Acquisition gameplay](acquisition-gameplay.md).
 
 Guided Artillery emits a single point blast at the accepted location, using its

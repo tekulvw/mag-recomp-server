@@ -254,6 +254,9 @@ impl Configuration {
             .as_ref()
             .map(|paths| paths.load(objective_catalog, spawns))
             .transpose()?;
+        setup
+            .validate_structural(objective_catalog)
+            .map_err(io::Error::other)?;
         if let Some(structural) = &setup.structural {
             structural
                 .validate_ground(ground)

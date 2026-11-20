@@ -4,6 +4,7 @@ import argparse
 from collections import defaultdict
 import hashlib
 import json
+import math
 from pathlib import Path
 import runpy
 import struct
@@ -13,6 +14,11 @@ METADATA = '38703201deb85a4bf836164492658344b109eebb68274b5179b71b53bb93a9ab'
 RETAIL = '0089f0d6d17e48533ce7ff8d943dddd03487b925e7b04a1a055bfb907568694c'
 STRUCTURAL = 'ObjectiveDemolitionStructuralProperties'
 SECURE = 'ObjectiveSecureAndHoldProperties'
+ARRIVAL = 'ObjectiveArrivalProperties'
+TRIGGER = 'ObjectiveTriggerProperties'
+DEMOLITION_TRIGGER = 'deadbeef000000010000000003'
+TRIGGER_PROOF_SHA256 = 'ec2a29ac5a59a2d78b2ca15da4effe35a658033527af9b6f1314280040612efe'
+SIM_SCHEDULE_SHA256 = '89d7579b5e32c54fee5bd7e21d315eba9800b4833e4ffdbc7721caad371870cf'
 TACTICAL = '/run/mag/ps3/scripts/objective_control/tactical_asset_control.lua'
 TERTIARY = '/run/mag/ps3/scripts/objective_control/tertiary_objective_control.lua'
 SCRIPTS = {
@@ -229,21 +235,180 @@ def project(disc, metadata_path, objective_path, spawn_path, game_path):
     }
 
 
+def interaction_triggers(receipt, by_token, instances, definitions):
+    def definition(instance):
+        return definitions[instance['definition_token']]
+
+    authored = {key: definition(row)['fields'] for key, row in instances.items()
+                if definition(row)['class_name'] == TRIGGER}
+    bound = {token(row['trigger_token']): row for row in unique(receipt['triggers'], 'trigger_token').values()}
+    require(bound.keys() == authored.keys(), 'Incomplete original trigger inventory')
+    by_object = defaultdict(dict)
+    for key, row in bound.items():
+        volume = row['authored_volume']
+        owner = token(row['objective_token'])
+        index = row['client_trigger_index']
+        source = authored[key]
+        cls = definition(instances[owner])['class_name']
+        require(owner == int(source['ObjectiveID']['raw_hex'], 16) == token(volume['objective_token'])
+                and key == token(volume['trigger_token'])
+                and cls == volume['objective_class']
+                and source['TriggerType']['raw_hex'] == volume['trigger_type_raw_hex']
+                and source['ObjectiveTriggerVolume']['token'] == volume['volume_token']
+                and volume['volume_class'] == 'TriggerVolumeBoxProperties'
+                and row['objective_initial_client_network_index'] == by_token[owner]['object_index']
+                and type(index) is int and 0 <= index < 255 and index == row['sim_trigger_index']
+                and row['family56_level_object_slot'] is None
+                and index not in by_object[owner],
+                'Unqualified original trigger binding')
+        by_object[owner][index] = volume
+    for owner, vector in by_object.items():
+        require(sorted(vector) == list(range(len(vector))), 'Incomplete original trigger vector')
+        if definition(instances[owner])['class_name'] == STRUCTURAL:
+            require(all(volume['trigger_type_raw_hex'] == DEMOLITION_TRIGGER
+                        for volume in vector.values()), 'Unqualified Structural trigger type')
+    return by_object
+
+
+def project_interactions(metadata_raw, objective_raw, bindings, trigger_raw, schedule_raw):
+    require(sha(metadata_raw) == METADATA, 'Wrong original retail map metadata')
+    require(sha(trigger_raw) == TRIGGER_PROOF_SHA256, 'Unqualified Acquisition trigger proof')
+    require(sha(schedule_raw) == SIM_SCHEDULE_SHA256, 'Unqualified Acquisition Sim schedule')
+    metadata, objective, trigger, schedule = map(
+        json.loads, (metadata_raw, objective_raw, trigger_raw, schedule_raw)
+    )
+    source = objective['source']
+    name = objective['map_name']
+    require(objective['format'] == 'mag_retail_objective_catalog' and objective['schema_version'] == 1
+            and objective['game_type'] == 1 and objective['entity_family'] == objective['network_type'] == 12
+            and source['capture_qualification'] == 'native_source_gameplay'
+            and source['authored_catalog_sha256'] == METADATA and source['source_image_sha256'] == RETAIL
+            and bindings['schema'] == 'mag_acquisition_structural_bindings_v1' and bindings['map'] == name
+            and bindings['metadata_sha256'] == METADATA
+            and bindings['initial_objective_sha256'] == source['binding_capture_sha256'],
+            'Wrong Acquisition gameplay catalog identity')
+    require(trigger['status'] == 'COMMON_TRIGGER_VECTOR_WITNESSES_REPLAYED_ON_ACQUISITION_SOURCE_INPUTS'
+            and schedule['schema'] == 'mag_acquisition_objective_sim_schedule_v1'
+            and schedule['status'] == 'RETAIL_SIM_SOURCE_ORDER_BOUND'
+            and schedule['retail_elf_sha256'] == RETAIL and schedule['metadata_sha256'] == METADATA
+            and schedule['client_source_bindings_sha256'] == source['binding_capture_sha256'],
+            'Unqualified Acquisition interaction evidence')
+
+    def map_row(receipt):
+        row, = [row for row in receipt['maps'] if row['map']['map'] == name]
+        return row
+
+    authored, vectors, sim = map(map_row, (metadata, trigger, schedule))
+    level = authored['source']
+    require(authored['map']['mode_enum'] == 'GameType128'
+            and authored['map'] == vectors['map'] == sim['map']
+            and level == vectors['source'] == sim['source']
+            and bindings['level_archive_sha256'] == level['archive_sha256']
+            and bindings['level_clv_sha256'] == level['clv_sha256'], 'Original level source mismatch')
+
+    definitions = unique(authored['objectives']['definitions'], 'definition_token')
+    instances = {token(row['name_token']): row for row in
+                 unique(authored['objectives']['instances'], 'name_token').values()}
+    classes = {key: definitions[row['definition_token']]['class_name'] for key, row in instances.items()}
+    roster = {key for key, cls in classes.items() if cls in (STRUCTURAL, SECURE, ARRIVAL)}
+    by_token = {token(row['token']): row for row in unique(objective['objects'], 'token').values()}
+    require(by_token.keys() == roster
+            and [(row['object_index'], token(row['token']), classes[token(row['token'])])
+                 for row in objective['objects']]
+            == [(row['sim_slot'], token(row['token']), row['class_name']) for row in sim['objects']],
+            'Original Sim schedule and objective catalog disagree')
+    bound = bindings['rows']
+    require({row['token'] for row in bound.values() if row['class'] == 'structural'}
+            == {key for key in roster if classes[key] == STRUCTURAL}, 'Incomplete native Structural roster')
+    vectors = interaction_triggers(vectors, by_token, instances, definitions)
+    shared = runpy.run_path(str(TOOLS / 'project-retail-domination-gameplay-objectives.py'))
+    fields, integer, range_fields, repair_rule, demolition_rule = (shared[key] for key in
+        ('fields', 'integer', 'range_fields', 'structural_repair', 'structural_demolition'))
+
+    result = []
+    rows = {}
+    for obj in objective['objects']:
+        key = token(obj['token'])
+        index = obj['object_index']
+        instance = instances[key]
+        if index in bound:
+            cls = 'structural' if classes[key] == STRUCTURAL else 'secure_hold'
+            require(bound[index]['token'] == key and bound[index]['class'] == cls
+                    and classes[key] in (STRUCTURAL, SECURE), 'Structural row slot/class mismatch')
+            rows[index] = dict(bound[index], trigger_positions=[])
+        if classes[key] != STRUCTURAL:
+            result.append(obj)
+            continue
+        require(index in rows and not {'native_class', 'interaction', 'repair', 'demolition'}.intersection(obj),
+                'Conflicting source Structural objective rules')
+        raw = fields(definitions[instance['definition_token']])
+        placed = {row['name']: row['value'] for row in instance['fields']}
+        owner = integer(raw['OwnerTeam'], 1)
+        score = dict(owner_team=owner, activation_score=raw['ActivationScoreValue'],
+                     deactivation_score=raw['DeactivationScoreValue'])
+        require(score['activation_score'] == score['deactivation_score'] == 0,
+                'An original Structural interaction requires direct score effects')
+        repair = repair_rule(raw, owner)
+        native = dict(obj, native_class='structural', repair=repair)
+        vector = vectors.get(key, {})
+        ordered = [vector[index] for index in range(len(vector))]
+        require(repair['can_repair'] == bool(ordered),
+                'Unqualified ordinary Structural repair capability')
+        if ordered:
+            positions = [volume['trigger_position'] for volume in ordered]
+            require(all(len(p) == 3 and all(math.isfinite(x) for x in p) for p in positions),
+                    'Invalid original trigger placement position')
+            boxes = [{key: volume['box'][key] for key in ('centre', 'axes', 'half_extents')}
+                     for volume in ordered]
+            pose = [placed['Translate' + axis] for axis in 'XYZ']
+            native['demolition'] = demolition_rule(raw, range_fields(pose, boxes), score)
+            rows[index]['trigger_positions'] = positions
+        result.append(native)
+    require(rows.keys() == bound.keys(), 'Unbound Structural binding row')
+    return dict(objective, objects=result), dict(
+        bindings, schema='mag_acquisition_structural_bindings_v2', rows=rows)
+
+
+def write_projected(path, result, check):
+    raw = (json.dumps(result, indent=2, allow_nan=False) + '\n').encode()
+    if check:
+        require(path.read_bytes() == raw, 'Acquisition Structural projection differs from reproduction')
+    else:
+        with path.open('xb') as file:
+            file.write(raw)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for arg in ('disc', 'metadata', 'objective-catalog', 'spawn-catalog', 'game', 'output'):
         parser.add_argument('--' + arg, type=Path, required=True)
+    interaction_args = ('native-elf', 'trigger-proof', 'sim-schedule', 'objective-output')
+    for arg in interaction_args:
+        parser.add_argument('--' + arg, type=Path)
     parser.add_argument('--check', action='store_true')
     args = parser.parse_args()
-    if args.output.resolve().is_relative_to(TOOLS.parents[1]):
-        parser.error('Output must be outside the source checkout')
-    result = project(args.disc, args.metadata, args.objective_catalog, args.spawn_catalog, args.game)
-    raw = (json.dumps(result, indent=2, allow_nan=False) + '\n').encode()
-    if args.check:
-        require(args.output.read_bytes() == raw, 'Structural bindings differ from source reproduction')
-    else:
-        with args.output.open('xb') as file:
-            file.write(raw)
+    elf, trigger, schedule, objective_output = (getattr(args, name.replace('-', '_'))
+                                                for name in interaction_args)
+    if any((elf, trigger, schedule, objective_output)) and not all((elf, trigger, schedule, objective_output)):
+        parser.error('Ordinary Structural projection requires all interaction inputs and --objective-output')
+    outputs = [path.resolve() for path in (args.output, objective_output) if path is not None]
+    inputs = {path.resolve() for path in
+              (args.metadata, args.objective_catalog, args.spawn_catalog, args.game, elf, trigger, schedule)
+              if path is not None}
+    if len(set(outputs)) != len(outputs) or any(
+            path.is_relative_to(TOOLS.parents[1]) or path in inputs for path in outputs):
+        parser.error('Outputs must be distinct paths outside the source checkout and inputs')
+    if not args.check and any(path.exists() for path in outputs):
+        parser.error('Projection outputs must be new files')
+    if elf:
+        with elf.open('rb') as image:
+            require(hashlib.file_digest(image, 'sha256').hexdigest() == RETAIL, 'Wrong original retail ELF')
+    bindings = project(args.disc, args.metadata, args.objective_catalog, args.spawn_catalog, args.game)
+    if elf:
+        objective, bindings = project_interactions(args.metadata.read_bytes(),
+            args.objective_catalog.read_bytes(), bindings, trigger.read_bytes(), schedule.read_bytes())
+        write_projected(objective_output, objective, args.check)
+    write_projected(args.output, bindings, args.check)
 
 
 if __name__ == '__main__':

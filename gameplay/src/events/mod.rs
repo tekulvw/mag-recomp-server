@@ -310,6 +310,31 @@ impl<W: Write> Engine<W> {
         {
             return self.event_domination_structural_repair(&event, *request, now, wall_secs);
         }
+        if self.acquisition_gameplay.is_some()
+            && event.rt_type == 0x3d
+            && event.plugin_id == Some(1)
+            && matches!(event.transport, Transport::Tcp)
+            && matches!(event.direction, Direction::ClientToServer)
+            && let Ok(protocol::GameMessage::Repair(request)) = &decoded.message
+            && request.target_object_id & 0xffff_0000 == 0x0c80_0000
+            && self.objective_world.as_ref().is_some_and(|world| {
+                world.native_class(request.target_object_id as u16)
+                    == Some(objective_catalog::NativeClass::Structural)
+            })
+        {
+            let (authority, leadership) = self
+                .plan_structural_repair_authority(self.acquisition_structural_repair_tool(), now)?;
+            return self.event_acquisition_structural(
+                &event,
+                acquisition_gameplay_engine::StructuralInput::Repair(
+                    request.target_object_id as u16,
+                    authority,
+                ),
+                leadership,
+                now,
+                wall_secs,
+            );
+        }
         let hospital_route_allowed = self.domination_gameplay.is_none()
             || match &decoded.message {
                 Ok(protocol::GameMessage::Hit(request)) if request.defender >> 24 == 13 => {
@@ -348,7 +373,7 @@ impl<W: Write> Engine<W> {
         // Preserve the sequence-exhaustion gate for every authenticated event,
         // including opaque transport payloads that produce no native reply.
         let next_sequence = active.next_sequence()?;
-        if self.domination_gameplay.is_some()
+        if (self.domination_gameplay.is_some() || self.acquisition_gameplay.is_some())
             && self.match_started
             && self.match_terminal.is_none()
             && event.rt_type == 0x3d
@@ -364,12 +389,29 @@ impl<W: Write> Engine<W> {
                     | protocol::ObjectiveInteractionKind::Deactivate
                     | protocol::ObjectiveInteractionKind::Release
             )
+            && (self.domination_gameplay.is_some()
+                || (request.target_object_id & 0xffff_0000 == 0x0c80_0000
+                    && self.objective_world.as_ref().is_some_and(|world| {
+                        world.native_class(request.target_object_id as u16)
+                            == Some(objective_catalog::NativeClass::Structural)
+                    })))
             && let Some(actor) = objectives::actor(active)
         {
             let modifier = plan
                 .leadership
                 .modifiers(active)
                 .value("kCharModDemolitionTime");
+            if self.acquisition_gameplay.is_some() {
+                return self.event_acquisition_structural(
+                    &event,
+                    acquisition_gameplay_engine::StructuralInput::Interaction(
+                        *request, actor, modifier,
+                    ),
+                    plan.leadership,
+                    now,
+                    wall_secs,
+                );
+            }
             return self.event_domination_interaction(
                 &event,
                 *request,

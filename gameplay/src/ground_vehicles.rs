@@ -279,6 +279,30 @@ pub(crate) struct DriverSeat {
     pub maximum_speed_mps: f32,
 }
 
+/// Full visibility inventory for the seats this profile admits.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SeatVisibility {
+    archive_sha256: String,
+    registry_member_sha256: String,
+    vehicles: Vec<VehicleSeatVisibility>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VehicleSeatVisibility {
+    vehicle_index: u16,
+    properties_member_sha256: String,
+    seats: Vec<OccupantVisibility>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OccupantVisibility {
+    seat: u8,
+    occupant_visible: bool,
+}
+
 /// Explicit qualified external bindings. No default vehicles or native IDs.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -295,6 +319,8 @@ pub struct Catalog {
     vehicle_sources: Vec<VehicleSource>,
     #[serde(default)]
     driver_seats: Vec<DriverSeat>,
+    #[serde(default)]
+    seat_visibility: Option<SeatVisibility>,
 }
 impl Catalog {
     pub fn load(
@@ -548,8 +574,64 @@ impl Catalog {
                 return Err("missing_passenger_spawn_binding");
             }
         }
+        if let Some(visibility) = &self.seat_visibility {
+            self.validate_seat_visibility(visibility)?;
+        }
         Ok(())
     }
+    fn validate_seat_visibility(&self, visibility: &SeatVisibility) -> Result<(), &'static str> {
+        let valid_hash =
+            |hash: &str| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit());
+        if self.source.creation_scope.as_deref() != Some("native_vehicle_source_points")
+            || !valid_hash(&visibility.archive_sha256)
+            || !valid_hash(&visibility.registry_member_sha256)
+        {
+            return Err("invalid_ground_seat_visibility_source");
+        }
+        let expected: BTreeSet<_> = self
+            .vehicles
+            .iter()
+            .flat_map(|vehicle| {
+                vehicle
+                    .passenger_seats
+                    .iter()
+                    .copied()
+                    .chain(self.driver_seat(vehicle.index).map(|driver| driver.seat))
+                    .map(|seat| (vehicle.index, seat))
+            })
+            .collect();
+        let mut vehicles = BTreeSet::new();
+        let mut seats = BTreeSet::new();
+        for row in &visibility.vehicles {
+            if !vehicles.insert(row.vehicle_index)
+                || !valid_hash(&row.properties_member_sha256)
+                || row.seats.is_empty()
+                || row
+                    .seats
+                    .iter()
+                    .any(|seat| !seats.insert((row.vehicle_index, seat.seat)))
+            {
+                return Err("invalid_ground_seat_visibility_inventory");
+            }
+        }
+        if expected.is_empty() || seats != expected {
+            return Err("invalid_ground_seat_visibility_inventory");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn seat_occupant_visible(&self, vehicle_index: u16, seat: u8) -> Option<bool> {
+        self.seat_visibility
+            .as_ref()?
+            .vehicles
+            .iter()
+            .find(|row| row.vehicle_index == vehicle_index)?
+            .seats
+            .iter()
+            .find(|row| row.seat == seat)
+            .map(|row| row.occupant_visible)
+    }
+
     pub(crate) fn driver_seat(&self, index: u16) -> Option<DriverSeat> {
         self.driver_seats
             .iter()

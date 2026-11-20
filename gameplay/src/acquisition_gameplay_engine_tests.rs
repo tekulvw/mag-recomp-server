@@ -392,6 +392,23 @@ fn acquisition_rejects_missing_escort_driver_bindings_before_setup_installation(
     assert!(engine.with_acquisition_gameplay(setup).is_ok());
 }
 
+#[test]
+fn acquisition_rejects_native_structure_without_its_effect_provider() {
+    let (mut engine, setup) = acquisition_setup_fixture(None, None, false, 4);
+    let catalog = engine.objective_catalog.as_mut().unwrap();
+    let structure = catalog
+        .objects
+        .iter_mut()
+        .find(|o| o.object_index == 120)
+        .unwrap();
+    structure.native_class = Some(crate::objective_catalog::NativeClass::Structural);
+
+    assert!(matches!(
+        engine.with_acquisition_gameplay(setup),
+        Err("acquisition_native_structural_provider_required")
+    ));
+}
+
 fn start_capture(e: &mut Engine<Vec<u8>>, player: u16, epoch_ms: u64) {
     reserve(e, player);
     let active = e.active.as_mut().unwrap();

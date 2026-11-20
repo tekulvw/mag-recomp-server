@@ -339,6 +339,9 @@ impl ObjectiveCatalog {
         let mut tokens = BTreeSet::new();
         let mut indices = BTreeSet::new();
         let mut previous = None;
+        let domination = self.is_domination_gameplay();
+        let acquisition =
+            self.game_type == 1 && self.source.capture_qualification == "native_source_gameplay";
         for object in &self.objects {
             let token = object
                 .token
@@ -354,28 +357,30 @@ impl ObjectiveCatalog {
             {
                 return Err("invalid_objective_binding");
             }
-            if (!self.is_domination_gameplay()
-                && (object.native_class.is_some() || object.repair.is_some()))
-                || (self.is_domination_gameplay()
-                    && ((object.interaction.is_some()
-                        && object.native_class != Some(NativeClass::SecureHold))
-                        || ((object.demolition.is_some() || object.repair.is_some())
-                            && object.native_class != Some(NativeClass::Structural))
-                        || object.native_class.is_some()
-                            && !matches!(object.initial_state, 0 | 1 | 6 | 7 | 9)
-                        || (object.native_class == Some(NativeClass::SecureHold)
-                            && object.initial_state == 6)
-                        || object.repair.is_some_and(|rule| {
-                            rule.owner_team > 1
-                                || rule.repair_ms > 3_600_000
-                                || rule.minimum_repair_ms > 3_600_000
-                                || object
-                                    .demolition
-                                    .as_ref()
-                                    .is_some_and(|d| d.owner_team != rule.owner_team)
-                        })))
+            let structural = object.native_class == Some(NativeClass::Structural);
+            let secure_hold = object.native_class == Some(NativeClass::SecureHold);
+            if (secure_hold && !domination)
+                || (structural && !(domination || acquisition))
+                || (domination && object.interaction.is_some() && !secure_hold)
+                || (domination && object.demolition.is_some() && !structural)
+                || (acquisition
+                    && structural
+                    && (object.interaction.is_some() || object.repair.is_none()))
+                || (object.native_class.is_some()
+                    && !matches!(object.initial_state, 0 | 1 | 6 | 7 | 9))
+                || (secure_hold && object.initial_state == 6)
+                || object.repair.is_some_and(|rule| {
+                    !structural
+                        || rule.owner_team > 1
+                        || rule.repair_ms > 3_600_000
+                        || rule.minimum_repair_ms > 3_600_000
+                        || object
+                            .demolition
+                            .as_ref()
+                            .is_some_and(|d| d.owner_team != rule.owner_team)
+                })
             {
-                return Err("invalid_native_domination_objective_binding");
+                return Err("invalid_native_objective_binding");
             }
             if object.reward.as_ref().is_some_and(|rule| {
                 rule.category > 4
@@ -412,7 +417,7 @@ impl ObjectiveCatalog {
                     || [rule.arm_ms, rule.detonate_ms, rule.defuse_ms]
                         .iter()
                         .any(|duration| *duration == 0 || *duration > 3_600_000)
-                    || (self.is_domination_gameplay()
+                    || ((domination || structural)
                         && rule.distance_policy != crate::objective_range::AUTHORED_TRIGGER_BOX)
                     || rule.trigger_count == 0
                     || rule.position.iter().any(|value| !value.is_finite())

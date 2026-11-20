@@ -163,6 +163,7 @@ mod score_clock;
 pub mod skill_catalog;
 pub mod spawn_catalog;
 mod spawn_progression;
+mod structural_repair_authority;
 pub mod structure_catalog;
 pub mod structures;
 pub mod telemetry;

@@ -43,7 +43,8 @@ file.
     "effects": "structural-effects.json",
     "collision_assets": "structural-collision",
     "terrain_index": "terrain-materials.json",
-    "terrain_materials": "terrain-materials.bin"
+    "terrain_materials": "terrain-materials.bin",
+    "repair_catalog": "retail-structures.json"
   }
 }
 ```
@@ -57,14 +58,28 @@ public checkout. When `structural` is present, its linked inputs and original
 motor-pool allocations must validate before the profile loads. Existing
 configurations can omit this member.
 
-The provider runs the sourced startup entries and consumes Precision transitions
-in family-12 order. It applies linked insertion points, motor-pool hooks,
+The v2 bindings enable ordinary Structural arming, defusing, fuse detonation,
+destruction and repair using the extracted rules. Ordered trigger bindings retain
+the selected demolition box and its authored explosion position. The authenticated
+interaction route requires a live, ready, on-foot actor; TCP repair also requires
+the currently equipped source repair tool. Repair tuning comes from the supplied
+repair catalog. Legacy v1 bindings retain their passive behavior.
+
+The provider runs the sourced startup entries and native Structural updates
+in family-12 order, including Precision transitions. It applies linked insertion points, motor-pool hooks,
 tactical command availability, Structural explosions and area damage, and
 sequence collision. Committed sequence state is included in late-join
 replication. Bound native infantry spawn types 4, 5 and 8 use the authored
 category-zero point for local character insertion until their physical routes
-are qualified. Ordinary demolition and repair interactions for these structures
-also lack runtime coverage.
+are qualified.
+
+Profiles with Structural area damage require complete authored occupant visibility
+for every admitted ground seat. Run `project-retail-ground-seat-visibility.py`
+against the original game archive and the selected ground catalog to add that
+source-bound inventory. Hidden occupants are excluded before the radius query;
+visible occupants use the current vehicle root position. Missing visibility
+rejects an enabled area-damage profile at startup. This does not qualify mounted
+firearm or radial-blast body coverage.
 
 ## Owned gameplay
 
@@ -111,6 +126,9 @@ recapture; destruction/occupants/recapture; APC/truck reinforcement and restored
 human insertion; late joins; rejected routes; and failed-record rollback. Private
 offline consumers qualify all six faction pairings across the three maps. These
 checks do not establish a native rendered match, throughput or frame rate.
+Connected Structural scenarios also cover selected-trigger arming, defusing and
+release, interruption by an actor life change, TCP repair through quiet frames,
+rearming, late-join state, reset, and failed-record rollback.
 
 Exact Havok solver/traversal/quaternion bits, native material penetration and
 dynamic blast occlusion remain fidelity work. Radial destruction uses an explicit

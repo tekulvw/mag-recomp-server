@@ -91,9 +91,17 @@ fn string(value: &Value, name: &str) -> io::Result<String> {
 }
 impl StructureCatalog {
     pub fn load(path: impl AsRef<Path>) -> io::Result<Self> {
-        Self::from_value(
+        Self::load_for_application(path, 20230)
+    }
+
+    pub(crate) fn load_for_application(
+        path: impl AsRef<Path>,
+        application_id: u64,
+    ) -> io::Result<Self> {
+        Self::from_value_for_application(
             serde_json::from_reader(io::BufReader::new(std::fs::File::open(path)?))
                 .map_err(|e| invalid(e.to_string()))?,
+            application_id,
         )
     }
     pub fn from_value(raw: Value) -> io::Result<Self> {

@@ -167,3 +167,65 @@ fn domination_initial_load_keeps_all_thirty_two_squads_without_enabling_gameplay
     input["squads"].as_array_mut().unwrap().pop();
     assert!(ObjectiveCatalog::from_json(&input.to_string()).is_err());
 }
+
+fn qualified_structural() -> Value {
+    let mut input = fixture(1, true);
+    input["source"]["capture_qualification"] = json!("native_source_gameplay");
+    input["objects"][0]["native_class"] = json!("structural");
+    input["objects"][0]["repair"] = json!({
+        "owner_team":0,"can_repair":true,"repair_ms":18000,"minimum_repair_ms":7000
+    });
+    input["objects"][0]["demolition"] = json!({
+        "owner_team":0,"arm_ms":2600,"detonate_ms":17000,"defuse_ms":1900,
+        "can_defuse":true,"activation_score":0,"deactivation_score":0,
+        "position":[10,20,30],"trigger_count":2,"maximum_distance_m":5,
+        "distance_policy":"authored_trigger_box",
+        "trigger_volumes":[
+            {"centre":[11,20,30],"axes":[[1,0,0],[0,1,0],[0,0,1]],"half_extents":[1,2,1]},
+            {"centre":[9,20,30],"axes":[[1,0,0],[0,1,0],[0,0,1]],"half_extents":[1,2,1]}
+        ]
+    });
+    input
+}
+
+#[test]
+fn acquisition_catalog_admits_source_qualified_native_structural_only() {
+    let input = qualified_structural();
+    ObjectiveCatalog::from_json(&input.to_string()).unwrap();
+
+    let mut wrong_scope = input.clone();
+    wrong_scope["source"]["capture_qualification"] = json!("bounded_concurrent_token_slot_capture");
+    assert!(ObjectiveCatalog::from_json(&wrong_scope.to_string()).is_err());
+
+    let mut wrong_mode = fixture(0, false);
+    wrong_mode["objects"][0] = input["objects"][0].clone();
+    assert!(ObjectiveCatalog::from_json(&wrong_mode.to_string()).is_err());
+
+    let mut secure = input;
+    secure["objects"][0] = json!({"token":"0x00001001","object_index":17,"initial_state":0,
+                                 "native_class":"secure_hold"});
+    assert!(ObjectiveCatalog::from_json(&secure.to_string()).is_err());
+}
+
+#[test]
+fn acquisition_catalog_rejects_missing_or_mismatched_structural_rules() {
+    let input = qualified_structural();
+    let mut bad_owner = input.clone();
+    bad_owner["objects"][0]["repair"]["owner_team"] = json!(1);
+    assert!(ObjectiveCatalog::from_json(&bad_owner.to_string()).is_err());
+
+    let mut bad_count = input.clone();
+    bad_count["objects"][0]["demolition"]["trigger_volumes"] = json!([]);
+    assert!(ObjectiveCatalog::from_json(&bad_count.to_string()).is_err());
+
+    let mut bad_policy = bad_count;
+    bad_policy["objects"][0]["demolition"]["distance_policy"] = json!("development_point_distance");
+    assert!(ObjectiveCatalog::from_json(&bad_policy.to_string()).is_err());
+
+    let mut missing_repair = input;
+    missing_repair["objects"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("repair");
+    assert!(ObjectiveCatalog::from_json(&missing_repair.to_string()).is_err());
+}

@@ -148,6 +148,7 @@ fn retail_ground_vehicle_batches_preserve_separate_network_indices_and_budget() 
         passenger_spawns: Vec::new(),
         vehicle_sources: Vec::new(),
         driver_seats: Vec::new(),
+        seat_visibility: None,
     };
     assert_eq!(world.batch_count(), 2);
     for batch in 0..2 {
