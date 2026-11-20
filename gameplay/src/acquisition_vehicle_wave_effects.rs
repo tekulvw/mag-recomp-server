@@ -9,6 +9,14 @@ use crate::{
 };
 use std::collections::BTreeMap;
 
+pub(crate) struct WaveFrame<'a> {
+    pub waves: &'a mut VehicleWaves,
+    pub physics: crate::acquisition_world::Settings,
+    pub filter_rows: [u32; 32],
+    pub staged_spawns: Option<&'a crate::spawn_catalog::SpawnCatalog>,
+    pub now: Duration,
+}
+
 impl<W: Write> Engine<W> {
     pub(crate) fn stage_acquisition_vehicle_waves(
         &mut self,
@@ -18,9 +26,7 @@ impl<W: Write> Engine<W> {
         native: &mut BTreeMap<u32, NativeState>,
         changes: &mut BTreeMap<u16, u32>,
     ) -> Result<(Vec<Value>, Vec<OutboundMessage>), &'static str> {
-        let now_ms = now.as_millis() as u32;
         let mut audit = Vec::new();
-        let mut messages = Vec::new();
         if runtime.vehicle_waves.is_none() {
             let epoch = self.match_epoch.unwrap_or(now).as_millis() as u32;
             runtime.vehicle_waves = Some(VehicleWaves::start(
@@ -29,8 +35,39 @@ impl<W: Write> Engine<W> {
             )?);
             audit.push(json!({"op":"acquisition_vehicle_waves_started","epoch_ms":epoch}));
         }
-        let waves = runtime.vehicle_waves.as_mut().unwrap();
-        for (team, due) in waves.tick(now_ms).into_iter().enumerate() {
+        let (rows, messages) = self.stage_ground_vehicle_waves(
+            WaveFrame {
+                waves: runtime.vehicle_waves.as_mut().unwrap(),
+                physics: runtime.setup.physics,
+                filter_rows: runtime.setup.filter_rows,
+                staged_spawns: None,
+                now,
+            },
+            ground,
+            native,
+            changes,
+        )?;
+        audit.extend(rows);
+        Ok((audit, messages))
+    }
+
+    pub(crate) fn stage_ground_vehicle_waves(
+        &mut self,
+        frame: WaveFrame<'_>,
+        ground: &mut ground::Runtime,
+        native: &mut BTreeMap<u32, NativeState>,
+        changes: &mut BTreeMap<u16, u32>,
+    ) -> Result<(Vec<Value>, Vec<OutboundMessage>), &'static str> {
+        let WaveFrame {
+            waves,
+            physics,
+            filter_rows,
+            staged_spawns,
+            now,
+        } = frame;
+        let mut audit = Vec::new();
+        let mut messages = Vec::new();
+        for (team, due) in waves.tick(now.as_millis() as u32).into_iter().enumerate() {
             let Some(queued) = due else { continue };
             let team = team as u8;
             audit.push(json!({
@@ -54,10 +91,11 @@ impl<W: Write> Engine<W> {
                 {
                     return Err("acquisition_vehicle_wave_stale_entry");
                 }
-                let point = self
-                    .spawn_catalog
-                    .as_ref()
-                    .and_then(|spawns| spawns.point(creation.spawn_point_index))
+                let spawns = staged_spawns
+                    .or(self.spawn_catalog.as_ref())
+                    .ok_or("acquisition_vehicle_wave_source_missing")?;
+                let point = spawns
+                    .point(creation.spawn_point_index)
                     .ok_or("acquisition_vehicle_wave_source_missing")?;
                 if point.index != current.source_spawn_point_index
                     || point.token != current.source_spawn_point_token
@@ -65,7 +103,8 @@ impl<W: Write> Engine<W> {
                 {
                     return Err("acquisition_vehicle_wave_source_mismatch");
                 }
-                let active = point.active;
+                let active =
+                    staged_spawns.map_or(point.active, |spawns| spawns.point_active(point.index));
                 if source_type == Some(7) && !active {
                     waves.queue(team, key)?;
                     audit.push(json!({"op":"acquisition_vehicle_wave_source_inactive","vehicle":key.object_id()}));
@@ -97,8 +136,8 @@ impl<W: Write> Engine<W> {
                             let result = self.stage_respawn_clearance(
                                 Clearance {
                                     source: key,
-                                    physics: runtime.setup.physics,
-                                    filter_rows: runtime.setup.filter_rows,
+                                    physics,
+                                    filter_rows,
                                     now,
                                 },
                                 native,

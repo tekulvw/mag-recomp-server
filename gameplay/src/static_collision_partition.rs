@@ -205,11 +205,11 @@ impl<W: std::io::Write> crate::Engine<W> {
         if self.active.is_some()
             || !self.peers.is_empty()
             || self.wire_profile.application_id() != 20231
-            || self.match_profile().game_type != 1
+            || !matches!(self.match_profile().game_type, 1 | 2)
             || partitions.is_empty()
             || partitions.len() > 64
         {
-            return Err("static_partitions_require_idle_retail_acquisition");
+            return Err("static_partitions_require_idle_retail_native_world");
         }
         Partition::validate_collection(
             &partitions,

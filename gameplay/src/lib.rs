@@ -40,6 +40,7 @@ pub mod bot_registry;
 mod bot_traffic_costs;
 mod bot_traffic_flow;
 pub mod bullet_hit;
+mod bunker_seats;
 pub mod collision;
 mod convex_penetration;
 pub mod correction_ack;
@@ -50,9 +51,15 @@ pub mod domination_callbacks;
 pub mod domination_control;
 pub mod domination_fsp;
 pub mod domination_fsp_bindings;
+pub mod domination_gameplay_config;
+pub mod domination_gameplay_effects;
+pub mod domination_gameplay_engine;
+pub mod domination_gameplay_provider;
 pub mod domination_match_flow;
 pub mod domination_objective_runtime;
 pub mod domination_repair_runtime;
+pub mod domination_structural_effects;
+pub mod domination_structural_world;
 pub mod dynamic_collision;
 pub mod dynamic_collision_runtime;
 #[cfg(test)]
@@ -88,6 +95,9 @@ pub fn drop_passages_exclusive(
     bot_traffic_flow::passages_exclusive(a, b, entry_buffer_m)
 }
 pub mod character_damage_rules;
+pub mod domination_helo;
+mod domination_helo_damage;
+mod domination_helo_engine;
 mod ground_seats;
 pub mod ground_vehicles;
 mod headless_sim;
@@ -956,7 +966,11 @@ struct Active {
     emplacement_creation: Option<Vec<u8>>,
     ground_vehicle_batch: usize,
     mounted_seat: Option<u8>,
+    /// Explicit family13 identity for source-bound hospitals; legacy Alpha uses None.
+    mounted_bunker: Option<u16>,
     ground_seat: Option<ground_seats::PassengerSeat>,
+    helo_seat: Option<domination_helo::PassengerSeat>,
+    helo_creation_sent: bool,
     seat_transitions: Vec<Vec<u8>>,
     last_exit: Option<protocol::DismountSeat>,
     match_clock_started: Option<Duration>,
@@ -1029,6 +1043,7 @@ pub struct Engine<W: Write> {
     ground_runtime: Option<acquisition_ground_runtime::Runtime>,
     acquisition_round: Option<acquisition_round::Round>,
     domination_round: Option<acquisition_round::Round>,
+    domination_gameplay: Option<domination_gameplay_provider::World>,
     acquisition_gameplay: Option<acquisition_gameplay_engine::Runtime>,
     acquisition_effect_origin: std::sync::Arc<()>,
     acquisition_static_partitions:
@@ -1230,6 +1245,7 @@ impl<W: Write> Engine<W> {
             .objective_catalog
             .as_ref()
             .is_some_and(|c| c.is_domination_gameplay())
+            && self.domination_gameplay.is_none()
         {
             return Err("domination_gameplay_configuration_required");
         }
@@ -1242,6 +1258,11 @@ impl<W: Write> Engine<W> {
     }
 
     fn initial_objective_index(&self, squad: u16) -> Result<u16, &'static str> {
+        if let Some(gameplay) = &self.domination_gameplay {
+            return gameplay
+                .assigned_objective(squad)
+                .ok_or("objective_squad_not_configured");
+        }
         if let Some(gameplay) = &self.acquisition_gameplay {
             return gameplay
                 .state
@@ -1695,7 +1716,10 @@ impl<W: Write> Engine<W> {
                     emplacement_creation: None,
                     ground_vehicle_batch: 0,
                     mounted_seat: None,
+                    mounted_bunker: None,
                     ground_seat: None,
+                    helo_seat: None,
+                    helo_creation_sent: false,
                     seat_transitions: Vec::new(),
                     last_exit: None,
                     match_clock_started: None,

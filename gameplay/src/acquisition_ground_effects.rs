@@ -3,8 +3,13 @@ use super::*;
 use crate::{
     acquisition_character_effects::{self as character, NativeState},
     acquisition_gameplay_engine::Runtime,
+    acquisition_ground_damage::Policy,
     acquisition_ground_runtime::{self as ground, Effect, Key},
+    acquisition_vehicle_waves::VehicleWaves,
     acquisition_volume_damage::TargetKind,
+    domination_structural_effects::InstantaneousBlast,
+    domination_structural_world::{AreaDamageState, BlastCollision, BlastSource},
+    dynamic_collision::QueryLimits,
     dynamic_collision::{Geometry, Pose, geometry},
     item_catalog::TargetDamageParameters,
 };
@@ -16,6 +21,25 @@ struct Effects<'a> {
     changes: &'a mut BTreeMap<u16, u32>,
     audit: Vec<Value>,
     messages: Vec<OutboundMessage>,
+    helo_doses: Vec<crate::domination_helo_damage::RadialDose>,
+}
+
+pub(crate) struct GroundFrame<'a> {
+    pub now: Duration,
+    pub dt: f32,
+    pub waves: &'a mut VehicleWaves,
+    pub policy: Option<&'a Policy>,
+    pub filter_row: u32,
+    pub limits: QueryLimits,
+    pub domination_blast: Option<(BlastCollision<'a>, f32)>,
+}
+
+#[derive(Default)]
+pub(crate) struct GroundUpdate {
+    pub audit: Vec<Value>,
+    pub messages: Vec<OutboundMessage>,
+    pub forced_fsp: Vec<(u32, u32, u8)>,
+    pub helo_doses: Vec<crate::domination_helo_damage::RadialDose>,
 }
 
 impl<W: Write> Engine<W> {
@@ -35,12 +59,49 @@ impl<W: Write> Engine<W> {
                     .ok_or("acquisition_ground_update_time_regression")
             })?
             .as_secs_f32();
+        let update = self.stage_ground_updates(
+            GroundFrame {
+                now,
+                dt,
+                waves: runtime
+                    .vehicle_waves
+                    .as_mut()
+                    .ok_or("acquisition_vehicle_waves_unavailable")?,
+                policy: runtime.setup.ground_damage.as_ref(),
+                filter_row: runtime.setup.filter_rows[6],
+                limits: runtime.setup.physics.query_limits,
+                domination_blast: None,
+            },
+            ground,
+            native,
+            changes,
+        )?;
+        for (objective, attacker, team) in update.forced_fsp {
+            runtime
+                .state
+                .request_forced_fsp_deactivation(objective, attacker, team)?;
+        }
+        runtime.last_ground_update = Some(now);
+        Ok((update.audit, update.messages))
+    }
+
+    pub(crate) fn stage_ground_updates(
+        &mut self,
+        mut frame: GroundFrame<'_>,
+        ground: &mut ground::Runtime,
+        native: &mut BTreeMap<u32, NativeState>,
+        changes: &mut BTreeMap<u16, u32>,
+    ) -> Result<GroundUpdate, &'static str> {
+        let now = frame.now;
+        let dt = frame.dt;
+        let mut forced_fsp = Vec::new();
         let mut output = Effects {
             now,
             native,
             changes,
             audit: Vec::new(),
             messages: Vec::new(),
+            helo_doses: Vec::new(),
         };
         let keys: Vec<_> = ground.vehicles().map(|vehicle| vehicle.key).collect();
         for key in keys {
@@ -54,18 +115,10 @@ impl<W: Write> Engine<W> {
                 .and_then(|catalog| catalog.vehicle(key.index))
                 .ok_or("unknown_ground_vehicle")?
                 .team;
-            let next_spawn = u64::from(
-                runtime
-                    .vehicle_waves
-                    .as_ref()
-                    .ok_or("acquisition_vehicle_waves_unavailable")?
-                    .next_timestamp(team)?,
-            );
+            let next_spawn = u64::from(frame.waves.next_timestamp(team)?);
             let mut events = if before.is_dying() {
-                runtime
-                    .setup
-                    .ground_damage
-                    .as_ref()
+                frame
+                    .policy
                     .ok_or("ground_damage_policy_required")?
                     .advance_critical(ground, key, dt)?
             } else {
@@ -85,22 +138,32 @@ impl<W: Write> Engine<W> {
                 .take()
                 .ok_or("ground_vehicle_runtime_required")?;
             self.ground_runtime = Some(ground.clone());
-            let result = self.consume_acquisition_ground_events(runtime, &events, &mut output);
+            let result = self.consume_acquisition_ground_events(
+                &mut frame,
+                &events,
+                &mut output,
+                &mut forced_fsp,
+            );
             *ground = self
                 .ground_runtime
                 .replace(previous)
                 .ok_or("ground_vehicle_runtime_required")?;
             result?;
         }
-        runtime.last_ground_update = Some(now);
-        Ok((output.audit, output.messages))
+        Ok(GroundUpdate {
+            audit: output.audit,
+            messages: output.messages,
+            forced_fsp,
+            helo_doses: output.helo_doses,
+        })
     }
 
     fn consume_acquisition_ground_events(
         &mut self,
-        runtime: &mut Runtime,
+        frame: &mut GroundFrame<'_>,
         events: &[ground::LifecycleEvent],
         output: &mut Effects<'_>,
+        forced_fsp: &mut Vec<(u32, u32, u8)>,
     ) -> Result<(), &'static str> {
         for event in events {
             let key = event.vehicle;
@@ -152,12 +215,16 @@ impl<W: Write> Engine<W> {
                     }
                 }
                 Effect::DestructionExplosion(destruction) => {
-                    self.stage_acquisition_destruction_explosion(
-                        runtime,
-                        key,
-                        destruction,
-                        output,
-                    )?;
+                    if frame.domination_blast.is_some() {
+                        self.stage_domination_ground_explosion(frame, key, destruction, output)?;
+                    } else {
+                        self.stage_acquisition_destruction_explosion(
+                            frame,
+                            key,
+                            destruction,
+                            output,
+                        )?;
+                    }
                 }
                 Effect::RequestFspDeactivation {
                     objective,
@@ -173,9 +240,7 @@ impl<W: Write> Engine<W> {
                         .reservation
                         .world;
                     let team = self.character_team_in_world(attacker, world).unwrap_or(0);
-                    runtime
-                        .state
-                        .request_forced_fsp_deactivation(objective, attacker, team)?;
+                    forced_fsp.push((objective, attacker, team));
                 }
                 Effect::DismountOccupants => {
                     let vehicle = self
@@ -202,11 +267,7 @@ impl<W: Write> Engine<W> {
                         .and_then(|catalog| catalog.vehicle(key.index))
                         .ok_or("unknown_ground_vehicle")?
                         .team;
-                    runtime
-                        .vehicle_waves
-                        .as_mut()
-                        .ok_or("acquisition_vehicle_waves_unavailable")?
-                        .queue(team, key)?;
+                    frame.waves.queue(team, key)?;
                     let ground = self
                         .ground_runtime
                         .as_mut()
@@ -247,9 +308,56 @@ impl<W: Write> Engine<W> {
         Ok(())
     }
 
+    fn stage_domination_ground_explosion(
+        &mut self,
+        frame: &GroundFrame<'_>,
+        key: Key,
+        blast: ground::Destruction,
+        output: &mut Effects<'_>,
+    ) -> Result<(), &'static str> {
+        let (collision, material_penetration) = frame
+            .domination_blast
+            .ok_or("domination_ground_blast_context_required")?;
+        let source = self
+            .ground_runtime
+            .as_ref()
+            .and_then(|r| r.get(key.index))
+            .filter(|vehicle| vehicle.key == key)
+            .ok_or("stale_domination_ground_candidate")?;
+        let position = source.pose.position;
+        let work = self.collect_domination_blast(
+            BlastSource::Ground {
+                body_id: key.object_id(),
+            },
+            source.last_attacker,
+            InstantaneousBlast {
+                origins: vec![[position.x, position.y, position.z]],
+                inner_radius: blast.half_radius,
+                outer_radius: blast.full_radius,
+                damage: blast.damage,
+                material_penetration,
+            },
+            collision,
+        )?;
+        let result = self.stage_domination_damage_with_ground(
+            &mut AreaDamageState::default(),
+            output.native,
+            frame.now,
+            std::slice::from_ref(&work),
+            frame.policy,
+        )?;
+        output.helo_doses.extend(result.helo_doses);
+        output.audit.extend(result.audit);
+        output.messages.extend(result.messages);
+        for index in result.changed_ground {
+            *output.changes.entry(index).or_default() |= 1 << 18;
+        }
+        Ok(())
+    }
+
     fn stage_acquisition_destruction_explosion(
         &mut self,
-        runtime: &Runtime,
+        frame: &GroundFrame<'_>,
         key: Key,
         blast: ground::Destruction,
         output: &mut Effects<'_>,
@@ -285,18 +393,18 @@ impl<W: Write> Engine<W> {
             source.pose.position.z,
         ];
         let source_id = u64::from(key.object_id());
-        let snapshot = self.dynamic_collision_snapshot(runtime.setup.filter_rows[6])?;
+        let snapshot = self.dynamic_collision_snapshot(frame.filter_row)?;
         let world = snapshot.context().0.world_id;
         let radius = Geometry::Sphere {
             radius: f64::from(blast.full_radius),
         };
-        let limits = runtime.setup.physics.query_limits;
+        let limits = frame.limits;
         let mut budget = limits.max_support_points;
         let mut los_budget = 1_000_000;
         let attacker_team = self.character_team_in_world(attacker, world);
         for body in snapshot.bodies() {
             if body.target.key.id == source_id
-                || runtime.setup.filter_rows[6] & (1 << body.layer) == 0
+                || frame.filter_row & (1 << body.layer) == 0
                 || !geometry::penetrates(
                     &radius,
                     Pose::at(origin.map(f64::from)),
@@ -407,10 +515,8 @@ impl<W: Write> Engine<W> {
                     let creation = self
                         .current_ground_vehicle(ground_target.index)
                         .ok_or("unknown_ground_vehicle")?;
-                    let hp = runtime
-                        .setup
-                        .ground_damage
-                        .as_ref()
+                    let hp = frame
+                        .policy
                         .ok_or("ground_damage_policy_required")?
                         .blast_amount(
                             &creation,

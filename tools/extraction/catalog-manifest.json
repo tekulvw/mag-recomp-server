@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "scope": "All 61 catalog filenames known to this source import; presence in this inventory does not mean every file is required by every runtime mode.",
+  "scope": "All 73 catalog filenames known to this source import; presence in this inventory does not mean every file is required by every runtime mode.",
   "status_definitions": {
     "direct": "Included parser/projector reads explicit original data or an included earlier catalog; no unpublished evidence input.",
     "direct-with-policy": "Included projector also requires explicit local operator policy.",
@@ -593,6 +593,124 @@
         "Python 3.11+ standard library"
       ],
       "limitations": "Full32 squad memberships/category-zero fallback only; required linked vehicle consumers remain separate."
+    },
+    {
+      "output": "character-damage-rules.json",
+      "status": "direct",
+      "command": "project-retail-character-damage-rules.py --game-archive GAME --spawn-catalog SPAWNS --output OUTPUT",
+      "inputs": "Original retail game archive and exact selected-mode spawn profile",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Selected native friendly-fire multiplier only; no equipment or actor authorization."
+    },
+    {
+      "output": "domination-gameplay-objectives.json",
+      "status": "external-proof",
+      "command": "project-retail-domination-gameplay-objectives.py --help",
+      "inputs": "Retail metadata, initial catalog, original ELF and source-qualified trigger/startup/Sim/interaction/repair receipts",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Maintains constructor state; gameplay class/timing data requires the connected recorded backend."
+    },
+    {
+      "output": "domination-ground.json",
+      "status": "external-proof",
+      "command": "project-retail-domination-ground.py --help",
+      "inputs": "Exact native initial ground allocation, faction body and conservative stationary exit evidence",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Sixteen ground allocations per profile; source vehicle class order differs between maps. Does not manufacture driver policy."
+    },
+    {
+      "output": "domination-hospitals.json",
+      "status": "external-proof",
+      "command": "project-retail-domination-hospitals.py --help",
+      "inputs": "Exact source placements, conditional fresh allocation, passenger pose, structure rules and clearance evidence",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Sixteen per-profile family13 bodies; scoped fresh production allocation differs from live observation."
+    },
+    {
+      "output": "domination-lalo-spawns.json",
+      "status": "external-proof",
+      "command": "project-retail-domination-lalo.py --spawn-catalog SPAWNS --lalo-poses POSES --output OUTPUT",
+      "inputs": "Original type5 position, rotation, native lane spacing/state and static clearance receipt",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Promotes source LALO arrivals independently of aircraft links; no invented altitude or Helo insertion."
+    },
+    {
+      "output": "domination-structural-effects.json",
+      "status": "direct",
+      "command": "project-retail-domination-structural-effects.py --help",
+      "inputs": "Original retail map, main and game archives and matching metadata",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Both objective classes; source state sequences, collision resources, material references and blast properties. Runtime identity and effects remain separate."
+    },
+    {
+      "output": "domination-gameplay.json",
+      "status": "operator-configuration",
+      "command": null,
+      "inputs": "Explicit paths to source-qualified per-profile objective, round, spawn, collision, aircraft policy, hospital and damage inputs",
+      "dependencies": [],
+      "limitations": "Opt-in bounded core policy keeps Helo human insertion unavailable until the independent carrier backend is qualified. Initial catalogs alone do not enable gameplay."
+    },
+    {
+      "output": "domination-helo-fleet.json",
+      "status": "external-proof",
+      "command": "project-retail-domination-helo.py --spawn-catalog SPAWNS --aircraft-links LINKS --paths PATHS --models MODELS --output OUTPUT",
+      "inputs": "Exact Domination spawn bytes and independently qualified original aircraft allocation, spline, model, seat and body receipts",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Projects four indexed source carriers per profile. Native evidence acquisition and numeric flight qualification remain external; a fleet catalog alone does not enable insertion."
+    },
+    {
+      "output": "domination-terrain-material-grid.json",
+      "status": "direct",
+      "command": "project-retail-domination-terrain-materials.py --elf ELF --metadata METADATA --levels LEVEL_ARCHIVES --game GAME --output OUTPUT_DIRECTORY",
+      "inputs": "Original retail ELF, matching Domination metadata, original three level archives and game archive",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Writes per-map JSON indices and pixel grids from original texture masks and material bindings. Uses bounded supported retail formats; native instruction qualification remains independently recorded."
+    },
+    {
+      "output": "domination-terrain-material-grid.bin",
+      "status": "direct",
+      "command": "project-retail-domination-terrain-materials.py --elf ELF --metadata METADATA --levels LEVEL_ARCHIVES --game GAME --output OUTPUT_DIRECTORY",
+      "inputs": "Original retail ELF, matching Domination metadata, original three level archives and game archive",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Writes per-map JSON indices and pixel grids from original texture masks and material bindings. Uses bounded supported retail formats; native instruction qualification remains independently recorded."
+    },
+    {
+      "output": "domination-helo-damage.json",
+      "status": "direct",
+      "command": "project-retail-domination-helo-damage.py --elf ELF --game-archive GAME --models MODELS --output OUTPUT",
+      "inputs": "Supported original retail ELF/game archive and qualified matching Helo model receipt",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Reads original per-faction properties and inherited native defaults. Native semantic qualification and model/body evidence remain separate; does not enable an aircraft world by itself."
+    },
+    {
+      "output": "domination-ground-lifecycle.json",
+      "status": "external-proof",
+      "command": "project-retail-domination-ground-lifecycle.py --elf ELF --game-archive GAME --body-lifecycle BODIES --profile SPAWNS GROUND [repeat for six pairs] --output OUTPUT",
+      "inputs": "Original supported retail ELF/game archive, qualified body lifecycle export and all six exact spawn/ground catalog pairs",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Projects neutral runtime fields and native wave/material settings. Body/hulk geometry and lifecycle qualification are external; private instruction witnesses are omitted."
     }
   ]
 }

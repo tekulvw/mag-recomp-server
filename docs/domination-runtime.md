@@ -11,11 +11,11 @@ python3 tools/extraction/build-retail-spawn-catalog.py \
   --attacking-faction FACTION --output SPAWNS
 ```
 
-The generator preserves every spawn record and type. For attacker squads with
-an unavailable APC insertion, an authored Basic alternate supplies the explicit
-entry fallback. Other special insertion kinds remain unavailable in this
-foundation. The inactive default objective state and no-assignment sentinel
-are retained until a separately qualified MissionStart transaction.
+The generator preserves every spawn record and type. The later ground, hospital
+and LALO projectors qualify their respective insertion consumers. An authored
+Basic point remains the entry fallback when a linked vehicle is unavailable.
+Aircraft insertion requires its own qualified runtime; an unavailable Helo point
+does not become a fabricated on-foot insertion.
 
 ## Initial objective bindings
 
@@ -82,8 +82,8 @@ Source-qualified mode2 catalogs can describe `secure_hold` and `structural`
 classes, exact indexed trigger boxes, authored timings, and structural repair
 rules. `ObjectiveWorld` stages desired requests and provides a per-object update
 API. A caller consumes each committed native entry before updating another
-object. Initial-load catalogs remain noninteractive. Engine admission refuses
-source gameplay catalogs until a concrete Domination backend is available.
+object. Initial-load catalogs remain noninteractive. Source gameplay catalogs
+require the explicit concrete backend configuration described below.
 
 SecureHold supports activation, completion, retaking, cancellation and release.
 Structural demolition preserves fuse priority and defuse back to Repaired after
@@ -118,12 +118,108 @@ Engine checks exercise opposite depletion outcomes, record-failure rollback and
 fresh-round selection. The score/result setup alone cannot supply objective
 entry effects or enable an interactive gameplay catalog.
 
-## Remaining connected gameplay
+## Concrete gameplay configuration
 
-The backend must complete class-specific entry, authored gameplay sequences and
-explosions, linked vehicle hooks, callbacks and native squad assignment refresh
-inside the recorded world transaction. Startup requests, constructor/current
-state and desired state remain distinct. Hospital identities, per-profile
-bunker ownership and special insertion consumers must be qualified before those
-points become selectable. Source checks are not a live-match acceptance claim.
-Native gameplay acceptance and manual release decisions follow live-match review.
+The normal Engine objective tick and authenticated interaction/repair handlers
+use `domination_gameplay_provider::World`. The backend stages class entry, FSP
+activity, controller callbacks, squad assignments and sequence effects together.
+It prepares damage/death callbacks and bounded replication packets before
+recording the transaction, then installs the candidate world. Failed preparation
+or recording leaves the previous world intact. Constructor state, current state,
+desired state and MissionStart requests remain distinct. Player START/RELEASE
+entries are synchronous; Lua requests are evaluated by the subsequent Sim pass.
+
+Each registry row can opt in using an absolute `domination_gameplay` path,
+alongside `domination_round`, `ground_vehicles`, `character_damage_rules`, a
+nonempty `collision_world`, and all three hospital inputs: `bunker_placement`,
+`bunker_structure` and `bunker_allocation`. Fixed-world library callers install
+the same configuration through `Engine::with_domination_gameplay`. It is off by
+default. The configuration has format `mag_domination_gameplay_configuration_v1`,
+schema version 1, and these explicit source paths:
+
+- `controller`, `mission_start`, `sim_schedule` and `forward_spawns` bind the
+  ordered native update and authored callback graph.
+- `structural_effects` and `sequence_assets` bind both Structural and SecureHold
+  sequence collision, explosions and area damage.
+- `initial_assignments` binds initial manual-tag and FRAGO state.
+- `core` binds aircraft-link qualification, hospital hulks, initial collision
+  filters, qualified original factory/trigger poses, ground damage policy and
+  its SHA-256, ground lifecycle rules and their SHA-256, and terrain material
+  grid index/pixels. The hospital collision receipt includes operational bodies
+  as well as destroyed hulks.
+
+Nested backend paths resolve relative to the configuration file. Top-level
+registry paths remain absolute. Sources are checked before the selected spawn
+catalog is promoted or any world is installed.
+
+The bounded `core.scope` named `core_without_helo_insertion` retains native
+Helo defaults for controller decisions and uses the authored category-zero
+fallback for human entry while aircraft insertion is unavailable. It does not
+claim the original helicopter is absent. The worker requires `--dynamic-bodies`
+and a `--static-partition` for every enabled map; the latter must prove that
+queries on layers 6 and 21 exclude the immutable static roots. Resource hashes,
+map identities, class coverage and all 32 squad bindings must agree.
+
+The included projectors accept explicit original inputs and qualified external
+proof; they do not acquire that proof automatically:
+
+```sh
+python3 tools/extraction/project-retail-domination-gameplay-objectives.py --help
+python3 tools/extraction/project-retail-domination-structural-effects.py --help
+python3 tools/extraction/project-retail-domination-ground.py --help
+python3 tools/extraction/project-retail-domination-ground-lifecycle.py --help
+python3 tools/extraction/project-retail-domination-hospitals.py --help
+python3 tools/extraction/project-retail-domination-lalo.py --help
+python3 tools/extraction/project-retail-domination-helo.py --help
+python3 tools/extraction/project-retail-domination-helo-damage.py --help
+python3 tools/extraction/project-retail-domination-terrain-materials.py --help
+python3 tools/extraction/project-retail-character-damage-rules.py --help
+```
+
+Sequence collision uses qualified original placements and materials, including
+terrain material sampling. Structural explosions and periodic area damage use
+the shared authoritative character armor/death pipeline. Hospital destruction
+updates the indexed body, processes its occupants and installs its collision
+hulk; repair restores that body and removes the hulk. Each hospital has separate
+ownership and passenger state. Boarding uses the qualified model passenger pose;
+disembark requires a clear, quantized candidate against static, dynamic and
+sequence/hulk collision. Exit clearance is an explicit conservative server
+policy. Direct hospital hits and critical decay use the qualified vehicle damage
+rules and recorded lifecycle; legacy Alpha damage cannot mutate these bodies.
+Hospital gunner-seat control remains unsupported.
+
+The optional aircraft scope is `core_with_helo_insertion`. It requires a complete
+`core.helo` object containing `fleet`, `models`, `paths`, `damage` and an explicit
+operator `random_seed`. Its fleet binds the exact spawn bytes and three original
+source receipts; the backend checks those receipt hashes, four spawn bindings,
+collision meshes and typed damage rules together. A missing pairing fails
+startup, and the scope without aircraft rejects aircraft inputs rather than
+silently ignoring them. The random seed is operator policy, not extracted game
+data. Healthy enabled helicopters remain at the insertion point. Manual
+passenger exits use the authenticated native dismount route and checked grounded
+positions. FSP disable and critical retreat follow their distinct source state
+and timer gates. Damage, occupant death, destruction and later reinforcement
+consume the shared vehicle and character pipelines. The bounded squad policy
+permits eight humans per aircraft even where the original model has more seats.
+
+## Verification and remaining acceptance
+
+Synthetic tests cover state/callback order, packet bounds, independent hospital
+seats and rollback. Private source-data checks exercise all six map/faction
+profiles through normal Engine capture, demolition and repair. They also follow
+the authored refinery graph to an attacker win, passive score depletion to a
+defender win, result/publication drain, cohort release and fresh two-faction
+reservation. Ground checks cover normal hit/grenade input, hulk transition and
+reinforcement into the same allocation. Aircraft checks cover source AA/FSP
+activation, queued boarding, persistent healthy hover, manual exits, late-join
+creation order, occupant death and the strict destruction-effect deadline.
+Those checks use original input data and clearly identified synthetic actor or
+combat inputs without launching a client.
+
+The profiles expose qualified ground passenger entry; general ground driver and
+gunner control, hospital turret control and command-ability execution remain
+separate gameplay consumers. Objective progression/XP and presentation fidelity
+are tracked separately from the match-completion loop.
+Source checks and schema validation are not live-match acceptance. Client visual
+and behavior review remains pending; releases are cut manually by the human
+after that review.

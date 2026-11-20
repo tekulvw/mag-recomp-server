@@ -283,6 +283,8 @@ pub(crate) struct DriverSeat {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Catalog {
+    #[serde(skip)]
+    raw_sha256: String,
     format: String,
     schema_version: u32,
     source: Source,
@@ -311,9 +313,15 @@ impl Catalog {
         }
         let mut value: Self = serde_json::from_str(text).map_err(io::Error::other)?;
         value.validate_for(spawns).map_err(io::Error::other)?;
+        use sha2::Digest;
+        value.raw_sha256 = format!("{:x}", sha2::Sha256::digest(text.as_bytes()));
         value.vehicles.sort_by_key(|v| v.index);
         Ok(value)
     }
+    pub(crate) fn raw_sha256(&self) -> &str {
+        &self.raw_sha256
+    }
+
     pub(crate) fn validate_for(
         &self,
         spawns: &crate::spawn_catalog::SpawnCatalog,
@@ -342,20 +350,36 @@ impl Catalog {
             return Err("ground_vehicle_spawn_catalog_mismatch");
         }
         let policy = spawns.match_profile();
-        if policy.game_type != 1 {
-            return Err("ground_vehicles_require_acquisition");
+        let domination = policy.game_type == 2;
+        let scope = self.source.creation_scope.as_deref();
+        let domination_scope = scope == Some("native_domination_vehicle_source_points");
+        if domination != domination_scope || (!domination && policy.game_type != 1) {
+            return Err("ground_vehicles_require_matching_profile_scope");
         }
-        if self.source.creation_scope.as_deref().is_some_and(|v| {
+        if domination
+            && (self.vehicles.len() != 16
+                || self.vehicle_sources.len() != 16
+                || self.passenger_spawns.len() != 8
+                || !self.driver_seats.is_empty())
+        {
+            return Err("incomplete_domination_ground_vehicle_population");
+        }
+        if scope.is_some_and(|v| {
             !matches!(
                 v,
-                "native_requested_free_slot_hidden_state0" | "native_vehicle_source_points"
+                "native_requested_free_slot_hidden_state0"
+                    | "native_vehicle_source_points"
+                    | "native_domination_vehicle_source_points"
             )
         }) {
             return Err("invalid_ground_vehicle_creation_scope");
         }
         let mut source_points = std::collections::BTreeMap::new();
         if !self.vehicle_sources.is_empty()
-            && self.source.creation_scope.as_deref() != Some("native_vehicle_source_points")
+            && !matches!(
+                scope,
+                Some("native_vehicle_source_points" | "native_domination_vehicle_source_points")
+            )
         {
             return Err("vehicle_source_qualification_required");
         }
@@ -363,25 +387,49 @@ impl Catalog {
             let vehicle = self
                 .vehicle(source.vehicle_index)
                 .ok_or("unknown_vehicle_source_identity")?;
-            let source_kind_valid = match (
-                source.vehicle_index < 4,
-                source.spawn_type,
-                source.user_class,
-            ) {
-                (true, 3, 0) => {
-                    source.team == 0
-                        && source.authored_active
-                        && self.is_existing_apc_source(vehicle)
-                        && spawns.point(source.spawn_point_index).is_some_and(|point| {
+            let source_kind_valid = if domination {
+                source.authored_active
+                    && match (source.spawn_type, source.user_class, source.team) {
+                        (3, 0, 0) => {
+                            self.has_passenger_spawn_binding(vehicle)
+                                && spawns.point(source.spawn_point_index).is_some_and(|point| {
+                                    point.active
+                                        && matches!(
+                                            point.kind,
+                                            crate::spawn_catalog::SpawnKind::VehiclePassenger
+                                        )
+                                })
+                        }
+                        (7, 1, 1) => spawns.point(source.spawn_point_index).is_some_and(|point| {
                             point.active
                                 && matches!(
                                     point.kind,
-                                    crate::spawn_catalog::SpawnKind::VehiclePassenger
+                                    crate::spawn_catalog::SpawnKind::Unsupported
                                 )
-                        })
+                        }),
+                        _ => false,
+                    }
+            } else {
+                match (
+                    source.vehicle_index < 4,
+                    source.spawn_type,
+                    source.user_class,
+                ) {
+                    (true, 3, 0) => {
+                        source.team == 0
+                            && source.authored_active
+                            && self.is_existing_apc_source(vehicle)
+                            && spawns.point(source.spawn_point_index).is_some_and(|point| {
+                                point.active
+                                    && matches!(
+                                        point.kind,
+                                        crate::spawn_catalog::SpawnKind::VehiclePassenger
+                                    )
+                            })
+                    }
+                    (false, 7 | 9, 1) => true,
+                    _ => false,
                 }
-                (false, 7 | 9, 1) => true,
-                _ => false,
             };
             if !source_kind_valid
                 || source.source_family != 35
@@ -394,6 +442,20 @@ impl Catalog {
             {
                 return Err("invalid_native_vehicle_source");
             }
+        }
+        if domination
+            && (source_points
+                .values()
+                .filter(|source| source.spawn_type == 3)
+                .count()
+                != 8
+                || source_points.keys().copied().ne(0..16)
+                || source_points
+                    .values()
+                    .zip(source_points.values().skip(1))
+                    .any(|(before, after)| before.spawn_point_index >= after.spawn_point_index))
+        {
+            return Err("invalid_domination_ground_vehicle_load_order");
         }
         let mut drivers = BTreeSet::new();
         for driver in &self.driver_seats {
@@ -504,11 +566,15 @@ impl Catalog {
         creation.index < 4
             && creation.team == 0
             && creation.initial_state == 2
-            && self.passenger_spawns.iter().any(|binding| {
-                binding.vehicle_index == creation.index
-                    && binding.spawn_point_index == creation.spawn_point_index
-                    && binding.spawn_point_token == creation.spawn_point_token
-            })
+            && self.has_passenger_spawn_binding(creation)
+    }
+
+    fn has_passenger_spawn_binding(&self, creation: &Creation) -> bool {
+        self.passenger_spawns.iter().any(|binding| {
+            binding.vehicle_index == creation.index
+                && binding.spawn_point_index == creation.spawn_point_index
+                && binding.spawn_point_token == creation.spawn_point_token
+        })
     }
     pub(crate) fn source_spawn_type(&self, creation: &Creation) -> Option<u8> {
         self.vehicle_source(creation.index)

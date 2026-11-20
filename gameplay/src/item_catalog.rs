@@ -47,6 +47,42 @@ pub struct ArmorParameters {
     pub prevention: f32,
     pub coverage: [f32; 4],
 }
+/// Apply the common vehicle damage model in the native order.
+pub(crate) fn apply_vehicle_armor(
+    damage: TargetDamageParameters,
+    penetration: f32,
+    friendly_factor: f32,
+    armor: ArmorParameters,
+    body: BodyParameters,
+) -> Result<f32, &'static str> {
+    if ![
+        damage.amount,
+        damage.armor_pierce,
+        damage.armor_redux,
+        penetration,
+    ]
+    .into_iter()
+    .all(|value| value.is_finite() && value >= 0.0)
+        || !(0.0..=1.0).contains(&friendly_factor)
+    {
+        return Err("invalid_vehicle_damage_input");
+    }
+    let coverage = *armor
+        .coverage
+        .get(body.armor_area)
+        .ok_or("unsupported_vehicle_hit_location")?;
+    let raw = damage.amount * penetration;
+    let scaled = raw * friendly_factor;
+    let rating = (armor.rating - damage.armor_pierce).max(0.0);
+    let remaining = (scaled - rating).max(0.0);
+    let prevention = (armor.prevention - damage.armor_redux).max(0.0);
+    let applied = remaining * (body.multiplier * (1.0 - coverage * prevention));
+    if !applied.is_finite() {
+        return Err("invalid_vehicle_damage_amount");
+    }
+    Ok(applied.max(0.0))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HealingParameters {
     pub cooldown_seconds: f32,
@@ -705,6 +741,15 @@ impl ItemCatalog {
             .ok_or("unresolved_saved_item")?;
         Ok(())
     }
+    pub(crate) fn is_retail_repair_tool(&self, id: u16) -> bool {
+        self.application_id() == 20231
+            && self.item(id).is_ok_and(|item| {
+                item.pointer("/definition/group").and_then(Value::as_str) == Some("active_items")
+                    && item.pointer("/definition/name").and_then(Value::as_str) == Some("repairkit")
+            })
+            && self.validate_item(id).is_ok()
+    }
+
     /// The Armory proves saved equipment identity/faction eligibility separately.
     /// Every populated slot must also resolve through this raw item catalog,
     /// including items in inventories that are not currently selected.

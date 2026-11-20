@@ -40,7 +40,9 @@ impl Active {
             self.last_exit = None;
             self.pending_spawn_deadline = None;
             self.mounted_seat = None;
+            self.mounted_bunker = None;
             self.ground_seat = None;
+            self.helo_seat = None;
             CharacterLife::AwaitingRespawn { generation }
         } else {
             CharacterLife::Alive {
@@ -141,11 +143,13 @@ impl Active {
                     }
                 } else if let Some(seat) = self.ground_seat {
                     seat.character_state()
+                } else if let Some(seat) = self.helo_seat {
+                    seat.character_state()
                 } else if let Some(seat) = self.mounted_seat {
                     replication::CharacterState {
                         state: 14,
                         stance: 0,
-                        user_data: [13, 0, seat],
+                        user_data: [13, self.mounted_bunker.unwrap_or(0) as u8, seat],
                     }
                 } else {
                     self.owner_fields
@@ -156,7 +160,11 @@ impl Active {
                             user_data: [0; 3],
                         })
                 },
-                position: sample.position,
+                position: if self.helo_seat.is_some() {
+                    domination_helo::mounted_wire_position(sample.position)
+                } else {
+                    sample.position
+                },
                 pitch: self.owner_fields.pitch.unwrap_or(127),
                 yaw: self.owner_fields.yaw.unwrap_or(0),
                 damage: self.last_damage,
@@ -470,6 +478,10 @@ impl<W: Write> Engine<W> {
             .active
             .as_ref()
             .is_some_and(|a| a.initial_objects.is_some());
+        let had_helo_creation = self
+            .active
+            .as_ref()
+            .is_some_and(|actor| actor.helo_creation_sent);
         let before_sequence = self.active.as_ref().map_or(0, |a| a.outbound_sequence);
         let before_owner = self.active.as_ref().map_or(0, |a| a.latest_owner_sequence);
         let before_alive_generation = self
@@ -491,8 +503,13 @@ impl<W: Write> Engine<W> {
                 .as_ref()
                 .filter(|a| a.initial_objects.is_some())
                 .map(|a| {
-                    a.projectile_removal_packets(now)
-                        .map(|packets| (a.reservation.player, a.mounted_seat, packets))
+                    a.projectile_removal_packets(now).map(|packets| {
+                        (
+                            a.reservation.player,
+                            a.mounted_seat.map(|_| a.mounted_bunker.unwrap_or(0)),
+                            packets,
+                        )
+                    })
                 })
                 .transpose()?
         } else {
@@ -557,6 +574,24 @@ impl<W: Write> Engine<W> {
             {
                 peer.queue_shared(snapshot.clone());
             }
+            // Remote snapshots can already reference Helos. Deliver the
+            // type-2 instances to this new peer before those snapshots.
+            if let Some(fleet) = self
+                .domination_gameplay
+                .as_ref()
+                .and_then(|world| world.state.helo.as_ref())
+            {
+                let carriers = fleet
+                    .carriers
+                    .iter()
+                    .map(|carrier| carrier.creation(2, now.as_millis() as u32))
+                    .collect::<Vec<_>>();
+                let packet =
+                    domination_helo::HeloCreation::encode_list(&carriers, self.wire_profile)?;
+                let actor = self.active.as_mut().unwrap();
+                actor.queue_shared(packet);
+                actor.helo_creation_sent = true;
+            }
             for packet in existing {
                 self.active.as_mut().unwrap().queue_shared(packet);
             }
@@ -574,7 +609,10 @@ impl<W: Write> Engine<W> {
                 .object_type_mask;
             // Per-character spawn assignment remains private; shared positions,
             // life, vehicles, deadlines and objectives are published to peers.
+            let own_helo_creation =
+                mask == 1 << 2 && !had_helo_creation && actor.helo_creation_sent;
             if mask != ((1 << 3) | (1 << 7) | (1 << 8) | (1 << 13))
+                && !own_helo_creation
                 && (mask != 8 || !is_spawn_assignment(&packet, self.wire_profile))
             {
                 for peer in self
@@ -632,7 +670,7 @@ impl<W: Write> Engine<W> {
         {
             self.alpha_turret_reporter = None;
         }
-        if let Some((player, seat, projectiles)) = removed {
+        if let Some((player, bunker_index, projectiles)) = removed {
             for packet in projectiles {
                 for peer in self
                     .peers
@@ -656,8 +694,8 @@ impl<W: Write> Engine<W> {
                 peer.queue_shared(packet.clone());
             }
             self.queue_roster(now)?;
-            if seat.is_some() {
-                self.queue_alpha_ownership(now)?;
+            if let Some(index) = bunker_index {
+                self.queue_bunker_ownership(index, now)?;
             }
         }
         let owner_report = owner_report.and_then(|(seq, fields)| {
@@ -788,7 +826,7 @@ impl<W: Write> Engine<W> {
             .map(|(id, _)| id.clone())
             .collect();
         let any_expired = !expired.is_empty();
-        let mut expired_occupant = false;
+        let mut expired_bunkers = std::collections::BTreeSet::new();
         for id in expired {
             let actor = self
                 .peers
@@ -828,7 +866,9 @@ impl<W: Write> Engine<W> {
             {
                 self.alpha_turret_reporter = None;
             }
-            expired_occupant |= removed.mounted_seat.is_some();
+            if removed.mounted_seat.is_some() {
+                expired_bunkers.insert(removed.mounted_bunker.unwrap_or(0));
+            }
             if removed.initial_objects.is_some() {
                 for packet in removed.projectile_removal_packets(now)? {
                     for peer in self
@@ -853,8 +893,8 @@ impl<W: Write> Engine<W> {
         }
         if any_expired {
             self.queue_roster(now)?;
-            if expired_occupant {
-                self.queue_alpha_ownership(now)?;
+            for index in &expired_bunkers {
+                self.queue_bunker_ownership(*index, now)?;
             }
         }
         if any_expired && self.peers.is_empty() && self.active.is_none() {
@@ -1084,7 +1124,9 @@ impl<W: Write> Engine<W> {
         // matches GetFirstAvailableSeat(-1), preserving seat8 for an empty bunker.
         (1..=8).rev().find(|seat| {
             !self.peers.values().chain(self.active.iter()).any(|actor| {
-                actor.reservation.player != player && actor.mounted_seat == Some(*seat)
+                actor.reservation.player != player
+                    && actor.mounted_bunker.is_none()
+                    && actor.mounted_seat == Some(*seat)
             })
         })
     }
@@ -1092,6 +1134,7 @@ impl<W: Write> Engine<W> {
         self.peers
             .values()
             .chain(self.active.iter())
+            .filter(|p| p.mounted_bunker.is_none())
             .filter_map(|p| p.mounted_seat.map(|seat| (p.reservation.player, seat)))
             .min_by_key(|(player, seat)| (*seat != 0, *player))
     }
@@ -1104,7 +1147,7 @@ impl<W: Write> Engine<W> {
             .peers
             .values()
             .chain(self.active.iter())
-            .filter(|p| p.reservation.player != player)
+            .filter(|p| p.reservation.player != player && p.mounted_bunker.is_none())
             .filter_map(|p| p.mounted_seat.map(|s| (p.reservation.player, s)))
             .chain(seat.map(|s| (player, s)));
         let owner = occupants.min_by_key(|(p, s)| (*s != 0, *p));
@@ -1112,20 +1155,6 @@ impl<W: Write> Engine<W> {
             owner: owner.map_or(0x105, |(p, _)| p),
             turret_owner: owner.filter(|(_, s)| *s == 0).map_or(u16::MAX, |(p, _)| p),
         }
-    }
-    fn queue_alpha_ownership(&mut self, now: Duration) -> Result<(), &'static str> {
-        let packet = self
-            .alpha_ownership_after(u16::MAX, None)
-            .encode_update_with_profile(1, now.as_millis() as u32, self.wire_profile)?;
-        for actor in self
-            .peers
-            .values_mut()
-            .chain(self.active.iter_mut())
-            .filter(|a| a.initial_objects.is_some())
-        {
-            actor.queue_shared(packet.clone());
-        }
-        Ok(())
     }
     pub(super) fn squad_spawn_for(&self, squad: u16) -> Option<u16> {
         self.peers

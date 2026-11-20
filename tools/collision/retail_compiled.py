@@ -156,7 +156,14 @@ def export(args):
                 if deleted:
                     removed.append(dict(instance_id=identity, source_triangle_indices=deleted))
                 if triangles:
-                    instances.append(dict(id=identity, vertices_xyz=vertices, triangles=triangles))
+                    instance = dict(id=identity, vertices_xyz=vertices, triangles=triangles)
+                    material = mesh.get('subpart_index')
+                    indices = pack['resource_binding']['material_indices']
+                    if placement is None:
+                        instance['terrain_material'] = True
+                    elif material is not None and material < len(indices):
+                        instance['material_index'] = indices[material]
+                    instances.append(instance)
     for record in records:
         placement = record['placement']
         token = placement['token']

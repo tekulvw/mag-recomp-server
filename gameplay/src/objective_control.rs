@@ -103,6 +103,7 @@ pub struct NativeEntry {
     pub previous: ObjectiveState,
     pub delta: ObjectiveControlDelta,
     pub actor_generation: Option<u32>,
+    pub active_trigger_index: Option<u8>,
 }
 
 impl NativeEntry {
@@ -226,14 +227,49 @@ impl ObjectiveWorld {
         now: Duration,
         actors: &BTreeMap<u16, ObjectiveActor>,
     ) -> Option<ObjectiveControlDelta> {
+        self.tick_native_object_with_elapsed(index, now, self.native_elapsed_ms, actors)
+    }
+
+    /// Retail player START/RELEASE advances only its admitted objective with
+    /// dt=0 inside the request stack. Script desired-state changes wait for
+    /// the original Sim manager pass.
+    pub fn commit_pending_native_interaction(
+        &mut self,
+        index: u16,
+        now: Duration,
+        actor: ObjectiveActor,
+    ) -> Option<ObjectiveControlDelta> {
+        let pending = self.objects.get(&index)?.native.as_ref()?.pending.as_ref();
+        if !matches!(
+            pending,
+            Some(NativePending::Secure(..) | NativePending::Demolition { .. })
+        ) {
+            return None;
+        }
+        self.tick_native_object_with_elapsed(
+            index,
+            now,
+            0,
+            &BTreeMap::from([(actor.player, actor)]),
+        )
+    }
+
+    fn tick_native_object_with_elapsed(
+        &mut self,
+        index: u16,
+        now: Duration,
+        elapsed_ms: u32,
+        actors: &BTreeMap<u16, ObjectiveActor>,
+    ) -> Option<ObjectiveControlDelta> {
         let object = self.objects.get_mut(&index)?;
         let mut mode = object.native.take()?;
         let previous = object.state;
+        let active_trigger_index = object.fuse.as_ref().map(|fuse| fuse.trigger_index);
         let generation = tick_native(
             object,
             &mut mode,
             now,
-            self.native_elapsed_ms,
+            elapsed_ms,
             actors,
             &mut self.reward_actions,
         );
@@ -249,6 +285,7 @@ impl ObjectiveWorld {
                 previous: previous.state_actor.state,
                 delta: object.state,
                 actor_generation: generation,
+                active_trigger_index,
             });
         }
         Some(object.state)
@@ -849,6 +886,14 @@ fn stage_native_interaction(
             && !at_native_trigger(actor.position, rule.range(), request.trigger_index)
     {
         return InteractionOutcome::denied("objective_invalid_native_contact");
+    }
+    if request.kind == Deactivate
+        && object
+            .fuse
+            .as_ref()
+            .is_some_and(|fuse| fuse.trigger_index != request.trigger_index)
+    {
+        return InteractionOutcome::denied("objective_active_trigger_mismatch");
     }
     let was_repaired = mode.was_repaired;
     let Some(adjusted) = adjusted_demolition_rule(rule, request.kind, modifier) else {

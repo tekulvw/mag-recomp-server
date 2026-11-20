@@ -46,6 +46,10 @@ struct Source {
     character_damage_rules: Option<PathBuf>,
     acquisition_gameplay: Option<PathBuf>,
     domination_round: Option<PathBuf>,
+    domination_gameplay: Option<PathBuf>,
+    bunker_placement: Option<PathBuf>,
+    bunker_structure: Option<PathBuf>,
+    bunker_allocation: Option<PathBuf>,
 }
 #[derive(Clone)]
 struct Loaded {
@@ -58,6 +62,8 @@ struct Loaded {
     damage: Option<character_damage_rules::Rules>,
     acquisition: Option<Arc<acquisition_gameplay_engine::Setup>>,
     domination_round: Option<acquisition_round::Round>,
+    domination: Option<domination_gameplay_provider::World>,
+    bunkers: Option<structures::BunkerWorld>,
 }
 pub struct Registry {
     profiles: BTreeMap<String, Loaded>,
@@ -108,17 +114,24 @@ impl Registry {
                 source.character_damage_rules.as_ref(),
                 source.acquisition_gameplay.as_ref(),
                 source.domination_round.as_ref(),
+                source.domination_gameplay.as_ref(),
+                source.bunker_placement.as_ref(),
+                source.bunker_structure.as_ref(),
+                source.bunker_allocation.as_ref(),
             ]
             .into_iter()
             .flatten()
             {
                 absolute(path)?;
             }
-            let spawns = spawn_catalog::SpawnCatalog::load(&source.spawn_catalog)?;
+            let mut spawns = spawn_catalog::SpawnCatalog::load(&source.spawn_catalog)?;
+            if source.acquisition_gameplay.is_some() && source.domination_gameplay.is_some() {
+                return Err(io::Error::other("conflicting_match_gameplay_configuration"));
+            }
             let policy = spawns.match_profile();
             if !matches!(policy.game_type, 0..=2)
                 || !policy.auto_assign_teams
-                || policy.has_bunkers
+                || (policy.has_bunkers && policy.game_type != 2)
                 || (policy.game_type == 2
                     && (policy.squad_capacity > 4 || spawns.map_pool().squads.len() != 32))
                 || policy.attacking_faction == policy.defending_faction
@@ -126,6 +139,21 @@ impl Registry {
             {
                 return Err(io::Error::other("unsupported_match_profile_policy"));
             }
+            let bunkers = match (
+                policy.has_bunkers,
+                source.bunker_placement.as_ref(),
+                source.bunker_structure.as_ref(),
+                source.bunker_allocation.as_ref(),
+            ) {
+                (true, Some(placement), Some(structure), Some(allocation)) => {
+                    Some(structures::BunkerWorld::load_domination(
+                        placement, structure, allocation, &spawns,
+                    )?)
+                }
+                (false, None, None, None) => None,
+                (true, ..) => return Err(io::Error::other("incomplete_match_profile_bunkers")),
+                (false, ..) => return Err(io::Error::other("unexpected_match_profile_bunkers")),
+            };
             // Every advertised seat must have an authored squad binding on both sides.
             let capacities = [0, 1].map(|team| {
                 (spawns
@@ -253,6 +281,7 @@ impl Registry {
             } else {
                 if objectives.as_ref().is_some_and(|catalog| {
                     catalog.source().capture_qualification == "native_source_gameplay"
+                        && !(policy.game_type == 2 && source.domination_gameplay.is_some())
                 }) {
                     return Err(io::Error::other(if policy.game_type == 2 {
                         "domination_gameplay_configuration_required"
@@ -277,6 +306,37 @@ impl Registry {
                     .validate_match(20231, &spawns)
                     .map_err(io::Error::other)?;
             }
+            let domination = if let Some(path) = source.domination_gameplay {
+                if policy.game_type != 2
+                    || domination_round.is_none()
+                    || vehicles.is_none()
+                    || damage.is_none()
+                    || collision
+                        .as_ref()
+                        .is_none_or(|world| world.stats().triangles == 0)
+                {
+                    return Err(io::Error::other(
+                        "domination_gameplay_requires_source_world_resources",
+                    ));
+                }
+                let objectives =
+                    Arc::new(objectives.clone().ok_or_else(|| {
+                        io::Error::other("domination_gameplay_requires_objectives")
+                    })?);
+                let bunkers = bunkers
+                    .as_ref()
+                    .ok_or_else(|| io::Error::other("domination_gameplay_requires_hospitals"))?;
+                Some(
+                    domination_gameplay_config::Configuration::load(path)?.build_for(
+                        objectives,
+                        &mut spawns,
+                        bunkers,
+                        vehicles.as_ref().unwrap(),
+                    )?,
+                )
+            } else {
+                None
+            };
             let summary = Summary {
                 profile_id: source.profile_id.clone(),
                 game_type: policy.game_type,
@@ -297,6 +357,8 @@ impl Registry {
                     damage,
                     acquisition,
                     domination_round,
+                    domination,
+                    bunkers,
                 },
             );
         }
@@ -310,7 +372,7 @@ impl Registry {
         if wire.application_id() != 20231 || items.application_id() != 20231 {
             return Err("match_profiles_require_explicit_retail_application");
         }
-        if self.has_acquisition_gameplay() {
+        if self.has_acquisition_gameplay() || self.has_domination_gameplay() {
             items.retail_combat()?;
         }
         for loaded in self.profiles.values() {
@@ -344,6 +406,32 @@ impl Registry {
         Ok(())
     }
 
+    pub fn has_domination_gameplay(&self) -> bool {
+        self.profiles
+            .values()
+            .any(|profile| profile.domination.is_some())
+    }
+
+    /// Validate current immutable static partitions before advertising mode2.
+    pub fn validate_domination_static_partitions<'a>(
+        &self,
+        partitions: impl IntoIterator<Item = &'a static_collision_partition::Partition>,
+    ) -> Result<(), &'static str> {
+        let partitions: Vec<_> = partitions.into_iter().collect();
+        for profile in self.profiles.values() {
+            let Some(world) = &profile.domination else {
+                continue;
+            };
+            let partition = partitions
+                .iter()
+                .find(|p| p.map_name() == profile.spawns.map_name())
+                .ok_or("match_profile_domination_static_partition_missing")?;
+            partition.require_excluded(6, &world.state.filter_rows)?;
+            partition.require_excluded(21, &world.state.filter_rows)?;
+        }
+        Ok(())
+    }
+
     pub fn has_acquisition_gameplay(&self) -> bool {
         self.profiles
             .values()
@@ -369,6 +457,7 @@ impl<W: Write> Engine<W> {
             || self.match_profiles.is_some()
             || self.acquisition_gameplay.is_some()
             || self.domination_round.is_some()
+            || self.domination_gameplay.is_some()
         {
             return Err("match_profiles_require_idle_explicit_retail_engine");
         }
@@ -381,6 +470,14 @@ impl<W: Write> Engine<W> {
             return Err("match_profiles_unsupported_world_extras");
         }
         registry.validate_runtime(&self.item_catalog, self.wire_profile)?;
+        if registry.has_domination_gameplay() && self.dynamic_body_resources.is_none() {
+            return Err("domination_profiles_require_dynamic_bodies");
+        }
+        registry.validate_domination_static_partitions(
+            self.acquisition_static_partitions
+                .values()
+                .map(AsRef::as_ref),
+        )?;
         if let Some(resources) = &self.dynamic_body_resources {
             resources.validate_profiles(&registry)?;
         }
@@ -468,6 +565,13 @@ impl<W: Write> Engine<W> {
                 &runtime.setup.ground_capabilities,
             )?;
         }
+        if let Some(world) = &loaded.domination {
+            world.configure_ground(
+                ground_runtime
+                    .as_mut()
+                    .ok_or("domination_gameplay_requires_ground_vehicles")?,
+            )?;
+        }
         self.record(
             json!({"op":"match_profile_selected","selected_match":selected}),
             wall,
@@ -476,6 +580,7 @@ impl<W: Write> Engine<W> {
         self.reset_objective_world();
         self.bot_registry = Default::default();
         self.spawn_catalog = Some(loaded.spawns);
+        self.bunker_world = loaded.bunkers;
         self.objective_catalog = loaded.objectives;
         self.objective_world = world;
         self.collision_world = loaded.collision;
@@ -485,6 +590,7 @@ impl<W: Write> Engine<W> {
         self.acquisition_gameplay = acquisition_gameplay;
         self.acquisition_round = acquisition_round;
         self.domination_round = loaded.domination_round;
+        self.domination_gameplay = loaded.domination;
         self.character_damage_rules = loaded.damage;
         self.development_dummy_position = self
             .spawn_catalog
@@ -622,9 +728,39 @@ mod tests {
                 vehicles: sample.ground_vehicles,
                 damage: None,
                 domination_round: None,
+                domination: None,
+                bunkers: None,
                 acquisition: Some(sample.acquisition_gameplay.unwrap().setup),
             },
         );
+    }
+
+    #[test]
+    fn profile_bunkers_require_all_three_bound_inputs() {
+        let files = Files::new();
+        let plain = files.spawns(0, 0, 1);
+        for fields in [
+            json!({"bunker_placement": files.0.join("placements.json")}),
+            json!({
+                "bunker_placement": files.0.join("placements.json"),
+                "bunker_structure": files.0.join("structures.json"),
+                "bunker_allocation": files.0.join("allocation.json"),
+            }),
+        ] {
+            let mut profile = json!({"profile_id":"fake","spawn_catalog":plain});
+            profile
+                .as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            let manifest = files.write(
+                "manifest.json",
+                json!({"format":"mag_match_profiles_v1","profiles":[profile]}),
+            );
+            assert_eq!(
+                Registry::load(manifest).err().unwrap().to_string(),
+                "unexpected_match_profile_bunkers"
+            );
+        }
     }
 
     #[test]

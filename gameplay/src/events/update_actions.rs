@@ -369,6 +369,53 @@ pub(super) fn plan_respawn<W: Write>(
                 .map_or(active.squad_spawn, |s| s.spawn_point_index),
         )
         .unwrap();
+    let mut helo_passenger = None;
+    if matches!(point.kind, spawn_catalog::SpawnKind::HeloPassenger) {
+        let candidate = ctx
+            .engine
+            .domination_gameplay
+            .as_ref()
+            .and_then(|world| world.state.helo.as_ref())
+            .filter(|_| !active.is_mounted() && active.helo_creation_sent && active.team() == 0)
+            .cloned();
+        let result = candidate
+            .ok_or("domination_helo_boarding_unavailable")
+            .and_then(|mut fleet| {
+                let carrier = fleet
+                    .by_spawn_mut(point.index)
+                    .filter(|carrier| {
+                        carrier.source.faction == active.reservation.character.faction
+                            && carrier.damage.state == replication::VehicleState::Operational
+                            && carrier.damage.wire.conditions & 8 == 0
+                            && carrier
+                                .source
+                                .squads
+                                .contains(&(active.squad_catalog.squad_index() as u8))
+                    })
+                    .ok_or("domination_helo_passenger_source_mismatch")?;
+                let position = carrier
+                    .current_pose
+                    .ok_or("domination_helo_position_pending")?
+                    .position;
+                let object_index = carrier.source.object_index;
+                let seat = carrier.motion.board_passenger(active.reservation.player)?;
+                Ok((
+                    fleet,
+                    domination_helo::PassengerSeat { object_index, seat },
+                    position,
+                ))
+            });
+        match result {
+            Ok((fleet, seat, position)) => {
+                helo_passenger = Some((seat, position));
+                plan.helo_runtime = Some(fleet);
+            }
+            Err(reason) => {
+                plan.gameplay_denial = Some(reason);
+                return Ok(());
+            }
+        }
+    }
     let ground_passenger = matches!(point.kind, spawn_catalog::SpawnKind::VehiclePassenger);
     let ground_seat = if ground_passenger {
         if active.is_mounted() {
@@ -416,12 +463,62 @@ pub(super) fn plan_respawn<W: Write>(
         plan.gameplay_denial = Some("parachute_spawn_requires_inventory");
         return Ok(());
     }
-    if bunker && ctx.engine.bunker_exit_policy.is_none() {
+    let indexed_bunker = if bunker
+        && ctx.engine.match_profile().game_type == 2
+        && ctx.engine.match_profile().auto_assign_teams
+    {
+        let Some(hospital) = ctx
+            .engine
+            .bunker_world
+            .as_ref()
+            .and_then(|world| world.domination_bunker_at_spawn(point.index))
+        else {
+            plan.gameplay_denial = Some("bunker_spawn_binding_required");
+            return Ok(());
+        };
+        if !hospital.operational
+            || hospital.team != active.team()
+            || hospital.faction != active.reservation.character.faction
+        {
+            plan.gameplay_denial = Some("bunker_spawn_not_operational_or_wrong_side");
+            return Ok(());
+        }
+        Some(hospital)
+    } else {
+        None
+    };
+    if bunker && indexed_bunker.is_none() && ctx.engine.bunker_exit_policy.is_none() {
         plan.gameplay_denial = Some("bunker_exit_policy_required");
         return Ok(());
     }
+    let passenger_seat = if bunker {
+        Some(if let Some(hospital) = &indexed_bunker {
+            match ctx
+                .engine
+                .bunker_passenger_seat(hospital, active.reservation.player)
+            {
+                Ok(seat) => seat,
+                Err(reason) => {
+                    plan.gameplay_denial = Some(reason);
+                    return Ok(());
+                }
+            }
+        } else {
+            ctx.engine
+                .alpha_passenger_seat(active.reservation.player)
+                .ok_or("alpha_passenger_seats_full")?
+        })
+    } else {
+        None
+    };
     let generation = active.life.next_generation();
-    let mut spawn_position = if let Some(seat) = ground_seat {
+    let mut spawn_position = if let Some(hospital) = &indexed_bunker {
+        hospital
+            .seat_position(passenger_seat.ok_or("bunker_passenger_seat_required")?)
+            .ok_or("bunker_passenger_pose_unqualified")?
+    } else if let Some((_, position)) = helo_passenger {
+        position
+    } else if let Some(seat) = ground_seat {
         ctx.engine
             .current_ground_vehicle(seat.vehicle_index)
             .ok_or("ground_vehicle_runtime_required")?
@@ -443,8 +540,13 @@ pub(super) fn plan_respawn<W: Write>(
         spawn_position = point.parachute_position(ordinal)?;
         plan.parachute_spawn = Some((point.index, deadline, ordinal));
     }
+    let wire_position = if helo_passenger.is_some() {
+        domination_helo::mounted_wire_position(spawn_position)
+    } else {
+        spawn_position
+    };
     let mut respawn =
-        replication::CharacterRespawn::at_position(now.as_millis() as u32, spawn_position);
+        replication::CharacterRespawn::at_position(now.as_millis() as u32, wire_position);
     if let Some(pose) = point.parachute {
         respawn.state = replication::CharacterState {
             state: 17,
@@ -456,30 +558,36 @@ pub(super) fn plan_respawn<W: Write>(
     respawn.damage.health_quarter_points = active.modifiers.max_health_quarter_points()?;
     respawn.sequence = next_sequence;
     respawn.object_index = active.reservation.player;
-    plan.session.server_position =
-        Some((spawn_position, player_tracking::PositionOrigin::ServerSpawn));
-    plan.audit.spawned_point = Some(point.index);
-    let passenger_seat = if bunker {
-        Some(
-            ctx.engine
-                .alpha_passenger_seat(active.reservation.player)
-                .ok_or("alpha_passenger_seats_full")?,
-        )
+    let position_origin = if helo_passenger.is_some() {
+        player_tracking::PositionOrigin::ServerMount
     } else {
-        None
+        player_tracking::PositionOrigin::ServerSpawn
     };
+    plan.session.server_position = Some((spawn_position, position_origin));
+    plan.audit.spawned_point = Some(point.index);
     if let Some(seat) = passenger_seat {
         respawn.state = replication::CharacterState {
             state: 14,
             stance: 0,
-            user_data: [13, 0, seat],
+            user_data: [
+                13,
+                indexed_bunker
+                    .as_ref()
+                    .map_or(0, |bunker| bunker.index as u8),
+                seat,
+            ],
         };
     }
     if let Some(seat) = ground_seat {
         respawn.state = seat.character_state();
     }
+    if let Some((seat, _)) = helo_passenger {
+        respawn.state = seat.character_state();
+    }
+    plan.session.new_helo_seat = Some(helo_passenger.map(|(seat, _)| seat));
     plan.session.new_ground_seat = Some(ground_seat);
     plan.session.new_mounted_seat = Some(passenger_seat);
+    plan.session.new_mounted_bunker = indexed_bunker.as_ref().map(|bunker| bunker.index);
     plan.session.spawn_pose = Some((respawn.state, respawn.yaw));
     plan.combat.new_life = Some(CharacterLife::Alive {
         generation: generation.unwrap(),
@@ -491,7 +599,18 @@ pub(super) fn plan_respawn<W: Write>(
     plan.combat.primary_equipped = loadout.as_ref().map(|l| l.primary_equipped);
     // Native invalid/empty inventory selection does not prevent
     // base physical spawn. Never silently replace the desired slot.
-    let delta = if bunker {
+    let delta = if let Some(hospital) = &indexed_bunker {
+        respawn.encode_in_bunker_with_profile(
+            loadout.as_ref(),
+            active.reservation.player,
+            ctx.engine.bunker_ownership_after(
+                hospital.index,
+                active.reservation.player,
+                passenger_seat,
+            ),
+            ctx.engine.wire_profile,
+        )?
+    } else if bunker {
         respawn.encode_in_alpha_with_ownership_with_profile(
             loadout.as_ref(),
             active.reservation.player,

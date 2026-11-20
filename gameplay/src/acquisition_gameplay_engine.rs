@@ -210,7 +210,7 @@ impl<W: Write> Engine<W> {
     /// The admitted replacement runtime has no temporary invulnerability
     /// producer. These values describe this owned world, not a native capture.
     /// Mounted status comes from current seats, never a default false flag.
-    fn owned_acquisition_characters(&self) -> BTreeMap<u32, NativeState> {
+    pub(crate) fn owned_acquisition_characters(&self) -> BTreeMap<u32, NativeState> {
         let mut states = BTreeMap::new();
         for actor in self.active.iter().chain(self.peers.values()) {
             states.insert(

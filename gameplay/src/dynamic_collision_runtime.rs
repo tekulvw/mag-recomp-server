@@ -101,6 +101,29 @@ fn vehicle_pose(v: &ground_vehicles::Creation) -> Pose {
     }
 }
 impl<W: Write> Engine<W> {
+    pub(super) fn domination_bunker_seat_position(
+        &self,
+        index: u16,
+        seat: u8,
+    ) -> Result<replication::CharacterPosition, &'static str> {
+        self.bunker_world
+            .as_ref()
+            .and_then(|world| world.domination_bunker(index))
+            .and_then(|bunker| bunker.seat_position(seat))
+            .ok_or("dynamic_body_mount_pose_unqualified")
+    }
+
+    pub(crate) fn domination_helo_passenger_position(
+        actor: &Active,
+    ) -> Result<replication::CharacterPosition, &'static str> {
+        actor
+            .tracking
+            .sample
+            .filter(|sample| matches!(sample.origin, player_tracking::PositionOrigin::ServerMount))
+            .map(|sample| sample.position)
+            .ok_or("domination_helo_passenger_pose_unavailable")
+    }
+
     /// Query the actual current owned world for one allocated spawning chassis.
     /// The caller supplies the current filter table and explicit sweep tuning.
     /// This prepares collision results only; it does not publish corrections or
@@ -170,7 +193,7 @@ impl<W: Write> Engine<W> {
         if self.active.is_some()
             || !self.peers.is_empty()
             || self.wire_profile.application_id() != 20231
-            || self.match_profile().game_type != 1
+            || !matches!(self.match_profile().game_type, 1 | 2)
         {
             return Err("dynamic_bodies_require_idle_retail_acquisition");
         }
@@ -198,10 +221,20 @@ impl<W: Write> Engine<W> {
         &self,
         current_filter_row6: u32,
     ) -> Result<Snapshot, &'static str> {
+        self.owned_dynamic_collision_snapshot(current_filter_row6, None)
+    }
+
+    /// For a seat exit, the moving character is intentionally excluded from
+    /// the candidate obstacle roster before resolving its mounted position.
+    pub(crate) fn owned_dynamic_collision_snapshot(
+        &self,
+        current_filter_row6: u32,
+        excluded_character: Option<u16>,
+    ) -> Result<Snapshot, &'static str> {
         if self.failed {
             return Err("engine_unavailable");
         }
-        if self.match_profile().game_type != 1 {
+        if !matches!(self.match_profile().game_type, 1 | 2) {
             return Err("dynamic_bodies_require_acquisition");
         }
         let resources = self
@@ -247,6 +280,9 @@ impl<W: Write> Engine<W> {
             if actor.reservation.world != world.world_id {
                 return Err("dynamic_body_world_mismatch");
             }
+            if excluded_character == Some(actor.reservation.player) {
+                continue;
+            }
             let (generation, dead) = match actor.life {
                 CharacterLife::AwaitingFirstSpawn => (1, false),
                 CharacterLife::Alive { generation, .. }
@@ -259,6 +295,10 @@ impl<W: Write> Engine<W> {
                         .ok_or("dynamic_body_mount_vehicle_unavailable")?
                         .position,
                 )
+            } else if let (Some(index), Some(seat)) = (actor.mounted_bunker, actor.mounted_seat) {
+                point(self.domination_bunker_seat_position(index, seat)?)
+            } else if actor.helo_seat.is_some() {
+                point(Self::domination_helo_passenger_position(actor)?)
             } else if actor.mounted_seat.is_some() {
                 return Err("dynamic_body_mount_pose_unqualified");
             } else if let Some(sample) = actor.tracking.sample {

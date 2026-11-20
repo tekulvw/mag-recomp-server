@@ -136,6 +136,7 @@ impl ClientCharacterFields {
 pub enum PositionOrigin {
     ServerSpawn,
     ServerExit,
+    ServerMount,
     ServerCorrection,
     ClientReported,
 }

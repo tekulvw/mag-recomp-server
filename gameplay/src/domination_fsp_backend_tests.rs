@@ -331,3 +331,46 @@ fn unsupported_native_member_cannot_be_promoted_to_worker_spawn_choice() {
     assert_eq!(original.available_for_squad(31), Some(&[0, 1][..]));
     assert_wire_availability(&original, 1, 1);
 }
+
+#[test]
+fn scoped_helo_keeps_native_default_with_playable_category_zero_fallback() {
+    let squads = (0..32)
+        .map(|index| {
+            json!({
+                "index":index,"team":index/16,"platoon":index%16/4,"squad":index%4,
+                "faction":if index < 16 { None } else { Some(0) },
+                "available":[0],"default_spawn":0,
+            })
+        })
+        .collect::<Vec<_>>();
+    let locations = (0..5).map(|index| json!({
+        "index":index,"token":100+index,"kind":if index == 0 {"insertion"} else {"unsupported"},
+        "active":index == 0,"position":{"x":10.*f64::from(index),"y":2.,"z":1.},
+    })).collect::<Vec<_>>();
+    let mut spawns = SpawnCatalog::from_json(&json!({
+        "format":"mag_spawn_catalog","schema_version":1,"source":"synthetic",
+        "active":{"map_name":"synthetic_fsp","squad_index":16,"default_spawn":0,"available":[0]},
+        "match_profile":{"game_type":2,"auto_assign_teams":true,"team_capacity":16,"squad_capacity":1,
+            "has_bunkers":false,"has_objectives":true,"attacking_faction":1},
+        "maps":[{"name":"synthetic_fsp","owner_faction":0,"spawn_count":5,"squads":squads,
+            "runtime_indices_verified":true,"runtime_indices_basis":"synthetic source","locations":locations}],
+    }).to_string()).unwrap();
+
+    assert_eq!(
+        spawns.set_runtime_squad_default(16, 1),
+        Err("unsupported_runtime_squad_spawn")
+    );
+    spawns
+        .configure_domination_helo_scope([1, 2, 3, 4].into(), [0; 32])
+        .unwrap();
+    spawns.set_runtime_point_active(1, 101, true).unwrap();
+    spawns.set_runtime_squad_default(16, 1).unwrap();
+    assert_eq!(spawns.default_for_squad(16), Some(1));
+    assert_eq!(spawns.default_spawn(), 0);
+    let late_join = spawns.for_squad(16).unwrap();
+    assert_eq!(late_join.default_spawn(), 0);
+    assert!(late_join.alpha(0).is_some());
+    assert!(late_join.alpha(1).is_none());
+    spawns.reset_runtime();
+    assert_eq!(spawns.default_for_squad(16), Some(0));
+}

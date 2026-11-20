@@ -748,3 +748,45 @@ fn vehicle_explosion_is_ordinary_protection_checked_damage_with_native_wire_meta
     assert_eq!(actor.last_damage.last_source_object, u32::MAX);
     assert_eq!(actor.last_damage.last_user_data, (90 << 20) | (512 + 90));
 }
+
+#[test]
+fn structural_effects_preserve_objective_attribution_and_burning_self_source() {
+    let mut engine = crate::human_kill_reward_tests::fixture();
+    let t = target(&engine, true);
+    let objective = 0x0c80_0002;
+    let mut native = states(t, native(0, false));
+    let requests = [
+        (
+            t,
+            Request::StructuralExplosion {
+                raw_hp: 12.,
+                from_direction: [1., 0., 0.],
+                attacker: t.character_id,
+                objective_id: objective,
+            },
+        ),
+        (
+            t,
+            Request::StructuralArea {
+                raw_hp: 1000.,
+                from_direction: [0., 0., 1.],
+            },
+        ),
+    ];
+    let candidate = engine
+        .prepare_acquisition_character_effects(&requests, &native, Duration::from_secs(1))
+        .unwrap();
+    assert_eq!(candidate.audit()[0]["source_object"], objective);
+    assert_eq!(candidate.audit()[0]["damage_source_type"], 6);
+    assert_eq!(candidate.audit()[1]["source_object"], u32::MAX);
+    assert_eq!(candidate.audit()[1]["damage_source_type"], 9);
+    assert_eq!(candidate.audit()[1]["attacker"], t.character_id);
+    assert_eq!(candidate.audit()[1]["location"], 0);
+    assert!(actor(&engine, t).life.is_alive());
+    engine
+        .install_acquisition_character_effects(candidate, &mut native)
+        .unwrap();
+    assert_eq!(actor(&engine, t).last_damage.last_location_and_type, 0x90);
+    assert_ne!(actor(&engine, t).last_damage.health_quarter_points, 400);
+    assert_eq!(actor(&engine, t).last_damage.last_attacker, t.character_id);
+}

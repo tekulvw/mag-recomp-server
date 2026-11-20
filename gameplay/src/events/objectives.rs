@@ -2,7 +2,7 @@
 use super::*;
 use crate::objective_control::{ObjectiveActor, ObjectiveWorld};
 
-fn actor(active: &Active) -> Option<ObjectiveActor> {
+pub(super) fn actor(active: &Active) -> Option<ObjectiveActor> {
     let CharacterLife::Alive { generation, .. } = active.life else {
         return None;
     };
@@ -116,6 +116,9 @@ pub(super) fn interaction<W: Write>(
 
 impl<W: Write> Engine<W> {
     pub(crate) fn reset_objective_world(&mut self) {
+        if let Some(gameplay) = &mut self.domination_gameplay {
+            gameplay.reset();
+        }
         if let Some(gameplay) = &mut self.acquisition_gameplay {
             gameplay.reset();
         }
@@ -286,6 +289,9 @@ impl<W: Write> Engine<W> {
         now: Duration,
         wall: u64,
     ) -> Result<Vec<OutboundMessage>, &'static str> {
+        if self.domination_gameplay.is_some() {
+            return self.tick_domination_objectives(now, wall);
+        }
         if self.acquisition_gameplay.is_some() {
             return self.tick_acquisition_objectives(now, wall);
         }

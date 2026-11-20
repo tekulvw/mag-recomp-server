@@ -3,8 +3,8 @@ use super::*;
 use crate::spawn_progression::{engine, ready, reserve};
 use std::sync::Arc;
 
-fn catalog() -> StructureCatalog {
-    StructureCatalog::from_value(json!({
+fn synthetic_structure_catalog() -> Value {
+    json!({
         "schema_version":1,"application_id":20230,
         "native_rules":{"health_condition_threshold_percent":[70.,40.,15.],
             "dead_below_health":1.,"minimum_rebuilt_health_percent":15.},
@@ -26,7 +26,11 @@ fn catalog() -> StructureCatalog {
             "damage_properties":{"MaxHitpoints":200.,"ArmorType":1,"DamageCriticalHealthLossRate":0.,
                 "CanBeRepairedFromDestroyed":true,"RepairedHealthPct":50.,"TimeToRepairInSeconds":-1.}
         })).collect::<Vec<_>>()
-    })).unwrap()
+    })
+}
+
+fn catalog() -> StructureCatalog {
+    StructureCatalog::from_value(synthetic_structure_catalog()).unwrap()
 }
 
 pub(super) fn fixture(actor_team: u8, bunker_team: u8, same_faction: bool) -> Engine<Vec<u8>> {
@@ -98,9 +102,15 @@ pub(super) fn fixture(actor_team: u8, bunker_team: u8, same_faction: bool) -> En
                     last_source_object: u32::MAX,
                     last_user_data: 0,
                 },
+                exit: None,
+                domination: None,
+                vehicle_state: VehicleState::Operational,
+                turret_destruction_started: false,
             },
         )]),
         vehicle_token: 1,
+        domination_spawn_sha256: None,
+        domination_structure_sha256: None,
         pending_placements: 0,
         commands: BTreeMap::new(),
     });
@@ -359,4 +369,65 @@ fn bunker_hits_preserve_weapon_mount_and_life_admission() {
         assert!(bullet(&mut engine, 1000).is_empty(), "{guard}");
         assert_eq!(health(&engine), before, "{guard}");
     }
+}
+
+#[test]
+fn retail_hospital_repair_requires_bound_wire_tool_and_fans_out() {
+    let mut engine = fixture(0, 0, true);
+    equip_repair(&mut engine);
+    engine.runtime_application_id = Some(20231);
+    engine.wire_profile = engine.wire_profiles.profile(20231).unwrap();
+    let actor = engine.active.as_mut().unwrap();
+    actor.wire_profile = engine.wire_profile;
+    actor.emplacement_creation = Some(Vec::new());
+    let world = engine.bunker_world.as_mut().unwrap();
+    world.domination_spawn_sha256 = Some("qualified synthetic profile".into());
+    world.bunkers.get_mut(&0).unwrap().domination = Some(DominationHospitalAccess {
+        mount_radii: vec![],
+        max_occupancy: 12,
+        passenger_seats: 12,
+    });
+
+    let retail = crate::resources::tests::retail_items();
+    engine.item_catalog = retail.clone();
+    assert!(repair(&mut engine).is_empty());
+    assert_eq!(health(&engine), 160.);
+    let mut raw = retail.raw().clone();
+    raw["items"]["FactionItemList0:2"]["name"] = json!("repairkit");
+    raw["items"]["FactionItemList0:2"]["definition"]["name"] = json!("repairkit");
+    raw["definitions"]["active_items"] = json!({"repairkit":{"parameters":{}}});
+    engine.item_catalog = Arc::new(
+        item_catalog::ItemCatalog::from_value_for_application(
+            raw,
+            retail.character_blast_rules(),
+            20231,
+        )
+        .unwrap(),
+    );
+    let world = engine.bunker_world.as_mut().unwrap();
+    world.catalog = StructureCatalog::from_value({
+        let mut raw = synthetic_structure_catalog();
+        raw["repair"]["item_id"] = json!(2);
+        raw
+    })
+    .unwrap();
+    let actor = engine.active.as_mut().unwrap();
+    actor.spawned_loadout.as_mut().unwrap().inventories[0].slots[3] = Some(2);
+    let mut other = fixture(0, 0, true).active.take().unwrap();
+    other.reservation.player = 1;
+    other.reservation.id = "other".into();
+    other.emplacement_creation = Some(Vec::new());
+    other.wire_profile = engine.wire_profile;
+    engine.peers.insert(other.reservation.id.clone(), other);
+
+    assert!(repair(&mut engine).is_empty());
+    assert_eq!(health(&engine), 170.);
+    let reporter = engine
+        .active
+        .as_ref()
+        .unwrap()
+        .pending_shared
+        .back()
+        .unwrap();
+    assert_eq!(engine.peers["other"].pending_shared.back(), Some(reporter));
 }
