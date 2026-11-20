@@ -333,10 +333,10 @@ impl<W: Write> Engine<W> {
                 let previous = engine.ground_runtime.replace(ground.clone());
                 let sequences = crate::domination_structural_world::SequenceCollisionState::default();
                 let costs = BTreeMap::new();
-                let result = engine.stage_active_ability_update(now, native, crate::domination_structural_world::BlastCollision {
+                let result = engine.stage_active_ability_update_in_world(now, native, crate::domination_structural_world::BlastCollision {
                     filter_rows: &setup.filter_rows, limits: setup.physics.query_limits,
                     sequences: &sequences, material_costs: &costs, terrain_materials: None,
-                }, setup.ground_damage.as_ref());
+                }, setup.ground_damage.as_ref(), Some(&mut world));
                 ground = std::mem::replace(&mut engine.ground_runtime, previous).ok_or("ground_vehicle_runtime_required")?;
                 let commit = result?;
                 audit.extend(commit.audit); messages.extend(commit.messages);
@@ -345,6 +345,9 @@ impl<W: Write> Engine<W> {
             }
             if abilities_enabled {
                 stage_objective_observations(engine, &mut runtime, &mut world, now, &mut changed, &mut entry_actors)?;
+            }
+            for delta in world.advance_acquisition_precision(now) {
+                changed.insert(delta.object_index, delta);
             }
             *native = engine.owned_acquisition_characters();
             for _ in 0..256 {

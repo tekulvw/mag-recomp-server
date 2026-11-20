@@ -7,8 +7,11 @@ binding consumed by the `map_bindings` entry in the active-abilities manifest.
 Keep original assets and generated bindings in the operator's private data
 directory. [Worker match profiles](worker-match-profiles.md)
 
-The worker requires binding schema 2 with a `damage_triggers` array. Rerun
-the projector for existing schema 1 bindings before using the updated worker.
+The projector generates binding schema 3 with `damage_triggers` and
+`precision_targets` arrays. Rerun it before enabling the platoon effect setup.
+A precision target binds a nonzero-category Structural objective to its exact
+type-12 network index and authored team. The worker checks that the live
+objective belongs to the other team at command admission.
 Each entry binds a source-projected damage trigger box to a Structural
 objective and one of its demolition trigger slots. An empty array records that
 the projection found no qualifying triggers. The ability setup manifest

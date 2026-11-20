@@ -222,6 +222,24 @@ def domination_trigger_slots(proof, catalog, poses, source, volumes):
     return slots
 
 
+def precision_target_rows(graph, indices):
+    """Project the native type-1 and nonzero-category receiver guard."""
+    instances = unique(graph['instances'], lambda row: int(row['name_token'], 16), 'Objective instance')
+    definitions = unique(graph['definitions'], lambda row: row['definition_token'], 'Objective definition')
+    targets = []
+    for token, index in indices.items():
+        definition = definitions[instances[token]['definition_token']]
+        if definition['class_name'] != STRUCTURAL:
+            continue
+        fields = definition['fields']
+        if enum(fields, 'Category') == 0:
+            continue
+        owner = fields['OwnerTeam']['value']
+        require(owner in (0, 1), 'Unsupported Precision Strike Objective owner team')
+        targets.append({'object_index': index, 'team': owner})
+    return sorted(targets, key=lambda row: row['object_index'])
+
+
 def objective_rows(graph, indices, source_rows, membership, mode):
     instances = unique(graph['instances'], lambda row: int(row['name_token'], 16), 'Objective instance')
     definitions = unique(graph['definitions'], lambda row: row['definition_token'], 'Objective definition')
@@ -321,7 +339,7 @@ def project(archive_bytes, objective_bytes, evidence_bytes, spawn, properties, m
             'map': name, 'roots': roots,
         }
     binding = {
-        'schema_version': 2, 'application_id': 20231, 'map_name': name,
+        'schema_version': 3, 'application_id': 20231, 'map_name': name,
         'source': {
             'retail_elf_sha256': RETAIL_SHA256, 'level_archive_sha256': source['archive_sha256'],
             'level_clv_sha256': source['clv_sha256'], 'terrain_resource_bank_sha256': digest(bank),
@@ -330,6 +348,7 @@ def project(archive_bytes, objective_bytes, evidence_bytes, spawn, properties, m
         },
         'boundary': horizontal, 'vertical_bounds': vertical, 'aaa': aaa, 'objectives': objectives,
         'damage_triggers': damage_triggers,
+        'precision_targets': precision_target_rows(graph, indices),
     }
     return binding, root_receipt
 

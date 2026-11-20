@@ -310,6 +310,7 @@ fn acquisition_setup_fixture(
             );
         }
     }
+    objective_rows.push(json!({"token":"0x000000fe","object_index":120,"initial_state":1}));
     let objective_catalog = ObjectiveCatalog::from_json(&json!({
         "schema_version":1,"format":"mag_retail_objective_catalog","application_id":20231,
         "protocol":protocol::ProtocolInfo::RETAIL_PROTOCOL,"game_type":1,"map_name":"synthetic_arena",
@@ -441,6 +442,49 @@ fn primary_assignment(e: &Engine<Vec<u8>>) -> u16 {
 
 fn active_position(e: &Engine<Vec<u8>>) -> CharacterPosition {
     e.active.as_ref().unwrap().tracking.sample.unwrap().position
+}
+
+#[test]
+fn precision_completes_an_unhooked_acquisition_structure_only_after_recording() {
+    let mut engine = capture_fixture();
+    start_capture(&mut engine, 0, 100);
+    let world = engine.objective_world.as_mut().unwrap();
+    let source = crate::structure_damage::Source {
+        player: 0,
+        generation: 1,
+    };
+    assert!(world.stage_precision_strike(120, Some(source)).unwrap());
+    let scores = engine.acquisition_round.as_ref().unwrap().points();
+    let max_log = engine.max_log;
+    engine.max_log = engine.written;
+    assert_eq!(
+        engine
+            .tick_acquisition_objectives(Duration::from_millis(400), 2)
+            .err(),
+        Some("log_limit_reached")
+    );
+    assert_eq!(
+        engine.objective_world.as_ref().unwrap().state(120),
+        Some(ObjectiveState::Deactivated)
+    );
+    engine.max_log = max_log;
+    engine.failed = false;
+    engine
+        .tick_acquisition_objectives(Duration::from_millis(400), 2)
+        .unwrap();
+
+    let world = engine.objective_world.as_ref().unwrap();
+    let row = world
+        .snapshot(1, 400)
+        .objectives
+        .into_iter()
+        .find(|row| row.object_index == 120)
+        .unwrap();
+    assert_eq!(row.state_actor.state, ObjectiveState::Completed);
+    assert_eq!(row.state_actor.actor_index, 0);
+    assert_eq!(row.health_percent, 0);
+    assert_eq!(world.state(FIRST_CAPTURE), Some(ObjectiveState::Activating));
+    assert_eq!(engine.acquisition_round.as_ref().unwrap().points(), scores);
 }
 
 #[test]

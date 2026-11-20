@@ -149,6 +149,7 @@ struct Spy {
     fail_ability: bool,
     fail_sequence: bool,
     allow_strike_lifecycle: bool,
+    precision_trigger: bool,
 }
 
 impl ExternalEffects for Spy {
@@ -197,7 +198,10 @@ impl ExternalEffects for Spy {
         if !self.allow_strike_lifecycle {
             return Err("unexpected_explosion");
         }
-        assert_eq!(entry.active_trigger_index, Some(0));
+        assert_eq!(
+            entry.active_trigger_index,
+            (!self.precision_trigger).then_some(0)
+        );
         self.calls.push(("explosion", entry.delta.object_index));
         Ok(())
     }
@@ -630,4 +634,72 @@ fn strike_entry_stages_existing_effects_and_progresses_without_a_held_actor() {
     assert_eq!(completed.world.state(0), Some(Completed));
     assert_eq!(completed.deltas[0].state_actor.actor_index, source.player);
     assert!(completed.effects.calls.contains(&("explosion", 0)));
+}
+
+#[test]
+fn precision_completion_uses_the_normal_entry_and_rolls_back_on_effect_failure() {
+    let (runtime, world, spawns, round) = fixture();
+    let started = runtime
+        .stage_mission_start(frame(100, &world, &spawns, &round), Spy::default())
+        .unwrap();
+    let mut live = started
+        .runtime
+        .stage_objective_update(
+            frame(100, &started.world, &started.spawns, &started.round),
+            &BTreeMap::new(),
+            started.effects,
+        )
+        .unwrap();
+    assert!(
+        live.world
+            .stage_precision_strike(
+                0,
+                Some(crate::structure_damage::Source {
+                    player: 3,
+                    generation: 5
+                }),
+            )
+            .unwrap()
+    );
+
+    let spy = |fail_sequence| Spy {
+        fail_sequence,
+        allow_strike_lifecycle: true,
+        precision_trigger: true,
+        ..Spy::default()
+    };
+    let evaluate = |fail_sequence| {
+        live.runtime.stage_objective_update(
+            frame(101, &live.world, &live.spawns, &live.round),
+            &BTreeMap::new(),
+            spy(fail_sequence),
+        )
+    };
+    assert_eq!(evaluate(true).err(), Some("synthetic_sequence_failure"));
+    assert_eq!(live.world.state(0), Some(ObjectiveState::Deactivated));
+    let candidate = evaluate(false).unwrap();
+    assert_eq!(candidate.world.state(0), Some(ObjectiveState::Completed));
+    assert_eq!(candidate.deltas[0].state_actor.actor_index, 3);
+    assert!(!candidate.spawns.point_active(2));
+    assert_eq!(candidate.deltas.len(), 1);
+    assert_eq!(candidate.sequences.len(), 1);
+    assert_eq!(
+        candidate.effects.calls,
+        [
+            ("class_prefix", 0),
+            ("class_suffix", 0),
+            ("assignment", 0),
+            ("sequence", 0),
+            ("class_prefix", 0),
+            ("class_suffix", 0),
+            ("assignment", 0),
+            ("sequence", 0),
+            ("class_prefix", 0),
+            ("vehicle", 0),
+            ("class_suffix", 0),
+            ("explosion", 0),
+            ("assignment", 0),
+            ("sequence", 0),
+        ]
+    );
 }

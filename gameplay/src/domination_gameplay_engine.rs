@@ -474,11 +474,21 @@ impl Runtime {
         next.world.begin_native_tick(frame.now);
         for &index in &self.setup.update_order {
             let state_before_update = next.world.state(index);
-            next.deltas
-                .extend(next.world.tick_native_object(index, frame.now, actors));
-            for entry in next.world.take_native_entries() {
-                next.prepare_entry(entry, frame.now.as_millis() as u32)?;
+            let mut published = None;
+            loop {
+                if let Some(delta) = next.world.tick_native_object(index, frame.now, actors) {
+                    published = Some(delta);
+                }
+                // The structural state machine queues each entry before
+                // continuing its desired-state chain in this same update.
+                for entry in next.world.take_native_entries() {
+                    next.prepare_entry(entry, frame.now.as_millis() as u32)?;
+                }
+                if !next.world.has_precision_transition(index) {
+                    break;
+                }
             }
+            next.deltas.extend(published);
             // The original Structural Completed/Repairing update can transition
             // first, then tail-call sustained damage for the state that ran.
             if next.world.native_class(index) == Some(NativeClass::Structural)
@@ -804,7 +814,13 @@ impl<E: ExternalEffects> Candidate<E> {
             if delta.object_index != entry.delta.object_index || delta.sequence_index < -1 {
                 return Err("domination_gameplay_sequence_binding_mismatch");
             }
-            self.sequences.push(delta);
+            if let Some(prior) = self.sequences.last_mut()
+                && prior.object_index == delta.object_index
+            {
+                *prior = delta;
+            } else {
+                self.sequences.push(delta);
+            }
         }
         Ok(())
     }
