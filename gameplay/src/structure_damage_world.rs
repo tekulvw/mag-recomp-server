@@ -69,11 +69,22 @@ impl World {
     }
     /// Family56 receivers use a positive radial gate and raw channel6 damage.
     /// Their simple-shape phantoms do not use the actor material-cover query.
+    #[cfg(test)]
     pub(crate) fn collect(
         &self,
         blast: &InstantaneousBlast,
         filter_row: u32,
         limits: QueryLimits,
+    ) -> Result<Vec<Key>, &'static str> {
+        self.collect_with_scale(blast, filter_row, limits, |distance| blast.scale(distance))
+    }
+
+    pub(crate) fn collect_with_scale(
+        &self,
+        blast: &InstantaneousBlast,
+        filter_row: u32,
+        limits: QueryLimits,
+        scale: impl Fn(f32) -> Result<f32, &'static str>,
     ) -> Result<Vec<Key>, &'static str> {
         if filter_row & (1 << 6) == 0 || blast.damage == 0. {
             return Ok(Vec::new());
@@ -100,7 +111,7 @@ impl World {
                 let delta = std::array::from_fn::<_, 3, _>(|i| origin[i] - target.rule.position[i]);
                 let distance =
                     ((delta[0] * delta[0] + delta[1] * delta[1]) + delta[2] * delta[2]).sqrt();
-                if blast.scale(distance)? > 0.
+                if scale(distance)? > 0.
                     && geometry::penetrates(
                         &sphere,
                         Pose::at(origin.map(f64::from)),

@@ -834,3 +834,40 @@ fn air_strike_preserves_protection_and_uses_ordinary_enemy_death_attribution() {
     );
     assert_eq!(engine.pending_reward_batch().len(), 1);
 }
+
+#[test]
+fn gas_pulse_uses_poison_damage_and_volume_death_attribution() {
+    let mut engine = crate::human_kill_reward_tests::enable_incoming_base(
+        crate::human_kill_reward_tests::fixture(),
+        0.25,
+    );
+    let victim = target(&engine, true);
+    let attacker = target(&engine, false);
+    let request = Request::AirStrikeGas {
+        raw_hp: 1000.,
+        from_direction: [1., 0., -1.],
+        attacker: attacker.character_id,
+    };
+    let now = Duration::from_secs(1);
+    let protected = engine
+        .plan_acquisition_character_effect(victim, request, native(2, false), now)
+        .unwrap();
+    assert_eq!(protected.outcome(), Outcome::Protected);
+
+    let mut unprotected = states(victim, native(0, false));
+    let candidate = engine
+        .prepare_acquisition_character_effects(&[(victim, request)], &unprotected, now)
+        .unwrap();
+    assert_eq!(candidate.audit()[0]["damage_type"], 4);
+    assert_eq!(candidate.audit()[0]["damage_source_type"], 7);
+    assert_eq!(candidate.audit()[0]["outcome"], "Applied");
+    engine
+        .install_acquisition_character_effects(candidate, &mut unprotected)
+        .unwrap();
+
+    let dead = actor(&engine, victim);
+    assert_eq!(dead.last_damage.last_location_and_type, 0x41);
+    assert_eq!(dead.last_damage.last_source_object, u32::MAX);
+    assert_eq!(dead.last_damage.last_attacker, attacker.character_id);
+    assert_eq!(&notice(dead)[6..11], &[7, 255, 255, 255, 255]);
+}

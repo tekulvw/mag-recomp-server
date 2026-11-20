@@ -272,7 +272,7 @@ impl<W: Write> Engine<W> {
             mounted,
         } = request;
         if self.wire_profile.application_id() != 20231
-            || ![4, 5, 6, 9, 10].contains(&source_type)
+            || ![4, 5, 6, 7, 9, 10].contains(&source_type)
             || source_index != -1
         {
             return Err("unsupported_character_effect_death_source");

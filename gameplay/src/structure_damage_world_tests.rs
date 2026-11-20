@@ -69,3 +69,28 @@ fn inactive_owner_and_unqualified_boxes_never_receive_damage() {
     assert!(World::new(&[invalid]).is_err());
     assert!(World::new(&[rule(), rule()]).is_err());
 }
+
+#[test]
+fn command_bomblet_applies_full_structure_channel_when_overlapping_box_center_is_outside() {
+    let mut world = World::new(&[rule()]).unwrap();
+    let mut blast = blast();
+    blast.origins = vec![[14.25, 2., 10.]];
+    assert!(
+        world
+            .collect(&blast, 1 << 6, Default::default())
+            .unwrap()
+            .is_empty()
+    );
+    let hits = world
+        .collect_with_scale(&blast, 1 << 6, Default::default(), |_| Ok(0.25))
+        .unwrap();
+    assert_eq!(hits, [(11, 0)]);
+    assert_eq!(
+        world.apply(hits[0], blast.damage, true).unwrap(),
+        StructureDamageOutcome::Accumulated
+    );
+    assert_eq!(
+        world.apply(hits[0], blast.damage, true).unwrap(),
+        StructureDamageOutcome::Destroyed
+    );
+}
