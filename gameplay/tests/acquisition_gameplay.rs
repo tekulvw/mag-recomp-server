@@ -287,3 +287,36 @@ fn arrival_deducts_authored_score_before_graph_effects_and_locks_capture_target(
         }
     );
 }
+
+#[test]
+fn manual_tag_uses_the_normal_acquisition_assignment_refresh() {
+    let (_, mut game, _) = fixture();
+    game.squad_mut(0).unwrap().normal = Some(vec![OrderSource {
+        objective_token: Some(CAPTURE),
+        order: 0,
+    }]);
+    let authored = game.set_manual_tag(0, u32::MAX).unwrap();
+    assert_eq!(authored.tagged_object, 0x0c80_0066);
+    assert_eq!(authored.primary_index, CAPTURE as u16);
+    const TARGET: u32 = 0x0100_0004;
+    let manual = game.set_manual_tag(0, TARGET).unwrap();
+    assert_eq!(manual.primary_index, authored.primary_index);
+    assert_eq!(manual.tagged_object, TARGET);
+    assert_eq!(game.set_manual_tag(0, u32::MAX).unwrap(), authored);
+
+    game.squad_mut(0).unwrap().spawn_resolved = false;
+    assert_eq!(game.set_manual_tag(0, TARGET).unwrap(), authored);
+    assert_eq!(game.squad(0).unwrap().manual_tag, TARGET);
+    game.squad_mut(0).unwrap().spawn_resolved = true;
+    game.refresh_assignments().unwrap();
+    assert_eq!(game.squad(0).unwrap().assignment, manual);
+
+    game.squad_mut(0).unwrap().frago[0].objective_token = Some(u32::MAX);
+    assert_eq!(
+        game.set_manual_tag(0, u32::MAX),
+        Err("unknown_acquisition_gameplay_order_objective")
+    );
+    let squad = game.squad(0).unwrap();
+    assert_eq!(squad.manual_tag, TARGET);
+    assert_eq!(squad.assignment, manual);
+}

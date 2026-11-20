@@ -68,14 +68,39 @@ impl World {
     }
 
     pub(crate) fn assigned_objective(&self, squad: u16) -> Option<u16> {
+        Some(self.squad_assignment(squad)?.primary_index)
+    }
+
+    pub(crate) fn squad_assignment(
+        &self,
+        squad: u16,
+    ) -> Option<crate::acquisition_objective_runtime::Assignment> {
         Some(
             self.state
                 .assignments
                 .get(usize::from(squad))?
                 .as_ref()?
-                .assignment
-                .primary_index,
+                .assignment,
         )
+    }
+
+    pub(crate) fn set_manual_tag(
+        &mut self,
+        squad: u16,
+        target: u32,
+        world: &ObjectiveWorld,
+        spawns: &SpawnCatalog,
+        phase: MatchPhase,
+    ) -> Result<crate::acquisition_objective_runtime::Assignment, &'static str> {
+        let slot = self
+            .state
+            .assignments
+            .get_mut(usize::from(squad))
+            .and_then(Option::as_mut)
+            .ok_or("domination_assignment_slot_missing")?;
+        *slot =
+            slot.with_manual_tag(squad, target, &self.state.objectives, world, spawns, phase)?;
+        Ok(slot.assignment)
     }
 }
 
