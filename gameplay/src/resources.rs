@@ -187,6 +187,7 @@ impl<W: Write> Engine<W> {
             bot_names: resources.bot_names,
             world_tick_enabled: false,
             last_world_tick: None,
+            automatic_repair: Default::default(),
             match_epoch: None,
             alpha_turret: turret::ClientTurretFields::default(),
             alpha_turret_reporter: None,

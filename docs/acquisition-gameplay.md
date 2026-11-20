@@ -81,6 +81,30 @@ visible occupants use the current vehicle root position. Missing visibility
 rejects an enabled area-damage profile at startup. This does not qualify mounted
 firearm or radial-blast body coverage.
 
+## Automatic vehicle repair
+
+The scheduler consumes the effective `kCharModAutoRepair` for living, ready
+occupants of source-type9 Escorts. The authoritative occupied seat selects the
+current vehicle; no equipped repair tool or client repair request is needed.
+Bound Ground occupants use the current vehicle root for leadership proximity.
+
+Each character life owns its repair timer. An elapsed interval strictly greater
+than 1.5 seconds produces at most one attempt per scheduler update, carrying the
+remainder. Loss of association or an effectively zero modifier resets the timer.
+A due attempt on a full or currently unrepairable associated vehicle still
+consumes its interval. Repair uses a percentage of the loaded maximum HP,
+retains float HP, updates health conditions and preserves prior damage
+attribution. Timer, leadership state, HP and field18 publication commit after
+recording succeeds. Cadence-only observations produce no empty evidence record.
+Current and late-join recipients see the resulting health.
+
+This first consumer admits operational, living, noncritical Escorts. Other
+Ground source types, hospitals, aircraft and destruction/rebuild repair remain
+separate work. Preserving the previous published source field is an explicit
+bounded policy; the native outgoing builder's transient source-field provenance
+and exact native publication timing remain unqualified. Automatic character
+healing is a separate consumer. Native match acceptance remains pending.
+
 ## Owned gameplay
 
 The objective tick clones objective, ground, character, round and vehicle-wave

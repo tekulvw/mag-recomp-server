@@ -113,6 +113,7 @@ mod event_decode;
 mod events;
 pub mod fall_damage;
 use event_decode::DecodedEvent;
+mod leadership_auto_repair;
 mod resources;
 mod world_tick;
 pub use resources::EngineResources;
@@ -1055,6 +1056,7 @@ pub struct Engine<W: Write> {
     bot_names: bot_names::Catalog,
     world_tick_enabled: bool,
     last_world_tick: Option<Duration>,
+    automatic_repair: leadership_auto_repair::State,
     match_epoch: Option<Duration>,
     alpha_turret: turret::ClientTurretFields,
     alpha_turret_reporter: Option<(String, u32)>,
@@ -2072,3 +2074,6 @@ mod falling_damage_tests;
 #[cfg(test)]
 #[path = "../tests/support/dynamic_collision_fixture.rs"]
 mod synthetic_dynamic_collision;
+
+#[cfg(test)]
+mod leadership_auto_repair_tests;

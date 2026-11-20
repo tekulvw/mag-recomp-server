@@ -680,6 +680,28 @@ impl<W: Write> Engine<W> {
         }
         Ok(())
     }
+    fn current_leadership_participant(
+        &self,
+        actor: &Active,
+        role: HeldLeadershipRole,
+    ) -> Option<PassiveParticipant> {
+        let mut participant = actor.leadership_participant(role)?;
+        if let Some(seat) = actor.ground_seat {
+            let catalog = self.ground_vehicles.as_ref()?;
+            let vehicle = self.current_ground_vehicle(seat.vehicle_index)?;
+            if !vehicle.passenger_seats.contains(&seat.seat)
+                && !catalog
+                    .driver_seat(seat.vehicle_index)
+                    .is_some_and(|driver| driver.seat == seat.seat)
+            {
+                return None;
+            }
+            // The ordinary native mounted update copies the vehicle root to
+            // the character position read by leadership's proximity query.
+            participant.position = [vehicle.position.x, vehicle.position.y, vehicle.position.z];
+        }
+        Some(participant)
+    }
     pub(crate) fn plan_leadership(&self, now: Duration) -> Result<LeadershipPlan, &'static str> {
         let Some(runtime) = &self.leadership else {
             return Ok(LeadershipPlan::default());
@@ -708,7 +730,7 @@ impl<W: Write> Engine<W> {
         let providers: Vec<_> = actors
             .iter()
             .filter_map(|a| {
-                a.leadership_participant(role_for(a))
+                self.current_leadership_participant(a, role_for(a))
                     .map(|p| (a.reservation.world, p))
             })
             .collect();
@@ -721,7 +743,7 @@ impl<W: Write> Engine<W> {
                 .map_or_else(PassiveState::default, |c| c.state);
             let old_level = a.leadership.map_or(0, |c| c.state.level());
             let role = role_for(a);
-            if let Some(recipient) = a.leadership_participant(role) {
+            if let Some(recipient) = self.current_leadership_participant(a, role) {
                 let scoped: Vec<_> = providers
                     .iter()
                     .filter(|(world, _)| *world == a.reservation.world)
