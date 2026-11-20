@@ -7,6 +7,13 @@ binding consumed by the `map_bindings` entry in the active-abilities manifest.
 Keep original assets and generated bindings in the operator's private data
 directory. [Worker match profiles](worker-match-profiles.md)
 
+The worker requires binding schema 2 with a `damage_triggers` array. Rerun
+the projector for existing schema 1 bindings before using the updated worker.
+Each entry binds a source-projected damage trigger box to a Structural
+objective and one of its demolition trigger slots. An empty array records that
+the projection found no qualifying triggers. The ability setup manifest
+continues to select the binding file through `map_bindings`.
+
 ## Acquisition
 
 Use the initial type-12 Objective identity receipt consumed by

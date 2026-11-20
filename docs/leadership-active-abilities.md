@@ -28,8 +28,10 @@ stages at most one sample per native update. Character damage has AirStrike sour
 and preserves armor, temporary protection, incapacitation, death and reward rules.
 Ground and configured Domination helicopter damage use their existing armor paths.
 The invocation keeps its team after disconnect, and a replacement occupant cannot
-receive its XP. Damage to objective structures from the strike is not implemented
-in this slice.
+receive its XP. Qualified structural damage triggers have a separate native
+receiver and ordinary objective lifecycle; see [structure strike damage](structure-strike-damage.md).
+The shipped Acquisition/Domination maps contain no eligible damage-trigger bodies,
+and their hospital bodies remain excluded from Cluster Bomb damage.
 
 Attacker Sensor scans one defender squad per update. Defender Sensor enables the
 actual authored platoon objective rosters, whose four-slot scans wrap at the current

@@ -666,6 +666,7 @@ actor_effect_state! {
     published_wave_deadline: Option<Duration>,
 }
 struct EffectState {
+    objective_world: Option<objective_control::ObjectiveWorld>,
     active_abilities: Option<active_ability_engine::Runtime>,
     actors: std::collections::BTreeMap<String, ActorEffects>,
     bots: bot_registry::CharacterDamageCandidate,
@@ -675,6 +676,7 @@ struct EffectState {
 impl EffectState {
     fn capture<W: Write>(engine: &Engine<W>) -> Self {
         Self {
+            objective_world: engine.objective_world.clone(),
             active_abilities: engine.active_abilities.clone(),
             actors: engine
                 .active
@@ -698,6 +700,7 @@ impl EffectState {
     }
     fn install<W: Write>(mut self, engine: &mut Engine<W>) {
         engine.active_abilities = self.active_abilities;
+        engine.objective_world = self.objective_world;
         for actor in engine.active.iter_mut().chain(engine.peers.values_mut()) {
             self.actors
                 .remove(&actor.reservation.id)

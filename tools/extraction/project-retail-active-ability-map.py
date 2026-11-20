@@ -17,6 +17,7 @@ TERRAIN_CLASS = '284c2f78'
 TERRAIN_INSTANCE = 0x82BA3FF2
 STRUCTURAL = 'ObjectiveDemolitionStructuralProperties'
 LINKED_CLASSES = {STRUCTURAL, 'ObjectiveSecureAndHoldProperties', 'ObjectiveArrivalProperties'}
+PHANTOM_TRIGGER_TYPES = {4, 5}
 
 
 def require(condition, message):
@@ -155,6 +156,72 @@ def enum(fields, key):
     return struct.unpack_from('>I', raw, 9)[0]
 
 
+def damage_trigger_rows(graph, volumes, indices, vector_slots):
+    definitions = unique(graph['definitions'], lambda row: row['definition_token'], 'Objective definition')
+    volumes = unique(volumes, lambda row: int(row['trigger_token'], 16), 'trigger volume')
+    output = []
+    used_slots = set()
+    for instance in graph['instances']:
+        definition = definitions[instance['definition_token']]
+        if definition['class_name'] != 'ObjectiveTriggerProperties':
+            continue
+        fields = definition['fields']
+        trigger_type = enum(fields, 'TriggerType')
+        # The server LevelLoaded path only gives these property types a Havok phantom.
+        if trigger_type not in PHANTOM_TRIGGER_TYPES:
+            continue
+        token = int(instance['name_token'], 16)
+        require(token in vector_slots, 'Damage trigger has no qualified Objective vector index')
+        require(token in volumes, 'Damage trigger has no supported linked volume')
+        object_index, trigger_index = vector_slots[token]
+        volume = volumes[token]
+        owner_token = int(volume['objective_token'], 16)
+        require(indices.get(owner_token) == object_index and type(trigger_index) is int
+                and 0 <= trigger_index < 255 and (object_index, trigger_index) not in used_slots,
+                'Damage trigger objective slot or trigger index differs from qualified binding')
+        used_slots.add((object_index, trigger_index))
+        active = fields['StartActive']['value']
+        threshold = fields['DamageThreshold']['value']
+        require(type(active) is bool and type(threshold) in (int, float) and math.isfinite(threshold),
+                'Invalid damage trigger activity or threshold')
+        box = {key: volume['box'][key] for key in ('centre', 'axes', 'half_extents')}
+        # The original trigger position getter reads the linked box centre.
+        output.append({
+            'object_index': object_index, 'trigger_index': trigger_index, 'trigger_type': trigger_type,
+            'start_active': active, 'damage_threshold': f32(threshold),
+            'position': box['centre'], 'box': box,
+        })
+    return sorted(output, key=lambda row: (row['object_index'], row['trigger_index']))
+
+
+def domination_trigger_slots(proof, catalog, poses, source, volumes):
+    require(proof['schema'] == 'mag_domination_initial_trigger_bindings_v1'
+            and proof['status'] == 'ORIGINAL_RETAIL_CLIENT_AND_SIM_INITIAL_TRIGGER_VECTOR_ORDER_BOUND'
+            and proof['original_elf_sha256']['retail'] == RETAIL_SHA256
+            and proof['authored_metadata_sha256'] == poses['metadata_sha256']
+            and proof['objective_binding_sha256'] == poses['client_source_bindings_sha256'],
+            'Unqualified Domination trigger-vector evidence')
+    maps = unique(proof['maps'], lambda row: row['map']['map'], 'trigger source map')
+    level = maps[catalog['map_name']]
+    require(all(level['source'][key] == value for key, value in source.items()),
+            'Trigger-vector evidence does not match the level')
+    bindings = unique(level['triggers'], lambda row: int(row['trigger_token'], 16), 'trigger-vector binding')
+    positions = unique(poses['trigger_positions'],
+                       lambda row: (row['objective_index'], row['trigger_index']), 'trigger position')
+    require(len(bindings) == len(positions) == len(volumes), 'Incomplete trigger-vector inventory')
+    slots = {}
+    for volume in volumes:
+        token = int(volume['trigger_token'], 16)
+        row = bindings[token]
+        slot = (row['objective_initial_client_network_index'], row['sim_trigger_index'])
+        require(row['authored_volume'] == volume and row['client_trigger_index'] == slot[1]
+                and slot in positions and positions[slot]['position'] == volume['box']['centre'],
+                'Trigger binding differs from linked native volume or position')
+        slots[token] = slot
+    require(set(slots.values()) == positions.keys(), 'Incomplete trigger-vector slot coverage')
+    return slots
+
+
 def objective_rows(graph, indices, source_rows, membership, mode):
     instances = unique(graph['instances'], lambda row: int(row['name_token'], 16), 'Objective instance')
     definitions = unique(graph['definitions'], lambda row: row['definition_token'], 'Objective definition')
@@ -204,7 +271,8 @@ def objective_rows(graph, indices, source_rows, membership, mode):
     return tuple(sorted(rows, key=lambda row: row['object_index']) for rows in (assets, objectives, roots))
 
 
-def project(archive_bytes, objective_bytes, evidence_bytes, spawn, properties, maps, helpers, psarc, parse_zrb):
+def project(archive_bytes, objective_bytes, evidence_bytes, spawn, properties, maps, helpers, psarc,
+            parse_zrb, trigger_evidence=None):
     catalog = json.loads(objective_bytes)
     evidence = json.loads(evidence_bytes)
     name, mode = catalog['map_name'], catalog['game_type']
@@ -232,6 +300,18 @@ def project(archive_bytes, objective_bytes, evidence_bytes, spawn, properties, m
     membership = platoon_membership(clv, mode, spawn, properties)
     graph = maps['objective_graph'](clv, helpers)
     aaa, objectives, roots = objective_rows(graph, indices, source_rows, membership, mode)
+    volume_tool = runpy.run_path(str(TOOLS / 'extract-retail-objective-volumes.py'))
+    parsed = spawn['retail_clv'](clv)
+    volume_projection = volume_tool['project_level'](
+        graph, parsed.tables('InstanceProperties'), volume_tool['classes_by_token'](parsed),
+        helpers['euler_basis'],
+    )
+    volumes = [trigger for row in volume_projection['objectives'] for trigger in row['triggers']]
+    vector_slots = {}
+    if trigger_evidence is not None:
+        require(mode == 2, 'Trigger-vector evidence requires Domination')
+        vector_slots = domination_trigger_slots(json.loads(trigger_evidence), catalog, evidence, source, volumes)
+    damage_triggers = damage_trigger_rows(graph, volumes, indices, vector_slots)
     root_receipt = None
     if mode == 1:
         root_receipt = {
@@ -241,7 +321,7 @@ def project(archive_bytes, objective_bytes, evidence_bytes, spawn, properties, m
             'map': name, 'roots': roots,
         }
     binding = {
-        'schema_version': 1, 'application_id': 20231, 'map_name': name,
+        'schema_version': 2, 'application_id': 20231, 'map_name': name,
         'source': {
             'retail_elf_sha256': RETAIL_SHA256, 'level_archive_sha256': source['archive_sha256'],
             'level_clv_sha256': source['clv_sha256'], 'terrain_resource_bank_sha256': digest(bank),
@@ -249,6 +329,7 @@ def project(archive_bytes, objective_bytes, evidence_bytes, spawn, properties, m
             'qualified_objective_poses_sha256': digest(json_bytes(root_receipt)) if root_receipt else evidence_sha,
         },
         'boundary': horizontal, 'vertical_bounds': vertical, 'aaa': aaa, 'objectives': objectives,
+        'damage_triggers': damage_triggers,
     }
     return binding, root_receipt
 
@@ -260,6 +341,8 @@ def main():
     evidence = parser.add_mutually_exclusive_group(required=True)
     evidence.add_argument('--domination-qualified-poses', type=Path, help='Qualified per-map Objective root receipt')
     evidence.add_argument('--acquisition-initial-bindings', type=Path, help='Retail initial Objective identity receipt')
+    parser.add_argument('--domination-trigger-bindings', type=Path,
+                        help='Qualified Domination Objective trigger-vector receipt')
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--acquisition-roots-output', type=Path, help='Optional generated Acquisition root receipt')
     args = parser.parse_args()
@@ -282,6 +365,7 @@ def main():
             (args.domination_qualified_poses or args.acquisition_initial_bindings).read_bytes(),
             tools('extract-retail-spawns.py'), tools('project-retail-sabotage-objectives.py'),
             tools('extract-retail-maps.py'), tools('retail_map_helpers.py'), Psarc, parse,
+            args.domination_trigger_bindings.read_bytes() if args.domination_trigger_bindings else None,
         )
         args.output.write_bytes(json_bytes(binding))
         if args.acquisition_roots_output:
