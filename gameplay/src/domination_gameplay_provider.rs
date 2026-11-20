@@ -189,11 +189,19 @@ impl<W: Write> Provider<'_, W> {
             .ground
             .as_mut()
             .ok_or("ground_vehicle_runtime_required")?;
-        if self.state.vehicle_waves.is_none() {
+        let base = spawns.match_profile().spawn_wave_ms;
+        let intervals = [
+            self.engine.strategic_spawn_interval(0, base[0])?,
+            self.engine.strategic_spawn_interval(1, base[1])?,
+        ];
+        if let Some(waves) = &mut self.state.vehicle_waves {
+            // Sample the modifiers before the later Company update can expire
+            // them. Both Ground and Helicopter keep their current shared stamp.
+            waves.set_intervals_ms(intervals)?;
+        } else {
             let epoch = self.engine.match_epoch.unwrap_or(self.now).as_millis() as u32;
             self.state.vehicle_waves = Some(crate::acquisition_vehicle_waves::VehicleWaves::start(
-                epoch,
-                spawns.match_profile().spawn_wave_ms,
+                epoch, intervals,
             )?);
         }
         let dt = self
