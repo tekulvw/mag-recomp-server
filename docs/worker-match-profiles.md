@@ -201,3 +201,16 @@ reservation/world/player/selection/revision binding. Pending rewards likewise
 remain available for their existing acknowledgement flow. The next world cannot
 be selected until both durable outboxes are clear. No worker selection permits
 concurrent multi-world hosting, starts a service, or authorizes a release.
+
+## Shared squad spawn selection
+
+A ready client can change its squad's shared spawn only after its initial objects
+exist. With native leadership enabled, the sender must hold the squad-leader
+role for its current reservation and squad. Legacy profiles without native
+election use the first squad member.
+
+Selection uses the squad's currently supported, available and active spawn
+points, including points activated by the mode's progression. Supporting other
+retail points requires authoritative runtime point ownership and a physical
+spawn path for their type. Members following the previous shared point follow
+the new one, while individual selections are retained.
