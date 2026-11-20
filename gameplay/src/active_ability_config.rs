@@ -20,6 +20,31 @@ use std::{
 const MAX_CONFIG_SIZE: u64 = 256 * 1024;
 const RETAIL_ELF_SHA256: &str = "0089f0d6d17e48533ce7ff8d943dddd03487b925e7b04a1a055bfb907568694c";
 
+/// Resolve the required map sidecar for a source gameplay provider. The
+/// manifest can be relocated through an explicit absolute path.
+pub fn manifest_path(
+    explicit: Option<PathBuf>,
+    provider: Option<&Path>,
+    map_name: &str,
+) -> io::Result<Option<PathBuf>> {
+    if explicit.is_some() {
+        return Ok(explicit);
+    }
+    let Some(provider) = provider else {
+        return Ok(None);
+    };
+    if map_name.is_empty()
+        || !map_name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(invalid("invalid_active_ability_sidecar_map_name"));
+    }
+    Ok(Some(provider.with_file_name(format!(
+        "{map_name}--active-abilities.json"
+    ))))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Manifest {
@@ -140,7 +165,8 @@ fn read_bounded(path: &Path) -> io::Result<Vec<u8>> {
         ));
     }
     let mut bytes = Vec::new();
-    File::open(path)?
+    File::open(path)
+        .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", path.display())))?
         .take(MAX_CONFIG_SIZE + 1)
         .read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_CONFIG_SIZE {

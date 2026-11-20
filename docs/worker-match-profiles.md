@@ -82,14 +82,15 @@ explicit backend inputs and current insertion scope.
 
 ## Active squad commands
 
-An interactive Acquisition or Domination profile can opt in with an
-`active_abilities` path in its profile row. A fixed Acquisition worker can
-supply the manifest with `--active-abilities`. Both paths require an explicit
-retail worker, a native squad election policy without development bindings, a
-connected gameplay provider, and the matching objective and collision inputs.
-These settings enable the ClusterBomb and Sensor implementations where the
-native mode and role make them available. Profiles that omit this path have no
-active command setup.
+Profiles with an Acquisition or Domination gameplay provider enable squad
+ClusterBomb and Sensor where the native mode and role make them available.
+By default the worker loads `<map_name>--active-abilities.json` from the
+gameplay configuration's directory. To relocate a manifest, set the profile's
+`active_abilities` field to its absolute path. A fixed Acquisition worker can
+use `--active-abilities` for the same override. Startup requires native squad
+election without development bindings and validates the manifest against the
+profile's collision world and objective catalog. Sabotage grants no active
+squad commands.
 
 The setup manifest uses absolute paths to external files.
 
