@@ -1,7 +1,7 @@
 //! Concrete Acquisition objective transactions over owned Engine state.
 use crate::{
     acquisition_atomic::{EnteredState, Entry},
-    acquisition_character_effects::NativeState,
+    acquisition_character_effects::{Candidate as CharacterCandidate, NativeState},
     acquisition_control::Catalog,
     acquisition_gameplay::{Effect, Gameplay},
     acquisition_round::{Round, Rules, ScoreIntent},
@@ -9,7 +9,8 @@ use crate::{
     acquisition_volume_effects::VolumeRequest,
     acquisition_world::Settings,
     dynamic_collision::QueryBox,
-    objective_control::ObjectiveActor,
+    objective_catalog::NativeClass,
+    objective_control::{ObjectiveActor, ObjectiveWorld},
     objective_range::TriggerBox,
     replication::{ObjectiveControlDelta, ObjectiveState},
     *,
@@ -32,7 +33,55 @@ pub struct Setup {
     pub structural: Option<crate::acquisition_structural::Setup>,
 }
 
+pub(crate) enum StructuralInput {
+    Interaction(protocol::ObjectiveInteraction, ObjectiveActor, f32),
+    Repair(u16, domination_repair_runtime::Authority),
+}
+
+struct ObjectiveCommit {
+    runtime: Runtime,
+    world: ObjectiveWorld,
+    ground: acquisition_ground_runtime::Runtime,
+    round: Option<Round>,
+    spawns: Option<spawn_catalog::SpawnCatalog>,
+    changed: BTreeMap<u16, ObjectiveControlDelta>,
+    ground_changes: BTreeMap<u16, u32>,
+    sequence_deltas: BTreeMap<u16, replication::ObjectiveSequenceDelta>,
+    transition_packets: Vec<Vec<u8>>,
+    characters: CharacterCandidate,
+    native: BTreeMap<u32, NativeState>,
+    leadership: Option<leadership_runtime::LeadershipPlan>,
+    refresh_assignments: bool,
+    audit: Value,
+}
+
 impl Setup {
+    pub(crate) fn validate_structural(
+        &self,
+        catalog: &objective_catalog::ObjectiveCatalog,
+    ) -> Result<(), &'static str> {
+        if let Some(structural) = &self.structural {
+            structural.validate_native_objectives(catalog)?;
+        }
+        for object in catalog
+            .objects
+            .iter()
+            .filter(|object| object.native_class == Some(NativeClass::Structural))
+        {
+            if self.structural.is_none() {
+                return Err("acquisition_native_structural_provider_required");
+            }
+            if self
+                .state
+                .objectives()
+                .any(|(_, control)| control.replication.object_index == object.object_index)
+            {
+                return Err("acquisition_native_structural_overlaps_controller");
+            }
+        }
+        Ok(())
+    }
+
     /// Every capture chain must link a distinct, drivable Retail Escort.
     /// Check this before advertising or starting a source gameplay profile.
     pub fn validate_ground_drivers(
@@ -150,6 +199,7 @@ impl<W: Write> Engine<W> {
             .objective_catalog
             .as_ref()
             .ok_or("objective_catalog_unavailable")?;
+        setup.validate_structural(catalog)?;
         if catalog.source().capture_qualification != "native_source_gameplay"
             || setup.rules.starting_points != self.match_profile().maximum_points
             || setup.rules.starting_points.iter().any(|v| *v <= 0)
@@ -215,6 +265,160 @@ impl<W: Write> Engine<W> {
         self.acquisition_round = Some(Round::new(setup.rules));
         self.acquisition_gameplay = Some(Runtime::from_setup(Arc::new(setup)));
         Ok(self)
+    }
+
+    pub(crate) fn acquisition_structural_repair_tool(
+        &self,
+    ) -> Option<structure_catalog::RepairParameters> {
+        self.acquisition_gameplay
+            .as_ref()?
+            .setup
+            .structural
+            .as_ref()?
+            .repair_tool
+    }
+
+    pub(crate) fn event_acquisition_structural(
+        &mut self,
+        event: &events::EventInput,
+        input: StructuralInput,
+        leadership: leadership_runtime::LeadershipPlan,
+        now: Duration,
+        wall: u64,
+    ) -> Result<Vec<OutboundMessage>, &'static str> {
+        let mut runtime = self
+            .acquisition_gameplay
+            .clone()
+            .ok_or("acquisition_gameplay_unavailable")?;
+        if !runtime.started {
+            return Err("acquisition_gameplay_not_started");
+        }
+        let structural = runtime
+            .structural
+            .as_mut()
+            .ok_or("acquisition_native_structural_provider_required")?;
+        let mut world = self
+            .objective_world
+            .clone()
+            .ok_or("objective_world_unavailable")?;
+        let index = match input {
+            StructuralInput::Interaction(request, ..) => request.target_object_id as u16,
+            StructuralInput::Repair(index, _) => index,
+        };
+        if world.native_class(index) != Some(NativeClass::Structural) {
+            return Err("acquisition_structural_entry_unbound");
+        }
+        let mut changed = BTreeMap::new();
+        let (op, reply, reason) = match input {
+            StructuralInput::Interaction(request, actor, modifier) => {
+                let outcome =
+                    world.interact_with_demolition_modifier(request, actor, now, modifier);
+                if outcome.accepted {
+                    world.attribute_operation(
+                        index,
+                        self.active
+                            .as_ref()
+                            .and_then(progression::RewardRecipient::from_active),
+                    );
+                    if let Some(delta) = world.commit_pending_native_interaction(index, now, actor)
+                    {
+                        changed.insert(index, delta);
+                    }
+                }
+                let reply = protocol::ObjectiveInteraction {
+                    target_object_id: request.target_object_id,
+                    actor_index: actor.player,
+                    trigger_index: outcome.reply_trigger_index,
+                    kind: if outcome.accepted {
+                        protocol::ObjectiveInteractionKind::Ack
+                    } else {
+                        protocol::ObjectiveInteractionKind::Nak
+                    },
+                };
+                (
+                    "acquisition_structural_interaction",
+                    Some(reply),
+                    Some(outcome.reason),
+                )
+            }
+            StructuralInput::Repair(index, authority) => {
+                world.stage_repair(0x0c80_0000 | u32::from(index), authority)?;
+                ("acquisition_structural_repair", None, None)
+            }
+        };
+        let mut ground = self
+            .ground_runtime
+            .clone()
+            .ok_or("ground_vehicle_runtime_required")?;
+        let mut spawns = self
+            .spawn_catalog
+            .clone()
+            .ok_or("acquisition_structural_spawn_catalog_required")?;
+        let mut ground_changes = BTreeMap::new();
+        let mut sequence_deltas = BTreeMap::new();
+        let native = self.owned_acquisition_characters();
+        let characters =
+            self.prepare_acquisition_character_callback(&native, now, |engine, native| {
+                let mut audit = Vec::new();
+                let mut messages = Vec::new();
+                let mut frame = crate::acquisition_structural::Frame {
+                    engine,
+                    ground: &mut ground,
+                    spawns: &mut spawns,
+                    native,
+                    ground_changes: &mut ground_changes,
+                    audit: &mut audit,
+                    messages: &mut messages,
+                    sequences: &mut sequence_deltas,
+                    filter_rows: &runtime.setup.filter_rows,
+                    physics: runtime.setup.physics,
+                    ground_policy: runtime.setup.ground_damage.as_ref(),
+                    now,
+                };
+                for entry in world.take_native_entries() {
+                    structural.stage_entry(entry, &mut frame)?;
+                }
+                if let Some(reply) = reply {
+                    messages.push(OutboundMessage {
+                        reservation_id: event.reservation_id.clone(),
+                        world_id: event.world_id,
+                        player_id: event.player_id,
+                        plugin_id: 1,
+                        payload_hex: protocol::encode_hex(&reply.encode()),
+                    });
+                }
+                Ok((audit, messages))
+            })?;
+        let audit = json!({
+            "op": op, "timestamp_ms": now.as_millis() as u64,
+            "world_id": event.world_id, "player_id": event.player_id,
+            "reservation_id": event.reservation_id, "object_index": index,
+            "transport": event.transport, "direction": event.direction,
+            "rt_type": event.rt_type, "plugin_id": event.plugin_id,
+            "payload_hex": event.payload_hex.to_ascii_lowercase(),
+            "reason": reason, "reply_kind": reply.map(|reply| reply.kind as u8),
+            "leadership_changes": leadership.audit(),
+        });
+        self.commit_acquisition_objective_candidate(
+            ObjectiveCommit {
+                runtime,
+                world,
+                ground,
+                round: None,
+                spawns: Some(spawns),
+                refresh_assignments: !changed.is_empty(),
+                changed,
+                ground_changes,
+                sequence_deltas,
+                transition_packets: Vec::new(),
+                characters,
+                native,
+                leadership: Some(leadership),
+                audit,
+            },
+            now,
+            wall,
+        )
     }
 
     /// The admitted replacement runtime has no temporary invulnerability
@@ -288,7 +492,7 @@ impl<W: Write> Engine<W> {
             .filter_map(|d| {
                 world
                     .interaction_owner(d.object_index)
-                    .map(|owner| (d.object_index, owner))
+                    .map(|owner| (d.object_index, (d.state_actor.state, owner)))
             })
             .collect();
         let mut changed: BTreeMap<u16, ObjectiveControlDelta> = BTreeMap::new();
@@ -336,7 +540,7 @@ impl<W: Write> Engine<W> {
         } else {
             None
         };
-        let mut native = self.owned_acquisition_characters();
+        let native = self.owned_acquisition_characters();
         let characters = self.prepare_acquisition_character_callback(&native, now, |engine, native| {
             let mut audit = Vec::new();
             let mut messages = Vec::new();
@@ -394,8 +598,8 @@ impl<W: Write> Engine<W> {
             for _ in 0..256 {
                 let next = runtime.state.pending_transitions().min_by_key(|(token, _)| runtime.state.objective(*token).unwrap().replication.object_index);
                 let Some((token, target)) = next else {
-                    for (&index, &(player, generation, trigger)) in &prior_owners {
-                        if !changed.get(&index).is_some_and(|d| d.state_actor.state != ObjectiveState::Activating) {
+                    for (&index, &(previous, (player, generation, trigger))) in &prior_owners {
+                        if !changed.get(&index).is_some_and(|d| d.state_actor.state != previous) {
                             continue;
                         }
                         if let Some(actor) = engine.active.iter().chain(engine.peers.values()).find(|a| {
@@ -465,14 +669,73 @@ impl<W: Write> Engine<W> {
             && !starting
             && ground_changes.is_empty()
             && characters.audit().is_empty()
+            && characters.messages().is_empty()
         {
             // A scheduling cursor carries no gameplay result. Keep it fresh
             // during idle ticks so new critical damage never ages retroactively.
             if let Some(live) = &mut self.acquisition_gameplay {
                 live.last_ground_update = Some(now);
             }
+            if runtime
+                .structural
+                .as_ref()
+                .is_some_and(crate::acquisition_structural::Runtime::advances_native_objectives)
+            {
+                // Native repair integrates each quiet frame before the next
+                // replicated health batch. Keep that timer with its world.
+                self.objective_world = Some(world);
+            }
             return Ok(vec![]);
         }
+        let audit = json!({
+            "op":"acquisition_objective_tick", "timestamp_ms":now.as_millis() as u64,
+            "startup":starting, "controller_sha256":setup.controller.fingerprint(),
+            "scores":round.points(),
+        });
+        self.commit_acquisition_objective_candidate(
+            ObjectiveCommit {
+                runtime,
+                world,
+                ground,
+                round: Some(round),
+                spawns: structural_spawns,
+                changed,
+                ground_changes,
+                sequence_deltas,
+                transition_packets,
+                characters,
+                native,
+                leadership: None,
+                refresh_assignments: true,
+                audit,
+            },
+            now,
+            wall,
+        )
+    }
+
+    fn commit_acquisition_objective_candidate(
+        &mut self,
+        candidate: ObjectiveCommit,
+        now: Duration,
+        wall: u64,
+    ) -> Result<Vec<OutboundMessage>, &'static str> {
+        let ObjectiveCommit {
+            runtime,
+            world,
+            ground,
+            round,
+            spawns,
+            changed,
+            ground_changes,
+            sequence_deltas,
+            transition_packets,
+            characters,
+            mut native,
+            leadership,
+            refresh_assignments,
+            mut audit,
+        } = candidate;
         let packet = if changed.is_empty() {
             None
         } else {
@@ -492,7 +755,7 @@ impl<W: Write> Engine<W> {
             self.wire_profile,
         )?;
         let mut spawn_packets = Vec::new();
-        let spawn_writes = if let Some(next) = &structural_spawns {
+        let spawn_writes = if let Some(next) = &spawns {
             self.prepare_runtime_spawn_publication(
                 self.spawn_catalog
                     .as_ref()
@@ -505,23 +768,59 @@ impl<W: Write> Engine<W> {
             Vec::new()
         };
         self.check_acquisition_character_effects(&characters, &native)?;
-        self.record(json!({
-            "op":"acquisition_objective_tick", "timestamp_ms":now.as_millis() as u64,
-            "startup":starting, "controller_sha256":setup.controller.fingerprint(),
-            "effects":characters.audit(), "messages":characters.messages(), "scores":round.points(),
-            "objective_updates":transition_packets.iter().map(|p| protocol::encode_hex(p)).collect::<Vec<_>>(),
-            "objectives":changed.values().map(|d|json!({"index":d.object_index,"state":d.state_actor.state as u8})).collect::<Vec<_>>(),
-            "spawn_updates":spawn_packets.iter().map(|p| protocol::encode_hex(p)).collect::<Vec<_>>(),
-            "personal_spawn_updates":spawn_writes.iter().filter_map(|write| write.packet.as_ref().map(|p|
-                json!({"player":write.player, "payload_hex":protocol::encode_hex(p)}))).collect::<Vec<_>>(),
-        }), wall)?;
+        audit["effects"] = json!(characters.audit());
+        audit["messages"] = json!(characters.messages());
+        audit["objective_updates"] = json!(
+            transition_packets
+                .iter()
+                .map(|p| protocol::encode_hex(p))
+                .collect::<Vec<_>>()
+        );
+        audit["objectives"] = json!(
+            changed
+                .values()
+                .map(|d| json!({"index":d.object_index,"state":d.state_actor.state as u8}))
+                .collect::<Vec<_>>()
+        );
+        audit["spawn_updates"] = json!(
+            spawn_packets
+                .iter()
+                .map(|p| protocol::encode_hex(p))
+                .collect::<Vec<_>>()
+        );
+        audit["personal_spawn_updates"] = json!(
+            spawn_writes
+                .iter()
+                .filter_map(|write| write
+                    .packet
+                    .as_ref()
+                    .map(|p| json!({"player":write.player, "payload_hex":protocol::encode_hex(p)})))
+                .collect::<Vec<_>>()
+        );
+        audit["objective_snapshot"] = json!(packet.as_ref().map(|p| protocol::encode_hex(p)));
+        audit["sequence_updates"] = json!(
+            sequence_packets
+                .iter()
+                .map(|p| protocol::encode_hex(p))
+                .collect::<Vec<_>>()
+        );
+        audit["ground_update"] = json!(ground_packet.as_ref().map(|p| protocol::encode_hex(p)));
+        self.record(audit, wall)?;
         let messages = self.install_character_effects_after_record(characters, &mut native);
         self.ground_runtime = Some(ground);
         self.objective_world = Some(world);
-        self.acquisition_round = Some(round);
+        if let Some(round) = round {
+            self.acquisition_round = Some(round);
+        }
         self.acquisition_gameplay = Some(runtime);
-        if let Some(spawns) = structural_spawns {
+        if let Some(spawns) = spawns {
             self.spawn_catalog = Some(spawns);
+        }
+        if let Some(leadership) = leadership {
+            self.commit_leadership(leadership);
+            if let Some(active) = &mut self.active {
+                active.last_event = now;
+            }
         }
         self.install_runtime_spawn_publication(&spawn_writes);
         for packet in spawn_packets {
@@ -539,24 +838,17 @@ impl<W: Write> Engine<W> {
         if let Some(packet) = ground_packet {
             self.broadcast_bot_packet(packet);
         }
-        for actor in self.active.iter_mut().chain(self.peers.values_mut()) {
-            actor.objective_assigned = false;
-            actor.objective_needs_clear = true;
+        if refresh_assignments {
+            for actor in self.active.iter_mut().chain(self.peers.values_mut()) {
+                actor.objective_assigned = false;
+                actor.objective_needs_clear = true;
+            }
         }
         Ok(messages)
     }
 }
 
-// Keep the established objective phase for default-off worlds; the opted-in
-// native pass calls this after squad/platoon effects have changed actor state.
-fn stage_objective_observations<W: Write>(
-    engine: &Engine<W>,
-    runtime: &mut Runtime,
-    world: &mut objective_control::ObjectiveWorld,
-    now: Duration,
-    changed: &mut BTreeMap<u16, ObjectiveControlDelta>,
-    entry_actors: &mut BTreeMap<u32, u16>,
-) -> Result<(), &'static str> {
+pub(crate) fn objective_actors<W: Write>(engine: &Engine<W>) -> BTreeMap<u16, ObjectiveActor> {
     let mut actors: BTreeMap<_, _> = engine
         .active
         .iter()
@@ -594,8 +886,21 @@ fn stage_objective_observations<W: Write>(
             );
         }
     }
+    actors
+}
+
+// Keep the established objective phase for default-off worlds; the opted-in
+// native pass calls this after squad/platoon effects have changed actor state.
+fn stage_objective_observations<W: Write>(
+    engine: &Engine<W>,
+    runtime: &mut Runtime,
+    world: &mut ObjectiveWorld,
+    now: Duration,
+    changed: &mut BTreeMap<u16, ObjectiveControlDelta>,
+    entry_actors: &mut BTreeMap<u32, u16>,
+) -> Result<(), &'static str> {
     *changed = world
-        .tick(now, &actors)
+        .tick(now, &objective_actors(engine))
         .into_iter()
         .map(|d| (d.object_index, d))
         .collect();
@@ -634,4 +939,18 @@ fn stage_objective_observations<W: Write>(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+
+    pub(crate) fn install_structural_fixture(
+        runtime: &mut Runtime,
+        setup: crate::acquisition_structural::Setup,
+    ) {
+        Arc::get_mut(&mut runtime.setup).unwrap().structural = Some(setup.clone());
+        runtime.structural = Some(crate::acquisition_structural::Runtime::new(setup));
+        runtime.started = true;
+    }
 }

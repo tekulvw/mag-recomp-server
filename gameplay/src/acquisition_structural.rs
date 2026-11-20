@@ -18,6 +18,7 @@ use crate::{
     objective_control::{NativeEntry, ObjectiveWorld},
     replication::{ObjectiveSequenceDelta, ObjectiveState},
     spawn_catalog::SpawnCatalog,
+    structure_catalog::RepairParameters,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -30,6 +31,17 @@ use std::{
     time::Duration,
 };
 
+#[cfg(test)]
+#[path = "acquisition_structural_connected_tests.rs"]
+pub(crate) mod connected_tests;
+
+#[cfg(test)]
+#[path = "acquisition_structural_runtime_tests.rs"]
+mod runtime_tests;
+
+const LEGACY_BINDINGS: &str = "mag_acquisition_structural_bindings_v1";
+const NATIVE_BINDINGS: &str = "mag_acquisition_structural_bindings_v2";
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Files {
@@ -38,6 +50,7 @@ pub(crate) struct Files {
     terrain_index: PathBuf,
     terrain_materials: PathBuf,
     bindings: PathBuf,
+    repair_catalog: Option<PathBuf>,
 }
 
 impl Files {
@@ -49,6 +62,9 @@ impl Files {
             &mut self.terrain_materials,
             &mut self.bindings,
         ] {
+            *path = directory.join(&*path);
+        }
+        if let Some(path) = &mut self.repair_catalog {
             *path = directory.join(&*path);
         }
     }
@@ -82,11 +98,17 @@ impl Files {
         .map_err(io::Error::other)?;
         let playback =
             Structural::from_acquisition_catalog(effects, objectives).map_err(io::Error::other)?;
+        let repair_tool = self
+            .repair_catalog
+            .as_ref()
+            .map(crate::structural_repair_authority::load_retail_repair_tool)
+            .transpose()?;
         let setup = Setup {
             playback,
             assets: Arc::new(assets),
             terrain: Arc::new(terrain),
             bindings: Arc::new(bindings),
+            repair_tool,
         };
         setup
             .validate_spawn_routes(spawns)
@@ -114,9 +136,26 @@ pub struct Setup {
     assets: Arc<SequenceCollisionAssets>,
     terrain: Arc<TerrainMaterialGrid>,
     bindings: Arc<Bindings>,
+    pub(crate) repair_tool: Option<RepairParameters>,
 }
 
 impl Setup {
+    pub(crate) fn validate_native_objectives(
+        &self,
+        objectives: &ObjectiveCatalog,
+    ) -> Result<(), &'static str> {
+        self.bindings.validate_native_objectives(objectives)?;
+        if self.repair_tool.is_none()
+            && objectives.objects.iter().any(|object| {
+                object.native_class == Some(NativeClass::Structural)
+                    && object.repair.is_some_and(|rule| rule.can_repair)
+            })
+        {
+            return Err("acquisition_structural_repair_catalog_required");
+        }
+        Ok(())
+    }
+
     fn configure_spawns(&self, spawns: &mut SpawnCatalog) -> Result<(), &'static str> {
         let unselectable = self
             .bindings
@@ -197,6 +236,21 @@ struct Row {
     spawn: Option<Spawn>,
     start_deactivated: bool,
     hooks: BTreeMap<u8, Hook>,
+    #[serde(default)]
+    trigger_positions: Vec<[f32; 3]>,
+}
+
+impl Row {
+    fn trigger_position(&self, trigger: Option<u8>) -> Result<Option<[f32; 3]>, &'static str> {
+        trigger
+            .map(|index| {
+                self.trigger_positions
+                    .get(usize::from(index))
+                    .copied()
+                    .ok_or("acquisition_structural_trigger_pose_required")
+            })
+            .transpose()
+    }
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -328,7 +382,7 @@ impl Bindings {
         objectives: &ObjectiveCatalog,
         spawns: &SpawnCatalog,
     ) -> Result<(), &'static str> {
-        if self.schema != "mag_acquisition_structural_bindings_v1"
+        if !matches!(self.schema.as_str(), LEGACY_BINDINGS | NATIVE_BINDINGS)
             || self.map != spawns.map_name()
             || self.metadata_sha256 != objectives.source().authored_catalog_sha256
             || self.initial_objective_sha256 != objectives.source().binding_capture_sha256
@@ -414,6 +468,46 @@ impl Bindings {
         }
         Ok(())
     }
+
+    fn validate_native_objectives(
+        &self,
+        objectives: &ObjectiveCatalog,
+    ) -> Result<(), &'static str> {
+        let expected: BTreeSet<_> = self
+            .rows
+            .iter()
+            .filter(|(_, row)| {
+                self.schema == NATIVE_BINDINGS && row.class == NativeClass::Structural
+            })
+            .map(|(&index, _)| index)
+            .collect();
+        let actual: BTreeMap<_, _> = objectives
+            .objects
+            .iter()
+            .filter(|object| object.native_class == Some(NativeClass::Structural))
+            .map(|object| (object.object_index, object))
+            .collect();
+        if actual.keys().copied().ne(expected) {
+            return Err("acquisition_structural_native_coverage_mismatch");
+        }
+        for (&index, row) in &self.rows {
+            let count = actual
+                .get(&index)
+                .and_then(|object| object.demolition.as_ref())
+                .map_or(0, |rule| rule.trigger_volumes.len());
+            if objectives.binding(row.token).map(|(id, _)| id) != Some(index)
+                || row.trigger_positions.len() != count
+                || row
+                    .trigger_positions
+                    .iter()
+                    .flatten()
+                    .any(|p| !p.is_finite())
+            {
+                return Err("acquisition_structural_trigger_pose_mismatch");
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -436,6 +530,10 @@ impl Runtime {
 
     pub(crate) fn sequences(&self) -> Vec<ObjectiveSequenceDelta> {
         self.setup.playback.current_sequences()
+    }
+
+    pub(crate) fn advances_native_objectives(&self) -> bool {
+        self.setup.bindings.schema == NATIVE_BINDINGS
     }
 
     pub(crate) fn blast_collision<'a>(
@@ -498,12 +596,10 @@ impl Runtime {
             let request = self.setup.playback.explosion(token, entry)?;
             if request.properties.damage_value != 0. {
                 let root = self.setup.playback.catalog().objective_pose(token)?;
-                if entry.active_trigger_index.is_some() {
-                    return Err("acquisition_structural_trigger_pose_required");
-                }
-                let blast = request
-                    .properties
-                    .instantaneous_blast(root.translation.map(|value| value as f32), None)?;
+                let blast = request.properties.instantaneous_blast(
+                    root.translation.map(|value| value as f32),
+                    row.trigger_position(entry.active_trigger_index)?,
+                )?;
                 let source = if entry.delta.state_actor.actor_index == u16::MAX {
                     u32::MAX
                 } else {
@@ -567,6 +663,9 @@ impl Runtime {
         if starting {
             self.setup.configure_spawns(frame.spawns)?;
         }
+        if self.advances_native_objectives() {
+            world.begin_native_tick(frame.now);
+        }
         let world_id = frame
             .engine
             .active
@@ -575,6 +674,7 @@ impl Runtime {
             .next()
             .map(|actor| actor.reservation.world)
             .ok_or("acquisition_structural_world_missing")?;
+        // The v2 projection verifies that these client slots match Sim family-12 order.
         let indices: Vec<_> = self.setup.bindings.rows.keys().copied().collect();
         let mut deltas = BTreeMap::new();
         for index in indices {
@@ -585,19 +685,51 @@ impl Runtime {
                 (starting && row.start_deactivated)
                     .then_some((ObjectiveState::Deactivated, u16::MAX))
             });
-            if let Some((state, actor)) = request
-                && let Some(entry) =
-                    world.enter_acquisition_spawn_state(index, class, state, actor, frame.now)?
-            {
-                self.stage_entry(entry, frame)?;
-                deltas.insert(index, entry.delta);
-            }
-            if let Some(delta) =
-                world.advance_acquisition_precision_entry(index, frame.now, |entry, _| {
-                    self.stage_entry(entry, frame)
-                })?
-            {
-                deltas.insert(index, delta);
+            if world.native_class(index) == Some(NativeClass::Structural) {
+                if let Some((state, actor)) = request {
+                    let source = (actor != u16::MAX)
+                        .then(|| crate::acquisition_gameplay_engine::objective_actors(frame.engine))
+                        .and_then(|actors| actors.get(&actor).copied())
+                        .map(|actor| crate::domination_objective_runtime::Actor {
+                            player: actor.player,
+                            generation: actor.generation.into(),
+                            team: actor.team,
+                        });
+                    world.stage_native_state(index, state, source)?;
+                }
+                // Earlier entries and area tails can kill or unseat a holder.
+                // Resolve the actor against the staged world at this slot.
+                let actors = if world.interaction_owner(index).is_some() {
+                    crate::acquisition_gameplay_engine::objective_actors(frame.engine)
+                } else {
+                    BTreeMap::new()
+                };
+                loop {
+                    if let Some(delta) = world.tick_native_object(index, frame.now, &actors) {
+                        deltas.insert(index, delta);
+                    }
+                    for entry in world.take_native_entries() {
+                        self.stage_entry(entry, frame)?;
+                    }
+                    if !world.has_precision_transition(index) {
+                        break;
+                    }
+                }
+            } else {
+                if let Some((state, actor)) = request
+                    && let Some(entry) = world
+                        .enter_acquisition_spawn_state(index, class, state, actor, frame.now)?
+                {
+                    self.stage_entry(entry, frame)?;
+                    deltas.insert(index, entry.delta);
+                }
+                if let Some(delta) =
+                    world.advance_acquisition_precision_entry(index, frame.now, |entry, _| {
+                        self.stage_entry(entry, frame)
+                    })?
+                {
+                    deltas.insert(index, delta);
+                }
             }
             if class == NativeClass::Structural
                 && let Some(state @ (ObjectiveState::Completed | ObjectiveState::Repairing)) =
