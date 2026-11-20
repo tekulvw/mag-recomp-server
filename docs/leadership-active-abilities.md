@@ -1,9 +1,10 @@
 # Leadership active abilities
 
-The worker can opt into squad ClusterBomb and Sensor through source-bound external
-inputs. This connects authenticated command requests to the normal Engine event,
-world tick, damage and reliable replication paths. No ability runtime is installed
-by default. Source checks are independent of native-client gameplay acceptance.
+Workers configured for source-backed Acquisition or Domination gameplay enable
+squad ClusterBomb and Sensor by default. The server validates the external ability
+inputs before it can accept a match. Authenticated command requests use the normal
+Engine event, world tick, damage and reliable replication paths. Source checks
+are independent of native-client gameplay acceptance.
 
 ## Supported scope
 
@@ -43,11 +44,16 @@ receiving an unsupported request does not report an accepted activation.
 
 ## Configuration and extraction
 
-Fixed worlds accept `--active-abilities /absolute/path/active-abilities.json`.
-A formation worker instead sets `active_abilities` on each applicable row in its
-`mag_match_profiles_v1` manifest. The selected row needs its gameplay provider,
-collision world, objective catalog and native leadership policy. The global flag
-cannot override a profile's inputs. See [worker profiles](worker-match-profiles.md).
+Place `<map_name>--active-abilities.json` beside the Acquisition or Domination
+gameplay configuration. `map_name` is the selected spawn catalog's map name.
+Each setup requires its matching collision world and objective catalog. Workers
+must supply `--leadership-passives` and `--leadership-role-policy` for native
+squad election without development bindings. Startup fails if any required
+input is missing or invalid.
+
+To use a different absolute manifest path, pass `--active-abilities` on a fixed
+Acquisition worker or set `active_abilities` on the applicable formation profile.
+See [worker profiles](worker-match-profiles.md).
 
 An ability manifest has this shape, with all paths absolute:
 
@@ -71,7 +77,7 @@ files are not distributed with the public server.
 Startup checks the original source hashes, matching map and mode, extracted delay,
 complete side/faction effect rows, exact current objective catalog and exact
 collision scene. Selection preloads everything, so no file access occurs while
-switching a formation. `--validate-only` checks these inputs without starting a
+switching a formation. `--validate-catalogs` checks these inputs without starting a
 worker. A new round gets fresh ability state; retrying an identical selection does
 not reset a live runtime.
 

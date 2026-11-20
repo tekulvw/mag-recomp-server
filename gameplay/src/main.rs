@@ -1122,6 +1122,11 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     let native_leadership = leadership
         .as_ref()
         .is_some_and(|(_, policy)| policy.supports_match_profiles());
+    let active_abilities_path = mag_gameplay::active_ability_config::manifest_path(
+        active_abilities_path,
+        acquisition_gameplay_path.as_deref(),
+        catalog.map_name(),
+    )?;
     let active_abilities = active_abilities_path
         .as_ref()
         .map(|path| {
@@ -2452,6 +2457,21 @@ mod runtime_profile_tests {
                 .to_string()
                 .contains("--spawn-catalog")
         );
+    }
+
+    #[test]
+    fn sabotage_registry_has_no_active_command_setup() {
+        let files = SyntheticCatalogs::new();
+        let manifest = synthetic_match_profile(&files);
+        files.write(
+            "synthetic_home--active-abilities.json",
+            &serde_json::json!({}),
+        );
+        let registry = mag_gameplay::match_profiles::Registry::load(&manifest).unwrap();
+        assert!(!registry.has_active_abilities());
+        let mut args = files.args();
+        args.extend(["--match-profiles".into(), manifest.display().to_string()]);
+        assert!(run(args).is_ok());
     }
 
     #[test]

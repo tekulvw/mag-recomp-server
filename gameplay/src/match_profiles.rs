@@ -251,7 +251,7 @@ impl Registry {
                 .as_ref()
                 .map(|p| ground_vehicles::Catalog::load(p, &spawns))
                 .transpose()?;
-            let acquisition = if let Some(path) = source.acquisition_gameplay {
+            let acquisition = if let Some(path) = &source.acquisition_gameplay {
                 let world = collision.as_ref().ok_or_else(|| {
                     io::Error::other("acquisition_gameplay_requires_collision_world")
                 })?;
@@ -309,7 +309,7 @@ impl Registry {
                     .validate_match(20231, &spawns)
                     .map_err(io::Error::other)?;
             }
-            let domination = if let Some(path) = source.domination_gameplay {
+            let domination = if let Some(path) = &source.domination_gameplay {
                 if policy.game_type != 2
                     || domination_round.is_none()
                     || vehicles.is_none()
@@ -340,8 +340,15 @@ impl Registry {
             } else {
                 None
             };
-            let active_abilities = source
-                .active_abilities
+            let ability_manifest = active_ability_config::manifest_path(
+                source.active_abilities,
+                source
+                    .acquisition_gameplay
+                    .as_deref()
+                    .or(source.domination_gameplay.as_deref()),
+                spawns.map_name(),
+            )?;
+            let active_abilities = ability_manifest
                 .as_ref()
                 .map(|path| {
                     if acquisition.is_none() && domination.is_none() {
