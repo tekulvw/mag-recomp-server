@@ -426,6 +426,7 @@ pub(crate) struct RadialDose {
     pub index: u16,
     pub world: u32,
     pub attacker: u32,
+    pub source_team: Option<u8>,
     pub damage: TargetDamageParameters,
     pub scale: f32,
     pub source_object: u32,
@@ -449,12 +450,14 @@ impl<W: Write> Engine<W> {
                 .find(|carrier| carrier.source.object_index == dose.index)
                 .ok_or("domination_helo_radial_target_missing")?;
             let profile = rules.profile(carrier.source.faction)?;
-            let friendly_factor =
-                if self.character_team_in_world(dose.attacker, dose.world) == Some(0) {
-                    catalog.friendly_fire_multiplier()
-                } else {
-                    1.0
-                };
+            let attacker_team = dose
+                .source_team
+                .or_else(|| self.character_team_in_world(dose.attacker, dose.world));
+            let friendly_factor = if attacker_team == Some(0) {
+                catalog.friendly_fire_multiplier()
+            } else {
+                1.0
+            };
             let amount = item_catalog::apply_vehicle_armor(
                 dose.damage,
                 dose.scale,
@@ -581,6 +584,7 @@ impl<W: Write> Engine<W> {
                     index,
                     world,
                     attacker,
+                    source_team: None,
                     damage,
                     scale: blast.scale(distance)?,
                     source_object: ((16 + u32::from(terminal.slot)) << 24) | 0x0080_0000 | player,

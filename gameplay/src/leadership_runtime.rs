@@ -113,6 +113,10 @@ impl RolePolicy {
     pub fn has_development_bindings(&self) -> bool {
         !self.development_bindings.is_empty()
     }
+    /// Registry-backed worlds use the schema-2 native vacancy policy.
+    pub fn supports_match_profiles(&self) -> bool {
+        self.native().is_some() && !self.has_development_bindings()
+    }
     fn native(&self) -> Option<&NativeElection> {
         self.native_election
             .as_ref()
@@ -144,6 +148,24 @@ pub(crate) struct LeadershipRuntime {
     /// Held squad leaders: squad index -> (player index, reservation id). Native
     /// promotion only fills vacancies; a sitting leader is never displaced.
     squad_leaders: BTreeMap<u16, (u16, String)>,
+}
+impl LeadershipRuntime {
+    pub(crate) fn supports_match_profiles(&self) -> bool {
+        self.policy.supports_match_profiles()
+    }
+    pub(crate) fn clear_held_roles(&mut self) {
+        self.squad_leaders.clear();
+    }
+    fn holds_native_squad_role(&self, actor: &Active) -> bool {
+        actor.initial_objects.is_some()
+            && self.policy.native().is_some()
+            && self
+                .squad_leaders
+                .get(&actor.squad_catalog.squad_index())
+                .is_some_and(|(player, id)| {
+                    *player == actor.reservation.player && *id == actor.reservation.id
+                })
+    }
 }
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct CachedLeadership {
@@ -212,7 +234,7 @@ impl<W: Write> Engine<W> {
         catalog: LeadershipCatalog,
         policy: RolePolicy,
     ) -> Result<Self, &'static str> {
-        if self.match_profiles.is_some() {
+        if self.match_profiles.is_some() && !policy.supports_match_profiles() {
             return Err("match_profiles_unsupported_world_extras");
         }
         if self.active.is_some() || !self.peers.is_empty() {
@@ -233,6 +255,15 @@ impl<W: Write> Engine<W> {
     }
     pub(crate) fn native_leader_election(&self) -> bool {
         self.native_election().is_some()
+    }
+    pub(crate) fn command_leadership_role(
+        &self,
+        actor: &Active,
+    ) -> Option<active_abilities::CommandRole> {
+        self.leadership
+            .as_ref()
+            .filter(|runtime| runtime.holds_native_squad_role(actor))
+            .map(|_| active_abilities::CommandRole::SquadLeader)
     }
     /// The saved record's fields, or the policy default when Horizon supplied none.
     pub(crate) fn leadership_record(&self, character: &Character) -> Option<LeadershipRecord> {
@@ -376,19 +407,13 @@ impl<W: Write> Engine<W> {
         let role_for = |a: &Active| {
             runtime.policy.binding(a).unwrap_or_else(|| {
                 let squad = a.squad_catalog.squad_index();
-                let held =
-                    match runtime.policy.squad_leader {
-                        Some(SquadLeaderMode::FirstMember) => {
-                            self.squad_members(squad, None)[0] == a.reservation.player
-                        }
-                        Some(SquadLeaderMode::Native) => runtime
-                            .squad_leaders
-                            .get(&squad)
-                            .is_some_and(|(player, id)| {
-                                *player == a.reservation.player && *id == a.reservation.id
-                            }),
-                        _ => false,
-                    };
+                let held = match runtime.policy.squad_leader {
+                    Some(SquadLeaderMode::FirstMember) => {
+                        self.squad_members(squad, None)[0] == a.reservation.player
+                    }
+                    Some(SquadLeaderMode::Native) => self.command_leadership_role(a).is_some(),
+                    _ => false,
+                };
                 if held {
                     HeldLeadershipRole::SquadLeader
                 } else {

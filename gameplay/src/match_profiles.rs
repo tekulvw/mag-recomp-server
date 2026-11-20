@@ -40,6 +40,7 @@ struct Source {
     profile_id: String,
     spawn_catalog: PathBuf,
     objective_catalog: Option<PathBuf>,
+    active_abilities: Option<PathBuf>,
     collision_world: Option<PathBuf>,
     navmesh_world: Option<PathBuf>,
     ground_vehicles: Option<PathBuf>,
@@ -56,6 +57,7 @@ struct Loaded {
     summary: Summary,
     spawns: spawn_catalog::SpawnCatalog,
     objectives: Option<objective_catalog::ObjectiveCatalog>,
+    active_abilities: Option<Arc<active_ability_engine::Setup>>,
     collision: Option<collision::CollisionWorld>,
     navmesh: Option<Arc<navmesh::NavMesh>>,
     vehicles: Option<ground_vehicles::Catalog>,
@@ -108,6 +110,7 @@ impl Registry {
             for path in [
                 Some(&source.spawn_catalog),
                 source.objective_catalog.as_ref(),
+                source.active_abilities.as_ref(),
                 source.collision_world.as_ref(),
                 source.navmesh_world.as_ref(),
                 source.ground_vehicles.as_ref(),
@@ -337,6 +340,34 @@ impl Registry {
             } else {
                 None
             };
+            let active_abilities = source
+                .active_abilities
+                .as_ref()
+                .map(|path| {
+                    if acquisition.is_none() && domination.is_none() {
+                        return Err(io::Error::other(
+                            "active_abilities_require_gameplay_provider",
+                        ));
+                    }
+                    let world = collision.as_ref().ok_or_else(|| {
+                        io::Error::other("active_abilities_require_collision_world")
+                    })?;
+                    let catalog = objectives.as_ref().ok_or_else(|| {
+                        io::Error::other("active_abilities_require_objective_catalog")
+                    })?;
+                    let objective_path = source.objective_catalog.as_ref().ok_or_else(|| {
+                        io::Error::other("active_abilities_require_objective_catalog")
+                    })?;
+                    active_ability_config::load_for_catalogs(
+                        path,
+                        &spawns,
+                        world,
+                        catalog,
+                        objective_path,
+                    )
+                    .map(Arc::new)
+                })
+                .transpose()?;
             let summary = Summary {
                 profile_id: source.profile_id.clone(),
                 game_type: policy.game_type,
@@ -351,6 +382,7 @@ impl Registry {
                     summary,
                     spawns,
                     objectives,
+                    active_abilities,
                     collision,
                     navmesh,
                     vehicles,
@@ -406,6 +438,12 @@ impl Registry {
         Ok(())
     }
 
+    pub fn has_active_abilities(&self) -> bool {
+        self.profiles
+            .values()
+            .any(|profile| profile.active_abilities.is_some())
+    }
+
     pub fn has_domination_gameplay(&self) -> bool {
         self.profiles
             .values()
@@ -455,6 +493,7 @@ impl<W: Write> Engine<W> {
             || self.active.is_some()
             || !self.peers.is_empty()
             || self.match_profiles.is_some()
+            || self.active_abilities.is_some()
             || self.acquisition_gameplay.is_some()
             || self.domination_round.is_some()
             || self.domination_gameplay.is_some()
@@ -464,10 +503,21 @@ impl<W: Write> Engine<W> {
         if self.bot_registry.config.is_some()
             || self.bunker_world.is_some()
             || self.bunker_exit_policy.is_some()
-            || self.leadership.is_some()
+            || self
+                .leadership
+                .as_ref()
+                .is_some_and(|leadership| !leadership.supports_match_profiles())
             || self.development_dummy
         {
             return Err("match_profiles_unsupported_world_extras");
+        }
+        if registry.has_active_abilities()
+            && !self
+                .leadership
+                .as_ref()
+                .is_some_and(leadership_runtime::LeadershipRuntime::supports_match_profiles)
+        {
+            return Err("active_abilities_require_native_leadership");
         }
         registry.validate_runtime(&self.item_catalog, self.wire_profile)?;
         if registry.has_domination_gameplay() && self.dynamic_body_resources.is_none() {
@@ -487,6 +537,10 @@ impl<W: Write> Engine<W> {
     pub(crate) fn retire_match_selection(&mut self) {
         if let Some(selected) = self.selected_match.take() {
             self.retired_formations.insert(selected.formation_id);
+            self.active_abilities = None;
+            if let Some(leadership) = &mut self.leadership {
+                leadership.clear_held_roles();
+            }
         }
     }
     pub(crate) fn select_match_profile(
@@ -545,6 +599,10 @@ impl<W: Write> Engine<W> {
             .objectives
             .as_ref()
             .map(objective_control::ObjectiveWorld::new);
+        let active_abilities = loaded
+            .active_abilities
+            .map(|setup| setup.runtime())
+            .transpose()?;
         let acquisition_round = loaded
             .acquisition
             .as_ref()
@@ -588,6 +646,7 @@ impl<W: Write> Engine<W> {
         self.ground_vehicles = loaded.vehicles;
         self.ground_runtime = ground_runtime;
         self.acquisition_gameplay = acquisition_gameplay;
+        self.active_abilities = active_abilities;
         self.acquisition_round = acquisition_round;
         self.domination_round = loaded.domination_round;
         self.domination_gameplay = loaded.domination;
@@ -664,7 +723,7 @@ mod tests {
             std::fs::remove_dir_all(&self.0).unwrap();
         }
     }
-    fn engine<W: Write>(files: &Files, writer: W, maximum_log: u64) -> Engine<W> {
+    fn base_engine<W: Write>(files: &Files, writer: W, maximum_log: u64) -> Engine<W> {
         let resources = EngineResources::for_application(
             crate::resources::tests::retail_items(),
             spawn_catalog::SpawnCatalog::load(files.spawns(0, 0, 1)).unwrap(),
@@ -674,8 +733,282 @@ mod tests {
         )
         .unwrap();
         Engine::from_resources(writer, maximum_log, resources)
+    }
+    fn engine<W: Write>(files: &Files, writer: W, maximum_log: u64) -> Engine<W> {
+        base_engine(files, writer, maximum_log)
             .with_match_profiles(files.registry())
             .unwrap()
+    }
+
+    fn leadership_catalog() -> leadership_passives::LeadershipCatalog {
+        leadership_passives::LeadershipCatalog::from_json(
+            &json!({
+                "schema_version":1,"application_id":20231,
+                "source":{"member":"scripts/character_leadership_abilities.zpr",
+                    "member_sha256":"a".repeat(64),"archive_sha256":"b".repeat(64),
+                    "extractor":"synthetic","projector":"synthetic"},
+                "max_separation_range":15.0,"refresh_hold_ms":400,"removal_grace_ms":200,
+                "levels":[
+                    {"level":0,"name":"none","modifiers":[]},
+                    {"level":1,"name":"squad","modifiers":[{"kind":"kCharModIncapacitatedTime","value":0.5}]},
+                    {"level":2,"name":"platoon","modifiers":[{"kind":"kCharModReloadTime","value":0.1}]},
+                    {"level":3,"name":"officer","modifiers":[{"kind":"kCharModAutoHeal","value":0.1}]}
+                ]
+            }).to_string(),
+        ).unwrap()
+    }
+
+    fn native_leadership_policy() -> leadership_runtime::RolePolicy {
+        native_policy_with_bindings(json!([]))
+    }
+
+    fn native_policy_with_bindings(bindings: Value) -> leadership_runtime::RolePolicy {
+        leadership_runtime::RolePolicy::from_json(
+            &json!({
+                "schema_version":2,"application_id":20231,
+                "squad_leader":"native","development_bindings":bindings,
+                "native_election":{
+                    "source_sha256":"a".repeat(64),"squad_level_weight":1.0,"squad_mslc_weight":5.0,
+                    "default_record":{"leadership_level":1,"nominations":1,"matches_since_last_command":0}
+                }
+            }).to_string(),
+        ).unwrap()
+    }
+
+    #[test]
+    fn registry_accepts_native_leadership_in_either_builder_order() {
+        let files = Files::new();
+        assert!(
+            base_engine(&files, Vec::new(), 100_000)
+                .with_leadership_passives(leadership_catalog(), native_leadership_policy())
+                .unwrap()
+                .with_match_profiles(files.registry())
+                .unwrap()
+                .native_leader_election()
+        );
+        assert!(
+            engine(&files, Vec::new(), 100_000)
+                .with_leadership_passives(leadership_catalog(), native_leadership_policy())
+                .unwrap()
+                .native_leader_election()
+        );
+    }
+
+    #[test]
+    fn registry_still_rejects_first_member_leadership_in_either_builder_order() {
+        let files = Files::new();
+        let legacy = leadership_runtime::RolePolicy::from_json(
+            r#"{"schema_version":1,"application_id":20231,"first_member_squad_leader":true,"development_bindings":[]}"#,
+        ).unwrap();
+        assert_eq!(
+            base_engine(&files, Vec::new(), 100_000)
+                .with_leadership_passives(leadership_catalog(), legacy.clone())
+                .unwrap()
+                .with_match_profiles(files.registry())
+                .err(),
+            Some("match_profiles_unsupported_world_extras")
+        );
+        assert_eq!(
+            engine(&files, Vec::new(), 100_000)
+                .with_leadership_passives(leadership_catalog(), legacy)
+                .err(),
+            Some("match_profiles_unsupported_world_extras")
+        );
+    }
+
+    #[test]
+    fn registry_rejects_native_leadership_with_development_bindings() {
+        let files = Files::new();
+        let policy = native_policy_with_bindings(json!([
+            {"account_id":1,"character_id":1,"native_role":1}
+        ]));
+        assert_eq!(
+            engine(&files, Vec::new(), 100_000)
+                .with_development_control()
+                .with_leadership_passives(leadership_catalog(), policy.clone())
+                .err(),
+            Some("match_profiles_unsupported_world_extras")
+        );
+        let mut fixed = base_engine(&files, Vec::new(), 100_000)
+            .with_development_control()
+            .with_leadership_passives(leadership_catalog(), policy)
+            .unwrap();
+        reserve_leader(&mut fixed, 0, 1, Value::Null);
+        fixed.reconcile_squad_leaders().unwrap();
+        assert_eq!(
+            fixed.command_leadership_role(fixed.active.as_ref().unwrap()),
+            None
+        );
+        // A registry is only installable before admission. Check the shared
+        // predicate independently of the idle-engine guard.
+        fixed.active = None;
+        assert_eq!(
+            fixed.with_match_profiles(files.registry()).err(),
+            Some("match_profiles_unsupported_world_extras")
+        );
+    }
+
+    fn reserve_leader(
+        engine: &mut Engine<Vec<u8>>,
+        player: u16,
+        faction: u8,
+        leadership: Value,
+    ) -> String {
+        let id = format!("synthetic-leader-reservation-{player}");
+        let result = engine.handle(
+            Request::Reserve {
+                v: BRIDGE_VERSION,
+                request_id: format!("reserve-{player}"),
+                reservation_id: id.clone(),
+                world_id: 7,
+                player_id: player,
+                account_id: u32::from(player) + 1,
+                session_key: "aaaaaaaaaaaaaaaa".into(),
+                access_key: "bbbbbbbbbbbbbbbb".into(),
+                character: serde_json::from_value(json!({
+                    "name": format!("Synthetic Leader {player}"),
+                    "faction": faction,"head":0,"voice":0,"universe_id":26,
+                    "character_id":u32::from(player)+1,
+                    "leadership":leadership
+                }))
+                .unwrap(),
+            },
+            Duration::ZERO,
+            1,
+        );
+        assert!(result.ok, "{:?}", result.error);
+        let actor = engine
+            .active
+            .iter_mut()
+            .chain(engine.peers.values_mut())
+            .find(|actor| actor.reservation.id == id)
+            .unwrap();
+        crate::spawn_progression::tests::ready(actor);
+        id
+    }
+
+    fn domination_spawns(files: &Files) -> Value {
+        let path = files.spawns(2, 0, 1);
+        let mut spawn: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        spawn["match_profile"]["team_capacity"] = json!(32);
+        spawn["match_profile"]["squad_capacity"] = json!(4);
+        let squads: Vec<_> = (0..32)
+            .map(|index| {
+                let team = index / 16;
+                json!({"index":index,"team":team,"platoon":index % 16 / 4,"squad":index % 4,
+                    "faction":if team == 0 { None } else { Some(1) },"available":[0],"default_spawn":0})
+            })
+            .collect();
+        spawn["maps"][0]["squads"] = json!(squads);
+        spawn
+    }
+
+    fn leadership_match(files: &Files) -> Engine<Vec<u8>> {
+        let path = files.write("leadership-spawns.json", domination_spawns(files));
+        let manifest = files.write(
+            "leadership-profiles.json",
+            json!({"format":"mag_match_profiles_v1","profiles":[{
+                "profile_id":"domination","spawn_catalog":path
+            }]}),
+        );
+        let mut engine = base_engine(files, Vec::new(), 100_000)
+            .with_match_profiles(Registry::load(manifest).unwrap())
+            .unwrap()
+            .with_leadership_passives(leadership_catalog(), native_leadership_policy())
+            .unwrap();
+        assert!(select(&mut engine, "leadership-1", "domination").ok);
+        engine
+    }
+
+    #[test]
+    fn registry_native_command_roles_follow_saved_nominations_and_held_squad_identity() {
+        use crate::active_abilities::CommandRole;
+
+        let files = Files::new();
+        let mut engine = leadership_match(&files);
+        let record = |leadership_level, nominations, matches_since_last_command| {
+            json!({"leadership_level":leadership_level,"nominations":nominations,
+                "matches_since_last_command":matches_since_last_command})
+        };
+        let fallback = reserve_leader(&mut engine, 0, 0, Value::Null);
+        let masked = reserve_leader(&mut engine, 1, 0, record(0, 1, 100));
+        let ranked = reserve_leader(&mut engine, 2, 0, record(1, 1, 10));
+        let defender = reserve_leader(&mut engine, 3, 1, record(1, 1, 1));
+        let squad = Arc::new(engine.spawn_catalog.as_ref().unwrap().for_squad(0).unwrap());
+        for id in [&masked, &ranked] {
+            engine.peers.get_mut(id).unwrap().squad_catalog = squad.clone();
+        }
+        assert_eq!(engine.peers[&masked].nominations, 0);
+        assert_eq!(engine.peers[&fallback].nominations, 1);
+        assert_eq!(
+            engine.active.as_ref().unwrap().squad_catalog.squad_index(),
+            16
+        );
+        assert!(!engine.match_started);
+        engine.reconcile_squad_leaders().unwrap();
+        assert_eq!(engine.command_leadership_role(&engine.peers[&ranked]), None);
+
+        engine.match_started = true;
+        engine.reconcile_squad_leaders().unwrap();
+        assert_eq!(engine.command_leadership_role(&engine.peers[&masked]), None);
+        assert_eq!(
+            engine.command_leadership_role(&engine.peers[&fallback]),
+            None
+        );
+        assert_eq!(
+            engine.command_leadership_role(&engine.peers[&ranked]),
+            Some(CommandRole::SquadLeader)
+        );
+        let defender_actor = engine.active.as_ref().unwrap();
+        assert_eq!(defender_actor.reservation.id, defender);
+        assert_eq!(
+            engine.command_leadership_role(defender_actor),
+            Some(CommandRole::SquadLeader)
+        );
+
+        let mut former = engine.peers.remove(&ranked).unwrap();
+        let original_id = std::mem::replace(&mut former.reservation.id, "new-reservation".into());
+        assert_eq!(engine.command_leadership_role(&former), None);
+        former.reservation.id = original_id;
+        let created = former.initial_objects.take();
+        assert_eq!(engine.command_leadership_role(&former), None);
+        former.initial_objects = created;
+        former.squad_catalog = Arc::new(squad.for_squad(1).unwrap());
+        assert_eq!(engine.command_leadership_role(&former), None);
+        former.squad_catalog = squad;
+        engine.reconcile_squad_leaders().unwrap();
+        assert_eq!(engine.command_leadership_role(&former), None);
+        assert_eq!(
+            engine.command_leadership_role(&engine.peers[&fallback]),
+            Some(CommandRole::SquadLeader)
+        );
+    }
+
+    #[test]
+    fn leadership_formation_retry_and_failed_selection_preserve_held_roles() {
+        let files = Files::new();
+        for fail_selection in [false, true] {
+            let mut engine = leadership_match(&files);
+            reserve_leader(&mut engine, 0, 0, Value::Null);
+            engine.match_started = true;
+            engine.reconcile_squad_leaders().unwrap();
+            let mut members = [u16::MAX; 8];
+            members[0] = 0;
+            assert_eq!(engine.squad_leader_index(0, &members), 0);
+            assert!(select(&mut engine, "leadership-1", "domination").ok);
+            assert_eq!(engine.squad_leader_index(0, &members), 0);
+            // Exercise the selection boundary with held roster state left over.
+            engine.active.take().unwrap();
+            if fail_selection {
+                engine.max_log = engine.written;
+            }
+            let result = select(&mut engine, "leadership-2", "domination");
+            assert_eq!(result.ok, !fail_selection, "{:?}", result.error);
+            assert_eq!(
+                engine.squad_leader_index(0, &members),
+                if fail_selection { 0 } else { u16::MAX }
+            );
+        }
     }
     fn select<W: Write>(engine: &mut Engine<W>, formation: &str, profile: &str) -> Response {
         engine.handle(
@@ -713,6 +1046,7 @@ mod tests {
         engine.match_profiles.as_mut().unwrap().profiles.insert(
             "acquisition-world".into(),
             Loaded {
+                active_abilities: None,
                 summary: Summary {
                     profile_id: "acquisition-world".into(),
                     game_type: 1,
@@ -889,18 +1223,7 @@ mod tests {
     #[test]
     fn domination_profiles_require_all_squads_and_bounded_admission() {
         let files = Files::new();
-        let path = files.spawns(2, 0, 1);
-        let mut spawn: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        spawn["match_profile"]["team_capacity"] = json!(32);
-        spawn["match_profile"]["squad_capacity"] = json!(4);
-        let squads: Vec<_> = (0..32)
-            .map(|index| {
-                let team = index / 16;
-                json!({"index":index,"team":team,"platoon":index % 16 / 4,"squad":index % 4,
-                    "faction":if team == 0 { None } else { Some(1) },"available":[0],"default_spawn":0})
-            })
-            .collect();
-        spawn["maps"][0]["squads"] = json!(squads);
+        let mut spawn = domination_spawns(&files);
         let path = files.write("domination-spawns.json", spawn.clone());
         let manifest = files.write(
             "domination-profiles.json",

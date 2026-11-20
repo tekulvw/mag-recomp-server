@@ -2,7 +2,7 @@
 use super::*;
 use replication::multiplayer::*;
 
-const MAX_SHARED_QUEUE: usize = 128;
+pub(super) const MAX_SHARED_QUEUE: usize = 128;
 
 impl Active {
     /// Reliable packets cannot be discarded or coalesced without traced ACK rules.

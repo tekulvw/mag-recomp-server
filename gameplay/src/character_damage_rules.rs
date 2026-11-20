@@ -87,6 +87,12 @@ impl<W: Write> Engine<W> {
     /// Caller context supplies the validated world; wire/source-object aliases
     /// must not be truncated into a different character handle.
     pub(crate) fn character_team_in_world(&self, character: u32, world: u32) -> Option<u8> {
+        if let Some((attacker, strike_world, team)) = self.active_ability_damage_team
+            && attacker == character
+            && strike_world == world
+        {
+            return Some(team);
+        }
         if let Some(actor) = self
             .peers
             .values()

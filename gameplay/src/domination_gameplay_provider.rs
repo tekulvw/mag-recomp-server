@@ -123,6 +123,59 @@ struct Provider<'a, W: Write> {
 }
 
 impl<W: Write> Provider<'_, W> {
+    fn prepare_active_abilities(&mut self) -> Result<(), &'static str> {
+        if self.engine.active_abilities.is_none() {
+            return Ok(());
+        }
+        let previous_ground =
+            std::mem::replace(&mut self.engine.ground_runtime, self.ground.clone());
+        let previous_bunkers =
+            std::mem::replace(&mut self.engine.bunker_world, self.bunkers.clone());
+        let result = self.engine.stage_active_ability_update(
+            self.now,
+            self.native,
+            BlastCollision {
+                filter_rows: &self.state.filter_rows,
+                limits: QueryLimits::default(),
+                sequences: &self.state.collisions,
+                material_costs: self.state.structural.material_penetration_costs(),
+                terrain_materials: Some(&self.state.terrain_materials),
+            },
+            Some(&self.state.ground_damage),
+        );
+        self.ground = std::mem::replace(&mut self.engine.ground_runtime, previous_ground);
+        self.bunkers = std::mem::replace(&mut self.engine.bunker_world, previous_bunkers);
+        let DamageCommit {
+            audit,
+            messages,
+            changed_ground,
+            helo_doses,
+        } = result?;
+        self.stage_helo_radial(&helo_doses)?;
+        if !changed_ground.is_empty() {
+            let changes = changed_ground
+                .into_iter()
+                .map(|i| (i, 1 << 18))
+                .collect::<Vec<_>>();
+            self.packets
+                .push(crate::ground_vehicles::encode_runtime_delta(
+                    self.engine
+                        .ground_vehicles
+                        .as_ref()
+                        .ok_or("domination_ground_catalog_required")?,
+                    self.ground
+                        .as_ref()
+                        .ok_or("domination_ground_world_required")?,
+                    &changes,
+                    2,
+                    self.now.as_millis() as u32,
+                )?);
+        }
+        self.audit.extend(audit);
+        self.messages.extend(messages);
+        Ok(())
+    }
+
     fn prepare_ground_sim(
         &mut self,
         spawns: &crate::spawn_catalog::SpawnCatalog,
@@ -1234,7 +1287,7 @@ impl<W: Write> Engine<W> {
         wall: u64,
     ) -> Result<Vec<OutboundMessage>, &'static str> {
         self.commit_domination_mission_start(&mut world.runtime, now, wall)?;
-        let actors = self
+        let actors_before: BTreeMap<u16, ObjectiveActor> = self
             .peers
             .values()
             .chain(self.active.iter())
@@ -1295,6 +1348,37 @@ impl<W: Write> Engine<W> {
                 before_sim
                     .effects
                     .prepare_ground_waves(&before_sim.spawns)?;
+                before_sim.effects.prepare_active_abilities()?;
+                let actors = if before_sim.effects.engine.active_abilities.is_some() {
+                    before_sim
+                        .effects
+                        .engine
+                        .peers
+                        .values()
+                        .chain(before_sim.effects.engine.active.iter())
+                        .filter_map(|actor| {
+                            let CharacterLife::Alive { generation, .. } = actor.life else {
+                                return None;
+                            };
+                            if !actor.entered_game || !actor.ready_for_updates || actor.is_mounted()
+                            {
+                                return None;
+                            }
+                            let player = actor.reservation.player;
+                            Some((
+                                player,
+                                ObjectiveActor {
+                                    player,
+                                    team: actor.team(),
+                                    generation,
+                                    position: actor.tracking.sample.as_ref()?.position,
+                                },
+                            ))
+                        })
+                        .collect()
+                } else {
+                    actors_before.clone()
+                };
                 let (candidate, mut provider) = before_sim
                     .runtime
                     .stage_objective_update(

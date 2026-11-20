@@ -1,9 +1,9 @@
 //! Original retail command codecs, authored availability and cooldown bookkeeping.
 //!
-//! No strike, response, delayed execution or ability replication is implemented.
-//! The caller must require effect authority after preflight. Cooldowns are recorded
-//! only after an authoritative effect has actually been accepted, never on receipt
-//! of an untrusted request. See RETAIL-ACTIVE-ABILITIES-NATIVE.md.
+//! These foundation codecs do not grant execution authority. The separately
+//! configured `active_ability_engine` validates owned native leadership and
+//! source-bound world inputs before publishing and scheduling supported effects.
+//! Keeping these legacy authority flags disabled cannot enable effects by itself.
 
 use serde::{Deserialize, Serialize};
 use std::{io, path::Path};

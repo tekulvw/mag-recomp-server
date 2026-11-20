@@ -23,6 +23,15 @@ pub mod acquisition_volume_effects;
 pub mod acquisition_volume_geometry;
 pub mod acquisition_world;
 pub mod active_abilities;
+pub mod active_ability_config;
+pub mod active_ability_effects;
+pub mod active_ability_engine;
+#[cfg(test)]
+mod active_ability_engine_tests;
+#[cfg(test)]
+mod active_ability_publication_tests;
+pub mod active_ability_sensor;
+pub mod active_ability_state;
 mod actor_collision;
 mod admission;
 pub mod armor;
@@ -1068,6 +1077,9 @@ pub struct Engine<W: Write> {
     item_catalog: std::sync::Arc<item_catalog::ItemCatalog>,
     skill_catalog: Option<skill_catalog::SkillCatalog>,
     leadership: Option<leadership_runtime::LeadershipRuntime>,
+    active_abilities: Option<active_ability_engine::Runtime>,
+    // Source identity, world and activation-time team during a single strike.
+    active_ability_damage_team: Option<(u32, u32, u8)>,
     fall_damage_rules: Option<fall_damage::Rules>,
     incapacitation_rules: Option<incapacitation::Rules>,
     character_damage_rules: Option<character_damage_rules::Rules>,
@@ -2031,3 +2043,7 @@ fn collision_audit(
 
 #[cfg(test)]
 mod falling_damage_tests;
+
+#[cfg(test)]
+#[path = "../tests/support/dynamic_collision_fixture.rs"]
+mod synthetic_dynamic_collision;

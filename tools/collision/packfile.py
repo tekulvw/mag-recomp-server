@@ -35,7 +35,7 @@ class Reader:
         except UnicodeError as e:raise CollisionFormatError('non-ASCII class name') from e
 
 
-def parse_packfile(data, base=0):
+def parse_packfile(data, base=0, *, include_static_ray=False):
     r=Reader(data)
     if r.span(base,8)!=MAGIC:raise CollisionFormatError('missing packfile magic')
     version=r.u32(base+12)
@@ -172,6 +172,16 @@ def parse_packfile(data, base=0):
             mesh['collision_filter']={'default_raw_u32':filter_info,'semantics':'unresolved'}
             mesh['materials']={'subpart_material_count':r.unpack('>H',sub+0xa,end)[0],'effective_material_index':None,'source':'runtime external resource material array override; packfile materialBase is not final'}
             mesh['triangle_offset']=r.u32(sub+0x4c,end)
+            if include_static_ray:
+                # The stored mesh triangle collection ray getter can use the
+                # material-derived filter only when its index base is present.
+                ray_sub = start + obj + 0x20 if count == 1 else sub
+                index_base = ray_sub + 4 - start
+                mesh['static_ray'] = {
+                    'default_filter_info': filter_info,
+                    'has_material_indices': (r.u32(ray_sub+4,end) != 0
+                                             or index_base in local or index_base in glob),
+                }
             mesh['gaps'].remove('mesh_subpart_transform_unresolved')
             if any(extrusion[:3]):mesh['gaps'].append('nonzero_triangle_extrusion_query_unimplemented')
     return {'format':'mag_collision_geometry','schema_version':1,'packfile_length':length,'packfile_sha256':hashlib.sha256(raw).hexdigest(),'native_format':{'version':version,'content_version':content,'pointer_bytes':4,'byte_order':'big','section_count':n},'local_fixup_count':fixup_total,'coordinate_space':'per_mesh_coordinate_space','meshes':meshes,'primitives':[],'shape_class_coverage':counts,'source_objects':objects,'unsupported':unsupported,'world_assembly':{'status':'unresolved','instances':[],'gaps':['authored_instance_and_resource_linkage_unresolved','parent_and_subpart_transforms_unresolved','terrain_snapping_unresolved','static_dynamic_destructible_state_unresolved']}}

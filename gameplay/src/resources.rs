@@ -165,6 +165,8 @@ impl<W: Write> Engine<W> {
             item_catalog: resources.item_catalog,
             skill_catalog: None,
             leadership: None,
+            active_abilities: None,
+            active_ability_damage_team: None,
             fall_damage_rules: None,
             incapacitation_rules: None,
             character_damage_rules: None,

@@ -100,6 +100,10 @@ struct InstanceDocument {
 #[serde(deny_unknown_fields)]
 pub struct StaticProperties {
     pub filter_info: u32,
+    /// Explicit uniform child filter for ray-enabled native shape containers.
+    /// When absent, this projected instance's child filter matches the root.
+    #[serde(default)]
+    pub ray_child_filter_info: Option<u32>,
     pub convex_radius: f64,
     pub provenance: String,
     pub child_filter_policy: ChildFilterPolicy,
@@ -247,11 +251,16 @@ impl CollisionWorld {
         }
         let mut radius: f64 = 0.;
         for row in self.static_properties.iter() {
-            radius = radius.max(
-                row.as_ref()
-                    .ok_or("world_cast_static_properties_unavailable")?
-                    .convex_radius,
-            );
+            let properties = row
+                .as_ref()
+                .ok_or("world_cast_static_properties_unavailable")?;
+            if properties
+                .ray_child_filter_info
+                .is_some_and(|child| child != properties.filter_info)
+            {
+                return Err("world_cast_static_child_filter_unqualified");
+            }
+            radius = radius.max(properties.convex_radius);
         }
         Ok(radius)
     }
@@ -538,6 +547,28 @@ impl CollisionWorld {
         end: Vec3,
         budget: &mut usize,
     ) -> Result<Vec<MaterialRayHit>, CollisionError> {
+        self.collect_material_ray_hits(start, end, None, budget)
+    }
+
+    /// Traverse eligible interior ray hits using projected root/child filters.
+    /// Missing collision properties on an intersected triangle are an error.
+    pub(crate) fn filtered_material_ray_hits(
+        &self,
+        start: Vec3,
+        end: Vec3,
+        filter_row: u32,
+        budget: &mut usize,
+    ) -> Result<Vec<MaterialRayHit>, CollisionError> {
+        self.collect_material_ray_hits(start, end, Some(filter_row), budget)
+    }
+
+    fn collect_material_ray_hits(
+        &self,
+        start: Vec3,
+        end: Vec3,
+        filter_row: Option<u32>,
+        budget: &mut usize,
+    ) -> Result<Vec<MaterialRayHit>, CollisionError> {
         if !valid_point(start, self.max_abs_coordinate)
             || !valid_point(end, self.max_abs_coordinate)
             || start == end
@@ -566,6 +597,21 @@ impl CollisionWorld {
                             && fraction > 0.0
                             && fraction < 1.0
                         {
+                            if let Some(row) = filter_row {
+                                let properties = self.static_properties[triangle.instance]
+                                    .as_ref()
+                                    .ok_or_else(|| {
+                                        invalid("filtered ray missing collision properties")
+                                    })?;
+                                let root = properties.filter_info & 31;
+                                let child = properties
+                                    .ray_child_filter_info
+                                    .unwrap_or(properties.filter_info)
+                                    & 31;
+                                if row & (1 << root) == 0 || row & (1 << child) == 0 {
+                                    continue;
+                                }
+                            }
                             let (material_index, terrain) =
                                 self.material_indices[triangle.instance];
                             hits.push(MaterialRayHit {
