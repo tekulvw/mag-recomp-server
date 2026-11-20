@@ -48,6 +48,12 @@ pub enum Request {
         from_direction: [f32; 3],
         attacker: u32,
     },
+    /// A qualified chemical damage pulse from a gas volume.
+    AirStrikeGas {
+        raw_hp: f32,
+        from_direction: [f32; 3],
+        attacker: u32,
+    },
     /// A qualified target in the Structural objective's periodic damage scan.
     StructuralArea {
         raw_hp: f32,
@@ -313,10 +319,20 @@ impl<W: Write> Engine<W> {
                 raw_hp,
                 from_direction,
                 attacker,
+            }
+            | Request::AirStrikeGas {
+                raw_hp,
+                from_direction,
+                attacker,
             } => {
                 if !raw_hp.is_finite() || raw_hp <= 0. {
                     return Err("invalid_acquisition_explosion_damage");
                 }
+                let (kind, wire_damage_type) = if matches!(request, Request::AirStrikeGas { .. }) {
+                    (damage::DamageKind::Poison, 4)
+                } else {
+                    (damage::DamageKind::Explosive, 10)
+                };
                 (
                     armor::RawCharacterDamage {
                         amount_hp: raw_hp,
@@ -324,11 +340,12 @@ impl<W: Write> Engine<W> {
                         armor_prevention_redux: 0.,
                         hit_location: 1,
                     },
-                    damage::DamageKind::Explosive,
-                    10,
+                    kind,
+                    wire_damage_type,
                     attacker,
                     match request {
                         Request::AirStrikeExplosion { .. } => 4,
+                        Request::AirStrikeGas { .. } => 7,
                         Request::StructuralExplosion { .. } => 6,
                         _ => 5,
                     },

@@ -37,7 +37,7 @@ pub fn native_ability_mask(ability: Ability) -> Result<u16, &'static str> {
     Ok(1 << ability_slot(ability)?)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum NativeAbilityScope {
     Squad(u16),
     Platoon(u16),

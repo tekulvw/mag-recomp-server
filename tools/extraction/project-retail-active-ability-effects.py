@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Project ClusterBomb and Sensor settings from an explicitly supplied retail archive."""
+"""Project command effect settings from an explicitly supplied retail archive."""
 
 import argparse
 import hashlib
@@ -11,6 +11,10 @@ import sys
 TOOLS = Path(__file__).resolve().parent
 CLUSTER = 'cluster_bomb_properties.zpr'
 SENSOR = 'ability_sensor_properties.zpr'
+PRECISION = 'ability_precision_strike_properties.zpr'
+GUIDED = 'ability_guided_artillery_properties.zpr'
+GAS = 'ability_gas_bombardment_properties.zpr'
+STRAFE = 'ability_strafing_run_properties.zpr'
 FACTIONS = {
     'FactionTypeBlack': 'black',
     'FactionTypeGreen': 'green',
@@ -74,23 +78,87 @@ def project_sensor(delay, row):
     }
 
 
-def project_tables(cluster, sensor):
+def project_precision(delay, _row):
+    return {'delay_ms': delay}
+
+
+def project_guided(delay, row):
+    return {
+        'delay_ms': delay,
+        'damage_delay_ms': unsigned(row['DamageDelay_ms'], 'DamageDelay_ms', minimum=0),
+        'effective_radius': scalar(row['EffectiveRadius'], 'EffectiveRadius'),
+    }
+
+
+def project_falloff(row, prefix, *, coincident=False):
+    outer_radius = scalar(row[prefix + 'FullDamageRadius'], prefix + 'FullDamageRadius')
+    inner_radius = scalar(row[prefix + 'HalfDamageRadius'], prefix + 'HalfDamageRadius')
+    outer_scale = scalar(row[prefix + 'FullDamageScale'], prefix + 'FullDamageScale', zero=True)
+    inner_scale = scalar(row[prefix + 'HalfDamageScale'], prefix + 'HalfDamageScale', zero=True)
+    require((inner_radius < outer_radius or coincident and inner_radius == outer_radius)
+            and outer_scale <= 1 and inner_scale <= 1, 'Invalid command blast falloff')
+    return {
+        'outer_radius': outer_radius,
+        'outer_scale': outer_scale,
+        'inner_radius': inner_radius,
+        'inner_scale': inner_scale,
+    }
+
+
+def project_gas(delay, row):
+    # The inherited DamageDelay_ms is absent in these retail rows. Original
+    # AbilityProps construction stores zero at its field offset (+0x28).
+    return {
+        'delay_ms': delay,
+        'damage_delay_ms': unsigned(row.get('DamageDelay_ms', 0), 'DamageDelay_ms', minimum=0),
+        'duration_ms': unsigned(row['Duration_ms'], 'Duration_ms'),
+        'interval_ms': unsigned(row['TimeBetweenBomblets_ms'], 'TimeBetweenBomblets_ms'),
+        'num_bomblets': unsigned(row['NumBomblets'], 'NumBomblets', maximum=255),
+        'bomblet_damage': scalar(row['BombletDamage'], 'BombletDamage'),
+        'bomblet': project_falloff(row, 'Bomblet'),
+        'gas_damage_per_second': scalar(row['GasDamagePerSecond'], 'GasDamagePerSecond'),
+        'gas': project_falloff(row, 'Gas', coincident=True),
+    }
+
+
+def project_strafe(delay, row):
+    return {
+        'delay_ms': delay,
+        'damage_delay_ms': unsigned(row['DamageDelay_ms'], 'DamageDelay_ms', minimum=0),
+        'duration_ms': unsigned(row['StrafeDuration_ms'], 'StrafeDuration_ms'),
+        'interval_ms': unsigned(row['TimeBetweenBomblets_ms'], 'TimeBetweenBomblets_ms'),
+        'strafe_length': scalar(row['StrafeLength'], 'StrafeLength'),
+        'deviation_radius': scalar(row['DeviationRadius'], 'DeviationRadius', zero=True),
+        'bomblet_damage': scalar(row['BombletDamage'], 'BombletDamage'),
+        'bomblet': project_falloff(row, 'Bomblet'),
+    }
+
+
+TABLES = (
+    ('cluster', CLUSTER, 'ClusterBombProps', 6, project_cluster),
+    ('sensor', SENSOR, 'AbilitySensorProps', 6, project_sensor),
+    ('precision_strike', PRECISION, 'PrecisionStrikeProps', 3, project_precision),
+    ('guided_artillery', GUIDED, 'GuidedArtilleryProps', 6, project_guided),
+    ('gas_bombardment', GAS, 'GasBombardmentProps', 6, project_gas),
+    ('strafing_run', STRAFE, 'StrafingRunProps', 6, project_strafe),
+)
+
+
+def project_tables(tables):
     rows = []
-    for variant, table, property_name, project in [
-        ('cluster', cluster, 'ClusterBombProps', project_cluster),
-        ('sensor', sensor, 'AbilitySensorProps', project_sensor),
-    ]:
+    for variant, _, property_name, count, project in TABLES:
+        table = tables[variant]
         delay = unsigned(table['Delay_ms'], 'Delay_ms')
         properties = table['PropsList']
-        expected = [f'{property_name}{i}' for i in range(6)]
+        expected = [f'{property_name}{i}' for i in range(count)]
         require(list(properties) == expected, f'Invalid {variant} properties rows or order')
         selected = set()
         for ordinal, entry in enumerate(properties.values()):
             row = entry[property_name]
             faction = FACTIONS.get(row['Faction'])
             require(faction is not None, f'Unknown {variant} row faction')
-            # Table access partitions the six authored rows into groups of
-            # three for side index 0/1, then searches the faction field.
+            # Precision shares one faction group on both gameplay sides.
+            # Store those rows under the canonical first (attacker) group.
             side = 'attacker' if ordinal < 3 else 'defender'
             require((side, faction) not in selected, f'Unexpected repeated {variant} side/faction')
             selected.add((side, faction))
@@ -109,21 +177,18 @@ def project(game_archive):
     require(source_archive == api['RETAIL_ARCHIVE_HASH'], 'Wrong original retail game archive')
     archive = Psarc(original)
     sources, tables = {}, {}
-    for variant, name, table in [
-        ('cluster', CLUSTER, 'ClusterBombPropsTable'),
-        ('sensor', SENSOR, 'AbilitySensorPropsTable'),
-    ]:
+    for variant, name, property_name, _, _ in TABLES:
         member = f'/run/mag/ps3/scripts/abilities/{name}'
         data = archive.extract(archive.names.index(member) + 1)
         sources[variant] = {'member': member, 'sha256': digest(data)}
         parsed = api['Parser'](data.decode('utf-8-sig'), member).parse()
-        tables[variant] = api['normalize'](parsed)[table]
+        tables[variant] = api['normalize'](parsed)[property_name + 'Table']
     return {
-        'schema_version': 1,
+        'schema_version': 2,
         'application_id': 20231,
         'source_archive_sha256': source_archive,
         'source_members': sources,
-        'rows': project_tables(tables['cluster'], tables['sensor']),
+        'rows': project_tables(tables),
     }
 
 

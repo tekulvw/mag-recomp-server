@@ -43,6 +43,12 @@ struct NativeElection {
     squad_mslc_weight: f32,
     default_record: LeadershipRecord,
 }
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlatoonElection {
+    level_weight: f32,
+    mslc_weight: f32,
+}
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RolePolicy {
@@ -54,6 +60,8 @@ pub struct RolePolicy {
     squad_leader: Option<SquadLeaderMode>,
     #[serde(default)]
     native_election: Option<NativeElection>,
+    #[serde(default)]
+    platoon_election: Option<PlatoonElection>,
     development_bindings: Vec<DevelopmentBinding>,
 }
 impl RolePolicy {
@@ -63,7 +71,7 @@ impl RolePolicy {
     pub fn from_json(raw: &str) -> io::Result<Self> {
         let mut value: Self =
             serde_json::from_str(raw).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        // Schema1 is the deployed boolean form; schema2 names the squad mode.
+        // Schema 1 uses the legacy boolean. Schema 2 names the squad mode.
         let mode_valid = match value.schema_version {
             1 => {
                 let schema2_fields = value.squad_leader.is_some();
@@ -77,7 +85,7 @@ impl RolePolicy {
                 });
                 first.is_some() && !schema2_fields && value.native_election.is_none()
             }
-            2 => {
+            2 | 3 => {
                 value.first_member_squad_leader.is_none()
                     && match (value.squad_leader, &value.native_election) {
                         (Some(SquadLeaderMode::Native), Some(n)) => {
@@ -93,8 +101,20 @@ impl RolePolicy {
             }
             _ => false,
         };
+        let platoon_valid = match (value.schema_version, value.platoon_election) {
+            (3, Some(weights)) => {
+                value.native().is_some()
+                    && weights.level_weight.is_finite()
+                    && weights.level_weight >= 0.0
+                    && weights.mslc_weight.is_finite()
+                    && weights.mslc_weight >= 0.0
+            }
+            (1 | 2, None) => true,
+            _ => false,
+        };
         let mut seen = BTreeSet::new();
         if !mode_valid
+            || !platoon_valid
             || value.application_id != 20231
             || value.development_bindings.iter().any(|b| {
                 b.account_id == 0
@@ -113,9 +133,12 @@ impl RolePolicy {
     pub fn has_development_bindings(&self) -> bool {
         !self.development_bindings.is_empty()
     }
-    /// Registry-backed worlds use the schema-2 native vacancy policy.
+    /// Registry-backed worlds use the native vacancy policy.
     pub fn supports_match_profiles(&self) -> bool {
         self.native().is_some() && !self.has_development_bindings()
+    }
+    pub fn supports_platoon_election(&self) -> bool {
+        self.platoon_election.is_some()
     }
     fn native(&self) -> Option<&NativeElection> {
         self.native_election
@@ -131,8 +154,8 @@ impl RolePolicy {
     }
 }
 /// Retail `MagSimCharacter::SetNominations` (0x0093b7b8) masks requested bits by
-/// saved leadership level: none, squad, then squad+platoon. Level3 adds the OIC
-/// bit only in GameType2, which this server does not host.
+/// saved leadership level: none, squad, then squad and platoon. The worker
+/// supports these two election scopes. OIC nomination remains outside its policy.
 pub fn mask_nominations(leadership_level: u8, bits: u8) -> u8 {
     match leadership_level {
         0 => 0,
@@ -140,32 +163,122 @@ pub fn mask_nominations(leadership_level: u8, bits: u8) -> u8 {
         _ => bits & 3,
     }
 }
-/// Squad index, new held leader (none = vacant) and audit reason.
-type LeaderChange = (u16, Option<(u16, String)>, &'static str);
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Leader {
+    player: u16,
+    reservation: String,
+    world: u32,
+}
+impl Leader {
+    fn from_actor(actor: &Active) -> Self {
+        Self {
+            player: actor.reservation.player,
+            reservation: actor.reservation.id.clone(),
+            world: actor.reservation.world,
+        }
+    }
+
+    fn matches(&self, actor: &Active, nomination: u8) -> bool {
+        actor.initial_objects.is_some()
+            && actor.nominations & nomination != 0
+            && self.player == actor.reservation.player
+            && self.reservation == actor.reservation.id
+            && self.world == actor.reservation.world
+    }
+}
+
 pub(crate) struct LeadershipRuntime {
     catalog: LeadershipCatalog,
     policy: RolePolicy,
-    /// Held squad leaders: squad index -> (player index, reservation id). Native
-    /// promotion only fills vacancies; a sitting leader is never displaced.
-    squad_leaders: BTreeMap<u16, (u16, String)>,
+    squad_leaders: BTreeMap<u16, Leader>,
+    platoon_leaders: BTreeMap<u16, Leader>,
 }
 impl LeadershipRuntime {
     pub(crate) fn supports_match_profiles(&self) -> bool {
         self.policy.supports_match_profiles()
     }
+    pub(crate) fn supports_platoon_election(&self) -> bool {
+        self.policy.supports_platoon_election()
+    }
     pub(crate) fn clear_held_roles(&mut self) {
         self.squad_leaders.clear();
+        self.platoon_leaders.clear();
     }
-    fn holds_native_squad_role(&self, actor: &Active) -> bool {
-        actor.initial_objects.is_some()
-            && self.policy.native().is_some()
-            && self
-                .squad_leaders
-                .get(&actor.squad_catalog.squad_index())
-                .is_some_and(|(player, id)| {
-                    *player == actor.reservation.player && *id == actor.reservation.id
+    fn elect<'a>(
+        &self,
+        candidates: impl Iterator<Item = &'a Active>,
+        native: &NativeElection,
+        nomination: u8,
+        weights: (f32, f32),
+    ) -> Option<&'a Active> {
+        let mut best = None;
+        for actor in candidates {
+            if actor.nominations & nomination == 0 || self.policy.binding(actor).is_some() {
+                continue;
+            }
+            let record = actor
+                .reservation
+                .character
+                .leadership
+                .unwrap_or(native.default_record);
+            let level = actor
+                .reservation
+                .character
+                .progression
+                .unwrap_or_default()
+                .level;
+            let score = f32::from(record.matches_since_last_command)
+                .mul_add(weights.1, f32::from(level) * weights.0);
+            if best.is_none_or(|(_, best_score)| best_score < score) {
+                best = Some((actor, score));
+            }
+        }
+        best.map(|(actor, _)| actor)
+    }
+
+    fn native_role(&self, actor: &Active) -> HeldLeadershipRole {
+        let squad = actor.squad_catalog.squad_index();
+        if self
+            .platoon_leaders
+            .get(&(squad / 4))
+            .is_some_and(|leader| leader.matches(actor, 2))
+        {
+            HeldLeadershipRole::PlatoonLeader
+        } else if self
+            .squad_leaders
+            .get(&squad)
+            .is_some_and(|leader| leader.matches(actor, 1))
+        {
+            HeldLeadershipRole::SquadLeader
+        } else {
+            HeldLeadershipRole::None
+        }
+    }
+}
+
+fn leadership_changes(
+    scope_key: &str,
+    current: &BTreeMap<u16, Leader>,
+    next: &BTreeMap<u16, Leader>,
+) -> Vec<Value> {
+    current
+        .keys()
+        .chain(next.keys())
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|index| {
+            let leader = next.get(&index);
+            (current.get(&index) != leader).then(|| {
+                json!({
+                    (scope_key): index,
+                    "reason": if leader.is_some() {"elected"} else {"removed"},
+                    "leader_index":leader.map_or(u16::MAX, |l| l.player),
+                    "reservation_id":leader.map(|l| &l.reservation)
                 })
-    }
+            })
+        })
+        .collect()
 }
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct CachedLeadership {
@@ -243,10 +356,23 @@ impl<W: Write> Engine<W> {
         if policy.has_development_bindings() && !self.development_control {
             return Err("leadership_bindings_require_development_control");
         }
+        if policy.supports_platoon_election()
+            && (self
+                .active_abilities
+                .as_ref()
+                .is_some_and(|runtime| !runtime.setup.has_platoon_effects())
+                || self
+                    .match_profiles
+                    .as_ref()
+                    .is_some_and(match_profiles::Registry::has_squad_only_abilities))
+        {
+            return Err("platoon_leadership_requires_complete_active_abilities");
+        }
         self.leadership = Some(LeadershipRuntime {
             catalog,
             policy,
             squad_leaders: BTreeMap::new(),
+            platoon_leaders: BTreeMap::new(),
         });
         Ok(self)
     }
@@ -260,10 +386,11 @@ impl<W: Write> Engine<W> {
         &self,
         actor: &Active,
     ) -> Option<active_abilities::CommandRole> {
-        self.leadership
-            .as_ref()
-            .filter(|runtime| runtime.holds_native_squad_role(actor))
-            .map(|_| active_abilities::CommandRole::SquadLeader)
+        match self.leadership.as_ref()?.native_role(actor) {
+            HeldLeadershipRole::SquadLeader => Some(active_abilities::CommandRole::SquadLeader),
+            HeldLeadershipRole::PlatoonLeader => Some(active_abilities::CommandRole::PlatoonLeader),
+            _ => None,
+        }
     }
     /// The saved record's fields, or the policy default when Horizon supplied none.
     pub(crate) fn leadership_record(&self, character: &Character) -> Option<LeadershipRecord> {
@@ -285,112 +412,135 @@ impl<W: Write> Engine<W> {
     /// other configuration keeps the existing first-member wire value.
     pub(crate) fn squad_leader_index(&self, squad: u16, members: &[u16; 8]) -> u16 {
         match &self.leadership {
-            Some(r) if r.policy.native().is_some() => {
-                r.squad_leaders.get(&squad).map_or(u16::MAX, |(p, _)| *p)
-            }
+            Some(r) if r.policy.native().is_some() => r
+                .squad_leaders
+                .get(&squad)
+                .map_or(u16::MAX, |leader| leader.player),
             _ => members[0],
         }
     }
-    /// Native vacancy maintenance, run at every roster publication and match
-    /// start. A departed, transferred or unnominated leader is removed
-    /// (`RemoveMember`/`ChangeSquadLeaderNomination`); while the match plays,
-    /// each vacancy is filled by `MagSimSquad::FindAvailableLeader` (0x0094ac38):
-    /// member slots in order, nomination bit1, no held role, score
-    /// level*levelWeight+matchesSinceLastCommand*mslcWeight, strict greater.
-    /// Bots carry no nominations and are never candidates.
+    /// Platoon field 8 publishes the elected character slot or the vacancy sentinel.
+    pub(crate) fn platoon_leader_index(&self, platoon: u16) -> u16 {
+        self.leadership
+            .as_ref()
+            .and_then(|runtime| runtime.platoon_leaders.get(&platoon))
+            .map_or(u16::MAX, |leader| leader.player)
+    }
+
+    /// Fill platoon vacancies before squad vacancies. Platoon promotion may
+    /// replace the winner's squad authority, so stage and record both together.
     pub(crate) fn reconcile_squad_leaders(&mut self) -> Result<(), &'static str> {
-        let Some(native) = self.native_election() else {
+        let Some(runtime) = self.leadership.as_ref() else {
             return Ok(());
         };
-        let (level_weight, mslc_weight) = (native.squad_level_weight, native.squad_mslc_weight);
+        let Some(native) = runtime.policy.native() else {
+            return Ok(());
+        };
         let actors: Vec<&Active> = self
             .active
             .iter()
             .chain(self.peers.values())
             .filter(|a| a.initial_objects.is_some())
             .collect();
-        let held = &self.leadership.as_ref().unwrap().squad_leaders;
-        let mut changes: Vec<LeaderChange> = Vec::new();
-        for (squad, (player, id)) in held {
-            let keep = actors.iter().any(|a| {
-                a.reservation.player == *player
-                    && a.reservation.id == *id
-                    && a.squad_catalog.squad_index() == *squad
-                    && a.nominations & 1 != 0
-            });
-            if !keep {
-                changes.push((*squad, None, "removed"));
-            }
-        }
+        let squads: BTreeMap<_, _> = actors
+            .iter()
+            .map(|a| a.squad_catalog.squad_index())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|squad| (squad, self.squad_members(squad, None)))
+            .collect();
+
+        let mut platoon_leaders = runtime.platoon_leaders.clone();
+        platoon_leaders.retain(|platoon, leader| {
+            actors.iter().any(|actor| {
+                actor.squad_catalog.squad_index() / 4 == *platoon && leader.matches(actor, 2)
+            })
+        });
+        let mut squad_leaders = runtime.squad_leaders.clone();
+        squad_leaders.retain(|squad, leader| {
+            actors.iter().any(|actor| {
+                actor.squad_catalog.squad_index() == *squad && leader.matches(actor, 1)
+            })
+        });
+
+        let members = |squad| {
+            let actors = &actors;
+            squads
+                .get(&squad)
+                .into_iter()
+                .flatten()
+                .filter_map(move |player| {
+                    actors.iter().copied().find(|a| {
+                        a.reservation.player == *player && a.squad_catalog.squad_index() == squad
+                    })
+                })
+        };
+
         if self.match_started {
-            let squads: BTreeSet<u16> = actors
-                .iter()
-                .map(|a| a.squad_catalog.squad_index())
-                .collect();
-            for squad in squads {
-                if held.contains_key(&squad) && !changes.iter().any(|(s, _, _)| *s == squad) {
-                    continue;
-                }
-                let mut best: Option<(&Active, f32)> = None;
-                for slot in self.squad_members(squad, None) {
-                    let Some(a) = actors.iter().find(|a| {
-                        a.reservation.player == slot && a.squad_catalog.squad_index() == squad
-                    }) else {
+            if let Some(weights) = runtime.policy.platoon_election {
+                let occupied_platoons: BTreeSet<u16> =
+                    squads.keys().map(|squad| squad / 4).collect();
+                for platoon in occupied_platoons {
+                    if platoon_leaders.contains_key(&platoon) {
                         continue;
-                    };
-                    let record = a
-                        .reservation
-                        .character
-                        .leadership
-                        .unwrap_or(native.default_record);
-                    let level = a
-                        .reservation
-                        .character
-                        .progression
-                        .unwrap_or_default()
-                        .level;
-                    let score = (f64::from(level) * f64::from(level_weight)
-                        + f64::from(record.matches_since_last_command) * f64::from(mslc_weight))
-                        as f32;
-                    // A development binding fixes this identity's role; native
-                    // candidates must hold no role at all.
-                    let unbound = self
-                        .leadership
-                        .as_ref()
-                        .is_some_and(|r| r.policy.binding(a).is_none());
-                    if a.nominations & 1 != 0 && unbound && best.is_none_or(|(_, b)| b < score) {
-                        best = Some((a, score));
+                    }
+                    let candidates = (platoon * 4..platoon * 4 + 4).flat_map(members);
+                    if let Some(winner) = runtime.elect(
+                        candidates,
+                        native,
+                        2,
+                        (weights.level_weight, weights.mslc_weight),
+                    ) {
+                        let squad = winner.squad_catalog.squad_index();
+                        if squad_leaders
+                            .get(&squad)
+                            .is_some_and(|leader| leader.matches(winner, 1))
+                        {
+                            squad_leaders.remove(&squad);
+                        }
+                        platoon_leaders.insert(platoon, Leader::from_actor(winner));
                     }
                 }
-                if let Some((a, _)) = best {
-                    changes.retain(|(s, _, _)| *s != squad);
-                    let elected = (a.reservation.player, a.reservation.id.clone());
-                    changes.push((squad, Some(elected), "elected"));
+            }
+
+            for &squad in squads.keys() {
+                if squad_leaders.contains_key(&squad) {
+                    continue;
+                }
+                let candidates = members(squad).filter(|actor| {
+                    !platoon_leaders
+                        .get(&(squad / 4))
+                        .is_some_and(|leader| leader.matches(actor, 2))
+                });
+                if let Some(winner) = runtime.elect(
+                    candidates,
+                    native,
+                    1,
+                    (native.squad_level_weight, native.squad_mslc_weight),
+                ) {
+                    squad_leaders.insert(squad, Leader::from_actor(winner));
                 }
             }
         }
-        if changes.is_empty() {
-            return Ok(());
+
+        let changes = leadership_changes("squad_index", &runtime.squad_leaders, &squad_leaders);
+        let platoon_changes =
+            leadership_changes("platoon_index", &runtime.platoon_leaders, &platoon_leaders);
+        if !platoon_changes.is_empty() {
+            self.record(
+                json!({"op":"leadership_roles_changed","squad_changes":changes,
+                    "platoon_changes":platoon_changes,"match_started":self.match_started}),
+                self.last_wall_secs,
+            )?;
+        } else if !changes.is_empty() {
+            self.record(
+                json!({"op":"squad_leaders_changed","changes":changes,"match_started":self.match_started}),
+                self.last_wall_secs,
+            )?;
         }
-        let audit: Vec<Value> = changes
-            .iter()
-            .map(|(squad, leader, reason)| {
-                json!({"squad_index":squad,"reason":reason,
-                    "leader_index":leader.as_ref().map_or(u16::MAX, |l| l.0),
-                    "reservation_id":leader.as_ref().map(|l| l.1.clone())})
-            })
-            .collect();
-        self.record(
-            json!({"op":"squad_leaders_changed","changes":audit,"match_started":self.match_started}),
-            self.last_wall_secs,
-        )?;
-        let held = &mut self.leadership.as_mut().unwrap().squad_leaders;
-        for (squad, leader, _) in changes {
-            match leader {
-                Some(leader) => held.insert(squad, leader),
-                None => held.remove(&squad),
-            };
-        }
+        let runtime = self.leadership.as_mut().unwrap();
+        runtime.squad_leaders = squad_leaders;
+        runtime.platoon_leaders = platoon_leaders;
         Ok(())
     }
     pub(crate) fn plan_leadership(&self, now: Duration) -> Result<LeadershipPlan, &'static str> {
@@ -407,17 +557,14 @@ impl<W: Write> Engine<W> {
         let role_for = |a: &Active| {
             runtime.policy.binding(a).unwrap_or_else(|| {
                 let squad = a.squad_catalog.squad_index();
-                let held = match runtime.policy.squad_leader {
-                    Some(SquadLeaderMode::FirstMember) => {
-                        self.squad_members(squad, None)[0] == a.reservation.player
+                match runtime.policy.squad_leader {
+                    Some(SquadLeaderMode::FirstMember)
+                        if self.squad_members(squad, None)[0] == a.reservation.player =>
+                    {
+                        HeldLeadershipRole::SquadLeader
                     }
-                    Some(SquadLeaderMode::Native) => self.command_leadership_role(a).is_some(),
-                    _ => false,
-                };
-                if held {
-                    HeldLeadershipRole::SquadLeader
-                } else {
-                    HeldLeadershipRole::None
+                    Some(SquadLeaderMode::Native) => runtime.native_role(a),
+                    _ => HeldLeadershipRole::None,
                 }
             })
         };

@@ -3,6 +3,7 @@ use crate::{
     acquisition_character_effects::{self as character, NativeState},
     acquisition_ground_damage, acquisition_ground_runtime as ground,
     acquisition_volume_damage::TargetKind,
+    active_ability_effects::{BlastFalloff, BombletSample, GasVolume},
     domination_structural_effects::{
         BlastProperties, Catalog as StructuralCatalog, Creation, InstantaneousBlast,
         PlaybackChange, TerrainMaterialGrid,
@@ -66,16 +67,61 @@ pub enum BlastSource {
     Helo { body_id: u32 },
     HeloGrenade,
     AirStrike,
+    CommandBomblet(BlastFalloff),
+    GuidedArtillery,
+    GasPulse(BlastFalloff),
 }
 
 impl BlastSource {
     fn supported_mode(self, game_type: i8) -> bool {
-        game_type == 2 || (game_type == 1 && matches!(self, Self::AirStrike))
+        game_type == 2 || (game_type == 1 && self.is_command())
+    }
+
+    fn is_command(self) -> bool {
+        matches!(
+            self,
+            Self::AirStrike | Self::CommandBomblet(_) | Self::GuidedArtillery | Self::GasPulse(_)
+        )
+    }
+
+    fn needs_cover_ray(self) -> bool {
+        !matches!(self, Self::GuidedArtillery | Self::GasPulse(_))
+    }
+
+    fn accepts_body(self, kind: TargetKind) -> bool {
+        match self {
+            Self::HeloGrenade => false,
+            Self::GuidedArtillery => kind == TargetKind::GroundVehicle,
+            Self::GasPulse(_) => kind == TargetKind::Character,
+            Self::CommandBomblet(_) => {
+                matches!(kind, TargetKind::Character | TargetKind::GroundVehicle)
+            }
+            _ => true,
+        }
+    }
+
+    pub(crate) fn scale(
+        self,
+        blast: &InstantaneousBlast,
+        distance: f32,
+    ) -> Result<f32, &'static str> {
+        match self {
+            Self::GuidedArtillery => Ok(1.),
+            Self::CommandBomblet(falloff) | Self::GasPulse(falloff) => {
+                native_command_falloff(falloff, distance)
+            }
+            _ => blast.scale(distance),
+        }
     }
 
     fn vehicle_body(self) -> Option<u32> {
         match self {
-            Self::Structural { .. } | Self::HeloGrenade | Self::AirStrike => None,
+            Self::Structural { .. }
+            | Self::HeloGrenade
+            | Self::AirStrike
+            | Self::CommandBomblet(_)
+            | Self::GuidedArtillery
+            | Self::GasPulse(_) => None,
             Self::Hospital { body_id } | Self::Ground { body_id } | Self::Helo { body_id } => {
                 Some(body_id)
             }
@@ -124,9 +170,10 @@ impl BlastCollision<'_> {
         snapshot: &dynamic_collision::Snapshot,
         [x, z]: [f32; 2],
         [min_y, max_y]: [f32; 2],
+        pad: f32,
     ) -> Result<Option<[f32; 3]>, &'static str> {
-        let top = max_y + 100.;
-        let bottom = min_y - 100.;
+        let top = max_y + pad;
+        let bottom = min_y - pad;
         if min_y > max_y || top <= bottom || ![x, z, top, bottom].iter().all(|v| v.is_finite()) {
             return Err("invalid_air_strike_vertical_bounds");
         }
@@ -197,7 +244,7 @@ impl BlastCollision<'_> {
         if start == end {
             return Ok(true);
         }
-        let zero_penetration_strike = matches!(source, BlastSource::AirStrike);
+        let zero_penetration_strike = source.is_command();
         let row = self.filter_rows[24];
         let mut hits = if zero_penetration_strike {
             scene.filtered_material_ray_hits(start, end, row, budget)
@@ -320,6 +367,55 @@ impl<W: Write> Engine<W> {
         {
             return Err("invalid_air_strike_blast_context");
         }
+        let Some(origin) = self.command_impact(xz, vertical_bounds, 100., collision)? else {
+            return Ok(None);
+        };
+        blast.origins.push(origin);
+        self.collect_domination_blast(BlastSource::AirStrike, attacker, blast, collision)
+            .map(Some)
+    }
+
+    pub(crate) fn collect_command_bomblet(
+        &self,
+        attacker: u32,
+        sample: BombletSample,
+        vertical_bounds: [f32; 2],
+        padded: bool,
+        collision: BlastCollision<'_>,
+    ) -> Result<Option<DamageWork>, &'static str> {
+        let pad = if padded { 100. } else { 0. };
+        let Some(origin) = self.command_impact(sample.xz, vertical_bounds, pad, collision)? else {
+            return Ok(None);
+        };
+        let rule = sample.blast;
+        let falloff = BlastFalloff {
+            inner_radius: rule.inner_radius,
+            outer_radius: rule.outer_radius,
+            inner_scale: rule.inner_scale,
+            outer_scale: rule.outer_scale,
+        };
+        self.collect_domination_blast(
+            BlastSource::CommandBomblet(falloff),
+            attacker,
+            InstantaneousBlast {
+                origins: vec![origin],
+                inner_radius: rule.inner_radius,
+                outer_radius: rule.outer_radius,
+                damage: rule.damage,
+                material_penetration: rule.material_penetration,
+            },
+            collision,
+        )
+        .map(Some)
+    }
+
+    fn command_impact(
+        &self,
+        xz: [f32; 2],
+        vertical_bounds: [f32; 2],
+        pad: f32,
+        collision: BlastCollision<'_>,
+    ) -> Result<Option<[f32; 3]>, &'static str> {
         let scene = self
             .collision_world
             .as_ref()
@@ -328,12 +424,51 @@ impl<W: Write> Engine<W> {
             })
             .ok_or("air_strike_static_collision_required")?;
         let snapshot = self.dynamic_collision_snapshot(collision.filter_rows[6])?;
-        let Some(origin) = collision.strike_impact(scene, &snapshot, xz, vertical_bounds)? else {
-            return Ok(None);
+        collision.strike_impact(scene, &snapshot, xz, vertical_bounds, pad)
+    }
+
+    pub(crate) fn collect_guided_artillery_blast(
+        &self,
+        attacker: u32,
+        origin: [f32; 3],
+        radius: f32,
+        collision: BlastCollision<'_>,
+    ) -> Result<DamageWork, &'static str> {
+        self.collect_domination_blast(
+            BlastSource::GuidedArtillery,
+            attacker,
+            InstantaneousBlast {
+                origins: vec![origin],
+                inner_radius: radius,
+                outer_radius: radius,
+                damage: 10_000.,
+                material_penetration: 0.,
+            },
+            collision,
+        )
+    }
+
+    pub(crate) fn collect_gas_pulse_characters(
+        &self,
+        volume: GasVolume,
+        collision: BlastCollision<'_>,
+    ) -> Result<Vec<BlastObservation>, &'static str> {
+        let DamageWork::Blast { observations, .. } = self.collect_domination_blast(
+            BlastSource::GasPulse(volume.falloff),
+            u32::MAX,
+            InstantaneousBlast {
+                origins: vec![volume.origin],
+                inner_radius: volume.falloff.inner_radius,
+                outer_radius: volume.falloff.outer_radius,
+                damage: volume.damage_per_second * 0.5,
+                material_penetration: 0.,
+            },
+            collision,
+        )?
+        else {
+            unreachable!("radial collector always produces blast work");
         };
-        blast.origins.push(origin);
-        self.collect_domination_blast(BlastSource::AirStrike, attacker, blast, collision)
-            .map(Some)
+        Ok(observations)
     }
 
     /// Collect radial pairs through current Engine bodies and the source-bound world.
@@ -347,7 +482,7 @@ impl<W: Write> Engine<W> {
         let filter_rows = collision.filter_rows;
         let limits = collision.limits;
         if !source.supported_mode(self.match_profile().game_type)
-            || (matches!(source, BlastSource::AirStrike) && blast.material_penetration != 0.)
+            || (source.is_command() && blast.material_penetration != 0.)
             || matches!(
                 source,
                 BlastSource::Structural { objective_id: 0 }
@@ -384,13 +519,18 @@ impl<W: Write> Engine<W> {
             });
         }
         let snapshot = self.dynamic_collision_snapshot(filter_rows[6])?;
-        let scene = self
-            .collision_world
-            .as_ref()
-            .filter(|scene| {
-                scene.stats().triangles != 0 && scene.metadata().map_name == self.map_name()
-            })
-            .ok_or("domination_structural_static_collision_required")?;
+        let scene = if source.needs_cover_ray() {
+            Some(
+                self.collision_world
+                    .as_ref()
+                    .filter(|scene| {
+                        scene.stats().triangles != 0 && scene.metadata().map_name == self.map_name()
+                    })
+                    .ok_or("domination_structural_static_collision_required")?,
+            )
+        } else {
+            None
+        };
         let world = snapshot.context().0.world_id;
         let sphere = Geometry::Sphere {
             radius: f64::from(blast.outer_radius),
@@ -401,7 +541,7 @@ impl<W: Write> Engine<W> {
             for body in snapshot
                 .bodies()
                 .iter()
-                .filter(|_| !matches!(source, BlastSource::HeloGrenade))
+                .filter(|body| source.accepts_body(body.target.kind))
             {
                 if source.vehicle_body().map(u64::from) == Some(body.target.key.id)
                     || filter_rows[6] & (1 << body.layer) == 0
@@ -421,24 +561,26 @@ impl<W: Write> Engine<W> {
                     continue;
                 };
                 let (_, distance_squared) = separation(*origin, position)?;
-                if blast.scale(distance_squared.sqrt())? == 0.0 {
+                if source.scale(&blast, distance_squared.sqrt())? == 0.0 {
                     continue;
                 }
-                if !collision.clear_path(
-                    scene,
-                    &snapshot,
-                    BlastRay {
-                        start: origin.map(f64::from),
-                        end: position.map(f64::from),
-                        excludes: [
-                            source.vehicle_body().map(u64::from),
-                            Some(body.target.key.id),
-                        ],
-                        penetration: blast.material_penetration,
-                        source,
-                    },
-                    &mut static_budget,
-                )? {
+                if let Some(scene) = scene
+                    && !collision.clear_path(
+                        scene,
+                        &snapshot,
+                        BlastRay {
+                            start: origin.map(f64::from),
+                            end: position.map(f64::from),
+                            excludes: [
+                                source.vehicle_body().map(u64::from),
+                                Some(body.target.key.id),
+                            ],
+                            penetration: blast.material_penetration,
+                            source,
+                        },
+                        &mut static_budget,
+                    )?
+                {
                     continue;
                 }
                 observations.push(BlastObservation {
@@ -448,7 +590,7 @@ impl<W: Write> Engine<W> {
                     line_of_damage: true,
                 });
             }
-            if filter_rows[6] & (1 << 22) != 0 {
+            if !matches!(source, BlastSource::GasPulse(_)) && filter_rows[6] & (1 << 22) != 0 {
                 for (&index, surface) in &collision.sequences.helos {
                     let target_id = u64::from(0x0280_0000 | u32::from(index));
                     if source.vehicle_body().map(u64::from) == Some(target_id) {
@@ -456,25 +598,29 @@ impl<W: Write> Engine<W> {
                     }
                     let position = surface.pose.translation.map(|component| component as f32);
                     let (_, distance_squared) = separation(*origin, position)?;
-                    if blast.scale(distance_squared.sqrt())? == 0.0 {
+                    if source.scale(&blast, distance_squared.sqrt())? == 0.0 {
                         continue;
                     }
                     let local = surface.local(origin.map(f64::from));
                     if !surface.overlaps_sphere(local, &sphere, limits, &mut budget)? {
                         continue;
                     }
-                    if collision.clear_path(
-                        scene,
-                        &snapshot,
-                        BlastRay {
-                            start: origin.map(f64::from),
-                            end: surface.pose.translation,
-                            excludes: [source.vehicle_body().map(u64::from), Some(target_id)],
-                            penetration: blast.material_penetration,
-                            source,
-                        },
-                        &mut static_budget,
-                    )? {
+                    let clear_path = match scene {
+                        Some(scene) => collision.clear_path(
+                            scene,
+                            &snapshot,
+                            BlastRay {
+                                start: origin.map(f64::from),
+                                end: surface.pose.translation,
+                                excludes: [source.vehicle_body().map(u64::from), Some(target_id)],
+                                penetration: blast.material_penetration,
+                                source,
+                            },
+                            &mut static_budget,
+                        )?,
+                        None => true,
+                    };
+                    if clear_path {
                         observations.push(BlastObservation {
                             target: BlastTarget::Helo { index, world },
                             origin_index,
@@ -625,8 +771,8 @@ impl<W: Write> Engine<W> {
                 DamageWork::Area(_) => game_type != 2,
                 DamageWork::Blast { source, blast, .. } => {
                     !source.supported_mode(game_type)
-                        || (matches!(source, BlastSource::AirStrike)
-                            && blast.material_penetration != 0.)
+                        || matches!(source, BlastSource::GasPulse(_))
+                        || (source.is_command() && blast.material_penetration != 0.)
                 }
             })
         {
@@ -820,7 +966,7 @@ impl<W: Write> Engine<W> {
                 .get(observation.origin_index)
                 .ok_or("domination_structural_blast_origin_missing")?;
             let (displacement, distance_squared) = separation(origin, observation.sample_position)?;
-            let scale = blast.scale(distance_squared.sqrt())?;
+            let scale = source.scale(blast, distance_squared.sqrt())?;
             if scale <= 0.0 || blast.damage == 0.0 || !observation.line_of_damage {
                 continue;
             }
@@ -868,11 +1014,16 @@ impl<W: Write> Engine<W> {
                     attacker,
                 },
                 BlastSource::HeloGrenade => return Err("invalid_domination_helo_grenade_target"),
-                BlastSource::AirStrike => character::Request::AirStrikeExplosion {
-                    raw_hp,
-                    from_direction,
-                    attacker,
-                },
+                BlastSource::GuidedArtillery | BlastSource::GasPulse(_) => {
+                    return Err("invalid_command_blast_character_target");
+                }
+                BlastSource::AirStrike | BlastSource::CommandBomblet(_) => {
+                    character::Request::AirStrikeExplosion {
+                        raw_hp,
+                        from_direction,
+                        attacker,
+                    }
+                }
             };
             output.apply(self, target, request)?;
         }
@@ -947,6 +1098,44 @@ impl DamageOutput<'_> {
         }
         Ok(())
     }
+}
+
+/// Retail 7a23d4 evaluates after the sphere-to-shape overlap. A sampled
+/// point outside the sphere can still receive the authored outer scale.
+pub(crate) fn native_command_falloff(
+    falloff: BlastFalloff,
+    distance: f32,
+) -> Result<f32, &'static str> {
+    let BlastFalloff {
+        inner_radius,
+        inner_scale,
+        outer_radius,
+        outer_scale,
+    } = falloff;
+    if !distance.is_finite()
+        || distance < 0.
+        || !inner_radius.is_finite()
+        || !outer_radius.is_finite()
+        || inner_radius <= 0.
+        || outer_radius < inner_radius
+        || !(0. ..=1.).contains(&inner_scale)
+        || !(0. ..=1.).contains(&outer_scale)
+    {
+        return Err("invalid_command_blast_falloff");
+    }
+    if distance <= inner_radius {
+        return Ok((inner_scale - 1.).mul_add(distance / inner_radius, 1.));
+    }
+    if distance >= outer_radius {
+        return Ok(outer_scale);
+    }
+    let width = outer_radius - inner_radius;
+    let fraction = if width >= 0.00001 {
+        (distance - inner_radius) / width
+    } else {
+        0.
+    };
+    Ok((outer_scale - inner_scale).mul_add(fraction, inner_scale))
 }
 
 fn separation(origin: [f32; 3], point: [f32; 3]) -> Result<([f32; 3], f32), &'static str> {
@@ -1792,6 +1981,20 @@ impl SequenceCollisionState {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn command_blast_falloff_retains_authored_edge_values_after_overlap() {
+        let falloff = crate::active_ability_effects::BlastFalloff {
+            inner_radius: 20.,
+            inner_scale: 0.75,
+            outer_radius: 20.,
+            outer_scale: 1.,
+        };
+        assert_eq!(native_command_falloff(falloff, 10.).unwrap(), 0.875);
+        assert_eq!(native_command_falloff(falloff, 20.).unwrap(), 0.75);
+        assert_eq!(native_command_falloff(falloff, 20.5).unwrap(), 1.);
+    }
+
     use super::*;
 
     #[test]
@@ -1910,25 +2113,25 @@ mod tests {
             ..context
         };
         let static_hit = static_only
-            .strike_impact(&scene, &snapshot, [1., 1.], [0., 8.])
+            .strike_impact(&scene, &snapshot, [1., 1.], [0., 8.], 100.)
             .unwrap()
             .unwrap();
         assert!((static_hit[1] - 1.5).abs() < 0.00002);
 
         // The known layer-17 overlay contributes both triangles at its live pose.
         let hit = context
-            .strike_impact(&scene, &snapshot, [1., 1.], [0., 8.])
+            .strike_impact(&scene, &snapshot, [1., 1.], [0., 8.], 100.)
             .unwrap();
         let hit = hit.unwrap();
         assert_eq!([hit[0], hit[2]], [1., 1.]);
         assert!((hit[1] - 5.5).abs() < 0.00002);
         let miss = context
-            .strike_impact(&scene, &snapshot, [8., 8.], [0., 8.])
+            .strike_impact(&scene, &snapshot, [8., 8.], [0., 8.], 100.)
             .unwrap();
         assert_eq!(miss, None);
         assert!(
             context
-                .strike_impact(&scene, &snapshot, [1., 1.], [8., 0.])
+                .strike_impact(&scene, &snapshot, [1., 1.], [8., 0.], 100.)
                 .is_err()
         );
     }

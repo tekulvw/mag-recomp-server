@@ -4,6 +4,7 @@ use crate::{
     active_abilities::{Ability, Rules, Side},
     active_ability_effects::EffectRules,
     active_ability_engine::{AntiAir, Boundary, SensorObjective, Setup},
+    active_ability_precision::PrecisionTarget,
     collision::CollisionWorld,
     objective_catalog::{NativeClass, Objective, ObjectiveCatalog},
     spawn_catalog::SpawnCatalog,
@@ -12,7 +13,7 @@ use crate::{
 use serde::{Deserialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::File,
     io::{self, Read},
     path::{Path, PathBuf},
@@ -68,6 +69,14 @@ struct SourceMember {
 struct EffectMembers {
     cluster: SourceMember,
     sensor: SourceMember,
+    #[serde(default)]
+    precision_strike: Option<SourceMember>,
+    #[serde(default)]
+    guided_artillery: Option<SourceMember>,
+    #[serde(default)]
+    gas_bombardment: Option<SourceMember>,
+    #[serde(default)]
+    strafing_run: Option<SourceMember>,
 }
 
 #[derive(Deserialize)]
@@ -129,6 +138,8 @@ struct MapBindings {
     aaa: Vec<AntiAir>,
     objectives: Vec<SensorObjective>,
     damage_triggers: Vec<Rule>,
+    #[serde(default)]
+    precision_targets: Vec<PrecisionTarget>,
 }
 
 #[derive(Deserialize)]
@@ -188,8 +199,13 @@ fn decode_map_bindings(bytes: &[u8]) -> io::Result<MapBindings> {
     let map: MapBindings = serde_json::from_slice(bytes).map_err(|error| {
         io::Error::new(io::ErrorKind::InvalidData, format!("{REPROJECT}: {error}"))
     })?;
-    if map.schema_version != 2 {
+    if !matches!(map.schema_version, 2 | 3) {
         return Err(invalid(REPROJECT));
+    }
+    if map.schema_version == 3
+        && !serde_json::from_slice::<serde_json::Value>(bytes)
+            .map_err(|_| invalid(REPROJECT))?["precision_targets"].is_array() {
+        return Err(invalid("active_ability_map_bindings_require_precision_targets"));
     }
     Ok(map)
 }
@@ -208,16 +224,43 @@ fn validate_sources(
     map: &MapBindings,
     scene: &StaticRayReceipt,
 ) -> io::Result<()> {
-    if effects.schema_version != 1
+    if !matches!(effects.schema_version, 1 | 2)
         || effects.application_id != 20231
         || effects.source_archive_sha256 != rules.source_archive_sha256
     {
         return Err(invalid("active_ability_effect_source_mismatch"));
     }
+    if (effects.schema_version == 1 && effects.rows.len() != 12)
+        || (effects.schema_version == 2 && (effects.rows.len() != 33 || map.schema_version != 3))
+    {
+        return Err(invalid("active_ability_effects_require_reprojection"));
+    }
     for (ability, source) in [
-        (Ability::ClusterBomb, &effects.source_members.cluster),
-        (Ability::Sensor, &effects.source_members.sensor),
+        (Ability::ClusterBomb, Some(&effects.source_members.cluster)),
+        (Ability::Sensor, Some(&effects.source_members.sensor)),
+        (
+            Ability::PrecisionStrike,
+            effects.source_members.precision_strike.as_ref(),
+        ),
+        (
+            Ability::GuidedArtillery,
+            effects.source_members.guided_artillery.as_ref(),
+        ),
+        (
+            Ability::GasBombardment,
+            effects.source_members.gas_bombardment.as_ref(),
+        ),
+        (
+            Ability::StrafingRun,
+            effects.source_members.strafing_run.as_ref(),
+        ),
     ] {
+        let Some(source) = source else {
+            if effects.schema_version == 2 {
+                return Err(invalid("active_ability_platoon_effect_member_missing"));
+            }
+            continue;
+        };
         let rule = rules
             .property(ability)
             .ok_or_else(|| invalid("active_ability_command_rule_missing"))?;
@@ -226,6 +269,11 @@ fn validate_sources(
         {
             return Err(invalid("active_ability_effect_member_mismatch"));
         }
+    }
+    if effects.schema_version == 2 && map.schema_version != 3 {
+        return Err(invalid(
+            "active_ability_platoon_map_bindings_require_reprojection",
+        ));
     }
     if map.application_id != 20231
         || scene.schema_version != 1
@@ -300,14 +348,12 @@ fn load_verified(path: &Path) -> io::Result<Loaded> {
     })?;
     let scene: StaticRayReceipt = read(&manifest.static_ray_receipt)?;
     validate_sources(&rules, &effects, &map, &scene)?;
+    let effect_schema = effects.schema_version;
     let rows = effects
         .rows
         .into_iter()
         .map(|row| {
-            let (ability, delay) = match row.rules {
-                EffectRules::Cluster(rule) => (Ability::ClusterBomb, rule.delay_ms),
-                EffectRules::Sensor(rule) => (Ability::Sensor, rule.delay_ms),
-            };
+            let (ability, delay) = (row.rules.ability(), row.rules.delay_ms());
             if rules.property(ability).map(|rule| rule.delay_ms) != Some(u64::from(delay)) {
                 return Err(invalid("active_ability_effect_delay_mismatch"));
             }
@@ -322,9 +368,14 @@ fn load_verified(path: &Path) -> io::Result<Loaded> {
         aaa: map.aaa,
         objectives: map.objectives,
         damage_triggers: map.damage_triggers,
+        precision_targets: map.precision_targets,
         effects: rows,
     };
     setup.validate().map_err(invalid)?;
+    if effect_schema == 2 && setup.effects.len() != 33 {
+        return Err(invalid("incomplete_active_ability_platoon_effects"));
+    }
+    require_precision_targets(&setup.precision_targets, effect_schema == 2)?;
     Ok(Loaded {
         setup,
         world_sha256: scene.world_sha256,
@@ -382,8 +433,76 @@ pub fn load_for_catalogs(
     {
         return Err(invalid("active_ability_objective_binding_mismatch"));
     }
+    validate_precision_bindings(
+        &setup.precision_targets,
+        &objectives.objects,
+        spawns.match_profile().game_type,
+        setup.has_platoon_effects(),
+    )?;
     validate_damage_trigger_bindings(&setup.damage_triggers, &objectives.objects)?;
     Ok(setup)
+}
+
+fn require_precision_targets(targets: &[PrecisionTarget], required: bool) -> io::Result<()> {
+    if required && targets.is_empty() {
+        return Err(invalid(
+            "active_ability_precision_target_inventory_required",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_precision_bindings(
+    targets: &[PrecisionTarget],
+    objectives: &[Objective],
+    game_type: i8,
+    required: bool,
+) -> io::Result<()> {
+    require_precision_targets(targets, required)?;
+    if targets.is_empty() {
+        return Ok(());
+    }
+
+    let supplied: BTreeMap<_, _> = targets
+        .iter()
+        .map(|row| (row.object_index, row.team))
+        .collect();
+    let mut checked = 0;
+    for objective in objectives {
+        let row = supplied.get(&objective.object_index);
+        let eligible = objective.native_class == Some(NativeClass::Structural)
+            && objective
+                .reward
+                .as_ref()
+                .is_none_or(|reward| reward.category != 0);
+        // The current typed Domination catalogs include every Structural slot.
+        // Where they omit category metadata, nonzero membership comes from the
+        // authored projection. Acquisition's minimal catalogs can confirm slot
+        // identity but leave the classification inventory to the projection.
+        if game_type == 2 && eligible != row.is_some() {
+            return Err(invalid("active_ability_precision_target_binding_mismatch"));
+        }
+        let Some(&team) = row else {
+            continue;
+        };
+        let teams = [
+            objective.scoring.as_ref().map(|rule| rule.owner_team),
+            objective.demolition.as_ref().map(|rule| rule.owner_team),
+            objective.repair.as_ref().map(|rule| rule.owner_team),
+        ];
+        if team > 1
+            || (objective.native_class.is_some() && !eligible)
+            || (game_type == 2 && teams.iter().all(Option::is_none))
+            || teams.into_iter().flatten().any(|owner| owner != team)
+        {
+            return Err(invalid("active_ability_precision_target_binding_mismatch"));
+        }
+        checked += 1;
+    }
+    if checked != targets.len() {
+        return Err(invalid("active_ability_precision_target_binding_mismatch"));
+    }
+    Ok(())
 }
 
 fn validate_damage_trigger_bindings(rules: &[Rule], objectives: &[Objective]) -> io::Result<()> {
@@ -451,6 +570,96 @@ mod tests {
         map["damage_triggers"] = json!([]);
         let decoded = decode_map_bindings(&map.to_string().into_bytes()).unwrap();
         assert!(decoded.damage_triggers.is_empty());
+    }
+
+    #[test]
+    fn precision_inventory_matches_typed_domination_roster_and_teams() {
+        let mut catalog = crate::objective_control::trigger_box_tests::native_catalog();
+        let first = catalog["objects"][1].clone();
+        let mut second = first.clone();
+        second["object_index"] = json!(12);
+        second["token"] = json!("0x000000fe");
+        second["scoring"] = json!({"owner_team":1,"activation_score":0,"deactivation_score":0});
+        second.as_object_mut().unwrap().remove("demolition");
+        let mut category_zero = first.clone();
+        category_zero["object_index"] = json!(13);
+        category_zero["token"] = json!("0x000000ff");
+        category_zero["reward"] = json!({"category":0,"subtype":1,"demolition":true});
+        let objects = catalog["objects"].as_array_mut().unwrap();
+        objects.extend([second, category_zero]);
+        let objectives: Vec<Objective> =
+            serde_json::from_value(catalog["objects"].clone()).unwrap();
+
+        let first = PrecisionTarget {
+            object_index: 11,
+            team: 1,
+        };
+        let second = PrecisionTarget {
+            object_index: 12,
+            team: 1,
+        };
+        let complete = [first, second];
+        assert!(validate_precision_bindings(&complete, &objectives, 2, true).is_ok());
+        assert!(validate_precision_bindings(&[], &objectives, 2, false).is_ok());
+        for wrong in [
+            vec![],
+            vec![first],
+            vec![first, PrecisionTarget { team: 0, ..second }],
+            vec![
+                first,
+                second,
+                PrecisionTarget {
+                    object_index: 10,
+                    team: 1,
+                },
+            ],
+            vec![
+                first,
+                second,
+                PrecisionTarget {
+                    object_index: 13,
+                    team: 1,
+                },
+            ],
+            vec![
+                first,
+                second,
+                PrecisionTarget {
+                    object_index: 14,
+                    team: 1,
+                },
+            ],
+        ] {
+            assert!(validate_precision_bindings(&wrong, &objectives, 2, true).is_err());
+        }
+    }
+
+    #[test]
+    fn precision_acquisition_requires_a_nonempty_bound_inventory() {
+        let objects: Vec<Objective> = serde_json::from_value(json!([
+            {"token":"0x00000001","object_index":1,"initial_state":0},
+            {"token":"0x00000002","object_index":2,"initial_state":0}
+        ]))
+        .unwrap();
+        let target = PrecisionTarget {
+            object_index: 2,
+            team: 1,
+        };
+        assert!(validate_precision_bindings(&[target], &objects, 1, true).is_ok());
+        assert!(validate_precision_bindings(&[], &objects, 1, false).is_ok());
+        assert!(validate_precision_bindings(&[], &objects, 1, true).is_err());
+        assert!(
+            validate_precision_bindings(
+                &[PrecisionTarget {
+                    object_index: 3,
+                    ..target
+                }],
+                &objects,
+                1,
+                true
+            )
+            .is_err()
+        );
     }
 
     #[test]

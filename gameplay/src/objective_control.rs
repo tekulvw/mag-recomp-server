@@ -96,6 +96,7 @@ enum NativePending {
         recipient: Option<RewardRecipient>,
     },
     Script(ObjectiveState, Option<secure::Actor>),
+    Precision(Option<crate::structure_damage::Source>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,6 +129,7 @@ pub struct ObjectiveWorld {
     progression_started: bool,
     delayed_deadline: Option<Duration>,
     native_entries: Vec<NativeEntry>,
+    acquisition_precision: BTreeMap<u16, Option<crate::structure_damage::Source>>,
     native_tick_time: Option<Duration>,
     native_elapsed_ms: u32,
 }
@@ -194,6 +196,7 @@ impl ObjectiveWorld {
             progression_started: false,
             delayed_deadline: None,
             native_entries: Vec::new(),
+            acquisition_precision: BTreeMap::new(),
             native_tick_time: None,
             native_elapsed_ms: 0,
         }
@@ -270,7 +273,11 @@ impl ObjectiveWorld {
         let object = self.objects.get_mut(&index)?;
         let mut mode = object.native.take()?;
         let previous = object.state;
-        let active_trigger_index = object.fuse.as_ref().map(|fuse| fuse.trigger_index);
+        let active_trigger_index = if matches!(mode.pending, Some(NativePending::Precision(_))) {
+            None
+        } else {
+            object.fuse.as_ref().map(|fuse| fuse.trigger_index)
+        };
         let generation = tick_native(
             object,
             &mut mode,
@@ -333,6 +340,64 @@ impl ObjectiveWorld {
             mode.pending = None;
         }
         Ok(())
+    }
+
+    /// Precision executes the Structural desired-state setter. Acquisition
+    /// consumes the same request through its separate objective controller.
+    pub(crate) fn stage_precision_strike(
+        &mut self,
+        index: u16,
+        source: Option<crate::structure_damage::Source>,
+    ) -> Result<bool, &'static str> {
+        let Some(object) = self.objects.get_mut(&index) else {
+            return Ok(false);
+        };
+        if object.state.state_actor.state == ObjectiveState::Completed {
+            return Ok(false);
+        }
+        match object.native.as_mut() {
+            Some(mode) if mode.class == NativeClass::Structural => {
+                mode.pending = Some(NativePending::Precision(source));
+            }
+            Some(_) => return Ok(false),
+            None => {
+                self.acquisition_precision.insert(index, source);
+            }
+        }
+        self.pristine = false;
+        Ok(true)
+    }
+
+    pub(crate) fn has_precision_transition(&self, index: u16) -> bool {
+        self.objects.get(&index).is_some_and(|object| {
+            matches!(
+                object
+                    .native
+                    .as_ref()
+                    .and_then(|mode| mode.pending.as_ref()),
+                Some(NativePending::Precision(_))
+            )
+        })
+    }
+
+    /// These source-qualified Acquisition structures have ordinary family-12
+    /// entries and are outside the Secure and Arrival controller's hook list.
+    pub(crate) fn advance_acquisition_precision(
+        &mut self,
+        now: Duration,
+    ) -> Vec<ObjectiveControlDelta> {
+        let mut updates = Vec::new();
+        for (index, source) in std::mem::take(&mut self.acquisition_precision) {
+            let Some(object) = self.objects.get_mut(&index) else {
+                continue;
+            };
+            let before = object.state;
+            while advance_precision(object, source, now).is_some() {}
+            if object.state != before {
+                updates.push(object.state);
+            }
+        }
+        updates
     }
 
     /// A destroyed type4/5 trigger invokes the owner's ordinary Activating
@@ -1086,6 +1151,42 @@ fn enter_structural(object: &mut Objective, mode: &mut NativeObjective, previous
     object.state.health_percent = mode.damage_health as u8;
 }
 
+/// Apply the next Structural state on a desired-Completed transition. The
+/// intervening Activating and Activated entries skip arm/fuse delays because
+/// their state IDs differ from the requested final state.
+fn advance_precision(
+    object: &mut Objective,
+    source: Option<crate::structure_damage::Source>,
+    now: Duration,
+) -> Option<ObjectiveState> {
+    use ObjectiveState::{
+        Activated, Activating, Completed, Deactivated, Deactivating, Inactive, Repaired, Repairing,
+    };
+    let next = match object.state.state_actor.state {
+        Inactive => Deactivated,
+        Deactivated | Repaired => Activating,
+        Activating => Activated,
+        Activated | Deactivating | Repairing => Completed,
+        _ => return None,
+    };
+    let player = if next == Deactivated {
+        u16::MAX
+    } else {
+        source.map_or(u16::MAX, |actor| actor.player)
+    };
+    set_native_state(object, next, player, now);
+    object.state.expiration_time_ms = 0;
+    object.state.deactivation_time_ms = 0;
+    if next == Completed {
+        object.state.health_percent = 0;
+    } else if matches!(next, Deactivated | Activated) {
+        object.state.health_percent = 100;
+    }
+    object.operation = None;
+    object.fuse = None;
+    Some(next)
+}
+
 fn tick_native(
     object: &mut Objective,
     mode: &mut NativeObjective,
@@ -1113,6 +1214,15 @@ fn tick_native(
                 mode.secure = object.rule.as_ref().map(|rule| secure_hold(target, rule));
             }
             return actor.and_then(|actor| u32::try_from(actor.generation).ok());
+        }
+        Some(NativePending::Precision(source)) => {
+            if let Some(next) = advance_precision(object, source, now) {
+                enter_structural(object, mode, previous);
+                if next != ObjectiveState::Completed {
+                    mode.pending = Some(NativePending::Precision(source));
+                }
+                return source.map(|a| a.generation);
+            }
         }
         Some(NativePending::Secure(request, duration)) => {
             return enter_secure(
@@ -1557,6 +1667,53 @@ pub(crate) mod trigger_box_tests {
         let now = Duration::from_millis(ms);
         world.begin_native_tick(now);
         world.tick_native_object(index, now, actors)
+    }
+
+    #[test]
+    fn precision_strike_queues_one_ordinary_structural_completion() {
+        let mut catalog = native_catalog();
+        catalog["objects"][1]["initial_state"] = json!(1);
+        let live = ObjectiveWorld::new(&ObjectiveCatalog::from_json(&catalog.to_string()).unwrap());
+        let mut candidate = live.clone();
+        let source = crate::structure_damage::Source {
+            player: 4,
+            generation: 3,
+        };
+        assert!(candidate.stage_precision_strike(11, Some(source)).unwrap());
+        assert_eq!(candidate.state(11), Some(ObjectiveState::Deactivated));
+        assert!(!candidate.has_native_entries());
+        for (ms, state) in [
+            (98, ObjectiveState::Activating),
+            (99, ObjectiveState::Activated),
+        ] {
+            let delta = frame(&mut candidate, 11, ms, &BTreeMap::new()).unwrap();
+            assert_eq!(delta.state_actor.state, state);
+            assert_eq!(delta.expiration_time_ms, 0);
+            assert_eq!(candidate.take_native_entries().len(), 1);
+        }
+        let completed = frame(&mut candidate, 11, 100, &BTreeMap::new()).unwrap();
+        assert_eq!(completed.state_actor.state, ObjectiveState::Completed);
+        assert_eq!(completed.state_actor.actor_index, 4);
+        assert_eq!(completed.health_percent, 0);
+        let entries = candidate.take_native_entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].actor_generation, Some(3));
+        assert_eq!(entries[0].active_trigger_index, None);
+        assert!(!candidate.stage_precision_strike(11, Some(source)).unwrap());
+        assert!(frame(&mut candidate, 11, 101, &BTreeMap::new()).is_none());
+        assert_eq!(live.state(11), Some(ObjectiveState::Deactivated));
+    }
+
+    #[test]
+    fn precision_does_not_force_a_locked_structure_to_complete() {
+        let mut catalog = native_catalog();
+        catalog["objects"][1]["initial_state"] = json!(9);
+        let mut world =
+            ObjectiveWorld::new(&ObjectiveCatalog::from_json(&catalog.to_string()).unwrap());
+        assert!(world.stage_precision_strike(11, None).unwrap());
+        assert!(frame(&mut world, 11, 100, &BTreeMap::new()).is_none());
+        assert_eq!(world.state(11), Some(ObjectiveState::Locked));
+        assert!(!world.has_native_entries());
     }
 
     #[test]

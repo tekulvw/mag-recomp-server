@@ -66,8 +66,13 @@ its exact source hash, matching map and coverage validation. Vehicles and
 character damage rules retain their existing exact spawn-source hash checks.
 Item catalogs, bootstrap equipment, combat/skill data and the map-independent
 falling/incapacitation rules remain global. Bootstrap faction coverage is checked
-for every loaded profile. Registry workers can use the native schema-2 squad
-election policy with `--leadership-passives` and `--leadership-role-policy`.
+for every loaded profile. Registry workers can use native election with `--leadership-passives` and
+`--leadership-role-policy`. Schema 2 enables squad vacancy filling. Schema 3
+also enables platoon vacancy filling using its separately projected weights.
+A platoon promotion can vacate a squad leadership slot, which the worker
+refills in the same roster update. Both schemas elect from the worker's
+assigned roster. Retail's separate pre-match squad reassignment is outside
+that policy.
 Registry mode rejects development role bindings, global bot population, global
 bunker arguments and development dummy settings. Per-profile Domination
 hospitals are supported.
