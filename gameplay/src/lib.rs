@@ -114,6 +114,7 @@ mod event_decode;
 mod events;
 pub mod fall_damage;
 use event_decode::DecodedEvent;
+mod leadership_auto_heal;
 mod leadership_auto_repair;
 mod resources;
 mod world_tick;
@@ -1004,6 +1005,8 @@ struct Active {
     replication_history: Vec<Vec<u8>>,
     outbound_sequence: u32,
     pending_shared: std::collections::VecDeque<Vec<u8>>,
+    /// Health replies must join the FIFO until scheduled health drains.
+    ordered_health_pending: bool,
     replication_backlogged: bool,
     objective_delta: Option<Vec<u8>>,
     objective_assigned: bool,
@@ -1068,6 +1071,7 @@ pub struct Engine<W: Write> {
     world_tick_enabled: bool,
     last_world_tick: Option<Duration>,
     automatic_repair: leadership_auto_repair::State,
+    automatic_heal: leadership_auto_heal::State,
     match_epoch: Option<Duration>,
     alpha_turret: turret::ClientTurretFields,
     alpha_turret_reporter: Option<(String, u32)>,
@@ -1759,6 +1763,7 @@ impl<W: Write> Engine<W> {
                     replication_history: Vec::new(),
                     outbound_sequence: 0,
                     pending_shared: std::collections::VecDeque::new(),
+                    ordered_health_pending: false,
                     replication_backlogged: false,
                     objective_delta: None,
                     objective_assigned: false,
@@ -2086,6 +2091,8 @@ mod falling_damage_tests;
 #[path = "../tests/support/dynamic_collision_fixture.rs"]
 mod synthetic_dynamic_collision;
 
+#[cfg(test)]
+mod leadership_auto_heal_tests;
 #[cfg(test)]
 mod leadership_auto_repair_tests;
 

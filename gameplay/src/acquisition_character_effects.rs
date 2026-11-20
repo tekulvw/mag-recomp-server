@@ -673,6 +673,7 @@ actor_effect_state! {
     projectile_publications: Vec<ProjectilePublication>,
     grenade_damage: std::collections::VecDeque<PendingDamage>,
     pending_shared: std::collections::VecDeque<Vec<u8>>,
+    ordered_health_pending: bool,
     replication_backlogged: bool,
     mounted_seat: Option<u8>,
     mounted_bunker: Option<u16>,

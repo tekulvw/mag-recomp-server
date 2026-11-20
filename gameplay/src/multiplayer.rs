@@ -1116,6 +1116,9 @@ impl<W: Write> Engine<W> {
                 actor.tracking.bind_correction(sequence, position);
             }
             actor.pending_shared.pop_front();
+            if actor.pending_shared.is_empty() {
+                actor.ordered_health_pending = false;
+            }
         }
         self.shared_drain_cursor = next_cursor;
         messages.extend(recipients);

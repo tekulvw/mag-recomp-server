@@ -117,6 +117,7 @@ pub(super) fn interaction<W: Write>(
 impl<W: Write> Engine<W> {
     pub(crate) fn reset_objective_world(&mut self) {
         self.automatic_repair = Default::default();
+        self.automatic_heal = Default::default();
         if let Some(runtime) = &mut self.squad_orders {
             runtime.reset();
         }

@@ -2760,7 +2760,7 @@ mod queued_grenade_reward_tests;
 
 #[cfg(test)]
 #[path = "healing_reward_relationship_tests.rs"]
-mod healing_reward_relationship_tests;
+pub(crate) mod healing_reward_relationship_tests;
 
 /// Isolated snapshot of precisely the registry fields ordinary damage mutates.
 pub(crate) struct CharacterDamageCandidate {

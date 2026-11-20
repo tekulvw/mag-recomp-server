@@ -154,6 +154,8 @@ struct CombatChanges {
 
 #[derive(Default)]
 struct ReplicationChanges {
+    /// Health/life bodies waiting behind already queued world publications.
+    ordered_health: Option<Vec<u8>>,
     initial_objects: Option<Vec<u8>>,
     spawn_delta: Option<Vec<u8>>,
     wave_delta: Option<Vec<u8>>,
@@ -437,6 +439,17 @@ impl<W: Write> Engine<W> {
                     || active.replication_history.len() < MAX_REPLICATION_HISTORY,
             };
             let decoded = plan_message(&ctx, &mut plan)?;
+            if active.ordered_health_pending
+                && !active.pending_shared.is_empty()
+                && (plan.replication.damage_delta.is_some()
+                    || plan.replication.spawn_delta.is_some()
+                    || plan.replication.wave_delta.is_some())
+            {
+                // A newer health/life body must not overtake a scheduled
+                // model already waiting in this recipient's reliable FIFO.
+                // Assign its sequence only when that FIFO actually drains.
+                plan.replication.ordered_health = plan.outgoing.take();
+            }
             if let Some(payload) = plan.outgoing.take() {
                 plan.messages.push(OutboundMessage {
                     reservation_id: event.reservation_id.clone(),
@@ -495,6 +508,7 @@ impl<W: Write> Engine<W> {
                 "peer_lives":plan.combat.peer_lives.iter().map(|(id,life)|json!({"reservation_id":id,"life":format!("{life:?}")})).collect::<Vec<_>>(),
                 "new_life":plan.combat.new_life.map(|life|format!("{life:?}")),
                 "death_notifications": plan.combat.death_notifications.iter().map(|p| p.audit()).collect::<Vec<_>>(),
+                "ordered_health": plan.replication.ordered_health.as_ref().map(|p| protocol::encode_hex(p)),
                 "domination_sequence_batches": plan.replication.domination_sequence_batches.iter()
                     .map(|packet| protocol::encode_hex(packet)).collect::<Vec<_>>(),
                 "messages": plan.messages,
@@ -654,6 +668,7 @@ impl<W: Write> Engine<W> {
             .or(plan.replication.damage_delta.as_ref())
             .or(plan.replication.projectile_delta.as_ref())
             .or(plan.replication.dummy_delta.as_ref())
+            .filter(|_| plan.replication.ordered_health.is_none())
         {
             active.remember(packet.clone())?;
         }
@@ -1022,6 +1037,16 @@ impl<W: Write> Engine<W> {
         }
         if let Some(candidate) = plan.squad_order_candidate {
             self.install_squad_order_candidate(candidate);
+        }
+        if let Some(packet) = plan.replication.ordered_health {
+            for recipient in self
+                .active
+                .iter_mut()
+                .chain(self.peers.values_mut())
+                .filter(|a| a.initial_objects.is_some())
+            {
+                recipient.queue_shared(packet.clone());
+            }
         }
         Ok(plan.messages)
     }
