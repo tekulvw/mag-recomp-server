@@ -53,8 +53,11 @@ impl EngineResources {
         if item_catalog.application_id() != application_id {
             return Err("item_catalog_application_mismatch");
         }
-        if spawn_catalog.match_profile().has_bunkers && bunker_world.is_none() {
-            return Err("bunker_world_required");
+        if spawn_catalog.match_profile().has_bunkers {
+            let world = bunker_world.as_ref().ok_or("bunker_world_required")?;
+            if application_id == 20231 {
+                world.validate_domination_profile(&spawn_catalog)?;
+            }
         }
         if !spawn_catalog.match_profile().has_bunkers {
             if bunker_world.is_some() {
@@ -84,6 +87,9 @@ impl EngineResources {
     ) -> Result<Self, &'static str> {
         if self.bunker_world.is_none() {
             return Err("bunker_exit_policy_requires_bunkers");
+        }
+        if self.runtime_application_id == Some(20231) {
+            return Err("retail_bunker_exits_are_profile_bound");
         }
         policy.validate()?;
         self.bunker_exit_policy = Some(policy);
@@ -199,6 +205,7 @@ impl<W: Write> Engine<W> {
             ground_runtime: None,
             acquisition_round: None,
             domination_round: None,
+            domination_gameplay: None,
             acquisition_gameplay: None,
             acquisition_effect_origin: std::sync::Arc::new(()),
             acquisition_static_partitions: Default::default(),

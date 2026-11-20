@@ -9,6 +9,9 @@ pub(super) fn mount_seat<W: Write>(
     if request.vehicle_id >> 24 == 1 {
         return ground_mount(ctx, plan, request);
     }
+    if ctx.engine.match_profile().game_type == 2 && ctx.engine.match_profile().auto_assign_teams {
+        return super::bunker_seats::mount(ctx, plan, request);
+    }
     let active = ctx.active;
     let now = ctx.now;
     let next_sequence = ctx.next_sequence;
@@ -84,8 +87,14 @@ pub(super) fn dismount_seat<W: Write>(
     plan: &mut EventPlan,
     request: protocol::DismountSeat,
 ) -> Result<Value, &'static str> {
+    if request.vehicle_id >> 24 == 2 {
+        return helo_dismount(ctx, plan, request);
+    }
     if request.vehicle_id >> 24 == 1 {
         return ground_dismount(ctx, plan, request);
+    }
+    if ctx.engine.match_profile().game_type == 2 && ctx.engine.match_profile().auto_assign_teams {
+        return super::bunker_seats::dismount(ctx, plan, request);
     }
     let active = ctx.active;
     let now = ctx.now;
@@ -150,6 +159,44 @@ pub(super) fn dismount_seat<W: Write>(
         "camera_yaw":request.camera_yaw,"eligible":eligible,
         "transition_sent":plan.replication.seat_transition.is_some(),"exit_policy":"operator_supplied_model_relative_clearance_deferred",
         "exit_candidate":exit.map(|value| value.candidate_index)}),
+    )
+}
+
+fn helo_dismount<W: Write>(
+    ctx: &PlanningContext<'_, W>,
+    plan: &mut EventPlan,
+    request: protocol::DismountSeat,
+) -> Result<Value, &'static str> {
+    let active = ctx.active;
+    if !ctx.accepted_client_route || !ctx.history_available {
+        plan.gameplay_denial = Some("domination_helo_exit_route_unavailable");
+    } else if !active.is_mounted() && active.last_exit == Some(request) {
+        plan.outgoing = active.seat_transitions.last().cloned();
+    } else {
+        match ctx
+            .engine
+            .prepare_manual_helo_exit(active, request, ctx.next_sequence, ctx.now)
+        {
+            Ok(exit) => {
+                plan.helo_runtime = Some(exit.fleet);
+                if let Some((pose, packet)) = exit.transition {
+                    plan.outgoing = Some(packet.clone());
+                    plan.replication.seat_transition = Some(packet);
+                    plan.session.new_helo_seat = Some(None);
+                    plan.session.last_exit = Some(request);
+                    plan.session.exit_yaw = Some(pose.packed_yaw);
+                    plan.session.server_position =
+                        Some((pose.position, player_tracking::PositionOrigin::ServerExit));
+                } else {
+                    plan.gameplay_denial = Some("domination_helo_disembark_unresolved");
+                }
+            }
+            Err(code) => plan.gameplay_denial = Some(code),
+        }
+    }
+    Ok(
+        json!({"type":"helo_dismount", "vehicle_id":request.vehicle_id, "seat_id":request.seat_id,
+        "transition_sent":plan.replication.seat_transition.is_some()}),
     )
 }
 

@@ -97,8 +97,12 @@ impl StructureCatalog {
         )
     }
     pub fn from_value(raw: Value) -> io::Result<Self> {
+        Self::from_value_for_application(raw, 20230)
+    }
+
+    pub(crate) fn from_value_for_application(raw: Value, application_id: u64) -> io::Result<Self> {
         if raw.get("schema_version").and_then(Value::as_u64) != Some(1)
-            || raw.get("application_id").and_then(Value::as_u64) != Some(20230)
+            || raw.get("application_id").and_then(Value::as_u64) != Some(application_id)
         {
             return Err(invalid("unsupported structure catalog schema/application"));
         }

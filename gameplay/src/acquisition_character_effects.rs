@@ -35,6 +35,18 @@ pub enum Request {
         from_direction: [f32; 3],
         attacker: u32,
     },
+    /// A Structural blast target after authored radius and material tracing.
+    StructuralExplosion {
+        raw_hp: f32,
+        from_direction: [f32; 3],
+        attacker: u32,
+        objective_id: u32,
+    },
+    /// A qualified target in the Structural objective's periodic damage scan.
+    StructuralArea {
+        raw_hp: f32,
+        from_direction: [f32; 3],
+    },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -190,6 +202,17 @@ impl<W: Write> Engine<W> {
         let initial_invulnerability = native
             .invulnerability
             .ok_or("acquisition_character_invulnerability_missing")?;
+        let source_object = match request {
+            Request::StructuralExplosion { objective_id, .. }
+                if objective_id & 0xffff_0000 == 0x0c80_0000 =>
+            {
+                objective_id
+            }
+            Request::StructuralExplosion { .. } => {
+                return Err("invalid_structural_blast_source_object");
+            }
+            _ => u32::MAX,
+        };
         let (
             raw,
             kind,
@@ -273,6 +296,12 @@ impl<W: Write> Engine<W> {
                 raw_hp,
                 from_direction,
                 attacker,
+            }
+            | Request::StructuralExplosion {
+                raw_hp,
+                from_direction,
+                attacker,
+                ..
             } => {
                 if !raw_hp.is_finite() || raw_hp <= 0. {
                     return Err("invalid_acquisition_explosion_damage");
@@ -287,10 +316,37 @@ impl<W: Write> Engine<W> {
                     damage::DamageKind::Explosive,
                     10,
                     attacker,
-                    5,
+                    if source_object == u32::MAX { 5 } else { 6 },
                     -1,
                     [0., -1., 0.],
                     explosion_direction_user_data(from_direction)?,
+                    false,
+                )
+            }
+            Request::StructuralArea {
+                raw_hp,
+                from_direction,
+            } => {
+                if !raw_hp.is_finite()
+                    || raw_hp <= 0.
+                    || !from_direction.iter().all(|x| x.is_finite())
+                {
+                    return Err("invalid_structural_area_damage");
+                }
+                (
+                    armor::RawCharacterDamage {
+                        amount_hp: raw_hp,
+                        armor_rating_redux: 0.,
+                        armor_prevention_redux: 0.,
+                        hit_location: 0,
+                    },
+                    damage::DamageKind::Bullet,
+                    9,
+                    target.character_id,
+                    9,
+                    -1,
+                    from_direction,
+                    0,
                     false,
                 )
             }
@@ -326,7 +382,7 @@ impl<W: Write> Engine<W> {
             "generation":target.generation,"world":target.world,"raw_amount_hp":raw.amount_hp,
             "damage_type":wire_damage_type,
             "damage_source_type":source_type,"damage_source_index":source_index,
-            "attacker":attacker,"source_object":u32::MAX,"location":raw.hit_location,"user_data":user_data,
+            "attacker":attacker,"source_object":source_object,"location":raw.hit_location,"user_data":user_data,
             "from_direction":from_direction,"invulnerability_before":initial_invulnerability,
             "invulnerability_during":native_during.invulnerability,"invulnerability_after":native_after.invulnerability});
         let human = plan.expected.reservation.as_ref().and_then(|id| {
@@ -391,7 +447,7 @@ impl<W: Write> Engine<W> {
                     )?,
                     conditions: 0,
                     last_attacker: attacker,
-                    last_source_object: u32::MAX,
+                    last_source_object: source_object,
                     last_user_data: user_data,
                 };
                 if let Some(victim) = human {
@@ -587,7 +643,9 @@ actor_effect_state! {
     pending_shared: std::collections::VecDeque<Vec<u8>>,
     replication_backlogged: bool,
     mounted_seat: Option<u8>,
+    mounted_bunker: Option<u16>,
     ground_seat: Option<ground_seats::PassengerSeat>,
+    helo_seat: Option<domination_helo::PassengerSeat>,
     last_exit: Option<protocol::DismountSeat>,
     pending_spawn_deadline: Option<Duration>,
     published_wave_deadline: Option<Duration>,

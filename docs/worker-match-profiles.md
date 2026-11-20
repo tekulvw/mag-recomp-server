@@ -6,6 +6,10 @@ opt-in with `--application-id 20231 --match-profiles /absolute/profiles.json`.
 The existing required base resource arguments, including `--spawn-catalog`, remain
 required and validated. The registry is an explicit override at acknowledged
 selection time; a missing optional profile resource never reuses a base resource.
+The base remains a supported no-bunker profile, even when registry rows supply
+Domination hospitals. A noninteractive initial-load Domination profile can serve
+as that base; supply its matching initial objective catalog. The worker refuses
+admission until an acknowledged registry selection replaces that base world.
 
 All resources are external operator inputs. The public tree contains source and
 invented fixtures only. These schema checks do not prove native identities,
@@ -45,8 +49,12 @@ collision paths are loaded once and immutable triangle/BVH buffers are shared
 across profiles and selections.
 
 The spawn catalog determines the summary, sides and map. Registry mode supports
-Sabotage (`game_type: 0`) and Acquisition (`game_type: 1`) with automatic team
-assignment, two distinct factions, defender-owned map metadata and no bunkers.
+Sabotage (`game_type: 0`), Acquisition (`game_type: 1`) and Domination
+(`game_type: 2`) with automatic team assignment, two distinct factions and
+defender-owned map metadata. Domination uses all 32 squad bindings and may supply
+the three per-profile hospital inputs together: `bunker_placement`,
+`bunker_structure` and `bunker_allocation`. Other modes retain their existing
+no-bunker profile restriction.
 Both sides must have enough authored squad capacity for the declared team
 capacity. `maximum_players` is twice that capacity and cannot exceed 64.
 All six ordered faction pairs for each mode can be listed; the registry does not
@@ -59,8 +67,18 @@ character damage rules retain their existing exact spawn-source hash checks.
 Item catalogs, bootstrap equipment, combat/skill data and the map-independent
 falling/incapacitation rules remain global. Bootstrap faction coverage is checked
 for every loaded profile. Unswitchable bot population, leadership, bunker and
-development-dummy combinations are rejected in registry mode. Their map-scoped
+development-dummy combinations are rejected in registry mode. Per-profile
+Domination hospitals are supported; global bunker arguments remain rejected.
+The remaining unsupported extras' map-scoped
 state must be explicitly implemented before those combinations can be supported.
+
+An interactive Domination profile additionally supplies `domination_round` and
+`domination_gameplay`, ground vehicles, character damage rules and collision.
+Its worker also needs dynamic body bindings and a qualified static partition for
+each map. Startup preloads and validates the complete backend before advertising
+the profile; selection installs a fresh clone and an exact formation retry keeps
+the current world. See [Domination configuration](domination-runtime.md) for the
+explicit backend inputs and current insertion scope.
 
 ## Bridge contract
 

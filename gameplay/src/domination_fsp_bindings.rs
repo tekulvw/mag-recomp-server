@@ -200,6 +200,17 @@ impl Bindings {
             objectives,
         })
     }
+    pub(crate) fn category_zero_indices(&self) -> Result<[u16; 32], &'static str> {
+        let mut result = [0; 32];
+        for (index, squad) in self.squads.iter().enumerate() {
+            result[index] = squad
+                .category_zero
+                .ok_or("domination_fsp_category_zero_missing")?
+                .native_id as u16;
+        }
+        Ok(result)
+    }
+
     pub fn plan_entry(
         &self,
         objective_token: u32,

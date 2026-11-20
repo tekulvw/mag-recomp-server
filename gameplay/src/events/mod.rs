@@ -9,6 +9,7 @@ mod corrections;
 mod falling;
 mod objectives;
 pub(crate) use objectives::exit_message as objective_hold_exit;
+mod bunker_seats;
 mod owner;
 mod resuscitate;
 mod seats;
@@ -48,6 +49,8 @@ struct EventPlan {
     session: SessionChanges,
     objective_world: Option<objective_control::ObjectiveWorld>,
     ground_runtime: Option<acquisition_ground_runtime::Runtime>,
+    helo_runtime: Option<domination_helo::FleetRuntime>,
+    helo_damage_relay: Vec<Vec<u8>>,
     ground_dynamics_relay: Option<(u16, Vec<u8>)>,
     ground_damage_relay: Option<Vec<u8>>,
     combat: CombatChanges,
@@ -84,7 +87,9 @@ struct SessionChanges {
     published_wave_deadline: Option<Duration>,
     cancel_pending_spawn: bool,
     new_mounted_seat: Option<Option<u8>>,
+    new_mounted_bunker: Option<u16>,
     new_ground_seat: Option<Option<ground_seats::PassengerSeat>>,
+    new_helo_seat: Option<Option<domination_helo::PassengerSeat>>,
     last_exit: Option<protocol::DismountSeat>,
     exit_yaw: Option<u16>,
     spawn_pose: Option<(replication::CharacterState, u16)>,
@@ -152,12 +157,14 @@ struct ReplicationChanges {
     projectile_delta: Option<Vec<u8>>,
     dummy_delta: Option<Vec<u8>>,
     objective_delta: Option<Vec<u8>>,
+    domination_sequence_batches: Vec<Vec<u8>>,
     objective_assignment: Option<Vec<u8>>,
     objective_clear: Option<Vec<u8>>,
     objective_target: Option<u16>,
     objective_count: usize,
     emplacement_creation: Option<Vec<u8>>,
     ground_vehicle_creation: Option<Vec<u8>>,
+    helo_creation: Option<Vec<u8>>,
     seat_transition: Option<Vec<u8>>,
     squad_spawn_delta: Option<Vec<u8>>,
 }
@@ -170,6 +177,7 @@ struct EventAudit {
     projectile_terminals: Vec<projectile::ProjectileTerminal>,
     grenade_blast_checks: Vec<blast_visibility::GrenadeBlastCheck>,
     ground_grenade_checks: Vec<Value>,
+    helo_grenade_checks: Vec<Value>,
     applied_damage: Option<Value>,
     falling_damage: Option<fall_damage::FallDamage>,
     spawned_point: Option<u16>,
@@ -285,7 +293,32 @@ impl<W: Write> Engine<W> {
         {
             return Err("identity_mismatch");
         }
-        if self.match_terminal.is_none()
+        if self.domination_gameplay.is_some()
+            && event.rt_type == 0x3d
+            && event.plugin_id == Some(1)
+            && matches!(event.transport, Transport::Tcp)
+            && matches!(event.direction, Direction::ClientToServer)
+            && let Ok(protocol::GameMessage::Repair(request)) = &decoded.message
+            && request.target_object_id & 0xffff_0000 == 0x0c80_0000
+        {
+            return self.event_domination_structural_repair(&event, *request, now, wall_secs);
+        }
+        let hospital_route_allowed = self.domination_gameplay.is_none()
+            || match &decoded.message {
+                Ok(protocol::GameMessage::Hit(request)) if request.defender >> 24 == 13 => {
+                    matches!(event.transport, Transport::Udp)
+                        && matches!(event.direction, Direction::ClientToServer)
+                }
+                Ok(protocol::GameMessage::Repair(request))
+                    if request.target_object_id >> 24 == 13 =>
+                {
+                    matches!(event.transport, Transport::Tcp)
+                        && matches!(event.direction, Direction::ClientToServer)
+                }
+                _ => true,
+            };
+        if hospital_route_allowed
+            && self.match_terminal.is_none()
             && event.rt_type == 0x3d
             && event.plugin_id == Some(1)
             && match (event.transport, &decoded.message) {
@@ -308,6 +341,38 @@ impl<W: Write> Engine<W> {
         // Preserve the sequence-exhaustion gate for every authenticated event,
         // including opaque transport payloads that produce no native reply.
         let next_sequence = active.next_sequence()?;
+        if self.domination_gameplay.is_some()
+            && self.match_started
+            && self.match_terminal.is_none()
+            && event.rt_type == 0x3d
+            && event.plugin_id == Some(1)
+            && matches!(event.direction, Direction::ClientToServer)
+            && (self.world_tick_enabled
+                || self.maximum_players > 1
+                || active.replication_history.len() < MAX_REPLICATION_HISTORY)
+            && let Ok(protocol::GameMessage::ObjectiveInteraction(request)) = &decoded.message
+            && matches!(
+                request.kind,
+                protocol::ObjectiveInteractionKind::Activate
+                    | protocol::ObjectiveInteractionKind::Deactivate
+                    | protocol::ObjectiveInteractionKind::Release
+            )
+            && let Some(actor) = objectives::actor(active)
+        {
+            let modifier = plan
+                .leadership
+                .modifiers(active)
+                .value("kCharModDemolitionTime");
+            return self.event_domination_interaction(
+                &event,
+                *request,
+                actor,
+                modifier,
+                plan.leadership,
+                now,
+                wall_secs,
+            );
+        }
         let decoded_log = if event.rt_type == 0x3d && event.plugin_id == Some(1) {
             let ctx = PlanningContext {
                 engine: self,
@@ -374,6 +439,8 @@ impl<W: Write> Engine<W> {
                 "peer_lives":plan.combat.peer_lives.iter().map(|(id,life)|json!({"reservation_id":id,"life":format!("{life:?}")})).collect::<Vec<_>>(),
                 "new_life":plan.combat.new_life.map(|life|format!("{life:?}")),
                 "death_notifications": plan.combat.death_notifications.iter().map(|p| p.audit()).collect::<Vec<_>>(),
+                "domination_sequence_batches": plan.replication.domination_sequence_batches.iter()
+                    .map(|packet| protocol::encode_hex(packet)).collect::<Vec<_>>(),
                 "messages": plan.messages,
                 "rewards": plan.combat.new_rewards,
                 "rejection": plan.rejection,
@@ -463,7 +530,10 @@ impl<W: Write> Engine<W> {
                 peer.life = life;
                 if !life.is_alive() {
                     peer.ground_seat = None;
+                    peer.helo_seat = None;
+                    peer.helo_creation_sent = false;
                     peer.mounted_seat = None;
+                    peer.mounted_bunker = None;
                 }
             }
         }
@@ -523,6 +593,7 @@ impl<W: Write> Engine<W> {
             .or(plan.replication.objective_clear.as_ref())
             .or(plan.replication.emplacement_creation.as_ref())
             .or(plan.replication.ground_vehicle_creation.as_ref())
+            .or(plan.replication.helo_creation.as_ref())
             .or(plan.replication.seat_transition.as_ref())
             .or(plan.replication.damage_delta.as_ref())
             .or(plan.replication.projectile_delta.as_ref())
@@ -619,7 +690,10 @@ impl<W: Write> Engine<W> {
             active.life = life;
             if !life.is_alive() {
                 active.ground_seat = None;
+                active.helo_seat = None;
+                active.helo_creation_sent = false;
                 active.mounted_seat = None;
+                active.mounted_bunker = None;
             }
             if !life.is_alive() || plan.replication.spawn_delta.is_some() {
                 active.revive_state_pending = false;
@@ -690,6 +764,9 @@ impl<W: Write> Engine<W> {
             active.objective_needs_clear = false;
         }
         active.objective_assigned |= plan.replication.objective_assignment.is_some();
+        for packet in plan.replication.domination_sequence_batches {
+            active.queue_shared(packet);
+        }
         if plan.replication.objective_delta.is_some() {
             active.objective_delta = plan.replication.objective_delta;
         }
@@ -699,17 +776,31 @@ impl<W: Write> Engine<W> {
         if plan.replication.ground_vehicle_creation.is_some() {
             active.ground_vehicle_batch += 1;
         }
+        active.helo_creation_sent |= plan.replication.helo_creation.is_some();
+        if let Some(seat) = plan.session.new_helo_seat {
+            active.helo_seat = seat;
+            if let Some(yaw) = plan.session.exit_yaw {
+                active.last_exit = plan.session.last_exit;
+                active.owner_fields.state = Some(replication::CharacterState {
+                    state: 1,
+                    stance: 0,
+                    user_data: [0; 3],
+                });
+                active.owner_fields.yaw = Some(yaw);
+            }
+        }
         if let Some(delta) = plan.replication.seat_transition {
             active.seat_transitions.push(delta);
         }
         if let Some(seat) = plan.session.new_mounted_seat {
             active.mounted_seat = seat;
+            active.mounted_bunker = seat.and(plan.session.new_mounted_bunker);
             active.last_exit = plan.session.last_exit;
             active.owner_fields.state = Some(match seat {
                 Some(seat) => replication::CharacterState {
                     state: 14,
                     stance: 0,
-                    user_data: [13, 0, seat],
+                    user_data: [13, active.mounted_bunker.unwrap_or(0) as u8, seat],
                 },
                 None => replication::CharacterState {
                     state: 1,
@@ -847,6 +938,16 @@ impl<W: Write> Engine<W> {
                     }
                 }
             }
+        }
+        if let Some(runtime) = plan.helo_runtime {
+            let world = self
+                .domination_gameplay
+                .as_mut()
+                .ok_or("domination_helo_world_required")?;
+            world.state.helo = Some(runtime);
+        }
+        for packet in plan.helo_damage_relay {
+            self.broadcast_bot_packet(packet);
         }
         // Manual seat transitions already carry the same-frame vehicle
         // ownership correction. Incapacitation clears it with a shared delta.

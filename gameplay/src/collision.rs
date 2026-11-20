@@ -88,6 +88,10 @@ struct InstanceDocument {
     triangles: Vec<[usize; 3]>,
     #[serde(default)]
     collision: Option<StaticProperties>,
+    #[serde(default)]
+    material_index: Option<u8>,
+    #[serde(default)]
+    terrain_material: bool,
 }
 
 /// Explicit physics inputs. Missing metadata remains unavailable to body casts;
@@ -208,6 +212,13 @@ impl Node {
         }
     }
 }
+pub(crate) struct MaterialRayHit {
+    pub(crate) fraction: f64,
+    pub(crate) material_index: Option<u8>,
+    pub(crate) terrain: bool,
+    pub(crate) front: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct CollisionWorld {
     source_sha256: String,
@@ -216,6 +227,7 @@ pub struct CollisionWorld {
     // these buffers instead of duplicating map geometry on each selection.
     instance_ids: std::sync::Arc<[String]>,
     static_properties: std::sync::Arc<[Option<StaticProperties>]>,
+    material_indices: std::sync::Arc<[(Option<u8>, bool)]>,
     triangles: std::sync::Arc<[Triangle]>,
     nodes: std::sync::Arc<[Node]>,
     root: Option<usize>,
@@ -257,9 +269,6 @@ impl CollisionWorld {
         max: Vec3,
         budget: &mut usize,
     ) -> Result<Vec<StaticTriangle<'_>>, &'static str> {
-        if !(0..3).all(|i| min[i].is_finite() && max[i].is_finite() && min[i] <= max[i]) {
-            return Err("world_cast_invalid_bounds");
-        }
         if self.metadata.coverage != Coverage::Complete
             && !self.metadata.physics_regions.iter().any(|r| {
                 r.ground_verified
@@ -268,6 +277,44 @@ impl CollisionWorld {
             })
         {
             return Err("world_cast_outside_verified_region");
+        }
+        self.triangle_indices_in_box(min, max, budget)?
+            .into_iter()
+            .map(|index| {
+                let triangle = &self.triangles[index];
+                Ok(StaticTriangle {
+                    vertices: triangle.vertices,
+                    properties: self.static_properties[triangle.instance]
+                        .as_ref()
+                        .ok_or("world_cast_static_properties_unavailable")?,
+                })
+            })
+            .collect()
+    }
+
+    /// Source-bound moving meshes carry geometry directly. They have no
+    /// static-world filter record or global partition coverage of their own.
+    pub(crate) fn local_triangles_in_box(
+        &self,
+        min: Vec3,
+        max: Vec3,
+        budget: &mut usize,
+    ) -> Result<Vec<[Vec3; 3]>, &'static str> {
+        Ok(self
+            .triangle_indices_in_box(min, max, budget)?
+            .into_iter()
+            .map(|index| self.triangles[index].vertices)
+            .collect())
+    }
+
+    fn triangle_indices_in_box(
+        &self,
+        min: Vec3,
+        max: Vec3,
+        budget: &mut usize,
+    ) -> Result<Vec<usize>, &'static str> {
+        if !(0..3).all(|i| min[i].is_finite() && max[i].is_finite() && min[i] <= max[i]) {
+            return Err("world_cast_invalid_bounds");
         }
         let overlaps = |b: Bounds| (0..3).all(|i| b.min[i] <= max[i] && b.max[i] >= min[i]);
         let mut stack = Vec::new();
@@ -290,18 +337,13 @@ impl CollisionWorld {
                     stack.push(*left);
                 }
                 Node::Leaf { start, end, .. } => {
-                    for t in &self.triangles[*start..*end] {
+                    for (triangle, t) in self.triangles[*start..*end].iter().enumerate() {
                         if *budget == 0 {
                             return Err("world_cast_work_limit");
                         }
                         *budget -= 1;
                         if overlaps(t.bounds) {
-                            rows.push(StaticTriangle {
-                                vertices: t.vertices,
-                                properties: self.static_properties[t.instance]
-                                    .as_ref()
-                                    .ok_or("world_cast_static_properties_unavailable")?,
-                            });
+                            rows.push(*start + triangle);
                         }
                     }
                 }
@@ -312,14 +354,7 @@ impl CollisionWorld {
     /// Read a regular JSON file once, validate all geometry, and build a BVH.
     /// Any read/schema/geometry failure is an error, never an empty world.
     pub fn load(path: impl AsRef<Path>, limits: CollisionLimits) -> Result<Self, CollisionError> {
-        if !limits.max_abs_coordinate.is_finite()
-            || limits.max_abs_coordinate <= 0.0
-            || limits.max_abs_coordinate > 1e50
-            || limits.max_file_bytes == 0
-            || limits.max_file_bytes.checked_add(1).is_none()
-        {
-            return Err(invalid("invalid collision limits"));
-        }
+        Self::validate_limits(limits)?;
         let path = path.as_ref();
         let info =
             std::fs::metadata(path).map_err(|e| invalid(format!("collision metadata: {e}")))?;
@@ -337,7 +372,18 @@ impl CollisionWorld {
         if bytes.len() as u64 > limits.max_file_bytes {
             return Err(invalid("collision file byte limit exceeded"));
         }
-        let document: WorldDocument = serde_json::from_slice(&bytes)
+        Self::from_bytes(&bytes, limits)
+    }
+
+    pub(crate) fn from_bytes(
+        bytes: &[u8],
+        limits: CollisionLimits,
+    ) -> Result<Self, CollisionError> {
+        Self::validate_limits(limits)?;
+        if bytes.len() as u64 > limits.max_file_bytes {
+            return Err(invalid("collision file byte limit exceeded"));
+        }
+        let document: WorldDocument = serde_json::from_slice(bytes)
             .map_err(|e| invalid(format!("collision JSON schema: {e}")))?;
         if document.format != "mag_collision_world"
             || document.schema_version != 1
@@ -383,6 +429,7 @@ impl CollisionWorld {
         }
         let mut instance_ids = Vec::with_capacity(document.instances.len());
         let mut static_properties = Vec::with_capacity(document.instances.len());
+        let mut material_indices = Vec::with_capacity(document.instances.len());
         let mut seen = HashSet::new();
         let mut triangles = Vec::with_capacity(triangle_count);
         for instance in document.instances {
@@ -429,6 +476,10 @@ impl CollisionWorld {
             }
             instance_ids.push(instance.id);
             static_properties.push(instance.collision);
+            if instance.material_index.is_some() && instance.terrain_material {
+                return Err(invalid("ambiguous terrain material binding"));
+            }
+            material_indices.push((instance.material_index, instance.terrain_material));
         }
         let mut nodes = Vec::new();
         let root = if triangles.is_empty() {
@@ -444,12 +495,13 @@ impl CollisionWorld {
             bounds: root.map(|i| nodes[i].bounds()),
         };
         use sha2::Digest;
-        let source_sha256 = format!("{:x}", sha2::Sha256::digest(&bytes));
+        let source_sha256 = format!("{:x}", sha2::Sha256::digest(bytes));
         Ok(Self {
             source_sha256,
             metadata,
             instance_ids: instance_ids.into(),
             static_properties: static_properties.into(),
+            material_indices: material_indices.into(),
             triangles: triangles.into(),
             nodes: nodes.into(),
             root,
@@ -457,6 +509,18 @@ impl CollisionWorld {
             max_abs_coordinate: limits.max_abs_coordinate,
         })
     }
+    fn validate_limits(limits: CollisionLimits) -> Result<(), CollisionError> {
+        if !limits.max_abs_coordinate.is_finite()
+            || limits.max_abs_coordinate <= 0.0
+            || limits.max_abs_coordinate > 1e50
+            || limits.max_file_bytes == 0
+            || limits.max_file_bytes.checked_add(1).is_none()
+        {
+            return Err(invalid("invalid collision limits"));
+        }
+        Ok(())
+    }
+
     /// Fingerprint of the validated disk input, cached once at load.
     pub fn source_sha256(&self) -> &str {
         &self.source_sha256
@@ -467,6 +531,117 @@ impl CollisionWorld {
     pub fn stats(&self) -> CollisionStats {
         self.stats
     }
+    /// Return all interior crossings with source subpart material and winding.
+    pub(crate) fn material_ray_hits(
+        &self,
+        start: Vec3,
+        end: Vec3,
+        budget: &mut usize,
+    ) -> Result<Vec<MaterialRayHit>, CollisionError> {
+        if !valid_point(start, self.max_abs_coordinate)
+            || !valid_point(end, self.max_abs_coordinate)
+            || start == end
+        {
+            return Err(invalid("invalid material ray"));
+        }
+        let delta = sub(end, start);
+        let mut hits = Vec::new();
+        let mut stack: Vec<_> = self.root.into_iter().collect();
+        while let Some(index) = stack.pop() {
+            consume_budget(budget)?;
+            let node = &self.nodes[index];
+            if !node.bounds().intersects(start, delta, 1.0) {
+                continue;
+            }
+            match node {
+                Node::Branch { left, right, .. } => stack.extend([*right, *left]),
+                Node::Leaf {
+                    start: first,
+                    end: last,
+                    ..
+                } => {
+                    for triangle in &self.triangles[*first..*last] {
+                        consume_budget(budget)?;
+                        if let Some(fraction) = intersect_triangle(start, delta, triangle.vertices)
+                            && fraction > 0.0
+                            && fraction < 1.0
+                        {
+                            let (material_index, terrain) =
+                                self.material_indices[triangle.instance];
+                            hits.push(MaterialRayHit {
+                                fraction,
+                                material_index,
+                                terrain,
+                                // The native triangle caster orients its returned
+                                // normal toward the ray's starting half-space.
+                                front: true,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        Ok(hits)
+    }
+
+    /// Test a world-space axis aligned box against this mesh in the
+    /// supplied rigid placement. BVH pruning is in the mesh coordinate space.
+    pub(crate) fn overlaps_placed_aabb(
+        &self,
+        pose: crate::dynamic_collision::Pose,
+        centre: Vec3,
+        half: Vec3,
+        budget: &mut usize,
+    ) -> Result<bool, CollisionError> {
+        if !valid_point(centre, self.max_abs_coordinate)
+            || half
+                .iter()
+                .any(|v| !v.is_finite() || *v <= 0.0 || *v > 100.0)
+        {
+            return Err(invalid("invalid placed body box"));
+        }
+        let offset = sub(centre, pose.translation);
+        let local: Vec3 = std::array::from_fn(|axis| {
+            (0..3)
+                .map(|row| offset[row] * pose.rotation[row][axis])
+                .sum()
+        });
+        let extent: Vec3 = std::array::from_fn(|axis| {
+            (0..3)
+                .map(|row| half[row] * pose.rotation[row][axis].abs())
+                .sum()
+        });
+        let mut stack: Vec<_> = self.root.into_iter().collect();
+        while let Some(index) = stack.pop() {
+            consume_budget(budget)?;
+            let node = &self.nodes[index];
+            let bounds = node.bounds();
+            if (0..3).any(|axis| {
+                bounds.max[axis] < local[axis] - extent[axis]
+                    || bounds.min[axis] > local[axis] + extent[axis]
+            }) {
+                continue;
+            }
+            match node {
+                Node::Branch { left, right, .. } => stack.extend([*right, *left]),
+                Node::Leaf { start, end, .. } => {
+                    for triangle in &self.triangles[*start..*end] {
+                        consume_budget(budget)?;
+                        let vertices = triangle.vertices.map(|vertex| {
+                            std::array::from_fn(|axis| {
+                                dot(pose.rotation[axis], vertex) + pose.translation[axis]
+                            })
+                        });
+                        if sweep_triangle(centre, [0.; 3], half, vertices).is_some() {
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(false)
+    }
+
     /// Nearest double-sided triangle crossing on [start,end]. A zero-length or
     /// invalid segment is rejected. Coplanar travel has no isolated crossing.
     /// A miss says only that supplied triangles did not intersect the segment.

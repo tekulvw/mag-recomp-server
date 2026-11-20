@@ -6,7 +6,28 @@ pub(super) fn hit<W: Write>(
     plan: &mut EventPlan,
     request: bullet_hit::NetMessageHit,
 ) -> Result<Value, &'static str> {
-    if ctx.engine.acquisition_gameplay.is_some() && request.defender >> 24 == 1 {
+    if request.defender >> 24 == 2 && ctx.engine.domination_gameplay.is_some() {
+        let result = if ctx.accepted_owner_route {
+            ctx.engine
+                .prepare_domination_helo_hit(ctx.active, &request, ctx.now)
+        } else {
+            Err("helo_hit_requires_native_client_route")
+        };
+        return Ok(match result {
+            Ok(hit) => {
+                plan.helo_runtime = Some(hit.fleet);
+                plan.helo_damage_relay.extend(hit.packet);
+                hit.audit
+            }
+            Err(code) => {
+                plan.gameplay_denial = Some(code);
+                json!({"type":"domination_helo_bullet_hit","target_id":request.defender})
+            }
+        });
+    }
+    if request.defender >> 24 == 1
+        && (ctx.engine.acquisition_gameplay.is_some() || ctx.engine.domination_gameplay.is_some())
+    {
         let result = if ctx.accepted_owner_route {
             ctx.engine
                 .prepare_acquisition_ground_hit(ctx.active, &request, ctx.now)
@@ -345,7 +366,8 @@ pub(super) fn fire_grenade<W: Write>(
     let bytes = ctx.decoded.bytes;
     let owned = request.shooter_id == (0x03800000 | u32::from(active.reservation.player))
         && request.shooter_client_index == active.reservation.player;
-    let qualified_route = ctx.engine.acquisition_gameplay.is_none() || ctx.accepted_client_route;
+    let qualified_route = ctx.accepted_client_route
+        || (ctx.engine.acquisition_gameplay.is_none() && ctx.engine.domination_gameplay.is_none());
     let eligible = qualified_route
         && active.entered_game
         && active.ready_for_updates

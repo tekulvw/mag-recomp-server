@@ -66,7 +66,7 @@ pub(super) fn object_update<W: Write>(
         "bot_script":plan.audit.bot_script,
         "development_target_spawned":plan.combat.dummy_health.is_some() && plan.audit.bot_script.as_ref().is_none_or(|r|r["phase"]=="spawn" || r["phase"]=="respawn"),
         "team_wave_deadline_ms":plan.session.published_wave_deadline.map(|d|d.as_millis() as u32),
-        "spawn_point_index":plan.audit.spawned_point,"spawn_mounted_seat":plan.session.new_mounted_seat.flatten(),
+        "spawn_point_index":plan.audit.spawned_point,"spawn_mounted_seat":plan.session.new_mounted_seat.flatten(),"spawn_mounted_bunker":plan.session.new_mounted_bunker,
         "spawn_ground_vehicle_index":plan.session.new_ground_seat.flatten().map(|s|s.vehicle_index),
         "spawn_ground_passenger_seat":plan.session.new_ground_seat.flatten().map(|s|s.seat),
         "life_generation":if plan.replication.spawn_delta.is_some(){active.life.next_generation()}else{None},
@@ -74,6 +74,9 @@ pub(super) fn object_update<W: Write>(
         "replication_sequence":if plan.replication.spawn_delta.is_some() || plan.replication.wave_delta.is_some(){Some(next_sequence)}else{None}});
     if !plan.audit.ground_grenade_checks.is_empty() {
         audit["ground_grenade_checks"] = json!(plan.audit.ground_grenade_checks);
+    }
+    if !plan.audit.helo_grenade_checks.is_empty() {
+        audit["helo_grenade_checks"] = json!(plan.audit.helo_grenade_checks);
     }
     Ok(audit)
 }
@@ -183,10 +186,11 @@ fn plan_owner_report<W: Write>(
         }
         Err(owner_update::OwnerUpdateError::Invalid(code)) => plan.rejection = Some(code),
         Ok(fields) => {
-            // Acquisition projectile authority includes both the reports that
-            // seed terminal state and the update that consumes that terminal.
-            let qualified_owner_route =
-                ctx.engine.acquisition_gameplay.is_none() || ctx.accepted_owner_route;
+            // Apply the route constraint to both the report that seeds a
+            // terminal and the update that consumes it.
+            let qualified_owner_route = ctx.accepted_owner_route
+                || (ctx.engine.acquisition_gameplay.is_none()
+                    && ctx.engine.domination_gameplay.is_none());
             if h.client_index == 0 && h.nak_sequence == 0 && qualified_owner_route {
                 plan.session.new_owner_sequence =
                     Some(active.latest_owner_sequence.max(h.sequence));
@@ -352,11 +356,7 @@ fn plan_grenade_blasts<W: Write>(
         && h.nak_sequence == 0
         && h.client_index == 0
         && ctx.engine.round_combat_allowed(ctx.now)
-        && ctx
-            .engine
-            .acquisition_gameplay
-            .as_ref()
-            .is_some_and(|g| g.setup.ground_damage.is_some())
+        && ctx.engine.ground_damage_policy().is_some()
         && plan.audit.projectile_terminals.iter().any(|terminal| {
             terminal.reason == projectile::ProjectileTerminalReason::ReportedDetonation
                 && terminal.position.is_some()
@@ -379,6 +379,15 @@ fn plan_grenade_blasts<W: Write>(
         }
         plan.ground_damage_relay = packet;
         plan.audit.ground_grenade_checks = audit;
+        if let Some(helo) = ctx.engine.prepare_domination_helo_grenades(
+            active,
+            &plan.audit.projectile_terminals,
+            ctx.now,
+        )? {
+            plan.helo_runtime = Some(helo.fleet);
+            plan.helo_damage_relay.extend(helo.packets);
+            plan.audit.helo_grenade_checks = helo.audit;
+        }
     }
 
     if ctx.engine.development_grenade_radius
@@ -619,6 +628,25 @@ fn plan_update_reply<W: Write>(
         plan.outgoing = Some(packet.clone());
         plan.replication.ground_vehicle_creation = Some(packet);
     } else if active.ready_for_updates
+        && active.initial_objects.is_some()
+        && history_available
+        && !active.helo_creation_sent
+        && let Some(fleet) = ctx
+            .engine
+            .domination_gameplay
+            .as_ref()
+            .and_then(|world| world.state.helo.as_ref())
+    {
+        let carriers = fleet
+            .carriers
+            .iter()
+            .map(|carrier| carrier.creation(next_sequence, now.as_millis() as u32))
+            .collect::<Vec<_>>();
+        let packet =
+            domination_helo::HeloCreation::encode_list(&carriers, ctx.engine.wire_profile)?;
+        plan.outgoing = Some(packet.clone());
+        plan.replication.helo_creation = Some(packet);
+    } else if active.ready_for_updates
         && (active.pending_damage.is_some() || !grenade_queue.is_empty())
         && history_available
     {
@@ -650,9 +678,16 @@ fn plan_update_reply<W: Write>(
                 .as_ref()
                 .filter(|w| !w.is_pristine())
             {
-                world
-                    .snapshot(next_sequence, timestamp)
-                    .encode_with_profile(ctx.engine.wire_profile)?
+                let snapshot = world.snapshot(next_sequence, timestamp);
+                if let Some(gameplay) = &ctx.engine.domination_gameplay {
+                    plan.replication.domination_sequence_batches =
+                        replication::ObjectiveSequenceDelta::encode_batches(
+                            &gameplay.current_sequences(),
+                            timestamp,
+                            ctx.engine.wire_profile,
+                        )?;
+                }
+                snapshot.encode_with_profile(ctx.engine.wire_profile)?
             } else {
                 catalog
                     .snapshot(next_sequence, timestamp)
@@ -708,7 +743,7 @@ fn plan_update_reply<W: Write>(
         && active.emplacement_creation.is_none()
         && history_available
     {
-        let bunkers = if ctx.engine.match_profile().has_bunkers {
+        let mut bunkers = if ctx.engine.match_profile().has_bunkers {
             ctx.engine
                 .bunker_world
                 .as_ref()
@@ -717,13 +752,26 @@ fn plan_update_reply<W: Write>(
         } else {
             Vec::new()
         };
+        for bunker in &mut bunkers {
+            let ownership = ctx
+                .engine
+                .bunker_ownership_after(bunker.object_index, u16::MAX, None);
+            bunker.owner_index = ownership.owner;
+            bunker.turret_owners[0] = ownership.turret_owner;
+        }
         let creation = replication::AlphaSpawnSetup {
             sequence: next_sequence,
             timestamp_ms: now.as_millis() as u32,
         }
         .encode_with_bunkers_with_profile(
             active.reservation.player,
-            ctx.engine.alpha_owner(),
+            if ctx.engine.match_profile().game_type == 2
+                && ctx.engine.match_profile().auto_assign_teams
+            {
+                None
+            } else {
+                ctx.engine.alpha_owner()
+            },
             active.squad_catalog.as_ref(),
             &bunkers,
             ctx.engine.wire_profile,

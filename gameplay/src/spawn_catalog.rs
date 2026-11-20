@@ -15,6 +15,8 @@ pub enum SpawnKind {
     Alternate,
     BunkerPassenger,
     VehiclePassenger,
+    #[serde(skip_deserializing)]
+    HeloPassenger,
     OnFoot,
     Parachute,
     Unsupported,
@@ -191,6 +193,10 @@ pub struct SpawnCatalog {
     runtime_inactive: BTreeSet<u16>,
     #[serde(skip)]
     runtime_squads: BTreeMap<u16, RuntimeSquadSpawns>,
+    /// Explicit Domination scope only. These native squad defaults may name a
+    /// disabled insertion. Human selection remains on the sourced category0.
+    #[serde(skip)]
+    domination_helo_scope: Option<(BTreeSet<u16>, [u16; 32])>,
 }
 impl SpawnCatalog {
     pub fn load(path: impl AsRef<Path>) -> io::Result<Self> {
@@ -414,7 +420,7 @@ impl SpawnCatalog {
             return Err("invalid_match_admission_policy");
         }
         if profile.auto_assign_teams {
-            if profile.has_bunkers {
+            if profile.has_bunkers && profile.game_type != 2 {
                 return Err("automatic_bunker_assignment_unsupported");
             }
             for team in 0..2 {
@@ -508,6 +514,80 @@ impl SpawnCatalog {
             .map(|s| s.default_spawn)
             .or_else(|| self.selected_squad(index).map(|s| s.default_spawn))
     }
+    pub(crate) fn qualify_domination_helo_points(
+        &mut self,
+        source: &crate::domination_helo::FleetSource,
+    ) -> Result<(), &'static str> {
+        if self.match_profile().game_type != 2
+            || self.domination_helo_scope.is_some()
+            || source.carriers.len() != 4
+        {
+            return Err("invalid_domination_helo_scope");
+        }
+        if source.carriers.iter().any(|carrier| {
+            self.point(carrier.spawn_index).is_none_or(|point| {
+                point.token != carrier.spawn_token
+                    || point.active
+                    || !matches!(point.kind, SpawnKind::Unsupported)
+            })
+        }) {
+            return Err("unbound_domination_helo_point");
+        }
+        let map = self
+            .maps
+            .iter_mut()
+            .find(|map| map.name == self.active.map_name)
+            .ok_or("missing_active_spawn_map")?;
+        for point in &mut map.locations {
+            if source
+                .carriers
+                .iter()
+                .any(|carrier| carrier.spawn_index == point.index)
+            {
+                point.kind = SpawnKind::HeloPassenger;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn configure_domination_helo_scope(
+        &mut self,
+        disabled: BTreeSet<u16>,
+        fallbacks: [u16; 32],
+    ) -> Result<(), &'static str> {
+        if self.match_profile().game_type != 2
+            || !self.map_pool().runtime_indices_verified
+            || disabled.len() != 4
+            || disabled.iter().any(|&index| {
+                self.point(index).is_none_or(|point| {
+                    point.active || !matches!(point.kind, SpawnKind::Unsupported)
+                })
+            })
+            || fallbacks.iter().enumerate().any(|(squad, &index)| {
+                self.available_for_squad(squad as u16)
+                    .is_none_or(|points| !points.contains(&index))
+                    || self.point(index).is_none_or(|point| {
+                        matches!(point.kind, SpawnKind::Unsupported) || !point.active
+                    })
+            })
+        {
+            return Err("invalid_domination_core_helo_scope");
+        }
+        self.domination_helo_scope = Some((disabled, fallbacks));
+        Ok(())
+    }
+
+    fn locally_selectable_default(&self, squad: u16, raw: u16) -> u16 {
+        let Some((disabled, fallbacks)) = &self.domination_helo_scope else {
+            return raw;
+        };
+        if disabled.contains(&raw) {
+            fallbacks.get(usize::from(squad)).copied().unwrap_or(raw)
+        } else {
+            raw
+        }
+    }
+
     /// Select an authored squad without changing or re-reading the source file.
     /// This infrequent copy is retained per participant, never made per tick.
     pub fn for_squad(&self, index: u16) -> Result<Self, &'static str> {
@@ -517,7 +597,8 @@ impl SpawnCatalog {
             map_name: self.active.map_name.clone(),
             squad_index: index,
             available: self.available_for_squad(index).unwrap().to_vec(),
-            default_spawn: self.default_for_squad(index).unwrap(),
+            default_spawn: self
+                .locally_selectable_default(index, self.default_for_squad(index).unwrap()),
         });
         Ok(selected)
     }
@@ -565,9 +646,13 @@ impl SpawnCatalog {
         squad: u16,
         index: u16,
     ) -> Result<(), &'static str> {
+        let scoped_helo = self
+            .domination_helo_scope
+            .as_ref()
+            .is_some_and(|(disabled, _)| disabled.contains(&index));
         if self
             .point(index)
-            .is_none_or(|point| matches!(point.kind, SpawnKind::Unsupported))
+            .is_none_or(|point| matches!(point.kind, SpawnKind::Unsupported) && !scoped_helo)
         {
             return Err("unsupported_runtime_squad_spawn");
         }
@@ -575,7 +660,7 @@ impl SpawnCatalog {
             .available_for_squad(squad)
             .ok_or("unknown_squad")?
             .to_vec();
-        if !available.contains(&index) {
+        if !scoped_helo && !available.contains(&index) {
             if available.len() >= 8 {
                 return Err("runtime_squad_spawn_capacity");
             }
@@ -589,11 +674,12 @@ impl SpawnCatalog {
             },
         );
         if self.squad_index() == squad {
+            let default = self.locally_selectable_default(squad, index);
             let selected = self
                 .runtime_selection
                 .get_or_insert_with(|| self.active.clone());
             selected.available = available;
-            selected.default_spawn = index;
+            selected.default_spawn = default;
         }
         Ok(())
     }
@@ -672,7 +758,7 @@ impl SpawnCatalog {
                     .find(|m| m.name == self.active.map_name)?
                     .locations
                     .iter()
-                    .find(|p| p.index == index)
+                    .find(|p| p.index == index && !matches!(p.kind, SpawnKind::Unsupported))
             })
             .flatten()
     }

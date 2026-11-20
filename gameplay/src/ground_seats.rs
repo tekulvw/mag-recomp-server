@@ -17,7 +17,7 @@ impl PassengerSeat {
 }
 impl Active {
     pub(crate) fn is_mounted(&self) -> bool {
-        self.mounted_seat.is_some() || self.ground_seat.is_some()
+        self.mounted_seat.is_some() || self.ground_seat.is_some() || self.helo_seat.is_some()
     }
 }
 impl<W: Write> Engine<W> {

@@ -252,7 +252,9 @@ impl<W: Write> Engine<W> {
                 exit.position.y,
             )?;
             actor.ground_seat = None;
+            actor.helo_seat = None;
             actor.mounted_seat = None;
+            actor.mounted_bunker = None;
             actor.last_exit = None;
             actor.owner_fields.state = Some(planned.state);
             actor.owner_fields.position = Some(exit.position);

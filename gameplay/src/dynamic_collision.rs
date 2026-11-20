@@ -477,6 +477,17 @@ impl Snapshot {
         rows: [u32; 32],
         limits: QueryLimits,
     ) -> Result<bool, &'static str> {
+        self.positive_ray_hit_ignoring(start, end, [Some(ignored), None], rows, limits)
+    }
+
+    pub(crate) fn positive_ray_hit_ignoring(
+        &self,
+        start: [f64; 3],
+        end: [f64; 3],
+        ignored: [Option<u64>; 2],
+        rows: [u32; 32],
+        limits: QueryLimits,
+    ) -> Result<bool, &'static str> {
         Pose::at(start).validate()?;
         Pose::at(end).validate()?;
         if start == end
@@ -495,7 +506,7 @@ impl Snapshot {
         };
         let mut budget = limits.max_support_points;
         for body in &self.bodies {
-            if body.target.key.id == ignored || rows[24] & (1 << body.layer) == 0 {
+            if ignored.contains(&Some(body.target.key.id)) || rows[24] & (1 << body.layer) == 0 {
                 continue;
             }
             if let Some((fraction, _)) = geometry::sweep(

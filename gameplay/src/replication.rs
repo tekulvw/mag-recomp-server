@@ -1029,12 +1029,38 @@ impl CharacterRespawn {
         if let Some(kit) = loadout {
             kit.validate()?;
         }
-        self.encode_equipped_with_profile(loadout, Some(ownership), profile)
+        self.encode_equipped_with_profile(loadout, Some((0, ownership)), profile)
+    }
+    /// Qualified family13 respawn; model-specific seat limits are checked by
+    /// the owning world before encoding this supported wire domain.
+    pub fn encode_in_bunker_with_profile(
+        &self,
+        loadout: Option<&CharacterLoadout>,
+        client_index: u16,
+        ownership: AlphaVehicleOwnership,
+        profile: crate::wire_profile::WireProfile,
+    ) -> Result<Vec<u8>, &'static str> {
+        if client_index >= 0x100
+            || self.state.state != 14
+            || self.state.user_data[0] != 13
+            || self.state.user_data[1] >= 16
+            || !(1..=16).contains(&self.state.user_data[2])
+        {
+            return Err("invalid_bunker_respawn");
+        }
+        if let Some(kit) = loadout {
+            kit.validate()?;
+        }
+        self.encode_equipped_with_profile(
+            loadout,
+            Some((u16::from(self.state.user_data[1]), ownership)),
+            profile,
+        )
     }
     fn encode_equipped_with_profile(
         &self,
         loadout: Option<&CharacterLoadout>,
-        bunker_owner: Option<AlphaVehicleOwnership>,
+        bunker_owner: Option<(u16, AlphaVehicleOwnership)>,
         profile: crate::wire_profile::WireProfile,
     ) -> Result<Vec<u8>, &'static str> {
         if self.object_index == u16::MAX || self.sequence <= 1 {
@@ -1091,8 +1117,8 @@ impl CharacterRespawn {
             }
         }
         bits.write(0, 1)?;
-        if let Some(ownership) = bunker_owner {
-            ownership.encode(&mut bits)?;
+        if let Some((index, ownership)) = bunker_owner {
+            ownership.encode_at(index, &mut bits)?;
         }
         Ok(bits.finish())
     }
@@ -1155,6 +1181,29 @@ impl ObjectiveControlSnapshot {
         &self,
         profile: crate::wire_profile::WireProfile,
     ) -> Result<Vec<u8>, &'static str> {
+        self.encode_with_sequences_with_profile(&[], profile)
+    }
+
+    /// Add signed sequence ordinal and synchronized start time to a control delta.
+    /// An unchanged sequence never appears in this slice.
+    pub fn encode_with_sequences_with_profile(
+        &self,
+        sequences: &[ObjectiveSequenceDelta],
+        profile: crate::wire_profile::WireProfile,
+    ) -> Result<Vec<u8>, &'static str> {
+        if sequences
+            .windows(2)
+            .any(|pair| pair[0].object_index >= pair[1].object_index)
+            || sequences.iter().any(|sequence| {
+                sequence.sequence_index < -1
+                    || !self
+                        .objectives
+                        .iter()
+                        .any(|row| row.object_index == sequence.object_index)
+            })
+        {
+            return Err("invalid_objective_sequence_links");
+        }
         if self.objectives.is_empty() {
             return Err("empty_objective_snapshot");
         }
@@ -1178,13 +1227,22 @@ impl ObjectiveControlSnapshot {
             previous = Some(objective.object_index);
             bits.write(1, 1)?;
             bits.write(objective.object_index.into(), 16)?;
+            let sequence = sequences
+                .iter()
+                .find(|s| s.object_index == objective.object_index);
             for field in 0..11 {
-                bits.write(u32::from(matches!(field, 2 | 3 | 4 | 6)), 1)?;
-                match field {
-                    2 => objective.state_actor.encode(&mut bits)?,
-                    3 => bits.write(objective.expiration_time_ms, 32)?,
-                    4 => bits.write(objective.deactivation_time_ms, 32)?,
-                    6 => bits.write(objective.health_percent.into(), 8)?,
+                let linked = sequence.filter(|_| matches!(field, 9 | 10));
+                bits.write(
+                    u32::from(matches!(field, 2 | 3 | 4 | 6) || linked.is_some()),
+                    1,
+                )?;
+                match (field, linked) {
+                    (2, _) => objective.state_actor.encode(&mut bits)?,
+                    (3, _) => bits.write(objective.expiration_time_ms, 32)?,
+                    (4, _) => bits.write(objective.deactivation_time_ms, 32)?,
+                    (6, _) => bits.write(objective.health_percent.into(), 8)?,
+                    (9, Some(sequence)) => bits.write(sequence.sequence_index as u32, 32)?,
+                    (10, Some(sequence)) => bits.write(sequence.start_time_ms, 32)?,
                     _ => {}
                 }
             }
@@ -1193,6 +1251,7 @@ impl ObjectiveControlSnapshot {
         Ok(bits.finish())
     }
 }
+
 /// Squad field12 holds a16-bit objective pool index, not a packed entity ID.
 #[derive(Clone, Copy, Debug)]
 pub struct SquadObjectiveAssignment {
@@ -1250,6 +1309,55 @@ pub struct ObjectiveSequenceDelta {
     pub sequence_index: i32,
     pub start_time_ms: u32,
 }
+
+impl ObjectiveSequenceDelta {
+    /// Sequence-only history updates for late join, after the base state
+    /// snapshot. Each entry uses 92 bits, and the same transport cap applies.
+    pub(crate) fn encode_batches(
+        sequences: &[Self],
+        timestamp_ms: u32,
+        profile: crate::wire_profile::WireProfile,
+    ) -> Result<Vec<Vec<u8>>, &'static str> {
+        if sequences
+            .windows(2)
+            .any(|pair| pair[0].object_index >= pair[1].object_index)
+            || sequences
+                .iter()
+                .any(|row| row.object_index >= 128 || row.sequence_index < -1)
+        {
+            return Err("invalid_objective_sequence_links");
+        }
+        sequences
+            .chunks(96)
+            .map(|entries| {
+                let mut bits = BitWriter::with_profile(profile);
+                UpdateHeader {
+                    sequence: 2,
+                    nak_sequence: 0,
+                    client_index: 0,
+                    object_type_mask: 1 << 12,
+                    timestamp_ms,
+                }
+                .encode(&mut bits)?;
+                for row in entries {
+                    bits.write(1, 1)?;
+                    bits.write(row.object_index.into(), 16)?;
+                    for field in 0..11 {
+                        bits.write(u32::from(matches!(field, 9 | 10)), 1)?;
+                        match field {
+                            9 => bits.write(row.sequence_index as u32, 32)?,
+                            10 => bits.write(row.start_time_ms, 32)?,
+                            _ => (),
+                        }
+                    }
+                }
+                bits.write(0, 1)?;
+                Ok(bits.finish())
+            })
+            .collect()
+    }
+}
+
 impl ObjectiveStateSnapshot {
     pub fn encode(&self) -> Result<Vec<u8>, &'static str> {
         self.encode_with_profile(crate::wire_profile::WireProfile::prototype())
@@ -1364,10 +1472,12 @@ impl VehicleDamage {
         bits.write(self.last_user_data, 32)
     }
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum VehicleState {
     Operational = 2,
+    Critical = 3,
+    Destroyed = 4,
 }
 /// One type13 vehicle, placed by its map-created SpawnPoint reference. Its
 /// 25-field schema has no position/quaternion fields (unlike ground vehicles).
@@ -1460,6 +1570,13 @@ impl DefensiveEmplacementCreation {
         }
         bits.write(1, 1)?;
         bits.write(self.object_index.into(), 16)?;
+        self.encode_base_vehicle_fields(bits)
+    }
+
+    pub(crate) fn encode_base_vehicle_fields(
+        &self,
+        bits: &mut BitWriter,
+    ) -> Result<(), &'static str> {
         for field in 0..25 {
             bits.write(
                 u32::from([0, 1, 3, 4, 5, 6, 7, 18, 19, 20].contains(&field)),
@@ -1539,19 +1656,35 @@ impl AlphaSeatTransition {
         ownership: Option<AlphaVehicleOwnership>,
         profile: crate::wire_profile::WireProfile,
     ) -> Result<Vec<u8>, &'static str> {
+        if matches!(self.action, AlphaSeatAction::Mount {seat, ..} if seat > 8) {
+            return Err("invalid_alpha_seat");
+        }
+        self.encode_for_bunker_with_profile(0, player, ownership, profile)
+    }
+    /// The family13 index is shared by character seat state and vehicle ownership.
+    pub fn encode_for_bunker_with_profile(
+        &self,
+        bunker_index: u16,
+        player: u16,
+        ownership: Option<AlphaVehicleOwnership>,
+        profile: crate::wire_profile::WireProfile,
+    ) -> Result<Vec<u8>, &'static str> {
+        if bunker_index >= 16 {
+            return Err("invalid_bunker_index");
+        }
         if self.sequence < 5 {
             return Err("invalid_seat_sequence");
         }
         let (state, owner, turret_owner, exit) = match self.action {
             AlphaSeatAction::Mount { seat, client_index } => {
-                if seat > 8 || client_index >= 0x100 {
+                if seat > 16 || client_index >= 0x100 {
                     return Err("invalid_alpha_seat");
                 }
                 (
                     CharacterState {
                         state: 14,
                         stance: 0,
-                        user_data: [13, 0, seat],
+                        user_data: [13, bunker_index as u8, seat],
                     },
                     client_index,
                     if seat == 0 { client_index } else { u16::MAX },
@@ -1611,7 +1744,7 @@ impl AlphaSeatTransition {
                 owner,
                 turret_owner,
             })
-            .encode(&mut bits)?;
+            .encode_at(bunker_index, &mut bits)?;
         Ok(bits.finish())
     }
 }
@@ -1636,6 +1769,19 @@ impl AlphaVehicleOwnership {
         timestamp_ms: u32,
         profile: crate::wire_profile::WireProfile,
     ) -> Result<Vec<u8>, &'static str> {
+        self.encode_bunker_update_with_profile(0, sequence, timestamp_ms, profile)
+    }
+    pub fn encode_bunker_update_with_profile(
+        &self,
+        bunker_index: u16,
+        sequence: u32,
+        timestamp_ms: u32,
+        profile: crate::wire_profile::WireProfile,
+    ) -> Result<Vec<u8>, &'static str> {
+        if bunker_index >= 16 {
+            return Err("invalid_bunker_index");
+        }
+
         let mut bits = BitWriter::with_profile(profile);
         UpdateHeader {
             sequence,
@@ -1645,12 +1791,12 @@ impl AlphaVehicleOwnership {
             timestamp_ms,
         }
         .encode(&mut bits)?;
-        self.encode(&mut bits)?;
+        self.encode_at(bunker_index, &mut bits)?;
         Ok(bits.finish())
     }
-    fn encode(&self, bits: &mut BitWriter) -> Result<(), &'static str> {
+    fn encode_at(&self, index: u16, bits: &mut BitWriter) -> Result<(), &'static str> {
         bits.write(1, 1)?;
-        bits.write(0, 16)?; // Existing Alpha emplacement0.
+        bits.write(index.into(), 16)?;
         for field in 0..25 {
             bits.write(u32::from([1, 6].contains(&field)), 1)?;
             match field {
@@ -1675,6 +1821,26 @@ impl SpawnAvailability {
         catalog: &crate::spawn_catalog::SpawnCatalog,
         profile: crate::wire_profile::WireProfile,
     ) -> Result<Vec<u8>, &'static str> {
+        Self::encode_update(sequence, timestamp_ms, catalog, profile, true)
+    }
+
+    /// Retail Domination's runtime validation dirties only the type7 bitset.
+    pub(crate) fn encode_domination_update(
+        sequence: u32,
+        timestamp_ms: u32,
+        catalog: &crate::spawn_catalog::SpawnCatalog,
+        profile: crate::wire_profile::WireProfile,
+    ) -> Result<Vec<u8>, &'static str> {
+        Self::encode_update(sequence, timestamp_ms, catalog, profile, false)
+    }
+
+    fn encode_update(
+        sequence: u32,
+        timestamp_ms: u32,
+        catalog: &crate::spawn_catalog::SpawnCatalog,
+        profile: crate::wire_profile::WireProfile,
+        include_count: bool,
+    ) -> Result<Vec<u8>, &'static str> {
         let mut bits = BitWriter::with_profile(profile);
         UpdateHeader {
             sequence,
@@ -1684,19 +1850,20 @@ impl SpawnAvailability {
             timestamp_ms,
         }
         .encode(&mut bits)?;
-        Self::encode(&mut bits, catalog, true)?;
+        Self::encode(&mut bits, catalog, true, include_count)?;
         Ok(bits.finish())
     }
     fn encode(
         bits: &mut BitWriter,
         catalog: &crate::spawn_catalog::SpawnCatalog,
         all_supported: bool,
+        include_count: bool,
     ) -> Result<(), &'static str> {
         bits.write(1, 1)?;
         bits.write(0, 16)?;
         for field in 0..10 {
-            bits.write(u32::from(field == 2 || field == 3), 1)?;
-            if field == 2 {
+            bits.write(u32::from((include_count && field == 2) || field == 3), 1)?;
+            if include_count && field == 2 {
                 bits.write(catalog.spawn_count().into(), 8)?;
             }
             if field == 3 {
@@ -1745,6 +1912,29 @@ impl SquadSpawnAssignment {
         }
         bits.write(0, 1)
     }
+    /// Publish the native field11 write for an already bound squad and point.
+    /// The current default can remain assigned when the point is inactive.
+    pub(crate) fn encode_bound_for_squad(
+        &self,
+        squad: u16,
+        profile: crate::wire_profile::WireProfile,
+    ) -> Result<Vec<u8>, &'static str> {
+        if self.sequence <= 1 {
+            return Err("invalid_squad_spawn_sequence");
+        }
+        let mut bits = BitWriter::with_profile(profile);
+        UpdateHeader {
+            sequence: self.sequence,
+            nak_sequence: 0,
+            client_index: 0,
+            object_type_mask: 1 << 8,
+            timestamp_ms: self.timestamp_ms,
+        }
+        .encode(&mut bits)?;
+        self.encode_object_for_squad(&mut bits, squad)?;
+        Ok(bits.finish())
+    }
+
     pub fn encode(&self) -> Result<Vec<u8>, &'static str> {
         self.encode_with_profile(crate::wire_profile::WireProfile::prototype())
     }
@@ -1901,7 +2091,7 @@ impl AlphaSpawnSetup {
             spawn_point_index: catalog.default_spawn(),
         }
         .encode_object_for_player(&mut bits, player)?;
-        SpawnAvailability::encode(&mut bits, catalog, all_supported)?;
+        SpawnAvailability::encode(&mut bits, catalog, all_supported, true)?;
         SquadSpawnAssignment {
             sequence: self.sequence,
             timestamp_ms: self.timestamp_ms,
@@ -2181,3 +2371,7 @@ mod objective_sequence_tests {
         assert_eq!(packet.encode(), Err("empty_objective_snapshot"));
     }
 }
+
+#[cfg(test)]
+#[path = "bunker_replication_tests.rs"]
+mod bunker_replication_tests;

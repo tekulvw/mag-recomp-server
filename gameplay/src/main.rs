@@ -502,7 +502,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             || collision_query.is_some()
         {
             return Err(io::Error::other(
-                "--match-profiles does not support bots, bunkers, leadership, dummy or collision-query",
+                "--match-profiles does not support global bunker arguments, bots, leadership, dummy or collision-query",
             ));
         }
     }
@@ -697,9 +697,10 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                     "--dynamic-bodies requires an absolute path",
                 ));
             }
-            if application_id != Some(20231) || catalog.match_profile().game_type != 1 {
+            if application_id != Some(20231) || !matches!(catalog.match_profile().game_type, 1 | 2)
+            {
                 return Err(io::Error::other(
-                    "dynamic bodies require retail Acquisition",
+                    "dynamic bodies require retail Acquisition or Domination",
                 ));
             }
             let bodies = mag_gameplay::dynamic_collision::Catalog::load(path)?;
@@ -721,9 +722,10 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                     "--static-partition requires an absolute path",
                 ));
             }
-            if application_id != Some(20231) || catalog.match_profile().game_type != 1 {
+            if application_id != Some(20231) || !matches!(catalog.match_profile().game_type, 1 | 2)
+            {
                 return Err(io::Error::other(
-                    "static partitions require retail Acquisition",
+                    "static partitions require retail Acquisition or Domination",
                 ));
             }
             mag_gameplay::static_collision_partition::Partition::load(path)
@@ -1107,6 +1109,16 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                 .validate_acquisition_static_partitions(&static_partitions)
                 .map_err(io::Error::other)?;
         }
+        if registry.has_domination_gameplay() {
+            if dynamic_bodies.is_none() {
+                return Err(io::Error::other(
+                    "Domination match profiles require dynamic bodies",
+                ));
+            }
+            registry
+                .validate_domination_static_partitions(&static_partitions)
+                .map_err(io::Error::other)?;
+        }
         registry
             .validate_runtime(
                 &item_catalog,
@@ -1145,7 +1157,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         }
         println!(
             "{}",
-            serde_json::json!({"event":"catalogs_validated","application_id":application_id,"skill_application_id":skill_catalog.application_id(),"bunkers":bunker_info,"fall_damage_enabled":fall_rules.is_some(),"incapacitation_enabled":incapacitation_rules.is_some(),"character_damage_rules_enabled":character_damage_rules.is_some(),"dynamic_body_catalog_validated":dynamic_bodies.is_some(),"static_partitions_validated":static_partitions.len(),"acquisition_gameplay_validated":acquisition_setup.is_some(),"scope":"schema_and_profile_validation_not_client_acceptance"})
+            serde_json::json!({"event":"catalogs_validated","application_id":application_id,"skill_application_id":skill_catalog.application_id(),"bunkers":bunker_info,"fall_damage_enabled":fall_rules.is_some(),"incapacitation_enabled":incapacitation_rules.is_some(),"character_damage_rules_enabled":character_damage_rules.is_some(),"dynamic_body_catalog_validated":dynamic_bodies.is_some(),"static_partitions_validated":static_partitions.len(),"acquisition_gameplay_validated":acquisition_setup.is_some(),"domination_gameplay_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_domination_gameplay()),"scope":"schema_and_profile_validation_not_client_acceptance"})
         );
         return Ok(());
     }
@@ -2205,7 +2217,14 @@ mod runtime_profile_tests {
             ]);
             v
         };
-        assert!(run(args()).is_ok());
+        for game_type in [1, 2] {
+            spawns["match_profile"]["game_type"] = serde_json::json!(game_type);
+            files.write("spawns.json", &spawns);
+            assert!(
+                run(args()).is_ok(),
+                "dynamic bodies rejected mode {game_type}"
+            );
+        }
         let mut bad = body.clone();
         bad["runtime_bindings"]["character_template"] = serde_json::json!("missing");
         files.write("bodies.json", &bad);
@@ -2214,6 +2233,13 @@ mod runtime_profile_tests {
                 .unwrap_err()
                 .to_string()
                 .contains("dynamic_body_bindings")
+        );
+        files.write("bodies.json", &body);
+        spawns["match_profile"]["game_type"] = serde_json::json!(3);
+        files.write("spawns.json", &spawns);
+        assert_eq!(
+            run(args()).unwrap_err().to_string(),
+            "dynamic bodies require retail Acquisition or Domination"
         );
         let mut relative = files.args();
         relative.extend(["--dynamic-bodies".to_owned(), "bodies.json".to_owned()]);
@@ -2298,7 +2324,14 @@ mod runtime_profile_tests {
             ]);
             v
         };
-        assert!(run(args()).is_ok());
+        for game_type in [1, 2] {
+            spawns["match_profile"]["game_type"] = serde_json::json!(game_type);
+            files.write("spawns.json", &spawns);
+            assert!(
+                run(args()).is_ok(),
+                "static partition rejected mode {game_type}"
+            );
+        }
         let mut duplicate = args();
         duplicate.extend([
             "--static-partition".to_owned(),

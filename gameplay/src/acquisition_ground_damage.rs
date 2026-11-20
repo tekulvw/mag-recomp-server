@@ -174,6 +174,15 @@ pub(crate) struct PreparedHit {
 }
 
 impl<W: Write> Engine<W> {
+    pub(crate) fn ground_damage_policy(&self) -> Option<&Policy> {
+        if let Some(world) = &self.domination_gameplay {
+            return Some(&world.state.ground_damage);
+        }
+        self.acquisition_gameplay
+            .as_ref()
+            .and_then(|gameplay| gameplay.setup.ground_damage.as_ref())
+    }
+
     pub(crate) fn prepare_acquisition_ground_hit(
         &self,
         actor: &Active,
@@ -181,9 +190,7 @@ impl<W: Write> Engine<W> {
         now: Duration,
     ) -> Result<PreparedHit, &'static str> {
         let policy = self
-            .acquisition_gameplay
-            .as_ref()
-            .and_then(|gameplay| gameplay.setup.ground_damage.as_ref())
+            .ground_damage_policy()
             .ok_or("acquisition_ground_damage_unconfigured")?;
         if !actor.entered_game
             || !actor.ready_for_updates
@@ -201,10 +208,13 @@ impl<W: Write> Engine<W> {
             .vehicle(index)
             .filter(|vehicle| vehicle.object_id() == request.defender)
             .ok_or("unknown_ground_bullet_target")?;
-        if catalog
-            .vehicle_source(index)
-            .is_none_or(|source| source.spawn_type != 9)
-        {
+        if catalog.vehicle_source(index).is_none_or(|source| {
+            if self.domination_gameplay.is_some() {
+                !matches!(source.spawn_type, 3 | 7)
+            } else {
+                source.spawn_type != 9
+            }
+        }) {
             return Err("unsupported_ground_bullet_target");
         }
         let before = self
@@ -281,14 +291,20 @@ impl<W: Write> Engine<W> {
             dynamic_collision::{Geometry, Pose, geometry},
             projectile::ProjectileTerminalReason,
         };
-        let Some(setup) = self.acquisition_gameplay.as_ref().map(|g| &g.setup) else {
+        let Some(policy) = self.ground_damage_policy() else {
             return Ok((None, vec![]));
         };
-        let Some(policy) = &setup.ground_damage else {
-            return Ok((None, vec![]));
+        let (filter_row, limits) = if let Some(world) = &self.domination_gameplay {
+            (world.state.filter_rows[6], Default::default())
+        } else {
+            let setup = &self
+                .acquisition_gameplay
+                .as_ref()
+                .ok_or("acquisition_ground_damage_unconfigured")?
+                .setup;
+            (setup.filter_rows[6], setup.physics.query_limits)
         };
-        let snapshot = self.dynamic_collision_snapshot(setup.filter_rows[6])?;
-        let limits = setup.physics.query_limits;
+        let snapshot = self.dynamic_collision_snapshot(filter_row)?;
         let mut budget = limits.max_support_points;
         let mut changes = std::collections::BTreeMap::new();
         let mut audit = Vec::new();
@@ -328,7 +344,7 @@ impl<W: Write> Engine<W> {
             // authoritative even if a same-report driver input is rejected.
             for body in snapshot.bodies() {
                 if body.target.kind != TargetKind::GroundVehicle
-                    || setup.filter_rows[6] & (1 << body.layer) == 0
+                    || filter_row & (1 << body.layer) == 0
                     || seen.contains(&body.target.key.id)
                     || !geometry::penetrates(
                         &radius,
