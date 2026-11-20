@@ -81,6 +81,7 @@ struct NativeObjective {
     repair: Option<repair::StructuralRepair>,
     damage_health: f32,
     was_repaired: bool,
+    autonomous_arming: bool,
     pending: Option<NativePending>,
 }
 
@@ -158,6 +159,7 @@ impl ObjectiveWorld {
                             repair: new_structural_repair(initial, object.repair),
                             damage_health,
                             was_repaired: initial == ObjectiveState::Repaired,
+                            autonomous_arming: false,
                             pending: None,
                         }
                     });
@@ -195,6 +197,10 @@ impl ObjectiveWorld {
             native_tick_time: None,
             native_elapsed_ms: 0,
         }
+    }
+
+    pub(crate) fn has_native_entries(&self) -> bool {
+        !self.native_entries.is_empty()
     }
 
     pub fn take_native_entries(&mut self) -> Vec<NativeEntry> {
@@ -327,6 +333,74 @@ impl ObjectiveWorld {
             mode.pending = None;
         }
         Ok(())
+    }
+
+    /// A destroyed type4/5 trigger invokes the owner's ordinary Activating
+    /// entry synchronously. Its source need not stand in an interaction volume.
+    pub(crate) fn activate_destroyed_trigger(
+        &mut self,
+        index: u16,
+        trigger: u8,
+        actor: crate::structure_damage::Source,
+        now: Duration,
+        modifier: f32,
+    ) -> Result<Option<ObjectiveControlDelta>, &'static str> {
+        let object = self
+            .objects
+            .get_mut(&index)
+            .ok_or("unknown_structure_damage_owner")?;
+        let mode = object
+            .native
+            .as_mut()
+            .filter(|m| m.class == NativeClass::Structural)
+            .ok_or("unsupported_structure_damage_owner")?;
+        let previous = object.state.state_actor.state;
+        if !matches!(
+            previous,
+            ObjectiveState::Deactivated | ObjectiveState::Repaired
+        ) {
+            return Ok(None);
+        }
+        let rule = object
+            .demolition
+            .as_ref()
+            .ok_or("structure_damage_demolition_rules_missing")?;
+        if trigger >= rule.trigger_count {
+            return Err("structure_damage_trigger_index_out_of_range");
+        }
+        let duration = modified_demolition_duration(rule.arm_ms, modifier)
+            .ok_or("invalid_structure_damage_arm_modifier")?;
+        let deadline = now
+            .checked_add(Duration::from_millis(duration.into()))
+            .ok_or("structure_damage_arm_deadline_overflow")?;
+        // Retail synchronous SetTargetStateId replaces an unstarted async script request.
+        mode.pending = None;
+        mode.autonomous_arming = true;
+        object.fuse = None;
+        object.operation = Some(Operation {
+            started_at: now,
+            recipient: None,
+            player: actor.player,
+            generation: actor.generation,
+            trigger_index: trigger,
+            deadline,
+        });
+        set_native_state(object, ObjectiveState::Activating, actor.player, now);
+        object.state.expiration_time_ms = wire_time(deadline);
+        object.state.deactivation_time_ms = 0;
+        let mut mode = object.native.take().expect("validated native structure");
+        enter_structural(object, &mut mode, previous);
+        object.native = Some(mode);
+        let delta = object.state;
+        self.native_entries.push(NativeEntry {
+            class: NativeClass::Structural,
+            previous,
+            delta,
+            actor_generation: Some(actor.generation),
+            active_trigger_index: Some(trigger),
+        });
+        self.pristine = false;
+        Ok(Some(delta))
     }
 
     pub fn stage_repair(
@@ -987,6 +1061,9 @@ fn enter_secure(
 fn enter_structural(object: &mut Objective, mode: &mut NativeObjective, previous: ObjectiveState) {
     use ObjectiveState::{Activated, Completed, Deactivated, Deactivating, Repaired, Repairing};
     let target = object.state.state_actor.state;
+    if target != ObjectiveState::Activating {
+        mode.autonomous_arming = false;
+    }
     match target {
         Completed => {
             mode.damage_health = 0.0;
@@ -1093,6 +1170,25 @@ fn tick_native(
                 })
         })?;
         return enter_secure(object, hold, request, None, now);
+    }
+
+    if mode.autonomous_arming && previous == ObjectiveState::Activating {
+        let operation = object.operation.as_ref().expect("autonomous arm operation");
+        if now < operation.deadline {
+            return None;
+        }
+        let operation = operation.clone();
+        let rule = object
+            .demolition
+            .as_ref()
+            .expect("autonomous demolition rules");
+        object.fuse = Some(Operation {
+            deadline: now.saturating_add(Duration::from_millis(rule.detonate_ms.into())),
+            ..operation.clone()
+        });
+        armed_state(object, now);
+        enter_structural(object, mode, previous);
+        return Some(operation.generation);
     }
 
     if let Some(rule) = object.demolition.clone() {
@@ -1377,7 +1473,7 @@ fn cancel(object: &mut Objective, now: Duration) {
 }
 
 #[cfg(test)]
-mod trigger_box_tests {
+pub(crate) mod trigger_box_tests {
     use super::*;
     use serde_json::json;
 
@@ -1418,7 +1514,7 @@ mod trigger_box_tests {
         )
     }
 
-    fn native_catalog() -> serde_json::Value {
+    pub(crate) fn native_catalog() -> serde_json::Value {
         json!({
             "schema_version":1,"format":"mag_retail_objective_catalog","application_id":20231,
             "protocol":crate::protocol::ProtocolInfo::RETAIL_PROTOCOL,"game_type":2,"map_name":"synthetic_arena",
@@ -1461,6 +1557,77 @@ mod trigger_box_tests {
         let now = Duration::from_millis(ms);
         world.begin_native_tick(now);
         world.tick_native_object(index, now, actors)
+    }
+
+    #[test]
+    fn destroyed_damage_trigger_arms_structural_owner_without_a_human_hold() {
+        let mut world = native_world();
+        world
+            .stage_native_state(11, ObjectiveState::Deactivated, None)
+            .unwrap();
+        frame(&mut world, 11, 1, &BTreeMap::new());
+        world.take_native_entries();
+        let source = crate::structure_damage::Source {
+            player: 7,
+            generation: 9,
+        };
+        let delta = world
+            .activate_destroyed_trigger(11, 0, source, Duration::from_millis(10), -0.5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(delta.state_actor.state, ObjectiveState::Activating);
+        assert_eq!(delta.expiration_time_ms, 15);
+        let entries = world.take_native_entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].actor_generation, Some(9));
+        assert!(frame(&mut world, 11, 14, &BTreeMap::new()).is_none());
+        let armed = frame(&mut world, 11, 15, &BTreeMap::new()).unwrap();
+        assert_eq!(armed.state_actor.state, ObjectiveState::Activated);
+        assert_eq!(armed.expiration_time_ms, 45);
+        assert!(world.take_reward_actions().is_empty());
+        assert_eq!(
+            frame(&mut world, 11, 45, &BTreeMap::new())
+                .unwrap()
+                .state_actor
+                .state,
+            ObjectiveState::Completed
+        );
+        assert!(
+            world
+                .activate_destroyed_trigger(11, 0, source, Duration::from_millis(46), 0.)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn admitted_strike_replaces_queued_unstarted_script_target() {
+        let mut world = native_world();
+        world
+            .stage_native_state(11, ObjectiveState::Deactivated, None)
+            .unwrap();
+        frame(&mut world, 11, 1, &BTreeMap::new());
+        world.take_native_entries();
+        world
+            .stage_native_state(11, ObjectiveState::Locked, None)
+            .unwrap();
+        let source = crate::structure_damage::Source {
+            player: 7,
+            generation: 9,
+        };
+        let activated = world
+            .activate_destroyed_trigger(11, 0, source, Duration::from_millis(10), 0.)
+            .unwrap()
+            .unwrap();
+        assert_eq!(activated.state_actor.state, ObjectiveState::Activating);
+        assert!(frame(&mut world, 11, 19, &BTreeMap::new()).is_none());
+        assert_eq!(
+            frame(&mut world, 11, 20, &BTreeMap::new())
+                .unwrap()
+                .state_actor
+                .state,
+            ObjectiveState::Activated
+        );
     }
 
     #[test]

@@ -8,6 +8,35 @@ PROJECTOR = runpy.run_path(str(TOOLS / 'project-retail-active-ability-map.py'))
 
 
 class AbilityMapProjectionTests(unittest.TestCase):
+    def test_damage_trigger_projects_linked_box_and_bound_vector_slot(self):
+        project = PROJECTOR.get('damage_trigger_rows')
+        axes = [[0., 1., 0.], [-1., 0., 0.], [0., 0., 1.]]
+        volume = {'trigger_token': '0xaa', 'objective_token': '0xbb',
+                  'trigger_position': [1., 2., 3.],
+                  'box': {'centre': [4., 5., 6.], 'axes': axes,
+                          'half_extents': [2., 3., 4.], 'scale': [4., 6., 8.]}}
+        fields = {'TriggerType': {'raw_hex': 'deadbeef000000010000000005'},
+                  'StartActive': {'value': False}, 'DamageThreshold': {'value': 12.5}}
+        graph = {
+            'definitions': [{'definition_token': '0xdd', 'class_name': 'ObjectiveTriggerProperties',
+                             'fields': fields}],
+            'instances': [{'name_token': '0xaa', 'definition_token': '0xdd'}],
+        }
+        self.assertIsNotNone(project, 'ability maps must project damage triggers')
+        self.assertEqual(
+            project(graph, [volume], {0xbb: 7}, {0xaa: (7, 3)}),
+            [{'object_index': 7, 'trigger_index': 3, 'trigger_type': 5,
+              'start_active': False, 'damage_threshold': 12.5,
+              'position': [4., 5., 6.],
+              'box': {'centre': [4., 5., 6.], 'axes': axes, 'half_extents': [2., 3., 4.]}}],
+        )
+        with self.assertRaisesRegex(ValueError, 'qualified.*vector'):
+            project(graph, [volume], {0xbb: 7}, {})
+        with self.assertRaisesRegex(ValueError, 'objective.*slot'):
+            project(graph, [volume], {0xbb: 7}, {0xaa: (8, 3)})
+        fields['TriggerType']['raw_hex'] = 'deadbeef000000010000000003'
+        self.assertEqual(project(graph, [volume], {0xbb: 7}, {}), [])
+
     def test_bounds_require_matching_terrain_and_empty_polygon(self):
         clv = bytearray(300)
         struct.pack_into('>IIIfI', clv, 0, 31, 0, 1, 17.0, 1)

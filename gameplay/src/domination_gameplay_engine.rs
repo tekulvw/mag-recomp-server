@@ -404,6 +404,18 @@ impl Runtime {
     }
 
     fn candidate<E>(&self, frame: &Frame<'_>, effects: E) -> Result<Candidate<E>, &'static str> {
+        let mut candidate = self.candidate_preserving_entries(frame, effects)?;
+        if !candidate.world.take_native_entries().is_empty() {
+            return Err("domination_gameplay_unconsumed_native_entries");
+        }
+        Ok(candidate)
+    }
+
+    fn candidate_preserving_entries<E>(
+        &self,
+        frame: &Frame<'_>,
+        effects: E,
+    ) -> Result<Candidate<E>, &'static str> {
         if frame.spawns.source_sha256() != Some(self.setup.spawn_sha256.as_str()) {
             return Err("domination_gameplay_runtime_spawn_mismatch");
         }
@@ -419,13 +431,9 @@ impl Runtime {
         {
             return Err("domination_gameplay_runtime_objective_mismatch");
         }
-        let mut world = frame.world.clone();
-        if !world.take_native_entries().is_empty() {
-            return Err("domination_gameplay_unconsumed_native_entries");
-        }
         Ok(Candidate {
             runtime: self.clone(),
-            world,
+            world: frame.world.clone(),
             spawns: frame.spawns.clone(),
             round: frame.round.clone(),
             effects,
@@ -479,6 +487,35 @@ impl Runtime {
             {
                 next.effects.prepare_structural_update_tail(index, state)?;
             }
+        }
+        Ok(next)
+    }
+
+    /// Publish each synchronous strike-triggered activation through its ordinary
+    /// entry effects before the next objective tick.
+    pub fn stage_structure_damage_entries<E: ExternalEffects>(
+        &self,
+        frame: Frame<'_>,
+        effects: E,
+    ) -> Result<Candidate<E>, &'static str> {
+        if !self.started {
+            return Err("domination_gameplay_not_started");
+        }
+        let mut next = self.candidate_preserving_entries(&frame, effects)?;
+        for entry in next.world.take_native_entries() {
+            if entry.class != NativeClass::Structural
+                || !matches!(
+                    entry.previous,
+                    ObjectiveState::Deactivated | ObjectiveState::Repaired
+                )
+                || entry.delta.state_actor.state != ObjectiveState::Activating
+                || entry.actor_generation.is_none()
+                || entry.active_trigger_index.is_none()
+            {
+                return Err("domination_gameplay_unexpected_structure_damage_entry");
+            }
+            next.deltas.push(entry.delta);
+            next.prepare_entry(entry, frame.now.as_millis() as u32)?;
         }
         Ok(next)
     }

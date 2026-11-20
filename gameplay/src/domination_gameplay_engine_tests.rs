@@ -62,7 +62,13 @@ fn fixture() -> (Runtime, ObjectiveWorld, SpawnCatalog, Round) {
             "startup_proof_sha256":format!("{:x}", Sha256::digest(&startup_raw)),"source_image_sha256":hash,
             "capture_qualification":"native_source_gameplay"},
         "objects":[
-            {"token":"0x0000000a","object_index":0,"initial_state":0,"native_class":"structural"},
+            {"token":"0x0000000a","object_index":0,"initial_state":0,"native_class":"structural",
+             "demolition":{"owner_team":1,"arm_ms":10,"detonate_ms":30,"defuse_ms":10,
+                "can_defuse":true,"activation_score":0,"deactivation_score":0,
+                "position":[1.,2.,1.],"trigger_count":1,"maximum_distance_m":5.,
+                "distance_policy":"authored_trigger_box","trigger_volumes":[
+                    {"centre":[1.,2.,1.],"axes":[[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]],"half_extents":[1.,1.,1.]}
+                ]}},
             {"token":"0x0000000b","object_index":1,"initial_state":0,"native_class":"secure_hold",
              "interaction":{"owner_team":1,"activate_ms":37,"complete_ms":43,"deactivate_ms":47,
                  "can_deactivate":true,"position":[4.,2.,1.],"trigger_count":1,"maximum_distance_m":5.,
@@ -142,6 +148,7 @@ struct Spy {
     calls: Vec<(&'static str, u16)>,
     fail_ability: bool,
     fail_sequence: bool,
+    allow_strike_lifecycle: bool,
 }
 
 impl ExternalEffects for Spy {
@@ -151,7 +158,7 @@ impl ExternalEffects for Spy {
         _: &ObjectiveWorld,
         spawns: &SpawnCatalog,
     ) -> Result<(), &'static str> {
-        if entry.delta.object_index == 0 {
+        if entry.delta.object_index == 0 && !self.allow_strike_lifecycle {
             assert!(!spawns.point_active(2));
         }
         self.calls.push(("class_prefix", entry.delta.object_index));
@@ -171,7 +178,9 @@ impl ExternalEffects for Spy {
         world: &ObjectiveWorld,
         spawns: &SpawnCatalog,
     ) -> Result<(), &'static str> {
-        assert!(spawns.point_active(2));
+        if !self.allow_strike_lifecycle {
+            assert!(spawns.point_active(2));
+        }
         assert_eq!(
             world.state(entry.delta.object_index),
             Some(entry.delta.state_actor.state)
@@ -182,10 +191,15 @@ impl ExternalEffects for Spy {
 
     fn prepare_explosion(
         &mut self,
-        _: NativeEntry,
+        entry: NativeEntry,
         _: &ObjectiveWorld,
     ) -> Result<(), &'static str> {
-        Err("unexpected_explosion")
+        if !self.allow_strike_lifecycle {
+            return Err("unexpected_explosion");
+        }
+        assert_eq!(entry.active_trigger_index, Some(0));
+        self.calls.push(("explosion", entry.delta.object_index));
+        Ok(())
     }
 
     fn prepare_ability(
@@ -512,4 +526,108 @@ fn engine_records_startup_before_installing_objective_requests() {
         engine.objective_world.as_ref().unwrap().state(0),
         Some(ObjectiveState::Inactive)
     );
+}
+
+#[test]
+fn strike_entry_stages_existing_effects_and_progresses_without_a_held_actor() {
+    use ObjectiveState::{Activated, Activating, Completed};
+
+    let (runtime, world, spawns, round) = fixture();
+    let started = runtime
+        .stage_mission_start(frame(100, &world, &spawns, &round), Spy::default())
+        .unwrap();
+    let mut live = started
+        .runtime
+        .stage_objective_update(
+            frame(100, &started.world, &started.spawns, &started.round),
+            &BTreeMap::new(),
+            started.effects,
+        )
+        .unwrap();
+
+    let source = crate::structure_damage::Source {
+        player: 3,
+        generation: 5,
+    };
+    let transition = live
+        .world
+        .activate_destroyed_trigger(0, 0, source, test_time(101), -0.5)
+        .unwrap()
+        .unwrap();
+    let owned_effects = || Spy {
+        allow_strike_lifecycle: true,
+        ..Spy::default()
+    };
+    assert_eq!(
+        live.runtime
+            .stage_objective_update(
+                frame(101, &live.world, &live.spawns, &live.round),
+                &BTreeMap::new(),
+                owned_effects(),
+            )
+            .err(),
+        Some("domination_gameplay_unconsumed_native_entries"),
+    );
+    assert_eq!(
+        live.runtime
+            .stage_structure_damage_entries(
+                frame(101, &live.world, &live.spawns, &live.round),
+                Spy {
+                    fail_sequence: true,
+                    ..owned_effects()
+                },
+            )
+            .err(),
+        Some("synthetic_sequence_failure"),
+    );
+    let strike = live
+        .runtime
+        .stage_structure_damage_entries(
+            frame(101, &live.world, &live.spawns, &live.round),
+            owned_effects(),
+        )
+        .unwrap();
+    assert_eq!(strike.deltas, [transition]);
+    assert_eq!(strike.world.state(0), Some(Activating));
+    assert_eq!(strike.sequences.len(), 1);
+    assert_eq!(
+        strike.effects.calls,
+        [
+            ("class_prefix", 0),
+            ("class_suffix", 0),
+            ("assignment", 0),
+            ("sequence", 0)
+        ]
+    );
+    let empty = strike
+        .runtime
+        .stage_structure_damage_entries(
+            frame(101, &strike.world, &strike.spawns, &strike.round),
+            owned_effects(),
+        )
+        .unwrap();
+    assert!(empty.deltas.is_empty());
+    assert!(empty.effects.calls.is_empty());
+
+    let armed = empty
+        .runtime
+        .stage_objective_update(
+            frame(106, &empty.world, &empty.spawns, &empty.round),
+            &BTreeMap::new(),
+            empty.effects,
+        )
+        .unwrap();
+    assert_eq!(armed.world.state(0), Some(Activated));
+    assert_eq!(armed.deltas[0].state_actor.actor_index, source.player);
+    let completed = armed
+        .runtime
+        .stage_objective_update(
+            frame(136, &armed.world, &armed.spawns, &armed.round),
+            &BTreeMap::new(),
+            armed.effects,
+        )
+        .unwrap();
+    assert_eq!(completed.world.state(0), Some(Completed));
+    assert_eq!(completed.deltas[0].state_actor.actor_index, source.player);
+    assert!(completed.effects.calls.contains(&("explosion", 0)));
 }

@@ -5,8 +5,9 @@ use crate::{
     active_ability_effects::EffectRules,
     active_ability_engine::{AntiAir, Boundary, SensorObjective, Setup},
     collision::CollisionWorld,
-    objective_catalog::ObjectiveCatalog,
+    objective_catalog::{NativeClass, Objective, ObjectiveCatalog},
     spawn_catalog::SpawnCatalog,
+    structure_damage_world::Rule,
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -127,6 +128,7 @@ struct MapBindings {
     vertical_bounds: [f32; 2],
     aaa: Vec<AntiAir>,
     objectives: Vec<SensorObjective>,
+    damage_triggers: Vec<Rule>,
 }
 
 #[derive(Deserialize)]
@@ -180,6 +182,18 @@ fn read<T: DeserializeOwned>(path: &Path) -> io::Result<T> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
+fn decode_map_bindings(bytes: &[u8]) -> io::Result<MapBindings> {
+    const REPROJECT: &str =
+        "active_ability_map_bindings_require_reprojection (schema 2 with damage_triggers required)";
+    let map: MapBindings = serde_json::from_slice(bytes).map_err(|error| {
+        io::Error::new(io::ErrorKind::InvalidData, format!("{REPROJECT}: {error}"))
+    })?;
+    if map.schema_version != 2 {
+        return Err(invalid(REPROJECT));
+    }
+    Ok(map)
+}
+
 fn invalid(reason: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, reason)
 }
@@ -213,8 +227,7 @@ fn validate_sources(
             return Err(invalid("active_ability_effect_member_mismatch"));
         }
     }
-    if map.schema_version != 1
-        || map.application_id != 20231
+    if map.application_id != 20231
         || scene.schema_version != 1
         || map.source.retail_elf_sha256 != RETAIL_ELF_SHA256
         || scene.source_elf_sha256 != map.source.retail_elf_sha256
@@ -279,7 +292,12 @@ fn load_verified(path: &Path) -> io::Result<Loaded> {
     let rules: Rules = read(&manifest.rules)?;
     rules.validate().map_err(invalid)?;
     let effects: Effects = read(&manifest.effects)?;
-    let map: MapBindings = read(&manifest.map_bindings)?;
+    let map = decode_map_bindings(&read_bounded(&manifest.map_bindings)?).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("{}: {error}", manifest.map_bindings.display()),
+        )
+    })?;
     let scene: StaticRayReceipt = read(&manifest.static_ray_receipt)?;
     validate_sources(&rules, &effects, &map, &scene)?;
     let rows = effects
@@ -303,6 +321,7 @@ fn load_verified(path: &Path) -> io::Result<Loaded> {
         vertical_bounds: scene.world_y_bounds,
         aaa: map.aaa,
         objectives: map.objectives,
+        damage_triggers: map.damage_triggers,
         effects: rows,
     };
     setup.validate().map_err(invalid)?;
@@ -330,6 +349,11 @@ pub fn load_for_catalogs(
 ) -> io::Result<Setup> {
     let loaded = load_verified(path)?;
     let setup = loaded.setup;
+    if !setup.damage_triggers.is_empty() && spawns.match_profile().game_type != 2 {
+        return Err(invalid(
+            "structure_damage_requires_native_domination_objective_lifecycle",
+        ));
+    }
     if setup.map_name != spawns.map_name()
         || !matches!(spawns.match_profile().game_type, 1 | 2)
         || collision.metadata().map_name != setup.map_name
@@ -358,5 +382,100 @@ pub fn load_for_catalogs(
     {
         return Err(invalid("active_ability_objective_binding_mismatch"));
     }
+    validate_damage_trigger_bindings(&setup.damage_triggers, &objectives.objects)?;
     Ok(setup)
+}
+
+fn validate_damage_trigger_bindings(rules: &[Rule], objectives: &[Objective]) -> io::Result<()> {
+    for rule in rules {
+        if !objectives.iter().any(|objective| {
+            objective.object_index == rule.object_index
+                && objective.native_class == Some(NativeClass::Structural)
+                && objective
+                    .demolition
+                    .as_ref()
+                    .is_some_and(|demolition| rule.trigger_index < demolition.trigger_count)
+        }) {
+            return Err(invalid("active_ability_damage_trigger_binding_mismatch"));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn map_bindings_fixture(version: u32) -> serde_json::Value {
+        json!({
+            "schema_version": version,
+            "application_id": 20231,
+            "map_name": "synthetic",
+            "source": {
+                "retail_elf_sha256": "synthetic",
+                "level_archive_sha256": "synthetic",
+                "level_clv_sha256": "synthetic",
+                "terrain_resource_bank_sha256": "synthetic",
+                "gameplay_objectives_sha256": "synthetic",
+                "qualified_objective_poses_sha256": "synthetic"
+            },
+            "boundary": {"min_x": 0.0, "max_x": 1.0, "min_z": 0.0, "max_z": 1.0},
+            "vertical_bounds": [0.0, 1.0],
+            "aaa": [],
+            "objectives": []
+        })
+    }
+
+    #[test]
+    fn legacy_map_bindings_require_reprojection() {
+        for version in [1, 2] {
+            let error =
+                decode_map_bindings(&map_bindings_fixture(version).to_string().into_bytes())
+                    .err()
+                    .expect("missing damage triggers must require reprojection");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert!(error.to_string().contains("require_reprojection"));
+        }
+        let mut map = map_bindings_fixture(1);
+        map["damage_triggers"] = json!([]);
+        let error = decode_map_bindings(&map.to_string().into_bytes())
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("require_reprojection"));
+    }
+
+    #[test]
+    fn schema_two_allows_an_explicit_empty_trigger_list() {
+        let mut map = map_bindings_fixture(2);
+        map["damage_triggers"] = json!([]);
+        let decoded = decode_map_bindings(&map.to_string().into_bytes()).unwrap();
+        assert!(decoded.damage_triggers.is_empty());
+    }
+
+    #[test]
+    fn triggers_bind_only_to_structural_demolition_slots() {
+        let mut map = map_bindings_fixture(2);
+        map["damage_triggers"] = json!([{
+            "object_index": 11, "trigger_index": 0, "trigger_type": 4,
+            "start_active": true, "damage_threshold": 60.0, "position": [1.0, 2.0, 3.0],
+            "box": {"centre": [1.0, 2.0, 3.0], "half_extents": [1.0, 1.0, 1.0],
+                    "axes": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]}
+        }]);
+        let map = decode_map_bindings(&map.to_string().into_bytes()).unwrap();
+        let mut objective: Objective = serde_json::from_value(json!({
+            "token": "0x00000001", "object_index": 11, "initial_state": 0, "native_class": "structural",
+            "demolition": {"trigger_count": 1, "owner_team": 0, "arm_ms": 1, "detonate_ms": 1,
+                "defuse_ms": 1, "can_defuse": true, "activation_score": 0, "deactivation_score": 0,
+                "position": [1.0, 2.0, 3.0], "maximum_distance_m": 1.0, "distance_policy": "synthetic"}
+        })).unwrap();
+        let rules = &map.damage_triggers;
+        assert!(validate_damage_trigger_bindings(rules, std::slice::from_ref(&objective)).is_ok());
+        assert!(validate_damage_trigger_bindings(rules, &[]).is_err());
+        objective.native_class = Some(NativeClass::SecureHold);
+        assert!(validate_damage_trigger_bindings(rules, std::slice::from_ref(&objective)).is_err());
+        objective.native_class = Some(NativeClass::Structural);
+        objective.demolition.as_mut().unwrap().trigger_count = 0;
+        assert!(validate_damage_trigger_bindings(rules, std::slice::from_ref(&objective)).is_err());
+    }
 }

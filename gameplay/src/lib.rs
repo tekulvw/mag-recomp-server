@@ -82,6 +82,10 @@ pub mod leadership_runtime;
 pub mod navmesh;
 pub mod retail_movement;
 pub mod static_collision_partition;
+pub mod structure_damage;
+#[cfg(test)]
+mod structure_damage_engine_tests;
+pub mod structure_damage_world;
 pub use development_bot_movement::{BotMove, BotMoveMode};
 mod development_target;
 pub use development_target::BotScript;

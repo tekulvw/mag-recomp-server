@@ -113,6 +113,7 @@ fn setup() -> Setup {
             platoons: vec![4],
         }],
         effects,
+        damage_triggers: Vec::new(),
     }
 }
 
@@ -170,7 +171,7 @@ pub(crate) fn configured() -> Engine<Vec<u8>> {
     engine
 }
 
-fn add_ready(engine: &mut Engine<Vec<u8>>, slot: u16) {
+pub(crate) fn add_ready(engine: &mut Engine<Vec<u8>>, slot: u16) {
     reserve(engine, slot);
     let actor = engine
         .active
@@ -187,7 +188,7 @@ fn add_ready(engine: &mut Engine<Vec<u8>>, slot: u16) {
     assert_eq!(actor.team(), 1);
 }
 
-fn activate(
+pub(crate) fn activate(
     engine: &mut Engine<Vec<u8>>,
     request: CommandRequest,
     actor: u16,
@@ -211,7 +212,7 @@ fn activate(
     )
 }
 
-fn request(squad_index: u16, ability: Ability) -> CommandRequest {
+pub(crate) fn request(squad_index: u16, ability: Ability) -> CommandRequest {
     CommandRequest {
         squad_index,
         ability,
@@ -396,7 +397,7 @@ fn late_join_queues_platoon_creation_before_active_squad_ability_snapshot() {
 
 use crate::synthetic_dynamic_collision as dynamic_fixture;
 
-fn strike_floor(map_name: &str, qualified: bool) -> collision::CollisionWorld {
+pub(crate) fn strike_floor(map_name: &str, qualified: bool) -> collision::CollisionWorld {
     let mut floor = json!({
         "id":"invented_floor",
         "vertices_xyz":[[80.,1.,80.],[120.,1.,80.],[120.,1.,120.],[80.,1.,120.]],
@@ -419,13 +420,13 @@ fn strike_floor(map_name: &str, qualified: bool) -> collision::CollisionWorld {
     .unwrap()
 }
 
-fn prepare_effect_tick(
+pub(crate) fn prepare_effect_tick(
     engine: &mut Engine<Vec<u8>>,
     native: &std::collections::BTreeMap<u32, acquisition_character_effects::NativeState>,
     millis: u64,
 ) -> Result<acquisition_character_effects::Candidate, &'static str> {
     let mut rows = [0; 32];
-    rows[6] = 1 << 21;
+    rows[6] = (1 << 6) | (1 << 21);
     rows[19] = 1 | (1 << 9);
     rows[24] = 1 | (1 << 9);
     let now = Duration::from_millis(millis);
@@ -455,7 +456,7 @@ fn actor(engine: &Engine<Vec<u8>>, slot: u16) -> &Active {
         .unwrap()
 }
 
-fn actor_mut(engine: &mut Engine<Vec<u8>>, slot: u16) -> &mut Active {
+pub(crate) fn actor_mut(engine: &mut Engine<Vec<u8>>, slot: u16) -> &mut Active {
     engine
         .active
         .iter_mut()

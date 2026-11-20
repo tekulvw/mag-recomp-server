@@ -58,10 +58,12 @@ pub struct Setup {
     pub aaa: Vec<AntiAir>,
     pub objectives: Vec<SensorObjective>,
     pub effects: Vec<(Side, u8, Ability, EffectRules)>,
+    pub damage_triggers: Vec<crate::structure_damage_world::Rule>,
 }
 impl Setup {
     pub fn validate(&self) -> Result<(), &'static str> {
         self.rules.validate()?;
+        crate::structure_damage_world::World::new(&self.damage_triggers)?;
         NativeCooldowns::new(&self.rules)?;
         if self.map_name.is_empty()
             || ![
@@ -106,7 +108,9 @@ impl Setup {
     }
     pub(crate) fn runtime(self: Arc<Self>) -> Result<Runtime, &'static str> {
         self.validate()?;
+        let structures = crate::structure_damage_world::World::new(&self.damage_triggers)?;
         Ok(Runtime {
+            structures,
             cooldowns: NativeCooldowns::new(&self.rules)?,
             setup: self,
             units: BTreeMap::new(),
@@ -163,6 +167,7 @@ struct ObjectiveSurveillance {
 #[derive(Clone)]
 pub(crate) struct Runtime {
     pub(crate) setup: Arc<Setup>,
+    structures: crate::structure_damage_world::World,
     cooldowns: NativeCooldowns,
     units: BTreeMap<u16, Unit>,
     effects: BTreeMap<(u16, u16), Running>,
@@ -230,6 +235,9 @@ impl<W: Write> Engine<W> {
             .is_some_and(|l| l.supports_match_profiles())
         {
             return Err("active_abilities_require_native_leadership");
+        }
+        if !setup.damage_triggers.is_empty() && self.match_profile().game_type != 2 {
+            return Err("structure_damage_requires_native_domination_objective_lifecycle");
         }
         self.active_abilities = Some(Arc::new(setup).runtime()?);
         Ok(self)
@@ -492,6 +500,33 @@ impl<W: Write> Engine<W> {
         collision: BlastCollision<'_>,
         ground_policy: Option<&acquisition_ground_damage::Policy>,
     ) -> Result<domination_structural_world::DamageCommit, &'static str> {
+        let mut objectives = self
+            .active_abilities
+            .as_ref()
+            .filter(|r| r.structures.has_targets())
+            .and_then(|_| self.objective_world.clone());
+        let has_world = objectives.is_some();
+        let result = self.stage_active_ability_update_in_world(
+            now,
+            native,
+            collision,
+            ground_policy,
+            objectives.as_mut(),
+        );
+        if result.is_ok() && has_world {
+            self.objective_world = objectives;
+        }
+        result
+    }
+
+    pub(crate) fn stage_active_ability_update_in_world(
+        &mut self,
+        now: Duration,
+        native: &mut BTreeMap<u32, acquisition_character_effects::NativeState>,
+        collision: BlastCollision<'_>,
+        ground_policy: Option<&acquisition_ground_damage::Policy>,
+        mut objectives: Option<&mut objective_control::ObjectiveWorld>,
+    ) -> Result<domination_structural_world::DamageCommit, &'static str> {
         let mut result = domination_structural_world::DamageCommit {
             audit: Vec::new(),
             messages: Vec::new(),
@@ -564,6 +599,25 @@ impl<W: Write> Engine<W> {
                                 },
                                 collision,
                             )? {
+                                let domination_structural_world::DamageWork::Blast {
+                                    blast, ..
+                                } = &work
+                                else {
+                                    return Err("structure_strike_requires_blast");
+                                };
+                                if runtime.structures.has_targets()
+                                    && (collision.filter_rows[19] | collision.filter_rows[24])
+                                        & (1 << 6)
+                                        != 0
+                                {
+                                    return Err("structure_phantom_raycast_filter_unqualified");
+                                }
+                                let structure_hits = runtime.structures.collect(
+                                    blast,
+                                    collision.filter_rows[6],
+                                    collision.limits,
+                                )?;
+                                let raw_damage = blast.damage;
                                 let mut commit = self.stage_domination_damage_with_ground(
                                     &mut runtime.area,
                                     native,
@@ -571,6 +625,14 @@ impl<W: Write> Engine<W> {
                                     &[work],
                                     ground_policy,
                                 )?;
+                                result.audit.extend(self.stage_structure_strike(
+                                    &mut runtime.structures,
+                                    objectives.as_deref_mut(),
+                                    &structure_hits,
+                                    raw_damage,
+                                    attacker,
+                                    now,
+                                )?);
                                 for dose in &mut commit.helo_doses {
                                     dose.source_team = Some(team);
                                 }

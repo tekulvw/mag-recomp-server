@@ -123,7 +123,7 @@ struct Provider<'a, W: Write> {
 }
 
 impl<W: Write> Provider<'_, W> {
-    fn prepare_active_abilities(&mut self) -> Result<(), &'static str> {
+    fn prepare_active_abilities(&mut self, world: &mut ObjectiveWorld) -> Result<(), &'static str> {
         if self.engine.active_abilities.is_none() {
             return Ok(());
         }
@@ -131,7 +131,7 @@ impl<W: Write> Provider<'_, W> {
             std::mem::replace(&mut self.engine.ground_runtime, self.ground.clone());
         let previous_bunkers =
             std::mem::replace(&mut self.engine.bunker_world, self.bunkers.clone());
-        let result = self.engine.stage_active_ability_update(
+        let result = self.engine.stage_active_ability_update_in_world(
             self.now,
             self.native,
             BlastCollision {
@@ -142,6 +142,7 @@ impl<W: Write> Provider<'_, W> {
                 terrain_materials: Some(&self.state.terrain_materials),
             },
             Some(&self.state.ground_damage),
+            Some(world),
         );
         self.ground = std::mem::replace(&mut self.engine.ground_runtime, previous_ground);
         self.bunkers = std::mem::replace(&mut self.engine.bunker_world, previous_bunkers);
@@ -1348,7 +1349,22 @@ impl<W: Write> Engine<W> {
                 before_sim
                     .effects
                     .prepare_ground_waves(&before_sim.spawns)?;
-                before_sim.effects.prepare_active_abilities()?;
+                before_sim
+                    .effects
+                    .prepare_active_abilities(&mut before_sim.world)?;
+                if before_sim.world.has_native_entries() {
+                    before_sim = before_sim.runtime.stage_structure_damage_entries(
+                        crate::domination_gameplay_engine::Frame {
+                            now,
+                            world: &before_sim.world,
+                            spawns: &before_sim.spawns,
+                            round: &before_sim.round,
+                        },
+                        before_sim.effects,
+                    )?;
+                }
+                let structure_deltas = std::mem::take(&mut before_sim.deltas);
+                let structure_sequences = std::mem::take(&mut before_sim.sequences);
                 let actors = if before_sim.effects.engine.active_abilities.is_some() {
                     before_sim
                         .effects
@@ -1379,7 +1395,7 @@ impl<W: Write> Engine<W> {
                 } else {
                     actors_before.clone()
                 };
-                let (candidate, mut provider) = before_sim
+                let (mut candidate, mut provider) = before_sim
                     .runtime
                     .stage_objective_update(
                         crate::domination_gameplay_engine::Frame {
@@ -1392,6 +1408,22 @@ impl<W: Write> Engine<W> {
                         before_sim.effects,
                     )?
                     .detach_effects();
+                // Native replication samples final fields. A zero-duration arm
+                // can enter twice in this pass; publish the final value once.
+                candidate.deltas = structure_deltas
+                    .into_iter()
+                    .chain(candidate.deltas)
+                    .map(|delta| (delta.object_index, delta))
+                    .collect::<BTreeMap<_, _>>()
+                    .into_values()
+                    .collect();
+                candidate.sequences = structure_sequences
+                    .into_iter()
+                    .chain(candidate.sequences)
+                    .map(|delta| (delta.object_index, delta))
+                    .collect::<BTreeMap<_, _>>()
+                    .into_values()
+                    .collect();
                 provider.prepare_hospital_damage_presence()?;
                 let Provider {
                     state: next_state,
