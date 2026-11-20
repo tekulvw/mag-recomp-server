@@ -1158,6 +1158,21 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             )
         })
         .transpose()?;
+    if leadership
+        .as_ref()
+        .is_some_and(|(_, policy)| policy.supports_oic_election())
+        && ((catalog.match_profile().game_type == 2
+            && active_abilities
+                .as_ref()
+                .is_some_and(|setup| !setup.has_strategic_effects()))
+            || match_profiles
+                .as_ref()
+                .is_some_and(|profiles| profiles.has_legacy_company_abilities()))
+    {
+        return Err(io::Error::other(
+            "oic_leadership_requires_strategic_effects",
+        ));
+    }
     let supports_platoon = leadership
         .as_ref()
         .is_some_and(|(_, policy)| policy.supports_platoon_election());

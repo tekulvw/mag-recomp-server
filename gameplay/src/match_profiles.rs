@@ -462,6 +462,16 @@ impl Registry {
         })
     }
 
+    pub fn has_legacy_company_abilities(&self) -> bool {
+        self.profiles.values().any(|profile| {
+            profile.spawns.match_profile().game_type == 2
+                && profile
+                    .active_abilities
+                    .as_ref()
+                    .is_some_and(|setup| !setup.has_strategic_effects())
+        })
+    }
+
     pub fn has_active_abilities(&self) -> bool {
         self.profiles
             .values()
@@ -552,6 +562,14 @@ impl<W: Write> Engine<W> {
                 .is_some_and(leadership_runtime::LeadershipRuntime::supports_match_profiles)
         {
             return Err("active_abilities_require_native_leadership");
+        }
+        if registry.has_legacy_company_abilities()
+            && self
+                .leadership
+                .as_ref()
+                .is_some_and(|l| l.supports_oic_election())
+        {
+            return Err("oic_leadership_requires_strategic_effects");
         }
         registry.validate_runtime(&self.item_catalog, self.wire_profile)?;
         if registry.has_domination_gameplay() && self.dynamic_body_resources.is_none() {
@@ -1078,6 +1096,121 @@ mod tests {
                 "platoon_election":{"level_weight":2.0,"mslc_weight":1.0}
             }).to_string(),
         )
+    }
+
+    fn oic_policy() -> leadership_runtime::RolePolicy {
+        leadership_runtime::RolePolicy::from_json(
+            &json!({
+                "schema_version":4,"application_id":20231,
+                "squad_leader":"native","development_bindings":[],
+                "native_election":{
+                    "source_sha256":"a".repeat(64),"squad_level_weight":1.0,"squad_mslc_weight":5.0,
+                    "default_record":{"leadership_level":1,"nominations":1,"matches_since_last_command":0}
+                },
+                "platoon_election":{"level_weight":2.0,"mslc_weight":1.0},
+                "company_election":{"level_weight":2.0,"mslc_weight":1.0}
+            }).to_string(),
+        ).unwrap()
+    }
+
+    #[test]
+    fn company_promotion_replaces_previous_authority_and_refills_it_atomically() {
+        use crate::active_abilities::CommandRole::PlatoonLeader;
+
+        let files = Files::new();
+        let mut engine = leadership_match_with_policy(&files, oic_policy());
+        let first = reserve_leader(
+            &mut engine,
+            0,
+            0,
+            json!({
+                "leadership_level":3,"nominations":3,"matches_since_last_command":4
+            }),
+        );
+        reserve_leader(
+            &mut engine,
+            1,
+            0,
+            json!({
+                "leadership_level":3,"nominations":3,"matches_since_last_command":1
+            }),
+        );
+        let squad = engine.active.as_ref().unwrap().squad_catalog.clone();
+        engine.active.as_mut().unwrap().squad_catalog = squad.for_squad(0).unwrap().into();
+        engine.match_started = true;
+        engine.reconcile_squad_leaders().unwrap();
+        assert_eq!(
+            engine.command_leadership_role(&engine.peers[&first]),
+            Some(PlatoonLeader)
+        );
+
+        let accepted = engine.requested_nominations(&engine.peers[&first], 0xff);
+        assert_eq!(accepted, Some(7));
+        engine.peers.get_mut(&first).unwrap().nominations = accepted.unwrap();
+        let saved_limit = engine.max_log;
+        engine.max_log = engine.written;
+        assert_eq!(
+            engine.reconcile_squad_leaders().err(),
+            Some("log_limit_reached")
+        );
+        assert_eq!(engine.company_leader_index(0), u16::MAX);
+        assert_eq!(engine.platoon_leader_index(0), 0);
+
+        engine.max_log = saved_limit;
+        engine.failed = false;
+        engine.reconcile_squad_leaders().unwrap();
+        assert_eq!(engine.company_leader_index(0), 0);
+        assert_eq!(engine.company_leader_index(1), u16::MAX);
+        assert_eq!(engine.platoon_leader_index(0), 1);
+        assert_eq!(
+            engine.strategic_leadership_team(&engine.peers[&first]),
+            Some(0)
+        );
+        assert_eq!(engine.command_leadership_role(&engine.peers[&first]), None);
+        assert_eq!(
+            engine.strategic_leadership_team(engine.active.as_ref().unwrap()),
+            None
+        );
+
+        engine.peers.get_mut(&first).unwrap().nominations = 3;
+        assert_eq!(
+            engine.strategic_leadership_team(&engine.peers[&first]),
+            None
+        );
+        engine.reconcile_squad_leaders().unwrap();
+        assert_eq!(engine.company_leader_index(0), u16::MAX);
+        assert_eq!(engine.platoon_leader_index(0), 1);
+    }
+
+    #[test]
+    fn company_nomination_requires_saved_tier_three_and_domination_policy() {
+        let files = Files::new();
+        let mut engine = leadership_match_with_policy(&files, oic_policy());
+        let party = reserve_leader(
+            &mut engine,
+            0,
+            0,
+            json!({
+                "leadership_level":2,"nominations":7,"matches_since_last_command":0
+            }),
+        );
+        let actor = engine.active.as_ref().unwrap();
+        assert_eq!(actor.reservation.id, party);
+        assert_eq!(actor.nominations, 3);
+        assert_eq!(engine.requested_nominations(actor, 7), Some(3));
+
+        let legacy = leadership_match_with_policy(&files, platoon_leadership_policy().unwrap());
+        let mut character = actor.reservation.character.clone();
+        character.leadership.as_mut().unwrap().leadership_level = 3;
+        assert_eq!(legacy.initial_nominations(&character), 3);
+        assert_eq!(engine.initial_nominations(&character), 7);
+        let mut acquisition = base_engine(&files, Vec::new(), 100_000)
+            .with_leadership_passives(leadership_catalog(), oic_policy())
+            .unwrap();
+        acquisition.spawn_catalog =
+            Some(spawn_catalog::SpawnCatalog::load(files.spawns(1, 0, 1)).unwrap());
+        assert_eq!(acquisition.initial_nominations(&character), 3);
+        assert_eq!(character.leadership.unwrap().nominations, 7);
     }
 
     #[test]

@@ -41,6 +41,7 @@ pub struct Configuration {
     ground_capabilities: Vec<GroundCapability>,
     ground_damage: Option<crate::acquisition_ground_damage::Policy>,
     vehicle_reinforcement_intervals_ms: [u32; 2],
+    structural: Option<crate::acquisition_structural::Files>,
 }
 
 #[derive(Deserialize)]
@@ -163,10 +164,18 @@ pub(crate) fn configure_ground(
 impl Configuration {
     pub fn load(path: impl AsRef<Path>) -> io::Result<Self> {
         let mut text = String::new();
+        let path = path.as_ref();
         File::open(path)?
             .take(MAX_BYTES as u64 + 1)
             .read_to_string(&mut text)?;
-        Self::from_json(&text)
+        let mut result = Self::from_json(&text)?;
+        if let Some(structural) = &mut result.structural {
+            structural.resolve(
+                path.parent()
+                    .ok_or_else(|| io::Error::other("acquisition_config_directory_missing"))?,
+            );
+        }
+        Ok(result)
     }
 
     pub fn from_json(text: &str) -> io::Result<Self> {
@@ -237,8 +246,20 @@ impl Configuration {
         ground: &Runtime,
     ) -> io::Result<Setup> {
         let controller = Catalog::load(&self.controller_path, spawns)?;
-        self.build_profile(controller, spawns, objective_catalog, ground)
-            .map_err(io::Error::other)
+        let mut setup = self
+            .build_profile(controller, spawns, objective_catalog, ground)
+            .map_err(io::Error::other)?;
+        setup.structural = self
+            .structural
+            .as_ref()
+            .map(|paths| paths.load(objective_catalog, spawns))
+            .transpose()?;
+        if let Some(structural) = &setup.structural {
+            structural
+                .validate_ground(ground)
+                .map_err(io::Error::other)?;
+        }
+        Ok(setup)
     }
 
     fn build_profile(
@@ -513,6 +534,7 @@ impl Configuration {
             ground_capabilities,
             ground_damage: self.ground_damage.clone(),
             vehicle_reinforcement_intervals_ms: self.vehicle_reinforcement_intervals_ms,
+            structural: None,
         })
     }
 }

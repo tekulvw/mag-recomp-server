@@ -29,14 +29,16 @@ pub(super) fn command<W: Write>(
     plan.gameplay_denial = denial;
     decoded.insert(
         "effects_implemented".into(),
-        json!(
-            ctx.engine.active_abilities.is_some()
-                && matches!(
-                    request.ability,
-                    crate::active_abilities::Ability::ClusterBomb
-                        | crate::active_abilities::Ability::Sensor
-                )
-        ),
+        json!(ctx.engine.active_abilities.as_ref().is_some_and(|runtime| {
+            runtime
+                .setup
+                .effects
+                .iter()
+                .any(|(_, faction, ability, _)| {
+                    *faction == ctx.active.reservation.character.faction
+                        && *ability == request.ability
+                })
+        })),
     );
     plan.active_ability_runtime = runtime;
     Ok(Value::Object(decoded))
@@ -47,12 +49,32 @@ pub(super) fn strategic<W: Write>(
     plan: &mut EventPlan,
     request: crate::active_abilities::StrategicRequest,
 ) -> Result<Value, &'static str> {
-    plan.gameplay_denial = Some("strategic_ability_execution_pending");
-    Ok(
-        json!({"type":"strategic_ability","ability_code":request.ability_code,
-        "actor_index":ctx.active.reservation.player,"recognized":true,"accepted":false,
-        "effects_implemented":false,"reason":"strategic_ability_execution_pending"}),
-    )
+    let (runtime, decision, denial) = ctx
+        .engine
+        .plan_strategic_ability(ctx.active, request, ctx.now)?;
+    if let Some(next) = &runtime {
+        plan.strategic_waves = Some(ctx.engine.plan_strategic_wave_clocks(next, ctx.now)?);
+    }
+    let Value::Object(mut decoded) = decision else {
+        return Err("invalid_strategic_decision");
+    };
+    decoded.insert("type".into(), json!("strategic_ability"));
+    decoded.insert("ability_code".into(), json!(request.ability_code));
+    decoded.insert("actor_index".into(), json!(ctx.active.reservation.player));
+    decoded.insert("recognized".into(), json!(true));
+    decoded.insert(
+        "effects_implemented".into(),
+        json!(
+            ctx.engine
+                .active_abilities
+                .as_ref()
+                .is_some_and(|r| r.strategic.is_some())
+        ),
+    );
+    decoded.insert("accepted".into(), json!(runtime.is_some()));
+    plan.gameplay_denial = denial;
+    plan.active_ability_runtime = runtime;
+    Ok(Value::Object(decoded))
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@ use crate::{
     active_ability_engine_tests::{activate, add_ready, configured, request},
 };
 
-fn platoon_leadership() -> (
+pub(crate) fn platoon_leadership() -> (
     leadership_passives::LeadershipCatalog,
     leadership_runtime::RolePolicy,
 ) {
@@ -60,7 +60,7 @@ fn legacy_active_abilities_reject_platoon_election_in_both_builder_orders() {
     );
 }
 
-pub(crate) fn platoon_engine() -> Engine<Vec<u8>> {
+pub(crate) fn configured_platoon_engine() -> Engine<Vec<u8>> {
     let mut engine = configured();
     let (catalog, policy) = platoon_leadership();
     let mut setup = engine
@@ -129,6 +129,11 @@ pub(crate) fn platoon_engine() -> Engine<Vec<u8>> {
             mode.platoon = vec![Ability::Sensor];
         }
     }
+    engine
+}
+
+pub(crate) fn platoon_engine() -> Engine<Vec<u8>> {
+    let mut engine = configured_platoon_engine();
     add_ready(&mut engine, 0);
     add_ready(&mut engine, 1);
     for actor in engine.active.iter_mut().chain(engine.peers.values_mut()) {

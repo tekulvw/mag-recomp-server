@@ -23,6 +23,7 @@ impl<W: Write> Engine<W> {
             self.tick_incapacitation(now, wall)?;
             self.tick_acquisition_ground_registration(wall)?;
             messages.extend(self.tick_bots(now, wall)?);
+            self.advance_strategic_player_waves(now, wall)?;
             self.queue_team_wave_deadlines(now, wall)?;
             messages.extend(self.tick_bot_firearms(now, wall)?);
             self.tick_bot_healing(now, wall)?;

@@ -61,6 +61,68 @@ const A: &str = "synthetic-reservation-a001";
 const B: &str = "synthetic-reservation-b001";
 
 #[test]
+fn blocked_bot_retries_after_team_wave_renews() {
+    let mut engine = populated_engine("Synthetic Blocked Wave");
+    engine.maximum_players = 8;
+    engine.bot_registry.total = 3;
+    assert!(reserve(&mut engine, 0, A, Duration::ZERO).ok);
+    let human = actor(&mut engine, A).unwrap();
+    ready(human);
+    human.spawn_delta = Some(Vec::new());
+    human.life = CharacterLife::Alive {
+        generation: 1,
+        health_quarter_points: 400,
+    };
+    let (&id, bot) = engine
+        .bot_registry
+        .bots
+        .iter()
+        .find(|(_, bot)| bot.target.squad.team() == 0)
+        .unwrap();
+    let generation = bot.target.runtime.unwrap().generation;
+    let damage = replication::CharacterDamage {
+        health_quarter_points: 0,
+        ..bot.damage
+    };
+    let at = Duration::from_millis;
+    engine.team_waves[0] = Some(TeamWaveClock {
+        first_deadline: at(100),
+        period: at(1000),
+    });
+    engine
+        .commit_bot_damage(id, generation, damage, at(50))
+        .unwrap();
+    engine.tick_bots(at(100), 1).unwrap();
+    assert_eq!(
+        engine.bot_registry.bots[&id].health, 0,
+        "body blocks the due spawn"
+    );
+    engine.team_waves[0]
+        .as_mut()
+        .unwrap()
+        .advance_native_cycle(at(100))
+        .unwrap();
+
+    actor(&mut engine, A).unwrap().tracking.server_position(
+        replication::CharacterPosition {
+            x: 8.,
+            y: 0.,
+            z: 8.,
+        },
+        player_tracking::PositionOrigin::ServerSpawn,
+        0,
+    );
+    engine.tick_bots(at(150), 1).unwrap();
+    let bot = &engine.bot_registry.bots[&id];
+    assert_eq!(
+        bot.target.runtime.unwrap().generation,
+        generation + 1,
+        "the first clear tick admits the bot whose wave was already due"
+    );
+    assert!(bot.health > 0);
+}
+
+#[test]
 fn loading_second_human_is_not_evicted_by_bot_traffic_and_resyncs_when_ready() {
     let mut engine = populated_engine("Synthetic Loading");
     engine.maximum_players = 8;

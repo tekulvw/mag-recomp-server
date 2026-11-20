@@ -8,6 +8,7 @@ are read from the input, never supplied as defaults here.
 import argparse
 import hashlib
 import json
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -38,6 +39,18 @@ def duration(table, key):
     value = table[key]
     check(type(value) is int and 0 < value < 2**32, 'invalid_duration:' + key)
     return value
+
+
+def strategic_spawn_modifier(table, ability):
+    raw = table.get('Modifier')
+    # The neutral literal parser preserves signed C-style float atoms such
+    # as '.5f' as strings. Accept literals only and never evaluate expressions.
+    if type(raw) is str and re.fullmatch(r'[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)[fF]', raw):
+        raw = float(raw[:-1])
+    check(type(raw) in (int, float), 'invalid_strategic_spawn_modifier:' + ability)
+    valid = 0 < raw <= 1 if ability == 'Blockade' else -1 < raw < 0
+    check(valid, 'invalid_strategic_spawn_modifier:' + ability)
+    return raw
 
 
 def elements(table, prefix=''):
@@ -84,10 +97,13 @@ def project(raw):
             continue
         name, table = next(iter(entry['parameters'].items()))
         check(name.startswith('Strategic') and name.endswith('PropsTable'), 'unknown_strategic_table')
-        strategic.append({'ability': name[len('Strategic'):-len('PropsTable')],
-                          'source_member': path, 'source_sha256': entry['sha256'],
-                          'cooldown_ms': duration(table, 'CoolDown_ms'),
-                          'duration_ms': duration(table, 'Duration_ms')})
+        ability = name[len('Strategic'):-len('PropsTable')]
+        row = {'ability': ability, 'source_member': path, 'source_sha256': entry['sha256'],
+               'cooldown_ms': duration(table, 'CoolDown_ms'),
+               'duration_ms': duration(table, 'Duration_ms')}
+        if ability in {'Blockade', 'RapidRedeploy'}:
+            row['spawn_interval_modifier'] = strategic_spawn_modifier(table, ability)
+        strategic.append(row)
     return {'schema_version': 1, 'application_id': 20231,
             'rules_sha256': hashlib.sha256(raw).hexdigest(),
             'source_archive_sha256': source['source_archive_sha256'],

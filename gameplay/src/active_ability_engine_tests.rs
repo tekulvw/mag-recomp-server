@@ -119,13 +119,17 @@ fn setup() -> Setup {
 }
 
 pub(crate) fn configured() -> Engine<Vec<u8>> {
+    configured_for_mode(2)
+}
+
+fn configured_for_mode(game_type: i8) -> Engine<Vec<u8>> {
     let abilities = setup();
     let name = &abilities.map_name;
     let spawns = spawn_catalog::SpawnCatalog::from_json(
         &json!({
             "format":"mag_spawn_catalog","schema_version":1,"source":"synthetic ability arena",
             "active":{"map_name":name,"squad_index":16,"default_spawn":0,"available":[0]},
-            "match_profile":{"game_type":2,"auto_assign_teams":true,"team_capacity":8,
+            "match_profile":{"game_type":game_type,"auto_assign_teams":true,"team_capacity":8,
                 "squad_capacity":4,"has_bunkers":false,"has_objectives":false,"attacking_faction":0},
             "maps":[{"name":name,"owner_faction":1,"spawn_count":1,
                 "locations":[{"index":0,"token":71,"kind":"on_foot","position":{"x":100.,"y":3.,"z":100.}}],
@@ -706,4 +710,63 @@ fn attacker_interception_spends_timers_but_invalid_target_does_not() {
     world.install_acquisition_delta(delta).unwrap();
     assert!(activate(&mut engine, command, 0, 120).ok);
     assert_eq!(last_command(&engine)["decoded"]["enabled_at_start"], true);
+}
+
+#[test]
+fn acquisition_control_mask_is_used_by_command_admission_and_candidate_rollback() {
+    let mut engine = configured_for_mode(1);
+    add_ready(&mut engine, 0);
+    engine.match_started = true;
+    engine.reconcile_squad_leaders().unwrap();
+    // The same native profile capability is exercised with an Acquisition mode
+    // after the fixed synthetic world is constructed.
+    let mut profile = engine
+        .active_abilities
+        .as_ref()
+        .unwrap()
+        .setup
+        .rules
+        .clone();
+    for mode in &mut profile.modes {
+        if mode.players == 128 {
+            mode.squad = vec![Ability::Sensor];
+        }
+    }
+    std::sync::Arc::make_mut(&mut engine.active_abilities.as_mut().unwrap().setup).rules = profile;
+    let request = request(16, Ability::Sensor);
+    let source = actor(&engine, 0);
+    assert!(
+        engine
+            .plan_command_ability(source, request, Duration::from_millis(20))
+            .unwrap()
+            .0
+            .is_some()
+    );
+    engine.set_acquisition_command_enabled(4, 4, false).unwrap();
+    let source = actor(&engine, 0);
+    assert_eq!(
+        engine
+            .plan_command_ability(source, request, Duration::from_millis(20))
+            .unwrap()
+            .2,
+        Some("command_disabled_by_platoon")
+    );
+    engine.set_acquisition_command_enabled(4, 4, true).unwrap();
+    let result = engine.prepare_acquisition_character_callback(
+        &Default::default(),
+        Duration::from_millis(20),
+        |candidate, _| {
+            candidate.set_acquisition_command_enabled(4, 4, false)?;
+            Err("synthetic_control_failure")
+        },
+    );
+    assert_eq!(result.err(), Some("synthetic_control_failure"));
+    let source = actor(&engine, 0);
+    assert!(
+        engine
+            .plan_command_ability(source, request, Duration::from_millis(20))
+            .unwrap()
+            .0
+            .is_some()
+    );
 }

@@ -356,3 +356,47 @@ fn ability_batches_share_a_single_header_and_reject_mixed_scope_or_overflow() {
     assert!(NativeAbilityUpdate::encode_batch(&[squad.clone(), platoon], 5, 10, profile).is_err());
     assert!(NativeAbilityUpdate::encode_batch(&vec![squad; 9], 5, 10, profile).is_err());
 }
+
+#[test]
+fn tactical_refresh_clears_own_team_individual_timers_and_retains_shared_gate() {
+    use NativeAbilityScope::{Platoon, Squad};
+    let mut state = NativeCooldowns::new(&rules()).unwrap();
+    for scope in [Squad(0), Squad(16), Platoon(4)] {
+        state
+            .record(
+                scope,
+                Ability::Sensor,
+                30_000,
+                NativeActivationOutcome::Activated,
+            )
+            .unwrap();
+    }
+    state.refresh_team(1).unwrap();
+    for scope in [Squad(16), Platoon(4)] {
+        assert_eq!(
+            state
+                .remaining_ms(scope, Ability::Sensor, 40_000, 0.)
+                .unwrap(),
+            10_000
+        );
+        assert_eq!(
+            state
+                .remaining_ms(scope, Ability::Sensor, 50_000, 0.)
+                .unwrap(),
+            0
+        );
+    }
+    assert_eq!(
+        state
+            .remaining_ms(Squad(0), Ability::Sensor, 40_000, 0.)
+            .unwrap(),
+        170_000
+    );
+    assert_eq!(state.refresh_team(2), Err("invalid_native_refresh_team"));
+    assert_eq!(
+        state
+            .remaining_ms(Squad(0), Ability::Sensor, 50_000, 0.)
+            .unwrap(),
+        160_000
+    );
+}

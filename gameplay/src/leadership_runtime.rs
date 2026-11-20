@@ -45,9 +45,16 @@ struct NativeElection {
 }
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PlatoonElection {
+struct ElectionWeights {
     level_weight: f32,
     mslc_weight: f32,
+}
+impl ElectionWeights {
+    fn valid(self) -> bool {
+        [self.level_weight, self.mslc_weight]
+            .into_iter()
+            .all(|weight| weight.is_finite() && weight >= 0.0)
+    }
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -61,7 +68,9 @@ pub struct RolePolicy {
     #[serde(default)]
     native_election: Option<NativeElection>,
     #[serde(default)]
-    platoon_election: Option<PlatoonElection>,
+    platoon_election: Option<ElectionWeights>,
+    #[serde(default)]
+    company_election: Option<ElectionWeights>,
     development_bindings: Vec<DevelopmentBinding>,
 }
 impl RolePolicy {
@@ -85,7 +94,7 @@ impl RolePolicy {
                 });
                 first.is_some() && !schema2_fields && value.native_election.is_none()
             }
-            2 | 3 => {
+            2..=4 => {
                 value.first_member_squad_leader.is_none()
                     && match (value.squad_leader, &value.native_election) {
                         (Some(SquadLeaderMode::Native), Some(n)) => {
@@ -102,19 +111,19 @@ impl RolePolicy {
             _ => false,
         };
         let platoon_valid = match (value.schema_version, value.platoon_election) {
-            (3, Some(weights)) => {
-                value.native().is_some()
-                    && weights.level_weight.is_finite()
-                    && weights.level_weight >= 0.0
-                    && weights.mslc_weight.is_finite()
-                    && weights.mslc_weight >= 0.0
-            }
+            (3 | 4, Some(weights)) => value.native().is_some() && weights.valid(),
             (1 | 2, None) => true,
+            _ => false,
+        };
+        let company_valid = match (value.schema_version, value.company_election) {
+            (4, Some(weights)) => weights.valid(),
+            (1..=3, None) => true,
             _ => false,
         };
         let mut seen = BTreeSet::new();
         if !mode_valid
             || !platoon_valid
+            || !company_valid
             || value.application_id != 20231
             || value.development_bindings.iter().any(|b| {
                 b.account_id == 0
@@ -140,6 +149,9 @@ impl RolePolicy {
     pub fn supports_platoon_election(&self) -> bool {
         self.platoon_election.is_some()
     }
+    pub fn supports_oic_election(&self) -> bool {
+        self.company_election.is_some()
+    }
     fn native(&self) -> Option<&NativeElection> {
         self.native_election
             .as_ref()
@@ -154,8 +166,8 @@ impl RolePolicy {
     }
 }
 /// Retail `MagSimCharacter::SetNominations` (0x0093b7b8) masks requested bits by
-/// saved leadership level: none, squad, then squad and platoon. The worker
-/// supports these two election scopes. OIC nomination remains outside its policy.
+/// Mask the lower-rank nominations shared by all modes. Domination under
+/// the Company election policy also admits saved tier-three OIC nomination.
 pub fn mask_nominations(leadership_level: u8, bits: u8) -> u8 {
     match leadership_level {
         0 => 0,
@@ -192,6 +204,7 @@ pub(crate) struct LeadershipRuntime {
     policy: RolePolicy,
     squad_leaders: BTreeMap<u16, Leader>,
     platoon_leaders: BTreeMap<u16, Leader>,
+    company_leaders: BTreeMap<u16, Leader>,
 }
 impl LeadershipRuntime {
     pub(crate) fn supports_match_profiles(&self) -> bool {
@@ -200,9 +213,13 @@ impl LeadershipRuntime {
     pub(crate) fn supports_platoon_election(&self) -> bool {
         self.policy.supports_platoon_election()
     }
+    pub(crate) fn supports_oic_election(&self) -> bool {
+        self.policy.supports_oic_election()
+    }
     pub(crate) fn clear_held_roles(&mut self) {
         self.squad_leaders.clear();
         self.platoon_leaders.clear();
+        self.company_leaders.clear();
     }
     fn elect<'a>(
         &self,
@@ -239,6 +256,12 @@ impl LeadershipRuntime {
     fn native_role(&self, actor: &Active) -> HeldLeadershipRole {
         let squad = actor.squad_catalog.squad_index();
         if self
+            .company_leaders
+            .get(&(squad / 16))
+            .is_some_and(|leader| leader.matches(actor, 4))
+        {
+            HeldLeadershipRole::OfficerInCharge
+        } else if self
             .platoon_leaders
             .get(&(squad / 4))
             .is_some_and(|leader| leader.matches(actor, 2))
@@ -368,11 +391,25 @@ impl<W: Write> Engine<W> {
         {
             return Err("platoon_leadership_requires_complete_active_abilities");
         }
+        if policy.supports_oic_election()
+            && ((self.match_profile().game_type == 2
+                && self
+                    .active_abilities
+                    .as_ref()
+                    .is_some_and(|r| !r.setup.has_strategic_effects()))
+                || self
+                    .match_profiles
+                    .as_ref()
+                    .is_some_and(match_profiles::Registry::has_legacy_company_abilities))
+        {
+            return Err("oic_leadership_requires_strategic_effects");
+        }
         self.leadership = Some(LeadershipRuntime {
             catalog,
             policy,
             squad_leaders: BTreeMap::new(),
             platoon_leaders: BTreeMap::new(),
+            company_leaders: BTreeMap::new(),
         });
         Ok(self)
     }
@@ -392,6 +429,35 @@ impl<W: Write> Engine<W> {
             _ => None,
         }
     }
+    pub(crate) fn strategic_leadership_team(&self, actor: &Active) -> Option<u8> {
+        (self.match_started
+            && self.match_profile().game_type == 2
+            && self.leadership.as_ref()?.native_role(actor) == HeldLeadershipRole::OfficerInCharge)
+            .then(|| actor.team())
+    }
+
+    /// Company field 11 publishes the elected character slot or the vacancy sentinel.
+    pub(crate) fn company_leader_index(&self, team: u8) -> u16 {
+        self.leadership
+            .as_ref()
+            .and_then(|runtime| runtime.company_leaders.get(&u16::from(team)))
+            .map_or(u16::MAX, |leader| leader.player)
+    }
+
+    fn match_nominations(&self, record: LeadershipRecord, bits: u8) -> u8 {
+        if self.match_profile().game_type == 2
+            && record.leadership_level >= 3
+            && self
+                .leadership
+                .as_ref()
+                .is_some_and(LeadershipRuntime::supports_oic_election)
+        {
+            bits & 7
+        } else {
+            mask_nominations(record.leadership_level, bits)
+        }
+    }
+
     /// The saved record's fields, or the policy default when Horizon supplied none.
     pub(crate) fn leadership_record(&self, character: &Character) -> Option<LeadershipRecord> {
         let native = self.native_election()?;
@@ -401,12 +467,12 @@ impl<W: Write> Engine<W> {
     /// SetNominations. Without native election the replicated value stays zero.
     pub(crate) fn initial_nominations(&self, character: &Character) -> u8 {
         self.leadership_record(character)
-            .map_or(0, |r| mask_nominations(r.leadership_level, r.nominations))
+            .map_or(0, |r| self.match_nominations(r, r.nominations))
     }
     /// Masked nominations for a ChangePlayerNominations request, if native.
     pub(crate) fn requested_nominations(&self, active: &Active, bits: u8) -> Option<u8> {
         self.leadership_record(&active.reservation.character)
-            .map(|r| mask_nominations(r.leadership_level, bits))
+            .map(|r| self.match_nominations(r, bits))
     }
     /// Squad field10. Native mode publishes the held leader or 0xffff; every
     /// other configuration keeps the existing first-member wire value.
@@ -427,8 +493,8 @@ impl<W: Write> Engine<W> {
             .map_or(u16::MAX, |leader| leader.player)
     }
 
-    /// Fill platoon vacancies before squad vacancies. Platoon promotion may
-    /// replace the winner's squad authority, so stage and record both together.
+    /// Fill Company, platoon and squad vacancies in that order. A promotion may
+    /// vacate the winner's previous role, so stage and record all scopes together.
     pub(crate) fn reconcile_squad_leaders(&mut self) -> Result<(), &'static str> {
         let Some(runtime) = self.leadership.as_ref() else {
             return Ok(());
@@ -450,6 +516,17 @@ impl<W: Write> Engine<W> {
             .map(|squad| (squad, self.squad_members(squad, None)))
             .collect();
 
+        let company_weights = runtime
+            .policy
+            .company_election
+            .filter(|_| self.match_profile().game_type == 2);
+        let mut company_leaders = runtime.company_leaders.clone();
+        company_leaders.retain(|company, leader| {
+            company_weights.is_some()
+                && actors.iter().any(|actor| {
+                    actor.squad_catalog.squad_index() / 16 == *company && leader.matches(actor, 4)
+                })
+        });
         let mut platoon_leaders = runtime.platoon_leaders.clone();
         platoon_leaders.retain(|platoon, leader| {
             actors.iter().any(|actor| {
@@ -477,6 +554,41 @@ impl<W: Write> Engine<W> {
         };
 
         if self.match_started {
+            if let Some(weights) = company_weights {
+                for company in 0..2 {
+                    if company_leaders.contains_key(&company) {
+                        continue;
+                    }
+                    let candidates = (company * 16..company * 16 + 16).flat_map(members);
+                    if let Some(winner) = runtime.elect(
+                        candidates,
+                        native,
+                        4,
+                        (weights.level_weight, weights.mslc_weight),
+                    ) {
+                        let squad = winner.squad_catalog.squad_index();
+                        if platoon_leaders
+                            .get(&(squad / 4))
+                            .is_some_and(|leader| leader.matches(winner, 2))
+                        {
+                            platoon_leaders.remove(&(squad / 4));
+                        }
+                        if squad_leaders
+                            .get(&squad)
+                            .is_some_and(|leader| leader.matches(winner, 1))
+                        {
+                            squad_leaders.remove(&squad);
+                        }
+                        company_leaders.insert(company, Leader::from_actor(winner));
+                    }
+                }
+            }
+
+            let not_company_leader = |actor: &&Active| {
+                !company_leaders
+                    .get(&(actor.squad_catalog.squad_index() / 16))
+                    .is_some_and(|leader| leader.matches(actor, 4))
+            };
             if let Some(weights) = runtime.policy.platoon_election {
                 let occupied_platoons: BTreeSet<u16> =
                     squads.keys().map(|squad| squad / 4).collect();
@@ -484,7 +596,9 @@ impl<W: Write> Engine<W> {
                     if platoon_leaders.contains_key(&platoon) {
                         continue;
                     }
-                    let candidates = (platoon * 4..platoon * 4 + 4).flat_map(members);
+                    let candidates = (platoon * 4..platoon * 4 + 4)
+                        .flat_map(members)
+                        .filter(not_company_leader);
                     if let Some(winner) = runtime.elect(
                         candidates,
                         native,
@@ -507,7 +621,7 @@ impl<W: Write> Engine<W> {
                 if squad_leaders.contains_key(&squad) {
                     continue;
                 }
-                let candidates = members(squad).filter(|actor| {
+                let candidates = members(squad).filter(not_company_leader).filter(|actor| {
                     !platoon_leaders
                         .get(&(squad / 4))
                         .is_some_and(|leader| leader.matches(actor, 2))
@@ -526,10 +640,13 @@ impl<W: Write> Engine<W> {
         let changes = leadership_changes("squad_index", &runtime.squad_leaders, &squad_leaders);
         let platoon_changes =
             leadership_changes("platoon_index", &runtime.platoon_leaders, &platoon_leaders);
-        if !platoon_changes.is_empty() {
+        let company_changes =
+            leadership_changes("company_index", &runtime.company_leaders, &company_leaders);
+        if !company_changes.is_empty() || !platoon_changes.is_empty() {
             self.record(
                 json!({"op":"leadership_roles_changed","squad_changes":changes,
-                    "platoon_changes":platoon_changes,"match_started":self.match_started}),
+                    "platoon_changes":platoon_changes,"company_changes":company_changes,
+                    "match_started":self.match_started}),
                 self.last_wall_secs,
             )?;
         } else if !changes.is_empty() {
@@ -541,6 +658,7 @@ impl<W: Write> Engine<W> {
         let runtime = self.leadership.as_mut().unwrap();
         runtime.squad_leaders = squad_leaders;
         runtime.platoon_leaders = platoon_leaders;
+        runtime.company_leaders = company_leaders;
         Ok(())
     }
     pub(crate) fn plan_leadership(&self, now: Duration) -> Result<LeadershipPlan, &'static str> {

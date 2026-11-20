@@ -24,6 +24,16 @@ def sequence(kind, fields=b''):
 
 
 class StructuralSequenceTests(unittest.TestCase):
+    def test_acquisition_only_projects_structural_definitions_for_selected_level(self):
+        classes = PROJECTOR['qualified_objective_classes']
+        row = {'map': {'mode_enum': 'GameType128'}}
+        self.assertEqual(classes({}, row, 'GameType128'),
+                         {'ObjectiveDemolitionStructuralProperties'})
+        with self.assertRaisesRegex(ValueError, 'Wrong authored mode'):
+            classes({}, row, 'GameType256')
+        with self.assertRaisesRegex(ValueError, 'Wrong authored mode'):
+            classes({'mode_enum': 'GameType256'}, row, 'GameType128')
+
     def test_reads_bounded_animated_object_and_uses_explicit_defaults(self):
         data = b''.join(
             field(name, 'util::Token', struct.pack('>I', index))

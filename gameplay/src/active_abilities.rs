@@ -166,6 +166,8 @@ pub struct StrategicProperty {
     pub source_sha256: String,
     pub cooldown_ms: u64,
     pub duration_ms: u64,
+    #[serde(default)]
+    pub spawn_interval_modifier: Option<f32>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

@@ -382,22 +382,97 @@ impl ObjectiveWorld {
 
     /// These source-qualified Acquisition structures have ordinary family-12
     /// entries and are outside the Secure and Arrival controller's hook list.
-    pub(crate) fn advance_acquisition_precision(
+    pub(crate) fn advance_acquisition_precision_entries(
         &mut self,
         now: Duration,
-    ) -> Vec<ObjectiveControlDelta> {
+        mut prepare: impl FnMut(NativeEntry, &mut Self) -> Result<(), &'static str>,
+    ) -> Result<Vec<ObjectiveControlDelta>, &'static str> {
         let mut updates = Vec::new();
-        for (index, source) in std::mem::take(&mut self.acquisition_precision) {
-            let Some(object) = self.objects.get_mut(&index) else {
-                continue;
-            };
-            let before = object.state;
-            while advance_precision(object, source, now).is_some() {}
-            if object.state != before {
-                updates.push(object.state);
-            }
+        for index in self
+            .acquisition_precision
+            .keys()
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            updates.extend(self.advance_acquisition_precision_entry(index, now, &mut prepare)?);
         }
-        updates
+        Ok(updates)
+    }
+
+    pub(crate) fn advance_acquisition_precision_entry(
+        &mut self,
+        index: u16,
+        now: Duration,
+        mut prepare: impl FnMut(NativeEntry, &mut Self) -> Result<(), &'static str>,
+    ) -> Result<Option<ObjectiveControlDelta>, &'static str> {
+        let Some(source) = self.acquisition_precision.remove(&index) else {
+            return Ok(None);
+        };
+        let mut published = None;
+        while let Some(object) = self.objects.get_mut(&index) {
+            let previous = object.state.state_actor.state;
+            if advance_precision(object, source, now).is_none() {
+                break;
+            }
+            let entry = NativeEntry {
+                class: NativeClass::Structural,
+                previous,
+                delta: object.state,
+                actor_generation: source.map(|actor| actor.generation),
+                active_trigger_index: None,
+            };
+            published = Some(entry.delta);
+            prepare(entry, self)?;
+        }
+        Ok(published)
+    }
+
+    /// Source-projected passive spawn objectives have only the script-requested
+    /// stable states. Their class entry effects are staged by the caller.
+    pub(crate) fn enter_acquisition_spawn_state(
+        &mut self,
+        index: u16,
+        class: NativeClass,
+        target: ObjectiveState,
+        actor: u16,
+        now: Duration,
+    ) -> Result<Option<NativeEntry>, &'static str> {
+        let object = self
+            .objects
+            .get_mut(&index)
+            .ok_or("acquisition_spawn_objective_missing")?;
+        let previous = object.state.state_actor.state;
+        if target == previous {
+            return Ok(None);
+        }
+        if !matches!(
+            previous,
+            ObjectiveState::Inactive | ObjectiveState::Deactivated | ObjectiveState::Completed
+        ) || !matches!(
+            target,
+            ObjectiveState::Deactivated | ObjectiveState::Completed
+        ) {
+            return Err("unqualified_acquisition_spawn_state");
+        }
+        set_native_state(object, target, actor, now);
+        object.state.expiration_time_ms = 0;
+        object.state.deactivation_time_ms = 0;
+        if class == NativeClass::Structural {
+            object.state.health_percent = if target == ObjectiveState::Completed {
+                0
+            } else {
+                100
+            };
+        }
+
+        self.pristine = false;
+        Ok(Some(NativeEntry {
+            class,
+            previous,
+            delta: object.state,
+            actor_generation: None,
+            active_trigger_index: None,
+        }))
     }
 
     /// A destroyed type4/5 trigger invokes the owner's ordinary Activating

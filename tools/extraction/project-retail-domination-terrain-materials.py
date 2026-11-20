@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Project original Domination terrain mask textures to private material bytes."""
+"""Project original retail terrain mask textures to private material bytes."""
 
 import argparse
 from collections import Counter
@@ -86,10 +86,10 @@ def material_tokens(game):
     return result
 
 
-def projection(meta, archive, materials):
+def projection(meta, archive, materials, *, mode='GameType256'):
     source = meta['source']
     name = meta['map']['map']
-    require(meta['map']['mode_enum'] == 'GameType256', 'Wrong original terrain mode')
+    require(meta['map']['mode_enum'] == mode, 'Wrong original terrain mode')
     archive_raw = archive.read_bytes()
     require(sha(archive_raw) == source['archive_sha256'], 'Changed original terrain map archive')
     arc = Psarc(archive_raw)
@@ -120,11 +120,22 @@ def projection(meta, archive, materials):
             require(token not in found and record['resource_version'] == 5 and len(header) == 36
                     and header[:2] == bytes((1, 1))
                     and struct.unpack_from('>II', header, 6) == (mask_width, mask_width)
-                    and header[14:18] == bytes.fromhex('0800aae4'), 'Unsupported original mask format')
+                    and header[14] in ((6, 8) if name == 'mag_voz_final' else (8,))
+                    and header[15:18] == bytes.fromhex('00aae4'), 'Unsupported original mask format')
             gpu = struct.unpack_from('>I', block, record['header_offset']+24)[0]
-            require(gpu + mask_width**2 <= sections[8], 'Truncated original mask GPU bytes')
-            raw = block[sections[7]+gpu:sections[7]+gpu+mask_width**2]
-            found[token] = (project_texture(raw, mask_width, by_token[token]), sha(raw))
+            length = mask_width**2 if header[14] == 8 else mask_width**2 // 2
+            require(gpu + length <= sections[8], 'Truncated original mask GPU bytes')
+            raw = block[sections[7]+gpu:sections[7]+gpu+length]
+            indices = by_token[token]
+            if header[14] == 6:
+                # Aralkum's constant DXT1 masks select black RGB with opaque alpha.
+                # The first and fourth authored slots also resolve to the same material.
+                require(raw == bytes.fromhex('0100000055555555') * (length // 8)
+                        and indices[0] == indices[3], 'Unsupported original constant mask')
+                projected = bytes([indices[3]]) * mask_width**2
+            else:
+                projected = project_texture(raw, mask_width, indices)
+            found[token] = (projected, sha(raw))
     require(found.keys() == by_token.keys(), 'Unresolved original terrain mask')
     result = b''.join(found[f'{row[0]:08x}'][0] for row in rows)
     receipt = {
@@ -144,20 +155,27 @@ def main():
     parser.add_argument('--metadata', type=Path, required=True, help='Qualified Domination map metadata')
     parser.add_argument('--levels', type=Path, required=True, help='Directory of original map PSARCs')
     parser.add_argument('--game', type=Path, required=True, help='Original shared game PSARC')
+    parser.add_argument('--mode', choices=('GameType128', 'GameType256'), default='GameType256')
     parser.add_argument('--output', type=Path, required=True,
                         help='New private directory for per-map JSON and binary material grids')
     args = parser.parse_args()
     native = args.elf.read_bytes()
     require(sha(native) == ELF_SHA256, 'Wrong native material authority')
     authored = args.metadata.read_bytes()
-    require(sha(authored) == METADATA_SHA256, 'Wrong original Domination metadata')
+    expected_metadata = {
+        'GameType128': '38703201deb85a4bf836164492658344b109eebb68274b5179b71b53bb93a9ab',
+        'GameType256': METADATA_SHA256,
+    }
+    require(sha(authored) == expected_metadata[args.mode], 'Wrong original terrain metadata')
     game = args.game.read_bytes()
     require(sha(game) == GAME_SHA256, 'Wrong retail game archive')
     tokens = material_tokens(Psarc(game))
     args.output.mkdir(parents=True, exist_ok=False)
     for row in json.loads(authored)['maps']:
+        if row['map']['mode_enum'] != args.mode:
+            continue
         path = args.levels / (row['map']['map'] + '.psarc')
-        name, receipt, payload = projection(row, path, tokens)
+        name, receipt, payload = projection(row, path, tokens, mode=args.mode)
         with (args.output / (name + '.bin')).open('xb') as stream:
             stream.write(payload)
         with (args.output / (name + '.json')).open('x') as stream:

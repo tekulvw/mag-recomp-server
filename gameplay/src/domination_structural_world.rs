@@ -74,7 +74,8 @@ pub enum BlastSource {
 
 impl BlastSource {
     fn supported_mode(self, game_type: i8) -> bool {
-        game_type == 2 || (game_type == 1 && self.is_command())
+        game_type == 2
+            || (game_type == 1 && (self.is_command() || matches!(self, Self::Structural { .. })))
     }
 
     fn is_command(self) -> bool {
@@ -768,7 +769,7 @@ impl<W: Write> Engine<W> {
         if !matches!(game_type, 1 | 2)
             || work.len() > 128
             || work.iter().any(|operation| match operation {
-                DamageWork::Area(_) => game_type != 2,
+                DamageWork::Area(_) => false,
                 DamageWork::Blast { source, blast, .. } => {
                     !source.supported_mode(game_type)
                         || matches!(source, BlastSource::GasPulse(_))
@@ -1998,11 +1999,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn air_strike_is_the_only_blast_admitted_in_acquisition() {
+    fn acquisition_admits_authored_structure_blasts_and_strikes() {
         assert!(BlastSource::AirStrike.supported_mode(1));
         assert!(BlastSource::AirStrike.supported_mode(2));
         assert!(!BlastSource::AirStrike.supported_mode(0));
-        assert!(!BlastSource::Structural { objective_id: 1 }.supported_mode(1));
+        assert!(BlastSource::Structural { objective_id: 1 }.supported_mode(1));
+        assert!(!BlastSource::Structural { objective_id: 1 }.supported_mode(0));
         assert!(!BlastSource::Ground { body_id: 1 }.supported_mode(1));
     }
 
