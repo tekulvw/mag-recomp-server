@@ -1,8 +1,9 @@
 //! Shared authoritative capture and demolition for reviewed retail objective bindings.
 use crate::{
+    domination_objective_runtime as secure, domination_repair_runtime as repair,
     objective_catalog::{
         ObjectiveCatalog, ObjectiveDemolitionRule, ObjectiveInteractionRule,
-        ObjectiveProgressionRule, native_state,
+        ObjectiveProgressionRule, ObjectiveRepairRule, native_state,
     },
     progression::{RewardKind, RewardRecipient},
     protocol::{ObjectiveInteraction, ObjectiveInteractionKind},
@@ -12,6 +13,8 @@ use crate::{
     },
 };
 use std::{collections::BTreeMap, time::Duration};
+
+pub use crate::objective_catalog::NativeClass;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ObjectiveActor {
@@ -67,7 +70,53 @@ struct Objective {
     fuse: Option<Operation>,
     state: ObjectiveControlDelta,
     operation: Option<Operation>,
+    native: Option<NativeObjective>,
 }
+
+#[derive(Clone)]
+struct NativeObjective {
+    class: NativeClass,
+    secure: Option<secure::SecureHold>,
+    repair_rule: Option<ObjectiveRepairRule>,
+    repair: Option<repair::StructuralRepair>,
+    damage_health: f32,
+    was_repaired: bool,
+    pending: Option<NativePending>,
+}
+
+#[derive(Clone)]
+enum NativePending {
+    Secure(secure::Request, Option<u32>),
+    Demolition {
+        kind: ObjectiveInteractionKind,
+        actor: ObjectiveActor,
+        trigger: u8,
+        modifier: f32,
+        recipient: Option<RewardRecipient>,
+    },
+    Script(ObjectiveState, Option<secure::Actor>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeEntry {
+    pub class: NativeClass,
+    pub previous: ObjectiveState,
+    pub delta: ObjectiveControlDelta,
+    pub actor_generation: Option<u32>,
+}
+
+impl NativeEntry {
+    /// Armed completion also dispatches the authored server explosion.
+    pub fn requires_authored_explosion(&self) -> bool {
+        self.class == NativeClass::Structural
+            && self.delta.state_actor.state == ObjectiveState::Completed
+            && matches!(
+                self.previous,
+                ObjectiveState::Activated | ObjectiveState::Deactivating
+            )
+    }
+}
+
 #[derive(Clone)]
 pub struct ObjectiveWorld {
     reward_actions: Vec<ObjectiveRewardAction>,
@@ -76,6 +125,9 @@ pub struct ObjectiveWorld {
     progression: Option<ObjectiveProgressionRule>,
     progression_started: bool,
     delayed_deadline: Option<Duration>,
+    native_entries: Vec<NativeEntry>,
+    native_tick_time: Option<Duration>,
+    native_elapsed_ms: u32,
 }
 impl ObjectiveWorld {
     pub fn new(catalog: &ObjectiveCatalog) -> Self {
@@ -85,6 +137,29 @@ impl ObjectiveWorld {
                 .objects
                 .iter()
                 .map(|object| {
+                    let initial =
+                        native_state(object.initial_state).expect("validated objective state");
+                    let native = object.native_class.map(|class| {
+                        let damage_health = if class == NativeClass::Structural
+                            && initial == ObjectiveState::Completed
+                        {
+                            0.0
+                        } else {
+                            100.0
+                        };
+                        NativeObjective {
+                            class,
+                            secure: object
+                                .interaction
+                                .as_ref()
+                                .map(|rule| secure_hold(initial, rule)),
+                            repair_rule: object.repair,
+                            repair: new_structural_repair(initial, object.repair),
+                            damage_health,
+                            was_repaired: initial == ObjectiveState::Repaired,
+                            pending: None,
+                        }
+                    });
                     (
                         object.object_index,
                         Objective {
@@ -95,16 +170,18 @@ impl ObjectiveWorld {
                             state: ObjectiveControlDelta {
                                 object_index: object.object_index,
                                 state_actor: ObjectiveStateActor {
-                                    state: native_state(object.initial_state)
-                                        .expect("validated objective state"),
+                                    state: initial,
                                     change_time_ms: 0,
                                     actor_index: u16::MAX,
                                 },
                                 expiration_time_ms: 0,
                                 deactivation_time_ms: 0,
-                                health_percent: 100,
+                                health_percent: native
+                                    .as_ref()
+                                    .map_or(100, |state| state.damage_health as u8),
                             },
                             operation: None,
+                            native,
                         },
                     )
                 })
@@ -113,15 +190,149 @@ impl ObjectiveWorld {
             progression: catalog.progression.clone(),
             progression_started: false,
             delayed_deadline: None,
+            native_entries: Vec::new(),
+            native_tick_time: None,
+            native_elapsed_ms: 0,
         }
+    }
+
+    pub fn take_native_entries(&mut self) -> Vec<NativeEntry> {
+        std::mem::take(&mut self.native_entries)
+    }
+
+    pub fn native_class(&self, index: u16) -> Option<NativeClass> {
+        Some(self.objects.get(&index)?.native.as_ref()?.class)
+    }
+
+    pub fn native_object_indices(&self) -> impl Iterator<Item = u16> + '_ {
+        self.objects
+            .iter()
+            .filter_map(|(&index, object)| object.native.as_ref().map(|_| index))
+    }
+
+    /// Start an objective update frame. The backend updates each qualified
+    /// object once and dispatches its entry before advancing to the next.
+    pub fn begin_native_tick(&mut self, now: Duration) {
+        let elapsed = self
+            .native_tick_time
+            .map_or(Duration::ZERO, |last| now.saturating_sub(last));
+        self.native_tick_time = Some(now);
+        self.native_elapsed_ms = elapsed.as_millis().min(u128::from(u32::MAX)) as u32;
+    }
+
+    pub fn tick_native_object(
+        &mut self,
+        index: u16,
+        now: Duration,
+        actors: &BTreeMap<u16, ObjectiveActor>,
+    ) -> Option<ObjectiveControlDelta> {
+        let object = self.objects.get_mut(&index)?;
+        let mut mode = object.native.take()?;
+        let previous = object.state;
+        let generation = tick_native(
+            object,
+            &mut mode,
+            now,
+            self.native_elapsed_ms,
+            actors,
+            &mut self.reward_actions,
+        );
+        let class = mode.class;
+        object.native = Some(mode);
+        if previous == object.state {
+            return None;
+        }
+        self.pristine = false;
+        if previous.state_actor.state != object.state.state_actor.state {
+            self.native_entries.push(NativeEntry {
+                class,
+                previous: previous.state_actor.state,
+                delta: object.state,
+                actor_generation: generation,
+            });
+        }
+        Some(object.state)
+    }
+
+    pub fn stage_native_state(
+        &mut self,
+        index: u16,
+        target: ObjectiveState,
+        actor: Option<secure::Actor>,
+    ) -> Result<(), &'static str> {
+        let object = self
+            .objects
+            .get_mut(&index)
+            .ok_or("unknown_native_objective")?;
+        let mode = object
+            .native
+            .as_mut()
+            .ok_or("native_objective_not_configured")?;
+        if !matches!(
+            target,
+            ObjectiveState::Inactive
+                | ObjectiveState::Deactivated
+                | ObjectiveState::Completed
+                | ObjectiveState::Locked
+        ) {
+            return Err("unsupported_native_script_state");
+        }
+        if matches!(
+            mode.pending,
+            Some(NativePending::Secure(..) | NativePending::Demolition { .. })
+        ) {
+            return Err("native_objective_transition_pending");
+        }
+        if object.state.state_actor.state != target {
+            mode.pending = Some(NativePending::Script(target, actor));
+            self.pristine = false;
+        } else {
+            mode.pending = None;
+        }
+        Ok(())
+    }
+
+    pub fn stage_repair(
+        &mut self,
+        target_object_id: u32,
+        authority: repair::Authority,
+    ) -> Result<(), &'static str> {
+        let index = target_object_id as u16;
+        if target_object_id != 0x0c80_0000 | u32::from(index) {
+            return Err("objective_invalid_target");
+        }
+        let object = self
+            .objects
+            .get_mut(&index)
+            .ok_or("unknown_native_objective")?;
+        let mode = object
+            .native
+            .as_mut()
+            .ok_or("native_objective_not_configured")?;
+        mode.repair
+            .as_mut()
+            .ok_or("native_structural_repair_not_configured")?
+            .submit(authority, mode.damage_health)?;
+        self.pristine = false;
+        Ok(())
     }
 
     /// Snapshot the authenticated admission at action start, not at delayed completion.
     pub(crate) fn attribute_operation(&mut self, index: u16, recipient: Option<RewardRecipient>) {
-        if let Some(operation) = self
-            .objects
-            .get_mut(&index)
-            .and_then(|object| object.operation.as_mut())
+        let Some(object) = self.objects.get_mut(&index) else {
+            return;
+        };
+        if let Some(NativePending::Demolition {
+            recipient: staged, ..
+        }) = object
+            .native
+            .as_mut()
+            .and_then(|mode| mode.pending.as_mut())
+        {
+            if staged.is_none() {
+                *staged = recipient;
+            }
+        } else if let Some(operation) = object.operation.as_mut()
             && operation.recipient.is_none()
         {
             operation.recipient = recipient;
@@ -194,7 +405,10 @@ impl ObjectiveWorld {
         let object = self.objects.get(&object_index)?;
         if !matches!(
             object.state.state_actor.state,
-            ObjectiveState::Activating | ObjectiveState::Deactivating
+            ObjectiveState::Activating
+                | ObjectiveState::Deactivating
+                | ObjectiveState::Retaking
+                | ObjectiveState::CancelRetaken
         ) {
             return None;
         }
@@ -243,6 +457,12 @@ impl ObjectiveWorld {
         let Some(object) = self.objects.get_mut(&index) else {
             return InteractionOutcome::denied("objective_unknown_target");
         };
+        if object.native.is_some() {
+            let outcome =
+                stage_native_interaction(object, request, actor, now, demolition_modifier);
+            self.pristine &= !outcome.accepted;
+            return outcome;
+        }
         if let Some(mut rule) = object.demolition.clone() {
             // Release remains possible independently of modifier validity.
             if request.kind != ObjectiveInteractionKind::Release {
@@ -258,7 +478,7 @@ impl ObjectiveWorld {
                 rule.arm_ms = arm;
                 rule.defuse_ms = defuse;
             }
-            let outcome = interact_demolition(object, &rule, request, actor, now);
+            let outcome = interact_demolition(object, &rule, request, actor, now, false);
             self.pristine &= outcome.changed.is_none();
             return outcome;
         }
@@ -345,8 +565,11 @@ impl ObjectiveWorld {
     ) -> Vec<ObjectiveControlDelta> {
         let mut changed = BTreeMap::new();
         for object in self.objects.values_mut() {
+            if object.native.is_some() {
+                continue;
+            }
             if let Some(rule) = object.demolition.clone() {
-                if tick_demolition(object, &rule, now, actors, &mut self.reward_actions) {
+                if tick_demolition(object, &rule, now, actors, &mut self.reward_actions, None) {
                     changed.insert(object.state.object_index, object.state);
                 }
                 continue;
@@ -534,12 +757,360 @@ fn modified_demolition_duration(base_ms: u32, modifier: f32) -> Option<u32> {
         .then_some(duration as u32)
 }
 
+fn secure_hold(initial: ObjectiveState, rule: &ObjectiveInteractionRule) -> secure::SecureHold {
+    secure::SecureHold::new(
+        initial,
+        secure::Rules {
+            owner_team: rule.owner_team,
+            trigger_count: rule.trigger_count,
+            can_deactivate: rule.can_deactivate,
+            activate_ms: rule.activate_ms,
+            complete_ms: rule.complete_ms,
+            deactivate_ms: rule.deactivate_ms,
+        },
+    )
+    .expect("validated secure hold")
+}
+
+fn new_structural_repair(
+    initial: ObjectiveState,
+    rule: Option<ObjectiveRepairRule>,
+) -> Option<repair::StructuralRepair> {
+    repair::StructuralRepair::new(initial, rule?.into()).ok()
+}
+
+fn at_native_trigger(
+    position: CharacterPosition,
+    range: crate::objective_range::ObjectiveRange<'_>,
+    index: u8,
+) -> bool {
+    range.volumes.get(usize::from(index)).is_some_and(|volume| {
+        crate::objective_range::ObjectiveRange {
+            volumes: std::slice::from_ref(volume),
+            ..range
+        }
+        .contains(position)
+    })
+}
+
+fn stage_native_interaction(
+    object: &mut Objective,
+    request: ObjectiveInteraction,
+    actor: ObjectiveActor,
+    now: Duration,
+    modifier: f32,
+) -> InteractionOutcome {
+    use ObjectiveInteractionKind::{Activate, Deactivate, Release};
+    let mode = object.native.as_mut().expect("native objective");
+    if mode.pending.is_some() {
+        return InteractionOutcome::denied("native_objective_transition_pending");
+    }
+    if let (Some(hold), Some(rule)) = (&mut mode.secure, &object.rule) {
+        let (action, base) = match request.kind {
+            Activate => (secure::Action::Activate, Some(rule.activate_ms)),
+            Deactivate => (secure::Action::Deactivate, Some(rule.deactivate_ms)),
+            Release => (secure::Action::Release, None),
+            _ => return InteractionOutcome::denied("objective_interaction_unsupported"),
+        };
+        let duration = match base {
+            Some(base) => match modified_demolition_duration(base, modifier) {
+                Some(duration) => Some(duration),
+                None => return InteractionOutcome::denied("invalid_objective_modifier"),
+            },
+            None => None,
+        };
+        let contact = at_native_trigger(actor.position, rule.range(), request.trigger_index);
+        let actor = secure::Actor {
+            player: actor.player,
+            team: actor.team,
+            generation: actor.generation.into(),
+        };
+        return match hold.request(action, actor, request.trigger_index, contact) {
+            Ok(transition) => {
+                mode.pending = Some(NativePending::Secure(transition, duration));
+                InteractionOutcome::accepted(
+                    "native_objective_interaction_staged",
+                    None,
+                    if action == secure::Action::Release {
+                        u8::MAX
+                    } else {
+                        request.trigger_index
+                    },
+                )
+            }
+            Err(reason) => InteractionOutcome::denied(reason),
+        };
+    }
+    let Some(rule) = object.demolition.as_ref() else {
+        return InteractionOutcome::denied("objective_interaction_not_configured");
+    };
+    if actor.team > 1
+        || request.kind != Release
+            && !at_native_trigger(actor.position, rule.range(), request.trigger_index)
+    {
+        return InteractionOutcome::denied("objective_invalid_native_contact");
+    }
+    let was_repaired = mode.was_repaired;
+    let Some(adjusted) = adjusted_demolition_rule(rule, request.kind, modifier) else {
+        return InteractionOutcome::denied("invalid_demolition_modifier");
+    };
+    let outcome = interact_demolition(
+        &mut object.clone(),
+        &adjusted,
+        request,
+        actor,
+        now,
+        was_repaired,
+    );
+    if outcome.changed.is_some() {
+        object.native.as_mut().expect("native objective").pending =
+            Some(NativePending::Demolition {
+                kind: request.kind,
+                actor,
+                trigger: request.trigger_index,
+                modifier,
+                recipient: None,
+            });
+    }
+    InteractionOutcome {
+        changed: None,
+        ..outcome
+    }
+}
+
+fn adjusted_demolition_rule(
+    rule: &ObjectiveDemolitionRule,
+    kind: ObjectiveInteractionKind,
+    modifier: f32,
+) -> Option<ObjectiveDemolitionRule> {
+    let mut rule = rule.clone();
+    match kind {
+        ObjectiveInteractionKind::Activate => {
+            rule.arm_ms = modified_demolition_duration(rule.arm_ms, modifier)?
+        }
+        ObjectiveInteractionKind::Deactivate => {
+            rule.defuse_ms = modified_demolition_duration(rule.defuse_ms, modifier)?
+        }
+        _ => {}
+    }
+    Some(rule)
+}
+
+fn set_native_state(object: &mut Objective, target: ObjectiveState, player: u16, now: Duration) {
+    object.state.state_actor = ObjectiveStateActor {
+        state: target,
+        actor_index: player,
+        change_time_ms: wire_time(now),
+    };
+}
+
+fn enter_secure(
+    object: &mut Objective,
+    hold: &mut secure::SecureHold,
+    request: secure::Request,
+    duration: Option<u32>,
+    now: Duration,
+) -> Option<u32> {
+    let entry = hold
+        .commit(request, wire_time(now), duration)
+        .expect("staged secure hold transition");
+    set_native_state(object, entry.current, entry.actor.player, now);
+    object.state.expiration_time_ms = entry.expiration_ms.unwrap_or_default();
+    object.state.deactivation_time_ms = entry.deactivation_ms.unwrap_or_default();
+    let generation = u32::try_from(entry.actor.generation).ok();
+    object.operation = if matches!(
+        entry.current,
+        ObjectiveState::Activating
+            | ObjectiveState::Deactivating
+            | ObjectiveState::Retaking
+            | ObjectiveState::CancelRetaken
+    ) {
+        Some(Operation {
+            started_at: now,
+            recipient: None,
+            player: entry.actor.player,
+            generation: generation.expect("world actor generation"),
+            trigger_index: request.trigger_index(),
+            deadline: now,
+        })
+    } else {
+        None
+    };
+    generation
+}
+
+fn enter_structural(object: &mut Objective, mode: &mut NativeObjective, previous: ObjectiveState) {
+    use ObjectiveState::{Activated, Completed, Deactivated, Deactivating, Repaired, Repairing};
+    let target = object.state.state_actor.state;
+    match target {
+        Completed => {
+            mode.damage_health = 0.0;
+            if matches!(previous, Activated | Deactivating) {
+                mode.was_repaired = false;
+            }
+        }
+        Repaired => {
+            mode.damage_health = 100.0;
+            if matches!(previous, Repairing | Deactivating) {
+                mode.was_repaired = true;
+            }
+        }
+        Deactivated | Activated => mode.damage_health = 100.0,
+        _ => {}
+    }
+    if target != Repairing {
+        mode.repair = new_structural_repair(target, mode.repair_rule);
+    }
+    object.state.health_percent = mode.damage_health as u8;
+}
+
+fn tick_native(
+    object: &mut Objective,
+    mode: &mut NativeObjective,
+    now: Duration,
+    elapsed_ms: u32,
+    actors: &BTreeMap<u16, ObjectiveActor>,
+    rewards: &mut Vec<ObjectiveRewardAction>,
+) -> Option<u32> {
+    let previous = object.state.state_actor.state;
+    match mode.pending.take() {
+        Some(NativePending::Script(target, actor)) => {
+            set_native_state(
+                object,
+                target,
+                actor.map_or(u16::MAX, |actor| actor.player),
+                now,
+            );
+            object.state.expiration_time_ms = 0;
+            object.state.deactivation_time_ms = 0;
+            object.operation = None;
+            object.fuse = None;
+            if mode.class == NativeClass::Structural {
+                enter_structural(object, mode, previous);
+            } else {
+                mode.secure = object.rule.as_ref().map(|rule| secure_hold(target, rule));
+            }
+            return actor.and_then(|actor| u32::try_from(actor.generation).ok());
+        }
+        Some(NativePending::Secure(request, duration)) => {
+            return enter_secure(
+                object,
+                mode.secure.as_mut().expect("native secure hold"),
+                request,
+                duration,
+                now,
+            );
+        }
+        Some(NativePending::Demolition {
+            kind,
+            actor,
+            trigger,
+            modifier,
+            recipient,
+        }) => {
+            let rule = adjusted_demolition_rule(
+                object.demolition.as_ref().expect("native demolition"),
+                kind,
+                modifier,
+            )
+            .expect("validated demolition modifier");
+            let request = ObjectiveInteraction {
+                target_object_id: 0x0c80_0000 | u32::from(object.state.object_index),
+                kind,
+                actor_index: actor.player,
+                trigger_index: trigger,
+            };
+            let fuse = object.fuse.clone();
+            if interact_demolition(object, &rule, request, actor, now, mode.was_repaired)
+                .changed
+                .is_some()
+            {
+                if let Some(operation) = object.operation.as_mut() {
+                    operation.recipient = recipient;
+                }
+                enter_structural(object, mode, previous);
+                return source_generation(object, Some(actor.generation), fuse.as_ref());
+            }
+            return None;
+        }
+        None => {}
+    }
+
+    if let (Some(hold), Some(rule)) = (mode.secure.as_mut(), object.rule.as_ref()) {
+        let request = hold.due(wire_time(now), |source| {
+            actors
+                .get(&source.player)
+                .zip(object.operation.as_ref())
+                .is_some_and(|(actor, operation)| {
+                    u64::from(actor.generation) == source.generation
+                        && actor.team == source.team
+                        && at_native_trigger(actor.position, rule.range(), operation.trigger_index)
+                })
+        })?;
+        return enter_secure(object, hold, request, None, now);
+    }
+
+    if let Some(rule) = object.demolition.clone() {
+        let operation = object.operation.clone();
+        let fuse = object.fuse.clone();
+        if tick_demolition(object, &rule, now, actors, rewards, Some(mode.was_repaired)) {
+            enter_structural(object, mode, previous);
+            return source_generation(
+                object,
+                operation.as_ref().map(|operation| operation.generation),
+                fuse.as_ref(),
+            );
+        }
+    }
+
+    let core = mode.repair.as_mut()?;
+    let request = match core
+        .update(elapsed_ms, mode.damage_health, true)
+        .expect("validated structural health")
+    {
+        repair::Update::None => return None,
+        repair::Update::Transition(request) => request,
+        repair::Update::Repair(batch) => {
+            mode.damage_health = batch.health_after;
+            object.state.health_percent = batch.health_after as u8;
+            core.observe_completion(object.state.health_percent, true)?
+        }
+    };
+    core.commit(request)
+        .expect("staged structural repair transition");
+    set_native_state(object, request.target, request.actor.player, now);
+    object.state.expiration_time_ms = 0;
+    object.state.deactivation_time_ms = 0;
+    enter_structural(object, mode, previous);
+    u32::try_from(request.actor.generation).ok()
+}
+
+fn source_generation(
+    object: &Objective,
+    generation: Option<u32>,
+    fuse: Option<&Operation>,
+) -> Option<u32> {
+    let player = object.state.state_actor.actor_index;
+    if player == u16::MAX {
+        None
+    } else if matches!(
+        object.state.state_actor.state,
+        ObjectiveState::Activated | ObjectiveState::Completed
+    ) && let Some(fuse) = fuse.filter(|fuse| fuse.player == player)
+    {
+        Some(fuse.generation)
+    } else {
+        generation
+    }
+}
+
 fn interact_demolition(
     object: &mut Objective,
     rule: &ObjectiveDemolitionRule,
     request: ObjectiveInteraction,
     actor: ObjectiveActor,
     now: Duration,
+    was_repaired: bool,
 ) -> InteractionOutcome {
     use ObjectiveInteractionKind::{Activate, Deactivate, Release};
     let state = object.state.state_actor.state;
@@ -561,6 +1132,9 @@ fn interact_demolition(
             armed_state(object, now);
         } else {
             cancel(object, now);
+            if was_repaired {
+                object.state.state_actor.state = ObjectiveState::Repaired;
+            }
         }
         return InteractionOutcome::accepted("objective_released", Some(object.state), u8::MAX);
     }
@@ -572,7 +1146,11 @@ fn interact_demolition(
     }
     let (expected, working, duration, reason) = match request.kind {
         Activate if actor.team != rule.owner_team => (
-            ObjectiveState::Deactivated,
+            if was_repaired {
+                ObjectiveState::Repaired
+            } else {
+                ObjectiveState::Deactivated
+            },
             ObjectiveState::Activating,
             rule.arm_ms,
             "demolition_arming_started",
@@ -603,7 +1181,11 @@ fn interact_demolition(
             InteractionOutcome::denied("objective_busy")
         };
     }
-    if state != expected {
+    if state != expected
+        && !(was_repaired
+            && expected == ObjectiveState::Repaired
+            && state == ObjectiveState::Deactivated)
+    {
         return InteractionOutcome::denied("objective_invalid_demolition_state");
     }
     let deadline = now.saturating_add(Duration::from_millis(duration.into()));
@@ -636,6 +1218,7 @@ fn tick_demolition(
     now: Duration,
     actors: &BTreeMap<u16, ObjectiveActor>,
     rewards: &mut Vec<ObjectiveRewardAction>,
+    native_was_repaired: Option<bool>,
 ) -> bool {
     let previous = object.state;
     let state = object.state.state_actor.state;
@@ -673,13 +1256,19 @@ fn tick_demolition(
         let valid = actors.get(&operation.player).is_some_and(|actor| {
             actor.generation == operation.generation
                 && (actor.team == rule.owner_team) == (state == ObjectiveState::Deactivating)
-                && demolition_in_range(*actor, rule)
+                && native_was_repaired.map_or_else(
+                    || demolition_in_range(*actor, rule),
+                    |_| at_native_trigger(actor.position, rule.range(), operation.trigger_index),
+                )
         });
         if !valid {
             if state == ObjectiveState::Deactivating {
                 armed_state(object, now);
             } else {
                 cancel(object, now);
+                if native_was_repaired == Some(true) {
+                    object.state.state_actor.state = ObjectiveState::Repaired;
+                }
             }
         } else if now >= operation.deadline {
             if state == ObjectiveState::Activating {
@@ -705,7 +1294,11 @@ fn tick_demolition(
                     rewards,
                 );
                 object.state.state_actor = ObjectiveStateActor {
-                    state: ObjectiveState::Deactivated,
+                    state: if native_was_repaired == Some(true) {
+                        ObjectiveState::Repaired
+                    } else {
+                        ObjectiveState::Deactivated
+                    },
                     change_time_ms: wire_time(now),
                     actor_index: operation.player,
                 };
@@ -778,6 +1371,229 @@ mod trigger_box_tests {
             },
             Duration::from_secs(1),
         )
+    }
+
+    fn native_catalog() -> serde_json::Value {
+        json!({
+            "schema_version":1,"format":"mag_retail_objective_catalog","application_id":20231,
+            "protocol":crate::protocol::ProtocolInfo::RETAIL_PROTOCOL,"game_type":2,"map_name":"synthetic_arena",
+            "entity_family":12,"network_type":12,
+            "source":{"authored_catalog_sha256":"0".repeat(64),"binding_capture_sha256":"1".repeat(64),
+                "startup_proof_sha256":"2".repeat(64),"source_image_sha256":"3".repeat(64),
+                "capture_qualification":"native_source_gameplay"},
+            "objects":[{"token":"0x0000000a","object_index":10,"initial_state":1,"native_class":"secure_hold",
+                "interaction":{"owner_team":1,"activate_ms":10,"complete_ms":20,"deactivate_ms":10,
+                    "can_deactivate":true,"position":[100.,3.,100.],"trigger_count":2,
+                    "maximum_distance_m":5.,"distance_policy":"authored_trigger_box",
+                    "trigger_volumes":[
+                        {"centre":[100.,3.,100.],"axes":[[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]],"half_extents":[2.5,1.,1.]},
+                        {"centre":[100.,3.,106.],"axes":[[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]],"half_extents":[2.5,1.,1.]}
+                    ]}},
+                {"token":"0x0000000b","object_index":11,"initial_state":7,"native_class":"structural",
+                 "repair":{"owner_team":1,"can_repair":true,"repair_ms":1000,"minimum_repair_ms":1000},
+                 "demolition":{"owner_team":1,"arm_ms":10,"detonate_ms":30,"defuse_ms":10,
+                    "can_defuse":true,"activation_score":0,"deactivation_score":0,
+                    "position":[100.,3.,100.],"trigger_count":1,"maximum_distance_m":5.,
+                    "distance_policy":"authored_trigger_box","trigger_volumes":[
+                        {"centre":[100.,3.,100.],"axes":[[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]],"half_extents":[2.5,1.,1.]}
+                    ]}}],
+            "squads":(0..2).flat_map(|team| (0..16).map(move |slot| json!({"team":team,
+                "squad_index":team*16+slot,"initial_objective_index":10,
+                "authored_objectives":[{"object_index":10,"order":1}]}))).collect::<Vec<_>>()
+        })
+    }
+
+    fn native_world() -> ObjectiveWorld {
+        ObjectiveWorld::new(&ObjectiveCatalog::from_json(&native_catalog().to_string()).unwrap())
+    }
+
+    fn frame(
+        world: &mut ObjectiveWorld,
+        index: u16,
+        ms: u64,
+        actors: &BTreeMap<u16, ObjectiveActor>,
+    ) -> Option<ObjectiveControlDelta> {
+        let now = Duration::from_millis(ms);
+        world.begin_native_tick(now);
+        world.tick_native_object(index, now, actors)
+    }
+
+    #[test]
+    fn native_secure_hold_stages_before_committing_one_object() {
+        let mut world = native_world();
+        assert_eq!(world.native_object_indices().collect::<Vec<_>>(), [10, 11]);
+        assert_eq!(world.native_class(10), Some(NativeClass::SecureHold));
+        assert!(!activate(&mut world, 106.).accepted);
+        let outcome = activate(&mut world, 100.);
+        assert!(outcome.accepted && outcome.changed.is_none());
+        assert_eq!(world.state(10), Some(ObjectiveState::Deactivated));
+        world
+            .stage_native_state(11, ObjectiveState::Inactive, None)
+            .unwrap();
+        assert!(
+            world
+                .tick(Duration::from_secs(1), &BTreeMap::new())
+                .is_empty()
+        );
+        let actor = ObjectiveActor {
+            player: 7,
+            team: 0,
+            generation: 1,
+            position: CharacterPosition {
+                x: 100.,
+                y: 2.5,
+                z: 100.,
+            },
+        };
+        let actors = BTreeMap::from([(7, actor)]);
+        assert_eq!(
+            frame(&mut world, 10, 1000, &actors)
+                .unwrap()
+                .expiration_time_ms,
+            1010
+        );
+        assert_eq!(world.state(11), Some(ObjectiveState::Completed));
+        let entries = world.take_native_entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].previous, ObjectiveState::Deactivated);
+        assert_eq!(entries[0].actor_generation, Some(1));
+        assert_eq!(
+            frame(&mut world, 11, 1000, &actors)
+                .unwrap()
+                .state_actor
+                .state,
+            ObjectiveState::Inactive
+        );
+        assert!(frame(&mut world, 10, 1009, &actors).is_none());
+        assert_eq!(
+            frame(&mut world, 10, 1010, &actors)
+                .unwrap()
+                .state_actor
+                .state,
+            ObjectiveState::Activated
+        );
+    }
+
+    #[test]
+    fn native_structural_repair_reports_net_health_and_entries() {
+        let mut world = native_world();
+        let mut authority = repair::Authority {
+            actor: secure::Actor {
+                player: 2,
+                generation: 8,
+                team: 0,
+            },
+            live: true,
+            tool_active: true,
+            repair_rate: 1.,
+        };
+        assert!(world.stage_repair(0x0c80_000b, authority).is_err());
+        authority.actor.team = 1;
+        world.stage_repair(0x0c80_000b, authority).unwrap();
+        assert_eq!(world.state(11), Some(ObjectiveState::Completed));
+        let empty = BTreeMap::new();
+        let delta = frame(&mut world, 11, 20, &empty).unwrap();
+        assert_eq!(delta.state_actor.state, ObjectiveState::Repairing);
+        assert_eq!(delta.health_percent, 0);
+        world.stage_repair(0x0c80_000b, authority).unwrap();
+        assert!(frame(&mut world, 11, 1019, &empty).is_none());
+        let delta = frame(&mut world, 11, 1020, &empty).unwrap();
+        assert_eq!(delta.state_actor.state, ObjectiveState::Repaired);
+        assert_eq!(delta.health_percent, 100);
+        let entries = world.take_native_entries();
+        assert_eq!(entries.len(), 2);
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.actor_generation == Some(8))
+        );
+        assert!(!entries[1].requires_authored_explosion());
+    }
+
+    #[test]
+    fn structural_defuse_restores_repaired_until_fuse_completes() {
+        use ObjectiveInteractionKind::{Activate, Deactivate};
+        let mut catalog = native_catalog();
+        catalog["objects"][1]["initial_state"] = json!(6);
+        let mut world =
+            ObjectiveWorld::new(&ObjectiveCatalog::from_json(&catalog.to_string()).unwrap());
+        let attacker = ObjectiveActor {
+            player: 7,
+            team: 0,
+            generation: 1,
+            position: CharacterPosition {
+                x: 100.,
+                y: 2.5,
+                z: 100.,
+            },
+        };
+        let defender = ObjectiveActor {
+            player: 8,
+            team: 1,
+            generation: 2,
+            ..attacker
+        };
+        let actors = BTreeMap::from([(7, attacker), (8, defender)]);
+        let interact = |world: &mut ObjectiveWorld, actor: ObjectiveActor, kind, ms| {
+            let outcome = world.interact(
+                ObjectiveInteraction {
+                    target_object_id: 0x0c80_000b,
+                    actor_index: actor.player,
+                    trigger_index: 0,
+                    kind,
+                },
+                actor,
+                Duration::from_millis(ms),
+            );
+            assert!(
+                outcome.accepted && outcome.changed.is_none(),
+                "{}",
+                outcome.reason
+            );
+        };
+
+        interact(&mut world, attacker, Activate, 100);
+        assert_eq!(world.state(11), Some(ObjectiveState::Repaired));
+        assert_eq!(
+            frame(&mut world, 11, 100, &actors)
+                .unwrap()
+                .state_actor
+                .state,
+            ObjectiveState::Activating
+        );
+        assert_eq!(
+            frame(&mut world, 11, 110, &actors)
+                .unwrap()
+                .expiration_time_ms,
+            140
+        );
+        interact(&mut world, defender, Deactivate, 115);
+        frame(&mut world, 11, 115, &actors);
+        assert_eq!(
+            frame(&mut world, 11, 125, &actors)
+                .unwrap()
+                .state_actor
+                .state,
+            ObjectiveState::Repaired
+        );
+        assert!(
+            world
+                .take_native_entries()
+                .iter()
+                .all(|entry| !entry.requires_authored_explosion())
+        );
+
+        interact(&mut world, attacker, Activate, 200);
+        frame(&mut world, 11, 200, &actors);
+        frame(&mut world, 11, 210, &actors);
+        interact(&mut world, defender, Deactivate, 230);
+        frame(&mut world, 11, 230, &actors);
+        let delta = frame(&mut world, 11, 240, &actors).unwrap();
+        assert_eq!(delta.state_actor.state, ObjectiveState::Completed);
+        assert_eq!(delta.health_percent, 0);
+        let entry = world.take_native_entries().pop().unwrap();
+        assert_eq!(entry.actor_generation, Some(1));
+        assert!(entry.requires_authored_explosion());
     }
 
     #[test]

@@ -46,7 +46,13 @@ pub mod correction_ack;
 pub mod damage;
 mod death_notifications;
 mod development_bot_movement;
+pub mod domination_callbacks;
 pub mod domination_control;
+pub mod domination_fsp;
+pub mod domination_fsp_bindings;
+pub mod domination_match_flow;
+pub mod domination_objective_runtime;
+pub mod domination_repair_runtime;
 pub mod dynamic_collision;
 pub mod dynamic_collision_runtime;
 #[cfg(test)]
@@ -98,7 +104,7 @@ mod match_flow;
 pub mod match_profiles;
 mod multiplayer;
 pub mod objective_catalog;
-mod objective_control;
+pub mod objective_control;
 pub mod objective_range;
 pub mod owner_update;
 pub mod player_tracking;
@@ -1022,6 +1028,7 @@ pub struct Engine<W: Write> {
     ground_vehicles: Option<ground_vehicles::Catalog>,
     ground_runtime: Option<acquisition_ground_runtime::Runtime>,
     acquisition_round: Option<acquisition_round::Round>,
+    domination_round: Option<acquisition_round::Round>,
     acquisition_gameplay: Option<acquisition_gameplay_engine::Runtime>,
     acquisition_effect_origin: std::sync::Arc<()>,
     acquisition_static_partitions:
@@ -1199,6 +1206,9 @@ impl<W: Write> Engine<W> {
         mut self,
         catalog: objective_catalog::ObjectiveCatalog,
     ) -> Result<Self, &'static str> {
+        if self.domination_round.is_some() {
+            return Err("domination_round_objective_catalog_locked");
+        }
         catalog.validate_match(self.map_name(), self.match_profile())?;
         if let Some(spawns) = &self.spawn_catalog {
             spawns.validate_objectives(Some(&catalog))?;
@@ -1213,6 +1223,15 @@ impl<W: Write> Engine<W> {
     ) -> Result<(), &'static str> {
         if let Some(spawns) = &self.spawn_catalog {
             spawns.validate_objectives(self.objective_catalog.as_ref())?;
+        }
+        // Interactive mode2 catalogs require the complete class-entry backend;
+        // the independently configurable score/result clock is insufficient.
+        if self
+            .objective_catalog
+            .as_ref()
+            .is_some_and(|c| c.is_domination_gameplay())
+        {
+            return Err("domination_gameplay_configuration_required");
         }
         objective_catalog::validate_configuration(
             self.objective_catalog.as_ref(),

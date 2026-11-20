@@ -45,6 +45,7 @@ struct Source {
     ground_vehicles: Option<PathBuf>,
     character_damage_rules: Option<PathBuf>,
     acquisition_gameplay: Option<PathBuf>,
+    domination_round: Option<PathBuf>,
 }
 #[derive(Clone)]
 struct Loaded {
@@ -56,6 +57,7 @@ struct Loaded {
     vehicles: Option<ground_vehicles::Catalog>,
     damage: Option<character_damage_rules::Rules>,
     acquisition: Option<Arc<acquisition_gameplay_engine::Setup>>,
+    domination_round: Option<acquisition_round::Round>,
 }
 pub struct Registry {
     profiles: BTreeMap<String, Loaded>,
@@ -105,6 +107,7 @@ impl Registry {
                 source.ground_vehicles.as_ref(),
                 source.character_damage_rules.as_ref(),
                 source.acquisition_gameplay.as_ref(),
+                source.domination_round.as_ref(),
             ]
             .into_iter()
             .flatten()
@@ -160,6 +163,16 @@ impl Registry {
             if policy.has_objectives && objectives.is_none() {
                 return Err(io::Error::other("retail_objective_catalog_required"));
             }
+            let domination_round = source
+                .domination_round
+                .map(domination_match_flow::Setup::load)
+                .transpose()?
+                .map(|setup| {
+                    setup
+                        .round_for(&spawns, objectives.as_ref())
+                        .map_err(io::Error::other)
+                })
+                .transpose()?;
             let collision = source
                 .collision_world
                 .as_ref()
@@ -241,9 +254,11 @@ impl Registry {
                 if objectives.as_ref().is_some_and(|catalog| {
                     catalog.source().capture_qualification == "native_source_gameplay"
                 }) {
-                    return Err(io::Error::other(
-                        "acquisition_gameplay_configuration_required",
-                    ));
+                    return Err(io::Error::other(if policy.game_type == 2 {
+                        "domination_gameplay_configuration_required"
+                    } else {
+                        "acquisition_gameplay_configuration_required"
+                    }));
                 }
                 None
             };
@@ -281,6 +296,7 @@ impl Registry {
                     vehicles,
                     damage,
                     acquisition,
+                    domination_round,
                 },
             );
         }
@@ -352,6 +368,7 @@ impl<W: Write> Engine<W> {
             || !self.peers.is_empty()
             || self.match_profiles.is_some()
             || self.acquisition_gameplay.is_some()
+            || self.domination_round.is_some()
         {
             return Err("match_profiles_require_idle_explicit_retail_engine");
         }
@@ -467,6 +484,7 @@ impl<W: Write> Engine<W> {
         self.ground_runtime = ground_runtime;
         self.acquisition_gameplay = acquisition_gameplay;
         self.acquisition_round = acquisition_round;
+        self.domination_round = loaded.domination_round;
         self.character_damage_rules = loaded.damage;
         self.development_dummy_position = self
             .spawn_catalog
@@ -603,6 +621,7 @@ mod tests {
                 navmesh: sample.navmesh_world,
                 vehicles: sample.ground_vehicles,
                 damage: None,
+                domination_round: None,
                 acquisition: Some(sample.acquisition_gameplay.unwrap().setup),
             },
         );

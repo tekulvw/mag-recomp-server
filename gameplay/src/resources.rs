@@ -198,6 +198,7 @@ impl<W: Write> Engine<W> {
             ground_vehicles: None,
             ground_runtime: None,
             acquisition_round: None,
+            domination_round: None,
             acquisition_gameplay: None,
             acquisition_effect_origin: std::sync::Arc::new(()),
             acquisition_static_partitions: Default::default(),

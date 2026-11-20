@@ -820,7 +820,14 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                 .is_some_and(|o| o.source().capture_qualification == "native_source_gameplay")
         {
             return Err(io::Error::other(
-                "source gameplay objectives require --acquisition-gameplay",
+                if objective_catalog
+                    .as_ref()
+                    .is_some_and(|o| o.is_domination_gameplay())
+                {
+                    "Domination source gameplay requires a connected gameplay backend"
+                } else {
+                    "source gameplay objectives require --acquisition-gameplay"
+                },
             ));
         }
         None

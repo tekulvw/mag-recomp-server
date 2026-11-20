@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "scope": "All 57 catalog filenames known to this source import; presence in this inventory does not mean every file is required by every runtime mode.",
+  "scope": "All 61 catalog filenames known to this source import; presence in this inventory does not mean every file is required by every runtime mode.",
   "status_definitions": {
     "direct": "Included parser/projector reads explicit original data or an included earlier catalog; no unpublished evidence input.",
     "direct-with-policy": "Included projector also requires explicit local operator policy.",
@@ -553,6 +553,46 @@
         "Python 3.11+ standard library"
       ],
       "limitations": "Initial inactive state and all32 squad lists only; successful fresh-load model is distinct from MissionStart and live pool observation."
+    },
+    {
+      "output": "domination-round.json",
+      "status": "direct",
+      "command": "project-retail-domination-round.py --game-archive GAME --spawn-catalog SPAWNS --objective-catalog OBJECTIVES --output OUTPUT",
+      "inputs": "Original retail game archive and exact projected worker resources",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Configures native score depletion and match completion/requeue; no objective entry, spawn or vehicle gameplay effects."
+    },
+    {
+      "output": "domination-spawns.json",
+      "status": "external-proof",
+      "command": "project-retail-domination-spawns.py --spawn-catalog SPAWNS --bindings BINDINGS --factory-proof FACTORY --native-elf ELF --output OUTPUT",
+      "inputs": "Original retail ELF, qualified initial SpawnPoint pool proof and authored profile",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Remaps initial indices only; preserves existing insertion eligibility, authored active state and positions."
+    },
+    {
+      "output": "domination-triggers.json",
+      "status": "external-proof",
+      "command": "project-retail-domination-triggers.py --metadata METADATA --bindings BINDINGS --objective-catalog OBJECTIVES --native-elf ELF --output OUTPUT",
+      "inputs": "Original retail ELF and qualified initial trigger registration proof",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Per-objective trigger vector indices and source volumes; not a global dynamic slot allocation claim."
+    },
+    {
+      "output": "domination-fsp-bindings.json",
+      "status": "external-proof",
+      "command": "project-retail-domination-fsp.py --metadata METADATA --spawn-catalog SPAWNS --objective-catalog OBJECTIVES --output OUTPUT",
+      "inputs": "Retail metadata and qualified matching objective/spawn catalogs",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Full32 squad memberships/category-zero fallback only; required linked vehicle consumers remain separate."
     }
   ]
 }

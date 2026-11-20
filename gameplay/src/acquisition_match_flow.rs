@@ -1,12 +1,19 @@
-//! Connect the owned Acquisition round to the shared retail result publisher.
+//! Connect the owned Acquisition and Domination rounds to the retail result publisher.
 use super::*;
 use acquisition_round::{Phase, Transition};
 use match_flow::{Outcome, ScorePublication};
 use protocol::ScoreChangeReason::TimedBleed;
 
+#[derive(Clone, Copy)]
+pub(crate) enum OwnedRound {
+    Acquisition,
+    Domination,
+}
+
 impl<W: Write> Engine<W> {
-    pub(crate) fn tick_acquisition_round(
+    pub(crate) fn tick_owned_round(
         &mut self,
+        mode: OwnedRound,
         now: Duration,
         wall: u64,
     ) -> Result<Vec<OutboundMessage>, &'static str> {
@@ -18,10 +25,11 @@ impl<W: Write> Engine<W> {
         {
             return Ok(Vec::new());
         }
-        let mut round = self
-            .acquisition_round
-            .clone()
-            .ok_or("acquisition_round_unavailable")?;
+        let mut round = match mode {
+            OwnedRound::Acquisition => self.acquisition_round.clone(),
+            OwnedRound::Domination => self.domination_round.clone(),
+        }
+        .ok_or("owned_round_unavailable")?;
         let now_ms = now.as_millis() as u32;
         let mut next = self.round.clone();
         let before_bleed = round.points();
@@ -34,7 +42,7 @@ impl<W: Write> Engine<W> {
         match round.update_end(now_ms) {
             Some(Transition::EndGame(result)) => {
                 let Phase::Ending { deadline_ms } = round.phase() else {
-                    return Err("acquisition_missing_end_deadline");
+                    return Err("owned_round_missing_end_deadline");
                 };
                 let outcome = Outcome {
                     winner: result.winner,
@@ -59,7 +67,7 @@ impl<W: Write> Engine<W> {
             Some(Transition::Finished) => {
                 next.outcome
                     .as_mut()
-                    .ok_or("acquisition_missing_outcome")?
+                    .ok_or("owned_round_missing_outcome")?
                     .finalized = true;
             }
             None => {}
@@ -72,8 +80,11 @@ impl<W: Write> Engine<W> {
             }
         }
         self.commit_round_update(next, rewards, effects, now, wall)?;
-        self.acquisition_round = Some(round);
-        self.publish_round_update(now, ScorePublication::Acquisition { before_bleed })
+        match mode {
+            OwnedRound::Acquisition => self.acquisition_round = Some(round),
+            OwnedRound::Domination => self.domination_round = Some(round),
+        }
+        self.publish_round_update(now, ScorePublication::NativeScoreRate { before_bleed })
     }
 }
 
