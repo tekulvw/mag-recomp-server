@@ -25,6 +25,8 @@ pub struct LeadershipRecord {
     pub leadership_level: u8,
     pub nominations: u8,
     pub matches_since_last_command: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leadership_points: Option<u32>,
 }
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -428,6 +430,11 @@ impl<W: Write> Engine<W> {
     pub(crate) fn native_leader_election(&self) -> bool {
         self.native_election().is_some()
     }
+    pub(crate) fn held_leadership_role(&self, actor: &Active) -> Option<HeldLeadershipRole> {
+        let runtime = self.leadership.as_ref()?;
+        runtime.policy.native()?;
+        Some(runtime.native_role(actor))
+    }
     pub(crate) fn command_leadership_role(
         &self,
         actor: &Active,
@@ -453,7 +460,7 @@ impl<W: Write> Engine<W> {
             .map_or(u16::MAX, |leader| leader.player)
     }
 
-    fn match_nominations(&self, record: LeadershipRecord, bits: u8) -> u8 {
+    pub(crate) fn match_nominations(&self, record: LeadershipRecord, bits: u8) -> u8 {
         if self.match_profile().game_type == 2
             && record.leadership_level >= 3
             && self

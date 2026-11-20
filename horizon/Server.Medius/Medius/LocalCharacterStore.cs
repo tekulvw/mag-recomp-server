@@ -20,13 +20,16 @@ namespace Server.Medius
         public MagLoadout ToLoadout() => new MagLoadout { UpdateId = UpdateId, Items = (short[])Items.Clone() };
         public static StoredLoadout FromLoadout(MagLoadout loadout) => new StoredLoadout { UpdateId = loadout.UpdateId, Items = (short[])loadout.Items.Clone() };
     }
-    /// <summary>Authoritative saved native byte fields; absence preserves legacy policy fallback.</summary>
+    /// <summary>Authoritative saved leadership fields; absence preserves legacy policy fallback.</summary>
     [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
     public sealed class StoredLeadershipRecord
     {
         [JsonRequired] public byte LeadershipLevel { get; set; }
         [JsonRequired] public byte Nominations { get; set; }
         [JsonRequired] public byte MatchesSinceLastCommand { get; set; }
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public uint? LeadershipPoints { get; set; }
+        // Historical rows could carry eligibility with no recorded point balance.
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public byte? LeadershipLevelFloor { get; set; }
     }
     public sealed class StoredCharacter
     {
@@ -81,6 +84,7 @@ namespace Server.Medius
                 UniverseId = UniverseId, NpId = (byte[])NpId.Clone(), LastUsedLoadout = LastUsedLoadout,
                 SkillPoints = SkillPoints ?? RecordInitialSkillPoints, Experience = (uint)(Experience ?? 0), Level = Level ?? 1,
                 LeadershipLevel = Leadership?.LeadershipLevel ?? 1,
+                LeadershipPoints = Leadership?.LeadershipPoints ?? 0,
                 LeadershipNominations = Leadership?.Nominations ?? 0,
                 MatchesSinceLastCommand = Leadership?.MatchesSinceLastCommand ?? 0,
                 AvailableItems = MergeMask(grants?.AvailableItems, UnlockedItems, 24), Skills = MergeMask(grants?.Skills, OwnedSkills, 5),
@@ -112,6 +116,15 @@ namespace Server.Medius
         public MagCharacterRecord Record { get; set; }
         public bool NewlyCompleted { get; set; }
     }
+    [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+    public sealed record LeadershipRewardOutcome(
+        [property: JsonRequired] uint LeadershipPoints,
+        [property: JsonRequired] byte LeadershipLevel,
+        [property: JsonRequired] byte Nominations,
+        [property: JsonRequired] byte MatchesSinceLastCommand,
+        [property: JsonRequired] bool Changed,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] uint? MatchLeadershipPoints);
+
     public sealed class ProgressionRewardOutcome
     {
         [JsonExtensionData] public Dictionary<string, JsonElement> ExtensionData { get; set; }
@@ -125,10 +138,12 @@ namespace Server.Medius
         [JsonRequired] public int ExperienceAwarded { get; set; }
         [JsonRequired] public int MatchExperience { get; set; }
         [JsonRequired] public float MatchFraction { get; set; }
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public LeadershipRewardOutcome Leadership { get; set; }
+        [JsonIgnore] public bool ShouldNotifyCharacterRecord => ExperienceAwarded > 0 || Leadership?.Changed == true;
         internal ProgressionRewardOutcome Copy(bool duplicate) => new ProgressionRewardOutcome {
             Result = Result, Reason = Reason, Duplicate = duplicate, Experience = Experience, Level = Level,
             PreviousLevel = PreviousLevel, SkillPoints = SkillPoints, ExperienceAwarded = ExperienceAwarded,
-            MatchExperience = MatchExperience, MatchFraction = MatchFraction };
+            MatchExperience = MatchExperience, MatchFraction = MatchFraction, Leadership = Leadership };
     }
     /// <summary>Planned or applied operator level change; Refused carries a reason and no write.</summary>
     public sealed class AdminLevelChange
@@ -188,6 +203,7 @@ namespace Server.Medius
             [JsonRequired] public string Kind { get; set; }
             [JsonRequired] public int Units { get; set; }
             [JsonRequired] public ProgressionRewardOutcome Snapshot { get; set; }
+            [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public GameplayLeadershipResult Leadership { get; set; }
         }
         private sealed class MatchRewardProgress
         {
@@ -281,6 +297,7 @@ namespace Server.Medius
         private static bool ValidName(string name) => !string.IsNullOrWhiteSpace(name) && name.Length <= 32 && name.All(c => c >= 33 && c <= 126);
         private static bool Valid(StoredCharacter c, int schema) => c != null && c.Id > 0 && ValidName(c.Name) && c.Faction <= 2 &&
             (c.Experience == null || c.Experience >= 0) && (c.Level == null || c.Level >= 1) &&
+            (c.Leadership?.LeadershipLevelFloor == null || c.Leadership.LeadershipPoints.HasValue && c.Leadership.LeadershipLevelFloor == c.Leadership.LeadershipLevel) &&
             (c.OwnedSkills == null || c.OwnedSkills.Length == 5) && (c.UnlockedItems == null || c.UnlockedItems.Length == 24) &&
             c.LastUsedLoadout < 5 && (c.Loadouts == null || (c.Loadouts.Length == 5 && c.Loadouts.All(ValidLoadout))) &&
             c.UniverseId == 26 && MagDevelopmentAccountPolicy.ValidNpId(c.NpId, schema == 1 ? null : c.Account) &&
@@ -326,6 +343,9 @@ namespace Server.Medius
                         created.Experience = catalog.ThresholdForLevel(start); created.Level = start;
                         created.SkillPoints = catalog.PointsAfterGain(catalog.InitialSkillPoints, catalog.InitialLevel, start);
                     }
+                    if (catalog.InitialLeadershipPoints is uint leadershipPoints)
+                        created.Leadership = new StoredLeadershipRecord {
+                            LeadershipPoints = leadershipPoints, LeadershipLevel = catalog.LeadershipLevelForPoints(leadershipPoints, created.Level.Value) };
                 }
                 all.Add(created);
             }
@@ -430,6 +450,15 @@ namespace Server.Medius
         private static bool ValidRewardKey(string value) => !string.IsNullOrEmpty(value) && value.Length <= 256 && value.All(c => c >= 33 && c <= 126);
         private static string MatchProgressKey(string account, uint characterId, string matchKey) => account + ":" + characterId.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":" + matchKey;
         private static bool ValidKindUnits(string kind, int units) => MagProgressionCatalog.ValidKindUnits(kind, units);
+        private static bool ValidLeadershipContext(string kind, GameplayLeadershipResult leadership) =>
+            leadership == null || MagProgressionCatalog.IsFinalRewardKind(kind) && leadership.IsValid;
+
+        private static bool ValidLeadershipSnapshot(GameplayLeadershipResult context, LeadershipRewardOutcome outcome)
+        {
+            if (outcome?.MatchLeadershipPoints is not uint matchPoints) return context == null;
+            return context != null && matchPoints <= int.MaxValue && matchPoints <= outcome.LeadershipPoints &&
+                (context.Role != 0 || matchPoints == 0);
+        }
         private static void ValidateRewardLedger(Document document)
         {
             if (document.SchemaVersion < 3)
@@ -455,6 +484,7 @@ namespace Server.Medius
                 var receipt = entry.Value; var snapshot = receipt?.Snapshot;
                 if (!ValidRewardKey(entry.Key) || receipt == null || !ValidRewardKey(receipt.MatchKey) ||
                     !ValidKindUnits(receipt.Kind, receipt.Units) || snapshot == null || snapshot.Result != MagNetResult.Success ||
+                    !ValidLeadershipContext(receipt.Kind, receipt.Leadership) || !ValidLeadershipSnapshot(receipt.Leadership, snapshot.Leadership) ||
                     snapshot.Reason != "reward-committed" || snapshot.Duplicate || snapshot.Experience < 0 || snapshot.ExperienceAwarded < 0 ||
                     snapshot.MatchExperience < snapshot.ExperienceAwarded || snapshot.Level < 1 || snapshot.PreviousLevel < 1 || snapshot.PreviousLevel > snapshot.Level ||
                     !float.IsFinite(snapshot.MatchFraction) || snapshot.MatchFraction < 0 || snapshot.MatchFraction >= 1 ||
@@ -467,11 +497,12 @@ namespace Server.Medius
         }
         /// <summary>Commit authoritative action XP immediately as local policy. IDs must be stable
         /// across delivery retries; matchKey isolates native fractional XP between match lifetimes.</summary>
-        public ProgressionRewardOutcome ApplyRewardForAccount(string account, uint characterId, string rewardId, string matchKey, string kind, int units)
+        public ProgressionRewardOutcome ApplyRewardForAccount(string account, uint characterId, string rewardId, string matchKey, string kind, int units,
+            GameplayLeadershipResult leadership = null)
         {
             ProgressionRewardOutcome Deny(string reason) => new ProgressionRewardOutcome { Result = MagNetResult.Error, Reason = reason };
             if (!MagDevelopmentAccountPolicy.ValidAccount(account) || characterId == 0 || !ValidRewardKey(rewardId) ||
-                !ValidRewardKey(matchKey) || !ValidKindUnits(kind, units)) return Deny("invalid-progression-reward");
+                !ValidRewardKey(matchKey) || !ValidKindUnits(kind, units) || !ValidLeadershipContext(kind, leadership)) return Deny("invalid-progression-reward");
             var catalog = ProgressionCatalog;
             if (catalog == null) return Deny("progression-catalog-unavailable");
             string path = ValidPath(); Directory.CreateDirectory(Path.GetDirectoryName(path));
@@ -483,7 +514,7 @@ namespace Server.Medius
             document.MatchRewardProgress = document.MatchRewardProgress ?? new Dictionary<string, MatchRewardProgress>(StringComparer.Ordinal);
             if (document.RewardReceipts.TryGetValue(rewardId, out var existing))
             {
-                if (existing.Account != account || existing.CharacterId != characterId || existing.MatchKey != matchKey || existing.Kind != kind || existing.Units != units)
+                if (existing.Account != account || existing.CharacterId != characterId || existing.MatchKey != matchKey || existing.Kind != kind || existing.Units != units || existing.Leadership != leadership)
                     return Deny("reward-receipt-mismatch");
                 return existing.Snapshot.Copy(true); // Historical response stays exact after further actions or purchases.
             }
@@ -502,16 +533,44 @@ namespace Server.Medius
             int experience = previousExperience + awarded;
             byte previousLevel = character.Level ?? 1; byte level = catalog.LevelForExperience(experience);
             byte points = catalog.PointsAfterGain(character.ToRecord().SkillPoints, previousLevel, level);
+            uint? matchLeadershipPoints = null;
+            if (leadership != null)
+            {
+                if (!catalog.TryLeadershipAward(leadership.Role, kind, out uint leadershipPoints)) return Deny("invalid-authored-leadership-reward");
+                if (leadershipPoints > uint.MaxValue - (character.Leadership?.LeadershipPoints ?? 0)) return Deny("leadership-points-overflow");
+                matchLeadershipPoints = leadershipPoints;
+            }
             var outcome = new ProgressionRewardOutcome { Result = MagNetResult.Success, Reason = "reward-committed",
                 Experience = experience, Level = level, PreviousLevel = previousLevel, SkillPoints = points,
-                ExperienceAwarded = awarded, MatchExperience = progress.Experience + awarded, MatchFraction = fraction };
+                ExperienceAwarded = awarded, MatchExperience = progress.Experience + awarded, MatchFraction = fraction,
+                Leadership = UpdateLeadership(character, catalog, level, leadership?.Baseline, matchLeadershipPoints) };
             character.Experience = experience; character.Level = level; character.SkillPoints = points;
             progress.Experience = outcome.MatchExperience; progress.Fraction = fraction; progress.Finalized = final;
             document.MatchRewardProgress[progressKey] = progress;
             document.RewardReceipts.Add(rewardId, new RewardReceipt { Account = account, CharacterId = characterId,
-                MatchKey = matchKey, Kind = kind, Units = units, Snapshot = outcome.Copy(false) });
+                MatchKey = matchKey, Kind = kind, Units = units, Snapshot = outcome.Copy(false), Leadership = leadership });
             Commit(path, document.Characters, document);
             return outcome.Copy(false);
+        }
+        private static LeadershipRewardOutcome UpdateLeadership(StoredCharacter character, MagProgressionCatalog catalog, byte characterLevel,
+            GameplayLeadershipBaseline baseline = null, uint? matchPoints = null)
+        {
+            var previous = character.Leadership;
+            if (!catalog.InitialLeadershipPoints.HasValue || previous?.LeadershipPoints == null && !matchPoints.HasValue) return null;
+            uint previousPoints = previous?.LeadershipPoints ?? 0;
+            uint points = checked(previousPoints + matchPoints.GetValueOrDefault());
+            byte nativeLevel = catalog.LeadershipLevelForPoints(points, characterLevel);
+            byte? floor = previous?.LeadershipPoints == null ? previous?.LeadershipLevel : previous.LeadershipLevelFloor;
+            if (floor <= nativeLevel) floor = null;
+            byte level = floor ?? nativeLevel;
+            byte nominations = previous?.Nominations ?? baseline.Nominations;
+            byte recency = previous?.MatchesSinceLastCommand ?? baseline.MatchesSinceLastCommand;
+            character.Leadership = new StoredLeadershipRecord {
+                LeadershipPoints = points, LeadershipLevel = level, LeadershipLevelFloor = floor,
+                Nominations = nominations, MatchesSinceLastCommand = recency };
+            bool changed = points != previousPoints || level != (previous?.LeadershipLevel ?? 1) ||
+                nominations != (previous?.Nominations ?? 0) || recency != (previous?.MatchesSinceLastCommand ?? 0);
+            return changed || matchPoints.HasValue ? new LeadershipRewardOutcome(points, level, nominations, recency, changed, matchPoints) : null;
         }
         public TrainingCompletionOutcome CompleteTrainingForAccount(string account, uint characterId)
         {
@@ -540,6 +599,7 @@ namespace Server.Medius
             byte points = rules.Progression.PointsAfterGain(character.ToRecord().SkillPoints, previousLevel, level);
             character.Flags |= rules.CompletedFlagMask;
             character.Experience = experience; character.Level = level; character.SkillPoints = points;
+            UpdateLeadership(character, rules.Progression, level);
             Commit(path, document.Characters, document);
             // The flag is the durable receipt. A failed/uncertain save never returns a success
             // snapshot; after a rename the next request observes it and cannot reward twice.
@@ -580,6 +640,7 @@ namespace Server.Medius
             using (var backup = new FileStream(change.BackupPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             { backup.Write(current); backup.Flush(true); }
             character.Experience = change.Experience; character.Level = change.Level; character.SkillPoints = change.SkillPoints;
+            UpdateLeadership(character, catalog, change.Level);
             Commit(path, document.Characters, document);
             change.Applied = true; change.Reason = "applied";
             return change;

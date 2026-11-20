@@ -25,8 +25,10 @@ namespace Server.Medius {
   public uint CharacterId {get;}
   public string Kind {get;}
   public uint Units {get;}
-  internal GameplayReward(string id,string reservation,string match,uint world,ushort player,string account,uint character,string kind,uint units) {
+  public GameplayLeadershipResult Leadership {get;}
+  internal GameplayReward(string id,string reservation,string match,uint world,ushort player,string account,uint character,string kind,uint units,GameplayLeadershipResult leadership) {
    RewardId=id;ReservationId=reservation;MatchId=match;WorldId=world;PlayerId=player;AccountId=account;CharacterId=character;Kind=kind;Units=units;
+   Leadership=leadership;
   }
  }
  public sealed class GameplayLoadoutSelection {
@@ -84,6 +86,16 @@ namespace Server.Medius {
    return names.Count==expected.Length;
   }
   static bool Identifier(string value)=>value!=null&&value.Length>=16&&value.Length<=64&&value.All(c=>c>='a'&&c<='z'||c>='A'&&c<='Z'||c>='0'&&c<='9'||c=='-'||c=='_');
+  static bool TryParseLeadership(JsonElement value, out GameplayLeadershipResult leadership) {
+   leadership=null;
+   if(!ExactFields(value,"role","baseline")||!value.GetProperty("role").TryGetByte(out var role))return false;
+   var baseline=value.GetProperty("baseline");
+   if(!ExactFields(baseline,"leadership_level","nominations","matches_since_last_command")||
+    !baseline.GetProperty("leadership_level").TryGetByte(out var level)||!baseline.GetProperty("nominations").TryGetByte(out var nominations)||
+    !baseline.GetProperty("matches_since_last_command").TryGetByte(out var recency))return false;
+   leadership=new GameplayLeadershipResult(role,new GameplayLeadershipBaseline(level,nominations,recency));
+   return leadership.IsValid;
+  }
   public static bool TryParse(byte[] line,string requestId,bool eventReply,out GameplayBridgeResponse response) {
    response=null;if(line==null||line.Length>MaximumResponseBytes||string.IsNullOrEmpty(requestId))return false;
    try {
@@ -117,12 +129,16 @@ namespace Server.Medius {
     if(hasRewards) {
      if(rewards.ValueKind!=JsonValueKind.Array||rewards.GetArrayLength()>32||(!success&&rewards.GetArrayLength()!=0))return false;
      foreach(var reward in rewards.EnumerateArray()) {
-      if(!ExactFields(reward,"reward_id","reservation_id","match_id","world_id","player_id","account_id","character_id","kind","units"))return false;
+      bool hasLeadership=reward.TryGetProperty("leadership",out var leadershipContext);
+      var rewardFields=new[]{"reward_id","reservation_id","match_id","world_id","player_id","account_id","character_id","kind","units"};
+      if(!ExactFields(reward,hasLeadership?rewardFields.Append("leadership").ToArray():rewardFields))return false;
       string id=reward.GetProperty("reward_id").GetString(),reservation=reward.GetProperty("reservation_id").GetString(),match=reward.GetProperty("match_id").GetString(),account=reward.GetProperty("account_id").GetString(),kind=reward.GetProperty("kind").GetString();
       if(id==null||id.Length<1||id.Length>128||!id.All(c=>char.IsAsciiLetterOrDigit(c)||c=='-'||c=='_')||!rewardIds.Add(id)||!Identifier(reservation)||!Identifier(match)||!MagDevelopmentAccountPolicy.ValidAccount(account)||
        !reward.GetProperty("world_id").TryGetUInt32(out var world)||!reward.GetProperty("player_id").TryGetUInt16(out var player)||!reward.GetProperty("character_id").TryGetUInt32(out var character)||character==0||
        !reward.GetProperty("units").TryGetUInt32(out var units)|| (units>int.MaxValue||!MagProgressionCatalog.ValidKindUnits(kind,(int)units))) return false;
-      parsedRewards.Add(new GameplayReward(id,reservation,match,world,player,account,character,kind,units));
+      GameplayLeadershipResult leadership=null;
+      if(hasLeadership&&(!MagProgressionCatalog.IsFinalRewardKind(kind)||!TryParseLeadership(leadershipContext,out leadership)))return false;
+      parsedRewards.Add(new GameplayReward(id,reservation,match,world,player,account,character,kind,units,leadership));
      }
     }
     var parsedCapabilities=new List<string>();var capabilityNames=new HashSet<string>(StringComparer.Ordinal);

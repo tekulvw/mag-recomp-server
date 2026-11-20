@@ -48,7 +48,8 @@ squad/member order, applies the projected platoon weights and nomination bit, an
 keeps the first candidate on equal scores. A squad leader can be promoted; that
 promotion vacates the squad role and allows its replacement in the same recorded
 reconciliation. Withdrawal, departure and transfer remove stale authority. Saved
-records and account progression are not modified by holding a role.
+records and account progression are not modified merely by holding a role.
+Terminal match rewards use the held role for [leadership progression](leadership-progression.md).
 
 Precision Strike admits only an enemy Structural demolition objective from the
 qualified map inventory. At its due time it resolves the sealed native target ID
