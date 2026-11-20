@@ -46,6 +46,27 @@ impl OwnedAssignment {
             manual_tag: u32::MAX,
         })
     }
+
+    pub(crate) fn with_manual_tag(
+        mut self,
+        squad: u16,
+        target: u32,
+        catalog: &ObjectiveCatalog,
+        world: &ObjectiveWorld,
+        spawns: &SpawnCatalog,
+        phase: MatchPhase,
+    ) -> Result<Self, &'static str> {
+        self.manual_tag = target;
+        let mut slots = [None; 32];
+        *slots
+            .get_mut(usize::from(squad))
+            .ok_or("domination_assignment_slot_missing")? = Some(self);
+        if let Some(update) = stage_owned_assignments(catalog, world, spawns, &slots, phase)?.pop()
+        {
+            self.assignment = update.assignment;
+        }
+        Ok(self)
+    }
 }
 
 /// Refresh all admitted squad slots from the staged live family-35 catalog.

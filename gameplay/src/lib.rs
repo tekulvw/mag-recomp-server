@@ -90,6 +90,10 @@ mod platoon_ability_publication_tests;
 #[cfg(test)]
 mod platoon_effect_engine_tests;
 pub mod retail_movement;
+mod squad_order_engine;
+#[cfg(test)]
+mod squad_order_engine_tests;
+pub mod squad_orders;
 pub mod static_collision_partition;
 pub mod strategic_abilities;
 mod strategic_engine;
@@ -1073,6 +1077,7 @@ pub struct Engine<W: Write> {
     domination_round: Option<acquisition_round::Round>,
     domination_gameplay: Option<domination_gameplay_provider::World>,
     acquisition_gameplay: Option<acquisition_gameplay_engine::Runtime>,
+    squad_orders: Option<squad_order_engine::Runtime>,
     acquisition_effect_origin: std::sync::Arc<()>,
     acquisition_static_partitions:
         std::collections::BTreeMap<String, std::sync::Arc<static_collision_partition::Partition>>,

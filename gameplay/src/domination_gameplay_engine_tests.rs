@@ -703,3 +703,51 @@ fn precision_completion_uses_the_normal_entry_and_rolls_back_on_effect_failure()
         ]
     );
 }
+
+#[test]
+fn manual_tag_uses_the_normal_domination_assignment_refresh() {
+    use crate::{
+        acquisition_objective_runtime::Assignment, domination_gameplay_effects::OwnedAssignment,
+        replication::MatchPhase,
+    };
+    let (runtime, mut world, spawns, _) = fixture();
+    world
+        .stage_native_state(0, ObjectiveState::Deactivated, None)
+        .unwrap();
+    world.tick_native_object(0, test_time(1), &BTreeMap::new());
+    let catalog = &runtime.setup.catalog;
+    let initial = OwnedAssignment::initial(catalog, 16).unwrap();
+    const TARGET: u32 = 0x0100_0004;
+    let manual = initial
+        .with_manual_tag(16, TARGET, catalog, &world, &spawns, MatchPhase::Playing)
+        .unwrap();
+    assert_eq!(
+        manual.assignment,
+        Assignment {
+            primary_index: 0,
+            tagged_object: TARGET
+        }
+    );
+    let cleared = manual
+        .with_manual_tag(16, u32::MAX, catalog, &world, &spawns, MatchPhase::Playing)
+        .unwrap();
+    assert_eq!(
+        cleared.assignment,
+        Assignment {
+            primary_index: 0,
+            tagged_object: u32::MAX
+        }
+    );
+    let skipped = manual
+        .with_manual_tag(
+            16,
+            u32::MAX,
+            catalog,
+            &world,
+            &spawns,
+            MatchPhase::EndCountdown,
+        )
+        .unwrap();
+    assert_eq!(skipped.assignment, manual.assignment);
+    assert_eq!(skipped.manual_tag, u32::MAX);
+}

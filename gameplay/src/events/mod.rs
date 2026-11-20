@@ -8,6 +8,7 @@ mod control;
 mod corrections;
 mod falling;
 mod objectives;
+mod orders;
 pub(crate) use objectives::exit_message as objective_hold_exit;
 mod bunker_seats;
 mod owner;
@@ -52,6 +53,7 @@ struct EventPlan {
     helo_runtime: Option<domination_helo::FleetRuntime>,
     active_ability_runtime: Option<crate::active_ability_engine::Runtime>,
     strategic_waves: Option<[Option<TeamWaveClock>; 2]>,
+    squad_order_candidate: Option<crate::squad_order_engine::Candidate>,
     helo_damage_relay: Vec<Vec<u8>>,
     ground_dynamics_relay: Option<(u16, Vec<u8>)>,
     ground_damage_relay: Option<Vec<u8>>,
@@ -269,6 +271,8 @@ fn plan_message<W: Write>(
         Ok(protocol::GameMessage::StrategicAbility(request)) => {
             abilities::strategic(ctx, plan, request)
         }
+        Ok(protocol::GameMessage::TaggedObject(request)) => orders::tagged(ctx, plan, request),
+        Ok(protocol::GameMessage::SquadWaypoint(request)) => orders::waypoint(ctx, plan, request),
         Ok(protocol::GameMessage::PluginGreeting) => Ok(json!({"type":"plugin_greeting"})),
         Ok(protocol::GameMessage::ProtocolInfo(info)) => Ok(
             json!({"type":"protocol_info","protocol":info.protocol,"build":info.build,
@@ -973,6 +977,9 @@ impl<W: Write> Engine<W> {
         }
         if let Some(runtime) = plan.active_ability_runtime {
             self.active_abilities = Some(runtime);
+        }
+        if let Some(candidate) = plan.squad_order_candidate {
+            self.install_squad_order_candidate(candidate);
         }
         Ok(plan.messages)
     }

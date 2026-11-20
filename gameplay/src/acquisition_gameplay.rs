@@ -424,56 +424,81 @@ impl Gameplay {
         })
     }
 
+    /// Update the stored manual override and rerun this squad's authored refresh.
+    pub fn set_manual_tag(
+        &mut self,
+        squad_index: u16,
+        target: u32,
+    ) -> Result<Assignment, &'static str> {
+        let squad = self
+            .squads
+            .get_mut(&squad_index)
+            .ok_or("unknown_acquisition_squad")?;
+        Self::refresh_assignment(&self.objectives, squad, target)?;
+        squad.manual_tag = target;
+        Ok(squad.assignment)
+    }
+
     pub fn refresh_assignments(&mut self) -> Result<Vec<AssignmentUpdate>, &'static str> {
         let mut updates = Vec::new();
         for (&squad_index, squad) in &mut self.squads {
-            if squad.gate_value == 3 || !squad.spawn_resolved {
-                continue;
+            if let Some(result) =
+                Self::refresh_assignment(&self.objectives, squad, squad.manual_tag)?
+            {
+                updates.push(AssignmentUpdate {
+                    squad_index,
+                    assignment: squad.assignment,
+                    result,
+                });
             }
-            let Some(normal) = &squad.normal else {
-                continue;
-            };
-            let resolve = |orders: &[OrderSource]| {
-                orders
-                    .iter()
-                    .map(|order| {
-                        let objective = order
-                            .objective_token
-                            .map(|token| {
-                                let objective = self
-                                    .objectives
-                                    .get(&token)
-                                    .ok_or("unknown_acquisition_gameplay_order_objective")?;
-                                assignment::Objective::new(
-                                    objective.object_id(),
-                                    objective.state.current,
-                                    squad.team != objective.owner_team,
-                                )
-                            })
-                            .transpose()?;
-                        Ok(assignment::Order {
-                            objective,
-                            order: order.order,
-                        })
-                    })
-                    .collect::<Result<Vec<_>, &'static str>>()
-            };
-            let normal = resolve(normal)?;
-            let frago = resolve(&squad.frago)?;
-            let result = squad.assignment.refresh(assignment::Refresh {
-                gate_value: squad.gate_value,
-                spawn_resolved: squad.spawn_resolved,
-                normal: Some(&normal),
-                frago: &frago,
-                manual_tag: squad.manual_tag,
-            });
-            updates.push(AssignmentUpdate {
-                squad_index,
-                assignment: squad.assignment,
-                result,
-            });
         }
         Ok(updates)
+    }
+
+    fn refresh_assignment(
+        objectives: &BTreeMap<u32, Objective>,
+        squad: &mut Squad,
+        manual_tag: u32,
+    ) -> Result<Option<assignment::RefreshResult>, &'static str> {
+        let Some(normal) = &squad.normal else {
+            return Ok(None);
+        };
+        if squad.gate_value == 3 || !squad.spawn_resolved {
+            return Ok(None);
+        }
+        let resolve = |orders: &[OrderSource]| {
+            orders
+                .iter()
+                .map(|order| {
+                    let objective = order
+                        .objective_token
+                        .map(|token| {
+                            let objective = objectives
+                                .get(&token)
+                                .ok_or("unknown_acquisition_gameplay_order_objective")?;
+                            assignment::Objective::new(
+                                objective.object_id(),
+                                objective.state.current,
+                                squad.team != objective.owner_team,
+                            )
+                        })
+                        .transpose()?;
+                    Ok(assignment::Order {
+                        objective,
+                        order: order.order,
+                    })
+                })
+                .collect::<Result<Vec<_>, &'static str>>()
+        };
+        let normal = resolve(normal)?;
+        let frago = resolve(&squad.frago)?;
+        Ok(Some(squad.assignment.refresh(assignment::Refresh {
+            gate_value: squad.gate_value,
+            spawn_resolved: squad.spawn_resolved,
+            normal: Some(&normal),
+            frago: &frago,
+            manual_tag,
+        })))
     }
 }
 
