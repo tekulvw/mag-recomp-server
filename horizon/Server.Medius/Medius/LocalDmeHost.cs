@@ -509,21 +509,39 @@ namespace Server.Medius
                     {
                         // Replacement reservations share the surviving round's native XP carry and result basis.
                         var result = _store.ApplyRewardForAccount(owner.Account, owner.CharacterId, reward.RewardId,
-                            $"world-{reward.WorldId}-{reward.MatchId}", reward.Kind, checked((int)reward.Units));
+                            $"world-{reward.WorldId}-{reward.MatchId}", reward.Kind, checked((int)reward.Units), reward.Leadership);
                         if (result.Result != MagNetResult.Success)
                         { retry = true; Logger.Warn($"Gameplay reward not committed: player={owner.Client.DmeId} reason={result.Reason}"); break; }
                         // Publish the latest account record, not an older receipt snapshot.
                         // A missed notification is also repaired by the next0238 query.
-                        bool notify; lock (_gate) notify = result.ExperienceAwarded > 0 && _notifiedRewards.Add(reward.RewardId);
-                        if (notify && owner.Notify != null)
+                        Action<MagCharacterRecord> notify = null;
+                        if (result.ShouldNotifyCharacterRecord)
+                        {
+                            lock (_gate)
+                            {
+                                var currentOwner = _reservations.Values.FirstOrDefault(r => !r.Invalidated &&
+                                    r.Account == owner.Account && r.CharacterId == owner.CharacterId);
+                                var callback = currentOwner?.Notify ?? owner.Notify;
+                                if (callback != null && _notifiedRewards.Add(reward.RewardId)) notify = callback;
+                            }
+                        }
+                        if (notify != null)
                         {
                             var current = _store.ReadForAccount(owner.Account).Single(c => c.Id == owner.CharacterId).ToRecord();
-                            owner.Notify(current);
+                            notify(current);
                         }
-                        var ack = await _bridge.RequestProgressionAsync(new { v = 2, request_id = Id(), op = "progression_committed",
-                            reservation_id = owner.Id, world_id = reward.WorldId, player_id = reward.PlayerId, reward_id = reward.RewardId,
-                            progression = new { experience = (uint)result.Experience, level = result.Level, skill_points = result.SkillPoints },
-                            match_experience = (uint)result.MatchExperience });
+                        var request = new Dictionary<string, object> {
+                            ["v"] = 2, ["request_id"] = Id(), ["op"] = "progression_committed", ["reservation_id"] = owner.Id,
+                            ["world_id"] = reward.WorldId, ["player_id"] = reward.PlayerId, ["reward_id"] = reward.RewardId,
+                            ["progression"] = new { experience = (uint)result.Experience, level = result.Level, skill_points = result.SkillPoints },
+                            ["match_experience"] = (uint)result.MatchExperience
+                        };
+                        if (result.Leadership is LeadershipRewardOutcome leadership)
+                        {
+                            request["leadership"] = new GameplayLeadershipRecord(leadership);
+                            if (leadership.MatchLeadershipPoints is uint matchPoints) request["match_leadership_points"] = matchPoints;
+                        }
+                        var ack = await _bridge.RequestProgressionAsync(request);
                         bool ackRouted;
                         lock (_gate) { ackRouted = Route(ack); if (!ackRouted) retry = true; else pending = ack.Rewards.Count > 0; }
                         if (ackRouted) await SettleLoadoutSelectionsAsync(ack);

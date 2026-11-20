@@ -15,6 +15,8 @@ namespace Server.Medius
         private readonly Dictionary<string, float> _objectiveAwards = new Dictionary<string, float>(StringComparer.Ordinal);
         private readonly Dictionary<string, float> _optionalActionAwards = new Dictionary<string, float>(StringComparer.Ordinal);
         private readonly Dictionary<string, float> _victoryModifiers = new Dictionary<string, float>(StringComparer.Ordinal);
+        private readonly SortedDictionary<byte, (int Points, int MinimumLevel)> _leadershipLevels = new();
+        private readonly Dictionary<(byte Role, string Kind), uint> _leadershipAwards = new();
         private static readonly Dictionary<string, string> ObjectiveAwardKeys = new Dictionary<string, string>(StringComparer.Ordinal) {
             { "primary_objective_activated", "PrimaryObjectiveActivated" }, { "primary_objective_secured", "PrimaryObjectiveSecured" },
             { "primary_objective_completed", "PrimaryObjective" }, { "secondary_objective_completed", "SecondaryObjective" },
@@ -24,12 +26,15 @@ namespace Server.Medius
         private static readonly Dictionary<string, string> VictoryModifierKeys = new Dictionary<string, string>(StringComparer.Ordinal) {
             { "match_major_victory", "MajorVictory" }, { "match_minor_victory", "MinorVictory" },
             { "match_major_defeat", "MajorDefeat" }, { "match_minor_defeat", "MinorDefeat" } };
+        private static readonly Dictionary<byte, string> LeadershipAwardKeys = new() {
+            { 1, "LeadershipPoints_Squad" }, { 2, "LeadershipPoints_Platoon" }, { 4, "LeadershipPoints_OIC" } };
         private int _enemyKilled;
         private float _healOther;
         public byte MaximumLevel => _levels.Keys.Last();
         public byte InitialLevel { get; private set; }
         public int InitialExperience => _levels[InitialLevel].Threshold;
         public byte InitialSkillPoints { get; private set; }
+        public uint? InitialLeadershipPoints { get; private set; }
         private MagProgressionCatalog() { }
         public static MagProgressionCatalog Load(string path, int applicationId = 20230)
         {
@@ -102,10 +107,73 @@ namespace Server.Medius
                     if (!float.IsFinite(value) || value < 0) throw new InvalidDataException("Invalid victory modifier.");
                     result._victoryModifiers.Add(entry.Key, value);
                 }
+                result.LoadLeadership(table, awards, creation);
                 return result;
             }
             catch (Exception e) when (e is JsonException || e is KeyNotFoundException || e is InvalidOperationException || e is FormatException || e is OverflowException || e is ArgumentException)
             { throw new InvalidDataException("Invalid progression catalog JSON/schema.", e); }
+        }
+        private void LoadLeadership(JsonElement table, JsonElement awards, JsonElement creation)
+        {
+            bool hasLevels = table.TryGetProperty("LeadershipLevels", out var levels);
+            bool hasCreation = creation.TryGetProperty("AdditionalLeadershipPoints", out var initialPoints);
+            if (!hasLevels && !hasCreation && !LeadershipAwardKeys.Values.Any(key => awards.TryGetProperty(key, out _))) return;
+            if (!hasLevels || !hasCreation) throw new InvalidDataException("Incomplete leadership progression catalog.");
+            InitialLeadershipPoints = initialPoints.GetUInt32();
+            bool unusedRow = false;
+            foreach (var entry in levels.EnumerateObject())
+            {
+                const string prefix = "ExperienceLeadershipLevel";
+                if (!entry.Name.StartsWith(prefix, StringComparison.Ordinal) || !byte.TryParse(entry.Name.AsSpan(prefix.Length), out byte level) ||
+                    entry.Name != prefix + level.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                    throw new InvalidDataException("Invalid leadership level ordinal.");
+                if (entry.Value.EnumerateObject().Count() != 1) throw new InvalidDataException("Invalid authored leadership level definition.");
+                var row = entry.Value.GetProperty(prefix);
+                if (level == 0)
+                {
+                    if (unusedRow || row.EnumerateObject().Any()) throw new InvalidDataException("Unused leadership level zero must remain empty.");
+                    unusedRow = true;
+                    continue;
+                }
+                if (row.EnumerateObject().Count() != 2) throw new InvalidDataException("Invalid authored leadership level fields.");
+                int threshold = row.GetProperty("LeadershipPoints").GetInt32();
+                int minimumLevel = row.GetProperty("MinimumLevel").GetInt32();
+                if (threshold < 0 || minimumLevel < 0) throw new InvalidDataException("Negative leadership requirement.");
+                _leadershipLevels.Add(level, (threshold, minimumLevel));
+            }
+            if (!unusedRow || _leadershipLevels.Count == 0 || _leadershipLevels.Keys.Where((level, index) => level != index + 1).Any())
+                throw new InvalidDataException("Leadership levels must be contiguous from level one.");
+            foreach (var role in LeadershipAwardKeys)
+            {
+                var row = awards.GetProperty(role.Value);
+                if (row.EnumerateObject().Count() != VictoryModifierKeys.Count)
+                    throw new InvalidDataException("Invalid leadership award outcome fields.");
+                foreach (var outcome in VictoryModifierKeys)
+                {
+                    float points = row.GetProperty(outcome.Value).GetSingle();
+                    if (!float.IsFinite(points) || (double)points > int.MaxValue)
+                        throw new InvalidDataException("Invalid leadership award.");
+                    _leadershipAwards.Add((role.Key, outcome.Key), (uint)MathF.Truncate(MathF.Max(0, points)));
+                }
+            }
+        }
+        internal byte LeadershipLevelForPoints(uint points, byte characterLevel)
+        {
+            // Native loads the record word as-is and compares it with signed cmpw.
+            int signedPoints = unchecked((int)points);
+            byte level = 0;
+            foreach (var row in _leadershipLevels)
+            {
+                if (signedPoints < row.Value.Points || characterLevel < row.Value.MinimumLevel) break;
+                level = row.Key;
+            }
+            return level;
+        }
+        internal bool TryLeadershipAward(byte role, string kind, out uint points)
+        {
+            points = 0;
+            return InitialLeadershipPoints.HasValue && IsFinalRewardKind(kind) &&
+                (role == 0 || _leadershipAwards.TryGetValue((role, kind), out points));
         }
         private static void ValidateAwards(JsonElement data)
         {
