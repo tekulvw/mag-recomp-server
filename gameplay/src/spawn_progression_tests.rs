@@ -986,3 +986,20 @@ mod startup_quorum;
 
 #[path = "dynamic_collision_runtime_tests.rs"]
 pub(crate) mod dynamic_bodies;
+
+#[test]
+fn retail_domination_owner_updates_do_not_run_the_prototype_countdown() {
+    let mut engine = engine();
+    reserve(&mut engine, 0);
+    let mut source = spawn_json();
+    source["match_profile"]["game_type"] = json!(2);
+    engine.spawn_catalog = Some(spawns(source).unwrap());
+    let maximum = engine.match_profile().maximum_points[0];
+    let active = engine.active.as_mut().unwrap();
+    ready(active);
+    active.match_clock_started = Some(Duration::from_millis(100));
+    active.last_clock_points = maximum;
+    let before = engine.active.as_ref().unwrap().last_clock_points;
+    owner_update(&mut engine, 2100, 1);
+    assert_eq!(engine.active.as_ref().unwrap().last_clock_points, before);
+}

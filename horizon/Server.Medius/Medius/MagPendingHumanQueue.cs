@@ -23,8 +23,8 @@ namespace Server.Medius
         public Entry Put(string owner, int gameType, byte faction, T value)
         {
             ValidateOwner(owner);
-            if (gameType < 0 || gameType > 1 || faction > 2)
-                throw new ArgumentException("Pending humans require mode 0/1 and saved faction 0..2.");
+            if (gameType < 0 || gameType > 2 || faction > 2)
+                throw new ArgumentException("Pending humans require mode 0..2 and saved faction 0..2.");
             if (value == null) throw new ArgumentNullException(nameof(value));
             _entries.TryGetValue(owner, out var previous);
             if (previous != null && previous.Human.GameType == gameType && previous.Human.Faction == faction)

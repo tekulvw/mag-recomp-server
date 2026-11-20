@@ -17,7 +17,7 @@ namespace Server.Medius
         static bool Pair(JsonElement row,out int mode,out byte attacker,out byte defender)
         {
             mode=-1;attacker=defender=255;
-            return row.GetProperty("game_type").TryGetInt32(out mode)&&(mode==0||mode==1)&&
+            return row.GetProperty("game_type").TryGetInt32(out mode)&&(mode is >= 0 and <= 2)&&
                 row.GetProperty("attacking_faction").TryGetByte(out attacker)&&attacker<3&&
                 row.GetProperty("defending_faction").TryGetByte(out defender)&&defender<3&&attacker!=defender;
         }

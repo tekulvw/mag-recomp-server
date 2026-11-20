@@ -35,6 +35,7 @@ pub(super) fn object_update<W: Write>(
         && plan.outgoing.is_none()
         && !ctx.engine.bunker_update_due(now)
         && ctx.engine.match_profile().game_type == 2
+        && !ctx.engine.match_profile().auto_assign_teams
         && let Some(started) = ctx.engine.match_epoch.or(active.match_clock_started)
     {
         // Local Domination's attacker points encode its countdown. Other

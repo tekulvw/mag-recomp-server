@@ -4,7 +4,7 @@ The public repository distributes extraction **source code**, synthetic test inp
 
 Python tools require Python 3.11 or newer and its standard library. Native game execution, RPCS3, Ghidra and Lua are not needed for the direct archive/literal parsers. Some **external prerequisites** were originally established through native analysis or qualified captures: their acquisition is not included here. Ghidra installations, project databases, DWARF tooling, a decrypted executable or normalized exports may be needed to establish those independently. Merely possessing an archive does not establish runtime pool IDs, numeric wire bindings, native damage rules or accepted gameplay behavior.
 
-The full [machine-readable catalog manifest](../tools/extraction/catalog-manifest.json) inventories all **55** known JSON filenames with a command, inputs, dependencies, status and limitation. “Direct” means an included parser can regenerate the stated data from explicit source inputs or a preceding included catalog. “External proof/export” means an included projector works only after the operator supplies a separately qualified input. “Gap” means the complete regeneration pipeline is not included. The inventory distinguishes these cases; it is not a claim of complete retail setup from a disc alone.
+The full [machine-readable catalog manifest](../tools/extraction/catalog-manifest.json) inventories all **57** known JSON filenames with a command, inputs, dependencies, status and limitation. “Direct” means an included parser can regenerate the stated data from explicit source inputs or a preceding included catalog. “External proof/export” means an included projector works only after the operator supplies a separately qualified input. “Gap” means the complete regeneration pipeline is not included. The inventory distinguishes these cases; it is not a claim of complete retail setup from a disc alone.
 
 ## Direct retail archive extraction
 
@@ -188,3 +188,6 @@ Checks exercise newly invented Lua tables, PSARC resources, ZRB headers, transfo
 | `retail-v1-mediation-profile.json` | direct | `extract-retail-mediation-profile.py` |
 | `statistics-login-profiles.json` | operator-configuration | Operator-authored policy/protocol configuration; consult runtime loaders and synthetic public examples |
 | `wire-profiles.json` | operator-configuration | Operator-authored policy/protocol configuration; consult runtime loaders and synthetic public examples |
+
+Domination profile and controller extraction, including the external initial-load
+qualification inputs, is described in [Domination runtime](domination-runtime.md).

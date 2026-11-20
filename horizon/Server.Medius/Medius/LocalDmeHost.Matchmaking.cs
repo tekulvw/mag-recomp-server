@@ -191,7 +191,8 @@ namespace Server.Medius
                         return; // An uncertain selection is retried with the SAME formation identity.
                     }
                     lock(_gate)if(_disposed||_matchmakingCancellation.IsCancellationRequested)return;
-                    if(!await _bridge.RequestAsync(_formationStartup.ConfigureRequest(Id(),_applicationId)))
+                    var startup=_formationStartup.WithProfileMaximum(profile.MaximumPlayers);
+                    if(!await _bridge.RequestAsync(startup.ConfigureRequest(Id(),_applicationId)))
                     {lock(_gate)_nextFormationAttempt=DateTime.UtcNow.AddSeconds(1);return;}
                     lock(_gate){if(_disposed||_matchmakingCancellation.IsCancellationRequested)return;_formationConfigured=true;}
                 }
