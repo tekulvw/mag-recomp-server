@@ -26,7 +26,7 @@ fn reserve(engine: &mut Engine<Vec<u8>>, player: u16) {
     assert!(response.ok, "{:?}", response.error);
 }
 
-fn effect() -> healing::HealingEffect {
+pub(crate) fn effect() -> healing::HealingEffect {
     let items = item_catalog::ItemCatalog::from_value_for_application(
         json!({
             "schema_version":2,"application_id":20231,

@@ -29,6 +29,7 @@ impl<W: Write> Engine<W> {
             self.tick_bot_healing(now, wall)?;
             messages.extend(self.tick_objectives(now, wall)?);
             self.tick_leadership_auto_repair(now, wall)?;
+            self.tick_leadership_auto_heal(now, wall)?;
             self.queue_squad_orders(now, wall)?;
             self.queue_active_ability_state(now, wall)?;
             messages.extend(self.tick_match_clock(now, wall)?);

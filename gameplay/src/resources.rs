@@ -188,6 +188,7 @@ impl<W: Write> Engine<W> {
             world_tick_enabled: false,
             last_world_tick: None,
             automatic_repair: Default::default(),
+            automatic_heal: Default::default(),
             match_epoch: None,
             alpha_turret: turret::ClientTurretFields::default(),
             alpha_turret_reporter: None,
