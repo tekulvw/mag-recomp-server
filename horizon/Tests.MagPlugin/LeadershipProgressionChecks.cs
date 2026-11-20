@@ -144,7 +144,7 @@ internal static class LeadershipProgressionChecks
         Create(legacy, "beta", "Beta");
         var fallback = new GameplayLeadershipBaseline(3, 5, 77);
         var squad = new GameplayLeadershipResult(1, fallback);
-        var legacyFinal = legacy.ApplyRewardForAccount("alpha", 1, "legacy-final", "legacy-round", "match_minor_victory", 1, squad);
+        var legacyFinal = legacy.ApplyRewardForAccount("alpha", 1, "legacy-final", "legacy-round", "match_minor_victory", 1);
         Check(legacyFinal.Result == MagNetResult.Success && legacyFinal.Leadership == null && !legacyFinal.ShouldNotifyCharacterRecord,
             "A catalog without leadership rows changed legacy final settlement");
         var fixture = JsonNode.Parse(File.ReadAllBytes(path))!;
@@ -197,6 +197,39 @@ internal static class LeadershipProgressionChecks
         var betaSaved = Reopen().ReadForAccount("beta").Single().Leadership;
         Check(betaSaved.LeadershipPoints == 68 && betaSaved.LeadershipLevel == 3 && betaSaved.LeadershipLevelFloor == null,
             "Compatibility floor did not clear when both authored thresholds passed");
+    });
+
+    public static void MissingCatalogRetry() => WithDirectory(directory =>
+    {
+        string path = Path.Combine(directory, "characters.json");
+        MagProgressionCatalog CatalogWithBonus(JsonObject fixture)
+        {
+            fixture["table"]!["Awards"]!["VictoryModifier"]!["MinorVictory"] = 1;
+            return Load(directory, fixture);
+        }
+        var store = new LocalCharacterStore(path) { ProgressionCatalog = CatalogWithBonus(LegacyCatalog()) };
+        Create(store, "alpha", "Alpha");
+        Check(store.ApplyRewardForAccount("alpha", 1, "action", "round", "enemy_killed", 1).Experience == 7,
+            "Synthetic action did not establish ordinary match XP");
+        var leadership = new GameplayLeadershipResult(1, new GameplayLeadershipBaseline(1, 1, 0));
+        byte[] before = File.ReadAllBytes(path);
+        var multiple = store.ApplyRewardForAccount("alpha", 1, "final", "round", "match_minor_victory", 2, leadership);
+        Check(multiple.Result != MagNetResult.Success && before.SequenceEqual(File.ReadAllBytes(path)), "Multiple terminal units mutated the store");
+        var missing = store.ApplyRewardForAccount("alpha", 1, "final", "round", "match_minor_victory", 1, leadership);
+        Check(missing.Result != MagNetResult.Success && missing.Reason == "invalid-authored-leadership-reward" &&
+            before.SequenceEqual(File.ReadAllBytes(path)), "Missing authored leadership data finalized the receipt or changed saved XP");
+
+        var repaired = new LocalCharacterStore(path) { ProgressionCatalog = CatalogWithBonus(Catalog()) };
+        var retry = repaired.ApplyRewardForAccount("alpha", 1, "final", "round", "match_minor_victory", 1, leadership);
+        Check(retry.Result == MagNetResult.Success && !retry.Duplicate && retry.Experience == 14 && retry.ExperienceAwarded == 7 &&
+            retry.Leadership is { LeadershipPoints: 12, MatchLeadershipPoints: 12 }, "Corrected catalog did not settle the original final receipt");
+
+        var incomplete = JsonNode.Parse(File.ReadAllBytes(path))!;
+        incomplete["rewardReceipts"]!["final"]!["snapshot"]!.AsObject().Remove("leadership");
+        File.WriteAllText(path, incomplete.ToJsonString());
+        try { repaired.ReadAll(); }
+        catch (InvalidDataException) { return; }
+        throw new Exception("A final receipt carrying leadership facts loaded without their committed snapshot");
     });
 
     private sealed class FailedCommitter(bool visible) : ICharacterStoreCommitter

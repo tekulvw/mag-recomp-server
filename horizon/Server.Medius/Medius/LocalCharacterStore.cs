@@ -453,10 +453,12 @@ namespace Server.Medius
         private static bool ValidLeadershipContext(string kind, GameplayLeadershipResult leadership) =>
             leadership == null || MagProgressionCatalog.IsFinalRewardKind(kind) && leadership.IsValid;
 
-        private static bool ValidLeadershipSnapshot(GameplayLeadershipResult context, LeadershipRewardOutcome outcome) =>
-            outcome == null || (outcome.MatchLeadershipPoints.HasValue == (context != null) &&
-                (outcome.MatchLeadershipPoints == null || outcome.MatchLeadershipPoints <= (uint)int.MaxValue &&
-                    outcome.MatchLeadershipPoints <= outcome.LeadershipPoints && (context.Role != 0 || outcome.MatchLeadershipPoints == 0)));
+        private static bool ValidLeadershipSnapshot(GameplayLeadershipResult context, LeadershipRewardOutcome outcome)
+        {
+            if (outcome?.MatchLeadershipPoints is not uint matchPoints) return context == null;
+            return context != null && matchPoints <= int.MaxValue && matchPoints <= outcome.LeadershipPoints &&
+                (context.Role != 0 || matchPoints == 0);
+        }
         private static void ValidateRewardLedger(Document document)
         {
             if (document.SchemaVersion < 3)
@@ -532,8 +534,9 @@ namespace Server.Medius
             byte previousLevel = character.Level ?? 1; byte level = catalog.LevelForExperience(experience);
             byte points = catalog.PointsAfterGain(character.ToRecord().SkillPoints, previousLevel, level);
             uint? matchLeadershipPoints = null;
-            if (leadership != null && catalog.TryLeadershipAward(leadership.Role, kind, out uint leadershipPoints))
+            if (leadership != null)
             {
+                if (!catalog.TryLeadershipAward(leadership.Role, kind, out uint leadershipPoints)) return Deny("invalid-authored-leadership-reward");
                 if (leadershipPoints > uint.MaxValue - (character.Leadership?.LeadershipPoints ?? 0)) return Deny("leadership-points-overflow");
                 matchLeadershipPoints = leadershipPoints;
             }
