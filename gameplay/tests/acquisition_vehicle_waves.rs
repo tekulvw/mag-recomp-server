@@ -38,3 +38,26 @@ fn queue_keeps_first_insertion_and_waits_for_the_following_wave() {
     );
     assert_eq!(waves.tick(60_000), [Some(vec![]), Some(vec![])]);
 }
+
+#[test]
+fn interval_changes_take_effect_only_when_the_advertised_wave_renews() {
+    let mut waves = VehicleWaves::start(1_000, [20_000, 40_000]).unwrap();
+    waves.queue(0, vehicle(3)).unwrap();
+    waves.set_intervals_ms([10_000, 60_000]).unwrap();
+    assert_eq!(waves.next_timestamp(0), Ok(21_000));
+    assert_eq!(waves.next_timestamp(1), Ok(41_000));
+    let before = waves.clone();
+    assert!(waves.set_intervals_ms([15_000, 0]).is_err());
+    assert_eq!(waves, before);
+
+    assert_eq!(waves.tick(20_999), [None, None]);
+    assert_eq!(waves.tick(21_000), [Some(vec![vehicle(3)]), None]);
+    assert_eq!(waves.next_timestamp(0), Ok(31_000));
+    assert_eq!(waves.next_timestamp(1), Ok(41_000));
+
+    waves.set_intervals_ms([20_000, 40_000]).unwrap();
+    assert_eq!(waves.tick(31_000), [Some(vec![]), None]);
+    assert_eq!(waves.next_timestamp(0), Ok(51_000));
+    assert_eq!(waves.tick(41_000), [None, Some(vec![])]);
+    assert_eq!(waves.next_timestamp(1), Ok(81_000));
+}

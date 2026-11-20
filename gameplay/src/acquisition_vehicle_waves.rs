@@ -25,6 +25,16 @@ impl VehicleWaves {
         })
     }
 
+    /// Change the interval used at each future renewal. Already published
+    /// timestamps and the vehicles queued against them remain in place.
+    pub fn set_intervals_ms(&mut self, intervals_ms: [u32; 2]) -> Result<(), &'static str> {
+        if intervals_ms.contains(&0) {
+            return Err("invalid_acquisition_vehicle_spawn_interval");
+        }
+        self.intervals_ms = intervals_ms;
+        Ok(())
+    }
+
     pub fn next_timestamp(&self, team: u8) -> Result<u32, &'static str> {
         self.timestamps_ms
             .get(usize::from(team))
