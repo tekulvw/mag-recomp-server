@@ -7,7 +7,7 @@ use std::{
     path::Path,
 };
 
-const MAX_BYTES: usize = 65_536;
+const MAX_BYTES: usize = 512 * 1024;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObjectiveSource {
@@ -36,7 +36,9 @@ impl ObjectiveSource {
                     && self.initial_load_scope.as_deref()
                         == Some("pre_mission_start_before_dynamic_creation")
             }
-            "native_source_gameplay" => game_type == 1 && self.initial_load_scope.is_none(),
+            "native_source_gameplay" => {
+                matches!(game_type, 1 | 2) && self.initial_load_scope.is_none()
+            }
             _ => false,
         }
     }
@@ -55,6 +57,37 @@ pub(crate) struct Objective {
     pub(crate) interaction: Option<ObjectiveInteractionRule>,
     #[serde(default)]
     pub(crate) demolition: Option<ObjectiveDemolitionRule>,
+    #[serde(default)]
+    pub(crate) native_class: Option<NativeClass>,
+    #[serde(default)]
+    pub(crate) repair: Option<ObjectiveRepairRule>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeClass {
+    SecureHold,
+    Structural,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ObjectiveRepairRule {
+    pub(crate) owner_team: u8,
+    pub(crate) can_repair: bool,
+    pub(crate) repair_ms: u32,
+    pub(crate) minimum_repair_ms: u32,
+}
+
+impl From<ObjectiveRepairRule> for crate::domination_repair_runtime::Rules {
+    fn from(rule: ObjectiveRepairRule) -> Self {
+        Self {
+            owner_team: rule.owner_team,
+            can_repair: rule.can_repair,
+            repair_ms: rule.repair_ms,
+            minimum_repair_ms: rule.minimum_repair_ms,
+        }
+    }
 }
 /// Authored classification, independent of XP values in the progression catalog.
 #[derive(Clone, Debug, Deserialize)]
@@ -210,6 +243,10 @@ impl ObjectiveCatalog {
         value.validate().map_err(io::Error::other)?;
         Ok(value)
     }
+    pub fn is_domination_gameplay(&self) -> bool {
+        self.game_type == 2 && self.source.capture_qualification == "native_source_gameplay"
+    }
+
     fn validate(&self) -> Result<(), &'static str> {
         if self.schema_version != 1
             || self.format != "mag_retail_objective_catalog"
@@ -245,11 +282,24 @@ impl ObjectiveCatalog {
                     || o.demolition.is_some()
                     || o.scoring.is_some()
                     || o.reward.is_some()
+                    || o.native_class.is_some()
+                    || o.repair.is_some()
             }) || self.progression.is_some()
                 || self.score_bleed.is_some()
                 || self.match_rules.is_some())
         {
             return Err("initial_objective_load_is_not_gameplay_qualification");
+        }
+        if self.game_type == 2
+            && (self.progression.is_some()
+                || self.score_bleed.is_some()
+                || !self.is_domination_gameplay()
+                    && self
+                        .objects
+                        .iter()
+                        .any(|object| object.interaction.is_some() || object.demolition.is_some()))
+        {
+            return Err("invalid_domination_objective_progression");
         }
         if self.match_rules.as_ref().is_some_and(|r| {
             r.end_game_delay_ms > 60_000
@@ -304,6 +354,29 @@ impl ObjectiveCatalog {
             {
                 return Err("invalid_objective_binding");
             }
+            if (!self.is_domination_gameplay()
+                && (object.native_class.is_some() || object.repair.is_some()))
+                || (self.is_domination_gameplay()
+                    && ((object.interaction.is_some()
+                        && object.native_class != Some(NativeClass::SecureHold))
+                        || ((object.demolition.is_some() || object.repair.is_some())
+                            && object.native_class != Some(NativeClass::Structural))
+                        || object.native_class.is_some()
+                            && !matches!(object.initial_state, 0 | 1 | 6 | 7 | 9)
+                        || (object.native_class == Some(NativeClass::SecureHold)
+                            && object.initial_state == 6)
+                        || object.repair.is_some_and(|rule| {
+                            rule.owner_team > 1
+                                || rule.repair_ms > 3_600_000
+                                || rule.minimum_repair_ms > 3_600_000
+                                || object
+                                    .demolition
+                                    .as_ref()
+                                    .is_some_and(|d| d.owner_team != rule.owner_team)
+                        })))
+            {
+                return Err("invalid_native_domination_objective_binding");
+            }
             if object.reward.as_ref().is_some_and(|rule| {
                 rule.category > 4
                     || (object.demolition.is_some() && !rule.demolition)
@@ -317,6 +390,8 @@ impl ObjectiveCatalog {
                     || (rule.complete_ms == 0
                         && self.source.capture_qualification != "native_source_gameplay")
                     || rule.deactivate_ms == 0
+                    || (self.is_domination_gameplay()
+                        && rule.distance_policy != crate::objective_range::AUTHORED_TRIGGER_BOX)
                     || rule.trigger_count == 0
                     || rule.position.iter().any(|value| !value.is_finite())
                     || !crate::objective_range::ObjectiveRange::validate(
@@ -337,6 +412,8 @@ impl ObjectiveCatalog {
                     || [rule.arm_ms, rule.detonate_ms, rule.defuse_ms]
                         .iter()
                         .any(|duration| *duration == 0 || *duration > 3_600_000)
+                    || (self.is_domination_gameplay()
+                        && rule.distance_policy != crate::objective_range::AUTHORED_TRIGGER_BOX)
                     || rule.trigger_count == 0
                     || rule.position.iter().any(|value| !value.is_finite())
                     || !crate::objective_range::ObjectiveRange::validate(
@@ -473,16 +550,17 @@ impl ObjectiveCatalog {
     pub fn object_count(&self) -> usize {
         self.objects.len()
     }
+    pub(crate) fn bound_objects(&self) -> impl Iterator<Item = (u32, u16)> + '_ {
+        self.objects
+            .iter()
+            .map(|object| (validated_token(&object.token), object.object_index))
+    }
+
     pub(crate) fn binding(&self, token: u32) -> Option<(u16, u8)> {
         self.objects
             .iter()
-            .find(|o| {
-                o.token
-                    .strip_prefix("0x")
-                    .and_then(|v| u32::from_str_radix(v, 16).ok())
-                    == Some(token)
-            })
-            .map(|o| (o.object_index, o.initial_state))
+            .find(|object| validated_token(&object.token) == token)
+            .map(|object| (object.object_index, object.initial_state))
     }
     pub(crate) fn authored_orders(
         &self,
@@ -571,6 +649,10 @@ impl ObjectiveCatalog {
         }
     }
 }
+fn validated_token(token: &str) -> u32 {
+    u32::from_str_radix(&token[2..], 16).expect("validated objective token")
+}
+
 pub(crate) fn native_state(state: u8) -> Option<replication::ObjectiveState> {
     use replication::ObjectiveState::*;
     Some(match state {

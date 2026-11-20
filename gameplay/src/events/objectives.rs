@@ -122,6 +122,9 @@ impl<W: Write> Engine<W> {
         if let Some(round) = &mut self.acquisition_round {
             round.reset();
         }
+        if let Some(round) = &mut self.domination_round {
+            round.reset();
+        }
         if let Some(ground) = &mut self.ground_runtime {
             ground.reset_for_new_world();
         }
@@ -552,8 +555,12 @@ impl<W: Write> Engine<W> {
         now: Duration,
         wall: u64,
     ) -> Result<Vec<OutboundMessage>, &'static str> {
+        use crate::acquisition_match_flow::OwnedRound;
         if self.acquisition_round.is_some() {
-            return self.tick_acquisition_round(now, wall);
+            return self.tick_owned_round(OwnedRound::Acquisition, now, wall);
+        }
+        if self.domination_round.is_some() {
+            return self.tick_owned_round(OwnedRound::Domination, now, wall);
         }
         if self
             .objective_catalog

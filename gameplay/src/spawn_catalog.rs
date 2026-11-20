@@ -188,6 +188,8 @@ pub struct SpawnCatalog {
     #[serde(skip)]
     activated: BTreeSet<u16>,
     #[serde(skip)]
+    runtime_inactive: BTreeSet<u16>,
+    #[serde(skip)]
     runtime_squads: BTreeMap<u16, RuntimeSquadSpawns>,
 }
 impl SpawnCatalog {
@@ -224,6 +226,9 @@ impl SpawnCatalog {
         self.match_profile = Some(file);
         self.validate()?;
         Ok(self)
+    }
+    pub(crate) fn authored_source(&self) -> &str {
+        &self.source
     }
     pub fn source_sha256(&self) -> Option<&str> {
         self.source_sha256.as_deref()
@@ -531,9 +536,68 @@ impl SpawnCatalog {
         self.runtime_selection.as_ref().unwrap_or(&self.active)
     }
     pub(crate) fn point_active(&self, index: u16) -> bool {
-        self.point(index)
-            .is_some_and(|p| p.active || self.activated.contains(&index))
+        self.point(index).is_some_and(|point| {
+            !self.runtime_inactive.contains(&index)
+                && (point.active || self.activated.contains(&index))
+        })
     }
+    pub(crate) fn set_runtime_point_active(
+        &mut self,
+        index: u16,
+        token: u32,
+        active: bool,
+    ) -> Result<(), &'static str> {
+        if self.point(index).is_none_or(|point| point.token != token) {
+            return Err("spawn_runtime_identity_mismatch");
+        }
+        if active {
+            self.runtime_inactive.remove(&index);
+            self.activated.insert(index);
+        } else {
+            self.activated.remove(&index);
+            self.runtime_inactive.insert(index);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn set_runtime_squad_default(
+        &mut self,
+        squad: u16,
+        index: u16,
+    ) -> Result<(), &'static str> {
+        if self
+            .point(index)
+            .is_none_or(|point| matches!(point.kind, SpawnKind::Unsupported))
+        {
+            return Err("unsupported_runtime_squad_spawn");
+        }
+        let mut available = self
+            .available_for_squad(squad)
+            .ok_or("unknown_squad")?
+            .to_vec();
+        if !available.contains(&index) {
+            if available.len() >= 8 {
+                return Err("runtime_squad_spawn_capacity");
+            }
+            available.push(index);
+        }
+        self.runtime_squads.insert(
+            squad,
+            RuntimeSquadSpawns {
+                available: available.clone(),
+                default_spawn: index,
+            },
+        );
+        if self.squad_index() == squad {
+            let selected = self
+                .runtime_selection
+                .get_or_insert_with(|| self.active.clone());
+            selected.available = available;
+            selected.default_spawn = index;
+        }
+        Ok(())
+    }
+
     pub(crate) fn forward_applied(&self, rule: ForwardSpawnBinding) -> bool {
         self.runtime_squads
             .get(&rule.squad_index)
@@ -591,6 +655,7 @@ impl SpawnCatalog {
     pub(crate) fn reset_runtime(&mut self) {
         let squad = self.squad_index();
         self.activated.clear();
+        self.runtime_inactive.clear();
         self.runtime_squads.clear();
         self.runtime_selection = self.selected_squad(squad).map(|binding| ActiveSpawns {
             map_name: self.active.map_name.clone(),
@@ -600,9 +665,7 @@ impl SpawnCatalog {
         });
     }
     pub fn alpha(&self, index: u16) -> Option<&SpawnLocation> {
-        self.selection()
-            .available
-            .contains(&index)
+        (self.selection().available.contains(&index) && self.point_active(index))
             .then(|| {
                 self.maps
                     .iter()

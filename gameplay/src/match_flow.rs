@@ -28,7 +28,7 @@ pub(crate) struct Round {
 #[derive(Clone, Copy)]
 pub(crate) enum ScorePublication {
     Sabotage { objective_effect: bool },
-    Acquisition { before_bleed: [i16; 2] },
+    NativeScoreRate { before_bleed: [i16; 2] },
 }
 
 pub(crate) enum Publication {
@@ -64,7 +64,11 @@ impl Active {
 }
 impl<W: Write> Engine<W> {
     pub(crate) fn round_combat_allowed(&self, now: Duration) -> bool {
-        if let Some(round) = &self.acquisition_round {
+        if let Some(round) = self
+            .acquisition_round
+            .as_ref()
+            .or(self.domination_round.as_ref())
+        {
             use acquisition_round::Phase;
             return match round.phase() {
                 Phase::Playing => true,
@@ -389,7 +393,7 @@ impl<W: Write> Engine<W> {
         {
             use protocol::ScoreChangeReason::{Initial, PrimaryObjective, TimedBleed};
             match (publication, recipient.round_scores) {
-                (ScorePublication::Acquisition { before_bleed }, Some(previous)) => {
+                (ScorePublication::NativeScoreRate { before_bleed }, Some(previous)) => {
                     // Objective entries commit before this score-bleed update.
                     // Preserve both notices if the same team changed twice.
                     for (team, points) in before_bleed.into_iter().enumerate() {
