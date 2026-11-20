@@ -46,6 +46,7 @@ pub mod correction_ack;
 pub mod damage;
 mod death_notifications;
 mod development_bot_movement;
+pub mod domination_control;
 pub mod dynamic_collision;
 pub mod dynamic_collision_runtime;
 #[cfg(test)]

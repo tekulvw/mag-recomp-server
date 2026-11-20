@@ -24,6 +24,13 @@ static class MatchProfileBridgeChecks
         Check(!GameplayBridgeResponseCodec.TryParse(Reply(new[]{profile,profile}),"synthetic",true,out _),"Duplicate profile accepted");
         Check(!GameplayBridgeResponseCodec.TryParse(Reply(new[]{profile with { }}),"wrong",true,out _),"Correlation mismatch accepted");
         Check(!GameplayBridgeResponseCodec.TryParse(Reply(Array.Empty<object>(),selected,false),"synthetic",false,out _),"Failed selection carried success identity");
+        var dominationProfile=profile with {game_type=2};
+        var dominationSelection=selected with {game_type=2};
+        Check(GameplayBridgeResponseCodec.TryParse(Reply(new[]{dominationProfile}),"synthetic",true,out var dominationHello)
+            && dominationHello.MatchProfiles[0].GameType==2,"Domination hello rejected");
+        Check(GameplayBridgeResponseCodec.TryParse(Reply(Array.Empty<object>(),dominationSelection),"synthetic",false,out var dominationAck)
+            && LocalDmeHost.MatchesFormationAcknowledgement(dominationAck,selected.formation_id,expected with {GameType=2}),
+            "Domination selection rejected");
         var bad=new {profile_id="bad",game_type=0,attacking_faction=0,defending_faction=0,maximum_players=64,team_capacity=32};
         Check(!GameplayBridgeResponseCodec.TryParse(Reply(new[]{bad}),"synthetic",true,out _),"Same faction accepted");
     }

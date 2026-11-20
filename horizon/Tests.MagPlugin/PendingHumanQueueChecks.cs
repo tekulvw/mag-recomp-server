@@ -44,7 +44,7 @@ internal static class PendingHumanQueueChecks
 
         foreach (string bad in new[] { null, "", " ", new string('a', 129) })
             Throws<ArgumentException>(() => queue.Put(bad, 0, 0, new object()));
-        Throws<ArgumentException>(() => queue.Put("bad", 2, 0, new object()));
+        Throws<ArgumentException>(() => queue.Put("bad", 3, 0, new object()));
         Throws<ArgumentException>(() => queue.Put("bad", 0, 3, new object()));
         Throws<ArgumentNullException>(() => queue.Put("bad", 0, 0, null));
         Check(queue.Count == 0 && generated == 4, "Invalid input mutated queue or called generator");
@@ -63,7 +63,7 @@ internal static class PendingHumanQueueChecks
         var reused = badGenerator.Put("new-owner", 0, 0, new object());
         Check(reused.Human.Order == 1 && !badGenerator.IsCurrent(stable), "Removed ID reuse must retain generation fencing and fresh age");
         next = "fresh";
-        Check(badGenerator.Put("fresh-owner", 0, 0, new object()).Human.Order == 2, "Rejected tickets consumed order");
+        Check(badGenerator.Put("fresh-owner", 2, 0, new object()).Human is { GameType: 2, Order: 2 }, "Rejected tickets consumed order");
 
         var full = new MagPendingHumanQueue<object>();
         for (int i = 0; i < 4096; i++) full.Put("owner-" + i, 0, 0, new object());

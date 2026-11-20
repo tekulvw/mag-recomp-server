@@ -49,12 +49,14 @@ Test("optional finishing and revive reward catalog fields", ReviveRewardChecks.R
 Test("selected kit ownership and complete store preservation", LoadoutPreferenceStoreChecks.Run);
 Test("account-bound NP identity creation and persistence", NpIdentityChecks.Run);
 
-Test("bounded retail Acquisition mode policy", () =>
+Test("bounded retail mode capacities", () =>
 {
     Check(LocalDmeHost.SupportedMaximumPlayers(20231, 1) == 64, "Retail Acquisition bound");
     Check(LocalDmeHost.SupportedMaximumPlayers(20231, 0) == 64, "Retail Sabotage bound");
     Check(LocalDmeHost.SupportedMaximumPlayers(20231, 3) == 64, "Retail Suppression bound");
-    Check(LocalDmeHost.SupportedMaximumPlayers(20231, 2) == 8, "Domination remains bounded separately");
+    Check(LocalDmeHost.SupportedMaximumPlayers(20231, 2) == 8, "Legacy Domination bound");
+    Check(LocalDmeHost.SupportedMaximumPlayers(20231, 2, hasDominationProfiles: true) == 64, "Profile-backed Domination bound");
+    Check(LocalDmeHost.SupportedMaximumPlayers(20230, 2, hasDominationProfiles: true) == 8, "Prototype Domination bound");
     Check(LocalDmeHost.SupportedMaximumPlayers(20230, 3) == 8, "Prototype bound");
     Throws<ArgumentException>(() => LocalDmeHost.SupportedMaximumPlayers(20230, 1));
     Throws<ArgumentException>(() => LocalDmeHost.SupportedMaximumPlayers(20230, 0));
@@ -69,6 +71,14 @@ Test("startup team minima share bridge policy and advertised total", () =>
     var root = request.RootElement;
     Check(root.GetProperty("minimum_players").GetInt32() == 3 && root.GetProperty("maximum_players").GetInt32() == 8, "Bridge aggregate differs from status");
     Check(root.GetProperty("minimum_players_per_team").EnumerateArray().Select(x => x.GetInt32()).SequenceEqual(new[] {2,1}), "Bridge team minima");
+    var bounded = policy.WithProfileMaximum(4);
+    using var boundedRequest = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(bounded.ConfigureRequest("synthetic", 20231)));
+    Check(boundedRequest.RootElement.GetProperty("maximum_players").GetInt32() == 4 &&
+        boundedRequest.RootElement.GetProperty("minimum_players").GetInt32() == 3 &&
+        boundedRequest.RootElement.GetProperty("minimum_players_per_team").EnumerateArray().Select(x => x.GetInt32()).SequenceEqual(new[] { 2, 1 }),
+        "Profile maximum must bound bridge configuration while preserving minima");
+    Check(policy.WithProfileMaximum(64).MaximumPlayers == 8, "Profile must preserve a lower operator limit");
+    Throws<ArgumentException>(() => policy.WithProfileMaximum(2));
     Check(new MagMatchStartupPolicy(5,8,null).MinimumPlayers == 5, "Legacy total minimum");
     Check(new MagMatchStartupPolicy(1,8,null).MinimumPlayers == 1, "Solo default");
     var supplied = new[] {1,1};

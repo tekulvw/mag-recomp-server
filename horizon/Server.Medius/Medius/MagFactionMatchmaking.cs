@@ -101,19 +101,19 @@ namespace Server.Medius
             var ids = new HashSet<string>(StringComparer.Ordinal);
             foreach (var player in waiting)
                 if (player == null || string.IsNullOrWhiteSpace(player.TicketId) || player.GameType < 0 ||
-                    player.GameType > 1 || player.Faction > 2 || !ids.Add(player.TicketId))
-                    throw new ArgumentException("Human tickets require unique identities, mode 0/1 and saved faction 0..2.", nameof(waiting));
+                    player.GameType > 2 || player.Faction > 2 || !ids.Add(player.TicketId))
+                    throw new ArgumentException("Human tickets require unique identities, mode 0..2 and saved faction 0..2.", nameof(waiting));
             return waiting.OrderBy(player => player.Order).ThenBy(player => player.TicketId, StringComparer.Ordinal).ToArray();
         }
 
         static void ValidateProfile(MagMatchProfile profile)
         {
             if (profile == null) throw new ArgumentNullException(nameof(profile));
-            if (string.IsNullOrWhiteSpace(profile.ProfileId) || profile.GameType < 0 || profile.GameType > 1 ||
+            if (string.IsNullOrWhiteSpace(profile.ProfileId) || profile.GameType < 0 || profile.GameType > 2 ||
                 profile.AttackingFaction > 2 || profile.DefendingFaction > 2 ||
                 profile.AttackingFaction == profile.DefendingFaction || profile.MaximumPlayers < 1 ||
                 profile.MaximumPlayers > 64 || profile.TeamCapacity < 1 || profile.TeamCapacity > 32)
-                throw new ArgumentException("Profiles require an identity, mode 0/1, opposing factions and bounded capacities.", nameof(profile));
+                throw new ArgumentException("Profiles require an identity, mode 0..2, opposing factions and bounded capacities.", nameof(profile));
         }
 
         static void ValidateOptions(int minimumPlayers, int maximumPlayers, int[] minimumPerTeam)

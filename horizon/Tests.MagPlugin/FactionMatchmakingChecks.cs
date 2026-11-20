@@ -21,7 +21,7 @@ internal static class FactionMatchmakingChecks
         new MagMatchProfile($"invented-{mode}-{attacker}-{defender}", mode, attacker, defender, maximum, team);
     static MagQueuedHuman Human(string id, byte faction, long order, int mode = 0) =>
         new MagQueuedHuman(id, mode, faction, order);
-    static MagMatchProfile[] Profiles() => (from mode in new[] { 0, 1 }
+    static MagMatchProfile[] Profiles() => (from mode in new[] { 0, 1, 2 }
         from attacker in new byte[] { 0, 1, 2 }
         from defender in new byte[] { 0, 1, 2 }
         where attacker != defender select Profile(attacker, defender, mode)).ToArray();
@@ -44,8 +44,8 @@ internal static class FactionMatchmakingChecks
             "Other faction and mode must stay outside cohort");
         Check(waiting.SequenceEqual(snapshot), "Planner changed caller queue");
 
-        // Every saved faction may be oldest, attack, or defend in either mode.
-        foreach (int mode in new[] { 0, 1 })
+        // Every saved faction may be oldest, attack, or defend in each mode.
+        foreach (int mode in new[] { 0, 1, 2 })
         foreach (byte oldest in new byte[] { 0, 1, 2 })
         foreach (int opponentDraw in new[] { 0, 1 })
         foreach (int roleDraw in new[] { 0, 1 })
@@ -101,7 +101,7 @@ internal static class FactionMatchmakingChecks
         var pair = new[] { Human("a", 0, 0), Human("b", 1, 1) };
         Throws<ArgumentException>(() => MagFactionMatchmaking.Select(pair.Concat(new[] { Human("a", 2, 2) }).ToArray(),
             Profiles(), 2, 64, new[] { 1, 1 }, n => 0));
-        foreach (var bad in new[] { Human("", 0, 0), Human("bad-faction", 3, 0), Human("bad-mode", 0, 0, 2) })
+        foreach (var bad in new[] { Human("", 0, 0), Human("bad-faction", 3, 0), Human("bad-mode", 0, 0, 3) })
             Throws<ArgumentException>(() => MagFactionMatchmaking.Select(new[] { bad }, Profiles(), 2, 64, new[] { 1, 1 }, n => 0));
         foreach (var bad in new[] { Profile(0, 0), Profile(3, 1), Profile(0, 1, mode: 3),
             Profile(0, 1, maximum: 65), Profile(0, 1, team: 33), Profile(0, 1, team: 0),

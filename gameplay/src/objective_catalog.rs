@@ -32,7 +32,7 @@ impl ObjectiveSource {
         match self.capture_qualification.as_str() {
             "bounded_concurrent_token_slot_capture" => self.initial_load_scope.is_none(),
             "native_initial_load" => {
-                game_type == 1
+                matches!(game_type, 1 | 2)
                     && self.initial_load_scope.as_deref()
                         == Some("pre_mission_start_before_dynamic_creation")
             }
@@ -215,7 +215,7 @@ impl ObjectiveCatalog {
             || self.format != "mag_retail_objective_catalog"
             || self.application_id != 20231
             || self.protocol != protocol::ProtocolInfo::RETAIL_PROTOCOL
-            || !matches!(self.game_type, 0 | 1)
+            || !matches!(self.game_type, 0..=2)
             || self.entity_family != 12
             || self.network_type != 12
             || self.map_name.is_empty()
@@ -275,7 +275,11 @@ impl ObjectiveCatalog {
         {
             return Err("invalid_objective_match_rules");
         }
-        let squads_per_team = if self.game_type == 1 { 8 } else { 4 };
+        let squads_per_team = match self.game_type {
+            2 => 16,
+            1 => 8,
+            _ => 4,
+        };
         if self.objects.is_empty()
             || self.objects.len() > 128
             || self.squads.len() != 2 * squads_per_team
@@ -433,7 +437,7 @@ impl ObjectiveCatalog {
                 .map(|authored| authored.object_index);
             let expected_assignment = match first_available {
                 Some(index) => Some(index),
-                None if self.game_type == 1 => Some(u16::MAX),
+                None if matches!(self.game_type, 1 | 2) => Some(u16::MAX),
                 None => None,
             };
             if expected_assignment != Some(squad.initial_objective_index) {

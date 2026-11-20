@@ -142,3 +142,28 @@ fn acquisition_source_gameplay_accepts_authored_zero_completion_delay_only_in_th
     value["source"]["initial_load_scope"] = json!("pre_mission_start_before_dynamic_creation");
     assert!(ObjectiveCatalog::from_json(&value.to_string()).is_err());
 }
+
+#[test]
+fn domination_initial_load_keeps_all_thirty_two_squads_without_enabling_gameplay() {
+    let mut input = fixture(1, true);
+    input["game_type"] = json!(2);
+    input["source"]["capture_qualification"] = json!("native_initial_load");
+    input["source"]["initial_load_scope"] = json!("pre_mission_start_before_dynamic_creation");
+    input["squads"] = json!(
+        (0..2)
+            .flat_map(|team| (0..16).map(move |slot| json!({
+                "team":team,"squad_index":team*16+slot,"initial_objective_index":65535,
+                "authored_objectives":[{"object_index":17,"order":9},{"object_index":63,"order":2}]
+            })))
+            .collect::<Vec<_>>()
+    );
+    let catalog = ObjectiveCatalog::from_json(&input.to_string()).unwrap();
+    for index in 0..32 {
+        assert_eq!(catalog.initial_assignment(index), Ok(u16::MAX));
+    }
+    input["objects"][0]["initial_state"] = json!(1);
+    assert!(ObjectiveCatalog::from_json(&input.to_string()).is_err());
+    input["objects"][0]["initial_state"] = json!(0);
+    input["squads"].as_array_mut().unwrap().pop();
+    assert!(ObjectiveCatalog::from_json(&input.to_string()).is_err());
+}

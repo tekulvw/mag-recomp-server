@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "scope": "All 55 catalog filenames known to this source import; presence in this inventory does not mean every file is required by every runtime mode.",
+  "scope": "All 57 catalog filenames known to this source import; presence in this inventory does not mean every file is required by every runtime mode.",
   "status_definitions": {
     "direct": "Included parser/projector reads explicit original data or an included earlier catalog; no unpublished evidence input.",
     "direct-with-policy": "Included projector also requires explicit local operator policy.",
@@ -533,6 +533,26 @@
       "inputs": "Operator-authored policy/protocol configuration; consult runtime loaders and synthetic public examples",
       "dependencies": [],
       "limitations": "These are not archive-extracted catalogs. Supply deliberate configuration for selected features; no retail values are fabricated."
+    },
+    {
+      "output": "domination-control.json",
+      "status": "direct",
+      "command": "project-retail-domination-control.py --metadata METADATA --game-archive GAME --output OUTPUT",
+      "inputs": "Retail Domination metadata and original decrypted game.psarc",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Ordered callback requests only; concrete Engine lifecycle effects and scheduling remain separate."
+    },
+    {
+      "output": "domination-initial-objectives.json",
+      "status": "external-proof",
+      "command": "project-retail-domination-initial-objectives.py --metadata METADATA --bindings BINDINGS --native-replay REPLAY --native-elf ELF --map MAP --output OUTPUT",
+      "inputs": "Retail metadata, original ELF and qualified client factory/load/native replay receipts",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Initial inactive state and all32 squad lists only; successful fresh-load model is distinct from MissionStart and live pool observation."
     }
   ]
 }

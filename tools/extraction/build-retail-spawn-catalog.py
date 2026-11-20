@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build an all-faction retail Suppression, Sabotage or Acquisition spawn profile.
+"""Build an all-faction retail Suppression, Sabotage, Acquisition or Domination spawn profile.
 
 Reads the original retail disc dump and the decrypted retail game.psarc directly,
 through the tracked extract-retail-spawns.py parser, and writes the Rust
@@ -20,6 +20,8 @@ SETTINGS_SHA256 = 'ed3b62d496bb0f36d53ec9a2ec3b29cae930f9e714af41e8c828f3c2dd9ed
 FACTIONS = {'Valor': 0, 'Raven': 1, 'SVER': 2}
 KINDS = {0: 'insertion', 1: 'alternate'}
 SQUADS = {'Alpha': 0, 'Bravo': 1, 'Charlie': 2, 'Delta': 3}
+OPPOSING_MODES = {'GameType64': 0, 'GameType128': 1, 'GameType256': 2}
+MODES = {**OPPOSING_MODES, 'GameTypeFactionExercise': 3}
 
 
 def sha(data):
@@ -87,12 +89,17 @@ def extract(disc, game_archive, map_name):
     arc = x.Psarc(game)
     settings = arc.extract(arc.names.index('/run/mag/ps3/settings/gameproperties.zpr') + 1)
     info = {m['map']: m for m in x.catalog_settings(settings.decode())}.get(map_name)
-    if info is None or info['mode_enum'] not in ('GameTypeFactionExercise', 'GameType64', 'GameType128'):
+    if info is None or info['mode_enum'] not in MODES:
         raise SystemExit('Map is not a supported retail spawn profile')
     match_rules, rules_source = original_rules(settings, info['mode_enum'])
     level = disc / 'PS3_GAME/USRDIR/run/mag/ps3/levels' / (map_name + '.psarc')
     points = x.extract_map(level, info)
-    if info['mode_enum'] in ('GameType64', 'GameType128'):
+    if info['mode_enum'] == 'GameType256':
+        domination = runpy.run_path(str(TOOLS / 'extract-retail-domination.py'))
+        if points['unresolved_squad_references']:
+            raise SystemExit('Unresolved authored Domination squad references')
+        domination['squad_links'](domination['index'](points['points'], 'name_token'))
+    if info['mode_enum'] in OPPOSING_MODES:
         # Reuse the maintained objective parser to document disabled authored content.
         maps = runpy.run_path(str(TOOLS / 'extract-retail-maps.py'))
         helpers = runpy.run_path(str(TOOLS / 'retail_map_helpers.py'))
@@ -113,10 +120,12 @@ def build(disc, game_archive, map_name, active_team, active_platoon, active_squa
           attacking_faction=None):
     points, groups, game_sha, match_rules, rules_source = extract(disc, game_archive, map_name)
     owner = points['map']['owner_faction']
-    sabotage = points['map']['mode_enum'] == 'GameType64'
-    acquisition = points['map']['mode_enum'] == 'GameType128'
-    opposing = sabotage or acquisition
-    if points['map']['mode_enum'] not in ('GameTypeFactionExercise', 'GameType64', 'GameType128'):
+    mode = points['map']['mode_enum']
+    sabotage = mode == 'GameType64'
+    acquisition = mode == 'GameType128'
+    domination = mode == 'GameType256'
+    opposing = mode in OPPOSING_MODES
+    if mode not in MODES:
         raise SystemExit('Map is not a supported retail spawn profile')
     if owner not in FACTIONS or any(p['team'] not in (0, 1)
             or p['faction'] != (None if opposing and p['team'] == 0 else owner)
@@ -132,7 +141,7 @@ def build(disc, game_archive, map_name, active_team, active_platoon, active_squa
         if attacking_faction not in FACTIONS or FACTIONS[attacking_faction] == owner:
             raise SystemExit('Opposing mode requires an explicit opposing attacking faction')
     elif attacking_faction is not None:
-        raise SystemExit('Explicit attacking faction is supported only for Sabotage or Acquisition')
+        raise SystemExit('Explicit attacking faction is supported only for Sabotage, Acquisition or Domination')
     index = {}
     locations = []
     unsupported_links = []
@@ -164,24 +173,38 @@ def build(disc, game_archive, map_name, active_team, active_platoon, active_squa
     squads = []
     fallbacks = []
     for g in groups:
+        squad_index = g['team'] * 16 + g['platoon_id'] * 4 + SQUADS[g['squad']]
         available = [index[p['catalog_id']] for p in g['points']
                      if p['active'] and locations[index[p['catalog_id']]]['kind'] != 'unsupported']
         defaults = [index[p['catalog_id']] for p in g['points']
                     if p['category'] == 0 and index[p['catalog_id']] in available]
-        if acquisition and not defaults:
+        # Domination's only supported substitute is the authored Basic slot 1
+        # attached to an attacking squad with an active APC slot 0.
+        apc_insertion = (domination and g['team'] == 0 and len(g['points']) >= 2
+                         and g['points'][0]['spawn_type_name'] == 'SpawnPointAPC'
+                         and g['points'][0]['spawn_type'] == 3
+                         and g['points'][0]['category'] == 0
+                         and g['points'][0]['user_class'] == 0
+                         and g['points'][0]['active']
+                         and g['points'][1]['category'] == 1)
+        if (acquisition or apc_insertion) and not defaults:
             defaults = [index[p['catalog_id']] for p in g['points']
                         if p['category'] == 1 and index[p['catalog_id']] in available]
+            if domination and defaults != [index[g['points'][1]['catalog_id']]]:
+                raise SystemExit('Squad requires one supported active spawn default')
             if len(defaults) == 1:
-                fallbacks.append({'squad_index': g['team'] * 16 + g['platoon_id'] * 4 + SQUADS[g['squad']],
+                fallbacks.append({'squad_index': squad_index,
                                   'default_spawn': defaults[0],
                                   'policy': 'Local Basic alternate; authored insertion unavailable'})
         if len(defaults) != 1:
             raise SystemExit('Squad requires one supported active spawn default')
         default = defaults[0]
-        squads.append({'index': g['team'] * 16 + g['platoon_id'] * 4 + SQUADS[g['squad']], 'team': g['team'],
+        squads.append({'index': squad_index, 'team': g['team'],
                        'platoon': g['platoon_id'], 'squad': SQUADS[g['squad']],
                        'faction': owner if g['team'] == 1 else None, 'available': available, 'default_spawn': default})
     squads.sort(key=lambda s: s['index'])
+    if domination and [s['index'] for s in squads] != list(range(32)):
+        raise SystemExit('Domination requires all 32 authored squads')
     active = next((s for s in squads if (s['team'], s['platoon'], s['squad']) ==
                    (active_team, active_platoon, active_squad)), None)
     if active is None:
@@ -199,10 +222,12 @@ def build(disc, game_archive, map_name, active_team, active_platoon, active_squa
             'definitions': len(graph['definitions']), 'direct_instances': len(graph['instances']),
             'catalog': 'gameplay/data/retail-maps.json', 'map': map_name,
             'runtime_policy': 'Disabled for entry foundation; authored objectives are present, runtime identities/control unresolved'})
-    if acquisition:
+    if domination:
+        source['authored_points_lost_per_death'] = match_rules['points_lost_per_death']
+    if acquisition or domination:
         source['default_spawn_fallbacks'] = fallbacks
         source['admission_policy'] = 'Local maximum64/team32/squad4; authored capacity is provenance only'
-    # Original-proven modes: Faction Exercise3, Sabotage0, Acquisition1.
+    # Original-proven modes: Faction Exercise3, Sabotage0, Acquisition1, Domination2.
     # No vehicle spawns are supported here. Objectives are disabled above;
     # Faction Exercise objectives remain an unverified absence policy.
     # Opposing attackers are explicit except for the legacy Syr Darya profile;
@@ -210,17 +235,18 @@ def build(disc, game_archive, map_name, active_team, active_platoon, active_squa
     # Admission limits/automatic balancing below are explicit local/user policy;
     # they are not new property fields recovered from the level archive. Keep
     # them in the generated runtime configuration rather than Rust constants.
-    profile = {'game_type': 1 if acquisition else 0 if sabotage else 3,
+    profile = {'game_type': MODES[mode],
                'attacking_faction': FACTIONS[attacking_faction] if opposing else owner,
-               'auto_assign_teams': True, 'team_capacity': 32, 'squad_capacity': 4 if acquisition else 8,
+               'auto_assign_teams': True, 'team_capacity': 32, 'squad_capacity': 4 if acquisition or domination else 8,
                'maximum_points': match_rules['maximum_points'],
                'spawn_wave_ms': match_rules['spawn_wave_ms'],
                'has_bunkers': False, 'has_objectives': False}
     if opposing:
         profile['initial_spawn_delay_ms'] = match_rules['initial_spawn_delay_ms']
-    if len(json.dumps(source, sort_keys=True)) >= 8192:
+    source_json = json.dumps(source, sort_keys=True, separators=(',', ':') if domination else None)
+    if len(source_json.encode()) >= 8192:
         raise SystemExit('Runtime spawn provenance exceeds source field bound')
-    return {'format': 'mag_spawn_catalog', 'schema_version': 1, 'source': json.dumps(source, sort_keys=True),
+    return {'format': 'mag_spawn_catalog', 'schema_version': 1, 'source': source_json,
             'match_profile': profile,
             'active': {'map_name': map_name, 'squad_index': active['index'], 'default_spawn': active['default_spawn'], 'available': active['available']},
             'maps': [{'name': map_name, 'spawn_count': len(locations), 'locations': locations, 'owner_faction': owner,
@@ -234,7 +260,7 @@ def main():
     parser.add_argument('--map', required=True)
     parser.add_argument('--active', required=True, help='team/platoon/squad index for the local player')
     parser.add_argument('--attacking-faction', choices=tuple(FACTIONS),
-                        help='Required opposing attacker for Sabotage and Acquisition; legacy Syr Darya defaults to Valor')
+                        help='Required opposing attacker for Sabotage, Acquisition and Domination; legacy Syr Darya defaults to Valor')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--check', action='store_true', help='Fail unless OUTPUT already matches')
     args = parser.parse_args()

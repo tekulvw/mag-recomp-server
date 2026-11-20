@@ -113,9 +113,11 @@ impl Registry {
             }
             let spawns = spawn_catalog::SpawnCatalog::load(&source.spawn_catalog)?;
             let policy = spawns.match_profile();
-            if !matches!(policy.game_type, 0 | 1)
+            if !matches!(policy.game_type, 0..=2)
                 || !policy.auto_assign_teams
                 || policy.has_bunkers
+                || (policy.game_type == 2
+                    && (policy.squad_capacity > 4 || spawns.map_pool().squads.len() != 32))
                 || policy.attacking_faction == policy.defending_faction
                 || spawns.map_pool().owner_faction != Some(policy.defending_faction)
             {
@@ -727,6 +729,67 @@ mod tests {
             &engine.acquisition_gameplay.as_ref().unwrap().setup,
             &old_setup
         ));
+    }
+
+    #[test]
+    fn domination_profiles_require_all_squads_and_bounded_admission() {
+        let files = Files::new();
+        let path = files.spawns(2, 0, 1);
+        let mut spawn: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        spawn["match_profile"]["team_capacity"] = json!(32);
+        spawn["match_profile"]["squad_capacity"] = json!(4);
+        let squads: Vec<_> = (0..32)
+            .map(|index| {
+                let team = index / 16;
+                json!({"index":index,"team":team,"platoon":index % 16 / 4,"squad":index % 4,
+                    "faction":if team == 0 { None } else { Some(1) },"available":[0],"default_spawn":0})
+            })
+            .collect();
+        spawn["maps"][0]["squads"] = json!(squads);
+        let path = files.write("domination-spawns.json", spawn.clone());
+        let manifest = files.write(
+            "domination-profiles.json",
+            json!({"format":"mag_match_profiles_v1","profiles":[{
+                "profile_id":"domination","spawn_catalog":path
+            }]}),
+        );
+        let mut engine = engine(&files, Vec::new(), 100_000);
+        engine.match_profiles = Some(Registry::load(&manifest).unwrap());
+        let selected = select(&mut engine, "formation-domination", "domination");
+        assert!(selected.ok, "{:?}", selected.error);
+        assert_eq!(selected.selected_match.unwrap().game_type, 2);
+        assert_eq!(engine.admission_capacity(), 64);
+        assert_eq!(engine.allocate_squad(0).unwrap().squad_index(), 0);
+        assert_eq!(engine.allocate_squad(1).unwrap().squad_index(), 16);
+        assert_eq!(
+            engine.allocate_squad(2).unwrap_err(),
+            "unsupported_match_character"
+        );
+
+        spawn["match_profile"]["team_capacity"] = json!(8);
+        spawn["match_profile"]["squad_capacity"] = json!(2);
+        files.write("domination-spawns.json", spawn.clone());
+        assert_eq!(
+            Registry::load(&manifest).unwrap().summaries()[0].maximum_players,
+            16
+        );
+        spawn["match_profile"]["squad_capacity"] = json!(5);
+        files.write("domination-spawns.json", spawn.clone());
+        assert_eq!(
+            Registry::load(&manifest).err().unwrap().to_string(),
+            "unsupported_match_profile_policy"
+        );
+
+        spawn["match_profile"]["team_capacity"] = json!(32);
+        spawn["match_profile"]["squad_capacity"] = json!(4);
+        // Fifteen squads can still seat 32 players. The authored 16th squad
+        // must be present independently of the local seat limit.
+        spawn["maps"][0]["squads"].as_array_mut().unwrap().pop();
+        files.write("domination-spawns.json", spawn);
+        assert_eq!(
+            Registry::load(&manifest).err().unwrap().to_string(),
+            "unsupported_match_profile_policy"
+        );
     }
 
     #[test]

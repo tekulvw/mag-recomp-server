@@ -1,4 +1,4 @@
-"""Invented Acquisition graph; no original map coordinates, tokens or records."""
+"""Invented opposing-mode graphs; no original map coordinates, tokens or records."""
 import hashlib
 import importlib.util
 import json
@@ -13,7 +13,7 @@ API = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(API)
 
 
-def invented():
+def invented(platoons=2):
     points, groups = [], []
 
     def point(kind, category, team, active=True, user=0):
@@ -29,7 +29,7 @@ def invented():
         return row
 
     for team in (0, 1):
-        for platoon in (0, 1):
+        for platoon in range(platoons):
             for squad in ('Alpha', 'Bravo', 'Charlie', 'Delta'):
                 insertion = 'SpawnPointAPC' if team == 0 and squad in ('Bravo', 'Charlie') else 'SpawnPointBasic'
                 rows = [point(insertion, 0, team), point('SpawnPointBasic', 1, team),
@@ -43,7 +43,7 @@ def invented():
     for i in range(24):
         point('SpawnPointMotorPool' if i % 2 else 'SpawnPointBasic', 0, i % 2,
               user=i % 2)
-    row = dict(map=dict(map='mag_voz_final', owner_faction='SVER', mode_enum='GameType128'),
+    row = dict(map=dict(map='mag_voz_final', owner_faction='SVER', mode_enum='GameType128' if platoons == 2 else 'GameType256'),
                points=points, source=dict(archive_sha256='a' * 64, clv_sha256='b' * 64),
                objectives=dict(definitions=[{}], instances=[{}]))
     rules = dict(maximum_points=[1200, 1000], spawn_wave_ms=[20000, 20000],
@@ -132,6 +132,59 @@ class AcquisitionProjectionTests(unittest.TestCase):
         extra = dict(group['points'][1], catalog_id='mag_voz_final:072', name_token=hex(200))
         data[0]['points'].append(extra)
         group['points'].append(extra)
+        with self.assertRaisesRegex(SystemExit, 'supported active.*default'):
+            self.project(data)
+
+
+class DominationProjectionTests(unittest.TestCase):
+    def project(self, data=None, attacker='Valor'):
+        data = data or self.authored()
+        with patch.object(API, 'extract', return_value=data):
+            return API.build(Path('/unused'), Path('/unused'), 'mag_voz_final',
+                             1, 3, 3, attacking_faction=attacker)
+
+    def authored(self):
+        data = invented(platoons=4)
+        data[3]['points_lost_per_death'] = [0, 0]
+        data[4].update(authored_maximum_players=256, authored_minimum_players=200)
+        return data
+
+    def test_all_squads_with_only_authored_basic_spawn_choices(self):
+        result = self.project()
+        profile = result['match_profile']
+        self.assertEqual((profile['game_type'], profile['team_capacity'],
+                          profile['squad_capacity']), (2, 32, 4))
+        pool = result['maps'][0]
+        self.assertEqual([row['index'] for row in pool['squads']], list(range(32)))
+        self.assertEqual(result['active']['squad_index'], 31)
+        self.assertFalse(pool['runtime_indices_verified'])
+        self.assertFalse(profile['has_bunkers'])
+        self.assertFalse(profile['has_objectives'])
+        source = json.loads(result['source'])
+        self.assertEqual(len(source['default_spawn_fallbacks']), 8)
+        for squad in pool['squads']:
+            index = squad['default_spawn']
+            self.assertIn(index, squad['available'])
+            if squad['team'] == 0 and squad['squad'] in (1, 2):
+                self.assertEqual(pool['locations'][index]['kind'], 'alternate')
+                self.assertNotIn(index - 1, squad['available'])
+            else:
+                self.assertEqual(pool['locations'][index]['kind'], 'insertion')
+
+    def test_rejects_incomplete_domination_squads(self):
+        data = self.authored()
+        data[1].pop()
+        with self.assertRaisesRegex(SystemExit, '32 authored squads'):
+            self.project(data)
+
+    def test_rejects_missing_or_same_faction_attacker(self):
+        for attacker in (None, 'SVER'):
+            with self.assertRaisesRegex(SystemExit, 'attacking faction'):
+                self.project(attacker=attacker)
+
+    def test_rejects_unsupported_alternate_fallback(self):
+        data = self.authored()
+        data[1][1]['points'][0]['spawn_type_name'] = 'FutureUnknownType'
         with self.assertRaisesRegex(SystemExit, 'supported active.*default'):
             self.project(data)
 

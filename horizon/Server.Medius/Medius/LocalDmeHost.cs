@@ -95,12 +95,12 @@ namespace Server.Medius
         }
         static void LogJoinRejection(string reason, MagJoinGameRequest request) =>
             Logger.Warn($"Gameplay join rejected: reason={reason} preference={request.Preference} value={request.Value} client_type={request.ClientType} party={(request as MagRetailJoinGameRequest)?.PartyId.ToString() ?? "none"}");
-        public static int SupportedMaximumPlayers(int applicationId, int gameType)
+        public static int SupportedMaximumPlayers(int applicationId, int gameType, bool hasDominationProfiles = false)
         {
             bool retail = applicationId == 20231;
             if (gameType != 2 && gameType != 3 && !(retail && (gameType == 0 || gameType == 1)))
                 throw new ArgumentException("Local gameplay serves types2/3, plus retail Sabotage0 and bounded Acquisition1.");
-            return retail && (gameType == 0 || gameType == 1 || gameType == 3) ? 64 : 8;
+            return retail && (gameType == 0 || gameType == 1 || gameType == 3 || (gameType == 2 && hasDominationProfiles)) ? 64 : 8;
         }
         public LocalDmeHost(GameplayBridge bridge, LocalCharacterStore store)
         {
@@ -109,8 +109,9 @@ namespace Server.Medius
             _minimumPlayers = _startupPolicy.MinimumPlayers;
             _gameType = Program.Settings.MagGameType;
             _maximumPlayers = Program.Settings.MagMaximumPlayers;
-            int supportedMaximum = SupportedMaximumPlayers(_applicationId, _gameType);
-            if (_minimumPlayers < 1 || _maximumPlayers > supportedMaximum || _minimumPlayers > _maximumPlayers) throw new ArgumentException($"Local match limits must be 1..{supportedMaximum}; 64-player capacity requires retail Sabotage, bounded Acquisition or Suppression.");
+            // Hello verifies profile-backed Domination before the host opens reservations.
+            int supportedMaximum = SupportedMaximumPlayers(_applicationId, _gameType, hasDominationProfiles: true);
+            if (_minimumPlayers < 1 || _maximumPlayers > supportedMaximum || _minimumPlayers > _maximumPlayers) throw new ArgumentException($"Local match limits must be 1..{supportedMaximum}.");
             var configuredFactions = Program.Settings.MagAllowedFactions ?? new[] { 0, 1, 2 };
             if (configuredFactions.Length == 0 || configuredFactions.Any(faction => faction < 0 || faction > 2) || configuredFactions.Distinct().Count() != configuredFactions.Length)
                 throw new ArgumentException("MagAllowedFactions requires distinct faction values0..2, or null for legacy availability.");
@@ -127,6 +128,9 @@ namespace Server.Medius
             var hello = await _bridge.RequestHelloAsync(new { v = 2, request_id = Id(), op = "hello" });
             RequireLoadoutSelectionCapability(hello);
             InitializeFactionMatchmaking(hello);
+            bool hasDominationProfiles = UsesFactionMatchmaking && _matchProfiles.Any(profile => profile.GameType == 2);
+            if (_maximumPlayers > SupportedMaximumPlayers(_applicationId, _gameType, hasDominationProfiles))
+                throw new IOException("Expanded retail Domination admission requires all ordered faction profiles.");
             if (!UsesFactionMatchmaking && !await _bridge.RequestAsync(_startupPolicy.ConfigureRequest(Id(), _applicationId))) throw new IOException("Gameplay match configuration was not acknowledged.");
             DmeProgram.SERVER_IP = MagNetworkSettings.FromEnvironment().Address; DmeProgram.Settings.TCPPort = 10073; DmeProgram.Settings.UDPPort = 10474;
             DmeProgram.Plugins = Program.Plugins ?? new Server.Plugins.PluginsManager("plugins/");
