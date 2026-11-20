@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "scope": "All 54 catalog filenames known to this source import; presence in this inventory does not mean every file is required by every runtime mode.",
+  "scope": "All 55 catalog filenames known to this source import; presence in this inventory does not mean every file is required by every runtime mode.",
   "status_definitions": {
     "direct": "Included parser/projector reads explicit original data or an included earlier catalog; no unpublished evidence input.",
     "direct-with-policy": "Included projector also requires explicit local operator policy.",
@@ -296,6 +296,16 @@
       "inputs": "Operator-selected development leadership assignments",
       "dependencies": [],
       "limitations": "Use the native-election projector for the separate native policy output."
+    },
+    {
+      "output": "retail-domination-map-metadata.json",
+      "status": "direct",
+      "command": "extract-retail-domination.py --disc DISC --game-archive GAME --output OUTPUT",
+      "inputs": "Original retail disc directory and decrypted game.psarc",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Authored map, rule, spawn, objective, bunker, trigger and script-binding metadata. Runtime placement, pool indices, admission and match logic remain separate."
     },
     {
       "output": "retail-maps.json",

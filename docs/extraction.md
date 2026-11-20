@@ -4,7 +4,7 @@ The public repository distributes extraction **source code**, synthetic test inp
 
 Python tools require Python 3.11 or newer and its standard library. Native game execution, RPCS3, Ghidra and Lua are not needed for the direct archive/literal parsers. Some **external prerequisites** were originally established through native analysis or qualified captures: their acquisition is not included here. Ghidra installations, project databases, DWARF tooling, a decrypted executable or normalized exports may be needed to establish those independently. Merely possessing an archive does not establish runtime pool IDs, numeric wire bindings, native damage rules or accepted gameplay behavior.
 
-The full [machine-readable catalog manifest](../tools/extraction/catalog-manifest.json) inventories all **54** known JSON filenames with a command, inputs, dependencies, status and limitation. “Direct” means an included parser can regenerate the stated data from explicit source inputs or a preceding included catalog. “External proof/export” means an included projector works only after the operator supplies a separately qualified input. “Gap” means the complete regeneration pipeline is not included. The inventory distinguishes these cases; it is not a claim of complete retail setup from a disc alone.
+The full [machine-readable catalog manifest](../tools/extraction/catalog-manifest.json) inventories all **55** known JSON filenames with a command, inputs, dependencies, status and limitation. “Direct” means an included parser can regenerate the stated data from explicit source inputs or a preceding included catalog. “External proof/export” means an included projector works only after the operator supplies a separately qualified input. “Gap” means the complete regeneration pipeline is not included. The inventory distinguishes these cases; it is not a claim of complete retail setup from a disc alone.
 
 ## Direct retail archive extraction
 
@@ -14,6 +14,7 @@ Run commands from the repository root. Capitalized arguments stand for your expl
 python3 tools/extraction/extract-item-catalog.py --game-archive GAME --output ITEMS
 python3 tools/extraction/extract-retail-rules.py --game-archive GAME --items ITEMS --output RULES --coverage-output COVERAGE
 python3 tools/extraction/extract-retail-maps.py --disc DISC --game-archive GAME --output MAPS
+python3 tools/extraction/extract-retail-domination.py --disc DISC --game-archive GAME --output DOMINATION_METADATA
 python3 tools/extraction/extract-retail-spawns.py --disc DISC --game-archive GAME --output SPAWN_METADATA_DIRECTORY
 python3 tools/extraction/build-retail-spawn-catalog.py --disc DISC --game-archive GAME --map MAP_NAME --active TEAM/PLATOON/SQUAD --output SPAWNS
 python3 tools/extraction/project-retail-sabotage-objectives.py --disc DISC --game-archive GAME --output OBJECTIVE_METADATA
@@ -164,6 +165,7 @@ Checks exercise newly invented Lua tables, PSARC resources, ZRB headers, transfo
 | `retail-leadership-role-policy-native.json` | direct-with-policy | `project-retail-leadership-role-policy.py` |
 | `retail-leadership-role-policy.json` | operator-configuration | Operator-selected development leadership assignments |
 | `retail-maps.json` | direct | `extract-retail-maps.py` |
+| `retail-domination-map-metadata.json` | direct | [Domination metadata extractor](domination-map-metadata.md) |
 | `retail-mode-gates.json` | gap | Independent native semantic evidence and original authored data where applicable |
 | `retail-movement.json` | gap | Independent native semantic evidence and original authored data where applicable |
 | `retail-progression.json` | external-proof | `extract-retail-progression-catalog.py` |
