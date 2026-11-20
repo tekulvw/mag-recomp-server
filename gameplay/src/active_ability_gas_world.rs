@@ -151,17 +151,22 @@ impl GasWorld {
         let mut audit = Vec::new();
         let mut messages = Vec::new();
         for (volume, source) in pulses {
-            let attacker = engine
-                .active
-                .iter()
-                .chain(engine.peers.values())
-                .any(|actor| {
-                    actor.reservation.world == source.world
-                        && (0x0380_0000 | u32::from(actor.reservation.player)) == source.attacker
-                        && actor.reservation.id == source.reservation
-                })
-                .then_some(source.attacker)
-                .unwrap_or(u32::MAX);
+            let source_is_present =
+                engine
+                    .active
+                    .iter()
+                    .chain(engine.peers.values())
+                    .any(|actor| {
+                        actor.reservation.world == source.world
+                            && (0x0380_0000 | u32::from(actor.reservation.player))
+                                == source.attacker
+                            && actor.reservation.id == source.reservation
+                    });
+            let attacker = if source_is_present {
+                source.attacker
+            } else {
+                u32::MAX
+            };
             let observations = engine.collect_gas_pulse_characters(volume, collision)?;
             audit.push(json!({
                 "op": "gas_bombardment_pulse", "world": source.world, "attacker": attacker,
