@@ -139,11 +139,12 @@ namespace Server.Medius
         [JsonRequired] public int MatchExperience { get; set; }
         [JsonRequired] public float MatchFraction { get; set; }
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public LeadershipRewardOutcome Leadership { get; set; }
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public int? MatchFragoPoints { get; set; }
         [JsonIgnore] public bool ShouldNotifyCharacterRecord => ExperienceAwarded > 0 || Leadership?.Changed == true;
         internal ProgressionRewardOutcome Copy(bool duplicate) => new ProgressionRewardOutcome {
             Result = Result, Reason = Reason, Duplicate = duplicate, Experience = Experience, Level = Level,
             PreviousLevel = PreviousLevel, SkillPoints = SkillPoints, ExperienceAwarded = ExperienceAwarded,
-            MatchExperience = MatchExperience, MatchFraction = MatchFraction, Leadership = Leadership };
+            MatchExperience = MatchExperience, MatchFraction = MatchFraction, Leadership = Leadership, MatchFragoPoints = MatchFragoPoints };
     }
     /// <summary>Planned or applied operator level change; Refused carries a reason and no write.</summary>
     public sealed class AdminLevelChange
@@ -204,6 +205,7 @@ namespace Server.Medius
             [JsonRequired] public int Units { get; set; }
             [JsonRequired] public ProgressionRewardOutcome Snapshot { get; set; }
             [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public GameplayLeadershipResult Leadership { get; set; }
+            [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public bool? Frago { get; set; }
         }
         private sealed class MatchRewardProgress
         {
@@ -213,6 +215,7 @@ namespace Server.Medius
             [JsonRequired] public string MatchKey { get; set; }
             [JsonRequired] public int Experience { get; set; }
             [JsonRequired] public float Fraction { get; set; }
+            [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public int? FragoPoints { get; set; }
             // Older schema-three matches have no end receipt and remain open.
             public bool Finalized { get; set; }
         }
@@ -475,6 +478,7 @@ namespace Server.Medius
                 var progress = entry.Value;
                 if (progress == null || !ValidRewardKey(progress.MatchKey) || progress.Experience < 0 ||
                     !float.IsFinite(progress.Fraction) || progress.Fraction < 0 || progress.Fraction >= 1 ||
+                    progress.FragoPoints is int tally && (tally < 0 || tally > progress.Experience) ||
                     entry.Key != MatchProgressKey(progress.Account, progress.CharacterId, progress.MatchKey) ||
                     !document.Characters.Any(c => c.Account == progress.Account && c.Id == progress.CharacterId))
                     throw new InvalidDataException("Malformed match reward state.");
@@ -485,12 +489,16 @@ namespace Server.Medius
                 if (!ValidRewardKey(entry.Key) || receipt == null || !ValidRewardKey(receipt.MatchKey) ||
                     !ValidKindUnits(receipt.Kind, receipt.Units) || snapshot == null || snapshot.Result != MagNetResult.Success ||
                     !ValidLeadershipContext(receipt.Kind, receipt.Leadership) || !ValidLeadershipSnapshot(receipt.Leadership, snapshot.Leadership) ||
+                    !MagProgressionCatalog.ValidFragoContext(receipt.Kind, receipt.Units, receipt.Frago) ||
+                    receipt.Frago.HasValue != snapshot.MatchFragoPoints.HasValue ||
                     snapshot.Reason != "reward-committed" || snapshot.Duplicate || snapshot.Experience < 0 || snapshot.ExperienceAwarded < 0 ||
                     snapshot.MatchExperience < snapshot.ExperienceAwarded || snapshot.Level < 1 || snapshot.PreviousLevel < 1 || snapshot.PreviousLevel > snapshot.Level ||
                     !float.IsFinite(snapshot.MatchFraction) || snapshot.MatchFraction < 0 || snapshot.MatchFraction >= 1 ||
                     !document.Characters.Any(c => c.Account == receipt.Account && c.Id == receipt.CharacterId && (c.Experience ?? 0) >= snapshot.Experience && (c.Level ?? 1) >= snapshot.Level) ||
                     !document.MatchRewardProgress.TryGetValue(MatchProgressKey(receipt.Account, receipt.CharacterId, receipt.MatchKey), out var progress) ||
                     progress.Experience < snapshot.MatchExperience ||
+                    snapshot.MatchFragoPoints is int tally && (tally < 0 || tally > snapshot.MatchExperience ||
+                        progress.FragoPoints is not int currentTally || tally > currentTally) ||
                     MagProgressionCatalog.IsFinalRewardKind(receipt.Kind) && (!progress.Finalized || progress.Experience != snapshot.MatchExperience))
                     throw new InvalidDataException("Malformed immutable reward receipt.");
             }
@@ -498,11 +506,12 @@ namespace Server.Medius
         /// <summary>Commit authoritative action XP immediately as local policy. IDs must be stable
         /// across delivery retries; matchKey isolates native fractional XP between match lifetimes.</summary>
         public ProgressionRewardOutcome ApplyRewardForAccount(string account, uint characterId, string rewardId, string matchKey, string kind, int units,
-            GameplayLeadershipResult leadership = null)
+            GameplayLeadershipResult leadership = null, bool? frago = null)
         {
             ProgressionRewardOutcome Deny(string reason) => new ProgressionRewardOutcome { Result = MagNetResult.Error, Reason = reason };
             if (!MagDevelopmentAccountPolicy.ValidAccount(account) || characterId == 0 || !ValidRewardKey(rewardId) ||
-                !ValidRewardKey(matchKey) || !ValidKindUnits(kind, units) || !ValidLeadershipContext(kind, leadership)) return Deny("invalid-progression-reward");
+                !ValidRewardKey(matchKey) || !ValidKindUnits(kind, units) || !ValidLeadershipContext(kind, leadership) ||
+                !MagProgressionCatalog.ValidFragoContext(kind, units, frago)) return Deny("invalid-progression-reward");
             var catalog = ProgressionCatalog;
             if (catalog == null) return Deny("progression-catalog-unavailable");
             string path = ValidPath(); Directory.CreateDirectory(Path.GetDirectoryName(path));
@@ -514,10 +523,11 @@ namespace Server.Medius
             document.MatchRewardProgress = document.MatchRewardProgress ?? new Dictionary<string, MatchRewardProgress>(StringComparer.Ordinal);
             if (document.RewardReceipts.TryGetValue(rewardId, out var existing))
             {
-                if (existing.Account != account || existing.CharacterId != characterId || existing.MatchKey != matchKey || existing.Kind != kind || existing.Units != units || existing.Leadership != leadership)
+                if (existing.Account != account || existing.CharacterId != characterId || existing.MatchKey != matchKey || existing.Kind != kind || existing.Units != units || existing.Leadership != leadership || existing.Frago != frago)
                     return Deny("reward-receipt-mismatch");
                 return existing.Snapshot.Copy(true); // Historical response stays exact after further actions or purchases.
             }
+            if (frago == true && !catalog.FragoBonusEnabled) return Deny("frago-bonus-unavailable");
             if (document.RewardReceipts.Count >= MaximumRewardReceipts) return Deny("reward-receipt-ledger-full");
             string progressKey = MatchProgressKey(account, characterId, matchKey);
             document.MatchRewardProgress.TryGetValue(progressKey, out var progress);
@@ -528,6 +538,16 @@ namespace Server.Medius
             int awarded; float fraction = progress.Fraction;
             if (final ? !catalog.TryFinalAward(kind, units, progress.Experience, out awarded) :
                 !catalog.TryAward(kind, units, progress.Fraction, out awarded, out fraction)) return Deny("invalid-authored-reward");
+            int? matchFragoPoints = null;
+            if (frago == true)
+            {
+                if (!catalog.TryFragoBonus(awarded, out int bonus)) return Deny("invalid-authored-frago-bonus");
+                if (bonus > int.MaxValue - awarded) return Deny("experience-overflow");
+                int previousFragoPoints = progress.FragoPoints.GetValueOrDefault();
+                if (bonus > int.MaxValue - previousFragoPoints) return Deny("frago-points-overflow");
+                awarded += bonus;
+                matchFragoPoints = previousFragoPoints + bonus;
+            }
             int previousExperience = character.Experience ?? 0;
             if (awarded > int.MaxValue - previousExperience || awarded > int.MaxValue - progress.Experience) return Deny("experience-overflow");
             int experience = previousExperience + awarded;
@@ -542,13 +562,14 @@ namespace Server.Medius
             }
             var outcome = new ProgressionRewardOutcome { Result = MagNetResult.Success, Reason = "reward-committed",
                 Experience = experience, Level = level, PreviousLevel = previousLevel, SkillPoints = points,
-                ExperienceAwarded = awarded, MatchExperience = progress.Experience + awarded, MatchFraction = fraction,
+                ExperienceAwarded = awarded, MatchExperience = progress.Experience + awarded, MatchFraction = fraction, MatchFragoPoints = matchFragoPoints,
                 Leadership = UpdateLeadership(character, catalog, level, leadership?.Baseline, matchLeadershipPoints) };
             character.Experience = experience; character.Level = level; character.SkillPoints = points;
             progress.Experience = outcome.MatchExperience; progress.Fraction = fraction; progress.Finalized = final;
+            progress.FragoPoints = matchFragoPoints ?? progress.FragoPoints;
             document.MatchRewardProgress[progressKey] = progress;
             document.RewardReceipts.Add(rewardId, new RewardReceipt { Account = account, CharacterId = characterId,
-                MatchKey = matchKey, Kind = kind, Units = units, Snapshot = outcome.Copy(false), Leadership = leadership });
+                MatchKey = matchKey, Kind = kind, Units = units, Snapshot = outcome.Copy(false), Leadership = leadership, Frago = frago });
             Commit(path, document.Characters, document);
             return outcome.Copy(false);
         }

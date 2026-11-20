@@ -225,6 +225,7 @@ namespace Server.Medius
                             loadout_account_id = reservation.Account,
                             leadership = character.Leadership == null ? null : new GameplayLeadershipRecord(character.Leadership),
                             leadership_progression_enabled = progressionCatalog?.InitialLeadershipPoints.HasValue == true,
+                            frago_bonus_enabled = _applicationId == 20231 && progressionCatalog?.FragoBonusEnabled == true,
                             account_id = progressionCatalog == null ? null : reservation.Account,
                             progression = progressionCatalog == null ? null : new { experience = record.Experience, level = record.Level, skill_points = record.SkillPoints },
                             skills = record.Skills, character_id = record.AccountId, name = record.Name, faction = record.Faction, head = record.HeadId, voice = record.VoiceId,
@@ -527,7 +528,7 @@ namespace Server.Medius
                     {
                         // Replacement reservations share the surviving round's native XP carry and result basis.
                         var result = _store.ApplyRewardForAccount(owner.Account, owner.CharacterId, reward.RewardId,
-                            $"world-{reward.WorldId}-{reward.MatchId}", reward.Kind, checked((int)reward.Units), reward.Leadership);
+                            $"world-{reward.WorldId}-{reward.MatchId}", reward.Kind, checked((int)reward.Units), reward.Leadership, reward.Frago);
                         if (result.Result != MagNetResult.Success)
                         { retry = true; Logger.Warn($"Gameplay reward not committed: player={owner.Client.DmeId} reason={result.Reason}"); break; }
                         // Publish the latest account record, not an older receipt snapshot.
@@ -554,6 +555,7 @@ namespace Server.Medius
                             ["progression"] = new { experience = (uint)result.Experience, level = result.Level, skill_points = result.SkillPoints },
                             ["match_experience"] = (uint)result.MatchExperience
                         };
+                        if (result.MatchFragoPoints is int fragoPoints) request["match_frago_points"] = (uint)fragoPoints;
                         if (result.Leadership is LeadershipRewardOutcome leadership)
                         {
                             request["leadership"] = new GameplayLeadershipRecord(leadership);

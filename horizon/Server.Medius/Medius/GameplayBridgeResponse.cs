@@ -26,9 +26,10 @@ namespace Server.Medius {
   public string Kind {get;}
   public uint Units {get;}
   public GameplayLeadershipResult Leadership {get;}
-  internal GameplayReward(string id,string reservation,string match,uint world,ushort player,string account,uint character,string kind,uint units,GameplayLeadershipResult leadership) {
+  public bool? Frago {get;}
+  internal GameplayReward(string id,string reservation,string match,uint world,ushort player,string account,uint character,string kind,uint units,GameplayLeadershipResult leadership,bool? frago) {
    RewardId=id;ReservationId=reservation;MatchId=match;WorldId=world;PlayerId=player;AccountId=account;CharacterId=character;Kind=kind;Units=units;
-   Leadership=leadership;
+   Leadership=leadership;Frago=frago;
   }
  }
  public sealed class GameplayLoadoutSelection {
@@ -130,15 +131,19 @@ namespace Server.Medius {
      if(rewards.ValueKind!=JsonValueKind.Array||rewards.GetArrayLength()>32||(!success&&rewards.GetArrayLength()!=0))return false;
      foreach(var reward in rewards.EnumerateArray()) {
       bool hasLeadership=reward.TryGetProperty("leadership",out var leadershipContext);
-      var rewardFields=new[]{"reward_id","reservation_id","match_id","world_id","player_id","account_id","character_id","kind","units"};
-      if(!ExactFields(reward,hasLeadership?rewardFields.Append("leadership").ToArray():rewardFields))return false;
+      bool hasFrago=reward.TryGetProperty("frago",out var fragoContext);
+      var rewardFields=new List<string>{"reward_id","reservation_id","match_id","world_id","player_id","account_id","character_id","kind","units"};
+      if(hasLeadership)rewardFields.Add("leadership");
+      if(hasFrago)rewardFields.Add("frago");
+      if(!ExactFields(reward,rewardFields.ToArray()))return false;
       string id=reward.GetProperty("reward_id").GetString(),reservation=reward.GetProperty("reservation_id").GetString(),match=reward.GetProperty("match_id").GetString(),account=reward.GetProperty("account_id").GetString(),kind=reward.GetProperty("kind").GetString();
       if(id==null||id.Length<1||id.Length>128||!id.All(c=>char.IsAsciiLetterOrDigit(c)||c=='-'||c=='_')||!rewardIds.Add(id)||!Identifier(reservation)||!Identifier(match)||!MagDevelopmentAccountPolicy.ValidAccount(account)||
        !reward.GetProperty("world_id").TryGetUInt32(out var world)||!reward.GetProperty("player_id").TryGetUInt16(out var player)||!reward.GetProperty("character_id").TryGetUInt32(out var character)||character==0||
        !reward.GetProperty("units").TryGetUInt32(out var units)|| (units>int.MaxValue||!MagProgressionCatalog.ValidKindUnits(kind,(int)units))) return false;
       GameplayLeadershipResult leadership=null;
       if(hasLeadership&&(!MagProgressionCatalog.IsFinalRewardKind(kind)||!TryParseLeadership(leadershipContext,out leadership)))return false;
-      parsedRewards.Add(new GameplayReward(id,reservation,match,world,player,account,character,kind,units,leadership));
+      if(hasFrago&&(fragoContext.ValueKind!=JsonValueKind.True||!MagProgressionCatalog.ValidFragoContext(kind,(int)units,true)))return false;
+      parsedRewards.Add(new GameplayReward(id,reservation,match,world,player,account,character,kind,units,leadership,hasFrago?true:null));
      }
     }
     var parsedCapabilities=new List<string>();var capabilityNames=new HashSet<string>(StringComparer.Ordinal);
