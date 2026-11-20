@@ -462,6 +462,16 @@ impl Registry {
         })
     }
 
+    pub fn has_legacy_company_abilities(&self) -> bool {
+        self.profiles.values().any(|profile| {
+            profile.spawns.match_profile().game_type == 2
+                && profile
+                    .active_abilities
+                    .as_ref()
+                    .is_some_and(|setup| !setup.has_strategic_effects())
+        })
+    }
+
     pub fn has_active_abilities(&self) -> bool {
         self.profiles
             .values()
@@ -552,6 +562,14 @@ impl<W: Write> Engine<W> {
                 .is_some_and(leadership_runtime::LeadershipRuntime::supports_match_profiles)
         {
             return Err("active_abilities_require_native_leadership");
+        }
+        if registry.has_legacy_company_abilities()
+            && self
+                .leadership
+                .as_ref()
+                .is_some_and(|l| l.supports_oic_election())
+        {
+            return Err("oic_leadership_requires_strategic_effects");
         }
         registry.validate_runtime(&self.item_catalog, self.wire_profile)?;
         if registry.has_domination_gameplay() && self.dynamic_body_resources.is_none() {

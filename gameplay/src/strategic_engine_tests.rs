@@ -47,15 +47,10 @@ fn reserve_actor(engine: &mut Engine<Vec<u8>>, player: u16, faction: u8) {
     assert_eq!(actor.team(), faction);
 }
 
-fn fixture() -> Engine<Vec<u8>> {
-    let mut engine = configured_platoon_engine();
-    let mut setup = engine
-        .active_abilities
-        .take()
-        .unwrap()
-        .setup
-        .as_ref()
-        .clone();
+fn oic_leadership() -> (
+    leadership_passives::LeadershipCatalog,
+    leadership_runtime::RolePolicy,
+) {
     let (catalog, _) = platoon_leadership();
     let policy = leadership_runtime::RolePolicy::from_json(
         &json!({
@@ -68,6 +63,19 @@ fn fixture() -> Engine<Vec<u8>> {
         .to_string(),
     )
     .unwrap();
+    (catalog, policy)
+}
+
+fn fixture() -> Engine<Vec<u8>> {
+    let mut engine = configured_platoon_engine();
+    let mut setup = engine
+        .active_abilities
+        .take()
+        .unwrap()
+        .setup
+        .as_ref()
+        .clone();
+    let (catalog, policy) = oic_leadership();
     for mode in &mut setup.rules.modes {
         if mode.players == 256 {
             mode.strategic = [
@@ -287,7 +295,38 @@ fn sensor_sweep_marks_an_enemy_squad_member_without_accepted_movement() {
         .queue_active_ability_state(Duration::from_millis(21), 1)
         .unwrap();
     assert!(actor(&engine, 3).tracking.sample.is_none());
-    let wire = actor(&engine, 0)
+    assert_sweep_detection(&engine);
+}
+
+#[test]
+fn sensor_sweep_republishes_detection_for_a_new_character_generation() {
+    let mut engine = fixture();
+    let activated = cast(&mut engine, 0, StrategicAbility::SensorSweep, 20);
+    assert_eq!(activated["decoded"]["accepted"], true);
+    advance(&mut engine, 21);
+    engine
+        .queue_active_ability_state(Duration::from_millis(21), 1)
+        .unwrap();
+    assert_sweep_detection(&engine);
+    actor_mut(&mut engine, 0).pending_shared.clear();
+
+    // Sweep advances the other fifteen squad slots before returning to squad 0.
+    for millis in 22..=36 {
+        advance(&mut engine, millis);
+    }
+    actor_mut(&mut engine, 3).life = CharacterLife::Alive {
+        generation: 2,
+        health_quarter_points: 400,
+    };
+    advance(&mut engine, 37);
+    engine
+        .queue_active_ability_state(Duration::from_millis(37), 1)
+        .unwrap();
+    assert_sweep_detection(&engine);
+}
+
+fn assert_sweep_detection(engine: &Engine<Vec<u8>>) {
+    let wire = actor(engine, 0)
         .pending_shared
         .iter()
         .find(|wire| {
@@ -408,4 +447,31 @@ fn company_late_join_fifo_preserves_active_order_after_publication_record_failur
         Some(u32::from(StrategicAbility::SignalsJamming.mask()))
     );
     assert_eq!(friendly_to_caster.activation_times[5], Some(20));
+}
+
+#[test]
+fn oic_policy_requires_strategic_data_in_both_builder_orders() {
+    let (catalog, policy) = oic_leadership();
+    assert_eq!(
+        configured_platoon_engine()
+            .with_leadership_passives(catalog.clone(), policy.clone())
+            .err(),
+        Some("oic_leadership_requires_strategic_effects")
+    );
+    let mut engine = configured_platoon_engine();
+    let setup = engine
+        .active_abilities
+        .take()
+        .unwrap()
+        .setup
+        .as_ref()
+        .clone();
+    assert_eq!(
+        engine
+            .with_leadership_passives(catalog, policy)
+            .unwrap()
+            .with_active_abilities(setup)
+            .err(),
+        Some("oic_leadership_requires_strategic_effects")
+    );
 }

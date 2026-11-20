@@ -147,6 +147,7 @@ pub(super) struct WorldBot {
     pub(super) firearm: crate::bot_firearms::State,
     pub(super) healing: crate::bot_healing::State,
     pub(super) move_attempted: bool,
+    due_respawn_wave: Option<(u32, Duration)>,
     respawn_wait: Option<Duration>,
     last_move_receipt: Option<Duration>,
     omitted_healthy_steps: u32,
@@ -1005,19 +1006,21 @@ impl<W: Write> Engine<W> {
             let runtime = bot.target.runtime.unwrap();
             if bot.health == 0 {
                 let team = usize::from(bot.target.squad.team());
-                // Match the world-owned team schedule. Compute
-                // from this life's death time so a late tick or occupied spawn
-                // cannot roll a due bot forward to another wave.
-                let waiting = match self.team_waves[team] {
-                    Some(clock) => now < clock.next_after(runtime.since)?,
-                    None => {
-                        now.saturating_sub(runtime.since)
-                            < Duration::from_millis(respawn_delays[team].into())
-                    }
+                // Once a dead life reaches its wave, retain that deadline
+                // through an occupied spawn and the team's clock rollover.
+                let deadline = match bot.due_respawn_wave {
+                    Some((generation, deadline)) if generation == runtime.generation => deadline,
+                    _ => match self.team_waves[team] {
+                        Some(clock) => clock.next_after(runtime.since)?,
+                        None => runtime
+                            .since
+                            .saturating_add(Duration::from_millis(respawn_delays[team].into())),
+                    },
                 };
-                if waiting {
+                if now < deadline {
                     continue;
                 }
+                bot.due_respawn_wave = Some((runtime.generation, deadline));
                 if actors.occupied(id, point(bot.target.position), bot_physics::Body::default())? {
                     if bot
                         .respawn_wait
@@ -1043,6 +1046,7 @@ impl<W: Write> Engine<W> {
                 );
                 runtime.phase = BotPhase::Complete;
                 bot.target.runtime = Some(runtime);
+                bot.due_respawn_wave = None;
                 bot.health = 400;
                 bot.firearm = Default::default();
                 bot.healing = Default::default();
@@ -2371,9 +2375,10 @@ impl<W: Write> Engine<W> {
                             policy.initial_spawn_delay_ms[usize::from(team)],
                         )))
                         .ok_or("wave_clock_overflow")?,
-                    period: Duration::from_millis(u64::from(
+                    period: Duration::from_millis(u64::from(self.strategic_spawn_interval(
+                        team,
                         policy.spawn_wave_ms[usize::from(team)],
-                    )),
+                    )?)),
                 })
             } else {
                 None
@@ -2435,6 +2440,7 @@ impl<W: Write> Engine<W> {
                     firearm: Default::default(),
                     healing: Default::default(),
                     move_attempted: false,
+                    due_respawn_wave: None,
                     respawn_wait: None,
                     last_move_receipt: None,
                     omitted_healthy_steps: 0,

@@ -16,6 +16,7 @@ pub mod acquisition_round;
 pub mod acquisition_score_rate;
 pub mod acquisition_spawn_blockers;
 pub mod acquisition_spawn_effects;
+pub mod acquisition_structural;
 mod acquisition_vehicle_wave_effects;
 pub mod acquisition_vehicle_waves;
 pub mod acquisition_volume_damage;
@@ -90,6 +91,12 @@ mod platoon_ability_publication_tests;
 mod platoon_effect_engine_tests;
 pub mod retail_movement;
 pub mod static_collision_partition;
+pub mod strategic_abilities;
+mod strategic_engine;
+#[cfg(test)]
+mod strategic_engine_tests;
+pub mod strategic_replication;
+mod strategic_waves;
 pub mod structure_damage;
 #[cfg(test)]
 mod structure_damage_engine_tests;

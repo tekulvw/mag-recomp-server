@@ -62,6 +62,12 @@ pub struct Setup {
     pub precision_targets: Vec<crate::active_ability_precision::PrecisionTarget>,
 }
 impl Setup {
+    pub fn has_strategic_effects(&self) -> bool {
+        self.rules
+            .strategic
+            .iter()
+            .any(|rule| rule.spawn_interval_modifier.is_some())
+    }
     pub fn has_platoon_effects(&self) -> bool {
         self.effects
             .iter()
@@ -71,6 +77,10 @@ impl Setup {
         self.rules.validate()?;
         crate::structure_damage_world::World::new(&self.damage_triggers)?;
         NativeCooldowns::new(&self.rules)?;
+        if self.has_strategic_effects() {
+            crate::strategic_abilities::StrategicState::new(&self.rules)?;
+        }
+
         if self.map_name.is_empty()
             || ![
                 self.boundary.min_x,
@@ -152,10 +162,18 @@ impl Setup {
         Ok(Runtime {
             structures,
             cooldowns: NativeCooldowns::new(&self.rules)?,
+            strategic: if self.has_strategic_effects() {
+                Some(crate::strategic_abilities::StrategicState::new(
+                    &self.rules,
+                )?)
+            } else {
+                None
+            },
             setup: self,
             units: BTreeMap::new(),
             effects: BTreeMap::new(),
             aaa_intercepts: BTreeMap::new(),
+            command_enabled: None,
             surveillance: BTreeMap::new(),
             histories: BTreeMap::new(),
             detected: BTreeMap::new(),
@@ -182,9 +200,15 @@ struct Running {
 }
 #[derive(Clone, Debug, Default)]
 struct Published {
+    companies: BTreeMap<u8, PublishedCompany>,
     platoons: BTreeMap<u16, PublishedPlatoon>,
     squads: BTreeMap<u16, Unit>,
-    detections: BTreeMap<u16, bool>,
+    detections: BTreeMap<u16, (String, bool)>,
+}
+#[derive(Clone, Debug, PartialEq)]
+struct PublishedCompany {
+    leader: u16,
+    snapshot: crate::strategic_abilities::CompanySnapshot,
 }
 #[derive(Clone, Debug, PartialEq)]
 struct PublishedPlatoon {
@@ -216,14 +240,16 @@ pub(crate) struct Runtime {
     pub(crate) setup: Arc<Setup>,
     structures: crate::structure_damage_world::World,
     cooldowns: NativeCooldowns,
+    pub(crate) strategic: Option<crate::strategic_abilities::StrategicState>,
     units: BTreeMap<NativeAbilityScope, Unit>,
     effects: BTreeMap<(NativeAbilityScope, u16), Running>,
     aaa_intercepts: BTreeMap<u16, u32>,
+    command_enabled: Option<[u16; 8]>,
     surveillance: BTreeMap<u16, ObjectiveSurveillance>,
     histories: BTreeMap<u16, Motion>,
     detected: BTreeMap<u16, Detection>,
     last_tick: Option<Duration>,
-    version: u64,
+    pub(crate) version: u64,
     publications: BTreeMap<String, Published>,
     area: AreaDamageState,
     gas: crate::active_ability_gas_world::GasWorld,
@@ -235,19 +261,38 @@ impl Runtime {
             .expect("validated ability setup");
     }
     fn mark(&mut self, target: &Target) {
-        let entry = self.detected.entry(target.index).or_insert(Detection {
-            identity: target.identity.clone(),
+        self.mark_character(target.index, target.identity.clone());
+    }
+    pub(crate) fn mark_character(&mut self, index: u16, identity: String) {
+        let entry = self.detected.entry(index).or_insert(Detection {
+            identity: identity.clone(),
             remaining: 0.,
             detected: false,
         });
-        if entry.identity != target.identity || !entry.detected {
+        if entry.identity != identity || !entry.detected {
             self.version += 1;
         }
         *entry = Detection {
-            identity: target.identity.clone(),
+            identity,
             remaining: 5.,
             detected: true,
         };
+    }
+    pub(crate) fn refresh_command_team(&mut self, team: u8) -> Result<(), &'static str> {
+        self.cooldowns.refresh_team(team)?;
+        for (scope, unit) in &mut self.units {
+            let owner = match scope {
+                NativeAbilityScope::Squad(index) => index / 16,
+                NativeAbilityScope::Platoon(index) => index / 4,
+            };
+            if owner == u16::from(team) {
+                for data in unit.data.iter_mut().flatten() {
+                    data.activate_time_ms = 0;
+                }
+            }
+        }
+        self.version += 1;
+        Ok(())
     }
     pub(crate) fn available(&self, mode: u16, side: Side, role: CommandRole) -> u16 {
         native_command_availability(&self.setup.rules, mode, side, role)
@@ -295,11 +340,41 @@ impl<W: Write> Engine<W> {
         if !has_platoon_effects && supports_platoon {
             return Err("platoon_leadership_requires_complete_active_abilities");
         }
+        if self.match_profile().game_type == 2
+            && self
+                .leadership
+                .as_ref()
+                .is_some_and(|l| l.supports_oic_election())
+            && !setup.has_strategic_effects()
+        {
+            return Err("oic_leadership_requires_strategic_effects");
+        }
         if !setup.damage_triggers.is_empty() && self.match_profile().game_type != 2 {
             return Err("structure_damage_requires_native_domination_objective_lifecycle");
         }
         self.active_abilities = Some(Arc::new(setup).runtime()?);
         Ok(self)
+    }
+    /// Called inside the Acquisition world candidate by qualified tactical-asset hooks.
+    pub(crate) fn set_acquisition_command_enabled(
+        &mut self,
+        platoon: u16,
+        mask: u16,
+        enabled: bool,
+    ) -> Result<(), &'static str> {
+        if platoon >= 8 || mask == 0 || mask & !0x3f != 0 {
+            return Err("invalid_acquisition_command_mask");
+        }
+        let Some(runtime) = self.active_abilities.as_mut() else {
+            return Ok(());
+        };
+        let row = &mut runtime.command_enabled.get_or_insert([u16::MAX; 8])[usize::from(platoon)];
+        let next = if enabled { *row | mask } else { *row & !mask };
+        if *row != next {
+            *row = next;
+            runtime.version += 1;
+        }
+        Ok(())
     }
     pub(crate) fn plan_command_ability(
         &self,
@@ -328,6 +403,13 @@ impl<W: Write> Engine<W> {
         };
         if matches!(actor.life, CharacterLife::AwaitingRespawn { .. }) {
             return denied("command_character_dead");
+        }
+        if next
+            .strategic
+            .as_ref()
+            .is_some_and(|state| state.commands_locked(actor.team()))
+        {
+            return denied("command_company_jammed");
         }
         let squad = actor.squad_catalog.squad_index();
         let platoon = squad / 4;
@@ -389,10 +471,11 @@ impl<W: Write> Engine<W> {
         {
             return denied("command_cooldown");
         }
-        let enabled = self
-            .domination_gameplay
-            .as_ref()
-            .map_or(u16::MAX, |w| w.state.ability_enabled[usize::from(platoon)])
+        let enabled = next.command_enabled.unwrap_or_else(|| {
+            self.domination_gameplay
+                .as_ref()
+                .map_or([u16::MAX; 8], |w| w.state.ability_enabled)
+        })[usize::from(platoon)]
             & mask
             != 0;
         let mut aaa = None;
@@ -708,9 +791,8 @@ impl<W: Write> Engine<W> {
                 if mark.detected {
                     mark.remaining -= dt;
                     if mark.remaining <= 0.
-                        || !targets
-                            .iter()
-                            .any(|t| t.index == *index && t.identity == mark.identity)
+                        || self.current_detection_identity(*index).as_deref()
+                            != Some(mark.identity.as_str())
                     {
                         mark.detected = false;
                         mark.remaining = 0.;
@@ -910,6 +992,7 @@ impl<W: Write> Engine<W> {
                 }
                 runtime.effects.insert(key, running);
             }
+            self.stage_company_strategics(&mut runtime, now)?;
             // Objective type12 runs after squad/platoon managers. Preserve each cursor.
             let objectives = runtime.setup.objectives.clone();
             for objective in objectives {
@@ -953,7 +1036,7 @@ impl<W: Write> Engine<W> {
         Ok(result)
     }
 }
-fn detection_identity(actor: &Active) -> String {
+pub(crate) fn detection_identity(actor: &Active) -> String {
     let generation = match actor.life {
         CharacterLife::AwaitingFirstSpawn => 0,
         CharacterLife::Alive { generation, .. }
@@ -991,10 +1074,11 @@ impl<W: Write> Engine<W> {
                 NativeAbilityScope::Platoon(_) => None,
             }))
             .collect();
-        let enabled = self
-            .domination_gameplay
-            .as_ref()
-            .map_or([u16::MAX; 8], |w| w.state.ability_enabled);
+        let enabled = next.command_enabled.unwrap_or_else(|| {
+            self.domination_gameplay
+                .as_ref()
+                .map_or([u16::MAX; 8], |w| w.state.ability_enabled)
+        });
         let mut publications = Vec::new();
         for actor in actors
             .iter()
@@ -1008,6 +1092,32 @@ impl<W: Write> Engine<W> {
                 .get(&actor.reservation.id)
                 .cloned()
                 .unwrap_or_default();
+            let mut company_updates = Vec::new();
+            if self.match_profile().game_type == 2
+                && let Some(strategic) = &next.strategic
+            {
+                for team in 0..2 {
+                    let value = PublishedCompany {
+                        leader: self.company_leader_index(team),
+                        snapshot: strategic.company(team).ok_or("invalid_strategic_team")?,
+                    };
+                    if published.companies.get(&team) == Some(&value) {
+                        continue;
+                    }
+                    let mut update = crate::strategic_replication::CompanyUpdate::new(team);
+                    if !published.companies.contains_key(&team) {
+                        update.active = Some(true);
+                        update.owner_index = Some(0x105);
+                        update.available_mask = Some(value.snapshot.available_mask);
+                        update.shadow_modifier_percent = Some(0);
+                    }
+                    update.data = value.snapshot.data;
+                    update.leader_index = Some(value.leader);
+                    update.active_mask = Some(value.snapshot.active_mask);
+                    company_updates.push(update);
+                    published.companies.insert(team, value);
+                }
+            }
             let mut platoon_updates = Vec::new();
             let mut squad_updates = Vec::new();
             let mut detections = Vec::new();
@@ -1106,7 +1216,13 @@ impl<W: Write> Engine<W> {
                         && format!("bot:{}:{}", b.object_index, b.generation) == detection.identity
                 });
                 let value = detection.detected && current;
-                if published.detections.get(&index) == Some(&value) {
+                if published
+                    .detections
+                    .get(&index)
+                    .is_some_and(|(identity, detected)| {
+                        *identity == detection.identity && *detected == value
+                    })
+                {
                     continue;
                 }
                 detections.push(NativeDetectionUpdate {
@@ -1114,7 +1230,9 @@ impl<W: Write> Engine<W> {
                     globally_detected: Some(value),
                     undetected_via_satellite_jammer: Some(false),
                 });
-                published.detections.insert(index, value);
+                published
+                    .detections
+                    .insert(index, (detection.identity.clone(), value));
             }
             let mut packets = Vec::new();
             for chunk in platoon_updates.chunks(8) {
@@ -1130,6 +1248,14 @@ impl<W: Write> Engine<W> {
             for chunk in squad_updates.chunks(8) {
                 packets.push(NativeAbilityUpdate::encode_batch(
                     chunk,
+                    2,
+                    now.as_millis() as u32,
+                    self.wire_profile,
+                )?);
+            }
+            if !company_updates.is_empty() {
+                packets.push(crate::strategic_replication::CompanyUpdate::encode_batch(
+                    &company_updates,
                     2,
                     now.as_millis() as u32,
                     self.wire_profile,

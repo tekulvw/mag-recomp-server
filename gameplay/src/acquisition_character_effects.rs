@@ -683,6 +683,7 @@ actor_effect_state! {
     published_wave_deadline: Option<Duration>,
 }
 struct EffectState {
+    team_waves: [Option<TeamWaveClock>; 2],
     objective_world: Option<objective_control::ObjectiveWorld>,
     active_abilities: Option<active_ability_engine::Runtime>,
     actors: std::collections::BTreeMap<String, ActorEffects>,
@@ -695,6 +696,7 @@ impl EffectState {
         Self {
             objective_world: engine.objective_world.clone(),
             active_abilities: engine.active_abilities.clone(),
+            team_waves: engine.team_waves,
             actors: engine
                 .active
                 .iter()
@@ -717,6 +719,7 @@ impl EffectState {
     }
     fn install<W: Write>(mut self, engine: &mut Engine<W>) {
         engine.active_abilities = self.active_abilities;
+        engine.team_waves = self.team_waves;
         engine.objective_world = self.objective_world;
         for actor in engine.active.iter_mut().chain(engine.peers.values_mut()) {
             self.actors

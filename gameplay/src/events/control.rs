@@ -364,7 +364,10 @@ pub(super) fn confirm_respawn<W: Write>(
         } else {
             let team = active.team();
             let policy = ctx.engine.match_profile();
-            let period = Duration::from_millis(u64::from(policy.spawn_wave_ms[usize::from(team)]));
+            let period = Duration::from_millis(u64::from(
+                ctx.engine
+                    .strategic_spawn_interval(team, policy.spawn_wave_ms[usize::from(team)])?,
+            ));
             let clock = match ctx.engine.team_waves[usize::from(team)] {
                 Some(clock) => clock,
                 None => TeamWaveClock {

@@ -51,6 +51,7 @@ struct EventPlan {
     ground_runtime: Option<acquisition_ground_runtime::Runtime>,
     helo_runtime: Option<domination_helo::FleetRuntime>,
     active_ability_runtime: Option<crate::active_ability_engine::Runtime>,
+    strategic_waves: Option<[Option<TeamWaveClock>; 2]>,
     helo_damage_relay: Vec<Vec<u8>>,
     ground_dynamics_relay: Option<(u16, Vec<u8>)>,
     ground_damage_relay: Option<Vec<u8>>,
@@ -966,6 +967,9 @@ impl<W: Write> Engine<W> {
                     self.queue_ground_driver_revocation(index, now)?;
                 }
             }
+        }
+        if let Some(clocks) = plan.strategic_waves {
+            self.team_waves = clocks;
         }
         if let Some(runtime) = plan.active_ability_runtime {
             self.active_abilities = Some(runtime);

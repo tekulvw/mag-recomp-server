@@ -159,6 +159,18 @@ impl NativeCooldowns {
         }
         Ok(())
     }
+    /// Retail Tactical Strike clears individual command timestamps throughout
+    /// one Company. Shared platoon clocks and running effects are retained.
+    pub fn refresh_team(&mut self, team: u8) -> Result<(), &'static str> {
+        if team > 1 {
+            return Err("invalid_native_refresh_team");
+        }
+        let squad = usize::from(team) * 16;
+        let platoon = usize::from(team) * 4;
+        self.squad_ms[squad..squad + 16].fill([0; ABILITY_COUNT]);
+        self.platoon_ms[platoon..platoon + 4].fill([0; ABILITY_COUNT]);
+        Ok(())
+    }
 }
 
 fn remaining(duration_ms: u32, last_ms: u32, now_ms: u32) -> u32 {
@@ -209,7 +221,7 @@ impl Default for NativeAbilityData {
 impl NativeAbilityData {
     pub const WIRE_BITS: usize = 177;
 
-    fn encode(self, bits: &mut BitWriter) -> Result<(), &'static str> {
+    pub(crate) fn encode(self, bits: &mut BitWriter) -> Result<(), &'static str> {
         if !self
             .position
             .iter()

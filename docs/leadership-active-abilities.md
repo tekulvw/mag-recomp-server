@@ -54,11 +54,12 @@ Precision Strike admits only an enemy Structural demolition objective from the
 qualified map inventory. At its due time it resolves the sealed native target ID
 again and requests Completed through the normal objective state/callback path.
 It does not apply generic blast damage or make hospitals eligible targets.
-Domination runs the Structural entry callbacks for each intermediate state and
-publishes the final state once. Acquisition's qualified targets are outside its
-secure/arrival callback roster: their Structural state and normal network update
-are supported, while a general Acquisition Structural explosion/sequence provider
-remains separate work.
+Both modes run the qualified Structural entry callbacks for each intermediate
+state and publish the final state once. Acquisition profiles with the optional
+Structural provider also apply sourced explosions, periodic area damage,
+sequence collision, tactical availability and linked spawn changes. Ordinary
+demolition and repair interactions for those structures remain separate work;
+see [Acquisition gameplay](acquisition-gameplay.md).
 
 Guided Artillery emits a single point blast at the accepted location, using its
 vehicle damage channel and its own overlap/cover rules. It does not apply that
@@ -76,9 +77,13 @@ The current shared collision collector excludes mounted characters. Exact damage
 to an exposed vehicle occupant requires the retail seat-visibility binding and
 remains unqualified; the vehicle itself still uses its supported damage path.
 
-OIC and strategic execution remain unsupported. Unsupported requests are denied
-without reporting an accepted activation. Authored mode/side lists still determine
-which of the implemented effects belongs to a squad or platoon.
+Domination supports native OIC vacancy election and all five strategic consumers
+when configured with the complete projected rules and schema-4 role policy.
+Company election precedes platoon and squad election, and promotions refill the
+vacated lower roles in the same reconciliation. The authenticated Company leader
+can issue an available strategic using the server clock. Sabotage and Acquisition
+do not gain OIC authority from the policy. See [OIC strategics](oic-strategic-abilities.md)
+for effects, publication and reinforcement semantics.
 
 ## Configuration and extraction
 
@@ -87,7 +92,8 @@ gameplay configuration. `map_name` is the selected spawn catalog's map name.
 Each setup requires its matching collision world and objective catalog. Workers
 must supply `--leadership-passives` and `--leadership-role-policy` for native
 squad and platoon election without development bindings. Full effect setups require
-the projected schema-3 role policy; the local fallback record still controls only
+the projected schema-3 role policy, or schema 4 for Domination OIC support;
+the local fallback record still controls only
 characters whose saved record is absent, and is not an account grant. Startup fails if any required
 input is missing or invalid.
 
@@ -116,7 +122,9 @@ the damage-trigger inventory. Legacy squad-only inputs retain their narrower
 capabilities with the squad-only role policy. They cannot be paired with platoon
 election, including inside a mixed registry; reproject every affected profile
 before using the full platoon policy. Missing platoon data is never supplied
-implicitly. The static-ray projector binds the
+implicitly. Schema-4 Domination setups also require the projected strategic
+spawn modifiers; legacy strategic inputs fail startup rather than granting an
+OIC with incomplete consumers. The static-ray projector binds the
 existing complete source geometry projection to native root and child filters and
 records the exact scene hash. Map bindings require the original level archive and
 qualified objective allocation/pose catalogs. The populated catalogs and original

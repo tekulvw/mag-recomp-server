@@ -391,6 +391,19 @@ impl<W: Write> Engine<W> {
         {
             return Err("platoon_leadership_requires_complete_active_abilities");
         }
+        if policy.supports_oic_election()
+            && ((self.match_profile().game_type == 2
+                && self
+                    .active_abilities
+                    .as_ref()
+                    .is_some_and(|r| !r.setup.has_strategic_effects()))
+                || self
+                    .match_profiles
+                    .as_ref()
+                    .is_some_and(match_profiles::Registry::has_legacy_company_abilities))
+        {
+            return Err("oic_leadership_requires_strategic_effects");
+        }
         self.leadership = Some(LeadershipRuntime {
             catalog,
             policy,
