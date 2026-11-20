@@ -83,7 +83,8 @@ impl Setup {
     }
 
     /// Every capture chain must link a distinct, drivable Retail Escort.
-    /// Check this before advertising or starting a source gameplay profile.
+    /// When native Structural area damage is present, all mountable ground
+    /// seats must also have source-bound occupant visibility.
     pub fn validate_ground_drivers(
         &self,
         vehicles: &ground_vehicles::Catalog,
@@ -112,6 +113,9 @@ impl Setup {
             {
                 return Err("acquisition_escort_driver_policy_required");
             }
+        }
+        if let Some(structural) = &self.structural {
+            structural.validate_ground_area_seats(vehicles)?;
         }
         Ok(())
     }

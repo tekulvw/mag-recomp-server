@@ -223,3 +223,23 @@ fn repairable_native_rows_require_a_tool_source() {
         Err("acquisition_structural_repair_catalog_required")
     );
 }
+
+#[test]
+fn native_area_damage_requires_ground_seat_visibility_at_admission() {
+    for (radius, damage, expected) in [
+        (0., 5., Ok(())),
+        (5., 0., Ok(())),
+        (
+            5.,
+            5.,
+            Err("acquisition_structural_ground_seat_visibility_required"),
+        ),
+    ] {
+        let engine = connected_tests::fixture_with_damage_and_area(0., radius, damage);
+        let setup = &engine.acquisition_gameplay.as_ref().unwrap().setup;
+        let vehicles = engine.ground_vehicles.as_ref().unwrap();
+        assert!(vehicles.driver_seat(4).is_some());
+        assert_eq!(vehicles.seat_occupant_visible(4, 0), None);
+        assert_eq!(setup.validate_ground_drivers(vehicles), expected);
+    }
+}

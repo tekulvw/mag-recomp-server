@@ -156,6 +156,48 @@ impl Setup {
         Ok(())
     }
 
+    pub(crate) fn validate_ground_area_seats(
+        &self,
+        vehicles: &crate::ground_vehicles::Catalog,
+    ) -> Result<(), &'static str> {
+        if self.bindings.schema != NATIVE_BINDINGS {
+            return Ok(());
+        }
+        for (&index, row) in &self.bindings.rows {
+            if row.class != NativeClass::Structural {
+                continue;
+            }
+            let blast = self.playback.blast_properties(index)?;
+            if blast.character_damage_over_time_radius == 0.0
+                || blast.character_damage_over_time_value == 0.0
+            {
+                continue;
+            }
+            // The rotating area scan can sample any occupied ground seat.
+            // Check each mountable seat's visibility before the match starts.
+            let qualified = vehicles.creations().all(|vehicle| {
+                vehicle
+                    .passenger_seats
+                    .iter()
+                    .copied()
+                    .chain(
+                        vehicles
+                            .driver_seat(vehicle.index)
+                            .map(|driver| driver.seat),
+                    )
+                    .all(|seat| {
+                        vehicles
+                            .seat_occupant_visible(vehicle.index, seat)
+                            .is_some()
+                    })
+            });
+            return qualified
+                .then_some(())
+                .ok_or("acquisition_structural_ground_seat_visibility_required");
+        }
+        Ok(())
+    }
+
     fn configure_spawns(&self, spawns: &mut SpawnCatalog) -> Result<(), &'static str> {
         let unselectable = self
             .bindings
