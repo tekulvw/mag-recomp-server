@@ -9,6 +9,10 @@ use crate::{ground_vehicles, replication::CharacterPosition};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
+#[cfg(test)]
+#[path = "acquisition_ground_runtime_tests.rs"]
+mod tests;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Key {
     pub index: u16,
@@ -140,6 +144,7 @@ pub struct Vehicle {
     pub health_quarter_points: u16,
     pub maximum_health_quarter_points: u16,
     health_hp: f32,
+    damage_conditions_resolved: bool,
     damage_location_and_type: u8,
     damage_user_data: u32,
     damage_source_object: u32,
@@ -185,16 +190,14 @@ impl Vehicle {
     }
 
     pub(crate) fn damage_wire(&self) -> crate::replication::VehicleDamage {
-        let conditions = if self.damage_location_and_type == 0 {
-            // Existing untyped health effects publish their supplied health and
-            // attacker with no resolved damage-model condition metadata.
-            0
-        } else {
+        let conditions = if self.damage_conditions_resolved {
             let percent = self.health_percent();
             u8::from(percent < 70.0)
                 | (u8::from(percent < 40.0) << 1)
                 | (u8::from(percent < 15.0) << 2)
                 | (u8::from(self.is_dead()) << 3)
+        } else {
+            0
         };
         crate::replication::VehicleDamage {
             last_location_and_type: self.damage_location_and_type,
@@ -213,17 +216,24 @@ impl Vehicle {
         location_and_type: u8,
         user_data: u32,
     ) -> LifecycleEvent {
-        self.health_hp = health_hp;
-        self.health_quarter_points = (health_hp * 4.0).trunc() as u16;
         self.last_attacker = attacker;
+        // Untyped damage retains its existing condition-suppression behavior.
+        self.damage_conditions_resolved = location_and_type != 0;
         self.damage_location_and_type = location_and_type;
         self.damage_user_data = user_data;
         self.damage_source_object = u32::MAX;
-        self.damage_changed = true;
+        let event = self.set_health(health_hp);
         self.pending_death = self.is_dead();
+        event
+    }
+
+    fn set_health(&mut self, health_hp: f32) -> LifecycleEvent {
+        self.health_hp = health_hp;
+        self.health_quarter_points = (health_hp * 4.0).trunc() as u16;
+        self.damage_changed = true;
         self.event(Effect::DamageChanged {
             health_quarter_points: self.health_quarter_points,
-            last_attacker: attacker,
+            last_attacker: self.last_attacker,
         })
     }
 
@@ -292,6 +302,7 @@ impl Runtime {
             health_quarter_points: creation.health_quarter_points,
             maximum_health_quarter_points: creation.health_quarter_points,
             health_hp: f32::from(creation.health_quarter_points) / 4.0,
+            damage_conditions_resolved: false,
             damage_location_and_type: 0,
             damage_user_data: 0,
             damage_source_object: u32::MAX,
@@ -560,6 +571,39 @@ impl Runtime {
             }
             let hp = (v.health_hp - f32::from(quarter_points) / 4.0).max(0.0);
             Ok(vec![v.set_damage_health(hp, attacker, 0, 0)])
+        })
+    }
+
+    /// Apply the ordinary live Ground model's percent heal while preserving
+    /// the existing damage attribution and lifecycle.
+    pub(crate) fn heal_percent(
+        &mut self,
+        key: Key,
+        percent: f32,
+    ) -> Result<Vec<LifecycleEvent>, &'static str> {
+        if !percent.is_finite() {
+            return Err("invalid_acquisition_ground_heal_percent");
+        }
+        self.mutate(key, |v| {
+            if percent <= 0.0
+                || v.state != 2
+                || v.body != Body::Operational
+                || v.is_dead()
+                || v.is_dying()
+            {
+                return Ok(vec![]);
+            }
+            let max_hp = f32::from(v.maximum_health_quarter_points) / 4.0;
+            let amount_hp = ((percent / 100.0) * max_hp).min(max_hp - v.health_hp);
+            if amount_hp < 0.0005 {
+                return Ok(vec![]);
+            }
+            let hp = (v.health_hp + amount_hp).min(max_hp);
+            if hp == v.health_hp {
+                return Ok(vec![]);
+            }
+            v.damage_conditions_resolved = true;
+            Ok(vec![v.set_health(hp)])
         })
     }
 
