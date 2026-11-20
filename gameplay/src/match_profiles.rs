@@ -911,6 +911,13 @@ mod tests {
     }
 
     fn leadership_match(files: &Files) -> Engine<Vec<u8>> {
+        leadership_match_with_policy(files, native_leadership_policy())
+    }
+
+    fn leadership_match_with_policy(
+        files: &Files,
+        policy: leadership_runtime::RolePolicy,
+    ) -> Engine<Vec<u8>> {
         let path = files.write("leadership-spawns.json", domination_spawns(files));
         let manifest = files.write(
             "leadership-profiles.json",
@@ -921,7 +928,7 @@ mod tests {
         let mut engine = base_engine(files, Vec::new(), 100_000)
             .with_match_profiles(Registry::load(manifest).unwrap())
             .unwrap()
-            .with_leadership_passives(leadership_catalog(), native_leadership_policy())
+            .with_leadership_passives(leadership_catalog(), policy)
             .unwrap();
         assert!(select(&mut engine, "leadership-1", "domination").ok);
         engine
@@ -989,6 +996,162 @@ mod tests {
             engine.command_leadership_role(&engine.peers[&fallback]),
             Some(CommandRole::SquadLeader)
         );
+    }
+
+    fn platoon_leadership_policy() -> Result<leadership_runtime::RolePolicy, io::Error> {
+        leadership_runtime::RolePolicy::from_json(
+            &json!({
+                "schema_version":3,"application_id":20231,
+                "squad_leader":"native","development_bindings":[],
+                "native_election":{
+                    "source_sha256":"a".repeat(64),"squad_level_weight":1.0,"squad_mslc_weight":5.0,
+                    "default_record":{"leadership_level":1,"nominations":1,"matches_since_last_command":0}
+                },
+                "platoon_election":{"level_weight":2.0,"mslc_weight":1.0}
+            }).to_string(),
+        )
+    }
+
+    #[test]
+    fn native_platoon_promotion_vacates_squad_and_refills_it_atomically() {
+        use crate::active_abilities::CommandRole::{PlatoonLeader, SquadLeader};
+
+        let files = Files::new();
+        let mut engine = leadership_match_with_policy(&files, platoon_leadership_policy().unwrap());
+        let first = reserve_leader(
+            &mut engine,
+            0,
+            0,
+            json!({
+                "leadership_level":3,"nominations":5,"matches_since_last_command":2
+            }),
+        );
+        let second = reserve_leader(
+            &mut engine,
+            1,
+            0,
+            json!({
+                "leadership_level":2,"nominations":3,"matches_since_last_command":2
+            }),
+        );
+        let squad = engine.active.as_ref().unwrap().squad_catalog.clone();
+        engine.active.as_mut().unwrap().squad_catalog = squad.for_squad(0).unwrap().into();
+        assert_eq!(engine.peers[&first].nominations, 1);
+        engine.active.as_mut().unwrap().nominations = 1;
+        engine.match_started = true;
+        engine.reconcile_squad_leaders().unwrap();
+        assert_eq!(
+            engine.command_leadership_role(&engine.peers[&first]),
+            Some(SquadLeader)
+        );
+
+        engine.peers.get_mut(&first).unwrap().nominations = 3;
+        engine.active.as_mut().unwrap().nominations = 3;
+        let saved_log = engine.max_log;
+        engine.max_log = engine.written;
+        assert!(engine.reconcile_squad_leaders().is_err());
+        assert_eq!(
+            engine.squad_leader_index(
+                0,
+                &[
+                    0,
+                    1,
+                    u16::MAX,
+                    u16::MAX,
+                    u16::MAX,
+                    u16::MAX,
+                    u16::MAX,
+                    u16::MAX
+                ]
+            ),
+            0
+        );
+        engine.max_log = saved_log;
+        engine.failed = false;
+        engine.reconcile_squad_leaders().unwrap();
+        assert_eq!(
+            engine.command_leadership_role(&engine.peers[&first]),
+            Some(PlatoonLeader)
+        );
+        assert_eq!(engine.active.as_ref().unwrap().reservation.id, second);
+        assert_eq!(
+            engine.command_leadership_role(engine.active.as_ref().unwrap()),
+            Some(SquadLeader)
+        );
+
+        engine.peers.get_mut(&first).unwrap().nominations = 1;
+        engine.reconcile_squad_leaders().unwrap();
+        assert_eq!(
+            engine.command_leadership_role(&engine.peers[&first]),
+            Some(SquadLeader)
+        );
+        assert_eq!(
+            engine.command_leadership_role(engine.active.as_ref().unwrap()),
+            Some(PlatoonLeader)
+        );
+
+        engine.active.take();
+        engine.reconcile_squad_leaders().unwrap();
+        assert_eq!(
+            engine.command_leadership_role(&engine.peers[&first]),
+            Some(SquadLeader)
+        );
+    }
+
+    #[test]
+    fn native_platoon_election_scores_all_squads_with_platoon_weights() {
+        use crate::active_abilities::CommandRole::{PlatoonLeader, SquadLeader};
+
+        let files = Files::new();
+        let policy = platoon_leadership_policy().unwrap();
+        assert!(policy.supports_platoon_election());
+        assert!(!native_leadership_policy().supports_platoon_election());
+        let mut engine = leadership_match_with_policy(&files, policy);
+        let first = reserve_leader(
+            &mut engine,
+            0,
+            0,
+            json!({
+                "leadership_level":2,"nominations":3,"matches_since_last_command":3
+            }),
+        );
+        reserve_leader(
+            &mut engine,
+            1,
+            0,
+            json!({
+                "leadership_level":2,"nominations":3,"matches_since_last_command":0
+            }),
+        );
+        let actor = engine.active.as_mut().unwrap();
+        actor.reservation.character.progression = Some(progression::ProgressionSnapshot {
+            level: 3,
+            ..Default::default()
+        });
+        actor.squad_catalog = actor.squad_catalog.for_squad(1).unwrap().into();
+        assert_eq!(engine.platoon_leader_index(0), u16::MAX);
+
+        engine.match_started = true;
+        engine.reconcile_squad_leaders().unwrap();
+        assert_eq!(engine.platoon_leader_index(0), 1);
+        assert_eq!(
+            engine.command_leadership_role(engine.active.as_ref().unwrap()),
+            Some(PlatoonLeader)
+        );
+        assert_eq!(
+            engine.command_leadership_role(&engine.peers[&first]),
+            Some(SquadLeader)
+        );
+
+        let actor = engine.active.as_mut().unwrap();
+        actor.squad_catalog = actor.squad_catalog.for_squad(4).unwrap().into();
+        assert_eq!(
+            engine.command_leadership_role(engine.active.as_ref().unwrap()),
+            None
+        );
+        engine.reconcile_squad_leaders().unwrap();
+        assert_eq!(engine.platoon_leader_index(0), 0);
+        assert_eq!(engine.platoon_leader_index(1), 1);
     }
 
     #[test]
