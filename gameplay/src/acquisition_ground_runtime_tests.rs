@@ -24,6 +24,34 @@ fn runtime(state: u8, source_type: u8, maximum_quarter_points: u16) -> (Runtime,
 }
 
 #[test]
+fn rocket_damage_keeps_area_direction_and_native_source_sentinel() {
+    let (mut runtime, key) = runtime(2, 3, 600);
+    runtime
+        .apply_grenade_damage(key, 30.0, ATTACKER, GRENADE)
+        .unwrap();
+    let before = runtime.get(4).unwrap();
+    assert_eq!(before.damage_wire().last_source_object, GRENADE);
+    assert!(
+        runtime
+            .apply_hospital_rocket_damage(key, 120.0, ATTACKER, 0, 0x1234)
+            .is_err()
+    );
+    assert_eq!(runtime.get(4).unwrap().health_quarter_points, 480);
+    runtime
+        .apply_hospital_rocket_damage(key, 120.0, ATTACKER, 5, 0x1234)
+        .unwrap();
+    let vehicle = runtime.get(4).unwrap();
+    let damage = vehicle.damage_wire();
+    assert_eq!(damage.health_quarter_points, 0);
+    assert_eq!(damage.last_location_and_type, 0xa5);
+    assert_eq!(damage.last_attacker, ATTACKER);
+    assert_eq!(damage.last_source_object, u32::MAX);
+    assert_eq!(damage.last_user_data, 0x1234);
+    assert_eq!(vehicle.body, Body::Operational);
+    assert!(vehicle.pending_death);
+}
+
+#[test]
 fn heal_percent_accumulates_float_hp_and_caps_at_loaded_maximum() {
     // This ground operation also applies to operational non-Escort models.
     let (mut runtime, key) = runtime(2, 7, 600);

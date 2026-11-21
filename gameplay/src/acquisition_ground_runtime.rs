@@ -701,6 +701,20 @@ impl Runtime {
         self.apply_weapon_damage(key, amount_hp, attacker, 0xa0, 0)
     }
 
+    pub(crate) fn apply_hospital_rocket_damage(
+        &mut self,
+        key: Key,
+        amount_hp: f32,
+        attacker: u32,
+        location: u8,
+        user_data: u32,
+    ) -> Result<Vec<LifecycleEvent>, &'static str> {
+        if !(1..=6).contains(&location) {
+            return Err("invalid_acquisition_ground_hit_location");
+        }
+        self.apply_weapon_damage(key, amount_hp, attacker, 0xa0 | location, user_data)
+    }
+
     fn apply_weapon_damage(
         &mut self,
         key: Key,

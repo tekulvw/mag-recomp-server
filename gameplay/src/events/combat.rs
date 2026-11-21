@@ -445,7 +445,11 @@ pub(super) fn fire_grenade<W: Write>(
         plan.gameplay_denial = Some("unowned_projectile_shooter");
     } else if !eligible || active.is_mounted() {
         plan.gameplay_denial = Some("projectile_requires_living_on_foot_character");
-    } else if request.ammo_index != 4 || request.projectile_index >= 3 || grenade.is_none() {
+    } else if request.ammo_index != 4
+        || request.projectile_index
+            >= u16::from(projectile::projectile_slot_count(ctx.engine.wire_profile))
+        || grenade.is_none()
+    {
         plan.gameplay_denial = Some("unsupported_projectile_item_or_slot");
     } else if active
         .hospital_rocket_flights
@@ -473,7 +477,7 @@ pub(super) fn fire_grenade<W: Write>(
     } else if let CharacterLife::Alive { generation, .. } = active.life {
         let slot = request.projectile_index as u8;
         let mut flights = active.projectiles.clone();
-        match flights.admit_item_with_catalog(
+        match flights.admit_item_with_profile(
             slot,
             generation,
             now.as_millis() as u64,
@@ -481,6 +485,7 @@ pub(super) fn fire_grenade<W: Write>(
             bytes,
             grenade_item.ok_or("missing_grenade_item")?,
             &ctx.engine.item_catalog,
+            ctx.engine.wire_profile,
         ) {
             Ok(projectile::LaunchDisposition::Duplicate { .. }) => (),
             Ok(projectile::LaunchDisposition::Created { .. }) if active.grenade_remaining == 0 => {

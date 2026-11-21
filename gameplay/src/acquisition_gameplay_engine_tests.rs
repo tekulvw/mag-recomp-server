@@ -1176,16 +1176,25 @@ pub(crate) fn ground_grenade_driver_fixture() -> Engine<Vec<u8>> {
 mod vehicle_wave_effects;
 
 fn grenade_report(e: &Engine<Vec<u8>>, sequence: u32, position: CharacterPosition) -> Vec<u8> {
+    grenade_report_for_slot(e, sequence, position, 0)
+}
+
+fn grenade_report_for_slot(
+    e: &Engine<Vec<u8>>,
+    sequence: u32,
+    position: CharacterPosition,
+    slot: u8,
+) -> Vec<u8> {
     projectile_replication::ProjectileOwnerDelta {
         header: UpdateHeader {
             sequence,
             nak_sequence: 0,
             client_index: 0,
-            object_type_mask: 1 << 16,
+            object_type_mask: 1 << (16 + slot),
             timestamp_ms: 0,
         },
         update: &projectile::ProjectileOwnerUpdate {
-            slot: 0,
+            slot,
             object_index: e.active.as_ref().unwrap().reservation.player,
             fields: projectile::ProjectileOwnerFields {
                 state: Some(2),
@@ -1276,6 +1285,204 @@ fn ground_grenade_tcp_owner_report_can_neither_seed_nor_consume_a_detonation() {
     );
 }
 
+fn grenade_launch_wire(e: &Engine<Vec<u8>>, slot: u16, x: f32) -> Vec<u8> {
+    let player = e.active.as_ref().unwrap().reservation.player;
+    let mut bits = replication::BitWriter::with_profile(e.wire_profile);
+    bits.write(0x0210, 16).unwrap();
+    for value in [x, 3., 100., 0., 0., 0., 1., 0., 0., 0.] {
+        bits.write(value.to_bits(), 32).unwrap();
+    }
+    for (value, width) in [
+        (4, 8),
+        (100, 10),
+        (u32::MAX, 32),
+        (0x0380_0000 | u32::from(player), 32),
+        (u32::from(player), 16),
+        (u32::from(slot), 16),
+        (0, 6),
+    ] {
+        bits.write(value, width).unwrap();
+    }
+    bits.finish()
+}
+
+fn prepare_ordinary_grenade_launch(e: &mut Engine<Vec<u8>>) {
+    let active = e.active.as_mut().unwrap();
+    active.projectiles = Default::default();
+    active.grenade_remaining = 2;
+    active.spawned_loadout.as_mut().unwrap().inventories[0].slots[4] = Some(4);
+    // The fixture has already completed its authored Ground registration.
+    let batches = e.ground_vehicles.as_ref().unwrap().batch_count();
+    for actor in e.active.iter_mut().chain(e.peers.values_mut()) {
+        actor.ground_vehicle_batch = batches;
+    }
+}
+
+#[test]
+fn retail_fourth_frag_launch_fuse_ground_damage_and_cleanup() {
+    let mut e = ground_grenade_fixture(false, 100.);
+    prepare_ordinary_grenade_launch(&mut e);
+    let player = e.active.as_ref().unwrap().reservation.player;
+    let slot = 3;
+    for invalid_slot in [4, 259] {
+        let invalid = grenade_launch_wire(&e, invalid_slot, 100.);
+        assert!(
+            grenade_packet_on_route(&mut e, &invalid, Transport::Tcp, 3249)
+                .unwrap()
+                .is_empty()
+        );
+    }
+    assert_eq!(e.active.as_ref().unwrap().grenade_remaining, 2);
+    let wire = grenade_launch_wire(&e, slot, 100.);
+    assert_eq!(wire.len(), 57);
+    let created = grenade_packet_on_route(&mut e, &wire, Transport::Tcp, 3250).unwrap();
+    assert_eq!(created.len(), 1, "accepted family-19 frag creation");
+    let packet = protocol::decode_hex(&created[0].payload_hex);
+    let creation = ObjectUpdate::decode_with_profile(&packet, e.wire_profile).unwrap();
+    assert_eq!(creation.header.object_type_mask, 1 << 19);
+    let actor = e.active.as_ref().unwrap();
+    assert_eq!(actor.grenade_remaining, 1);
+    assert!(actor.projectiles.get(3).is_some());
+    assert_eq!(
+        actor
+            .projectile_replicas
+            .snapshot_packets(3250)
+            .unwrap()
+            .len(),
+        2
+    );
+
+    assert!(
+        grenade_packet_on_route(&mut e, &wire, Transport::Tcp, 3251)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(e.active.as_ref().unwrap().grenade_remaining, 1);
+    let before = e.ground_runtime.clone();
+    let truck_pos = before.as_ref().unwrap().get(4).unwrap().pose.position;
+    let target = CharacterPosition {
+        x: truck_pos.x - 2.,
+        ..truck_pos
+    };
+    let forged = grenade_report_for_slot(&e, 99, target, 3);
+    grenade_packet_on_route(&mut e, &forged, Transport::Tcp, 3280).unwrap();
+    assert!(
+        !e.active
+            .as_ref()
+            .unwrap()
+            .projectiles
+            .get(3)
+            .unwrap()
+            .terminal_reported
+    );
+
+    let genuine = grenade_report_for_slot(&e, 1, target, 3);
+    grenade_packet_on_route(&mut e, &genuine, Transport::Udp, 3300).unwrap();
+    let flight = e.active.as_ref().unwrap().projectiles.get(3).unwrap();
+    assert!(flight.terminal_reported);
+    assert!(!flight.completed);
+    assert_eq!(e.ground_runtime, before);
+
+    ground_grenade_update(&mut e, 3350).unwrap();
+    ground_grenade_update(&mut e, 3351).unwrap();
+    let actor = e.active.as_ref().unwrap();
+    assert!(actor.projectiles.get(3).unwrap().completed);
+    assert!(
+        actor
+            .projectile_replicas
+            .snapshot_packets(3350)
+            .unwrap()
+            .is_empty()
+    );
+    let ground = e.ground_runtime.clone();
+    let damage = ground.as_ref().unwrap().get(4).unwrap().damage_wire();
+    assert_eq!(damage.health_quarter_points, 300);
+    assert_eq!(damage.last_source_object, 0x1380_0000 | u32::from(player));
+
+    let next = grenade_launch_wire(&e, slot, 101.);
+    assert!(
+        grenade_packet_on_route(&mut e, &next, Transport::Tcp, 3351)
+            .unwrap()
+            .is_empty()
+    );
+    e.queue_projectile_publications(Duration::from_millis(3351))
+        .unwrap();
+    let terminal = e
+        .drain_shared(Vec::new(), 1)
+        .unwrap()
+        .into_iter()
+        .filter_map(|message| {
+            let bytes = protocol::decode_hex(&message.payload_hex);
+            let decoded = ObjectUpdate::decode_with_profile(&bytes, e.wire_profile).ok()?;
+            projectile::decode_projectile_updates_with_profile(&decoded, e.wire_profile).ok()
+        })
+        .flatten()
+        .filter(|row| row.slot == 3 && row.fields.state == Some(2))
+        .count();
+    assert_eq!(
+        terminal,
+        e.active
+            .iter()
+            .chain(e.peers.values())
+            .filter(|actor| actor.initial_objects.is_some())
+            .count()
+    );
+
+    e.queue_projectile_publications(Duration::from_millis(3849))
+        .unwrap();
+    assert!(e.projectile_cleanup_pending(e.active.as_ref().unwrap(), 3));
+    let at = Duration::from_millis(3850);
+    e.queue_projectile_publications(at).unwrap();
+    let removal = projectile_replication::ProjectileRemoval {
+        slot: 3,
+        object_index: player,
+    };
+    let queued = removal
+        .encode_with_profile(1, 3850, e.wire_profile)
+        .unwrap();
+    assert!(e.active.as_ref().unwrap().pending_shared.contains(&queued));
+    assert!(
+        grenade_packet_on_route(&mut e, &next, Transport::Tcp, 3851)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(e.active.as_ref().unwrap().grenade_remaining, 1);
+    assert!(!e.drain_shared(Vec::new(), 1).unwrap().is_empty());
+    assert!(!e.projectile_cleanup_pending(e.active.as_ref().unwrap(), 3));
+    assert!(
+        !grenade_packet_on_route(&mut e, &next, Transport::Tcp, 3852)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(e.active.as_ref().unwrap().grenade_remaining, 0);
+    assert_eq!(e.ground_runtime, ground);
+}
+
+#[test]
+fn prototype_frag_allows_slot_two_and_rejects_slot_three() {
+    let mut e = ground_grenade_fixture(false, 100.);
+    prepare_ordinary_grenade_launch(&mut e);
+    let profile = wire_profile::WireProfile::prototype();
+    e.wire_profile = profile;
+    let actor = e.active.as_mut().unwrap();
+    actor.wire_profile = profile;
+    actor.projectile_replicas = projectile_replication::ProjectileReplicas::with_profile(profile);
+    let invalid = grenade_launch_wire(&e, 3, 100.);
+    assert!(
+        grenade_packet_on_route(&mut e, &invalid, Transport::Tcp, 3250)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(e.active.as_ref().unwrap().grenade_remaining, 2);
+    let valid = grenade_launch_wire(&e, 2, 100.);
+    assert!(
+        !grenade_packet_on_route(&mut e, &valid, Transport::Tcp, 3251)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(e.active.as_ref().unwrap().grenade_remaining, 1);
+}
+
 #[test]
 fn ground_grenade_allows_client_tcp_launch_and_rejects_server_direction_at_ingress() {
     let mut e = ground_grenade_fixture(false, 300.0);
@@ -1285,23 +1492,7 @@ fn ground_grenade_allows_client_tcp_launch_and_rejects_server_direction_at_ingre
     active.spawned_loadout.as_mut().unwrap().inventories[0].slots[4] = Some(4);
     let player = active.reservation.player;
 
-    let mut bits = replication::BitWriter::with_profile(e.wire_profile);
-    bits.write(0x0210, 16).unwrap();
-    for value in [100.0_f32, 3.0, 100.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0] {
-        bits.write(value.to_bits(), 32).unwrap();
-    }
-    for (value, width) in [
-        (4, 8),
-        (100, 10),
-        (u32::MAX, 32),
-        (0x0380_0000 | u32::from(player), 32),
-        (u32::from(player), 16),
-        (0, 16),
-        (0, 6),
-    ] {
-        bits.write(value, width).unwrap();
-    }
-    let wire = bits.finish();
+    let wire = grenade_launch_wire(&e, 0, 100.);
     let actor = e.active.as_ref().unwrap();
     let invalid = json!({
         "v":BRIDGE_VERSION,"op":"event","request_id":"wrong-direction",

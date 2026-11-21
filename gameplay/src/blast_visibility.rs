@@ -189,7 +189,35 @@ pub fn resolve_grenade_blast_for_item(
     item_id: u16,
     catalog: &crate::item_catalog::ItemCatalog,
 ) -> Result<Vec<GrenadeBlastCheck>, &'static str> {
-    if slot >= 3 || generation == 0 || targets.len() > MAX_BLAST_TARGETS {
+    resolve_grenade_blast_for_item_with_profile(
+        world,
+        expected_map,
+        slot,
+        generation,
+        blast,
+        targets,
+        item_id,
+        catalog,
+        crate::wire_profile::WireProfile::prototype(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolve_grenade_blast_for_item_with_profile(
+    world: Option<&CollisionWorld>,
+    expected_map: &str,
+    slot: u8,
+    generation: u32,
+    blast: CharacterPosition,
+    targets: &[CharacterBlastTarget],
+    item_id: u16,
+    catalog: &crate::item_catalog::ItemCatalog,
+    profile: crate::wire_profile::WireProfile,
+) -> Result<Vec<GrenadeBlastCheck>, &'static str> {
+    if slot >= crate::projectile::projectile_slot_count(profile)
+        || generation == 0
+        || targets.len() > MAX_BLAST_TARGETS
+    {
         return Err("invalid_blast_roster");
     }
     let mut ids = std::collections::BTreeSet::new();
@@ -238,4 +266,44 @@ pub fn resolve_grenade_blast_for_item(
         });
     }
     Ok(checks)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wire_profile::{WireProfile, WireProfileCatalog};
+
+    #[test]
+    fn retail_fourth_frag_character_blast_uses_profile_slot_limit() {
+        let items = crate::human_kill_reward_tests::grenade_items_for_ground_test(100.);
+        let item = items.default_grenade_item().unwrap();
+        let origin = CharacterPosition {
+            x: 100.,
+            y: 2.,
+            z: 100.,
+        };
+        let prototype = WireProfile::prototype();
+        let retail = WireProfileCatalog::embedded().profile(20231).unwrap();
+        let resolve = |slot, profile| {
+            resolve_grenade_blast_for_item_with_profile(
+                None,
+                "synthetic",
+                slot,
+                1,
+                origin,
+                &[],
+                item,
+                &items,
+                profile,
+            )
+        };
+        assert!(resolve(3, retail).unwrap().is_empty());
+        assert_eq!(resolve(4, retail).unwrap_err(), "invalid_blast_roster");
+        assert_eq!(resolve(3, prototype).unwrap_err(), "invalid_blast_roster");
+        assert_eq!(
+            resolve_grenade_blast_with_catalog(None, "synthetic", 3, 1, origin, &[], &items)
+                .unwrap_err(),
+            "invalid_blast_roster",
+        );
+    }
 }

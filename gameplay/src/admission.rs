@@ -235,7 +235,7 @@ impl<W: Write> Engine<W> {
             projectile_replicas: projectile_replication::ProjectileReplicas::with_profile(
                 self.wire_profile,
             ),
-            projectile_cleanup: [None, None, None],
+            projectile_cleanup: Default::default(),
             projectile_publications: Vec::new(),
             grenade_remaining: 0,
             observed_primary: None,

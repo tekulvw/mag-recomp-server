@@ -254,7 +254,7 @@ pub struct ProjectileFlight {
 }
 #[derive(Clone, Default)]
 pub struct ProjectileFlights {
-    slots: [Option<ProjectileFlight>; 3],
+    slots: [Option<ProjectileFlight>; MAX_PROJECTILE_SLOTS],
     next_generation: u32,
 }
 impl ProjectileFlights {
@@ -310,12 +310,36 @@ impl ProjectileFlights {
         item_id: u16,
         catalog: &ItemCatalog,
     ) -> Result<LaunchDisposition, &'static str> {
+        self.admit_item_with_profile(
+            slot,
+            life,
+            now,
+            floor,
+            fingerprint,
+            item_id,
+            catalog,
+            WireProfile::prototype(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn admit_item_with_profile(
+        &mut self,
+        slot: u8,
+        life: u32,
+        now: u64,
+        floor: u32,
+        fingerprint: &[u8],
+        item_id: u16,
+        catalog: &ItemCatalog,
+        profile: WireProfile,
+    ) -> Result<LaunchDisposition, &'static str> {
         let parameters = catalog.grenade(item_id)?;
         let expiry_after_ms = parameters
             .authored_lifetime_ms
             .checked_add(catalog.grenade_expiry_grace_ms())
             .ok_or("invalid_projectile_lifetime")?;
-        if slot >= 3 || fingerprint.len() != 57 {
+        if slot >= projectile_slot_count(profile) || fingerprint.len() != 57 {
             return Err("invalid_projectile_launch");
         }
         if let Some(previous) = &self.slots[usize::from(slot)]
@@ -424,5 +448,26 @@ impl ProjectileFlights {
             }
         }
         events
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retail_fourth_frag_admission_preserves_unprofiled_prototype_limit() {
+        let mut flights = ProjectileFlights::default();
+        let bytes = [0; 57];
+        let items = crate::human_kill_reward_tests::grenade_items_for_ground_test(100.);
+        assert_eq!(
+            flights.admit_with_catalog(3, 1, 0, 0, &bytes, &items),
+            Err("invalid_projectile_launch")
+        );
+        assert!(matches!(
+            flights.admit_with_catalog(2, 1, 0, 0, &bytes, &items),
+            Ok(LaunchDisposition::Created { .. })
+        ));
+        assert!(flights.get(3).is_none());
     }
 }

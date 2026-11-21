@@ -144,6 +144,7 @@ mod ground_turrets;
 pub mod ground_vehicles;
 mod headless_sim;
 pub mod healing;
+mod hospital_rocket_ground;
 mod hospital_rocket_runtime;
 pub mod hospital_rockets;
 mod hospital_turret_wire;
@@ -1073,7 +1074,7 @@ struct Active {
     projectiles: projectile::ProjectileFlights,
     hospital_rocket_flights: hospital_rocket_runtime::Flights,
     projectile_replicas: projectile_replication::ProjectileReplicas,
-    projectile_cleanup: [Option<ProjectileCleanup>; 3],
+    projectile_cleanup: [Option<ProjectileCleanup>; projectile::MAX_PROJECTILE_SLOTS],
     projectile_publications: Vec<ProjectilePublication>,
     grenade_remaining: u8,
     observed_primary: Option<replication::InventoryItem>,
@@ -1191,6 +1192,7 @@ pub struct Engine<W: Write> {
     domination_round: Option<acquisition_round::Round>,
     domination_gameplay: Option<domination_gameplay_provider::World>,
     hospital_rockets: Option<std::sync::Arc<hospital_rockets::Catalog>>,
+    hospital_rocket_ground: Option<std::sync::Arc<hospital_rocket_ground::Catalog>>,
     projectile_contacts: Option<std::sync::Arc<domination_projectile_collision::ContactBindings>>,
     acquisition_gameplay: Option<acquisition_gameplay_engine::Runtime>,
     squad_orders: Option<squad_order_engine::Runtime>,

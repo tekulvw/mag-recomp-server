@@ -49,6 +49,7 @@ struct Core {
     hospital_hulks: PathBuf,
     hospital_turrets: Option<PathBuf>,
     hospital_rockets: Option<PathBuf>,
+    hospital_rocket_ground: Option<PathBuf>,
     projectile_contacts: Option<PathBuf>,
     ground_turrets: Option<PathBuf>,
     initial_filters: PathBuf,
@@ -78,6 +79,9 @@ impl Core {
             (self.scope.as_str(), self.helo.as_ref()),
             ("core_without_helo_insertion", None) | ("core_with_helo_insertion", Some(_))
         ) {
+            if self.hospital_rocket_ground.is_some() && self.hospital_rockets.is_none() {
+                return Err(io::Error::other("hospital_rocket_ground_requires_rockets"));
+            }
             if self.hospital_rockets.is_some()
                 && (self.hospital_turrets.is_none() || self.projectile_contacts.is_none())
             {
@@ -265,6 +269,10 @@ impl Configuration {
                 *path = directory.join(&*path);
             }
             for (input, error) in [
+                (
+                    &mut core.hospital_rocket_ground,
+                    "empty_domination_hospital_rocket_ground_path",
+                ),
                 (
                     &mut core.hospital_rockets,
                     "empty_domination_hospital_rocket_source_path",
@@ -783,6 +791,28 @@ impl Configuration {
                 Ok::<_, io::Error>(Arc::new(bindings))
             })
             .transpose()?;
+        let hospital_rocket_ground = core
+            .hospital_rocket_ground
+            .as_ref()
+            .map(|path| {
+                let rules =
+                    crate::hospital_rocket_ground::Catalog::from_bytes(&read(path, 16 * 1024)?)
+                        .map_err(io::Error::other)?;
+                rules
+                    .validate(
+                        native_elf,
+                        hospital_doc["main_archive_sha256"]
+                            .as_str()
+                            .ok_or_else(|| {
+                                io::Error::other("hospital_rocket_ground_main_source_missing")
+                            })?,
+                        &core.ground_damage_sha256,
+                        grounds,
+                    )
+                    .map_err(io::Error::other)?;
+                Ok::<_, io::Error>(Arc::new(rules))
+            })
+            .transpose()?;
         Ok(World {
             runtime: sources.runtime,
             state: State {
@@ -791,6 +821,7 @@ impl Configuration {
                 assets: Arc::new(sources.sequence_assets),
                 hospital_hulks: Some(Arc::new(hospital_assets)),
                 hospital_turret_yaws: Arc::new(yaws),
+                hospital_rocket_ground,
                 projectile_contacts,
                 helo,
                 helo_collision,
@@ -892,6 +923,16 @@ impl<W: Write> Engine<W> {
                 )
                 .map_err(io::Error::other)?;
         }
+        if let Some(rules) = &world.state.hospital_rocket_ground {
+            rules
+                .validate_dynamic(
+                    self.dynamic_body_resources.as_ref().ok_or_else(|| {
+                        io::Error::other("hospital_rocket_ground_requires_dynamic_bodies")
+                    })?,
+                    self.ground_vehicles.as_ref().unwrap(),
+                )
+                .map_err(io::Error::other)?;
+        }
         if let Some(source) = hospital_source {
             let rules = crate::hospital_turrets::qualify(
                 &source,
@@ -922,6 +963,7 @@ impl<W: Write> Engine<W> {
             .map_err(io::Error::other)?;
         self.projectile_contacts = world.state.projectile_contacts.clone();
         self.hospital_rockets = hospital_rockets;
+        self.hospital_rocket_ground = world.state.hospital_rocket_ground.clone();
         self.domination_gameplay = Some(world);
         Ok(self)
     }
@@ -1027,6 +1069,27 @@ mod tests {
             }
             if turrets {
                 value["hospital_turrets"] = "turrets.json".into();
+            }
+            let parsed: Core = serde_json::from_value(value).unwrap();
+            assert_eq!(parsed.validate_scope().is_ok(), valid);
+        }
+    }
+
+    #[test]
+    fn ground_rocket_rules_require_the_equipped_rocket_provider() {
+        for (ground, rocket, valid) in [
+            (false, false, true),
+            (true, false, false),
+            (true, true, true),
+        ] {
+            let mut value = core();
+            if ground {
+                value["hospital_rocket_ground"] = "rocket-ground.json".into();
+            }
+            if rocket {
+                value["hospital_rockets"] = "rockets.json".into();
+                value["hospital_turrets"] = "turrets.json".into();
+                value["projectile_contacts"] = "contacts.json".into();
             }
             let parsed: Core = serde_json::from_value(value).unwrap();
             assert_eq!(parsed.validate_scope().is_ok(), valid);

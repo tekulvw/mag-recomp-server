@@ -82,6 +82,20 @@ impl Registry {
     ) -> Result<(), &'static str> {
         for profile in self.profiles.values() {
             bindings.validate_for(catalog, profile.vehicles.as_ref())?;
+            if let Some(rules) = profile
+                .domination
+                .as_ref()
+                .and_then(|world| world.state.hospital_rocket_ground.as_ref())
+            {
+                rules.validate_dynamic_parts(
+                    catalog,
+                    bindings,
+                    profile
+                        .vehicles
+                        .as_ref()
+                        .ok_or("hospital_rocket_ground_requires_vehicles")?,
+                )?;
+            }
             if let Some(contacts) = profile
                 .domination
                 .as_ref()
@@ -596,6 +610,15 @@ impl Registry {
             .any(|profile| profile.hospital_rockets.is_some())
     }
 
+    pub fn has_hospital_rocket_ground(&self) -> bool {
+        self.profiles.values().any(|profile| {
+            profile
+                .domination
+                .as_ref()
+                .is_some_and(|world| world.state.hospital_rocket_ground.is_some())
+        })
+    }
+
     pub fn has_projectile_contacts(&self) -> bool {
         self.profiles.values().any(|profile| {
             profile
@@ -714,6 +737,7 @@ impl<W: Write> Engine<W> {
             self.retired_formations.insert(selected.formation_id);
             self.active_abilities = None;
             self.hospital_rockets = None;
+            self.hospital_rocket_ground = None;
             self.projectile_contacts = None;
             if let Some(leadership) = &mut self.leadership {
                 leadership.clear_held_roles();
@@ -833,6 +857,10 @@ impl<W: Write> Engine<W> {
             .as_ref()
             .and_then(|world| world.state.projectile_contacts.clone());
         self.hospital_rockets = loaded.hospital_rockets;
+        self.hospital_rocket_ground = loaded
+            .domination
+            .as_ref()
+            .and_then(|world| world.state.hospital_rocket_ground.clone());
         self.domination_gameplay = loaded.domination;
         self.character_damage_rules = loaded.damage;
         self.development_dummy_position = self
