@@ -225,6 +225,7 @@ pub(crate) struct Runtime {
     version: u8,
     aim: Fields,
     grant: Option<Grant>,
+    pub(crate) rocket_magazine: Option<crate::hospital_rocket_runtime::Magazine>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -243,6 +244,7 @@ impl Runtime {
             version: 2,
             aim: Fields::default(),
             grant: None,
+            rocket_magazine: None,
         }
     }
 
@@ -250,6 +252,7 @@ impl Runtime {
         self.version = 2;
         self.aim = Fields::default();
         self.grant = None;
+        self.rocket_magazine = None;
     }
 
     pub(crate) fn revoke(&mut self) {
@@ -411,6 +414,17 @@ pub(crate) struct QualifiedPrimary {
     pub(crate) definition_version: u8,
 }
 
+pub(crate) struct QualifiedSecondary<'a> {
+    pub(crate) index: u16,
+    pub(crate) faction: u8,
+    pub(crate) item_id: u16,
+    pub(crate) version: u8,
+    pub(crate) yaw: f32,
+    pub(crate) pitch: f32,
+    pub(crate) body: crate::vehicle_exit::BunkerTransform,
+    pub(crate) turret: &'a Runtime,
+}
+
 /// Definitions and aim fit in one packet, followed by at most 16 owner rows.
 pub(crate) const MAX_LATE_JOIN_PACKETS: usize = 17;
 
@@ -503,6 +517,40 @@ impl<W: Write> Engine<W> {
             item_id: turret.items[0].ok_or("hospital_turret_primary_missing")?,
             equipped,
             definition_version: turret.version,
+        })
+    }
+
+    pub(crate) fn hospital_secondary_for_actor(
+        &self,
+        actor: &Active,
+    ) -> Result<QualifiedSecondary<'_>, &'static str> {
+        let index = actor
+            .mounted_bunker
+            .ok_or("hospital_turret_unknown_index")?;
+        let (turret, grant) = self.hospital_authority(actor, index)?;
+        if !grant.primary.is_some_and(|item| turret.can_fire(item))
+            || !grant.secondary.is_some_and(|item| {
+                item.inventory_update_id == turret.version
+                    && item.gear_slot == 1
+                    && item.ammo_pool == 0
+            })
+        {
+            return Err("hospital_rocket_secondary_not_initialized");
+        }
+        let bunker = self
+            .bunker_world
+            .as_ref()
+            .and_then(|world| world.domination_bunker(index))
+            .ok_or("hospital_turret_unknown_index")?;
+        Ok(QualifiedSecondary {
+            index,
+            faction: bunker.faction,
+            item_id: turret.items[1].ok_or("hospital_rocket_secondary_missing")?,
+            version: turret.version,
+            yaw: turret.yaw().unwrap_or(0.0),
+            pitch: turret.aim.pitch.map_or(0.0, wire::Pitch::radians),
+            body: bunker.exit_policy.transform,
+            turret,
         })
     }
 

@@ -269,35 +269,48 @@ impl<'a> Collector<'a, '_> {
         shape: &Geometry,
         pose: Pose,
     ) -> Result<Option<(f64, Option<Point>)>, &'static str> {
-        let tolerance = self.limits.boundary_epsilon;
-        let initial = geometry::distance(
-            &self.sphere,
-            self.start,
-            shape,
-            pose,
-            self.limits,
-            self.budget,
-        )?;
-        if initial.upper <= self.sphere.radius() + shape.radius() + tolerance {
-            return Ok(Some((0., initial.normal)));
+        let epsilon = self.limits.boundary_epsilon;
+        let radius = self.sphere.radius() + shape.radius();
+        let contact_distance = radius + epsilon;
+        // Keep the accepted contact tolerance fixed. Split its error budget so
+        // a conservative step lands inside it even if the next core-distance
+        // bounds differ by their convergence tolerance.
+        let advance_distance = radius + epsilon * 0.5;
+        let distance_limits = QueryLimits {
+            boundary_epsilon: epsilon * 0.25,
+            ..self.limits
+        };
+        let delta = geometry::sub(self.end, self.start.translation);
+        let mut fraction = 0.;
+        for _ in 0..self.limits.max_iterations {
+            let position = geometry::add(self.start.translation, delta.map(|axis| axis * fraction));
+            let distance = geometry::distance(
+                &self.sphere,
+                Pose::at(position),
+                shape,
+                pose,
+                distance_limits,
+                self.budget,
+            )?;
+            if distance.upper <= contact_distance {
+                return Ok(Some((fraction, distance.normal)));
+            }
+            let normal = distance.normal.ok_or("world_cast_distance_unresolved")?;
+            let closing = -geometry::dot(delta, normal);
+            if closing <= 0. || fraction == 1. {
+                return if distance.lower > contact_distance {
+                    Ok(None)
+                } else {
+                    Err("world_cast_distance_unresolved")
+                };
+            }
+            let next = (fraction + (distance.lower - advance_distance) / closing).min(1.);
+            if next <= fraction {
+                return Err("world_cast_distance_unresolved");
+            }
+            fraction = next;
         }
-
-        // The shared character sweep has a separating-overlap escape. The
-        // projectile already handled starting overlaps, so that branch is moot.
-        geometry::sweep(
-            &self.sphere,
-            self.start,
-            self.end,
-            shape,
-            pose,
-            geometry::SweepLimits {
-                tolerance,
-                extra: 0.,
-                query: self.limits,
-            },
-            self.budget,
-        )
-        .map(|contact| contact.map(|(fraction, normal)| (fraction, Some(normal))))
+        Err("world_cast_iteration_limit")
     }
 }
 

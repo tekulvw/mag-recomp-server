@@ -138,11 +138,13 @@ pub mod character_damage_rules;
 pub mod domination_helo;
 mod domination_helo_damage;
 mod domination_helo_engine;
+mod domination_projectile_collision;
 mod ground_seats;
 mod ground_turrets;
 pub mod ground_vehicles;
 mod headless_sim;
 pub mod healing;
+mod hospital_rocket_runtime;
 pub mod hospital_rockets;
 mod hospital_turret_wire;
 mod hospital_turrets;
@@ -169,6 +171,7 @@ pub mod projectile;
 pub mod projectile_contact;
 pub mod projectile_motion;
 pub mod projectile_replication;
+mod projectile_scene;
 pub mod protocol;
 pub mod replication;
 pub mod retail_armory;
@@ -1068,6 +1071,7 @@ struct Active {
     repair_credit: repair_rewards::State,
     next_heal_allowed: Duration,
     projectiles: projectile::ProjectileFlights,
+    hospital_rocket_flights: hospital_rocket_runtime::Flights,
     projectile_replicas: projectile_replication::ProjectileReplicas,
     projectile_cleanup: [Option<ProjectileCleanup>; 3],
     projectile_publications: Vec<ProjectilePublication>,
@@ -1186,6 +1190,8 @@ pub struct Engine<W: Write> {
     acquisition_round: Option<acquisition_round::Round>,
     domination_round: Option<acquisition_round::Round>,
     domination_gameplay: Option<domination_gameplay_provider::World>,
+    hospital_rockets: Option<std::sync::Arc<hospital_rockets::Catalog>>,
+    projectile_contacts: Option<std::sync::Arc<domination_projectile_collision::ContactBindings>>,
     acquisition_gameplay: Option<acquisition_gameplay_engine::Runtime>,
     squad_orders: Option<squad_order_engine::Runtime>,
     acquisition_effect_origin: std::sync::Arc<()>,

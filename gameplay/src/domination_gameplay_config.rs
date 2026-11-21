@@ -48,6 +48,8 @@ struct Core {
     aircraft_links: PathBuf,
     hospital_hulks: PathBuf,
     hospital_turrets: Option<PathBuf>,
+    hospital_rockets: Option<PathBuf>,
+    projectile_contacts: Option<PathBuf>,
     ground_turrets: Option<PathBuf>,
     initial_filters: PathBuf,
     qualified_poses: PathBuf,
@@ -76,6 +78,13 @@ impl Core {
             (self.scope.as_str(), self.helo.as_ref()),
             ("core_without_helo_insertion", None) | ("core_with_helo_insertion", Some(_))
         ) {
+            if self.hospital_rockets.is_some()
+                && (self.hospital_turrets.is_none() || self.projectile_contacts.is_none())
+            {
+                return Err(io::Error::other(
+                    "hospital_rockets_require_turrets_and_contacts",
+                ));
+            }
             Ok(())
         } else {
             Err(io::Error::other("unknown_domination_gameplay_scope"))
@@ -255,6 +264,23 @@ impl Configuration {
                 }
                 *path = directory.join(&*path);
             }
+            for (input, error) in [
+                (
+                    &mut core.hospital_rockets,
+                    "empty_domination_hospital_rocket_source_path",
+                ),
+                (
+                    &mut core.projectile_contacts,
+                    "empty_domination_projectile_contact_source_path",
+                ),
+            ] {
+                if let Some(path) = input {
+                    if path.as_os_str().is_empty() {
+                        return Err(io::Error::other(error));
+                    }
+                    *path = directory.join(&*path);
+                }
+            }
             if let Some(path) = &mut core.ground_turrets {
                 if path.as_os_str().is_empty() {
                     return Err(io::Error::other(
@@ -378,6 +404,14 @@ impl Configuration {
             .as_ref()
             .and_then(|core| core.hospital_turrets.as_ref())
             .map(|path| read(path, 256 * 1024))
+            .transpose()
+    }
+
+    pub(crate) fn hospital_rocket_source(&self) -> io::Result<Option<Vec<u8>>> {
+        self.core
+            .as_ref()
+            .and_then(|core| core.hospital_rockets.as_ref())
+            .map(|path| read(path, 1024 * 1024))
             .transpose()
     }
 
@@ -729,6 +763,26 @@ impl Configuration {
                 .map_err(io::Error::other)?;
             (None, None, None, helos)
         };
+        let projectile_contacts = core
+            .projectile_contacts
+            .as_ref()
+            .map(|path| {
+                let bindings = crate::domination_projectile_collision::ContactBindings::from_json(
+                    &read(path, 512 * 1024)?,
+                )
+                .map_err(io::Error::other)?;
+                bindings
+                    .validate(
+                        spawns.map_name(),
+                        native_elf,
+                        &sources.sequence_assets,
+                        &hospital_assets,
+                        helo_collision.as_deref(),
+                    )
+                    .map_err(io::Error::other)?;
+                Ok::<_, io::Error>(Arc::new(bindings))
+            })
+            .transpose()?;
         Ok(World {
             runtime: sources.runtime,
             state: State {
@@ -737,6 +791,7 @@ impl Configuration {
                 assets: Arc::new(sources.sequence_assets),
                 hospital_hulks: Some(Arc::new(hospital_assets)),
                 hospital_turret_yaws: Arc::new(yaws),
+                projectile_contacts,
                 helo,
                 helo_collision,
                 helo_damage,
@@ -803,7 +858,41 @@ impl<W: Write> Engine<W> {
             .ok_or_else(|| io::Error::other("domination_gameplay_requires_ground_catalog"))?;
         let native_elf = objectives.source().source_image_sha256.clone();
         let world = config.build_for(objectives, spawns, bunkers, ground)?;
-        if let Some(source) = config.hospital_turret_source()? {
+        let hospital_source = config.hospital_turret_source()?;
+        let hospital_rockets = config
+            .hospital_rocket_source()?
+            .map(|source| {
+                crate::hospital_rockets::Catalog::from_bytes(
+                    &source,
+                    &self.item_catalog,
+                    hospital_source
+                        .as_deref()
+                        .ok_or_else(|| io::Error::other("hospital_rockets_require_turrets"))?,
+                    &native_elf,
+                )
+                .map(Arc::new)
+                .map_err(io::Error::other)
+            })
+            .transpose()?;
+        if let Some(contacts) = &world.state.projectile_contacts {
+            contacts
+                .validate_static(
+                    self.collision_world
+                        .as_ref()
+                        .ok_or_else(|| io::Error::other("hospital_rockets_require_static_world"))?,
+                )
+                .map_err(io::Error::other)?;
+            contacts
+                .validate_dynamic(
+                    &self
+                        .dynamic_body_resources
+                        .as_ref()
+                        .ok_or_else(|| io::Error::other("hospital_rockets_require_dynamic_bodies"))?
+                        .catalog,
+                )
+                .map_err(io::Error::other)?;
+        }
+        if let Some(source) = hospital_source {
             let rules = crate::hospital_turrets::qualify(
                 &source,
                 bunkers,
@@ -831,6 +920,8 @@ impl<W: Write> Engine<W> {
         world
             .configure_ground(self.ground_runtime.as_mut().unwrap())
             .map_err(io::Error::other)?;
+        self.projectile_contacts = world.state.projectile_contacts.clone();
+        self.hospital_rockets = hospital_rockets;
         self.domination_gameplay = Some(world);
         Ok(self)
     }
@@ -916,5 +1007,29 @@ mod tests {
         );
         std::fs::remove_file(&file).unwrap();
         std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn rocket_sources_require_both_the_turret_role_and_contact_provider() {
+        for (rocket, contacts, turrets, valid) in [
+            (false, false, false, true),
+            (true, false, true, false),
+            (true, true, false, false),
+            (true, true, true, true),
+            (false, true, false, true),
+        ] {
+            let mut value = core();
+            if rocket {
+                value["hospital_rockets"] = "rockets.json".into();
+            }
+            if contacts {
+                value["projectile_contacts"] = "contacts.json".into();
+            }
+            if turrets {
+                value["hospital_turrets"] = "turrets.json".into();
+            }
+            let parsed: Core = serde_json::from_value(value).unwrap();
+            assert_eq!(parsed.validate_scope().is_ok(), valid);
+        }
     }
 }

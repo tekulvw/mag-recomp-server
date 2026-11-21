@@ -248,6 +248,12 @@ fn plan_owner_report<W: Write>(
                 if let CharacterLife::Alive { generation, .. } = active.life {
                     let mut flights = active.projectiles.clone();
                     for report in fields.projectiles.iter().cloned() {
+                        if active.hospital_rocket_flights.occupies(report.slot) {
+                            plan.audit.projectile_reports.push(json!({
+                                "report":report,"accepted":false,"reason":"server_owned_hospital_rocket"
+                            }));
+                            continue;
+                        }
                         let accepted = flights.accept_owner(
                             report.slot,
                             generation,

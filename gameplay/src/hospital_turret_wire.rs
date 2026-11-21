@@ -47,7 +47,6 @@ impl Pitch {
         self.0
     }
 
-    #[cfg(test)]
     pub(crate) fn radians(self) -> f32 {
         signed_fixed(self.0, 1 << 9, 256.0)
     }

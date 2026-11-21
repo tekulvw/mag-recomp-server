@@ -95,6 +95,7 @@ impl Active {
                     .flatten()
                     .map(|entry| entry.removal),
             )
+            .chain(self.hospital_rocket_flights.removals())
             .map(|removal| {
                 removal.encode_with_profile(1, now.as_millis() as u32, self.wire_profile)
             })
@@ -463,6 +464,7 @@ impl<W: Write> Engine<W> {
                 messages.extend(self.tick_objectives(now, wall)?);
                 self.queue_squad_orders(now, wall)?;
                 messages.extend(self.tick_match_clock(now, wall)?);
+                messages.extend(self.tick_hospital_rockets(now, wall)?);
                 self.queue_projectile_publications(now)?;
             }
             return self.drain_shared(messages, wall);
@@ -659,6 +661,10 @@ impl<W: Write> Engine<W> {
                     packets.extend(
                         a.projectile_replicas
                             .snapshot_packets(now.as_millis() as u32)?,
+                    );
+                    packets.extend(
+                        a.hospital_rocket_flights
+                            .snapshot_packets(now.as_millis() as u32, self.wire_profile)?,
                     );
                     Ok(packets)
                 })
@@ -906,6 +912,7 @@ impl<W: Write> Engine<W> {
             messages.extend(self.tick_objectives(now, wall)?);
             self.queue_squad_orders(now, wall)?;
             messages.extend(self.tick_match_clock(now, wall)?);
+            messages.extend(self.tick_hospital_rockets(now, wall)?);
             self.queue_projectile_publications(now)?;
         }
         self.drain_shared(messages, wall)
@@ -1014,7 +1021,10 @@ impl<W: Write> Engine<W> {
     /// Slot reuse also waits for previously queued cleanup packets to enter every
     /// recipient's immutable history, including when the32-message budget defers them.
     pub(super) fn projectile_cleanup_pending(&self, owner: &Active, slot: u8) -> bool {
-        owner.projectile_cleanup[usize::from(slot)].is_some()
+        owner
+            .projectile_cleanup
+            .get(usize::from(slot))
+            .is_some_and(Option::is_some)
             || self
                 .peers
                 .values()
@@ -1037,17 +1047,8 @@ impl<W: Write> Engine<W> {
                     })
                 })
     }
-    /// This runs after admission: a launch on the cleanup deadline is denied;
-    /// the same request flushes removal, permitting the next launch request.
-    pub(crate) fn queue_projectile_publications(
-        &mut self,
-        now: Duration,
-    ) -> Result<(), &'static str> {
-        // Hold cleanup for the slowest recipient. This check runs before drain:
-        // the last queued state2 grants500ms from its actual delivery request,
-        // even when the32-message budget deferred it past the original deadline.
-        let queued_terminals: std::collections::BTreeSet<_> = self
-            .peers
+    pub(super) fn queued_projectile_terminals(&self) -> std::collections::BTreeSet<(u8, u16)> {
+        self.peers
             .values()
             .chain(self.active.iter())
             .flat_map(|recipient| &recipient.pending_shared)
@@ -1060,7 +1061,18 @@ impl<W: Write> Engine<W> {
             .flatten()
             .filter(|report| report.fields.state == Some(2))
             .map(|report| (report.slot, report.object_index))
-            .collect();
+            .collect()
+    }
+    /// This runs after admission: a launch on the cleanup deadline is denied;
+    /// the same request flushes removal, permitting the next launch request.
+    pub(crate) fn queue_projectile_publications(
+        &mut self,
+        now: Duration,
+    ) -> Result<(), &'static str> {
+        // Hold cleanup for the slowest recipient. This check runs before drain:
+        // the last queued state2 grants500ms from its actual delivery request,
+        // even when the32-message budget deferred it past the original deadline.
+        let queued_terminals = self.queued_projectile_terminals();
         let held_until = (!queued_terminals.is_empty())
             .then(|| {
                 now.checked_add(Duration::from_millis(500))

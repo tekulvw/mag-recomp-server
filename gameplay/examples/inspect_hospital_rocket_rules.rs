@@ -30,7 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         native_elf_sha,
     )?;
 
-    println!("Offline source inspection. Engine rocket firing remains disabled.");
+    println!("Offline source inspection. This command does not start an Engine or enable firing.");
     println!("Native ELF SHA-256 {native_elf_sha}");
     for binding in catalog.variants() {
         let variant = catalog

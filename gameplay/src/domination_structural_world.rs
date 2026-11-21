@@ -4,6 +4,9 @@ use crate::{
     acquisition_ground_damage, acquisition_ground_runtime as ground,
     acquisition_volume_damage::TargetKind,
     active_ability_effects::{BlastFalloff, BombletSample, GasVolume},
+    domination_projectile_collision::{
+        BodyBinding, ContactBindings, SequenceBinding, SurfaceBinding,
+    },
     domination_structural_effects::{
         BlastProperties, Catalog as StructuralCatalog, Creation, InstantaneousBlast,
         PlaybackChange, TerrainMaterialGrid,
@@ -13,6 +16,9 @@ use crate::{
     *,
 };
 use std::collections::{BTreeMap, BTreeSet};
+
+#[path = "hospital_rocket_damage.rs"]
+mod hospital_rocket_damage;
 
 const CHARACTERS_PER_UPDATE: u16 = 16;
 const CHARACTER_FAMILY_CAPACITY: u16 = 256;
@@ -165,7 +171,8 @@ struct BlastRay {
     end: [f64; 3],
     excludes: [Option<u64>; 2],
     penetration: f32,
-    source: BlastSource,
+    zero_penetration_strike: bool,
+    filter_static: bool,
 }
 
 impl BlastCollision<'_> {
@@ -244,14 +251,14 @@ impl BlastCollision<'_> {
             end,
             excludes,
             penetration,
-            source,
+            zero_penetration_strike,
+            filter_static,
         } = ray;
         if start == end {
             return Ok(true);
         }
-        let zero_penetration_strike = source.is_command();
         let row = self.filter_rows[24];
-        let mut hits = if zero_penetration_strike {
+        let mut hits = if filter_static {
             scene.filtered_material_ray_hits(start, end, row, budget)
         } else {
             scene.material_ray_hits(start, end, budget)
@@ -581,7 +588,8 @@ impl<W: Write> Engine<W> {
                                 Some(body.target.key.id),
                             ],
                             penetration: blast.material_penetration,
-                            source,
+                            zero_penetration_strike: source.is_command(),
+                            filter_static: source.is_command(),
                         },
                         &mut static_budget,
                     )?
@@ -619,7 +627,8 @@ impl<W: Write> Engine<W> {
                                 end: surface.pose.translation,
                                 excludes: [source.vehicle_body().map(u64::from), Some(target_id)],
                                 penetration: blast.material_penetration,
-                                source,
+                                zero_penetration_strike: source.is_command(),
+                                filter_static: source.is_command(),
                             },
                             &mut static_budget,
                         )?,
@@ -1252,6 +1261,17 @@ fn direction(displacement: [f32; 3], distance_squared: f32) -> [f32; 3] {
     }
 }
 
+impl SequencePackBinding {
+    fn projectile_binding(&self, mesh: &collision::CollisionWorld) -> Option<SequenceBinding> {
+        Some(SequenceBinding {
+            source_sha256: self.source_sha256.clone(),
+            neutral_sha256: self.neutral_sha256.clone(),
+            collision_tag: self.collision_tag.try_into().ok()?,
+            part_ids: projectile_part_ids(mesh),
+        })
+    }
+}
+
 /// Neutral shape resources extracted from the placed map. Every pack is
 /// validated against its source digest before being used by a sequence.
 pub struct SequenceCollisionAssets {
@@ -1297,7 +1317,8 @@ pub struct SequenceCollisionState {
     helos: BTreeMap<u16, SequenceSurface>,
 }
 #[derive(Clone)]
-struct SequenceSurface {
+pub(crate) struct SequenceSurface {
+    projectile: Option<SurfaceBinding>,
     pose: Pose,
     mesh: collision::CollisionWorld,
 }
@@ -1307,8 +1328,10 @@ pub struct HospitalHulkAssets {
 }
 
 struct HospitalHulk {
+    layer: u8,
     mesh: collision::CollisionWorld,
     operational: Option<collision::CollisionWorld>,
+    projectile: Option<BodyBinding>,
     damage: HospitalDestruction,
 }
 
@@ -1385,6 +1408,8 @@ impl HospitalHulkAssets {
         {
             return Err("domination_hulk_asset_source_mismatch");
         }
+        use sha2::Digest;
+        let asset_sha256 = format!("{:x}", sha2::Sha256::digest(raw));
         let mut by_faction = BTreeMap::new();
         for (faction, mut row) in doc.factions {
             if row.collision_tag != 9
@@ -1437,6 +1462,12 @@ impl HospitalHulkAssets {
             if mesh.stats().triangles == 0 {
                 return Err("empty_domination_hulk_mesh");
             }
+            let mut projectile = row.operational.as_ref().map(|body| BodyBinding {
+                asset_sha256: asset_sha256.clone(),
+                faction,
+                packfile_sha256: body.packfile_sha256.clone(),
+                part_ids: Vec::new(),
+            });
             let operational = row.operational.map(|mut body| {
                 if body.layer != 22 || body.motion_type != 6 || body.collision_tag != 9
                     || !digest(&body.packfile_sha256) || !digest(&body.source_member_sha256)
@@ -1466,11 +1497,16 @@ impl HospitalHulkAssets {
                 }
                 Ok(mesh)
             }).transpose()?;
+            if let (Some(binding), Some(mesh)) = (&mut projectile, &operational) {
+                binding.part_ids = projectile_part_ids(mesh);
+            }
             by_faction.insert(
                 faction,
                 HospitalHulk {
+                    layer: row.initial_rigid_body_filter,
                     mesh,
                     operational,
+                    projectile,
                     damage,
                 },
             );
@@ -1503,6 +1539,7 @@ impl HospitalHulkAssets {
 
 /// Original keyframed transport meshes, bound to the selected fleet source.
 pub struct HeloCollisionAssets {
+    projectile: BTreeMap<u8, BodyBinding>,
     by_faction: BTreeMap<u8, collision::CollisionWorld>,
 }
 
@@ -1554,6 +1591,7 @@ impl HeloCollisionAssets {
         {
             return Err("domination_helo_mesh_source_mismatch");
         }
+        let mut projectile = BTreeMap::new();
         let mut by_faction = BTreeMap::new();
         for (faction, name) in [(0, "Valor"), (1, "Raven"), (2, "SVER")] {
             let row = doc
@@ -1597,9 +1635,21 @@ impl HeloCollisionAssets {
             if mesh.stats().triangles == 0 {
                 return Err("empty_domination_helo_mesh");
             }
+            projectile.insert(
+                faction,
+                BodyBinding {
+                    asset_sha256: models_receipt_sha256.to_owned(),
+                    faction,
+                    packfile_sha256: row.packfile_sha256.clone(),
+                    part_ids: projectile_part_ids(&mesh),
+                },
+            );
             by_faction.insert(faction, mesh);
         }
-        Ok(Self { by_faction })
+        Ok(Self {
+            by_faction,
+            projectile,
+        })
     }
 
     fn mesh(&self, faction: u8) -> Result<collision::CollisionWorld, &'static str> {
@@ -1610,7 +1660,114 @@ impl HeloCollisionAssets {
     }
 }
 
+fn projectile_part_ids(mesh: &collision::CollisionWorld) -> Vec<String> {
+    let mut ids = mesh.instance_ids().to_vec();
+    ids.sort_unstable();
+    ids
+}
+
+impl SequenceCollisionAssets {
+    pub(crate) fn projectile_bindings(&self) -> Result<BTreeSet<SequenceBinding>, &'static str> {
+        self.packs
+            .values()
+            .flatten()
+            .map(|pack| {
+                pack.binding
+                    .projectile_binding(&pack.mesh)
+                    .ok_or("invalid_projectile_sequence_tag")
+            })
+            .collect()
+    }
+}
+
+impl HospitalHulkAssets {
+    pub(crate) fn projectile_bindings(&self) -> BTreeSet<BodyBinding> {
+        self.by_faction
+            .values()
+            .filter_map(|row| row.projectile.clone())
+            .collect()
+    }
+}
+
+impl HeloCollisionAssets {
+    pub(crate) fn projectile_bindings(&self) -> impl Iterator<Item = &BodyBinding> {
+        self.projectile.values()
+    }
+}
+
+impl SequenceCollisionState {
+    pub(crate) fn projectile_surfaces(
+        &self,
+        budget: &mut usize,
+    ) -> Result<Vec<(String, &SequenceSurface)>, &'static str> {
+        let mut surfaces = Vec::new();
+        for ((objective, event), rows) in &self.active {
+            for (slot, surface) in rows.iter().enumerate() {
+                *budget = budget
+                    .checked_sub(1)
+                    .ok_or("projectile_contact_work_limit")?;
+                surfaces.push((format!("objective-{objective}-{event}-{slot}"), surface));
+            }
+        }
+        for (label, rows) in [
+            ("hospital", &self.hospitals),
+            ("hulk", &self.hulks),
+            ("helo", &self.helos),
+        ] {
+            for (index, surface) in rows {
+                *budget = budget
+                    .checked_sub(1)
+                    .ok_or("projectile_contact_work_limit")?;
+                surfaces.push((format!("{label}-{index}"), surface));
+            }
+        }
+        Ok(surfaces)
+    }
+}
+
 impl SequenceSurface {
+    pub(crate) fn projectile_obstacles<'a>(
+        &'a self,
+        placement: &'a str,
+        sweep: &crate::projectile_contact::SphereSweep,
+        layer_mask: u32,
+        bindings: &ContactBindings,
+        budget: &mut usize,
+    ) -> Result<Vec<crate::projectile_contact::TriangleObstacle<'a>>, &'static str> {
+        use crate::projectile_contact::{TriangleId, TriangleObstacle};
+        let (root, properties) = self
+            .projectile
+            .as_ref()
+            .ok_or("projectile_overlay_binding_unavailable")?
+            .layers(bindings)?;
+        if layer_mask & (1 << root) == 0 {
+            return Ok(Vec::new());
+        }
+        let properties = properties.ok_or("projectile_overlay_binding_unavailable")?;
+        if layer_mask & (1 << properties.child_filter_info) == 0 {
+            return Ok(Vec::new());
+        }
+        let start = self.local(sweep.start);
+        let end = self.local(sweep.end);
+        let extent = sweep.radius + properties.convex_radius;
+        let min = std::array::from_fn(|axis| start[axis].min(end[axis]) - extent);
+        let max = std::array::from_fn(|axis| start[axis].max(end[axis]) + extent);
+        Ok(self
+            .mesh
+            .local_projectile_triangles_in_box(min, max, budget)?
+            .map(|(instance, triangle, vertices)| TriangleObstacle {
+                id: TriangleId::Sequence {
+                    placement,
+                    instance,
+                    triangle,
+                },
+                vertices,
+                pose: self.pose,
+                margin: properties.convex_radius,
+            })
+            .collect())
+    }
+
     fn overlaps_sphere(
         &self,
         local: [f64; 3],
@@ -1819,6 +1976,10 @@ impl SequenceCollisionState {
                 let pose = resolve_pose(creation, &pack.binding)?;
                 pose.validate()?;
                 surfaces.push(SequenceSurface {
+                    projectile: pack
+                        .binding
+                        .projectile_binding(&pack.mesh)
+                        .map(SurfaceBinding::Sequence),
                     pose,
                     mesh: pack.mesh.clone(),
                 });
@@ -1840,13 +2001,18 @@ impl SequenceCollisionState {
         assets: &HospitalHulkAssets,
     ) -> Result<(), &'static str> {
         pose.validate()?;
-        let mesh = assets
+        let hulk = assets
             .by_faction
             .get(&faction)
-            .ok_or("unbound_domination_hospital_hulk")?
-            .mesh
-            .clone();
-        self.hulks.insert(index, SequenceSurface { pose, mesh });
+            .ok_or("unbound_domination_hospital_hulk")?;
+        self.hulks.insert(
+            index,
+            SequenceSurface {
+                pose,
+                mesh: hulk.mesh.clone(),
+                projectile: Some(SurfaceBinding::HospitalHulk { layer: hulk.layer }),
+            },
+        );
         Ok(())
     }
 
@@ -1878,8 +2044,17 @@ impl SequenceCollisionState {
         };
         pose.validate()?;
         self.hulks.remove(&hospital.index);
-        self.hospitals
-            .insert(hospital.index, SequenceSurface { pose, mesh });
+        self.hospitals.insert(
+            hospital.index,
+            SequenceSurface {
+                pose,
+                mesh,
+                projectile: assets.by_faction[&hospital.faction]
+                    .projectile
+                    .clone()
+                    .map(SurfaceBinding::Hospital),
+            },
+        );
         Ok(())
     }
 
@@ -1896,7 +2071,18 @@ impl SequenceCollisionState {
     ) -> Result<(), &'static str> {
         pose.validate()?;
         let mesh = assets.mesh(faction)?;
-        self.helos.insert(index, SequenceSurface { pose, mesh });
+        self.helos.insert(
+            index,
+            SequenceSurface {
+                pose,
+                mesh,
+                projectile: assets
+                    .projectile
+                    .get(&faction)
+                    .cloned()
+                    .map(SurfaceBinding::Helo),
+            },
+        );
         Ok(())
     }
 
@@ -2044,6 +2230,37 @@ impl SequenceCollisionState {
 }
 
 #[cfg(test)]
+impl SequenceCollisionState {
+    pub(crate) fn synthetic_projectile_hospital(&mut self, index: u16, x: f64, digest: String) {
+        let payload = json!({
+            "format":"mag_collision_world", "schema_version":1, "coordinate_space":"world",
+            "metadata":{"map_name":"synthetic","build":"synthetic","coverage":"provisional",
+                "provenance":["synthetic"],"unknowns":[]},
+            "instances":[{"id":"hospital-face", "material_index":1,
+                "vertices_xyz":[[0.,-2.,-2.],[0.,2.,-2.],[0.,0.,2.]],"triangles":[[0,1,2]]}]
+        });
+        let mesh = collision::CollisionWorld::from_bytes(
+            &serde_json::to_vec(&payload).unwrap(),
+            collision::CollisionLimits::default(),
+        )
+        .unwrap();
+        self.hospitals.insert(
+            index,
+            SequenceSurface {
+                projectile: Some(SurfaceBinding::Hospital(BodyBinding {
+                    asset_sha256: digest.clone(),
+                    faction: 0,
+                    packfile_sha256: digest,
+                    part_ids: vec!["hospital-face".to_owned()],
+                })),
+                pose: Pose::at([x, 0., 0.]),
+                mesh,
+            },
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
 
     #[test]
@@ -2111,14 +2328,16 @@ mod tests {
             end: [1., -1., 1.],
             excludes: [None; 2],
             penetration: 0.,
-            source: BlastSource::AirStrike,
+            zero_penetration_strike: true,
+            filter_static: true,
         };
         assert_eq!(
             collision.clear_path(&scene, &snapshot, ray, &mut 100),
             Ok(false)
         );
         let old_source = BlastRay {
-            source: BlastSource::Structural { objective_id: 1 },
+            zero_penetration_strike: false,
+            filter_static: false,
             ..ray
         };
         assert_eq!(
@@ -2160,6 +2379,7 @@ mod tests {
         sequences.hulks.insert(
             1,
             SequenceSurface {
+                projectile: None,
                 pose: Pose::at([0., 1., 0.]),
                 mesh: scene.clone(),
             },
@@ -2276,6 +2496,7 @@ mod tests {
         )
         .unwrap();
         let assets = HeloCollisionAssets {
+            projectile: BTreeMap::new(),
             by_faction: BTreeMap::from([(0, mesh)]),
         };
         let mut state = SequenceCollisionState::default();

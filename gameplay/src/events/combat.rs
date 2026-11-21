@@ -413,6 +413,12 @@ pub(super) fn fire_grenade<W: Write>(
     request: protocol::FireGrenade,
 ) -> Result<Value, &'static str> {
     let active = ctx.active;
+    if ctx.engine.hospital_rockets.is_some()
+        && active.mounted_bunker.is_some()
+        && active.mounted_seat == Some(0)
+    {
+        return Ok(fire_hospital_rocket(ctx, plan, request));
+    }
     let now = ctx.now;
     let next_sequence = ctx.next_sequence;
     let history_available = ctx.history_available;
@@ -441,6 +447,11 @@ pub(super) fn fire_grenade<W: Write>(
         plan.gameplay_denial = Some("projectile_requires_living_on_foot_character");
     } else if request.ammo_index != 4 || request.projectile_index >= 3 || grenade.is_none() {
         plan.gameplay_denial = Some("unsupported_projectile_item_or_slot");
+    } else if active
+        .hospital_rocket_flights
+        .occupies(request.projectile_index as u8)
+    {
+        plan.gameplay_denial = Some("projectile_slot_in_use");
     } else if ctx
         .engine
         .projectile_cleanup_pending(active, request.projectile_index as u8)
@@ -527,6 +538,45 @@ pub(super) fn fire_grenade<W: Write>(
         "projectile_index":request.projectile_index,"projectile_created":created,"damage_applied":false,
         "ammo_remaining":plan.combat.new_grenade_remaining.unwrap_or(active.grenade_remaining)}),
     )
+}
+
+fn fire_hospital_rocket<W: Write>(
+    ctx: &PlanningContext<'_, W>,
+    plan: &mut EventPlan,
+    request: protocol::FireGrenade,
+) -> Value {
+    use crate::hospital_rocket_runtime::LaunchDisposition;
+    let candidate = if !ctx.accepted_client_route {
+        Err("hospital_rocket_requires_native_client_route")
+    } else if !ctx.history_available {
+        Err("replication_history_limit")
+    } else {
+        ctx.engine.plan_hospital_rocket_launch(
+            ctx.active,
+            request,
+            ctx.decoded.bytes,
+            ctx.now,
+            ctx.next_sequence,
+        )
+    };
+    match candidate {
+        Ok(LaunchDisposition::Created(launch)) => {
+            plan.hospital_turret = Some((launch.hospital, launch.turret));
+            plan.combat.new_hospital_rocket = Some((launch.slot, launch.flight));
+            plan.replication.projectile_delta = Some(launch.packet.clone());
+            plan.outgoing = Some(launch.packet);
+            launch.audit
+        }
+        Ok(LaunchDisposition::Duplicate) => {
+            json!({"type":"hospital_rocket_launch","disposition":"duplicate",
+                "slot":request.projectile_index})
+        }
+        Err(reason) => {
+            plan.gameplay_denial = Some(reason);
+            json!({"type":"hospital_rocket_launch","disposition":"denied",
+                "slot":request.projectile_index,"reason":reason})
+        }
+    }
 }
 
 pub(super) fn heal<W: Write>(
