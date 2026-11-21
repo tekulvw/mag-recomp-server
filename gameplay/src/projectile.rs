@@ -1,12 +1,25 @@
-//! Native grenade projectile replication. Evidence: heal-grenade-armor and spawn-wire.
-//! Types16..18 reconcile with the client's already predicted projectiles; their
-//! Object::Position and Object::Rotation fields have49 and44 bits respectively.
+//! Native projectile replication. Families 16–18 in prototype and 16–19 in
+//! retail reconcile with client-predicted objects using the same position and
+//! rotation fields.
 use crate::item_catalog::{self, ItemCatalog};
 use crate::replication::{BitReader, BitWriter, CharacterPosition, ObjectUpdate, UpdateHeader};
+use crate::wire_profile::WireProfile;
 use serde::Serialize;
 /// Age allowance is local admission policy, separate from authored lifetime.
 pub const PROJECTILE_AGE_GRACE_MS: u64 = 2000;
+/// Legacy three-family mask for callers using the prototype profile.
 pub const PROJECTILE_TYPE_MASK: u32 = (1 << 16) | (1 << 17) | (1 << 18);
+pub(crate) const MAX_PROJECTILE_SLOTS: usize = 4;
+
+/// Both profiles register contiguous projectile families starting at 16.
+/// The wire catalog pairs prototype with 19 mask bits and retail with 20.
+pub(crate) fn projectile_slot_count(profile: WireProfile) -> u8 {
+    (profile.object_type_bits() - 16) as u8
+}
+
+pub(crate) fn projectile_type_mask(profile: WireProfile) -> u32 {
+    ((1 << projectile_slot_count(profile)) - 1) << 16
+}
 #[derive(Clone, Copy, Debug)]
 pub struct ProjectileCreation {
     pub slot: u8,
@@ -61,7 +74,9 @@ impl ProjectileCreation {
         header: UpdateHeader,
         profile: crate::wire_profile::WireProfile,
     ) -> Result<Vec<u8>, &'static str> {
-        if self.slot >= 3 || header.object_type_mask != 1u32 << (16 + self.slot) {
+        if self.slot >= projectile_slot_count(profile)
+            || header.object_type_mask != 1u32 << (16 + self.slot)
+        {
             return Err("invalid_projectile_type");
         }
         let mut bits = BitWriter::with_profile(profile);
@@ -175,13 +190,13 @@ pub fn decode_projectile_updates_with_profile(
     profile: crate::wire_profile::WireProfile,
 ) -> Result<Vec<ProjectileOwnerUpdate>, &'static str> {
     update.validate_profile(profile)?;
-    if update.header.object_type_mask & !PROJECTILE_TYPE_MASK != 0 {
+    if update.header.object_type_mask & !projectile_type_mask(profile) != 0 {
         return Err("unsupported_client_object_type");
     }
     let mut bits = BitReader::with_profile(update.wire, profile);
     bits.position = profile.header_bits();
     let mut entries = Vec::new();
-    for slot in 0..3 {
+    for slot in 0..projectile_slot_count(profile) {
         if update.header.object_type_mask & (1 << (16 + slot)) == 0 {
             continue;
         }

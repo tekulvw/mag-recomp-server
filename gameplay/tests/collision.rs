@@ -203,3 +203,146 @@ fn disk_loader_reads_current_file_and_preserves_explicit_empty_provisional_world
     fs::remove_file(&file.0).unwrap();
     assert!(file.load().is_err());
 }
+
+#[test]
+fn projectile_static_candidates_require_explicit_scope_and_preserve_identity() {
+    use mag_gameplay::projectile_contact::{Coverage, TriangleId};
+    let mut data = fixture();
+    for row in data["instances"].as_array_mut().unwrap() {
+        row["collision"] = json!({"filter_info":9,"ray_child_filter_info":0,
+            "convex_radius":0.3,"provenance":"Synthetic explicit child/margin",
+            "child_filter_policy":"uniform"});
+    }
+    let world = DiskFixture::world(&data).load().unwrap();
+    let mut budget = 1000;
+    assert_eq!(
+        world
+            .projectile_obstacles(
+                [0.; 3],
+                [4., 0., 0.],
+                0.1,
+                Coverage::CompleteCurrent,
+                (1 << 9) | 1,
+                &mut budget
+            )
+            .err(),
+        Some("projectile_static_coverage_unavailable")
+    );
+    let rows = world
+        .projectile_obstacles(
+            [0.; 3],
+            [4., 0., 0.],
+            0.1,
+            Coverage::ReferencePose,
+            (1 << 9) | 1,
+            &mut budget,
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].id,
+        TriangleId::Static {
+            instance: "wall-0",
+            triangle: 0
+        }
+    );
+    assert_eq!(rows[0].margin, 0.3);
+    // Root admission alone cannot silently admit an explicitly excluded child.
+    assert!(
+        world
+            .projectile_obstacles(
+                [0.; 3],
+                [4., 0., 0.],
+                0.1,
+                Coverage::ReferencePose,
+                1 << 9,
+                &mut budget
+            )
+            .unwrap()
+            .is_empty()
+    );
+    // Caller can combine these leaves with live convex and other overlay leaves.
+    let hit = mag_gameplay::projectile_contact::sweep_sphere(
+        mag_gameplay::projectile_contact::SphereSweep {
+            start: [0.; 3],
+            end: [4., 0., 0.],
+            radius: 0.1,
+            associated_character: None,
+        },
+        Coverage::ReferencePose,
+        &rows,
+        &[],
+        Default::default(),
+        &mut budget,
+    )
+    .unwrap()
+    .unwrap();
+    assert!((hit.center[0] - 1.6).abs() < 1e-5);
+}
+
+#[test]
+fn projectile_static_candidates_never_turn_missing_metadata_or_work_into_a_miss() {
+    use mag_gameplay::projectile_contact::Coverage;
+    let world = DiskFixture::world(&fixture()).load().unwrap();
+    let mut budget = 1000;
+    assert_eq!(
+        world
+            .projectile_obstacles(
+                [0.; 3],
+                [4., 0., 0.],
+                0.1,
+                Coverage::ReferencePose,
+                u32::MAX,
+                &mut budget
+            )
+            .err(),
+        Some("projectile_static_properties_unavailable")
+    );
+    let mut data = fixture();
+    for row in data["instances"].as_array_mut().unwrap() {
+        row["collision"] = json!({"filter_info":9,"convex_radius":0.,"provenance":"Synthetic",
+            "child_filter_policy":"uniform"});
+    }
+    let world = DiskFixture::world(&data).load().unwrap();
+    let mut budget = 0;
+    assert!(
+        world
+            .projectile_obstacles(
+                [0.; 3],
+                [4., 0., 0.],
+                0.1,
+                Coverage::ReferencePose,
+                u32::MAX,
+                &mut budget
+            )
+            .is_err()
+    );
+    let mut budget = 1000;
+    assert_eq!(
+        world
+            .projectile_obstacles(
+                [0.; 3],
+                [4., 0., 0.],
+                0.1,
+                Coverage::Unavailable,
+                u32::MAX,
+                &mut budget
+            )
+            .err(),
+        Some("projectile_static_coverage_unavailable")
+    );
+    for radius in [-1., f64::NAN, f64::INFINITY] {
+        assert!(
+            world
+                .projectile_obstacles(
+                    [0.; 3],
+                    [4., 0., 0.],
+                    radius,
+                    Coverage::ReferencePose,
+                    u32::MAX,
+                    &mut budget
+                )
+                .is_err()
+        );
+    }
+}

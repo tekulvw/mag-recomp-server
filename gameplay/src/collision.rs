@@ -239,6 +239,87 @@ pub struct CollisionWorld {
     max_abs_coordinate: f64,
 }
 impl CollisionWorld {
+    /// Enumerate immutable represented-world leaves for the separate combined
+    /// projectile collector. Callers must also supply every eligible live body
+    /// and overlay before using a clear result as a world-flight decision.
+    ///
+    /// `ReferencePose` deliberately accepts this file's represented poses and
+    /// preserves its provisional metadata. It does not establish current parent
+    /// transforms. Root and explicit uniform child layer masks are intersected
+    /// as a replacement query policy, not Havok collision-agent certification.
+    pub fn projectile_obstacles(
+        &self,
+        start: Vec3,
+        end: Vec3,
+        radius: f64,
+        scope: crate::projectile_contact::Coverage,
+        layer_mask: u32,
+        budget: &mut usize,
+    ) -> Result<Vec<crate::projectile_contact::TriangleObstacle<'_>>, &'static str> {
+        use crate::projectile_contact::{Coverage as Scope, TriangleId, TriangleObstacle};
+        if scope == Scope::Unavailable {
+            return Err("projectile_static_coverage_unavailable");
+        }
+        if !valid_point(start, self.max_abs_coordinate)
+            || !valid_point(end, self.max_abs_coordinate)
+            || start == end
+            || !radius.is_finite()
+            || !(0.0..=100.).contains(&radius)
+            || radius == 0.
+        {
+            return Err("projectile_static_invalid_segment");
+        }
+        let mut margin: f64 = 0.;
+        for row in self.static_properties.iter() {
+            *budget = budget
+                .checked_sub(1)
+                .ok_or("projectile_contact_work_limit")?;
+            let properties = row
+                .as_ref()
+                .ok_or("projectile_static_properties_unavailable")?;
+            if layer_mask & (1 << (properties.filter_info & 31)) != 0 {
+                margin = margin.max(properties.convex_radius);
+            }
+        }
+        let min = std::array::from_fn(|i| start[i].min(end[i]) - radius - margin);
+        let max = std::array::from_fn(|i| start[i].max(end[i]) + radius + margin);
+        if scope == Scope::CompleteCurrent
+            && self.metadata.coverage != Coverage::Complete
+            && !self.metadata.physics_regions.iter().any(|r| {
+                r.ground_verified
+                    && r.obstacles_verified
+                    && (0..3).all(|i| r.min[i] <= min[i] && r.max[i] >= max[i])
+            })
+        {
+            return Err("projectile_static_coverage_unavailable");
+        }
+        let candidates = self.triangle_indices_in_box(min, max, budget)?;
+        let mut result = Vec::with_capacity(candidates.len());
+        for index in candidates {
+            let triangle = &self.triangles[index];
+            let properties = self.static_properties[triangle.instance]
+                .as_ref()
+                .ok_or("projectile_static_properties_unavailable")?;
+            let child = properties
+                .ray_child_filter_info
+                .unwrap_or(properties.filter_info);
+            if layer_mask & (1 << (properties.filter_info & 31)) == 0
+                || layer_mask & (1 << (child & 31)) == 0
+            {
+                continue;
+            }
+            result.push(TriangleObstacle {
+                id: TriangleId::Static {
+                    instance: &self.instance_ids[triangle.instance],
+                    triangle: triangle.triangle_index,
+                },
+                vertices: triangle.vertices,
+                pose: crate::dynamic_collision::Pose::at([0.; 3]),
+                margin: properties.convex_radius,
+            });
+        }
+        Ok(result)
+    }
     pub(crate) fn static_query_radius(&self) -> Result<f64, &'static str> {
         if self.metadata.coverage != Coverage::Complete
             && !self

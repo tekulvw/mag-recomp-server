@@ -94,7 +94,7 @@ impl Geometry {
             | Self::Triangle { radius, .. } => *radius,
         }
     }
-    fn validate(&self) -> Result<(), &'static str> {
+    pub(crate) fn validate(&self) -> Result<(), &'static str> {
         let valid = |p: [f64; 3]| p.into_iter().all(|v| v.is_finite() && v.abs() <= 10_000.);
         let r = self.radius();
         if !r.is_finite() || !(0.0..=100.).contains(&r) {

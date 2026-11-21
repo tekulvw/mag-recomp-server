@@ -45,13 +45,15 @@ impl ClientCharacterFields {
         let mut bits = BitReader::with_profile(update.wire, profile);
         bits.position = bits.profile.header_bits();
         let mask = update.header.object_type_mask;
-        if mask & !(8 | crate::projectile::PROJECTILE_TYPE_MASK) != 0 {
+        if mask & !(8 | crate::projectile::projectile_type_mask(profile)) != 0 {
             return Err("unsupported_client_object_type");
         }
         // Native lists are ordered by increasing object type, with each object's
         // presence bits interleaved with its data. Decode the entire body before
         // exposing either the Character prefix or any projectile report.
-        for object_type in [3, 16, 17, 18] {
+        for object_type in
+            std::iter::once(3).chain(16..16 + crate::projectile::projectile_slot_count(profile))
+        {
             if mask & (1 << object_type) == 0 || bits.read(1)? == 0 {
                 continue;
             }
