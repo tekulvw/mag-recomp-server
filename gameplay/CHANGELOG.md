@@ -1,5 +1,61 @@
 # Changelog
 
+## [0.8.0](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.7.1...gameplay-v0.8.0) (2026-11-21)
+
+
+### Features
+
+* **gameplay:** add authenticated manual squad orders ([fa83a4e](https://github.com/tekulvw/mag-recomp-server/commit/fa83a4ea4617df62bc2829776b64054152a62557))
+* **gameplay:** add bounded Domination objective and round runtime ([#84](https://github.com/tekulvw/mag-recomp-server/issues/84)) ([fb70714](https://github.com/tekulvw/mag-recomp-server/commit/fb70714d0991db4bbd2922269baa33c2cb1f8d0e))
+* **gameplay:** add bounded Domination profiles and controller primitives ([#83](https://github.com/tekulvw/mag-recomp-server/issues/83)) ([bb3a715](https://github.com/tekulvw/mag-recomp-server/commit/bb3a7157907b8ca598f65b878968f612664f6f79))
+* **gameplay:** add source-bound Domination APC gunners ([#111](https://github.com/tekulvw/mag-recomp-server/issues/111)) ([b012e44](https://github.com/tekulvw/mag-recomp-server/commit/b012e447901f840a5f727ea4172c3ab0d1adb3c7))
+* **gameplay:** add source-bound hospital rocket prerequisites ([#114](https://github.com/tekulvw/mag-recomp-server/issues/114)) ([3e100a4](https://github.com/tekulvw/mag-recomp-server/commit/3e100a4875b1c9fb444ebd113a185b41fd78c665))
+* **gameplay:** apply living leadership AutoHeal ([861af10](https://github.com/tekulvw/mag-recomp-server/commit/861af102ddf79faf99ffc934ddf8e241bb96f407))
+* **gameplay:** apply occupied Escort leadership AutoRepair ([ea6ea29](https://github.com/tekulvw/mag-recomp-server/commit/ea6ea299e454cbe9cf4c134a2f7d17e10a9ae6c4))
+* **gameplay:** apply retail structure strike receivers ([8640dc3](https://github.com/tekulvw/mag-recomp-server/commit/8640dc3734453060ca5aa4f9018c751c564c5a39))
+* **gameplay:** apply retail structure strike receivers ([fce3baa](https://github.com/tekulvw/mag-recomp-server/commit/fce3baa6f610b7bffdf1ac7699af261f6264f295))
+* **gameplay:** award contextual FRAGO bonuses for healing and revival ([3903542](https://github.com/tekulvw/mag-recomp-server/commit/3903542961923dcf1560c38d91b4d338291be7a3))
+* **gameplay:** award contextual FRAGO kill bonuses ([9ec1466](https://github.com/tekulvw/mag-recomp-server/commit/9ec1466486dc67e20a197d9614f09c7433f34c2f))
+* **gameplay:** award FRAGO bonuses for healing and revival ([4a0b353](https://github.com/tekulvw/mag-recomp-server/commit/4a0b353bfb595229f3b4dd53d0cd62ec065519c9))
+* **gameplay:** award repair work XP and contextual FRAGO bonuses ([be58260](https://github.com/tekulvw/mag-recomp-server/commit/be582602c905845db7bc57d75f1ff8c26f337f1d))
+* **gameplay:** award repair work XP and FRAGO bonuses ([b64b625](https://github.com/tekulvw/mag-recomp-server/commit/b64b625b2b6e3774c018632895718398974eca8d))
+* **gameplay:** award structural destruction and escort delivery XP ([c0d7448](https://github.com/tekulvw/mag-recomp-server/commit/c0d74480e3f6a756fd8597e303aee2bf35da8757))
+* **gameplay:** award structural destruction and escort delivery XP ([decd9af](https://github.com/tekulvw/mag-recomp-server/commit/decd9afb3bf87a955a7898a9241f3ed936f850e6))
+* **gameplay:** complete Acquisition Structural interactions ([442b97d](https://github.com/tekulvw/mag-recomp-server/commit/442b97d400238502ee96a0c586712d59e901402a))
+* **gameplay:** complete the core Acquisition match loop ([#81](https://github.com/tekulvw/mag-recomp-server/issues/81)) ([9b7cd13](https://github.com/tekulvw/mag-recomp-server/commit/9b7cd1389ea37f8065b13380f64508fd3bb121af))
+* **gameplay:** connect Domination objectives and vehicle lifecycle ([#85](https://github.com/tekulvw/mag-recomp-server/issues/85)) ([11d0ef1](https://github.com/tekulvw/mag-recomp-server/commit/11d0ef157d260fb3f4f8ee66433d213b29d3b390))
+* **gameplay:** connect platoon authority and command effects ([bb3586e](https://github.com/tekulvw/mag-recomp-server/commit/bb3586ed9f119189ca94094345014f845a5dc6f4))
+* **gameplay:** enable Acquisition Escort gunners ([#113](https://github.com/tekulvw/mag-recomp-server/issues/113)) ([542db6b](https://github.com/tekulvw/mag-recomp-server/commit/542db6bcf7f53e102a87bfe81cfed64d732f2733))
+* **gameplay:** enable hospital rockets against on-foot characters ([#115](https://github.com/tekulvw/mag-recomp-server/issues/115)) ([983dd27](https://github.com/tekulvw/mag-recomp-server/commit/983dd27dc6304291243695b50f72c29923a00542))
+* **gameplay:** enable qualified Domination APC drivers ([#109](https://github.com/tekulvw/mag-recomp-server/issues/109)) ([3a4de1f](https://github.com/tekulvw/mag-recomp-server/commit/3a4de1f0c15f9844b35f5a6b3caf26c275249846))
+* **gameplay:** enable squad abilities by default ([534ed89](https://github.com/tekulvw/mag-recomp-server/commit/534ed896c20c0d2a91ebe91b36ec71fabea3c9af))
+* **gameplay:** enable squad abilities by default ([25c0126](https://github.com/tekulvw/mag-recomp-server/commit/25c0126e38145354e39da1de490c2eba837ab9e0))
+* **gameplay:** execute source-bound squad abilities ([e395567](https://github.com/tekulvw/mag-recomp-server/commit/e395567b76b2e7bacdb72d54324f0a8f4d3ac760))
+* **gameplay:** execute source-bound squad abilities ([c24b648](https://github.com/tekulvw/mag-recomp-server/commit/c24b64884cae1026430f1db21755647d249966a6))
+* **gameplay:** isolate completed match cohorts for requeue ([#105](https://github.com/tekulvw/mag-recomp-server/issues/105)) ([45a0d2f](https://github.com/tekulvw/mag-recomp-server/commit/45a0d2f52ea4839a4bf3c74a992f858f9d25b18f))
+* **gameplay:** persist leadership points and rank advancement ([6b34889](https://github.com/tekulvw/mag-recomp-server/commit/6b3488993dd9118b39b8ac0b18ff175f160dfa1e))
+* **gameplay:** qualify excluded static roots for Acquisition respawns ([#79](https://github.com/tekulvw/mag-recomp-server/issues/79)) ([508c7ea](https://github.com/tekulvw/mag-recomp-server/commit/508c7eaedadce2a4080c9c92ff24b77ca72f0c4f))
+* **gameplay:** settle objective XP with FRAGO bonuses ([999ef58](https://github.com/tekulvw/mag-recomp-server/commit/999ef58549ee8f3de1f816aa6f42b65c3f9e2581))
+* **gameplay:** settle objective XP with FRAGO bonuses ([9419478](https://github.com/tekulvw/mag-recomp-server/commit/94194789188ec8d7e0add8e4c90e01bdf7df08dd))
+* **gameplay:** support indexed Domination hospital primary turrets ([#110](https://github.com/tekulvw/mag-recomp-server/issues/110)) ([bcd4ac6](https://github.com/tekulvw/mag-recomp-server/commit/bcd4ac6c551ac8442bbd8cdf4de0b550dd8e0091))
+* **gameplay:** support manual Ground vehicle repairs ([36d45ff](https://github.com/tekulvw/mag-recomp-server/commit/36d45ffee4334dc716745bc7ba0f9ba2a4488d80))
+* **gameplay:** support manual Ground vehicle repairs ([907250a](https://github.com/tekulvw/mag-recomp-server/commit/907250ac7de63cc9fea1e1fa4b3d088e4bd472c1))
+* **gameplay:** support native platoon command abilities ([815b971](https://github.com/tekulvw/mag-recomp-server/commit/815b9718a5d8f4d81215f41ab86e0002e13ad636))
+* **gameplay:** support OIC strategics and Acquisition structural effects ([d9638b6](https://github.com/tekulvw/mag-recomp-server/commit/d9638b6461736edf8cb4ead6f4237ff01ba3f310))
+* **server:** coordinate configured independent live worlds ([#106](https://github.com/tekulvw/mag-recomp-server/issues/106)) ([d5e68a4](https://github.com/tekulvw/mag-recomp-server/commit/d5e68a488892e7c81731bf05081bc1c0a9e2687f))
+
+
+### Bug Fixes
+
+* **gameplay:** complete objective counters and rebuilt defuse rewards ([1af7194](https://github.com/tekulvw/mag-recomp-server/commit/1af71945c8c25332a31538dfb73ebc5aa6cc39af))
+* **gameplay:** complete objective counters and rebuilt defuse rewards ([9cdee8e](https://github.com/tekulvw/mag-recomp-server/commit/9cdee8ed7fc9d3fdab352c19735a20885818f87f))
+* **gameplay:** honor held leadership for squad spawn selection ([5531077](https://github.com/tekulvw/mag-recomp-server/commit/5531077e34fcc725ec49fa770bbd6ecdf7287791))
+* **gameplay:** publish same-state Domination playback sequences ([#108](https://github.com/tekulvw/mag-recomp-server/issues/108)) ([387c4e7](https://github.com/tekulvw/mag-recomp-server/commit/387c4e7ea6137be18e0b4ac09b695d97c6a7f593))
+* **gameplay:** qualify Domination APC passenger area scans ([#107](https://github.com/tekulvw/mag-recomp-server/issues/107)) ([5dc3c4f](https://github.com/tekulvw/mag-recomp-server/commit/5dc3c4fa666f8e453a7716f694a28507d8dd1ab0))
+* **gameplay:** qualify scripted objective reward attribution ([0c75840](https://github.com/tekulvw/mag-recomp-server/commit/0c75840a0272e452d8012ca5d40d8c4c5cf12955))
+* **gameplay:** qualify scripted objective reward attribution ([db09b0b](https://github.com/tekulvw/mag-recomp-server/commit/db09b0bc9c90a167c2dc31cddc8526626bb16ef8))
+* **gameplay:** route mounted primaries through Ground damage ([#112](https://github.com/tekulvw/mag-recomp-server/issues/112)) ([94773c1](https://github.com/tekulvw/mag-recomp-server/commit/94773c1cafdf43b65d1cf7063f44c1ad63f64ed2))
+
 ## [0.7.1](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.7.0...gameplay-v0.7.1) (2026-11-08)
 
 

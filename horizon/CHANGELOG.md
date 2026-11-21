@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.5.0](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.4.0...medius-v0.5.0) (2026-11-21)
+
+
+### Features
+
+* **gameplay:** add bounded Domination profiles and controller primitives ([#83](https://github.com/tekulvw/mag-recomp-server/issues/83)) ([bb3a715](https://github.com/tekulvw/mag-recomp-server/commit/bb3a7157907b8ca598f65b878968f612664f6f79))
+* **gameplay:** award contextual FRAGO bonuses for healing and revival ([3903542](https://github.com/tekulvw/mag-recomp-server/commit/3903542961923dcf1560c38d91b4d338291be7a3))
+* **gameplay:** award contextual FRAGO kill bonuses ([9ec1466](https://github.com/tekulvw/mag-recomp-server/commit/9ec1466486dc67e20a197d9614f09c7433f34c2f))
+* **gameplay:** award FRAGO bonuses for healing and revival ([4a0b353](https://github.com/tekulvw/mag-recomp-server/commit/4a0b353bfb595229f3b4dd53d0cd62ec065519c9))
+* **gameplay:** award repair work XP and contextual FRAGO bonuses ([be58260](https://github.com/tekulvw/mag-recomp-server/commit/be582602c905845db7bc57d75f1ff8c26f337f1d))
+* **gameplay:** award repair work XP and FRAGO bonuses ([b64b625](https://github.com/tekulvw/mag-recomp-server/commit/b64b625b2b6e3774c018632895718398974eca8d))
+* **gameplay:** award structural destruction and escort delivery XP ([c0d7448](https://github.com/tekulvw/mag-recomp-server/commit/c0d74480e3f6a756fd8597e303aee2bf35da8757))
+* **gameplay:** award structural destruction and escort delivery XP ([decd9af](https://github.com/tekulvw/mag-recomp-server/commit/decd9afb3bf87a955a7898a9241f3ed936f850e6))
+* **gameplay:** isolate completed match cohorts for requeue ([#105](https://github.com/tekulvw/mag-recomp-server/issues/105)) ([45a0d2f](https://github.com/tekulvw/mag-recomp-server/commit/45a0d2f52ea4839a4bf3c74a992f858f9d25b18f))
+* **gameplay:** persist leadership points and rank advancement ([6b34889](https://github.com/tekulvw/mag-recomp-server/commit/6b3488993dd9118b39b8ac0b18ff175f160dfa1e))
+* **gameplay:** settle objective XP with FRAGO bonuses ([999ef58](https://github.com/tekulvw/mag-recomp-server/commit/999ef58549ee8f3de1f816aa6f42b65c3f9e2581))
+* **gameplay:** settle objective XP with FRAGO bonuses ([9419478](https://github.com/tekulvw/mag-recomp-server/commit/94194789188ec8d7e0add8e4c90e01bdf7df08dd))
+* **server:** coordinate configured independent live worlds ([#106](https://github.com/tekulvw/mag-recomp-server/issues/106)) ([d5e68a4](https://github.com/tekulvw/mag-recomp-server/commit/d5e68a488892e7c81731bf05081bc1c0a9e2687f))
+
 ## [0.4.0](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.3.1...medius-v0.4.0) (2026-11-11)
 
 
