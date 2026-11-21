@@ -71,6 +71,8 @@ struct Objective {
     state: ObjectiveControlDelta,
     operation: Option<Operation>,
     native: Option<NativeObjective>,
+    reward_attacker: Option<u16>,
+    reward_defender: Option<u16>,
 }
 
 #[derive(Clone)]
@@ -82,8 +84,6 @@ struct NativeObjective {
     damage_health: f32,
     was_repaired: bool,
     autonomous_arming: bool,
-    reward_attacker: Option<u16>,
-    reward_defender: Option<u16>,
     pending: Option<NativePending>,
 }
 
@@ -101,14 +101,19 @@ enum NativePending {
     Precision(Option<crate::structure_damage::Source>),
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum PrecisionRewardActor {
+    Attacker(u16),
+    Defender(u16),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NativeEntry {
     pub class: NativeClass,
     pub previous: ObjectiveState,
     pub delta: ObjectiveControlDelta,
     pub actor_generation: Option<u32>,
-    /// Qualified ordinary stat-callback actor, independent of the wire actor.
-    /// Precision, scripts and damage-trigger latch attribution remain unqualified.
+    /// Qualified native stat-callback actor, independent of the wire actor.
     pub reward_actor: Option<u16>,
     pub active_trigger_index: Option<u8>,
 }
@@ -167,8 +172,6 @@ impl ObjectiveWorld {
                             damage_health,
                             was_repaired: initial == ObjectiveState::Repaired,
                             autonomous_arming: false,
-                            reward_attacker: None,
-                            reward_defender: None,
                             pending: None,
                         }
                     });
@@ -194,6 +197,8 @@ impl ObjectiveWorld {
                             },
                             operation: None,
                             native,
+                            reward_attacker: None,
+                            reward_defender: None,
                         },
                     )
                 })
@@ -281,7 +286,8 @@ impl ObjectiveWorld {
         let mut mode = object.native.take()?;
         let previous = object.state;
         let scripted = matches!(mode.pending, Some(NativePending::Script(..)));
-        let active_trigger_index = if matches!(mode.pending, Some(NativePending::Precision(_))) {
+        let precision = matches!(mode.pending, Some(NativePending::Precision(_)));
+        let active_trigger_index = if precision {
             None
         } else {
             object.fuse.as_ref().map(|fuse| fuse.trigger_index)
@@ -295,13 +301,23 @@ impl ObjectiveWorld {
             &mut self.reward_actions,
         );
         let class = mode.class;
-        let reward_actor = match class {
-            NativeClass::SecureHold if !scripted => Some(object.state.state_actor.actor_index),
-            NativeClass::Structural => match object.state.state_actor.state {
-                ObjectiveState::Activated | ObjectiveState::Completed => mode.reward_attacker,
-                ObjectiveState::Deactivated | ObjectiveState::Repaired => mode.reward_defender,
-                _ => None,
-            },
+        let reward_actor = match (class, scripted, precision) {
+            (NativeClass::SecureHold, false, _) => Some(object.state.state_actor.actor_index),
+            (NativeClass::Structural, false, true) => {
+                precision_completion_actor(object, previous.state_actor.state)
+            }
+            (NativeClass::Structural, false, false) => {
+                use ObjectiveState::{
+                    Activated, Activating, Completed, Deactivated, Deactivating, Repaired,
+                };
+                match (previous.state_actor.state, object.state.state_actor.state) {
+                    (Activating, Activated) | (Activated | Deactivating, Completed) => {
+                        object.reward_attacker
+                    }
+                    (Deactivating, Deactivated | Repaired) => object.reward_defender,
+                    _ => None,
+                }
+            }
             _ => None,
         };
         object.native = Some(mode);
@@ -362,10 +378,20 @@ impl ObjectiveWorld {
 
     /// Precision executes the Structural desired-state setter. Acquisition
     /// consumes the same request through its separate objective controller.
+    #[cfg(test)]
     pub(crate) fn stage_precision_strike(
         &mut self,
         index: u16,
         source: Option<crate::structure_damage::Source>,
+    ) -> Result<bool, &'static str> {
+        self.stage_precision_strike_with_actor(index, source, None)
+    }
+
+    pub(crate) fn stage_precision_strike_with_actor(
+        &mut self,
+        index: u16,
+        source: Option<crate::structure_damage::Source>,
+        reward_actor: Option<PrecisionRewardActor>,
     ) -> Result<bool, &'static str> {
         let Some(object) = self.objects.get_mut(&index) else {
             return Ok(false);
@@ -381,6 +407,11 @@ impl ObjectiveWorld {
             None => {
                 self.acquisition_precision.insert(index, source);
             }
+        }
+        match reward_actor {
+            Some(PrecisionRewardActor::Attacker(player)) => object.reward_attacker = Some(player),
+            Some(PrecisionRewardActor::Defender(player)) => object.reward_defender = Some(player),
+            None => {}
         }
         self.pristine = false;
         Ok(true)
@@ -432,12 +463,15 @@ impl ObjectiveWorld {
             if advance_precision(object, source, now).is_none() {
                 break;
             }
+            if object.state.state_actor.state == ObjectiveState::Deactivated {
+                object.reward_attacker = None;
+            }
             let entry = NativeEntry {
                 class: NativeClass::Structural,
                 previous,
                 delta: object.state,
                 actor_generation: source.map(|actor| actor.generation),
-                reward_actor: None,
+                reward_actor: precision_completion_actor(object, previous),
                 active_trigger_index: None,
             };
             published = Some(entry.delta);
@@ -477,6 +511,8 @@ impl ObjectiveWorld {
         object.state.expiration_time_ms = 0;
         object.state.deactivation_time_ms = 0;
         if class == NativeClass::Structural {
+            object.reward_attacker = None;
+            object.reward_defender = None;
             object.state.health_percent = if target == ObjectiveState::Completed {
                 0
             } else {
@@ -497,11 +533,24 @@ impl ObjectiveWorld {
 
     /// A destroyed type4/5 trigger invokes the owner's ordinary Activating
     /// entry synchronously. Its source need not stand in an interaction volume.
+    #[cfg(test)]
     pub(crate) fn activate_destroyed_trigger(
         &mut self,
         index: u16,
         trigger: u8,
         actor: crate::structure_damage::Source,
+        now: Duration,
+        modifier: f32,
+    ) -> Result<Option<ObjectiveControlDelta>, &'static str> {
+        self.activate_destroyed_trigger_with_source(index, trigger, actor, false, now, modifier)
+    }
+
+    pub(crate) fn activate_destroyed_trigger_with_source(
+        &mut self,
+        index: u16,
+        trigger: u8,
+        actor: crate::structure_damage::Source,
+        source_allocated: bool,
         now: Duration,
         modifier: f32,
     ) -> Result<Option<ObjectiveControlDelta>, &'static str> {
@@ -536,8 +585,8 @@ impl ObjectiveWorld {
         // Retail synchronous SetTargetStateId replaces an unstarted async script request.
         mode.pending = None;
         mode.autonomous_arming = true;
-        mode.reward_attacker = None;
-        mode.reward_defender = None;
+        // Trigger admission installs the source in the attacker slot for either team.
+        object.reward_attacker = source_allocated.then_some(actor.player);
         object.fuse = None;
         object.operation = Some(Operation {
             started_at: now,
@@ -1252,7 +1301,11 @@ fn enter_structural(object: &mut Objective, mode: &mut NativeObjective, previous
                 mode.was_repaired = true;
             }
         }
-        Deactivated | Activated => mode.damage_health = 100.0,
+        Deactivated => {
+            object.reward_attacker = None;
+            mode.damage_health = 100.0;
+        }
+        Activated => mode.damage_health = 100.0,
         _ => {}
     }
     if target != Repairing {
@@ -1297,6 +1350,19 @@ fn advance_precision(
     Some(next)
 }
 
+fn precision_completion_actor(object: &Objective, previous: ObjectiveState) -> Option<u16> {
+    if object.state.state_actor.state == ObjectiveState::Completed
+        && matches!(
+            previous,
+            ObjectiveState::Activated | ObjectiveState::Deactivating
+        )
+    {
+        object.reward_attacker
+    } else {
+        None
+    }
+}
+
 fn tick_native(
     object: &mut Objective,
     mode: &mut NativeObjective,
@@ -1308,8 +1374,8 @@ fn tick_native(
     let previous = object.state.state_actor.state;
     match mode.pending.take() {
         Some(NativePending::Script(target, actor)) => {
-            mode.reward_attacker = None;
-            mode.reward_defender = None;
+            object.reward_attacker = None;
+            object.reward_defender = None;
             set_native_state(
                 object,
                 target,
@@ -1328,10 +1394,6 @@ fn tick_native(
             return actor.and_then(|actor| u32::try_from(actor.generation).ok());
         }
         Some(NativePending::Precision(source)) => {
-            // The desired-Completed cascade bypasses intermediate activation
-            // stats. Its final actor requires side-resolved native latch data.
-            mode.reward_attacker = None;
-            mode.reward_defender = None;
             if let Some(next) = advance_precision(object, source, now) {
                 enter_structural(object, mode, previous);
                 if next != ObjectiveState::Completed {
@@ -1378,10 +1440,10 @@ fn tick_native(
                 }
                 match (kind, object.state.state_actor.state) {
                     (ObjectiveInteractionKind::Activate, ObjectiveState::Activating) => {
-                        mode.reward_attacker = Some(actor.player)
+                        object.reward_attacker = Some(actor.player)
                     }
                     (ObjectiveInteractionKind::Deactivate, ObjectiveState::Deactivating) => {
-                        mode.reward_defender = Some(actor.player)
+                        object.reward_defender = Some(actor.player)
                     }
                     _ => {}
                 }
@@ -1836,6 +1898,150 @@ pub(crate) mod trigger_box_tests {
     }
 
     #[test]
+    fn precision_completion_keeps_the_planter_when_the_strike_source_is_unresolved() {
+        let mut catalog = native_catalog();
+        catalog["objects"][1]["initial_state"] = json!(1);
+        let mut world =
+            ObjectiveWorld::new(&ObjectiveCatalog::from_json(&catalog.to_string()).unwrap());
+        let planter = ObjectiveActor {
+            player: 7,
+            team: 0,
+            generation: 1,
+            position: CharacterPosition {
+                x: 100.,
+                y: 2.5,
+                z: 100.,
+            },
+        };
+        let actors = BTreeMap::from([(planter.player, planter)]);
+        assert!(
+            world
+                .interact(
+                    ObjectiveInteraction {
+                        target_object_id: 0x0c80_000b,
+                        kind: ObjectiveInteractionKind::Activate,
+                        actor_index: planter.player,
+                        trigger_index: 0,
+                    },
+                    planter,
+                    Duration::from_millis(80),
+                )
+                .accepted
+        );
+        frame(&mut world, 11, 80, &actors).unwrap();
+        frame(&mut world, 11, 90, &actors).unwrap();
+        assert_eq!(
+            world.take_native_entries().last().unwrap().reward_actor,
+            Some(7)
+        );
+
+        let strike = crate::structure_damage::Source {
+            player: 4,
+            generation: 3,
+        };
+        for (reward_actor, credited) in [
+            (None, planter.player),
+            (Some(PrecisionRewardActor::Defender(4)), planter.player),
+            (Some(PrecisionRewardActor::Attacker(4)), 4),
+        ] {
+            let mut candidate = world.clone();
+            assert!(
+                candidate
+                    .stage_precision_strike_with_actor(11, Some(strike), reward_actor)
+                    .unwrap()
+            );
+            frame(&mut candidate, 11, 100, &BTreeMap::new()).unwrap();
+            let entry = candidate.take_native_entries().pop().unwrap();
+            assert_eq!(entry.delta.state_actor.actor_index, strike.player);
+            assert_eq!(entry.reward_actor, Some(credited));
+            assert_eq!(world.state(11), Some(ObjectiveState::Activated));
+        }
+    }
+
+    #[test]
+    fn precision_has_one_completion_callback_and_inactive_entry_clears_the_attacker() {
+        for (initial, credited) in [(0, None), (1, Some(4)), (5, None)] {
+            let mut catalog = native_catalog();
+            catalog["objects"][1]["initial_state"] = json!(if initial == 5 { 7 } else { initial });
+            let mut world =
+                ObjectiveWorld::new(&ObjectiveCatalog::from_json(&catalog.to_string()).unwrap());
+            if initial == 5 {
+                let object = world.objects.get_mut(&11).unwrap();
+                set_native_state(object, ObjectiveState::Repairing, 7, Duration::ZERO);
+            }
+            assert!(
+                world
+                    .stage_precision_strike_with_actor(
+                        11,
+                        None,
+                        Some(PrecisionRewardActor::Attacker(4))
+                    )
+                    .unwrap()
+            );
+            let mut entries = Vec::new();
+            for millis in 100..104 {
+                frame(&mut world, 11, millis, &BTreeMap::new());
+                entries.extend(world.take_native_entries());
+            }
+            let (completed, intermediate) = entries.split_last().unwrap();
+            assert!(
+                intermediate
+                    .iter()
+                    .all(|entry| entry.reward_actor.is_none())
+            );
+            assert_eq!(completed.delta.state_actor.state, ObjectiveState::Completed);
+            assert_eq!(completed.delta.state_actor.actor_index, u16::MAX);
+            assert_eq!(completed.reward_actor, credited);
+        }
+    }
+
+    #[test]
+    fn passive_precision_uses_the_same_qualified_completion_latch() {
+        for (initial, credited) in [(0, None), (1, Some(4))] {
+            let mut catalog = native_catalog();
+            catalog["objects"][1]
+                .as_object_mut()
+                .unwrap()
+                .remove("native_class");
+            catalog["objects"][1]
+                .as_object_mut()
+                .unwrap()
+                .remove("repair");
+            catalog["objects"][1]
+                .as_object_mut()
+                .unwrap()
+                .remove("demolition");
+            catalog["objects"][1]["initial_state"] = json!(initial);
+            let mut world =
+                ObjectiveWorld::new(&ObjectiveCatalog::from_json(&catalog.to_string()).unwrap());
+            assert!(
+                world
+                    .stage_precision_strike_with_actor(
+                        11,
+                        None,
+                        Some(PrecisionRewardActor::Attacker(4))
+                    )
+                    .unwrap()
+            );
+            let mut entries = Vec::new();
+            world
+                .advance_acquisition_precision_entries(Duration::from_millis(100), |entry, _| {
+                    entries.push(entry);
+                    Ok(())
+                })
+                .unwrap();
+            let (completed, intermediate) = entries.split_last().unwrap();
+            assert!(
+                intermediate
+                    .iter()
+                    .all(|entry| entry.reward_actor.is_none())
+            );
+            assert_eq!(completed.delta.state_actor.state, ObjectiveState::Completed);
+            assert_eq!(completed.reward_actor, credited);
+        }
+    }
+
+    #[test]
     fn precision_does_not_force_a_locked_structure_to_complete() {
         let mut catalog = native_catalog();
         catalog["objects"][1]["initial_state"] = json!(9);
@@ -2093,6 +2299,7 @@ pub(crate) mod trigger_box_tests {
         assert_eq!(delta.health_percent, 0);
         let entry = world.take_native_entries().pop().unwrap();
         assert_eq!(entry.actor_generation, Some(1));
+        assert_eq!(entry.reward_actor, Some(attacker.player));
         assert!(entry.requires_authored_explosion());
     }
 

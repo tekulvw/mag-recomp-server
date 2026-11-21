@@ -209,6 +209,12 @@ impl<W: Write> Engine<W> {
         frame: Frame<'_>,
     ) -> progression::RewardEvent {
         if !event.kind.is_frago_objective(event.units)
+            || event.kind.is_extended_objective()
+                && !actor
+                    .reservation
+                    .character
+                    .extended_objective_rewards_enabled
+                    .unwrap_or(false)
             || !actor
                 .reservation
                 .character

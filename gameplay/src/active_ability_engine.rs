@@ -874,7 +874,14 @@ impl<W: Write> Engine<W> {
                             .as_deref_mut()
                             .ok_or("precision_objective_world_required")?;
                         let source = self.command_source(&running).1;
-                        let changed = self.stage_precision_strike(world, data.target_id, source)?;
+                        let changed = self.stage_precision_strike(
+                            world,
+                            &runtime.setup.precision_targets,
+                            data.target_id,
+                            source,
+                            running.invoker,
+                            running.world,
+                        )?;
                         result.audit.push(
                             json!({"op":"precision_strike_target","target_id":data.target_id,
                             "source":source.map(|s|s.player),"staged":changed}),

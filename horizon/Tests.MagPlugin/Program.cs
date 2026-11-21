@@ -63,6 +63,11 @@ Test("objective FRAGO admission compatibility", LeadershipProgressionChecks.Obje
 Test("objective FRAGO admission opt-in survives reservation release", LeadershipProgressionChecks.ObjectiveFragoAdmissionRetainedOnRelease);
 Test("objective FRAGO durable XP and match points settlement", LeadershipProgressionChecks.ObjectiveFragoDurableSettlement);
 Test("objective FRAGO overflow and invalid direct settlement", LeadershipProgressionChecks.ObjectiveFragoOverflowAndInvalidContext);
+Test("extended objective admission compatibility", LeadershipProgressionChecks.ExtendedObjectiveAdmissionCapability);
+Test("extended objective bridge receipt schema", LeadershipProgressionChecks.ExtendedObjectiveBridgeSchema);
+Test("extended objective optional catalog group validation", LeadershipProgressionChecks.ExtendedObjectiveCatalogValidation);
+Test("extended objective independent admission and released owner", LeadershipProgressionChecks.ExtendedObjectiveAdmissionRetained);
+Test("extended objective durable XP and match points settlement", LeadershipProgressionChecks.ExtendedObjectiveDurableSettlement);
 Test("leadership terminal reward bridge schema", LeadershipProgressionChecks.BridgeSchema);
 Test("leadership authored creation and ordinary XP promotion", LeadershipProgressionChecks.CreationAndExperience);
 Test("leadership optional authored table validation", LeadershipProgressionChecks.CatalogValidation);

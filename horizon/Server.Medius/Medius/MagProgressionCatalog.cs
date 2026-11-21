@@ -22,6 +22,16 @@ namespace Server.Medius
             { "primary_objective_activated", "PrimaryObjectiveActivated" }, { "primary_objective_secured", "PrimaryObjectiveSecured" },
             { "primary_objective_completed", "PrimaryObjective" }, { "secondary_objective_completed", "SecondaryObjective" },
             { "charge_planted", "ChargePlanted" }, { "charge_defused", "ChargeDefused" } };
+        private static readonly Dictionary<string, string> ExtendedObjectiveAwardKeys = new Dictionary<string, string>(StringComparer.Ordinal) {
+            { "defensive_emplacements_destroyed", "DefensiveEmplacementDestroyed" },
+            { "bridges_destroyed", "BridgeDestroyed" },
+            { "fortifications_destroyed", "FortificationDestroyed" },
+            { "gates_destroyed", "GateDestroyed" },
+            { "mortars_destroyed", "MortarDestroyed" },
+            { "sensor_networks_destroyed", "SensorNetworkDestroyed" },
+            { "anti_aircraft_destroyed", "AntiAircraftDestroyed" },
+            { "motor_pools_destroyed", "MotorPoolsDestroyed" },
+            { "escort_vehicle_delivered", "EscortVehicleDelivered" } };
         private static readonly Dictionary<string, string> OptionalActionAwardKeys = new Dictionary<string, string>(StringComparer.Ordinal) {
             { "enemy_finished", "FinishingMoves" }, { "teammate_resuscitated", "Resuscitations" } };
         private static readonly Dictionary<string, string> VictoryModifierKeys = new Dictionary<string, string>(StringComparer.Ordinal) {
@@ -41,6 +51,7 @@ namespace Server.Medius
         internal bool FragoBonusEnabled => _fragoBonusModifier.HasValue;
         internal bool FragoActionBonusEnabled => FragoBonusEnabled && _optionalActionAwards.ContainsKey("teammate_resuscitated");
         internal bool RepairRewardsEnabled => _experiencePerRepairUnit.HasValue;
+        internal bool ExtendedObjectiveRewardsEnabled => _objectiveAwards.Count == ObjectiveAwardKeys.Count + ExtendedObjectiveAwardKeys.Count;
         private MagProgressionCatalog() { }
         public static MagProgressionCatalog Load(string path, int applicationId = 20230)
         {
@@ -112,6 +123,7 @@ namespace Server.Medius
                     if (!float.IsFinite(value) || value < 0 || (double)value > int.MaxValue) throw new InvalidDataException("Invalid objective reward field.");
                     result._objectiveAwards.Add(entry.Key, value);
                 }
+                result.LoadExtendedObjectiveAwards(awards);
                 foreach (var entry in OptionalActionAwardKeys)
                 {
                     if (!awards.TryGetProperty(entry.Value, out var authored)) continue;
@@ -131,6 +143,21 @@ namespace Server.Medius
             }
             catch (Exception e) when (e is JsonException || e is KeyNotFoundException || e is InvalidOperationException || e is FormatException || e is OverflowException || e is ArgumentException)
             { throw new InvalidDataException("Invalid progression catalog JSON/schema.", e); }
+        }
+        private void LoadExtendedObjectiveAwards(JsonElement awards)
+        {
+            var extended = new Dictionary<string, float>(StringComparer.Ordinal);
+            foreach (var entry in ExtendedObjectiveAwardKeys)
+            {
+                if (!awards.TryGetProperty(entry.Value, out var authored)) continue;
+                float value = authored.GetSingle();
+                if (!float.IsFinite(value) || authored.GetDouble() < 0 || (double)value > int.MaxValue)
+                    throw new InvalidDataException($"Invalid extended objective award field {entry.Value}.");
+                extended.Add(entry.Key, value);
+            }
+            // Make the optional group available to settlement as a whole.
+            if (extended.Count == ExtendedObjectiveAwardKeys.Count)
+                foreach (var entry in extended) _objectiveAwards.Add(entry.Key, entry.Value);
         }
         private void LoadLeadership(JsonElement table, JsonElement awards, JsonElement creation)
         {
@@ -223,11 +250,13 @@ namespace Server.Medius
         internal static bool IsFinalRewardKind(string kind) => kind != null && VictoryModifierKeys.ContainsKey(kind);
         internal static bool ValidKindUnits(string kind, int units) => units > 0 && units <= ushort.MaxValue &&
             (kind is "teammate_healed" or RepairRewardKind ||
-                units == 1 && (kind == "enemy_killed" || kind != null && (ObjectiveAwardKeys.ContainsKey(kind) || OptionalActionAwardKeys.ContainsKey(kind) || IsFinalRewardKind(kind))));
+                units == 1 && (kind == "enemy_killed" || IsFragoObjectiveKind(kind) ||
+                    kind != null && (OptionalActionAwardKeys.ContainsKey(kind) || IsFinalRewardKind(kind))));
         internal static bool IsFragoSupportKind(string kind) => kind is "teammate_healed" or "teammate_resuscitated" or RepairRewardKind;
+        internal static bool IsExtendedObjectiveRewardKind(string kind) =>
+            kind != null && ExtendedObjectiveAwardKeys.ContainsKey(kind);
         internal static bool IsFragoObjectiveKind(string kind) =>
-            kind is "primary_objective_activated" or "primary_objective_secured" or
-                "primary_objective_completed" or "secondary_objective_completed" or "charge_planted" or "charge_defused";
+            kind != null && (ObjectiveAwardKeys.ContainsKey(kind) || IsExtendedObjectiveRewardKind(kind));
         internal static bool ValidFragoContext(string kind, int units, bool? frago) =>
             frago == null || frago == true &&
             (kind == "enemy_killed" || IsFragoSupportKind(kind) || IsFragoObjectiveKind(kind)) && ValidKindUnits(kind, units);

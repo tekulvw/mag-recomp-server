@@ -50,12 +50,37 @@ pub enum RewardKind {
     SecondaryObjectiveCompleted,
     ChargePlanted,
     ChargeDefused,
+    DefensiveEmplacementsDestroyed,
+    BridgesDestroyed,
+    FortificationsDestroyed,
+    GatesDestroyed,
+    MortarsDestroyed,
+    SensorNetworksDestroyed,
+    AntiAircraftDestroyed,
+    MotorPoolsDestroyed,
+    EscortVehicleDelivered,
     MatchMajorVictory,
     MatchMinorVictory,
     MatchMajorDefeat,
     MatchMinorDefeat,
 }
 impl RewardKind {
+    pub(crate) fn is_structural_destruction(self) -> bool {
+        matches!(
+            self,
+            Self::DefensiveEmplacementsDestroyed
+                | Self::BridgesDestroyed
+                | Self::FortificationsDestroyed
+                | Self::GatesDestroyed
+                | Self::MortarsDestroyed
+                | Self::SensorNetworksDestroyed
+                | Self::AntiAircraftDestroyed
+                | Self::MotorPoolsDestroyed
+        )
+    }
+    pub(crate) fn is_extended_objective(self) -> bool {
+        self.is_structural_destruction() || self == Self::EscortVehicleDelivered
+    }
     pub(crate) fn is_frago_action(self, units: u32) -> bool {
         match self {
             Self::TeammateHealed | Self::RepairUnits => (1..=u32::from(u16::MAX)).contains(&units),
@@ -65,15 +90,16 @@ impl RewardKind {
     }
     pub(crate) fn is_frago_objective(self, units: u32) -> bool {
         units == 1
-            && matches!(
-                self,
-                Self::PrimaryObjectiveActivated
-                    | Self::PrimaryObjectiveSecured
-                    | Self::PrimaryObjectiveCompleted
-                    | Self::SecondaryObjectiveCompleted
-                    | Self::ChargePlanted
-                    | Self::ChargeDefused
-            )
+            && (self.is_extended_objective()
+                || matches!(
+                    self,
+                    Self::PrimaryObjectiveActivated
+                        | Self::PrimaryObjectiveSecured
+                        | Self::PrimaryObjectiveCompleted
+                        | Self::SecondaryObjectiveCompleted
+                        | Self::ChargePlanted
+                        | Self::ChargeDefused
+                ))
     }
     pub(crate) fn statistic(self) -> Option<u8> {
         match self {
@@ -86,6 +112,15 @@ impl RewardKind {
             Self::SecondaryObjectiveCompleted => Some(40),
             Self::ChargePlanted => Some(60),
             Self::ChargeDefused => Some(62),
+            Self::DefensiveEmplacementsDestroyed => Some(42),
+            Self::BridgesDestroyed => Some(44),
+            Self::FortificationsDestroyed => Some(46),
+            Self::GatesDestroyed => Some(48),
+            Self::MortarsDestroyed => Some(50),
+            Self::SensorNetworksDestroyed => Some(52),
+            Self::AntiAircraftDestroyed => Some(54),
+            Self::MotorPoolsDestroyed => Some(56),
+            Self::EscortVehicleDelivered => Some(59),
             _ => None,
         }
     }
@@ -502,6 +537,17 @@ impl<W: Write> Engine<W> {
             None
         };
         let mut statistic_updates: Vec<_> = statistic_update.into_iter().collect();
+        if same_round && pending.kind.is_structural_destruction() {
+            statistic_updates.push((
+                61,
+                participation
+                    .statistics
+                    .get(&61)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(pending.units.min(i32::MAX as u32) as i32),
+            ));
+        }
         if let Some(points) = match_leadership_points
             && same_round
         {
