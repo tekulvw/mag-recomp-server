@@ -34,7 +34,8 @@ impl<W: Write> Engine<W> {
             self.queue_active_ability_state(now, wall)?;
             messages.extend(self.tick_match_clock(now, wall)?);
             self.queue_projectile_publications(now)?;
-            self.drain_shared(messages, wall)
+            let messages = self.drain_shared(messages, wall)?;
+            self.tick_results_cohorts(now, wall, messages)
         })();
         match result {
             Ok(messages) => self.world_response(request_id, messages),
@@ -121,5 +122,9 @@ impl<W: Write> Engine<W> {
             .values()
             .chain(self.active.iter())
             .all(|a| a.reservation.world == world_id)
+            && self
+                .results_cohorts
+                .values()
+                .all(|c| c.terminal.world_id == world_id)
     }
 }

@@ -73,14 +73,18 @@ impl<W: Write> Engine<W> {
         &self,
         actor: &Active,
         snapshot: Option<LeadershipRecord>,
+        experience: u32,
+        game_type: i8,
     ) -> Option<CommittedLeadership> {
+        let character = &actor.reservation.character;
+        let current_experience = character.progression.unwrap_or_default().experience;
+        if experience < current_experience {
+            return None;
+        }
         let mut record = snapshot?;
         let points = record.leadership_points?;
-        if let Some(prior) = actor
-            .reservation
-            .character
-            .leadership
-            .and_then(|r| r.leadership_points)
+        if let Some(current) = character.leadership
+            && let Some(prior) = current.leadership_points
         {
             if points < prior {
                 return None;
@@ -90,10 +94,14 @@ impl<W: Write> Engine<W> {
             // its native result, including the signed high-bit boundary.
             if points == prior {
                 record.leadership_level = record.leadership_level.max(actor.leadership_level);
+                if experience == current_experience {
+                    record.nominations = current.nominations;
+                    record.matches_since_last_command = current.matches_since_last_command;
+                }
             }
         }
         Some(CommittedLeadership {
-            nominations: self.match_nominations(record, actor.nominations),
+            nominations: self.nominations_for_mode(game_type, record, actor.nominations),
             record,
         })
     }

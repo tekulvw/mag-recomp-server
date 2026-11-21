@@ -457,6 +457,7 @@ fn acquisition_delivery_completes_both_stages_publishes_victory_and_requeues() {
         6,
     );
     assert!(response.ok, "{:?}", response.error);
+    reserve(&mut engine, 1); // Admission installs the new round; release retains old receipts.
     assert!(engine.match_terminal.is_none());
     assert_eq!(
         engine.acquisition_round.as_ref().unwrap().points(),

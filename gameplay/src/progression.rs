@@ -1,12 +1,20 @@
 //! Private authoritative event receipts. Horizon owns XP/level/point arithmetic
 //! and durable deduplication; Rust only reports committed gameplay quantities.
-use crate::{Active, Engine, OutboundMessage, Request, protocol, replication};
+use crate::match_flow::Publication;
+use crate::{
+    Active, Engine, OutboundMessage, Request, leadership_progression::CommittedLeadership,
+    protocol, replication,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::{io::Write, time::Duration};
+use std::{collections::BTreeMap, io::Write, time::Duration};
 pub const MAX_PENDING_REWARDS: usize = 256;
 pub const MAX_REWARD_BATCH: usize = 32;
+// Horizon accepts 128 deliveries per response. Leave one slot for the
+// originating cohort's match-statistics packet.
+const MAX_ACK_LEVEL_MESSAGES: usize = 127;
+const MAX_REWARD_NOTIFICATIONS: usize = 128;
 // One terminal callback per bounded human, with up to 128 authored objective
 // vector rows (repetitions included) and one result. Wire batches stay at 32.
 const MAX_TERMINAL_REWARDS: usize = crate::MAX_MATCH_PLAYERS * (128 + 1);
@@ -287,6 +295,131 @@ pub(crate) fn participant_key(reservation: &crate::Reservation) -> Option<Partic
         reservation.character.character_id?,
     ))
 }
+impl RoundParticipation {
+    fn settle(
+        &mut self,
+        pending: &RewardEvent,
+        receipt: &CommittedReward,
+    ) -> Vec<protocol::StatValue> {
+        let match_total = receipt.match_experience.max(self.match_experience);
+        let add_units = |stat| {
+            self.statistics
+                .get(&stat)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(pending.units.min(i32::MAX as u32) as i32)
+        };
+        let mut stats = Vec::new();
+        if let Some(stat) = pending.kind.statistic() {
+            stats.push((stat, add_units(stat)));
+        } else if pending.kind.is_match_result() && match_total > self.match_experience {
+            stats.push((4, (match_total - self.match_experience) as i32));
+        }
+        if pending.kind.is_structural_destruction() {
+            stats.push((61, add_units(61)));
+        }
+        if let Some(points) = receipt.match_leadership_points {
+            stats.push((7, points as i32));
+        }
+        if let Some(points) = receipt.match_frago_points {
+            stats.push((
+                3,
+                (points as i32).max(self.statistics.get(&3).copied().unwrap_or(0)),
+            ));
+        }
+        self.statistics.extend(stats.iter().copied());
+        if self.match_experience != match_total {
+            self.match_experience = match_total;
+            stats.insert(0, (2, match_total as i32));
+        }
+        stats
+            .into_iter()
+            .map(|(stat, value)| protocol::StatValue { stat, value })
+            .collect()
+    }
+}
+
+struct RewardAcknowledgement<'a> {
+    pending: &'a RewardEvent,
+    receipt: &'a CommittedReward,
+    now: Duration,
+}
+
+struct RewardSubjectUpdate {
+    reservation_id: String,
+    progression: ProgressionSnapshot,
+    leadership: Option<CommittedLeadership>,
+    original_actor: bool,
+}
+
+#[derive(Default)]
+struct CohortRewardPlan {
+    subject: Option<RewardSubjectUpdate>,
+    participation: Option<RoundParticipation>,
+    ordered: bool,
+    stat_notification: Option<Vec<u8>>,
+    level_packet: Option<Vec<u8>>,
+    level_publications: BTreeMap<String, Vec<u8>>,
+}
+impl CohortRewardPlan {
+    fn install<'a>(
+        mut self,
+        actors: impl Iterator<Item = &'a mut Active>,
+        participants: &mut BTreeMap<ParticipantKey, RoundParticipation>,
+        key: &ParticipantKey,
+    ) {
+        if let Some(subject) = self.subject {
+            for actor in actors {
+                if actor.reservation.id == subject.reservation_id {
+                    actor.reservation.character.progression = Some(subject.progression);
+                    if let Some(leadership) = subject.leadership {
+                        actor.install_committed_leadership(leadership);
+                    }
+                    if subject.original_actor
+                        && let Some(participation) = &self.participation
+                    {
+                        actor.match_experience = participation.match_experience;
+                        actor
+                            .reward_statistics
+                            .clone_from(&participation.statistics);
+                    }
+                    if let Some(wire) = self.stat_notification.take() {
+                        actor.queue_round(Publication::Application(wire));
+                    }
+                }
+                if let Some(wire) = self.level_publications.remove(&actor.reservation.id) {
+                    actor
+                        .remember(wire)
+                        .expect("validated reward replication plan");
+                } else if actor.initial_objects.is_some()
+                    && let Some(packet) = &self.level_packet
+                {
+                    if self.ordered {
+                        if actor.ready_for_updates {
+                            actor.queue_round(Publication::Replication(packet.clone()));
+                        }
+                    } else {
+                        actor.queue_shared(packet.clone());
+                    }
+                }
+            }
+        }
+        if let Some(participation) = self.participation {
+            participants.insert(key.clone(), participation);
+        }
+    }
+}
+
+fn reward_message(recipient: &Active, wire: &[u8]) -> OutboundMessage {
+    OutboundMessage {
+        reservation_id: recipient.reservation.id.clone(),
+        world_id: recipient.reservation.world,
+        player_id: recipient.reservation.player,
+        plugin_id: 1,
+        payload_hex: protocol::encode_hex(wire),
+    }
+}
+
 impl<W: Write> Engine<W> {
     /// Retire a departed reservation id so a later Horizon release replays as
     /// acknowledged. Without match profiles the set is bounded to 512 ids.
@@ -308,7 +441,7 @@ impl<W: Write> Engine<W> {
         {
             self.release_order.push_back(actor.reservation.id.clone());
         }
-        if self.match_profiles.is_some()
+        if (self.match_profiles.is_some() || self.match_terminal.is_some())
             && let Some(receipt) = &actor.pending_loadout_selection
         {
             self.retired_loadout_selections
@@ -413,6 +546,146 @@ impl<W: Write> Engine<W> {
     pub(crate) fn attacker_is_friendly(&self, attacker: u32, world: u32, team: u8) -> bool {
         self.character_team_in_world(attacker, world) == Some(team)
     }
+    fn plan_cohort_reward<'a>(
+        &self,
+        actors: impl Iterator<Item = &'a Active> + Clone,
+        participation: Option<RoundParticipation>,
+        acknowledgement: &RewardAcknowledgement<'_>,
+        game_type: i8,
+        ordered: bool,
+        messages: &mut Vec<OutboundMessage>,
+    ) -> Result<CohortRewardPlan, &'static str> {
+        let RewardAcknowledgement {
+            pending,
+            receipt,
+            now,
+        } = *acknowledgement;
+        let subject = actors.clone().find(|actor| {
+            let character = &actor.reservation.character;
+            character.account_id.as_deref() == Some(pending.account_id.as_str())
+                && character.character_id == Some(pending.character_id)
+        });
+        let original_actor = subject.filter(|actor| {
+            actor.reward_match_id == pending.match_id && actor.reservation.world == pending.world_id
+        });
+        let mut plan = CohortRewardPlan {
+            participation,
+            ordered,
+            ..Default::default()
+        };
+        if let Some(participation) = &mut plan.participation {
+            if let Some(actor) = original_actor {
+                *participation = RoundParticipation {
+                    match_experience: actor.match_experience,
+                    statistics: actor.reward_statistics.clone(),
+                    repair_credit: actor.repair_credit,
+                };
+            }
+            let stats = participation.settle(pending, receipt);
+            if let Some(actor) = original_actor
+                && !stats.is_empty()
+                && (!ordered || (actor.initial_objects.is_some() && actor.ready_for_updates))
+            {
+                let wire = protocol::StatUpdate {
+                    character_index: actor.reservation.player,
+                    stats,
+                }
+                .encode_with_profile(actor.wire_profile)?;
+                if ordered {
+                    plan.stat_notification = Some(wire);
+                } else {
+                    messages.push(reward_message(actor, &wire));
+                }
+            }
+        }
+        let Some(actor) = subject else {
+            return Ok(plan);
+        };
+        let old = actor.reservation.character.progression.unwrap_or_default();
+        let progression = if receipt.progression.experience > old.experience {
+            ProgressionSnapshot {
+                level: receipt.progression.level.max(old.level),
+                ..receipt.progression
+            }
+        } else {
+            old
+        };
+        let leadership = self.committed_leadership(
+            actor,
+            receipt.leadership,
+            receipt.progression.experience,
+            game_type,
+        );
+        let changed_leadership = leadership.is_some_and(|update| {
+            update.record.leadership_level != actor.leadership_level
+                || update.nominations != actor.nominations
+        });
+        if (progression.level > old.level || changed_leadership) && actor.initial_objects.is_some()
+        {
+            let mut mag_info = actor.mag_info(progression.level);
+            if let Some(update) = leadership {
+                mag_info.leadership_level = update.record.leadership_level;
+                mag_info.nominations = update.nominations;
+            }
+            // These avatars have independent object indices, wire profiles and
+            // reliable sequences even when they represent the same character.
+            let update = replication::CharacterLevelUpdate {
+                sequence: 1,
+                timestamp_ms: now.as_millis() as u32,
+                object_index: actor.reservation.player,
+                mag_info,
+            };
+            plan.level_packet = Some(update.encode_with_profile(actor.wire_profile)?);
+            for recipient in actors
+                .clone()
+                .filter(|a| {
+                    !ordered
+                        && a.initial_objects.is_some()
+                        && a.ready_for_updates
+                        && a.pending_shared.is_empty()
+                })
+                .take(MAX_ACK_LEVEL_MESSAGES.saturating_sub(messages.len()))
+            {
+                let wire = replication::CharacterLevelUpdate {
+                    sequence: recipient.next_sequence()?,
+                    ..update.clone()
+                }
+                .encode_with_profile(recipient.wire_profile)?;
+                messages.push(reward_message(recipient, &wire));
+                plan.level_publications
+                    .insert(recipient.reservation.id.clone(), wire);
+            }
+        }
+        // The archived result stream owns both End and its following stats.
+        // If it has not reserved space for End or these deltas yet, retain the
+        // pending receipt for a later poll after the stream drains.
+        if ordered {
+            for recipient in actors.filter(|a| a.initial_objects.is_some() && a.ready_for_updates) {
+                let notifications = usize::from(plan.level_packet.is_some())
+                    + usize::from(
+                        std::ptr::eq(recipient, actor) && plan.stat_notification.is_some(),
+                    );
+                if notifications != 0 {
+                    if !recipient.end_announced {
+                        return Err("reward_end_not_queued");
+                    }
+                    if recipient.pending_notifications.len() + notifications
+                        > MAX_REWARD_NOTIFICATIONS
+                    {
+                        return Err("reward_notifications_full");
+                    }
+                }
+            }
+        }
+        plan.subject = Some(RewardSubjectUpdate {
+            reservation_id: actor.reservation.id.clone(),
+            progression,
+            leadership,
+            original_actor: original_actor.is_some(),
+        });
+        Ok(plan)
+    }
+
     pub(crate) fn acknowledge_progression(
         &mut self,
         request: Request,
@@ -484,229 +757,52 @@ impl<W: Write> Engine<W> {
         if pending.frago.is_none() && match_frago_points.is_some() {
             return Err("unexpected_match_frago_points");
         }
-        let same_round = self.reward_match_id.as_deref() == Some(pending.match_id.as_str());
         let key = (
             pending.world_id,
             pending.account_id.clone(),
             pending.character_id,
         );
-        // Account state can advance while its terminal receipt is deferred
-        // into another round. Match totals remain scoped independently below.
-        let actor = self
-            .active
-            .iter()
-            .chain(self.peers.values())
-            .find(|actor| participant_key(&actor.reservation).as_ref() == Some(&key));
-        let actor_in_round =
-            actor.is_some_and(|actor| same_round && actor.reward_match_id == pending.match_id);
-        let recipient_id = actor.map(|a| a.reservation.id.clone());
-        let recipient_player = actor.map_or(player_id, |a| a.reservation.player);
-        let mut participation = if let Some(actor) = actor.filter(|_| actor_in_round) {
-            RoundParticipation {
-                match_experience: actor.match_experience,
-                statistics: actor.reward_statistics.clone(),
-                repair_credit: actor.repair_credit,
-            }
-        } else if same_round {
-            self.round_participants
-                .get(&key)
-                .cloned()
-                .unwrap_or_default()
-        } else {
-            RoundParticipation::default()
+        let participation = |match_id: Option<&str>, participants: &BTreeMap<_, _>| {
+            (match_id == Some(pending.match_id.as_str()))
+                .then(|| participants.get(&key).cloned().unwrap_or_default())
         };
-        let match_total = match_experience.max(participation.match_experience);
-        let statistic_update = if !same_round {
-            None
-        } else if let Some(stat) = pending.kind.statistic() {
-            Some((
-                stat,
-                participation
-                    .statistics
-                    .get(&stat)
-                    .copied()
-                    .unwrap_or(0)
-                    .saturating_add(pending.units.min(i32::MAX as u32) as i32),
-            ))
-        } else if pending.kind.is_match_result() && match_total > participation.match_experience {
-            Some((
-                4,
-                (match_total - participation.match_experience).min(i32::MAX as u32) as i32,
-            ))
-        } else {
-            None
+        let acknowledgement = RewardAcknowledgement {
+            pending: &pending,
+            receipt: &receipt,
+            now,
         };
-        let mut statistic_updates: Vec<_> = statistic_update.into_iter().collect();
-        if same_round && pending.kind.is_structural_destruction() {
-            statistic_updates.push((
-                61,
-                participation
-                    .statistics
-                    .get(&61)
-                    .copied()
-                    .unwrap_or(0)
-                    .saturating_add(pending.units.min(i32::MAX as u32) as i32),
-            ));
-        }
-        if let Some(points) = match_leadership_points
-            && same_round
-        {
-            statistic_updates.push((7, points as i32));
-        }
-        if let Some(points) = match_frago_points
-            && same_round
-        {
-            statistic_updates.push((
-                3,
-                (points as i32).max(participation.statistics.get(&3).copied().unwrap_or(0)),
-            ));
-        }
         let mut messages = Vec::new();
-        let mut level_packet = None;
-        let mut updated = None;
-        if let Some(actor) = actor {
-            let old = actor.reservation.character.progression.unwrap_or_default();
-            let state = if progression.experience > old.experience {
-                ProgressionSnapshot {
-                    level: progression.level.max(old.level),
-                    ..progression
-                }
-            } else {
-                old
-            };
-            let mut stats = Vec::new();
-            if actor_in_round {
-                for &(stat, value) in &statistic_updates {
-                    stats.push(protocol::StatValue { stat, value });
-                }
-            }
-            if actor_in_round && match_total != actor.match_experience {
-                stats.insert(
-                    0,
-                    protocol::StatValue {
-                        stat: 2,
-                        value: match_total as i32,
-                    },
-                );
-            }
-            if !stats.is_empty() {
-                let wire = protocol::StatUpdate {
-                    character_index: recipient_player,
-                    stats,
-                }
-                .encode_with_profile(self.wire_profile)?;
-                messages.push(OutboundMessage {
-                    reservation_id: actor.reservation.id.clone(),
-                    world_id,
-                    player_id: recipient_player,
-                    plugin_id: 1,
-                    payload_hex: protocol::encode_hex(&wire),
-                });
-            }
-            let leadership_update = self.committed_leadership(actor, leadership);
-            let changed_leadership = leadership_update.is_some_and(|update| {
-                update.record.leadership_level != actor.leadership_level
-                    || update.nominations != actor.nominations
-            });
-            if (state.level > old.level || changed_leadership) && actor.initial_objects.is_some() {
-                let mut mag_info = actor.mag_info(state.level);
-                if let Some(update) = leadership_update {
-                    mag_info.leadership_level = update.record.leadership_level;
-                    mag_info.nominations = update.nominations;
-                }
-                level_packet = Some(
-                    replication::CharacterLevelUpdate {
-                        sequence: 1,
-                        timestamp_ms: now.as_millis() as u32,
-                        object_index: recipient_player,
-                        mag_info,
-                    }
-                    .encode_with_profile(self.wire_profile)?,
-                );
-            }
-            updated = Some((
-                state,
-                if actor_in_round {
-                    match_total
-                } else {
-                    actor.match_experience
-                },
-                leadership_update,
-            ));
-        }
-        // Stage the level delta in each recipient's own reliable sequence space
-        // before recording the receipt. A recording failure releases neither the
-        // stat notice nor the state commit; retry never needs to replay gameplay.
-        let mut level_publications = Vec::new();
-        if let Some(packet) = &level_packet {
-            for actor in self
-                .peers
-                .values()
-                .chain(self.active.iter())
-                .filter(|a| a.initial_objects.is_some() && a.ready_for_updates)
-            {
-                let wire = replication::multiplayer::for_recipient_with_profile(
-                    packet,
-                    actor.next_sequence()?,
-                    self.wire_profile,
-                )?;
-                messages.push(OutboundMessage {
-                    reservation_id: actor.reservation.id.clone(),
-                    world_id: actor.reservation.world,
-                    player_id: actor.reservation.player,
-                    plugin_id: 1,
-                    payload_hex: protocol::encode_hex(&wire),
-                });
-                level_publications.push((actor.reservation.id.clone(), wire));
+        let live = self.plan_cohort_reward(
+            self.peers.values().chain(self.active.iter()),
+            participation(self.reward_match_id.as_deref(), &self.round_participants),
+            &acknowledgement,
+            self.match_profile().game_type,
+            false,
+            &mut messages,
+        )?;
+        let mut retained = Vec::new();
+        for (match_id, cohort) in &self.results_cohorts {
+            let plan = self.plan_cohort_reward(
+                cohort.actors.values(),
+                participation(Some(match_id), &cohort.participants),
+                &acknowledgement,
+                cohort.game_type,
+                self.world_tick_enabled,
+                &mut messages,
+            )?;
+            if plan.subject.is_some() || plan.participation.is_some() {
+                retained.push((match_id.clone(), plan));
             }
         }
         self.record(json!({"op":"progression_committed","reward_id":reward_id,"reservation_id":reservation_id,"progression":progression,"match_experience":match_experience,"leadership":leadership,"match_leadership_points":match_leadership_points,"match_frago_points":match_frago_points,"messages":messages}),wall)?;
-        if let Some((state, match_total, leadership_update)) = updated {
-            let reservation_id = recipient_id.as_ref().unwrap();
-            let actor = if self
-                .active
-                .as_ref()
-                .is_some_and(|a| a.reservation.id == *reservation_id)
-            {
-                self.active.as_mut().unwrap()
-            } else {
-                self.peers.get_mut(reservation_id).unwrap()
-            };
-            actor.reservation.character.progression = Some(state);
-            actor.match_experience = match_total;
-            if let Some(update) = leadership_update {
-                actor.install_committed_leadership(update);
-            }
-            if actor_in_round {
-                for &(stat, value) in &statistic_updates {
-                    actor.reward_statistics.insert(stat, value);
-                }
-            }
-        }
-        for (id, wire) in level_publications {
-            let actor = if self.active.as_ref().is_some_and(|a| a.reservation.id == id) {
-                self.active.as_mut().unwrap()
-            } else {
-                self.peers.get_mut(&id).unwrap()
-            };
-            actor.remember(wire)?;
-        }
-        if let Some(packet) = level_packet {
-            for actor in self
-                .peers
-                .values_mut()
-                .chain(self.active.iter_mut())
-                .filter(|a| a.initial_objects.is_some() && !a.ready_for_updates)
-            {
-                actor.queue_shared(packet.clone());
-            }
-        }
-        if same_round {
-            participation.match_experience = match_total;
-            for &(stat, value) in &statistic_updates {
-                participation.statistics.insert(stat, value);
-            }
-            self.round_participants.insert(key, participation);
+        live.install(
+            self.peers.values_mut().chain(self.active.iter_mut()),
+            &mut self.round_participants,
+            &key,
+        );
+        for (match_id, plan) in retained {
+            let cohort = self.results_cohorts.get_mut(&match_id).unwrap();
+            plan.install(cohort.actors.values_mut(), &mut cohort.participants, &key);
         }
         self.pending_rewards.remove(&reward_id);
         self.reward_order.retain(|id| id != &reward_id);
@@ -742,3 +838,7 @@ mod revive_reward_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "match_cohort_reward_tests.rs"]
+mod match_cohort_reward_tests;

@@ -461,7 +461,16 @@ impl<W: Write> Engine<W> {
     }
 
     pub(crate) fn match_nominations(&self, record: LeadershipRecord, bits: u8) -> u8 {
-        if self.match_profile().game_type == 2
+        self.nominations_for_mode(self.match_profile().game_type, record, bits)
+    }
+
+    pub(crate) fn nominations_for_mode(
+        &self,
+        game_type: i8,
+        record: LeadershipRecord,
+        bits: u8,
+    ) -> u8 {
+        if game_type == 2
             && record.leadership_level >= 3
             && self
                 .leadership

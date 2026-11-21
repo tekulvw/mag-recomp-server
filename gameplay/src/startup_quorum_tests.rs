@@ -215,7 +215,7 @@ fn startup_quorum_empty_world_reset_retains_policy_for_the_next_cohort() {
         assert!(response.ok, "{:?}", response.error);
     }
     assert!(!engine.match_started);
-    reserve(&mut engine, 0);
+    assert!(reserve_identity(&mut engine, 0, 1, "synthetic-quorum-fresh-cohort").ok);
     quorum_ready(actors(&mut engine).next().unwrap());
     poll_quorum(&mut engine, Duration::from_secs(2));
     assert!(

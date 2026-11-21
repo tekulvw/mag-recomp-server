@@ -334,6 +334,24 @@ impl<W: Write> Engine<W> {
         {
             return Err("match_profile_not_selected");
         }
+        if let Some(reservation_id) = match &request {
+            Request::Event { reservation_id, .. }
+            | Request::Release { reservation_id, .. }
+            | Request::DevelopmentDamage { reservation_id, .. }
+            | Request::DevelopmentArmDemolition { reservation_id, .. }
+            | Request::DevelopmentSpawnTarget { reservation_id, .. }
+            | Request::DevelopmentMoveBot { reservation_id, .. }
+            | Request::DevelopmentStructureDamage { reservation_id, .. } => Some(reservation_id),
+            _ => None,
+        } && self.results_owner(reservation_id).is_some()
+        {
+            let messages = self.handle_results_request(&request, decoded, now, wall)?;
+            return if self.world_tick_enabled {
+                Ok(messages)
+            } else {
+                self.tick_results_cohorts(now, wall, messages)
+            };
+        }
         if let Request::Release { reservation_id, .. } = &request
             && self.released_reservations.contains(reservation_id)
         {
@@ -343,12 +361,26 @@ impl<W: Write> Engine<W> {
             )?;
             return Ok(Vec::new());
         }
+        if let Request::Reserve { world_id, .. } = &request
+            && self
+                .results_cohorts
+                .values()
+                .any(|c| c.terminal.world_id != *world_id)
+        {
+            return Err("reservation_conflict");
+        }
         if let Request::Reserve { reservation_id, .. } = &request {
             if self.released_reservations.contains(reservation_id) {
                 return Err("reservation_id_retired");
             }
+            if self.results_owner(reservation_id).is_some() {
+                return Err("reservation_id_retired");
+            }
             if self.match_terminal.is_some() {
-                return Err("match_finished");
+                if self.match_profiles.is_some() {
+                    return Err("match_finished");
+                }
+                return self.reserve_fixed_cohort(request, now, wall);
             }
         }
         if matches!(&request, Request::RefreshLoadouts { .. }) {
@@ -901,7 +933,7 @@ impl<W: Write> Engine<W> {
         }
         if any_expired && self.peers.is_empty() && self.active.is_none() {
             self.clear_bot_world();
-            self.reset_objective_world();
+            self.reset_empty_gameplay_world();
             self.team_waves = [None; 2];
             self.last_published_rosters.clear();
             self.shared_drain_cursor = 0;

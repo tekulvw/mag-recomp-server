@@ -277,13 +277,13 @@ mod tests {
             2,
         );
         assert!(release.ok, "{:?}", release.error);
+        reserve_ready(&mut engine, 2);
         assert!(engine.match_terminal.is_none());
         assert_eq!(engine.round.scores, None);
         assert_eq!(
             engine.acquisition_round.as_ref().unwrap().phase(),
             Phase::Playing
         );
-        reserve_ready(&mut engine, 2);
         engine.match_epoch = Some(Duration::from_millis(2004));
         engine
             .tick_match_clock(Duration::from_millis(3000), 3)

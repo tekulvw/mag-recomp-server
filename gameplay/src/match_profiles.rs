@@ -619,11 +619,10 @@ impl<W: Write> Engine<W> {
                 return Err("match_formation_profile_conflict");
             }
         }
-        if self.active.is_some()
-            || !self.peers.is_empty()
-            || !self.pending_rewards.is_empty()
-            || !self.pending_loadout_selections().is_empty()
-        {
+        let rollover = self.match_terminal.is_some();
+        if rollover {
+            self.check_cohort_rollover()?;
+        } else if self.active.is_some() || !self.peers.is_empty() {
             return Err("match_profile_selection_locked");
         }
         if self.retired_formations.len() >= 4096 {
@@ -686,6 +685,9 @@ impl<W: Write> Engine<W> {
             json!({"op":"match_profile_selected","selected_match":selected}),
             wall,
         )?;
+        if rollover {
+            self.archive_terminal_cohort();
+        }
         self.retire_match_selection();
         self.reset_objective_world();
         self.bot_registry = Default::default();
@@ -1770,7 +1772,7 @@ mod tests {
         assert_eq!(engine.map_name(), "synthetic_home_2");
     }
     #[test]
-    fn pending_selection_survives_actor_release_and_blocks_switch_until_settled() {
+    fn pending_selection_survives_actor_release_and_independent_switch() {
         let files = Files::new();
         let mut engine = engine(&files, Vec::new(), 100_000);
         assert!(select(&mut engine, "formation-1", "p-0-0-1").ok);
@@ -1791,12 +1793,8 @@ mod tests {
             engine.pending_loadout_selections().as_slice(),
             std::slice::from_ref(&receipt)
         );
-        assert_eq!(
-            select(&mut engine, "formation-2", "p-1-0-2")
-                .error
-                .as_deref(),
-            Some("match_profile_selection_locked")
-        );
+        assert!(select(&mut engine, "formation-2", "p-1-0-2").ok);
+        assert_eq!(engine.pending_loadout_selections(), vec![receipt.clone()]);
         let response = engine.handle(
             Request::LoadoutSelectionSettled {
                 v: BRIDGE_VERSION,
@@ -1858,7 +1856,55 @@ mod tests {
     }
 
     #[test]
-    fn pending_rewards_block_idle_switch_without_erasing_outbox() {
+    fn terminal_selection_archives_old_members_and_failure_leaves_them_live() {
+        let files = Files::new();
+        let mut engine = engine(&files, Vec::new(), 100_000);
+        assert!(select(&mut engine, "formation-1", "p-0-0-1").ok);
+        assert!(reserve(&mut engine).ok);
+        let old_match = engine.reward_match_id.clone().unwrap();
+        let mut next = engine.round.clone();
+        next.scores = Some([0, 1000]);
+        next.outcome = Some(match_flow::Outcome {
+            winner: 1,
+            major: true,
+            deadline: Duration::from_secs(5),
+            finalized: false,
+        });
+        engine
+            .commit_round_update(next, vec![], vec![], Duration::from_secs(2), 2)
+            .unwrap();
+        let max = engine.max_log;
+        engine.max_log = engine.written;
+        assert_eq!(
+            select(&mut engine, "formation-2", "p-1-0-2")
+                .error
+                .as_deref(),
+            Some("log_limit_reached")
+        );
+        assert!(engine.results_cohorts.is_empty());
+        assert!(engine.active.is_some());
+        assert_eq!(
+            engine.selected_match.as_ref().unwrap().formation_id,
+            "formation-1"
+        );
+        engine.max_log = max;
+        engine.failed = false;
+        assert!(select(&mut engine, "formation-2", "p-1-0-2").ok);
+        assert!(engine.active.is_none() && engine.peers.is_empty());
+        assert_eq!(engine.results_cohorts[&old_match].actors.len(), 1);
+        assert!(engine.round.outcome.is_none());
+        assert!(reserve_id(&mut engine, "synthetic-fresh-profile-reservation").ok);
+        assert_eq!(engine.active.as_ref().unwrap().match_experience, 0);
+        assert_eq!(
+            select(&mut engine, "formation-1", "p-0-0-1")
+                .error
+                .as_deref(),
+            Some("match_formation_retired")
+        );
+    }
+
+    #[test]
+    fn pending_rewards_survive_idle_switch_without_blocking_next_cohort() {
         let files = Files::new();
         let mut engine = engine(&files, Vec::new(), 100_000);
         assert!(select(&mut engine, "formation-1", "p-0-0-1").ok);
@@ -1879,16 +1925,11 @@ mod tests {
         engine
             .pending_rewards
             .insert(reward.reward_id.clone(), reward.clone());
-        assert_eq!(
-            select(&mut engine, "formation-2", "p-1-0-2")
-                .error
-                .as_deref(),
-            Some("match_profile_selection_locked")
-        );
+        assert!(select(&mut engine, "formation-2", "p-1-0-2").ok);
         assert_eq!(engine.pending_reward_batch(), [reward]);
         assert_eq!(
             engine.selected_match.as_ref().unwrap().formation_id,
-            "formation-1"
+            "formation-2"
         );
     }
 
@@ -1921,12 +1962,8 @@ mod tests {
                 .contains("synthetic-reservation-0001")
         );
         assert_eq!(engine.pending_loadout_selections().len(), 1);
-        assert_eq!(
-            select(&mut engine, "formation-2", "p-1-0-2")
-                .error
-                .as_deref(),
-            Some("match_profile_selection_locked")
-        );
+        assert!(select(&mut engine, "formation-2", "p-1-0-2").ok);
+        assert_eq!(engine.pending_loadout_selections().len(), 1);
     }
 
     #[test]

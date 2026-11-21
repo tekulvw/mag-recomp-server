@@ -175,8 +175,11 @@ The worker never changes a saved character's faction.
 Admission returns `match_profile_not_selected` until selection succeeds. An exact
 formation/profile retry is idempotent, even with active actors. Reusing a live
 formation with another profile returns `match_formation_profile_conflict`.
-A different formation cannot replace an active world or bypass pending durable
-rewards/loadout selections; it returns `match_profile_selection_locked`.
+A different formation cannot replace an unfinished active world; it returns
+`match_profile_selection_locked`. With `independent_match_cohorts_v1`, a terminal
+world moves into bounded results-only retention while the successor is selected.
+Pending durable rewards/loadout selections stay in their original outboxes and
+do not block the next formation.
 Unknown profiles fail without changing the current selection or world.
 
 A new idle selection allocates/validates its next state before recording the
@@ -193,14 +196,16 @@ new cohorts require new formation and reservation identities. A retired formatio
 cannot be selected again. At 4096 retired formations, further new selections fail
 with `match_formation_history_full`; an operator can drain pending durable work
 and restart the worker to bound session history. Fixed-profile workers retain
-their previous reservation cleanup behavior.
+a bounded history of 512 retired reservation IDs across rounds.
 
 Pending loadout selection receipts survive actor release/expiry in an outbox and
 continue to appear in bridge responses until settled through the original
 reservation/world/player/selection/revision binding. Pending rewards likewise
-remain available for their existing acknowledgement flow. The next world cannot
-be selected until both durable outboxes are clear. No worker selection permits
-concurrent multi-world hosting, starts a service, or authorizes a release.
+remain available for their existing acknowledgement flow. Both outboxes survive
+independent cohort rollover. See [result cohorts and requeue](match-cohorts.md)
+for bounded retention, ordered delivery and exact identity rules. No worker
+selection permits concurrent live multi-world hosting, starts a service, or
+authorizes a release.
 
 ## Shared squad spawn selection
 
