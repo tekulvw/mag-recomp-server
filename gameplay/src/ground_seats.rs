@@ -25,8 +25,20 @@ impl<W: Write> Engine<W> {
         &self,
         seat: PassengerSeat,
     ) -> Result<replication::CharacterPosition, &'static str> {
+        let runtime = self
+            .ground_runtime
+            .as_ref()
+            .ok_or("dynamic_body_mount_vehicle_unavailable")?;
+        self.ground_seat_position_in(seat, runtime)
+    }
+
+    pub(crate) fn ground_seat_position_in(
+        &self,
+        seat: PassengerSeat,
+        runtime: &crate::acquisition_ground_runtime::Runtime,
+    ) -> Result<replication::CharacterPosition, &'static str> {
         let vehicle = self
-            .current_ground_vehicle(seat.vehicle_index)
+            .current_ground_vehicle_in(seat.vehicle_index, runtime)
             .ok_or("dynamic_body_mount_vehicle_unavailable")?;
         if seat.seat == 1
             && let Some(turret) = self.ground_turret_policy(seat.vehicle_index)

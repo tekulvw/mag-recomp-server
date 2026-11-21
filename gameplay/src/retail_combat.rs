@@ -190,6 +190,8 @@ authored_profile!(RetailGrenadeMetadata {
     initial_count: u32,
     effective_range: f64,
     max_range: f64,
+    #[serde(default)]
+    material_penetration: Option<f64>,
     detonation_strategy: String,
     explosion_strategy: String,
     physics: RetailGrenadePhysicsMetadata,
@@ -471,6 +473,31 @@ impl RetailCombatCatalog {
             .get(&item_id)
             .ok_or(RetailCombatError::UnsupportedItem(item_id))
     }
+    /// Qualify the ordinary on-foot frag path separately from legacy grenade damage.
+    pub fn validate_frag_character_blast(&self) -> Result<(), RetailCombatError> {
+        if !self.0.authority.grenade_damage {
+            return Err(RetailCombatError::PendingAuthority(
+                RetailCombatCapability::GrenadeDamage,
+            ));
+        }
+        if self.0.grenades.is_empty() {
+            return Err(RetailCombatError::InvalidMetadata(
+                "frag Character blast requires supported grenade profiles".into(),
+            ));
+        }
+        for (item_id, grenade) in &self.0.grenades {
+            if !grenade
+                .material_penetration
+                .is_some_and(|value| (0.0..=f64::from(f32::MAX)).contains(&value))
+            {
+                return Err(RetailCombatError::InvalidMetadata(format!(
+                    "frag Character blast requires valid authored material penetration for item {item_id}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     pub fn grenade_for_physics(
         &self,
         _item_id: u16,
@@ -1577,5 +1604,73 @@ pub(crate) mod hospital_primary_tests {
                 Some((4, expected_hp))
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod frag_character_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_frag_damage_remains_available_but_character_blast_requires_penetration() {
+        let items = crate::human_kill_reward_tests::grenade_items_for_ground_test(22.);
+        let catalog = items.retail_combat().unwrap();
+        assert!(
+            catalog
+                .grenade_for_damage(4)
+                .unwrap()
+                .material_penetration
+                .is_none()
+        );
+        assert!(matches!(
+            catalog.validate_frag_character_blast(),
+            Err(RetailCombatError::InvalidMetadata(_))
+        ));
+    }
+
+    #[test]
+    fn frag_character_blast_checks_every_enabled_profile_and_authority() {
+        let items = crate::human_kill_reward_tests::grenade_items_for_ground_test(22.);
+        let source = items.retail_combat().unwrap();
+        let initial = &source.0;
+        let mut metadata = CatalogMetadata {
+            schema_version: initial.schema_version,
+            application_id: initial.application_id,
+            status: initial.status.clone(),
+            authority: initial.authority.clone(),
+            runtime_policy: initial.runtime_policy.clone(),
+            provenance: initial.provenance.clone(),
+            bullets: initial.bullets.clone(),
+            melee: initial.melee.clone(),
+            melee_direction: initial.melee_direction.clone(),
+            grenades: initial.grenades.clone(),
+            armor: initial.armor.clone(),
+            body: initial.body.clone(),
+            healing: initial.healing.clone(),
+            unsupported: initial.unsupported.clone(),
+            limitations: initial.limitations.clone(),
+        };
+        let mut second = metadata.grenades[&4].clone();
+        second.material_penetration = Some(1.25);
+        metadata.grenades.insert(5, second);
+        let mut catalog = RetailCombatCatalog(metadata);
+        for invalid in [None, Some(-1.), Some(f64::INFINITY), Some(f64::MAX)] {
+            catalog.0.grenades.get_mut(&4).unwrap().material_penetration = invalid;
+            assert!(
+                catalog.validate_frag_character_blast().is_err(),
+                "{invalid:?}"
+            );
+        }
+        catalog.0.grenades.get_mut(&4).unwrap().material_penetration = Some(0.);
+        assert!(catalog.validate_frag_character_blast().is_ok());
+        catalog.0.grenades.clear();
+        assert!(catalog.validate_frag_character_blast().is_err());
+        catalog.0.authority.grenade_damage = false;
+        assert!(matches!(
+            catalog.validate_frag_character_blast(),
+            Err(RetailCombatError::PendingAuthority(
+                RetailCombatCapability::GrenadeDamage
+            ))
+        ));
     }
 }

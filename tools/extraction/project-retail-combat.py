@@ -211,7 +211,10 @@ def project(catalog_bytes, binding_bytes, bootstrap_bytes, bullet_witness_bytes,
             check(full > half, 'invalid_frag_radius_order')
             fuse, lifetime = duration_ms(p, 'detonation_timer'), duration_ms(p, 'm_fLifetimeMax')
             check(fuse <= lifetime, 'fuse_exceeds_authored_lifetime')
-            frag.update({'ammo': ammo_source, 'damage': damage(p), 'full_radius': full,
+            penetration = number(p, 'MaterialPenetration')
+            check(penetration <= float.fromhex('0x1.fffffep+127'),
+                  'invalid_numeric_parameter:MaterialPenetration')
+            frag.update({'material_penetration': penetration, 'ammo': ammo_source, 'damage': damage(p), 'full_radius': full,
                          'half_radius': half, 'fuse_ms': fuse, 'authored_lifetime_ms': lifetime,
                          'initial_count': byte(w, 'initial_magazine_count'),
                          'effective_range': number(w, 'effective_range'),

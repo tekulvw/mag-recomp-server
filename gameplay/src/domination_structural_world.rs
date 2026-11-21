@@ -160,6 +160,27 @@ pub struct PreparedDamage {
     pub area_state: AreaDamageState,
 }
 
+#[derive(Clone, Copy, Default)]
+pub(crate) struct OnFootBlastPose {
+    pub(crate) position: Option<replication::CharacterPosition>,
+    pub(crate) stance: Option<u8>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct CharacterBlastShape {
+    pub(crate) origin: [f64; 3],
+    pub(crate) half_radius_m: f32,
+    pub(crate) outer_radius_m: f32,
+    pub(crate) material_penetration: f32,
+}
+
+pub(crate) struct CharacterBlastObservation {
+    pub(crate) target: character::Target,
+    pub(crate) distance: f32,
+    pub(crate) scale: f32,
+    pub(crate) direction: [f32; 3],
+}
+
 #[derive(Clone, Copy)]
 pub struct BlastCollision<'a> {
     pub filter_rows: &'a [u32; 32],
@@ -657,6 +678,70 @@ impl<W: Write> Engine<W> {
         })
     }
 
+    fn domination_character_blast_anchor(
+        &self,
+        body: acquisition_volume_damage::Target,
+        world: u32,
+        accepted: OnFootBlastPose,
+    ) -> Result<Option<(character::Target, [f32; 3])>, &'static str> {
+        let id = u32::try_from(body.key.id).map_err(|_| "invalid_domination_structural_target")?;
+        let target = character::Target {
+            character_id: id,
+            generation: body.key.generation,
+            world,
+        };
+        let actor = self
+            .active
+            .iter()
+            .map(|a| (a, true))
+            .chain(self.peers.values().map(|a| (a, false)))
+            .find(|(a, _)| a.reservation.world == world && a.reservation.player == id as u16);
+        let (mut position, stance) = if let Some((actor, active)) = actor {
+            if actor.is_mounted()
+                || !actor
+                    .life
+                    .damage_health()
+                    .is_some_and(|(life, _)| life == target.generation)
+            {
+                return Ok(None);
+            }
+            let pose = if active {
+                accepted
+            } else {
+                OnFootBlastPose::default()
+            };
+            let position = match pose.position {
+                Some(p) => [p.x, p.y, p.z],
+                None => self.acquisition_character_position(target)?,
+            };
+            // Until the first owner state, a spawned Character stands.
+            let stance = pose
+                .stance
+                .or(actor.owner_fields.state.map(|s| s.stance))
+                .unwrap_or(0);
+            (position, stance)
+        } else {
+            let bot = self
+                .bot_registry
+                .bots
+                .get(&(id as u16))
+                .ok_or("domination_structural_blast_unqualified_stance")?;
+            if bot.health == 0 {
+                return Ok(None);
+            }
+            let runtime = bot
+                .target
+                .runtime
+                .filter(|runtime| runtime.generation == body.key.generation)
+                .ok_or("domination_structural_blast_bot_pose_missing")?;
+            (runtime.physical_position().map(|value| value as f32), 0)
+        };
+        position[1] += [2.0, 0.8, 0.3, 1.8]
+            .get(usize::from(stance))
+            .ok_or("domination_structural_blast_unqualified_stance")?;
+        Ok(Some((target, position)))
+    }
+
     fn domination_blast_target(
         &self,
         body: acquisition_volume_damage::Target,
@@ -664,45 +749,9 @@ impl<W: Write> Engine<W> {
     ) -> Result<Option<(BlastTarget, [f32; 3])>, &'static str> {
         let id = u32::try_from(body.key.id).map_err(|_| "invalid_domination_structural_target")?;
         match body.kind {
-            TargetKind::Character => {
-                let target = character::Target {
-                    character_id: id,
-                    generation: body.key.generation,
-                    world,
-                };
-                let actor = self.active.iter().chain(self.peers.values()).find(|actor| {
-                    actor.reservation.world == world && actor.reservation.player == id as u16
-                });
-                let (mut position, stance) = if let Some(actor) = actor {
-                    if actor.is_mounted() || actor.life.damage_health().is_none() {
-                        return Ok(None);
-                    }
-                    // Before the first owner state, the spawned on-foot
-                    // authority publishes standing stance zero.
-                    let stance = actor.owner_fields.state.map_or(0, |state| state.stance);
-                    (self.acquisition_character_position(target)?, stance)
-                } else {
-                    let bot = self
-                        .bot_registry
-                        .bots
-                        .get(&(id as u16))
-                        .ok_or("domination_structural_blast_unqualified_stance")?;
-                    if bot.health == 0 {
-                        return Ok(None);
-                    }
-                    let runtime = bot
-                        .target
-                        .runtime
-                        .filter(|runtime| runtime.generation == body.key.generation)
-                        .ok_or("domination_structural_blast_bot_pose_missing")?;
-                    // The server bot authority publishes standing stance zero.
-                    (runtime.physical_position().map(|value| value as f32), 0)
-                };
-                position[1] += [2.0, 0.8, 0.3, 1.8]
-                    .get(usize::from(stance))
-                    .ok_or("domination_structural_blast_unqualified_stance")?;
-                Ok(Some((BlastTarget::Character(target), position)))
-            }
+            TargetKind::Character => Ok(self
+                .domination_character_blast_anchor(body, world, OnFootBlastPose::default())?
+                .map(|(target, anchor)| (BlastTarget::Character(target), anchor))),
             TargetKind::GroundVehicle => {
                 let key = ground::Key {
                     index: id as u16,

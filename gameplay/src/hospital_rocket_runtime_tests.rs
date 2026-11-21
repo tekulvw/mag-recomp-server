@@ -65,7 +65,7 @@ fn equipped_fixture() -> Engine<Vec<u8>> {
     engine
 }
 
-fn launch_wire(engine: &Engine<Vec<u8>>, slot: u16, ammo: u8) -> Vec<u8> {
+pub(crate) fn launch_wire(engine: &Engine<Vec<u8>>, slot: u16, ammo: u8) -> Vec<u8> {
     let player = engine.active.as_ref().unwrap().reservation.player;
     let mut bits = replication::BitWriter::with_profile(engine.wire_profile);
     bits.write(0x0210, 16).unwrap();

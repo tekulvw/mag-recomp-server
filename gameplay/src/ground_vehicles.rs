@@ -940,8 +940,16 @@ impl<W: io::Write> crate::Engine<W> {
     }
 
     pub(crate) fn current_ground_vehicle(&self, index: u16) -> Option<Creation> {
+        self.current_ground_vehicle_in(index, self.ground_runtime.as_ref()?)
+    }
+
+    pub(crate) fn current_ground_vehicle_in(
+        &self,
+        index: u16,
+        runtime: &crate::acquisition_ground_runtime::Runtime,
+    ) -> Option<Creation> {
         let mut creation = self.ground_vehicles.as_ref()?.vehicle(index)?.clone();
-        let current = self.ground_runtime.as_ref()?.get(index)?;
+        let current = runtime.get(index)?;
         creation.position = current.pose.position;
         creation.rotation = current.pose.rotation;
         creation.initial_state = current.state;

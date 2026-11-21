@@ -135,6 +135,7 @@ pub fn drop_passages_exclusive(
     bot_traffic_flow::passages_exclusive(a, b, entry_buffer_m)
 }
 pub mod character_damage_rules;
+mod character_frag_damage;
 pub mod domination_helo;
 mod domination_helo_damage;
 mod domination_helo_engine;
@@ -1193,6 +1194,7 @@ pub struct Engine<W: Write> {
     domination_gameplay: Option<domination_gameplay_provider::World>,
     hospital_rockets: Option<std::sync::Arc<hospital_rockets::Catalog>>,
     hospital_rocket_ground: Option<std::sync::Arc<hospital_rocket_ground::Catalog>>,
+    frag_character_blast: bool,
     projectile_contacts: Option<std::sync::Arc<domination_projectile_collision::ContactBindings>>,
     acquisition_gameplay: Option<acquisition_gameplay_engine::Runtime>,
     squad_orders: Option<squad_order_engine::Runtime>,

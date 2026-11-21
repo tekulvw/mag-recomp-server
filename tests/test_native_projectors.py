@@ -230,6 +230,7 @@ class NativeProjectorTests(unittest.TestCase):
         frag = {**bullet, 'ammo_name': 'invented_projectile'}
         ammo = {'damage': damage, 'full_damage_radius': 9., 'half_damage_radius': 4., 'detonation_timer': 3.,
             'm_fLifetimeMax': 6., 'detonation_strategy': 'invented', 'explosion_strategy': 'invented',
+            'MaterialPenetration': 2.75,
             **{key: 2. for key in tool.PHYSICS_FIELDS}}
         def definition(parameters, token=123):
             return {'parameters': parameters, 'source': {'invented': True}, 'native_token_u32': token}
@@ -265,6 +266,7 @@ class NativeProjectorTests(unittest.TestCase):
         self.assertEqual(result['runtime_policy'], policy)
         self.assertEqual(result['bullets']['0']['magazine_capacity'], 17)
         self.assertEqual(result['grenades']['2']['fuse_ms'], 3000)
+        self.assertEqual(result['grenades']['2']['material_penetration'], 2.75)
         self.assertEqual(result['healing']['3']['heal_percent'], 17.)
         self.assertEqual(len(result['body']), 16)
         self.assertEqual(result['body'][7]['incapacitated_multiplier'], .479375)

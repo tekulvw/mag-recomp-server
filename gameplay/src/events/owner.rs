@@ -15,8 +15,9 @@ pub(super) fn object_update<W: Write>(
         position_status,
         owner_fields,
         body_supported,
+        accepted_stance,
     } = plan_owner_report(ctx, plan, &update)?;
-    let mut grenade_queue = plan_grenade_blasts(ctx, plan, h, body_supported)?;
+    let mut grenade_queue = plan_grenade_blasts(ctx, plan, h, body_supported, accepted_stance)?;
     if let Some(fall) = plan.combat.queued_fall.take() {
         if grenade_queue.len() < 64 {
             grenade_queue.push_back(fall);
@@ -57,7 +58,7 @@ pub(super) fn object_update<W: Write>(
         "applied_damage":plan.audit.applied_damage,"applied_healing":plan.audit.applied_healing,
         "projectile_reports":plan.audit.projectile_reports,"projectile_terminals":plan.audit.projectile_terminals,
         "grenade_blast_checks":plan.audit.grenade_blast_checks,
-        "grenade_visibility_policy":if ctx.engine.development_grenade_radius {"disk_triangles_three_body_samples"} else {"unknown_no_damage"},
+        "grenade_visibility_policy":if ctx.engine.frag_character_blast {"current_body_stance_material_ray"} else if ctx.engine.development_grenade_radius {"disk_triangles_three_body_samples"} else {"unknown_no_damage"},
         "initial_objectives":plan.replication.objective_delta.is_some(),"objective_count":plan.replication.objective_count,
         "initial_emplacement":plan.replication.emplacement_creation.is_some(),
         "assigned_objective":plan.replication.objective_target,
@@ -77,6 +78,10 @@ pub(super) fn object_update<W: Write>(
     }
     if !plan.audit.helo_grenade_checks.is_empty() {
         audit["helo_grenade_checks"] = json!(plan.audit.helo_grenade_checks);
+    }
+    if !plan.audit.native_grenade_character_checks.is_empty() {
+        audit["native_grenade_character_checks"] =
+            json!(plan.audit.native_grenade_character_checks);
     }
     Ok(audit)
 }
@@ -123,6 +128,7 @@ struct OwnerReport {
     position_status: &'static str,
     owner_fields: Option<Value>,
     body_supported: bool,
+    accepted_stance: Option<u8>,
 }
 
 fn plan_owner_report<W: Write>(
@@ -217,6 +223,7 @@ fn plan_owner_report<W: Write>(
     let mut position_status = "absent";
     let mut owner_fields = None;
     let mut body_supported = true;
+    let mut accepted_stance = None;
     match fields {
         Err(
             error @ (owner_update::OwnerUpdateError::UnsupportedCharacterField
@@ -245,7 +252,17 @@ fn plan_owner_report<W: Write>(
                     plan.combat.observed_secondary = fields.secondary;
                     plan.combat.primary_equipped = fields.primary_equipped;
                 }
-                if let CharacterLife::Alive { generation, .. } = active.life {
+                if ctx.engine.frag_character_blast
+                    && ctx.accepted_owner_route
+                    && h.sequence > active.latest_owner_sequence
+                    && !active.is_mounted()
+                {
+                    accepted_stance = active.owner_presentation(&fields).state.map(|s| s.stance);
+                }
+                if let CharacterLife::Alive { generation, .. } = active.life
+                    && (!ctx.engine.frag_character_blast
+                        || h.sequence > active.latest_owner_sequence)
+                {
                     let mut flights = active.projectiles.clone();
                     for report in fields.projectiles.iter().cloned() {
                         if active.hospital_rocket_flights.occupies(report.slot) {
@@ -389,6 +406,7 @@ fn plan_owner_report<W: Write>(
         position_status,
         owner_fields,
         body_supported,
+        accepted_stance,
     })
 }
 
@@ -397,23 +415,60 @@ fn plan_grenade_blasts<W: Write>(
     plan: &mut EventPlan,
     h: replication::UpdateHeader,
     body_supported: bool,
+    accepted_stance: Option<u8>,
 ) -> Result<std::collections::VecDeque<PendingDamage>, &'static str> {
     let active = ctx.active;
     let attacker = 0x0380_0000 | u32::from(active.reservation.player);
     let world = active.reservation.world;
     let mut grenade_queue = active.grenade_damage.clone();
-    if ctx.accepted_owner_route
+    let admitted_owner_blast = ctx.accepted_owner_route
         && body_supported
         && plan.rejection.is_none()
         && h.nak_sequence == 0
         && h.client_index == 0
-        && ctx.engine.round_combat_allowed(ctx.now)
-        && ctx.engine.ground_damage_policy().is_some()
-        && plan.audit.projectile_terminals.iter().any(|terminal| {
-            terminal.reason == projectile::ProjectileTerminalReason::ReportedDetonation
-                && terminal.position.is_some()
-        })
-    {
+        && ctx.engine.round_combat_allowed(ctx.now);
+    let detonated = plan.audit.projectile_terminals.iter().any(|terminal| {
+        terminal.reason == projectile::ProjectileTerminalReason::ReportedDetonation
+            && terminal.position.is_some()
+    });
+    let queue_limit = blast_visibility::MAX_BLAST_TARGETS
+        * usize::from(projectile::projectile_slot_count(ctx.engine.wire_profile));
+    if ctx.engine.frag_character_blast && admitted_owner_blast && detonated {
+        // Freeze the accepted motion candidate before applying any blast
+        // damage to the same Ground runtime.
+        let frame = crate::character_frag_damage::FragFrame {
+            pose: crate::domination_structural_world::OnFootBlastPose {
+                position: plan.session.client_position.map(|(position, _)| position),
+                stance: accepted_stance,
+            },
+            ground: plan.ground_runtime.as_ref(),
+            leadership: &plan.leadership,
+        };
+        match ctx.engine.prepare_frag_character_damage(
+            active,
+            &plan.audit.projectile_terminals,
+            frame,
+        ) {
+            Ok(effect) => {
+                plan.audit.native_grenade_character_checks = effect.audit;
+                if grenade_queue.len() + effect.doses.len() <= queue_limit {
+                    grenade_queue.extend(effect.doses);
+                } else {
+                    plan.gameplay_denial
+                        .get_or_insert("grenade_damage_queue_full");
+                    let available = queue_limit.saturating_sub(grenade_queue.len());
+                    grenade_queue.extend(effect.doses.into_iter().take(available));
+                }
+            }
+            Err(error) => {
+                plan.gameplay_denial.get_or_insert(error);
+                plan.audit
+                    .native_grenade_character_checks
+                    .push(json!({"error":error}));
+            }
+        }
+    }
+    if admitted_owner_blast && ctx.engine.ground_damage_policy().is_some() && detonated {
         let motion_staged = plan.ground_runtime.is_some();
         let mut candidate = plan
             .ground_runtime
@@ -442,7 +497,8 @@ fn plan_grenade_blasts<W: Write>(
         }
     }
 
-    if ctx.engine.development_grenade_radius
+    if !ctx.engine.frag_character_blast
+        && ctx.engine.development_grenade_radius
         && body_supported
         && plan.rejection.is_none()
         && h.nak_sequence == 0
@@ -568,8 +624,6 @@ fn plan_grenade_blasts<W: Write>(
                 ))?,
             });
         }
-        let queue_limit = blast_visibility::MAX_BLAST_TARGETS
-            * usize::from(projectile::projectile_slot_count(ctx.engine.wire_profile));
         for terminal in &plan.audit.projectile_terminals {
             if terminal.reason != projectile::ProjectileTerminalReason::ReportedDetonation {
                 continue;
@@ -702,7 +756,10 @@ fn plan_update_reply<W: Write>(
         plan.outgoing = Some(packet.clone());
         plan.replication.helo_creation = Some(packet);
     } else if active.ready_for_updates
-        && (active.pending_damage.is_some() || !grenade_queue.is_empty())
+        && (active.pending_damage.is_some()
+            || (!grenade_queue.is_empty()
+                && (!ctx.engine.frag_character_blast
+                    || (ctx.accepted_owner_route && ctx.engine.round_combat_allowed(now)))))
         && history_available
     {
         update_actions::plan_pending_damage(ctx, plan, grenade_queue)?;
