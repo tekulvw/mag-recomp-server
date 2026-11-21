@@ -17,7 +17,7 @@ use crate::{
     },
     dynamic_collision::{Pose, QueryLimits},
     objective_catalog::ObjectiveCatalog,
-    objective_control::{NativeEntry, ObjectiveActor, ObjectiveWorld},
+    objective_control::{ActionTimingModifiers, NativeEntry, ObjectiveActor, ObjectiveWorld},
     replication::{MatchPhase, ObjectiveSequenceDelta, ObjectiveState, SquadObjectiveAssignment},
     spawn_catalog::SpawnCatalog,
     structures::BunkerWorld,
@@ -1650,7 +1650,7 @@ impl<W: Write> Engine<W> {
         event: &crate::events::EventInput,
         request: crate::protocol::ObjectiveInteraction,
         actor: ObjectiveActor,
-        timer_modifier: f32,
+        timings: ActionTimingModifiers,
         leadership: crate::leadership_runtime::LeadershipPlan,
         now: Duration,
         wall: u64,
@@ -1660,14 +1660,7 @@ impl<W: Write> Engine<W> {
             .take()
             .ok_or("domination_gameplay_configuration_required")?;
         let result = self.run_domination_interaction_world(
-            &mut world,
-            event,
-            request,
-            actor,
-            timer_modifier,
-            leadership,
-            now,
-            wall,
+            &mut world, event, request, actor, timings, leadership, now, wall,
         );
         self.domination_gameplay = Some(world);
         result
@@ -1680,7 +1673,7 @@ impl<W: Write> Engine<W> {
         event: &crate::events::EventInput,
         request: crate::protocol::ObjectiveInteraction,
         actor: ObjectiveActor,
-        timer_modifier: f32,
+        timings: ActionTimingModifiers,
         leadership: crate::leadership_runtime::LeadershipPlan,
         now: Duration,
         wall: u64,
@@ -1707,12 +1700,8 @@ impl<W: Write> Engine<W> {
                     messages: Vec::new(),
                     packets: Vec::new(),
                 };
-                let input = crate::domination_gameplay_engine::PlayerInteraction {
-                    request,
-                    actor,
-                    timer_modifier,
-                };
-                let outcome = runtime.stage_interaction(frame, input, provider)?;
+                let outcome = runtime
+                    .stage_interaction_with_timing(frame, request, actor, timings, provider)?;
                 let (candidate, provider) = outcome.candidate.detach_effects();
                 let Provider {
                     state: next_state,

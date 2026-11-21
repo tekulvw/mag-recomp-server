@@ -24,6 +24,12 @@ pub struct ObjectiveActor {
     pub position: CharacterPosition,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ActionTimingModifiers {
+    pub secure_and_hold: f32,
+    pub demolition: f32,
+}
+
 pub struct InteractionOutcome {
     pub accepted: bool,
     pub reason: &'static str,
@@ -718,7 +724,7 @@ impl ObjectiveWorld {
         if trigger >= rule.trigger_count {
             return Err("structure_damage_trigger_index_out_of_range");
         }
-        let duration = modified_demolition_duration(rule.arm_ms, modifier)
+        let duration = modified_action_duration(rule.arm_ms, modifier)
             .ok_or("invalid_structure_damage_arm_modifier")?;
         let deadline = now
             .checked_add(Duration::from_millis(duration.into()))
@@ -926,7 +932,7 @@ impl ObjectiveWorld {
         actor: ObjectiveActor,
         now: Duration,
     ) -> InteractionOutcome {
-        self.interact_with_demolition_modifier(request, actor, now, 0.0)
+        self.interact_with_action_timing(request, actor, now, ActionTimingModifiers::default())
     }
 
     /// Native GetModifiedTime uses single-precision fused base*modifier+base
@@ -939,6 +945,24 @@ impl ObjectiveWorld {
         now: Duration,
         demolition_modifier: f32,
     ) -> InteractionOutcome {
+        self.interact_with_action_timing(
+            request,
+            actor,
+            now,
+            ActionTimingModifiers {
+                demolition: demolition_modifier,
+                ..Default::default()
+            },
+        )
+    }
+
+    pub fn interact_with_action_timing(
+        &mut self,
+        request: ObjectiveInteraction,
+        actor: ObjectiveActor,
+        now: Duration,
+        timings: ActionTimingModifiers,
+    ) -> InteractionOutcome {
         let index = request.target_object_id as u16;
         if request.target_object_id != 0x0c80_0000 | u32::from(index) {
             return InteractionOutcome::denied("objective_invalid_target");
@@ -950,27 +974,20 @@ impl ObjectiveWorld {
             return InteractionOutcome::denied("objective_unknown_target");
         };
         if object.native.is_some() {
-            let outcome =
-                stage_native_interaction(object, request, actor, now, demolition_modifier);
+            let outcome = stage_native_interaction(object, request, actor, now, timings);
             self.pristine &= !outcome.accepted;
             return outcome;
         }
-        if let Some(mut rule) = object.demolition.clone() {
-            // Release remains possible independently of modifier validity.
-            if request.kind != ObjectiveInteractionKind::Release {
-                let Some(arm) = modified_demolition_duration(rule.arm_ms, demolition_modifier)
-                else {
-                    return InteractionOutcome::denied("invalid_demolition_modifier");
-                };
-                let Some(defuse) =
-                    modified_demolition_duration(rule.defuse_ms, demolition_modifier)
-                else {
-                    return InteractionOutcome::denied("invalid_demolition_modifier");
-                };
-                rule.arm_ms = arm;
-                rule.defuse_ms = defuse;
-            }
-            let outcome = interact_demolition(object, &rule, request, actor, now, false);
+        if let Some(rule) = object.demolition.clone() {
+            let outcome = interact_demolition(
+                object,
+                &rule,
+                request,
+                actor,
+                now,
+                false,
+                timings.demolition,
+            );
             self.pristine &= outcome.changed.is_none();
             return outcome;
         }
@@ -1008,7 +1025,15 @@ impl ObjectiveWorld {
                 if object.state.state_actor.state != ObjectiveState::Deactivated {
                     return InteractionOutcome::denied("objective_not_deactivated");
                 }
-                let deadline = now.saturating_add(Duration::from_millis(rule.activate_ms.into()));
+                let duration = if timings.secure_and_hold == 0.0 {
+                    Some(rule.activate_ms)
+                } else {
+                    modified_action_duration(rule.activate_ms, timings.secure_and_hold)
+                };
+                let Some(duration) = duration else {
+                    return InteractionOutcome::denied("invalid_objective_modifier");
+                };
+                let deadline = now.saturating_add(Duration::from_millis(duration.into()));
                 object.operation = Some(Operation {
                     started_at: now,
                     recipient: None,
@@ -1273,7 +1298,7 @@ fn armed_state(object: &mut Objective, now: Duration) {
     object.operation = None;
 }
 
-fn modified_demolition_duration(base_ms: u32, modifier: f32) -> Option<u32> {
+fn modified_action_duration(base_ms: u32, modifier: f32) -> Option<u32> {
     let base = base_ms as f32;
     let duration = modifier.mul_add(base, base);
     // Native takes low32 after signed64 truncation. Only ordinary finite,
@@ -1323,7 +1348,7 @@ fn stage_native_interaction(
     request: ObjectiveInteraction,
     actor: ObjectiveActor,
     now: Duration,
-    modifier: f32,
+    timings: ActionTimingModifiers,
 ) -> InteractionOutcome {
     use ObjectiveInteractionKind::{Activate, Deactivate, Release};
     let mode = object.native.as_mut().expect("native objective");
@@ -1331,18 +1356,11 @@ fn stage_native_interaction(
         return InteractionOutcome::denied("native_objective_transition_pending");
     }
     if let (Some(hold), Some(rule)) = (&mut mode.secure, &object.rule) {
-        let (action, base) = match request.kind {
-            Activate => (secure::Action::Activate, Some(rule.activate_ms)),
-            Deactivate => (secure::Action::Deactivate, Some(rule.deactivate_ms)),
-            Release => (secure::Action::Release, None),
+        let action = match request.kind {
+            Activate => secure::Action::Activate,
+            Deactivate => secure::Action::Deactivate,
+            Release => secure::Action::Release,
             _ => return InteractionOutcome::denied("objective_interaction_unsupported"),
-        };
-        let duration = match base {
-            Some(base) => match modified_demolition_duration(base, modifier) {
-                Some(duration) => Some(duration),
-                None => return InteractionOutcome::denied("invalid_objective_modifier"),
-            },
-            None => None,
         };
         let contact = at_native_trigger(actor.position, rule.range(), request.trigger_index);
         let actor = secure::Actor {
@@ -1350,21 +1368,37 @@ fn stage_native_interaction(
             team: actor.team,
             generation: actor.generation.into(),
         };
-        return match hold.request(action, actor, request.trigger_index, contact) {
-            Ok(transition) => {
-                mode.pending = Some(NativePending::Secure(transition, duration));
-                InteractionOutcome::accepted(
-                    "native_objective_interaction_staged",
-                    None,
-                    if action == secure::Action::Release {
-                        u8::MAX
-                    } else {
-                        request.trigger_index
-                    },
-                )
-            }
-            Err(reason) => InteractionOutcome::denied(reason),
+        let mut candidate = hold.clone();
+        let transition = match candidate.request(action, actor, request.trigger_index, contact) {
+            Ok(transition) => transition,
+            Err(reason) => return InteractionOutcome::denied(reason),
         };
+        let base = match transition.target() {
+            ObjectiveState::Activating | ObjectiveState::Retaking => Some(rule.activate_ms),
+            ObjectiveState::Deactivating | ObjectiveState::CancelRetaken => {
+                Some(rule.deactivate_ms)
+            }
+            _ => None,
+        };
+        let duration = if let Some(base) = base {
+            let Some(duration) = modified_action_duration(base, timings.secure_and_hold) else {
+                return InteractionOutcome::denied("invalid_objective_modifier");
+            };
+            Some(duration)
+        } else {
+            None
+        };
+        *hold = candidate;
+        mode.pending = Some(NativePending::Secure(transition, duration));
+        return InteractionOutcome::accepted(
+            "native_objective_interaction_staged",
+            None,
+            if action == secure::Action::Release {
+                u8::MAX
+            } else {
+                request.trigger_index
+            },
+        );
     }
     let Some(rule) = object.demolition.as_ref() else {
         return InteractionOutcome::denied("objective_interaction_not_configured");
@@ -1396,16 +1430,15 @@ fn stage_native_interaction(
         return InteractionOutcome::denied("objective_active_trigger_mismatch");
     }
     let was_repaired = mode.was_repaired;
-    let Some(adjusted) = adjusted_demolition_rule(rule, request.kind, modifier) else {
-        return InteractionOutcome::denied("invalid_demolition_modifier");
-    };
+    let modifier = timings.demolition;
     let outcome = interact_demolition(
         &mut object.clone(),
-        &adjusted,
+        rule,
         request,
         actor,
         now,
         was_repaired,
+        modifier,
     );
     if outcome.changed.is_some() {
         object.native.as_mut().expect("native objective").pending =
@@ -1421,24 +1454,6 @@ fn stage_native_interaction(
         changed: None,
         ..outcome
     }
-}
-
-fn adjusted_demolition_rule(
-    rule: &ObjectiveDemolitionRule,
-    kind: ObjectiveInteractionKind,
-    modifier: f32,
-) -> Option<ObjectiveDemolitionRule> {
-    let mut rule = rule.clone();
-    match kind {
-        ObjectiveInteractionKind::Activate => {
-            rule.arm_ms = modified_demolition_duration(rule.arm_ms, modifier)?
-        }
-        ObjectiveInteractionKind::Deactivate => {
-            rule.defuse_ms = modified_demolition_duration(rule.defuse_ms, modifier)?
-        }
-        _ => {}
-    }
-    Some(rule)
 }
 
 fn set_native_state(object: &mut Objective, target: ObjectiveState, player: u16, now: Duration) {
@@ -1796,12 +1811,7 @@ fn tick_native(
             modifier,
             recipient,
         }) => {
-            let rule = adjusted_demolition_rule(
-                object.demolition.as_ref().expect("native demolition"),
-                kind,
-                modifier,
-            )
-            .expect("validated demolition modifier");
+            let rule = object.demolition.clone().expect("native demolition rule");
             let request = ObjectiveInteraction {
                 target_object_id: 0x0c80_0000 | u32::from(object.state.object_index),
                 kind,
@@ -1809,9 +1819,17 @@ fn tick_native(
                 trigger_index: trigger,
             };
             let fuse = object.fuse.clone();
-            if interact_demolition(object, &rule, request, actor, now, mode.was_repaired)
-                .changed
-                .is_some()
+            if interact_demolition(
+                object,
+                &rule,
+                request,
+                actor,
+                now,
+                mode.was_repaired,
+                modifier,
+            )
+            .changed
+            .is_some()
             {
                 if let Some(operation) = object.operation.as_mut() {
                     operation.recipient = recipient;
@@ -1929,6 +1947,7 @@ fn interact_demolition(
     actor: ObjectiveActor,
     now: Duration,
     was_repaired: bool,
+    modifier: f32,
 ) -> InteractionOutcome {
     use ObjectiveInteractionKind::{Activate, Deactivate, Release};
     let state = object.state.state_actor.state;
@@ -2006,6 +2025,9 @@ fn interact_demolition(
     {
         return InteractionOutcome::denied("objective_invalid_demolition_state");
     }
+    let Some(duration) = modified_action_duration(duration, modifier) else {
+        return InteractionOutcome::denied("invalid_demolition_modifier");
+    };
     let deadline = now.saturating_add(Duration::from_millis(duration.into()));
     object.operation = Some(Operation {
         started_at: now,
@@ -2720,6 +2742,243 @@ pub(crate) mod trigger_box_tests {
                 .state_actor
                 .state,
             ObjectiveState::Activated
+        );
+    }
+
+    fn timing_actor(team: u8) -> ObjectiveActor {
+        ObjectiveActor {
+            player: u16::from(team) + 7,
+            team,
+            generation: 1,
+            position: CharacterPosition {
+                x: 100.,
+                y: 3.,
+                z: 100.,
+            },
+        }
+    }
+
+    fn timing_request(
+        actor: ObjectiveActor,
+        kind: ObjectiveInteractionKind,
+    ) -> ObjectiveInteraction {
+        ObjectiveInteraction {
+            target_object_id: 0x0c80_000a,
+            actor_index: actor.player,
+            trigger_index: 0,
+            kind,
+        }
+    }
+
+    fn timing_world(initial: ObjectiveState) -> ObjectiveWorld {
+        let mut catalog = native_catalog();
+        catalog["objects"][0]["interaction"]["activate_ms"] = json!(37);
+        catalog["objects"][0]["interaction"]["deactivate_ms"] = json!(47);
+        let mut world =
+            ObjectiveWorld::new(&ObjectiveCatalog::from_json(&catalog.to_string()).unwrap());
+        use ObjectiveInteractionKind::{Activate, Deactivate};
+        use ObjectiveState::{Activated, Completed, Deactivated, Retaken};
+        let base_state = match initial {
+            Activated => Deactivated,
+            Retaken => Completed,
+            state => state,
+        };
+        let object = world.objects.get_mut(&10).unwrap();
+        object.state.state_actor.state = base_state;
+        object.native.as_mut().unwrap().secure =
+            Some(secure_hold(base_state, object.rule.as_ref().unwrap()));
+
+        // Establish transient completion-window states through their actual holds.
+        if matches!(initial, Activated | Retaken) {
+            let (actor, kind) = match initial {
+                Activated => (timing_actor(0), Activate),
+                _ => (timing_actor(1), Deactivate),
+            };
+            let start = Duration::from_millis(60);
+            assert!(
+                world
+                    .interact(timing_request(actor, kind), actor, start)
+                    .accepted
+            );
+            world
+                .commit_pending_native_interaction(10, start, actor)
+                .unwrap();
+            assert_eq!(
+                frame(&mut world, 10, 97, &BTreeMap::from([(actor.player, actor)]))
+                    .unwrap()
+                    .state_actor
+                    .state,
+                initial
+            );
+        }
+        world
+    }
+
+    #[test]
+    fn action_timing_demolition_modifier_does_not_shorten_capture() {
+        let mut world = timing_world(ObjectiveState::Deactivated);
+        let actor = timing_actor(0);
+        let now = Duration::from_millis(100);
+        assert!(
+            world
+                .interact_with_demolition_modifier(
+                    timing_request(actor, ObjectiveInteractionKind::Activate),
+                    actor,
+                    now,
+                    -0.2,
+                )
+                .accepted
+        );
+        assert_eq!(
+            world
+                .commit_pending_native_interaction(10, now, actor)
+                .unwrap()
+                .expiration_time_ms,
+            137
+        );
+    }
+
+    #[test]
+    fn action_timing_selects_native_entering_state_and_secure_slot() {
+        use ObjectiveInteractionKind::{Activate, Deactivate};
+        use ObjectiveState::{
+            Activated, Activating, CancelRetaken, Completed, Deactivated, Deactivating, Retaken,
+            Retaking,
+        };
+        let now = Duration::from_millis(100);
+        for (initial, kind, team, expected_state, deadline) in [
+            (Deactivated, Activate, 0, Activating, 146),
+            (Activated, Deactivate, 1, Deactivating, 158),
+            (Completed, Deactivate, 1, Retaking, 146),
+            (Retaken, Activate, 0, CancelRetaken, 158),
+        ] {
+            let mut world = timing_world(initial);
+            let actor = timing_actor(team);
+            assert!(
+                world
+                    .interact_with_action_timing(
+                        timing_request(actor, kind),
+                        actor,
+                        now,
+                        ActionTimingModifiers {
+                            secure_and_hold: 0.25,
+                            demolition: f32::NAN
+                        },
+                    )
+                    .accepted
+            );
+            let delta = world
+                .commit_pending_native_interaction(10, now, actor)
+                .unwrap();
+            let time = if matches!(expected_state, Retaking | Activating) {
+                delta.expiration_time_ms
+            } else {
+                delta.deactivation_time_ms
+            };
+            assert_eq!((delta.state_actor.state, time), (expected_state, deadline));
+        }
+    }
+
+    #[test]
+    fn action_timing_invalid_native_duration_leaves_no_staged_hold() {
+        use ObjectiveInteractionKind::{Activate, Release};
+        let mut world = timing_world(ObjectiveState::Deactivated);
+        let actor = timing_actor(0);
+        let now = Duration::from_millis(100);
+        let invalid = ActionTimingModifiers {
+            secure_and_hold: f32::NAN,
+            demolition: f32::NAN,
+        };
+        let request = timing_request(actor, Activate);
+        assert_eq!(
+            world
+                .interact_with_action_timing(request, actor, now, invalid)
+                .reason,
+            "invalid_objective_modifier"
+        );
+        assert!(
+            world
+                .commit_pending_native_interaction(10, now, actor)
+                .is_none()
+        );
+        assert!(world.interact(request, actor, now).accepted);
+        let delta = world
+            .commit_pending_native_interaction(10, now, actor)
+            .unwrap();
+        assert_eq!(delta.expiration_time_ms, 137);
+
+        let later = now + Duration::from_millis(5);
+        assert!(
+            !world
+                .interact_with_action_timing(request, actor, later, invalid)
+                .accepted
+        );
+        assert!(
+            world
+                .interact_with_action_timing(timing_request(actor, Release), actor, later, invalid,)
+                .accepted
+        );
+        let delta = world
+            .commit_pending_native_interaction(10, later, actor)
+            .unwrap();
+        assert_eq!(delta.state_actor.state, ObjectiveState::Deactivated);
+    }
+
+    #[test]
+    fn action_timing_legacy_capture_honors_secure_modifier_without_restarting_duplicate() {
+        let mut world = world();
+        let actor = timing_actor(0);
+        let now = Duration::from_millis(100);
+        let request = timing_request(actor, ObjectiveInteractionKind::Activate);
+        let outcome = world.interact_with_action_timing(
+            request,
+            actor,
+            now,
+            ActionTimingModifiers {
+                secure_and_hold: -0.2,
+                demolition: f32::NAN,
+            },
+        );
+        assert_eq!(outcome.changed.unwrap().expiration_time_ms, 108);
+        let later = now + Duration::from_millis(1);
+        let duplicate = world.interact_with_action_timing(
+            request,
+            actor,
+            later,
+            ActionTimingModifiers {
+                secure_and_hold: f32::NAN,
+                demolition: 0.0,
+            },
+        );
+        assert!(duplicate.accepted && duplicate.changed.is_none());
+        assert_eq!(world.objects[&10].state.expiration_time_ms, 108);
+    }
+
+    #[test]
+    fn action_timing_zero_keeps_exact_authored_legacy_deadline() {
+        let mut world = world();
+        world
+            .objects
+            .get_mut(&10)
+            .unwrap()
+            .rule
+            .as_mut()
+            .unwrap()
+            .activate_ms = u32::MAX;
+        let actor = timing_actor(0);
+        let now = Duration::from_millis(100);
+        assert!(
+            world
+                .interact(
+                    timing_request(actor, ObjectiveInteractionKind::Activate),
+                    actor,
+                    now
+                )
+                .accepted
+        );
+        assert_eq!(
+            world.objects[&10].operation.as_ref().unwrap().deadline,
+            now + Duration::from_millis(u64::from(u32::MAX))
         );
     }
 

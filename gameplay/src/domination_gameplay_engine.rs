@@ -8,7 +8,7 @@ use crate::{
     domination_fsp_bindings::Bindings,
     domination_objective_runtime::Actor,
     objective_catalog::{NativeClass, ObjectiveCatalog},
-    objective_control::{NativeEntry, ObjectiveActor, ObjectiveWorld},
+    objective_control::{ActionTimingModifiers, NativeEntry, ObjectiveActor, ObjectiveWorld},
     protocol::{ObjectiveInteraction, ObjectiveInteractionKind},
     replication::{
         ObjectiveControlDelta, ObjectiveControlSnapshot, ObjectiveSequenceDelta, ObjectiveState,
@@ -371,6 +371,7 @@ pub struct Frame<'a> {
 pub struct PlayerInteraction {
     pub request: ObjectiveInteraction,
     pub actor: ObjectiveActor,
+    /// Actor's DemolitionTime modifier for arm and defuse.
     pub timer_modifier: f32,
 }
 
@@ -546,24 +547,40 @@ impl Runtime {
         input: PlayerInteraction,
         effects: E,
     ) -> Result<InteractionCandidate<E>, &'static str> {
+        self.stage_interaction_with_timing(
+            frame,
+            input.request,
+            input.actor,
+            ActionTimingModifiers {
+                demolition: input.timer_modifier,
+                ..Default::default()
+            },
+            effects,
+        )
+    }
+
+    pub(crate) fn stage_interaction_with_timing<E: ExternalEffects>(
+        &self,
+        frame: Frame<'_>,
+        request: ObjectiveInteraction,
+        actor: ObjectiveActor,
+        timings: ActionTimingModifiers,
+        effects: E,
+    ) -> Result<InteractionCandidate<E>, &'static str> {
         if !self.started {
             return Err("domination_gameplay_not_started");
         }
         let mut candidate = self.candidate(&frame, effects)?;
-        let request = input.request;
-        let outcome = candidate.world.interact_with_demolition_modifier(
-            request,
-            input.actor,
-            frame.now,
-            input.timer_modifier,
-        );
+        let outcome = candidate
+            .world
+            .interact_with_action_timing(request, actor, frame.now, timings);
         if outcome.accepted {
             candidate
                 .deltas
                 .extend(candidate.world.commit_pending_native_interaction(
                     request.target_object_id as u16,
                     frame.now,
-                    input.actor,
+                    actor,
                 ));
             for entry in candidate.world.take_native_entries() {
                 candidate.prepare_entry(entry, frame.now.as_millis() as u32)?;
@@ -571,7 +588,7 @@ impl Runtime {
         }
         let reply = ObjectiveInteraction {
             target_object_id: request.target_object_id,
-            actor_index: input.actor.player,
+            actor_index: actor.player,
             trigger_index: outcome.reply_trigger_index,
             kind: if outcome.accepted {
                 ObjectiveInteractionKind::Ack
