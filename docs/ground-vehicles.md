@@ -40,9 +40,10 @@ initial-load proof concerns a fresh/reset compiled load before dynamic creation;
 it does not observe an existing process's pool occupancy. Vehicle network indices
 remain an explicit local allocation policy, separate from native spawn indices.
 
-Driving, turret equipment/combat, damage/repair, destruction and moving exits
-remain separate typed implementation work. A spawn row alone does not enable a
-vehicle. Native game acceptance, deployment and a release require their own review.
+Explicit driver catalogs connect qualified Acquisition Escorts and opted-in
+Domination APCs to the shared manual seating and owner-motion path. A spawn row
+alone does not grant driving or turret authority. Native game acceptance,
+deployment and a release require their own review.
 
 ## Admitted-seat visibility
 
@@ -60,3 +61,25 @@ The output must be outside the source checkout. Repeat with `--check` to verify 
 A bound Structural objective with nonzero periodic area radius and damage requires complete visibility for every admitted ground seat before gameplay starts. The area scan can encounter any occupied seat before applying its distance test, so leaving one vehicle unqualified can interrupt processing even if it is far from the objective. Hidden passengers are skipped without damage while the scan cursor still advances. Maps with no enabled periodic Structural effect retain optional visibility compatibility.
 
 Updating a Domination ground catalog changes its bytes. Regenerate the paired ground-lifecycle projection with those exact upgraded ground files and update the gameplay configuration's lifecycle path and SHA256; retain the matching spawn catalogs and active-ability sidecars. An old lifecycle digest cannot bind upgraded ground data. These source checks remain separate from native live-match review.
+
+## Domination APC driver opt-in
+
+The Domination ground projector can explicitly enable manual driver and passenger entry for the eight source-type3 attacker APCs. Vehicle indices are source allocations: select by kind rather than assuming that APCs occupy the lowest indices. Type7 motor-pool sources receive no new seating or control authority, and turret seat1 remains excluded.
+
+```sh
+python3 tools/extraction/project-retail-domination-ground.py \
+  --spawn-catalog /absolute/POST-HOSPITAL-SPAWNS.json \
+  --ground-sources /absolute/GROUND-SOURCES.json \
+  --exits /absolute/QUALIFIED-EXITS.json \
+  --enable-apc-driver --game-archive /absolute/game.psarc \
+  --spawn-output /absolute/DRIVER-SPAWNS.json \
+  --ground-output /absolute/DRIVER-GROUND.json
+```
+
+The explicit flag requires the original game archive. The projector verifies its digest, original registry, unique faction/modifier wheeled-class variant, exact property member, passenger layout, health and occupancy. It emits driver seat0 and immediately verifies original physical roles and visibility for every admitted driver/passenger slot. Outputs must be outside the public source checkout. Without the flag, the existing projection stays byte-identical and does not take an archive argument. Repeat with `--check` to verify reproduction. The enabled projection preserves the final spawn bytes, while ground/lifecycle/config hashes change.
+
+The generated limits are conservative replacement policy:8m manual mount distance,750ms position age and25m/s reported driver speed. They are not extracted retail constants. Every original APC variant has an authored occupancy cap8; the Engine conservatively counts all occupants against it. The original can transfer ownership to passengers. This implementation grants motion only to the authenticated operator in seat0 and revokes that grant to server owner0x105 when the driver leaves or loses authority.
+
+An opted-in Domination catalog requires exactly eight source-type3 driver rows, each at physical seat0 with passenger slots2–9 and cap8. Legacy no-driver catalogs retain their previous behavior. Admitted operator visibility is part of the same complete seat inventory required by periodic Structural area effects.
+
+Driving changes dismount qualification for every occupant of that APC. The runtime rechecks the candidate exit against the current rotated vehicle pose, loaded map-matched static scene and current dynamic bodies. Failed clearance retains the seat and driver grant. Reproduce and test all initial poses and moved/rotated exits using the intended collision resources; a stationary source-exit receipt alone does not establish current-pose clearance. Keep each gameplay configuration's collision world and active-ability sidecar digests synchronized when staging data.
