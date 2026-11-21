@@ -22,6 +22,10 @@ pub(crate) fn grenade_items_with_cover() -> Arc<item_catalog::ItemCatalog> {
     combat_fixture_items(true, 0.0, 0.0, Some(1.25))
 }
 
+pub(crate) fn vehicle_grenade_items_with_cover(vehicle_hp: f32) -> Arc<item_catalog::ItemCatalog> {
+    combat_fixture_items(true, 0.0, vehicle_hp, Some(1.25))
+}
+
 fn combat_fixture_items(
     grenade: bool,
     vehicle_hp: f32,

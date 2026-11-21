@@ -156,7 +156,7 @@ impl<W: Write> Engine<W> {
             }
             let location = rules.location(&creation, pose, origin)?;
             let friendly = source.team == creation.team;
-            let amount = policy.hospital_rocket_amount(
+            let amount = policy.classified_vehicle_blast_amount(
                 &creation,
                 dose.vehicle_hp,
                 scale,
@@ -172,7 +172,13 @@ impl<W: Write> Engine<W> {
             ))?;
             let after = candidate.after.get_or_insert_with(|| runtime.clone());
             if after
-                .apply_hospital_rocket_damage(vehicle.key, amount, attacker, location, user_data)?
+                .apply_classified_vehicle_blast_damage(
+                    vehicle.key,
+                    amount,
+                    attacker,
+                    location,
+                    user_data,
+                )?
                 .is_empty()
             {
                 continue;

@@ -17,6 +17,9 @@ use crate::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+#[path = "acquisition_frag_ground_damage.rs"]
+mod acquisition_frag_ground_damage;
+
 #[path = "hospital_rocket_damage.rs"]
 mod hospital_rocket_damage;
 

@@ -493,6 +493,10 @@ impl Catalog {
         &self.raw_sha256
     }
 
+    pub(crate) fn native_elf_sha256(&self) -> &str {
+        &self.source.native_elf_sha256
+    }
+
     pub(crate) fn validate_for(
         &self,
         spawns: &crate::spawn_catalog::SpawnCatalog,

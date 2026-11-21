@@ -33,12 +33,12 @@ fn rocket_damage_keeps_area_direction_and_native_source_sentinel() {
     assert_eq!(before.damage_wire().last_source_object, GRENADE);
     assert!(
         runtime
-            .apply_hospital_rocket_damage(key, 120.0, ATTACKER, 0, 0x1234)
+            .apply_classified_vehicle_blast_damage(key, 120.0, ATTACKER, 0, 0x1234)
             .is_err()
     );
     assert_eq!(runtime.get(4).unwrap().health_quarter_points, 480);
     runtime
-        .apply_hospital_rocket_damage(key, 120.0, ATTACKER, 5, 0x1234)
+        .apply_classified_vehicle_blast_damage(key, 120.0, ATTACKER, 5, 0x1234)
         .unwrap();
     let vehicle = runtime.get(4).unwrap();
     let damage = vehicle.damage_wire();

@@ -30,6 +30,7 @@ pub struct Setup {
     pub ground_capabilities: Vec<(u16, acquisition_ground_runtime::Capabilities)>,
     pub ground_damage: Option<acquisition_ground_damage::Policy>,
     pub frag_character_blast: bool,
+    pub(crate) frag_ground_areas: Option<Arc<acquisition_frag_ground::Catalog>>,
     pub vehicle_reinforcement_intervals_ms: [u32; 2],
     pub structural: Option<crate::acquisition_structural::Setup>,
 }
@@ -62,6 +63,58 @@ struct CaptureWitness {
 }
 
 impl Setup {
+    pub fn has_frag_ground_areas(&self) -> bool {
+        self.frag_ground_areas.is_some()
+    }
+
+    pub fn validate_frag_ground(
+        &self,
+        items: &item_catalog::ItemCatalog,
+        world: Option<&collision::CollisionWorld>,
+        ground: &ground_vehicles::Catalog,
+        objectives: &objective_catalog::ObjectiveCatalog,
+    ) -> Result<(), &'static str> {
+        let Some(areas) = &self.frag_ground_areas else {
+            return Ok(());
+        };
+        self.structural
+            .as_ref()
+            .ok_or("acquisition_frag_ground_requires_structural")?
+            .validate_frag_character_inputs(items, world, self.filter_rows[24])?;
+        if [6, 24]
+            .into_iter()
+            .any(|row| self.filter_rows[row] & (1 << 22) == 0)
+        {
+            return Err("acquisition_frag_ground_collision_filter_required");
+        }
+        let policy = self
+            .ground_damage
+            .as_ref()
+            .ok_or("acquisition_frag_ground_requires_damage_policy")?;
+        policy.validate()?;
+        let native_elf = &objectives.source().source_image_sha256;
+        if ground.native_elf_sha256() != native_elf {
+            return Err("acquisition_frag_ground_area_source_mismatch");
+        }
+        areas.validate(native_elf, ground)?;
+        for creation in ground.creations() {
+            policy.validate_vehicle(creation)?;
+        }
+        Ok(())
+    }
+
+    pub fn validate_frag_ground_dynamic(
+        &self,
+        bodies: &dynamic_collision::Catalog,
+        bindings: &dynamic_collision_runtime::RuntimeBindings,
+        ground: &ground_vehicles::Catalog,
+    ) -> Result<(), &'static str> {
+        if let Some(areas) = &self.frag_ground_areas {
+            areas.validate_dynamic_parts(bodies, bindings, ground)?;
+        }
+        Ok(())
+    }
+
     pub fn validate_frag_character_blast(
         &self,
         items: &item_catalog::ItemCatalog,
@@ -208,6 +261,14 @@ impl Runtime {
 }
 
 impl<W: Write> Engine<W> {
+    pub(crate) fn source_frag_owner_updates(&self) -> bool {
+        self.frag_character_blast
+            || self
+                .acquisition_gameplay
+                .as_ref()
+                .is_some_and(|runtime| runtime.setup.has_frag_ground_areas())
+    }
+
     /// Explicit replacement gameplay configuration, separate from the native
     /// pre-MissionStart identity catalog. No services or game process are used.
     pub fn with_acquisition_gameplay(mut self, setup: Setup) -> Result<Self, &'static str> {
@@ -234,6 +295,19 @@ impl<W: Write> Engine<W> {
             .ok_or("objective_catalog_unavailable")?;
         setup.validate_structural(catalog)?;
         setup.validate_frag_character_blast(&self.item_catalog, self.collision_world.as_ref())?;
+        setup.validate_frag_ground(
+            &self.item_catalog,
+            self.collision_world.as_ref(),
+            ground,
+            catalog,
+        )?;
+        if setup.has_frag_ground_areas() {
+            let bodies = self
+                .dynamic_body_resources
+                .as_ref()
+                .ok_or("acquisition_frag_ground_requires_dynamic_bodies")?;
+            setup.validate_frag_ground_dynamic(&bodies.catalog, bodies.bindings(), ground)?;
+        }
         if setup.frag_character_blast && self.dynamic_body_resources.is_none() {
             return Err("frag_character_blast_requires_dynamic_bodies");
         }

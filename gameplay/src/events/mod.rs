@@ -793,6 +793,7 @@ impl<W: Write> Engine<W> {
                 peer.queue_shared(packet.clone());
             }
         }
+        let source_frag_owner_updates = self.source_frag_owner_updates();
         let active = self.active.as_mut().unwrap();
         if let Some((update, report)) = decoded.owner_update()
             && update.header.client_index == 0
@@ -802,7 +803,7 @@ impl<W: Write> Engine<W> {
         {
             let fields = active.owner_presentation(fields);
             if fields.state.is_some()
-                && (!self.frag_character_blast
+                && (!source_frag_owner_updates
                     || (matches!(event.transport, Transport::Udp)
                         && matches!(event.direction, Direction::ClientToServer)))
             {
