@@ -18,7 +18,7 @@ These are entry callbacks, not final-snapshot comparisons. Authored category is 
 | Structural | Deactivating → Deactivated | Charge defused, followed by primary activation when category ≤1 |
 | Structural | Activated → Completed | Primary secured, category 0 or 1 |
 
-Rollback to Activated does not re-award planting. A rebuilt structure defused into Repaired follows its separate zero-XP completion path. Completion while a defuse is underway does not award the primary secure increment. Independent subtype destruction counters and their positive XP are separate from the six kinds in this change.
+Rollback to Activated does not re-award planting. A rebuilt structure defused into Repaired earns ChargeDefused; the follow-on [completion-counter qualification](objective-completion-counters.md) corrects the initial shared-callback interpretation. Only Repairing → Repaired selects a zero-XP subtype repair counter. Completion while a defuse is underway does not award the primary secure increment. Independent subtype destruction counters and their positive XP are separate from the six kinds in this change.
 
 The native callback resolves the current allocated character at its latched player slot. Gameplay requires the current admission to have claimed and entered the world; it does not require a living character or the initiator's old life generation. Missing actors and account-less bots create no account reward. Acquisition's existing delayed capture queue retains its full reservation, world, player, account, character and round identity fence.
 
@@ -56,4 +56,4 @@ Rerun with `--check` for exact-byte reproduction. Use a new output outside the c
 
 ## Acceptance boundary and next sources
 
-Verification uses synthetic Rust/Horizon/Python tests and offline original-retail qualification. No live match, deployment or release is part of this change. Structural subtype destruction and Acquisition delivery now use the [additional typed reward group and qualified callback latches](extended-objective-rewards.md). Zero-XP tagged, vehicle-capture, detonation and repair-completion counters remain separate. Rendered XP and final-results behavior still require live-match review before a human cuts a release.
+Verification uses synthetic Rust/Horizon/Python tests and offline original-retail qualification. No live match, deployment or release is part of this change. Structural subtype destruction and Acquisition delivery now use the [additional typed reward group and qualified callback latches](extended-objective-rewards.md). Detonation counters accompany destruction settlement. The [zero-XP tagged, vehicle-capture and repair-completion paths](objective-completion-counters.md) are recorded by the gameplay callback independently of XP admission. Rendered XP and final-results behavior still require live-match review before a human cuts a release.

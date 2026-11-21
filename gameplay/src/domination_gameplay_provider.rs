@@ -1034,16 +1034,25 @@ impl<W: Write> ExternalEffects for Provider<'_, W> {
             })
             .and_then(|a| a.as_ref())
             .map(|a| a.assignment);
-        self.audit
-            .extend(self.engine.stage_native_objective_rewards(
-                entry,
-                assignment,
-                crate::frago::Frame {
-                    ground: self.ground.as_ref(),
-                    helo: self.state.helo.as_ref(),
-                    ..Default::default()
-                },
-            )?);
+        let assignments: Vec<_> = self
+            .state
+            .assignments
+            .iter()
+            .enumerate()
+            .filter_map(|(index, value)| value.map(|v| (index as u16, v.assignment)))
+            .collect();
+        let effects = self.engine.stage_native_objective_callbacks(
+            entry,
+            assignment,
+            &assignments,
+            crate::frago::Frame {
+                ground: self.ground.as_ref(),
+                helo: self.state.helo.as_ref(),
+                ..Default::default()
+            },
+        )?;
+        self.audit.extend(effects.audit);
+        self.messages.extend(effects.messages);
         Ok(())
     }
 
@@ -1653,13 +1662,17 @@ impl<W: Write> Engine<W> {
         let result = self.commit_domination_gameplay(
             &mut world.runtime, now, wall, BTreeMap::new(),
             |engine, _, runtime, frame| {
-                let candidate = runtime.stage_repair(frame, request.target_object_id, authority)?;
-                let credit = credit?;
+                use crate::domination_repair_runtime::{HEALTH_ALREADY_COVERED, Submission};
+                let (candidate, submission) = runtime.stage_repair(frame, request.target_object_id, authority)?;
+                let (credit, reason) = match submission {
+                    Submission::Queued(_) => (Some(credit?), None),
+                    Submission::LatchOnly => (None, Some(HEALTH_ALREADY_COVERED)),
+                };
                 let audit = json!({"op":"domination_structural_repair",
                     "reservation_id":event.reservation_id,"world_id":event.world_id,"player_id":event.player_id,
                     "target":request.target_object_id,"payload_hex":event.payload_hex.to_ascii_lowercase(),
-                    "leadership_changes":leadership.audit(),"repair_credit":credit.audit()});
-                let messages = engine.install_repair_credit(credit);
+                    "reason":reason,"leadership_changes":leadership.audit(),"repair_credit":credit.as_ref().map(|credit| credit.audit())});
+                let messages = credit.map_or_else(Vec::new, |credit| engine.install_repair_credit(credit));
                 Ok((candidate, EffectsCommit {
                     audit: vec![audit],
                     messages,

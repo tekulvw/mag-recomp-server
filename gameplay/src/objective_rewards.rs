@@ -16,7 +16,10 @@ fn action_kinds(entry: NativeEntry, category: u8, subtype: u8) -> Vec<Kind> {
     if structural && old == State::Activating && new == State::Activated {
         kinds.push(Kind::ChargePlanted);
     }
-    if structural && old == State::Deactivating && new == State::Deactivated {
+    if structural
+        && old == State::Deactivating
+        && matches!(new, State::Deactivated | State::Repaired)
+    {
         kinds.push(Kind::ChargeDefused);
     }
     if structural
@@ -215,18 +218,22 @@ impl<W: Write> Engine<W> {
                 && a.entered_game
                 && a.claimed.is_some()
                 && a.wire_profile.application_id() == 20231
-                && a.reservation
-                    .character
-                    .extended_objective_rewards_enabled
-                    .unwrap_or(false)
         }) else {
             return Ok(None);
         };
-        let Some(recipient) = progression::RewardRecipient::from_active(actor) else {
-            return Ok(None);
-        };
+        let recipient = progression::RewardRecipient::from_active(actor).filter(|_| {
+            actor
+                .reservation
+                .character
+                .extended_objective_rewards_enabled
+                .unwrap_or(false)
+        });
         Ok(Some(acquisition_delivery::RewardWitness {
             recipient,
+            reservation_id: actor.reservation.id.clone(),
+            world: actor.reservation.world,
+            player: actor.reservation.player,
+            match_id: actor.reward_match_id.clone(),
             position: self.frago_character_position(
                 actor,
                 frago::Frame {
@@ -250,7 +257,7 @@ impl<W: Write> Engine<W> {
         ground: &acquisition_ground_runtime::Runtime,
         token: u32,
         witness: acquisition_delivery::RewardWitness,
-    ) -> Result<Vec<Value>, &'static str> {
+    ) -> Result<crate::objective_counters::Effects, &'static str> {
         let object = runtime
             .state
             .objective(token)
@@ -258,44 +265,61 @@ impl<W: Write> Engine<W> {
         if object.state.target != State::Completed as i32
             || runtime.state.target_version(token) != Some(witness.target_version)
         {
-            return Ok(vec![]);
+            return Ok(Default::default());
         }
-        let Some(actor) = self
-            .active
-            .iter()
-            .chain(self.peers.values())
-            .find(|a| witness.recipient.matches_active(a))
-        else {
-            return Ok(vec![]);
+        let Some(actor) = self.active.iter().chain(self.peers.values()).find(|a| {
+            a.reservation.id == witness.reservation_id
+                && a.reservation.world == witness.world
+                && a.reservation.player == witness.player
+                && a.reward_match_id == witness.match_id
+                && a.entered_game
+                && a.claimed.is_some()
+        }) else {
+            return Ok(Default::default());
         };
         let index = object.replication.object_index;
         let assignment = runtime
             .state
             .squad(actor.squad_catalog.squad_index())
             .map(|s| s.assignment);
-        let reward = self.frago_objective_reward(
-            witness.recipient.event(
-                format!(
-                    "delivery-{:016x}-{index}-{}-{}",
-                    self.round_number, witness.timestamp_ms, witness.recipient.reservation_id
-                ),
-                Kind::EscortVehicleDelivered,
-                1,
-            ),
-            actor,
-            self.frago_object_position(0x0c80_0000 | u32::from(index)),
-            assignment,
-            frago::Frame {
-                ground: Some(ground),
-                position: witness.position,
-                active_reservation: Some(&witness.recipient.reservation_id),
-                ..Default::default()
-            },
-        );
-        self.check_reward_capacity(std::slice::from_ref(&reward))?;
-        let audit = vec![json!({"op":"objective_reward","reward":reward})];
-        self.commit_rewards(vec![reward]);
-        Ok(audit)
+        let assignments: Vec<_> = (0..32)
+            .filter_map(|index| runtime.state.squad(index).map(|s| (index, s.assignment)))
+            .collect();
+        let reward = witness
+            .recipient
+            .as_ref()
+            .filter(|recipient| recipient.matches_active(actor))
+            .map(|recipient| {
+                self.frago_objective_reward(
+                    recipient.event(
+                        format!(
+                            "delivery-{:016x}-{index}-{}-{}",
+                            self.round_number, witness.timestamp_ms, witness.reservation_id
+                        ),
+                        Kind::EscortVehicleDelivered,
+                        1,
+                    ),
+                    actor,
+                    self.frago_object_position(0x0c80_0000 | u32::from(index)),
+                    assignment,
+                    frago::Frame {
+                        ground: Some(ground),
+                        position: witness.position,
+                        active_reservation: Some(&witness.reservation_id),
+                        ..Default::default()
+                    },
+                )
+            });
+        self.check_reward_capacity(reward.as_slice())?;
+        let mut effects =
+            self.stage_objective_counters(witness.player, index, &[], true, &assignments)?;
+        if let Some(reward) = reward {
+            effects
+                .audit
+                .push(json!({"op":"objective_reward","reward":reward}));
+            self.commit_rewards(vec![reward]);
+        }
+        Ok(effects)
     }
 
     /// One award for each qualifying ordered row, including repeated objectives.

@@ -437,7 +437,7 @@ fn acquisition_rejects_native_structure_without_its_effect_provider() {
     ));
 }
 
-fn start_capture(e: &mut Engine<Vec<u8>>, player: u16, epoch_ms: u64) {
+fn prepare_capture_actor(e: &mut Engine<Vec<u8>>, player: u16, epoch_ms: u64) {
     reserve(e, player);
     let active = e.active.as_mut().unwrap();
     ready(active);
@@ -455,6 +455,10 @@ fn start_capture(e: &mut Engine<Vec<u8>>, player: u16, epoch_ms: u64) {
         Some(ObjectiveState::Deactivated)
     );
     assert_eq!(primary_assignment(e), FIRST_CAPTURE);
+}
+
+fn start_capture(e: &mut Engine<Vec<u8>>, player: u16, epoch_ms: u64) {
+    prepare_capture_actor(e, player, epoch_ms);
     let position = active_position(e);
     let outcome = e.objective_world.as_mut().unwrap().interact(
         protocol::ObjectiveInteraction {
@@ -574,6 +578,204 @@ fn engine_capture_callback_log_failure_preserves_objective_and_escort_state() {
     assert_eq!(
         e.objective_world.as_ref().unwrap().state(FIRST_CAPTURE),
         Some(ObjectiveState::Activating)
+    );
+}
+
+fn claim_capture_actor(engine: &mut Engine<Vec<u8>>) {
+    let actor = engine.active.as_mut().unwrap();
+    actor.claimed = Some(Claimed {
+        wire: Vec::new(),
+        np_identity: [0; 36],
+        game_info: protocol::GameInfo {
+            client_index: actor.reservation.player,
+            level_name: "synthetic_arena".into(),
+            start_time_ms: 0,
+            attacking_faction: 1,
+            defending_faction: 0,
+            maximum_points: [1200, 1000],
+            current_points: [1200, 1000],
+            game_type: 1,
+        },
+    });
+}
+
+#[test]
+fn late_ordinary_capture_increments_vehicles_captured_once_after_recording() {
+    let mut engine = capture_fixture();
+    prepare_capture_actor(&mut engine, 0, 100);
+    claim_capture_actor(&mut engine);
+    assert!(progression::RewardRecipient::from_active(engine.active.as_ref().unwrap()).is_none());
+    crate::objective_reward_tests::interact(
+        &mut engine,
+        FIRST_CAPTURE,
+        protocol::ObjectiveInteractionKind::Activate,
+        200,
+    )
+    .unwrap();
+    let limit = engine.max_log;
+    engine.max_log = engine.written;
+    let due = Duration::from_millis(3200);
+    assert_eq!(
+        engine.tick_acquisition_objectives(due, 2).unwrap_err(),
+        "log_limit_reached"
+    );
+    assert!(
+        !engine
+            .active
+            .as_ref()
+            .unwrap()
+            .reward_statistics
+            .contains_key(&58)
+    );
+
+    engine.failed = false;
+    engine.max_log = limit;
+    engine.tick_acquisition_objectives(due, 2).unwrap();
+    engine.tick_acquisition_objectives(due, 3).unwrap();
+    assert_eq!(
+        engine.active.as_ref().unwrap().reward_statistics.get(&58),
+        Some(&1)
+    );
+}
+
+#[test]
+fn accountless_capture_cannot_credit_a_reused_player_slot() {
+    let mut engine = capture_fixture();
+    let catalog = engine.objective_catalog.as_mut().unwrap();
+    catalog
+        .objects
+        .iter_mut()
+        .find(|object| object.object_index == FIRST_CAPTURE)
+        .unwrap()
+        .interaction
+        .as_mut()
+        .unwrap()
+        .complete_ms = 1000;
+    engine.objective_world = Some(objective_control::ObjectiveWorld::new(catalog));
+    prepare_capture_actor(&mut engine, 0, 100);
+    claim_capture_actor(&mut engine);
+    let original = engine.active.as_ref().unwrap();
+    assert!(progression::RewardRecipient::from_active(original).is_none());
+    let original_id = original.reservation.id.clone();
+    crate::objective_reward_tests::interact(
+        &mut engine,
+        FIRST_CAPTURE,
+        protocol::ObjectiveInteractionKind::Activate,
+        200,
+    )
+    .unwrap();
+    engine
+        .tick_acquisition_objectives(Duration::from_millis(3200), 2)
+        .unwrap();
+    assert_eq!(
+        engine
+            .objective_world
+            .as_ref()
+            .unwrap()
+            .state(FIRST_CAPTURE),
+        Some(ObjectiveState::Activated)
+    );
+
+    super::super::reserve_faction(&mut engine, 1, 0);
+    ready(engine.active.as_mut().unwrap());
+    claim_capture_actor(&mut engine);
+    let released = engine.handle(
+        Request::Release {
+            v: BRIDGE_VERSION,
+            request_id: "release-accountless-capture".into(),
+            reservation_id: original_id,
+        },
+        Duration::from_millis(3300),
+        2,
+    );
+    assert!(released.ok, "{:?}", released.error);
+    assert_eq!(
+        engine
+            .objective_world
+            .as_ref()
+            .unwrap()
+            .state(FIRST_CAPTURE),
+        Some(ObjectiveState::Activated)
+    );
+
+    let id = "capture-replacement-slot";
+    let reserved = super::super::reserve_identity(&mut engine, 0, 1, id);
+    assert!(reserved.ok, "{:?}", reserved.error);
+    ready(engine.active.as_mut().unwrap());
+    claim_capture_actor(&mut engine);
+    let squad = engine.active.as_ref().unwrap().squad_catalog.squad_index();
+    assert_eq!(
+        engine
+            .objective_counter_leader(squad)
+            .unwrap()
+            .reservation
+            .id,
+        id
+    );
+    engine
+        .acquisition_gameplay
+        .as_mut()
+        .unwrap()
+        .state
+        .squad_mut(squad)
+        .unwrap()
+        .assignment
+        .tagged_object = 0x0c80_0000 | u32::from(FIRST_CAPTURE);
+
+    engine
+        .tick_acquisition_objectives(Duration::from_millis(4200), 3)
+        .unwrap();
+    assert_eq!(
+        engine
+            .objective_world
+            .as_ref()
+            .unwrap()
+            .state(FIRST_CAPTURE),
+        Some(ObjectiveState::Completed)
+    );
+    let statistics = &engine.active.as_ref().unwrap().reward_statistics;
+    assert_eq!((statistics.get(&58), statistics.get(&41)), (None, None));
+}
+
+#[test]
+fn generic_escort_completion_does_not_increment_vehicles_captured() {
+    let mut engine = capture_fixture();
+    start_capture(&mut engine, 0, 100);
+    claim_capture_actor(&mut engine);
+    engine
+        .acquisition_gameplay
+        .as_mut()
+        .unwrap()
+        .state
+        .request_state(u32::from(FIRST_CAPTURE), ObjectiveState::Completed)
+        .unwrap();
+    engine
+        .tick_acquisition_objectives(Duration::from_millis(110), 2)
+        .unwrap();
+    assert_eq!(
+        engine
+            .objective_world
+            .as_ref()
+            .unwrap()
+            .state(FIRST_CAPTURE),
+        Some(ObjectiveState::Completed)
+    );
+    assert!(
+        engine
+            .ground_runtime
+            .as_ref()
+            .unwrap()
+            .get(4)
+            .unwrap()
+            .spawn_cycle_enabled
+    );
+    assert!(
+        !engine
+            .active
+            .as_ref()
+            .unwrap()
+            .reward_statistics
+            .contains_key(&58)
     );
 }
 

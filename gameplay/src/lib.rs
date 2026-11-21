@@ -118,6 +118,7 @@ mod frago;
 mod ground_repair;
 mod leadership_auto_heal;
 mod leadership_auto_repair;
+mod objective_counters;
 mod objective_rewards;
 mod repair_rewards;
 mod resources;
@@ -2146,3 +2147,6 @@ mod extended_objective_ack_tests;
 
 #[cfg(test)]
 mod extended_delivery_reward_tests;
+
+#[cfg(test)]
+mod objective_counter_tests;

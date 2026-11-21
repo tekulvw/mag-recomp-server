@@ -584,13 +584,13 @@ impl Runtime {
         frame: Frame<'_>,
         target: u32,
         authority: crate::domination_repair_runtime::Authority,
-    ) -> Result<Candidate<()>, &'static str> {
+    ) -> Result<(Candidate<()>, crate::domination_repair_runtime::Submission), &'static str> {
         if !self.started {
             return Err("domination_gameplay_not_started");
         }
         let mut candidate = self.candidate(&frame, ())?;
-        candidate.world.stage_repair(target, authority)?;
-        Ok(candidate)
+        let submission = candidate.world.stage_repair_packet(target, authority)?;
+        Ok((candidate, submission))
     }
 
     /// An actual ScriptObjectExecutor update samples the game clock once.

@@ -595,6 +595,7 @@ impl Runtime {
 
 pub(crate) struct Frame<'a, W: Write> {
     pub(crate) engine: &'a mut Engine<W>,
+    pub(crate) assignments: &'a [(u16, crate::acquisition_objective_runtime::Assignment)],
     pub(crate) ground: &'a mut ground::Runtime,
     pub(crate) spawns: &'a mut SpawnCatalog,
     pub(crate) native: &'a mut BTreeMap<u32, NativeState>,
@@ -640,17 +641,24 @@ impl Runtime {
             .iter()
             .chain(frame.engine.peers.values())
             .find(|a| Some(a.reservation.player) == entry.reward_actor)
-            .and_then(|a| frame.engine.frago_assignment(a));
-        frame
-            .audit
-            .extend(frame.engine.stage_native_objective_rewards(
-                entry,
-                assignment,
-                crate::frago::Frame {
-                    ground: Some(frame.ground),
-                    ..Default::default()
-                },
-            )?);
+            .and_then(|a| {
+                frame
+                    .assignments
+                    .iter()
+                    .find(|(index, _)| *index == a.squad_catalog.squad_index())
+                    .map(|(_, assignment)| *assignment)
+            });
+        let effects = frame.engine.stage_native_objective_callbacks(
+            entry,
+            assignment,
+            frame.assignments,
+            crate::frago::Frame {
+                ground: Some(frame.ground),
+                ..Default::default()
+            },
+        )?;
+        frame.audit.extend(effects.audit);
+        frame.messages.extend(effects.messages);
         if entry.requires_authored_explosion() {
             let request = self.setup.playback.explosion(token, entry)?;
             if request.properties.damage_value != 0. {

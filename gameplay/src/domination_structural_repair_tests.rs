@@ -2,7 +2,10 @@
 use super::*;
 use crate::{
     CharacterLife, DecodedEvent, Direction, Engine, OutboundMessage, Transport,
-    acquisition_structural::connected_tests::terrain_and_assets,
+    acquisition_structural::connected_tests::{
+        assert_tool_completion_counters, bind_repair_counter_squad, select_tool_actor,
+        terrain_and_assets,
+    },
     domination_gameplay_effects::{OwnedAssignment, Structural},
     domination_gameplay_provider::{State, World},
     domination_structural_world::SequenceCollisionState,
@@ -181,14 +184,136 @@ fn enemy_actor_and_covered_queue_leave_repair_credit_unchanged() {
     engine.active.as_mut().unwrap().squad_catalog = owner;
     repair(&mut engine, 200).unwrap();
     let accepted = engine.pending_reward_batch();
-    assert_eq!(
-        repair(&mut engine, 201).unwrap_err(),
-        "structural_repair_health_already_covered"
-    );
+    assert!(repair(&mut engine, 201).unwrap().is_empty());
     let actor = engine.active.as_ref().unwrap();
     assert_eq!(actor.repair_credit.sequence, 1);
     assert_eq!(actor.reward_statistics.get(&35), Some(&1));
     assert_eq!(engine.pending_reward_batch(), accepted);
+}
+
+#[test]
+fn covered_repair_latch_uses_the_domination_record_boundary() {
+    let mut engine = repair_fixture();
+    repair(&mut engine, 200).unwrap();
+    let world = engine.objective_world.as_mut().unwrap();
+    let begin = test_time(200);
+    world.begin_native_tick(begin);
+    world.tick_native_object(0, begin, &BTreeMap::new());
+    world.take_native_entries();
+    assert_eq!(world.state(0), Some(ObjectiveState::Repairing));
+    world
+        .stage_repair(
+            0x0c80_0000,
+            crate::domination_repair_runtime::Authority {
+                actor: crate::domination_objective_runtime::Actor {
+                    player: 77,
+                    generation: 4,
+                    team: 1,
+                },
+                live: true,
+                tool_active: true,
+                repair_rate: 1.,
+            },
+        )
+        .unwrap();
+    let credit_before = engine.active.as_ref().unwrap().repair_credit;
+    let rewards_before = engine.pending_reward_batch();
+    let completion_actor = |engine: &Engine<Vec<u8>>| {
+        let mut world = engine.objective_world.clone().unwrap();
+        let finish = test_time(1200);
+        world.begin_native_tick(finish);
+        world.tick_native_object(0, finish, &BTreeMap::new());
+        let entry = world.take_native_entries().pop().unwrap();
+        assert_eq!(entry.delta.state_actor.state, ObjectiveState::Repaired);
+        entry.reward_actor
+    };
+
+    let limit = engine.max_log;
+    engine.max_log = engine.written;
+    assert_eq!(repair(&mut engine, 201).unwrap_err(), "log_limit_reached");
+    assert_eq!(completion_actor(&engine), Some(77));
+
+    engine.max_log = limit;
+    engine.failed = false;
+    assert!(repair(&mut engine, 201).unwrap().is_empty());
+    assert_eq!(completion_actor(&engine), Some(0));
+    assert_eq!(engine.active.as_ref().unwrap().repair_credit, credit_before);
+    assert_eq!(engine.pending_reward_batch(), rewards_before);
+}
+
+#[test]
+fn recorded_tool_repair_completion_credits_last_repairer_and_tagged_leader() {
+    let mut e = repair_fixture();
+    e.ground_runtime = Some(Default::default());
+    let setup = &mut e.domination_gameplay.as_mut().unwrap().state;
+    Arc::make_mut(&mut setup.known_empty_vehicle_spawns).insert(2);
+    setup.ground_respawn_physics = Some(Default::default());
+
+    let defenders = e.active.as_ref().unwrap().squad_catalog.clone();
+    e.item_catalog = engine().item_catalog;
+    reserve(&mut e, 1);
+    let last = e.active.as_mut().unwrap();
+    ready(last);
+    last.squad_catalog = defenders;
+    last.life = CharacterLife::Alive {
+        generation: 1,
+        health_quarter_points: 400,
+    };
+    equip_synthetic_repair_kit(&mut e);
+    let squad = bind_repair_counter_squad(&mut e, 0);
+
+    select_tool_actor(&mut e, "synthetic-reservation-0000");
+    repair(&mut e, 200).unwrap();
+    e.tick_domination_objectives(test_time(200), 1).unwrap();
+    assert_eq!(
+        e.objective_world.as_ref().unwrap().state(0),
+        Some(ObjectiveState::Repairing)
+    );
+    repair(&mut e, 201).unwrap();
+    select_tool_actor(&mut e, "synthetic-reservation-0001");
+    assert!(repair(&mut e, 202).unwrap().is_empty());
+    e.domination_gameplay
+        .as_mut()
+        .unwrap()
+        .set_manual_tag(
+            squad,
+            0x0c80_0000,
+            e.objective_world.as_ref().unwrap(),
+            e.spawn_catalog.as_ref().unwrap(),
+            crate::replication::MatchPhase::Playing,
+        )
+        .unwrap();
+    assert_tool_completion_counters(&e, 0);
+
+    let finish = test_time(1200);
+    let limit = e.max_log;
+    e.max_log = e.written;
+    assert_eq!(
+        e.tick_domination_objectives(finish, 1).unwrap_err(),
+        "log_limit_reached"
+    );
+    assert_eq!(
+        e.objective_world.as_ref().unwrap().state(0),
+        Some(ObjectiveState::Repairing)
+    );
+    assert_tool_completion_counters(&e, 0);
+
+    e.max_log = limit;
+    e.failed = false;
+    let rewards = e.pending_reward_batch();
+    e.tick_domination_objectives(finish, 1).unwrap();
+    let row = e
+        .objective_world
+        .as_ref()
+        .unwrap()
+        .snapshot(1, 1200)
+        .objectives[0];
+    assert_eq!(row.state_actor.state, ObjectiveState::Repaired);
+    assert_eq!(row.state_actor.actor_index, 1);
+    assert_tool_completion_counters(&e, 1);
+    e.tick_domination_objectives(test_time(1201), 1).unwrap();
+    assert_tool_completion_counters(&e, 1);
+    assert_eq!(e.pending_reward_batch(), rewards);
 }
 
 #[test]

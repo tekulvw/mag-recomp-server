@@ -55,6 +55,11 @@ struct ObjectiveCommit {
     audit: Value,
 }
 
+struct CaptureWitness {
+    completion: crate::objective_control::CaptureCompletion,
+    target_version: u64,
+}
+
 impl Setup {
     pub(crate) fn validate_structural(
         &self,
@@ -297,6 +302,9 @@ impl<W: Write> Engine<W> {
         if !runtime.started {
             return Err("acquisition_gameplay_not_started");
         }
+        let assignments: Vec<_> = (0..32)
+            .filter_map(|index| runtime.state.squad(index).map(|s| (index, s.assignment)))
+            .collect();
         let structural = runtime
             .structural
             .as_mut()
@@ -319,12 +327,9 @@ impl<W: Write> Engine<W> {
                 let outcome =
                     world.interact_with_demolition_modifier(request, actor, now, modifier);
                 if outcome.accepted {
-                    world.attribute_operation(
-                        index,
-                        self.active
-                            .as_ref()
-                            .and_then(progression::RewardRecipient::from_active),
-                    );
+                    if let Some(active) = &self.active {
+                        world.attribute_operation(index, active);
+                    }
                     if let Some(delta) = world.commit_pending_native_interaction(index, now, actor)
                     {
                         changed.insert(index, delta);
@@ -347,14 +352,21 @@ impl<W: Write> Engine<W> {
                 )
             }
             StructuralInput::Repair(index, authority) => {
-                world.stage_repair(0x0c80_0000 | u32::from(index), authority)?;
-                let actor = self.active.as_ref().ok_or("no_reservation")?;
-                repair_credit = Some(self.plan_repair_credit(
-                    actor,
-                    leadership.modifiers(actor).value("kCharModRepairAmount"),
-                    self.frago_object_position(0x0c80_0000 | u32::from(index)),
-                )?);
-                ("acquisition_structural_repair", None, None)
+                use crate::domination_repair_runtime::{HEALTH_ALREADY_COVERED, Submission};
+                let target = 0x0c80_0000 | u32::from(index);
+                let reason = match world.stage_repair_packet(target, authority)? {
+                    Submission::Queued(_) => {
+                        let actor = self.active.as_ref().ok_or("no_reservation")?;
+                        repair_credit = Some(self.plan_repair_credit(
+                            actor,
+                            leadership.modifiers(actor).value("kCharModRepairAmount"),
+                            self.frago_object_position(target),
+                        )?);
+                        None
+                    }
+                    Submission::LatchOnly => Some(HEALTH_ALREADY_COVERED),
+                };
+                ("acquisition_structural_repair", None, reason)
             }
         };
         let mut ground = self
@@ -378,6 +390,7 @@ impl<W: Write> Engine<W> {
                 }
                 let mut frame = crate::acquisition_structural::Frame {
                     engine,
+                    assignments: &assignments,
                     ground: &mut ground,
                     spawns: &mut spawns,
                     native,
@@ -512,6 +525,7 @@ impl<W: Write> Engine<W> {
             .collect();
         let mut changed: BTreeMap<u16, ObjectiveControlDelta> = BTreeMap::new();
         let mut entry_actors = BTreeMap::new();
+        let mut capture_witnesses = BTreeMap::new();
         let abilities_enabled = self.active_abilities.is_some();
         if !abilities_enabled {
             stage_objective_observations(
@@ -521,6 +535,7 @@ impl<W: Write> Engine<W> {
                 now,
                 &mut changed,
                 &mut entry_actors,
+                &mut capture_witnesses,
             )?;
         }
         let starting = !runtime.started;
@@ -587,12 +602,14 @@ impl<W: Write> Engine<W> {
                 if !commit.helo_doses.is_empty() { return Err("acquisition_unexpected_helo_strike_target"); }
             }
             if abilities_enabled {
-                stage_objective_observations(engine, &mut runtime, &mut world, now, &mut changed, &mut entry_actors)?;
+                stage_objective_observations(engine, &mut runtime, &mut world, now, &mut changed, &mut entry_actors, &mut capture_witnesses)?;
             }
             audit.extend(engine.stage_acquisition_capture_rewards(world.take_reward_actions(), &runtime, &ground)?);
+            let assignments: Vec<_> = (0..32).filter_map(|index| runtime.state.squad(index).map(|s|(index,s.assignment))).collect();
             if let Some(structural) = &mut runtime.structural {
                 let mut frame = crate::acquisition_structural::Frame {
                     engine,
+                    assignments: &assignments,
                     ground: &mut ground,
                     spawns: structural_spawns.as_mut().ok_or("acquisition_structural_spawn_catalog_required")?,
                     native,
@@ -611,8 +628,10 @@ impl<W: Write> Engine<W> {
                     let assignment = engine.active.iter().chain(engine.peers.values())
                         .find(|a| Some(a.reservation.player) == entry.reward_actor)
                         .and_then(|a| runtime.state.squad(a.squad_catalog.squad_index()).map(|s|s.assignment));
-                    audit.extend(engine.stage_native_objective_rewards(entry, assignment,
-                        crate::frago::Frame{ground:Some(&ground),..Default::default()})?);
+                    let assignments: Vec<_> = (0..32).filter_map(|index| runtime.state.squad(index).map(|s|(index,s.assignment))).collect();
+                    let effects = engine.stage_native_objective_callbacks(entry, assignment, &assignments,
+                        crate::frago::Frame{ground:Some(&ground),..Default::default()})?;
+                    audit.extend(effects.audit); messages.extend(effects.messages);
                     Ok(())
                 })? {
                     changed.insert(delta.object_index, delta);
@@ -641,16 +660,38 @@ impl<W: Write> Engine<W> {
                     if attributed & 0xffff_0000 == 0x0380_0000 { attributed as u16 } else { u16::MAX }
                 });
                 if let Some(witness) = delivery_rewards.remove(&token)
-                    && state == ObjectiveState::Completed && actor_index == witness.recipient.player_id {
-                    audit.extend(engine.stage_acquisition_delivery_reward(&runtime, &ground, token, witness)?);
+                    && state == ObjectiveState::Completed && actor_index == witness.player {
+                    let effects=engine.stage_acquisition_delivery_reward(&runtime, &ground, token, witness)?;
+                    audit.extend(effects.audit); messages.extend(effects.messages);
                 }
+                let qualified_capture = capture_witnesses.remove(&token).is_some_and(|witness| {
+                    state == ObjectiveState::Completed
+                        && actor_index == witness.completion.player
+                        && runtime.state.target_version(token) == Some(witness.target_version)
+                        && {
+                            let actor = engine.active.iter().chain(engine.peers.values())
+                                .find(|actor| actor.reservation.player == actor_index);
+                            match (witness.completion.actor.as_ref(), actor) {
+                                (Some(identity), Some(actor)) => {
+                                    actor.entered_game && actor.claimed.is_some() && identity.matches(actor)
+                                }
+                                (None, None) => engine.bot_registry.bots.contains_key(&actor_index),
+                                _ => false,
+                            }
+                        }
+                });
                 let callback = setup.controller.objective_tokens().any(|t| t == token);
                 let delta = if callback && matches!(state, ObjectiveState::Completed | ObjectiveState::Deactivated) {
                     let entry = Entry { objective_token: token, state: if state == ObjectiveState::Completed { EnteredState::Completed } else { EnteredState::Deactivated }, actor_index, timestamp_ms: now.as_millis() as u32 };
                     let mut rates = round.rates_mut().clone();
-                    let publication = runtime.state.apply_entry(&setup.controller, &entry, &mut ground, &mut rates, |ground, effect| {
+                    let publication = runtime.state.apply_entry_with_capture(&setup.controller, &entry, &mut ground, &mut rates, qualified_capture, |ground, effect| {
                         let previous = engine.ground_runtime.replace(ground.clone()).ok_or("ground_vehicle_runtime_required")?;
                         let result = match effect {
+                            Effect::CaptureCompleted { object_index, actor_index, squads, vehicle_capture } => {
+                                let assignments: Vec<_> = squads.iter().map(|(&index,squad)|(index,squad.assignment)).collect();
+                                let effects = engine.stage_objective_counters(actor_index, object_index, if vehicle_capture { &[58] } else { &[] }, true, &assignments)?;
+                                Ok((effects.audit,effects.messages))
+                            }
                             Effect::Blockers(source) => engine.stage_respawn_clearance(Clearance { source, physics: setup.physics, filter_rows: setup.filter_rows, now }, native, &mut ground_changes),
                             Effect::Volume { target, arguments, damage_type_symbol, damage_source_symbol } => {
                                 acquisition_damage_metadata::Metadata::from_symbols(damage_type_symbol, damage_source_symbol)?;
@@ -926,12 +967,10 @@ fn stage_objective_observations<W: Write>(
     now: Duration,
     changed: &mut BTreeMap<u16, ObjectiveControlDelta>,
     entry_actors: &mut BTreeMap<u32, u16>,
+    capture_witnesses: &mut BTreeMap<u32, CaptureWitness>,
 ) -> Result<(), &'static str> {
-    *changed = world
-        .tick(now, &objective_actors(engine))
-        .into_iter()
-        .map(|d| (d.object_index, d))
-        .collect();
+    let (changes, captures) = world.tick_with_capture_completions(now, &objective_actors(engine));
+    *changed = changes.into_iter().map(|d| (d.object_index, d)).collect();
     for (token, object) in runtime.state.objectives().collect::<Vec<_>>() {
         if let Some(delta) = changed.get(&object.replication.object_index) {
             entry_actors.insert(token, delta.state_actor.actor_index);
@@ -964,6 +1003,23 @@ fn stage_objective_observations<W: Write>(
                 delta.state_actor.actor_index,
                 delta.state_actor.change_time_ms,
             )?;
+        }
+    }
+    for completion in captures {
+        if let Some(token) = runtime.state.token_for_index(completion.object_index)
+            && changed.get(&completion.object_index).is_some_and(|delta| {
+                delta.state_actor.state == ObjectiveState::Completed
+                    && delta.state_actor.actor_index == completion.player
+            })
+            && let Some(target_version) = runtime.state.target_version(token)
+        {
+            capture_witnesses.insert(
+                token,
+                CaptureWitness {
+                    completion,
+                    target_version,
+                },
+            );
         }
     }
     Ok(())

@@ -30,6 +30,14 @@ pub struct Contribution {
     pub amount: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Submission {
+    Queued(Contribution),
+    LatchOnly,
+}
+
+pub(crate) const HEALTH_ALREADY_COVERED: &str = "structural_repair_health_already_covered";
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Batch {
     pub contributions: Vec<Contribution>,
@@ -115,6 +123,17 @@ impl StructuralRepair {
         authority: Authority,
         damage_model_health: f32,
     ) -> Result<Contribution, &'static str> {
+        match self.submit_packet(authority, damage_model_health)? {
+            Submission::Queued(contribution) => Ok(contribution),
+            Submission::LatchOnly => Err(HEALTH_ALREADY_COVERED),
+        }
+    }
+
+    pub(crate) fn submit_packet(
+        &mut self,
+        authority: Authority,
+        damage_model_health: f32,
+    ) -> Result<Submission, &'static str> {
         validate_health(damage_model_health)?;
         if !self.rules.can_repair
             || !matches!(
@@ -138,7 +157,7 @@ impl StructuralRepair {
         // queued-health ceiling. Keep that credit candidate independently.
         self.last_actor = Some(authority.actor);
         if damage_model_health + self.repair_total >= MAX_HEALTH {
-            return Err("structural_repair_health_already_covered");
+            return Ok(Submission::LatchOnly);
         }
         let contribution = Contribution {
             actor: authority.actor,
@@ -146,7 +165,7 @@ impl StructuralRepair {
         };
         self.repair_total += amount;
         self.repairs.push(contribution);
-        Ok(contribution)
+        Ok(Submission::Queued(contribution))
     }
 
     fn request(&mut self, target: ObjectiveState) -> Option<Request> {

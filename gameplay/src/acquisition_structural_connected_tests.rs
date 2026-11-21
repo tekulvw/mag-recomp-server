@@ -332,6 +332,72 @@ fn repair(
     event(engine, &wire, now, transport)
 }
 
+pub(crate) fn bind_repair_counter_squad(engine: &mut crate::Engine<Vec<u8>>, object: u16) -> u16 {
+    let owner = engine.active.as_ref().unwrap();
+    assert_eq!(owner.team(), 1);
+    let squad = owner.squad_catalog.clone();
+    let game_info = crate::protocol::GameInfo {
+        client_index: 0,
+        level_name: engine.map_name().into(),
+        start_time_ms: 0,
+        attacking_faction: engine.match_profile().attacking_faction,
+        defending_faction: engine.match_profile().defending_faction,
+        maximum_points: [100, 100],
+        current_points: [100, 100],
+        game_type: engine.match_profile().game_type,
+    };
+    for actor in engine.active.iter_mut().chain(engine.peers.values_mut()) {
+        actor.squad_catalog = squad.clone();
+        actor.claimed = Some(crate::Claimed {
+            wire: Vec::new(),
+            np_identity: [actor.reservation.player as u8; 36],
+            game_info: crate::protocol::GameInfo {
+                client_index: actor.reservation.player,
+                ..game_info.clone()
+            },
+        });
+    }
+    engine
+        .objective_catalog
+        .as_mut()
+        .unwrap()
+        .objects
+        .iter_mut()
+        .find(|row| row.object_index == object && row.native_class == Some(NativeClass::Structural))
+        .unwrap()
+        .reward = Some(crate::objective_catalog::ObjectiveRewardRule {
+        category: 4,
+        subtype: 3,
+        demolition: true,
+    });
+    squad.squad_index()
+}
+
+pub(crate) fn select_tool_actor(engine: &mut crate::Engine<Vec<u8>>, actor: &str) {
+    let next = engine.peers.remove(actor).unwrap();
+    let previous = engine.active.replace(next).unwrap();
+    engine
+        .peers
+        .insert(previous.reservation.id.clone(), previous);
+}
+
+pub(crate) fn assert_tool_completion_counters(engine: &crate::Engine<Vec<u8>>, count: i32) {
+    for (player, tags, repairs) in [(0, count, 0), (1, 0, count)] {
+        let actor = engine
+            .active
+            .iter()
+            .chain(engine.peers.values())
+            .find(|actor| actor.reservation.player == player)
+            .unwrap();
+        assert_eq!(actor.reward_statistics.get(&41).copied().unwrap_or(0), tags);
+        assert_eq!(
+            actor.reward_statistics.get(&43).copied().unwrap_or(0),
+            repairs
+        );
+        assert_eq!(actor.match_experience, 0);
+    }
+}
+
 #[test]
 fn ordinary_activation_commits_immediate_entry_and_preserves_duplicate_deadline() {
     let mut engine = fixture();
@@ -672,6 +738,101 @@ fn failed_repair_record_or_wrong_route_does_not_consume_work_and_retry_is_once()
         e.active.as_ref().unwrap().reward_statistics.get(&35),
         Some(&1)
     );
+}
+
+#[test]
+fn covered_repair_records_latch_only_and_recorder_failure_keeps_the_original_actor() {
+    let mut e = repair_credit_fixture(0.);
+    repair(&mut e, 131, Transport::Tcp).unwrap();
+    tick(&mut e, 131);
+    assert_eq!(row(&e).state_actor.state, ObjectiveState::Repairing);
+    e.objective_world
+        .as_mut()
+        .unwrap()
+        .stage_repair(
+            TARGET,
+            crate::domination_repair_runtime::Authority {
+                actor: crate::domination_objective_runtime::Actor {
+                    player: 77,
+                    generation: 4,
+                    team: 1,
+                },
+                live: true,
+                tool_active: true,
+                repair_rate: 1.,
+            },
+        )
+        .unwrap();
+    let credit_before = e.active.as_ref().unwrap().repair_credit;
+    let rewards_before = e.pending_reward_batch();
+    let max_log = e.max_log;
+    e.max_log = e.written;
+    assert_eq!(
+        repair(&mut e, 132, Transport::Tcp).err(),
+        Some("log_limit_reached")
+    );
+    let mut candidate = e.objective_world.clone().unwrap();
+    let finish = Duration::from_millis(1131);
+    candidate.begin_native_tick(finish);
+    candidate.tick_native_object(INDEX, finish, &BTreeMap::new());
+    let failed_entry = candidate.take_native_entries().pop().unwrap();
+    assert_eq!(failed_entry.reward_actor, Some(77));
+
+    e.max_log = max_log;
+    e.failed = false;
+    let recorder_before = e.writer.len();
+    repair(&mut e, 132, Transport::Tcp).unwrap();
+    assert!(e.writer.len() > recorder_before);
+    assert_eq!(e.active.as_ref().unwrap().repair_credit, credit_before);
+    assert_eq!(e.pending_reward_batch(), rewards_before);
+    let expected = e.active.as_ref().unwrap().reservation.player;
+    tick(&mut e, 1131);
+    assert_eq!(row(&e).state_actor.state, ObjectiveState::Repaired);
+    assert_eq!(row(&e).state_actor.actor_index, expected);
+}
+
+#[test]
+fn recorded_tool_repair_completion_credits_last_repairer_and_tagged_leader() {
+    let mut e = repair_credit_fixture(0.);
+    let squad = bind_repair_counter_squad(&mut e, INDEX);
+    select_tool_actor(&mut e, "synthetic-reservation-0000");
+    crate::structural_repair_authority::tests::equip_synthetic_repair_kit(&mut e);
+    repair(&mut e, 131, Transport::Tcp).unwrap();
+    tick(&mut e, 131);
+    assert_eq!(row(&e).state_actor.state, ObjectiveState::Repairing);
+    repair(&mut e, 132, Transport::Tcp).unwrap();
+    select_tool_actor(&mut e, "synthetic-reservation-0001");
+    assert!(repair(&mut e, 133, Transport::Tcp).unwrap().is_empty());
+    let tagged = e
+        .acquisition_gameplay
+        .as_mut()
+        .unwrap()
+        .state
+        .set_manual_tag(squad, TARGET)
+        .unwrap();
+    assert_eq!(tagged.tagged_object, TARGET);
+    assert_tool_completion_counters(&e, 0);
+
+    let finish = Duration::from_millis(1131);
+    let max = e.max_log;
+    e.max_log = e.written;
+    assert_eq!(
+        e.tick_acquisition_objectives(finish, 1).unwrap_err(),
+        "log_limit_reached"
+    );
+    assert_eq!(row(&e).state_actor.state, ObjectiveState::Repairing);
+    assert_tool_completion_counters(&e, 0);
+
+    e.max_log = max;
+    e.failed = false;
+    let rewards = e.pending_reward_batch();
+    e.tick_acquisition_objectives(finish, 1).unwrap();
+    assert_eq!(row(&e).state_actor.state, ObjectiveState::Repaired);
+    assert_eq!(row(&e).state_actor.actor_index, 1);
+    assert_tool_completion_counters(&e, 1);
+    tick(&mut e, 1132);
+    assert_tool_completion_counters(&e, 1);
+    assert_eq!(e.pending_reward_batch(), rewards);
 }
 
 #[test]

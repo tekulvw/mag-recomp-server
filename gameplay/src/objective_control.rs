@@ -1,6 +1,6 @@
 //! Shared authoritative capture and demolition for reviewed retail objective bindings.
 use crate::{
-    domination_objective_runtime as secure, domination_repair_runtime as repair,
+    Active, domination_objective_runtime as secure, domination_repair_runtime as repair,
     objective_catalog::{
         ObjectiveCatalog, ObjectiveDemolitionRule, ObjectiveInteractionRule,
         ObjectiveProgressionRule, ObjectiveRepairRule, native_state,
@@ -57,10 +57,40 @@ impl InteractionOutcome {
 struct Operation {
     started_at: Duration,
     recipient: Option<RewardRecipient>,
+    capture_actor: Option<CaptureActorIdentity>,
     player: u16,
     generation: u32,
     trigger_index: u8,
     deadline: Duration,
+}
+
+#[derive(Clone)]
+pub(crate) struct CaptureActorIdentity {
+    reservation_id: String,
+    world: u32,
+    player: u16,
+    match_id: String,
+    account: u32,
+}
+
+impl CaptureActorIdentity {
+    fn from_active(actor: &Active) -> Self {
+        Self {
+            reservation_id: actor.reservation.id.clone(),
+            world: actor.reservation.world,
+            player: actor.reservation.player,
+            match_id: actor.reward_match_id.clone(),
+            account: actor.reservation.account,
+        }
+    }
+
+    pub(crate) fn matches(&self, actor: &Active) -> bool {
+        self.reservation_id == actor.reservation.id
+            && self.world == actor.reservation.world
+            && self.player == actor.reservation.player
+            && self.match_id == actor.reward_match_id
+            && self.account == actor.reservation.account
+    }
 }
 #[derive(Clone)]
 struct Objective {
@@ -309,12 +339,15 @@ impl ObjectiveWorld {
             (NativeClass::Structural, false, false) => {
                 use ObjectiveState::{
                     Activated, Activating, Completed, Deactivated, Deactivating, Repaired,
+                    Repairing,
                 };
                 match (previous.state_actor.state, object.state.state_actor.state) {
                     (Activating, Activated) | (Activated | Deactivating, Completed) => {
                         object.reward_attacker
                     }
-                    (Deactivating, Deactivated | Repaired) => object.reward_defender,
+                    (Deactivating, Deactivated | Repaired) | (Repairing, Repaired) => {
+                        object.reward_defender
+                    }
                     _ => None,
                 }
             }
@@ -591,6 +624,7 @@ impl ObjectiveWorld {
         object.operation = Some(Operation {
             started_at: now,
             recipient: None,
+            capture_actor: None,
             player: actor.player,
             generation: actor.generation,
             trigger_index: trigger,
@@ -620,6 +654,17 @@ impl ObjectiveWorld {
         target_object_id: u32,
         authority: repair::Authority,
     ) -> Result<(), &'static str> {
+        match self.stage_repair_packet(target_object_id, authority)? {
+            repair::Submission::Queued(_) => Ok(()),
+            repair::Submission::LatchOnly => Err(repair::HEALTH_ALREADY_COVERED),
+        }
+    }
+
+    pub(crate) fn stage_repair_packet(
+        &mut self,
+        target_object_id: u32,
+        authority: repair::Authority,
+    ) -> Result<repair::Submission, &'static str> {
         let index = target_object_id as u16;
         if target_object_id != 0x0c80_0000 | u32::from(index) {
             return Err("objective_invalid_target");
@@ -632,16 +677,18 @@ impl ObjectiveWorld {
             .native
             .as_mut()
             .ok_or("native_objective_not_configured")?;
-        mode.repair
+        let submission = mode
+            .repair
             .as_mut()
             .ok_or("native_structural_repair_not_configured")?
-            .submit(authority, mode.damage_health)?;
+            .submit_packet(authority, mode.damage_health)?;
+        object.reward_defender = Some(authority.actor.player);
         self.pristine = false;
-        Ok(())
+        Ok(submission)
     }
 
     /// Snapshot the authenticated admission at action start, not at delayed completion.
-    pub(crate) fn attribute_operation(&mut self, index: u16, recipient: Option<RewardRecipient>) {
+    pub(crate) fn attribute_operation(&mut self, index: u16, actor: &Active) {
         let Some(object) = self.objects.get_mut(&index) else {
             return;
         };
@@ -653,12 +700,24 @@ impl ObjectiveWorld {
             .and_then(|mode| mode.pending.as_mut())
         {
             if staged.is_none() {
-                *staged = recipient;
+                *staged = RewardRecipient::from_active(actor);
             }
         } else if let Some(operation) = object.operation.as_mut()
-            && operation.recipient.is_none()
+            && operation.player == actor.reservation.player
+            && operation
+                .capture_actor
+                .as_ref()
+                .is_none_or(|identity| identity.matches(actor))
         {
-            operation.recipient = recipient;
+            if operation.recipient.is_none() {
+                operation.recipient = RewardRecipient::from_active(actor);
+            }
+            if object.native.is_none()
+                && object.demolition.is_none()
+                && operation.capture_actor.is_none()
+            {
+                operation.capture_actor = Some(CaptureActorIdentity::from_active(actor));
+            }
         }
     }
 
@@ -714,6 +773,7 @@ impl ObjectiveWorld {
         object.fuse = Some(Operation {
             started_at: now,
             recipient: None,
+            capture_actor: None,
             player: u16::MAX,
             generation: 0,
             trigger_index: 0,
@@ -843,6 +903,7 @@ impl ObjectiveWorld {
                 object.operation = Some(Operation {
                     started_at: now,
                     recipient: None,
+                    capture_actor: None,
                     player: actor.player,
                     generation: actor.generation,
                     trigger_index: request.trigger_index,
@@ -885,6 +946,31 @@ impl ObjectiveWorld {
         &mut self,
         now: Duration,
         actors: &BTreeMap<u16, ObjectiveActor>,
+    ) -> Vec<ObjectiveControlDelta> {
+        self.tick_observing_captures(now, actors, |_, _| {})
+    }
+
+    pub(crate) fn tick_with_capture_completions(
+        &mut self,
+        now: Duration,
+        actors: &BTreeMap<u16, ObjectiveActor>,
+    ) -> (Vec<ObjectiveControlDelta>, Vec<CaptureCompletion>) {
+        let mut captures = Vec::new();
+        let changes = self.tick_observing_captures(now, actors, |object_index, operation| {
+            captures.push(CaptureCompletion {
+                object_index,
+                player: operation.player,
+                actor: operation.capture_actor.clone(),
+            });
+        });
+        (changes, captures)
+    }
+
+    fn tick_observing_captures(
+        &mut self,
+        now: Duration,
+        actors: &BTreeMap<u16, ObjectiveActor>,
+        mut capture_completed: impl FnMut(u16, &Operation),
     ) -> Vec<ObjectiveControlDelta> {
         let mut changed = BTreeMap::new();
         for object in self.objects.values_mut() {
@@ -947,6 +1033,7 @@ impl ObjectiveWorld {
                     RewardKind::PrimaryObjectiveSecured,
                     &mut self.reward_actions,
                 );
+                capture_completed(object.state.object_index, &operation);
                 object.state.state_actor.state = ObjectiveState::Completed;
                 object.state.state_actor.change_time_ms = wire_time(operation.deadline);
                 object.state.expiration_time_ms = 0;
@@ -1019,6 +1106,12 @@ impl ObjectiveWorld {
         object.operation = None;
         changed.insert(index, object.state);
     }
+}
+
+pub(crate) struct CaptureCompletion {
+    pub(crate) object_index: u16,
+    pub(crate) player: u16,
+    pub(crate) actor: Option<CaptureActorIdentity>,
 }
 
 #[derive(Clone, Debug)]
@@ -1271,6 +1364,7 @@ fn enter_secure(
         Some(Operation {
             started_at: now,
             recipient: None,
+            capture_actor: None,
             player: entry.actor.player,
             generation: generation.expect("world actor generation"),
             trigger_index: request.trigger_index(),
@@ -1305,7 +1399,10 @@ fn enter_structural(object: &mut Objective, mode: &mut NativeObjective, previous
             object.reward_attacker = None;
             mode.damage_health = 100.0;
         }
-        Activated => mode.damage_health = 100.0,
+        Activated => {
+            object.reward_defender = None;
+            mode.damage_health = 100.0;
+        }
         _ => {}
     }
     if target != Repairing {
@@ -1630,6 +1727,7 @@ fn interact_demolition(
     object.operation = Some(Operation {
         started_at: now,
         recipient: None,
+        capture_actor: None,
         player: actor.player,
         generation: actor.generation,
         trigger_index: request.trigger_index,
@@ -2213,6 +2311,8 @@ pub(crate) mod trigger_box_tests {
                 .iter()
                 .all(|entry| entry.actor_generation == Some(8))
         );
+        assert_eq!(entries[0].reward_actor, None);
+        assert_eq!(entries[1].reward_actor, Some(2));
         assert!(!entries[1].requires_authored_explosion());
     }
 
