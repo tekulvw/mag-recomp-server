@@ -180,6 +180,12 @@ impl HullDamage {
             | (u8::from(hp == 0.0) << 3)
     }
 
+    pub(crate) fn accepts_damage(self, flight: domination_helo::FlightState) -> bool {
+        flight != domination_helo::FlightState::Dormant
+            && self.state != replication::VehicleState::Destroyed
+            && self.wire.conditions & 12 == 0
+    }
+
     pub(crate) fn apply(
         &mut self,
         flight: domination_helo::FlightState,
@@ -190,11 +196,7 @@ impl HullDamage {
         if !dose.hp.is_finite() || dose.hp < 0.0 {
             return Err("invalid_domination_helo_damage_dose");
         }
-        if flight == domination_helo::FlightState::Dormant
-            || self.state == replication::VehicleState::Destroyed
-            || self.wire.conditions & 12 != 0
-            || dose.hp == 0.0
-        {
+        if !self.accepts_damage(flight) || dose.hp == 0.0 {
             return Ok(false);
         }
         let old = self.hp;

@@ -72,6 +72,7 @@ struct Helo {
     models: PathBuf,
     paths: PathBuf,
     damage: PathBuf,
+    hospital_rocket_damage_areas: Option<PathBuf>,
     random_seed: u32,
 }
 
@@ -81,6 +82,14 @@ impl Core {
             (self.scope.as_str(), self.helo.as_ref()),
             ("core_without_helo_insertion", None) | ("core_with_helo_insertion", Some(_))
         ) {
+            if self
+                .helo
+                .as_ref()
+                .is_some_and(|helo| helo.hospital_rocket_damage_areas.is_some())
+                && self.hospital_rockets.is_none()
+            {
+                return Err(io::Error::other("hospital_rocket_helo_requires_rockets"));
+            }
             if self.hospital_rocket_ground.is_some() && self.hospital_rockets.is_none() {
                 return Err(io::Error::other("hospital_rocket_ground_requires_rockets"));
             }
@@ -310,6 +319,12 @@ impl Configuration {
                         return Err(io::Error::other("empty_domination_helo_source_path"));
                     }
                     *input = directory.join(&*input);
+                }
+                if let Some(path) = &mut helo.hospital_rocket_damage_areas {
+                    if path.as_os_str().is_empty() {
+                        return Err(io::Error::other("empty_domination_helo_rocket_areas_path"));
+                    }
+                    *path = directory.join(&*path);
                 }
             }
         }
@@ -709,70 +724,99 @@ impl Configuration {
                 OwnedAssignment::initial(&objectives, squad as u16).map_err(io::Error::other)?,
             );
         }
-        let (helo, helo_collision, helo_damage, disabled_helos) = if let Some(input) = &core.helo {
-            let source =
-                crate::domination_helo::FleetSource::load(&read(&input.fleet, 256 * 1024)?, spawns)
-                    .map_err(io::Error::other)?;
-            let models = read(&input.models, 4 * 1024 * 1024)?;
-            let paths = read(&input.paths, 256 * 1024)?;
-            for (raw, expected) in [
-                (&aircraft_links_raw, &source.source_receipt_sha256[0]),
-                (&paths, &source.source_receipt_sha256[1]),
-                (&models, &source.source_receipt_sha256[2]),
-            ] {
-                if format!("{:x}", Sha256::digest(raw)) != *expected {
-                    return Err(io::Error::other("domination_helo_source_pairing_mismatch"));
-                }
-            }
-            if source
-                .carriers
-                .iter()
-                .map(|carrier| carrier.spawn_index)
-                .collect::<BTreeSet<_>>()
-                != helos
-            {
-                return Err(io::Error::other("domination_helo_spawn_coverage_mismatch"));
-            }
-            let damage = crate::domination_helo_damage::HeloDamageRules::from_json(
-                &read(&input.damage, 256 * 1024)?,
-                native_elf,
-                &source,
-            )
-            .map_err(io::Error::other)?;
-            let collision = crate::domination_structural_world::HeloCollisionAssets::from_json(
-                &models,
-                spawns.map_name(),
-                native_elf,
-                &source.source_receipt_sha256[2],
-            )
-            .map_err(io::Error::other)?;
-            let fleet = crate::domination_helo::FleetRuntime::from_source(
-                source.clone(),
-                input.random_seed,
-            )
-            .map_err(io::Error::other)?;
-            // Promote the four source points only after every paired source validates.
-            spawns
-                .qualify_domination_helo_points(&source)
-                .map_err(io::Error::other)?;
-            (
-                Some(fleet),
-                Some(Arc::new(collision)),
-                Some(Arc::new(damage)),
-                BTreeSet::new(),
-            )
-        } else {
-            spawns
-                .configure_domination_helo_scope(
-                    helos.clone(),
-                    sources
-                        .runtime
-                        .category_zero_indices()
-                        .map_err(io::Error::other)?,
+        let (helo, helo_collision, helo_damage, disabled_helos, hospital_rocket_helo_areas) =
+            if let Some(input) = &core.helo {
+                let source = crate::domination_helo::FleetSource::load(
+                    &read(&input.fleet, 256 * 1024)?,
+                    spawns,
                 )
                 .map_err(io::Error::other)?;
-            (None, None, None, helos)
-        };
+                let models = read(&input.models, 4 * 1024 * 1024)?;
+                let paths = read(&input.paths, 256 * 1024)?;
+                for (raw, expected) in [
+                    (&aircraft_links_raw, &source.source_receipt_sha256[0]),
+                    (&paths, &source.source_receipt_sha256[1]),
+                    (&models, &source.source_receipt_sha256[2]),
+                ] {
+                    if format!("{:x}", Sha256::digest(raw)) != *expected {
+                        return Err(io::Error::other("domination_helo_source_pairing_mismatch"));
+                    }
+                }
+                if source
+                    .carriers
+                    .iter()
+                    .map(|carrier| carrier.spawn_index)
+                    .collect::<BTreeSet<_>>()
+                    != helos
+                {
+                    return Err(io::Error::other("domination_helo_spawn_coverage_mismatch"));
+                }
+                let damage_raw = read(&input.damage, 256 * 1024)?;
+                let damage = crate::domination_helo_damage::HeloDamageRules::from_json(
+                    &damage_raw,
+                    native_elf,
+                    &source,
+                )
+                .map_err(io::Error::other)?;
+                let collision = crate::domination_structural_world::HeloCollisionAssets::from_json(
+                    &models,
+                    spawns.map_name(),
+                    native_elf,
+                    &source.source_receipt_sha256[2],
+                )
+                .map_err(io::Error::other)?;
+                let rocket_areas = input
+                    .hospital_rocket_damage_areas
+                    .as_ref()
+                    .map(|path| {
+                        let areas = crate::hospital_rocket_helo::Catalog::from_bytes(&read(
+                            path,
+                            16 * 1024,
+                        )?)
+                        .map_err(io::Error::other)?;
+                        areas
+                            .validate(
+                                native_elf,
+                                hospital_doc["main_archive_sha256"]
+                                    .as_str()
+                                    .ok_or_else(|| {
+                                        io::Error::other("hospital_rocket_helo_main_source_missing")
+                                    })?,
+                                &damage_raw,
+                                &collision,
+                            )
+                            .map_err(io::Error::other)?;
+                        Ok::<_, io::Error>(Arc::new(areas))
+                    })
+                    .transpose()?;
+                let fleet = crate::domination_helo::FleetRuntime::from_source(
+                    source.clone(),
+                    input.random_seed,
+                )
+                .map_err(io::Error::other)?;
+                // Promote the four source points only after every paired source validates.
+                spawns
+                    .qualify_domination_helo_points(&source)
+                    .map_err(io::Error::other)?;
+                (
+                    Some(fleet),
+                    Some(Arc::new(collision)),
+                    Some(Arc::new(damage)),
+                    BTreeSet::new(),
+                    rocket_areas,
+                )
+            } else {
+                spawns
+                    .configure_domination_helo_scope(
+                        helos.clone(),
+                        sources
+                            .runtime
+                            .category_zero_indices()
+                            .map_err(io::Error::other)?,
+                    )
+                    .map_err(io::Error::other)?;
+                (None, None, None, helos, None)
+            };
         let projectile_contacts = core
             .projectile_contacts
             .as_ref()
@@ -824,6 +868,7 @@ impl Configuration {
                 hospital_hulks: Some(Arc::new(hospital_assets)),
                 hospital_turret_yaws: Arc::new(yaws),
                 hospital_rocket_ground,
+                hospital_rocket_helo_areas,
                 frag_character_blast: core.frag_character_blast,
                 projectile_contacts,
                 helo,
@@ -1124,6 +1169,30 @@ mod tests {
         assert!(parsed.hospital_rockets.is_none());
         assert!(parsed.projectile_contacts.is_none());
         assert!(parsed.validate_scope().is_ok());
+    }
+
+    #[test]
+    fn helo_rocket_areas_require_the_equipped_rocket_provider() {
+        for (areas, rocket, valid) in [
+            (false, false, true),
+            (false, true, true),
+            (true, false, false),
+            (true, true, true),
+        ] {
+            let mut value = core();
+            value["scope"] = "core_with_helo_insertion".into();
+            value["helo"] = helo();
+            if areas {
+                value["helo"]["hospital_rocket_damage_areas"] = "areas.json".into();
+            }
+            if rocket {
+                value["hospital_rockets"] = "rockets.json".into();
+                value["hospital_turrets"] = "turrets.json".into();
+                value["projectile_contacts"] = "contacts.json".into();
+            }
+            let parsed: Core = serde_json::from_value(value).unwrap();
+            assert_eq!(parsed.validate_scope().is_ok(), valid);
+        }
     }
 
     #[test]

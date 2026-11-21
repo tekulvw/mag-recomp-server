@@ -1,11 +1,13 @@
 # Hospital secondary rocket support
 
 Domination hospital secondaries have optional server-owned launch, straight flight,
-contact, ordinary on-foot Character damage, optional qualified Ground damage
-and reliable cleanup. They remain off
+contact, ordinary on-foot Character damage, optional qualified Ground and Helo
+damage and reliable cleanup. They remain off
 unless the selected profile explicitly supplies `core.hospital_turrets`,
 `core.hospital_rockets` and `core.projectile_contacts`. Ground damage additionally
-requires `core.hospital_rocket_ground`. Direct Engine configuration
+requires `core.hospital_rocket_ground`. Helo damage requires
+`core.helo.hospital_rocket_damage_areas` alongside the existing Helo and rocket
+providers. Direct Engine configuration
 and the match-profile registry validate the same source bindings. The CLI's
 `--validate-catalogs` path qualifies the weapon rules and contact inputs before
 advertising readiness, opening a listener or creating a log.
@@ -44,8 +46,9 @@ cargo run --locked --example inspect_hospital_rocket_rules -- \
 
 The separate authored impact amount does not establish an additional damage
 callback. The qualified ordinary on-foot Character route uses its own typed dose,
-current body/stance and material cover callback. Vehicle, hospital, Helo, exposed
-mounted targets and blocked-ray fallbacks require their respective admission and
+current body/stance and material cover callback. Optional Ground and Helo
+consumers use the separately qualified vehicle callback. Hospital/objective,
+exposed mounted targets and blocked-ray fallbacks require separate admission and
 damage paths. Ordinary on-foot Character damage is enabled only through an
 authenticated, source-bound hospital launch and current contact. The other target consumers
 remain separate.
@@ -82,10 +85,10 @@ critical/destruction/hulk/respawn lifecycle. Field 18 retains the established in
 Ground source word; projectile identity is recorded in audit. The final native
 source-word export remains unqualified.
 
-Character damage, optional Ground damage and terminal publication share one
-record and queue preflight. Insufficient capacity defers both health effects.
-Recorder refusal leaves both health states, the flight and queues unchanged.
-Helo, objectives, exposed mounted targets, blocked-ray native fallback and rocket
+Character damage, optional Ground/Helo damage and terminal publication share one
+record and queue preflight. Insufficient capacity defers all health effects.
+Recorder refusal leaves all health states, the flight and queues unchanged.
+Objectives, exposed mounted targets, blocked-ray native fallback and rocket
 kill-feed weapon indices remain separate.
 
 The maintained `tools/extraction/project-retail-hospital-rocket-ground-bounds.py`
@@ -95,6 +98,31 @@ dynamic catalog and Ground policy; the runtime refuses inferred legacy roles or
 mismatched template/bounds inputs. Private staging supplies both current six-profile
 scopes with explicit rules. All authored thresholds and damage inputs remain in
 external files.
+
+## Optional Helo vehicle effects
+
+The maintained `tools/extraction/project-retail-hospital-rocket-helo-areas.py`
+consumes the owner's original executable/archive and current Helo model/damage
+inputs. Its three-faction catalog binds exact original source hashes, loaded
+model bytes, operational packs and native cached damage-area thresholds. Missing
+rocket dependencies, malformed rules or source mismatches refuse readiness.
+Existing profiles without this input keep their prior behavior.
+
+The planner verifies each damageable carrier's current pose against its installed
+operational chassis. Row-6 overlap and a target-excluding layer-24 material ray
+admit the independent vehicle dose. Classified native areas 1–6 feed the existing
+Helo armor, friendly scaling and current flight health floors; generic area 0 is
+not substituted. Dormant, critical and destroyed eligibility is shared with the
+existing HullDamage path. Missing or mismatched active geometry is an error.
+
+Character, Ground, Helo and terminal changes share one record and reliable queue
+preflight. Refusal or insufficient capacity leaves all health states and the
+flight unchanged. Helo field-18 updates go only to recipients that have received
+Helo creation; later creation embeds the installed current damage. The normal
+Helo provider continues critical, death, passenger, retreat and recovery handling.
+The inherited source-word export remains unqualified: field 18 keeps the bounded
+invalid sentinel while the allocated projectile ID remains in audit. Native
+flight and frame-exact callback ordering remain separate.
 
 ## Projectile libraries
 

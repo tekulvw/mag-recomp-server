@@ -207,22 +207,12 @@ impl Catalog {
             return Err("invalid_hospital_rocket_ground_origin");
         }
         let row = self.variant(creation)?;
-        let displacement: [f32; 3] =
-            std::array::from_fn(|axis| blast_origin[axis] as f32 - pose.translation[axis] as f32);
-        let local = |axis: usize| {
-            (0..3).fold(0., |sum, world| {
-                (pose.rotation[world][axis] as f32).mul_add(displacement[world], sum)
-            })
-        };
-        let z = local(2);
-        let area = if z > row.front_threshold_z {
-            1
-        } else if z < row.rear_threshold_z {
-            3
-        } else {
-            2
-        };
-        Ok(area + if local(0) > 0. { 0 } else { 3 })
+        Ok(crate::hospital_rockets::vehicle_blast_location(
+            pose,
+            blast_origin,
+            row.rear_threshold_z,
+            row.front_threshold_z,
+        ))
     }
 
     #[cfg(test)]

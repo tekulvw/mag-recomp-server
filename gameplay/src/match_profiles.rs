@@ -637,6 +637,15 @@ impl Registry {
         })
     }
 
+    pub fn has_hospital_rocket_helo(&self) -> bool {
+        self.profiles.values().any(|profile| {
+            profile
+                .domination
+                .as_ref()
+                .is_some_and(|world| world.state.hospital_rocket_helo_areas.is_some())
+        })
+    }
+
     pub fn has_hospital_rocket_ground(&self) -> bool {
         self.profiles.values().any(|profile| {
             profile
