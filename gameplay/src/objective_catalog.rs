@@ -386,6 +386,9 @@ impl ObjectiveCatalog {
             }
             if object.reward.as_ref().is_some_and(|rule| {
                 rule.category > 4
+                    || object
+                        .native_class
+                        .is_some_and(|class| rule.demolition != (class == NativeClass::Structural))
                     || (object.demolition.is_some() && !rule.demolition)
                     || (object.interaction.is_some() && rule.demolition)
             }) {

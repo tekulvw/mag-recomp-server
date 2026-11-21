@@ -1017,10 +1017,33 @@ impl<W: Write> ExternalEffects for Provider<'_, W> {
 
     fn prepare_class_entry(
         &mut self,
-        _: NativeEntry,
+        entry: NativeEntry,
         _: &ObjectiveWorld,
         _: &SpawnCatalog,
     ) -> Result<(), &'static str> {
+        let assignment = self
+            .engine
+            .active
+            .iter()
+            .chain(self.engine.peers.values())
+            .find(|a| Some(a.reservation.player) == entry.reward_actor)
+            .and_then(|a| {
+                self.state
+                    .assignments
+                    .get(usize::from(a.squad_catalog.squad_index()))
+            })
+            .and_then(|a| a.as_ref())
+            .map(|a| a.assignment);
+        self.audit
+            .extend(self.engine.stage_native_objective_rewards(
+                entry,
+                assignment,
+                crate::frago::Frame {
+                    ground: self.ground.as_ref(),
+                    helo: self.state.helo.as_ref(),
+                    ..Default::default()
+                },
+            )?);
         Ok(())
     }
 

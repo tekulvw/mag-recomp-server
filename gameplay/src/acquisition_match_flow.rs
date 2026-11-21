@@ -50,18 +50,18 @@ impl<W: Write> Engine<W> {
                     deadline: Duration::from_millis(deadline_ms.into()),
                     finalized: false,
                 };
-                rewards.extend(
-                    self.peers
-                        .values()
-                        .chain(self.active.iter())
-                        .filter_map(|actor| {
-                            if !actor.entered_game || actor.claimed.is_none() {
-                                return None;
-                            }
-                            let recipient = progression::RewardRecipient::from_active(actor)?;
-                            Some(self.match_result_reward(actor, &recipient, &outcome))
-                        }),
-                );
+                for actor in self
+                    .peers
+                    .values()
+                    .chain(self.active.iter())
+                    .filter(|a| a.entered_game && a.claimed.is_some())
+                {
+                    let Some(recipient) = progression::RewardRecipient::from_active(actor) else {
+                        continue;
+                    };
+                    rewards.extend(self.end_objective_rewards(actor)?);
+                    rewards.push(self.match_result_reward(actor, &recipient, &outcome));
+                }
                 next.outcome = Some(outcome);
             }
             Some(Transition::Finished) => {

@@ -69,11 +69,11 @@ internal static partial class LeadershipProgressionChecks
         finally { Directory.Delete(directory, true); }
     }
 
-    private static MagProgressionCatalog Load(string directory, JsonObject fixture)
+    private static MagProgressionCatalog Load(string directory, JsonObject fixture, int applicationId = 20231)
     {
         string path = Path.Combine(directory, "progression.json");
         File.WriteAllText(path, fixture.ToJsonString());
-        return MagProgressionCatalog.Load(path, 20231);
+        return MagProgressionCatalog.Load(path, applicationId);
     }
 
     private static void Create(LocalCharacterStore store, string account, string name)
