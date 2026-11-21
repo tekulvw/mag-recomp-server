@@ -3,7 +3,7 @@ use crate::{
     Active, CharacterLife, Engine, PendingDamage, acquisition_character_effects, armor,
     blast_visibility::MAX_BLAST_TARGETS,
     damage,
-    domination_structural_world::{BlastCollision, CharacterBlastShape, OnFootBlastPose},
+    domination_structural_world::{CharacterBlastShape, OnFootBlastPose},
     dynamic_collision_runtime::OwnerCollisionView,
     leadership_runtime::LeadershipPlan,
     projectile::{ProjectileTerminal, ProjectileTerminalReason},
@@ -43,18 +43,10 @@ impl<W: Write> Engine<W> {
                 .blast_collision()
                 .ok_or("acquisition_frag_character_blast_requires_structural")?
         } else {
-            let state = &self
-                .domination_gameplay
+            self.domination_gameplay
                 .as_ref()
                 .ok_or("frag_character_blast_world_required")?
-                .state;
-            BlastCollision {
-                filter_rows: &state.filter_rows,
-                limits: Default::default(),
-                sequences: &state.collisions,
-                material_costs: state.structural.material_penetration_costs(),
-                terrain_materials: Some(&state.terrain_materials),
-            }
+                .frag_blast_collision()
         };
         let snapshot = self.owner_collision_snapshot(
             collision.filter_rows[6],

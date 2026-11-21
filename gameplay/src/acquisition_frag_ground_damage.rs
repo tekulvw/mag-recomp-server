@@ -5,6 +5,10 @@ use crate::{
     projectile::{ProjectileTerminal, ProjectileTerminalReason},
 };
 
+#[cfg(test)]
+#[path = "domination_frag_ground_damage_tests.rs"]
+mod domination_tests;
+
 #[derive(Default)]
 pub(crate) struct GroundFragCandidate {
     pub(crate) after: Option<ground::Runtime>,
@@ -13,7 +17,18 @@ pub(crate) struct GroundFragCandidate {
 }
 
 impl<W: Write> Engine<W> {
-    pub(crate) fn prepare_acquisition_ground_frag(
+    pub(crate) fn ground_frag_areas(&self) -> Option<&acquisition_frag_ground::Catalog> {
+        if let Some(world) = &self.domination_gameplay {
+            return world.state.frag_ground_areas.as_deref();
+        }
+        self.acquisition_gameplay
+            .as_ref()?
+            .setup
+            .frag_ground_areas
+            .as_deref()
+    }
+
+    pub(crate) fn prepare_ground_frag(
         &self,
         actor: &Active,
         staged: &ground::Runtime,
@@ -21,30 +36,27 @@ impl<W: Write> Engine<W> {
         terminals: &[ProjectileTerminal],
         now: Duration,
     ) -> Result<GroundFragCandidate, &'static str> {
-        let runtime = self
-            .acquisition_gameplay
-            .as_ref()
-            .ok_or("acquisition_frag_ground_requires_gameplay")?;
-        let rules = runtime
-            .setup
-            .frag_ground_areas
-            .as_deref()
-            .ok_or("acquisition_frag_ground_requires_areas")?;
-        let policy = runtime
-            .setup
-            .ground_damage
-            .as_ref()
-            .ok_or("acquisition_frag_ground_requires_damage_policy")?;
-        let collision = runtime
-            .blast_collision()
-            .ok_or("acquisition_frag_ground_requires_structural")?;
+        let rules = self
+            .ground_frag_areas()
+            .ok_or("frag_ground_requires_areas")?;
+        let policy = self
+            .ground_damage_policy()
+            .ok_or("frag_ground_requires_damage_policy")?;
+        let collision = if let Some(world) = &self.domination_gameplay {
+            world.frag_blast_collision()
+        } else {
+            self.acquisition_gameplay
+                .as_ref()
+                .and_then(|runtime| runtime.blast_collision())
+                .ok_or("acquisition_frag_ground_requires_structural")?
+        };
         let scene = self
             .collision_world
             .as_ref()
             .filter(|world| {
                 world.stats().triangles != 0 && world.metadata().map_name == self.map_name()
             })
-            .ok_or("acquisition_frag_ground_requires_static_world")?;
+            .ok_or("frag_ground_requires_static_world")?;
         let snapshot = self.owner_collision_snapshot(
             collision.filter_rows[6],
             OwnerCollisionView {
@@ -53,7 +65,7 @@ impl<W: Write> Engine<W> {
             },
         )?;
         if snapshot.context().0.world_id != actor.reservation.world {
-            return Err("stale_acquisition_frag_ground_world");
+            return Err("stale_frag_ground_world");
         }
         let catalog = self.item_catalog.retail_combat()?;
         let mut overlap_budget = collision.limits.max_support_points;
@@ -71,13 +83,13 @@ impl<W: Write> Engine<W> {
             };
             let frag = catalog
                 .grenade_for_damage(terminal.item_id)
-                .map_err(|_| "acquisition_frag_ground_item_unavailable")?;
+                .map_err(|_| "frag_ground_item_unavailable")?;
             let amount_hp = frag.damage.vehicle as f32;
             let half_radius = frag.half_radius as f32;
             let outer_radius = frag.full_radius as f32;
-            let penetration =
-                frag.material_penetration
-                    .ok_or("acquisition_frag_ground_material_required")? as f32;
+            let penetration = frag
+                .material_penetration
+                .ok_or("frag_ground_material_required")? as f32;
             if !amount_hp.is_finite()
                 || amount_hp < 0.
                 || !half_radius.is_finite()
@@ -87,7 +99,7 @@ impl<W: Write> Engine<W> {
                 || !penetration.is_finite()
                 || penetration < 0.
             {
-                return Err("invalid_acquisition_frag_ground_dose");
+                return Err("invalid_frag_ground_dose");
             }
             if amount_hp == 0. {
                 continue;

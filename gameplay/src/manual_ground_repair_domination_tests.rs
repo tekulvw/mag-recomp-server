@@ -16,6 +16,7 @@ const GRENADE: u32 = 0x1080_0002;
 
 fn source_catalogs(
     attacking_faction: u8,
+    use_drivers: bool,
 ) -> (spawn_catalog::SpawnCatalog, ground_vehicles::Catalog) {
     let defending_faction = (attacking_faction + 1) % 3;
     let mut locations = vec![
@@ -78,25 +79,53 @@ fn source_catalogs(
         .to_string(),
     )
     .unwrap();
-    let catalog = ground_vehicles::Catalog::from_json(
-        &json!({
-            "format":"mag_ground_vehicles","schema_version":1,
-            "source":{"spawn_catalog_sha256":spawns.source_sha256().unwrap(),
-                "native_elf_sha256":"a".repeat(64),"native_binding_sha256":"b".repeat(64),
-                "vehicle_properties_sha256":"c".repeat(64),
-                "creation_scope":"native_domination_vehicle_source_points"},
-            "vehicles":vehicles,"vehicle_sources":sources,"passenger_spawns":passenger_spawns
-        })
-        .to_string(),
-        &spawns,
-    )
-    .unwrap();
+    let mut source = json!({
+        "format":"mag_ground_vehicles","schema_version":1,
+        "source":{"spawn_catalog_sha256":spawns.source_sha256().unwrap(),
+            "native_elf_sha256":"a".repeat(64),"native_binding_sha256":"b".repeat(64),
+            "vehicle_properties_sha256":"c".repeat(64),
+            "creation_scope":"native_domination_vehicle_source_points"},
+        "vehicles":vehicles,"vehicle_sources":sources,"passenger_spawns":passenger_spawns
+    });
+    if use_drivers {
+        for row in &mut source["vehicles"].as_array_mut().unwrap()[..8] {
+            row["maximum_mount_distance_m"] = json!(8.);
+            row["maximum_mount_position_age_ms"] = json!(750);
+            row["passenger_seats"] = json!([2, 3, 4, 5, 6, 7, 8, 9]);
+            row["maximum_occupancy"] = json!(8);
+        }
+        source["driver_seats"] = json!(
+            (0..8)
+                .map(|index| json!({
+                    "vehicle_index":index,"seat":0,"maximum_speed_mps":25.
+                }))
+                .collect::<Vec<_>>()
+        );
+        let seats =
+            [0, 2, 3, 4, 5, 6, 7, 8, 9].map(|seat| json!({"seat":seat,"occupant_visible":false}));
+        source["seat_visibility"] = json!({
+            "archive_sha256":"1".repeat(64),"registry_member_sha256":"2".repeat(64),
+            "vehicles":(0..8).map(|index| json!({
+                "vehicle_index":index,"properties_member_sha256":"3".repeat(64),
+                "seats":seats
+            })).collect::<Vec<_>>()
+        });
+    }
+    let catalog = ground_vehicles::Catalog::from_json(&source.to_string(), &spawns).unwrap();
     (spawns, catalog)
 }
 
 pub(crate) fn fixture(attacking_faction: u8, team: u8) -> Engine<Vec<u8>> {
+    fixture_with_drivers(attacking_faction, team, false)
+}
+
+pub(crate) fn fixture_with_drivers(
+    attacking_faction: u8,
+    team: u8,
+    use_drivers: bool,
+) -> Engine<Vec<u8>> {
     let mut engine = repair_fixture();
-    let (spawns, catalog) = source_catalogs(attacking_faction);
+    let (spawns, catalog) = source_catalogs(attacking_faction, use_drivers);
     let squad = u16::from(team) * 16;
     let actor = engine.active.as_mut().unwrap();
     actor.squad_catalog = Arc::new(spawns.for_squad(squad).unwrap());

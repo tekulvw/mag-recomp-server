@@ -52,6 +52,7 @@ struct Core {
     hospital_rocket_ground: Option<PathBuf>,
     #[serde(default)]
     frag_character_blast: bool,
+    frag_ground_areas: Option<PathBuf>,
     projectile_contacts: Option<PathBuf>,
     ground_turrets: Option<PathBuf>,
     initial_filters: PathBuf,
@@ -280,6 +281,10 @@ impl Configuration {
                 *path = directory.join(&*path);
             }
             for (input, error) in [
+                (
+                    &mut core.frag_ground_areas,
+                    "empty_domination_frag_ground_areas_path",
+                ),
                 (
                     &mut core.hospital_rocket_ground,
                     "empty_domination_hospital_rocket_ground_path",
@@ -859,6 +864,31 @@ impl Configuration {
                 Ok::<_, io::Error>(Arc::new(rules))
             })
             .transpose()?;
+        let frag_ground_areas = core
+            .frag_ground_areas
+            .as_ref()
+            .map(|path| {
+                use crate::acquisition_frag_ground::{Catalog, Scope};
+                let rules = Catalog::from_bytes_for(&read(path, 16 * 1024)?, Scope::Domination)
+                    .map_err(io::Error::other)?;
+                if grounds.native_elf_sha256() != native_elf {
+                    return Err(io::Error::other(
+                        "domination_frag_ground_area_source_mismatch",
+                    ));
+                }
+                rules
+                    .validate(native_elf, grounds)
+                    .map_err(io::Error::other)?;
+                let main_digest =
+                    hospital_doc["main_archive_sha256"]
+                        .as_str()
+                        .ok_or_else(|| {
+                            io::Error::other("domination_frag_ground_main_source_missing")
+                        })?;
+                rules.validate_main(main_digest).map_err(io::Error::other)?;
+                Ok::<_, io::Error>(Arc::new(rules))
+            })
+            .transpose()?;
         Ok(World {
             runtime: sources.runtime,
             state: State {
@@ -870,6 +900,7 @@ impl Configuration {
                 hospital_rocket_ground,
                 hospital_rocket_helo_areas,
                 frag_character_blast: core.frag_character_blast,
+                frag_ground_areas,
                 projectile_contacts,
                 helo,
                 helo_collision,
@@ -937,6 +968,17 @@ impl<W: Write> Engine<W> {
             .ok_or_else(|| io::Error::other("domination_gameplay_requires_ground_catalog"))?;
         let native_elf = objectives.source().source_image_sha256.clone();
         let world = config.build_for(objectives, spawns, bunkers, ground)?;
+        world
+            .validate_frag_ground(
+                &self.item_catalog,
+                self.collision_world.as_ref(),
+                spawns.map_name(),
+            )
+            .map_err(io::Error::other)?;
+        let bodies = self.dynamic_body_resources.as_ref().unwrap();
+        world
+            .validate_frag_ground_dynamic(&bodies.catalog, bodies.bindings(), ground)
+            .map_err(io::Error::other)?;
         if world.state.frag_character_blast {
             if self.dynamic_body_resources.is_none() {
                 return Err(io::Error::other(
