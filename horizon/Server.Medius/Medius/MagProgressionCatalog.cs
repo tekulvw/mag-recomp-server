@@ -30,11 +30,13 @@ namespace Server.Medius
             { 1, "LeadershipPoints_Squad" }, { 2, "LeadershipPoints_Platoon" }, { 4, "LeadershipPoints_OIC" } };
         private int _enemyKilled;
         private float _healOther;
+        private float? _fragoBonusModifier;
         public byte MaximumLevel => _levels.Keys.Last();
         public byte InitialLevel { get; private set; }
         public int InitialExperience => _levels[InitialLevel].Threshold;
         public byte InitialSkillPoints { get; private set; }
         public uint? InitialLeadershipPoints { get; private set; }
+        internal bool FragoBonusEnabled => _fragoBonusModifier.HasValue;
         private MagProgressionCatalog() { }
         public static MagProgressionCatalog Load(string path, int applicationId = 20230)
         {
@@ -87,6 +89,12 @@ namespace Server.Medius
                 result._healOther = awards.GetProperty("ExperienceToHealOtherRatio").GetSingle();
                 if (result._enemyKilled < 0 || !float.IsFinite(result._healOther) || result._healOther < 0)
                     throw new InvalidDataException("Invalid supported reward fields.");
+                if (awards.TryGetProperty("FRAGOBonusPointModifer", out var authoredFragoBonus))
+                {
+                    float modifier = authoredFragoBonus.GetSingle();
+                    if (!float.IsFinite(modifier) || authoredFragoBonus.GetDouble() < 0) throw new InvalidDataException("Invalid FRAGO bonus modifier.");
+                    result._fragoBonusModifier = modifier;
+                }
                 foreach (var entry in ObjectiveAwardKeys)
                 {
                     float value = awards.GetProperty(entry.Value).GetSingle();
@@ -204,6 +212,8 @@ namespace Server.Medius
         internal static bool IsFinalRewardKind(string kind) => kind != null && VictoryModifierKeys.ContainsKey(kind);
         internal static bool ValidKindUnits(string kind, int units) => units > 0 && units <= ushort.MaxValue &&
             (kind == "teammate_healed" || units == 1 && (kind == "enemy_killed" || kind != null && (ObjectiveAwardKeys.ContainsKey(kind) || OptionalActionAwardKeys.ContainsKey(kind) || IsFinalRewardKind(kind))));
+        internal static bool ValidFragoContext(string kind, int units, bool? frago) =>
+            frago == null || frago == true && kind == "enemy_killed" && units == 1;
         internal bool TryFinalAward(string kind, int units, int matchExperience, out int experience)
         {
             experience = 0;
@@ -237,6 +247,18 @@ namespace Server.Medius
             if (!float.IsFinite(total) || total < 0 || (double)total > int.MaxValue) return false;
             experience = checked((int)MathF.Truncate(total)); fraction = total - experience;
             return float.IsFinite(fraction) && fraction >= 0 && fraction < 1;
+        }
+
+        internal bool TryFragoBonus(int baseExperience, out int bonus)
+        {
+            bonus = 0;
+            if (_fragoBonusModifier is not float modifier || baseExperience < 0) return false;
+            if (baseExperience == 0) return true;
+            // Native multiplies the whole base award after ordinary fractional carry has been saved.
+            float product = (float)baseExperience * modifier;
+            if (!float.IsFinite(product) || (double)product > int.MaxValue) return false;
+            bonus = checked((int)MathF.Truncate(product));
+            return true;
         }
     }
 }

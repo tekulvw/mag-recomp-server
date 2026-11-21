@@ -1873,6 +1873,7 @@ mod tests {
             kind: progression::RewardKind::EnemyKilled,
             units: 1,
             leadership: None,
+            frago: None,
         };
         engine.reward_order.push_back(reward.reward_id.clone());
         engine

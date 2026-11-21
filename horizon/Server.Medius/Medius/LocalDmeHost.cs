@@ -55,6 +55,7 @@ namespace Server.Medius
         readonly TaskCompletionSource<bool> _firstWorldStream = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         Task _worldStreamWorker = Task.CompletedTask;
         bool _worldStreamHealthy;
+        bool _supportsFragoKillBonus;
         bool _ready; bool _started; bool _disposed;
         public Server.Dme.Models.World World { get; private set; }
         public bool IsReady { get { lock (_gate) return _ready && _worldStreamHealthy && !_disposed; } }
@@ -126,8 +127,7 @@ namespace Server.Medius
         {
             if (_started) throw new InvalidOperationException("DME already started."); _started = true;
             var hello = await _bridge.RequestHelloAsync(new { v = 2, request_id = Id(), op = "hello" });
-            RequireLoadoutSelectionCapability(hello);
-            InitializeFactionMatchmaking(hello);
+            InitializeGameplayHello(hello);
             bool hasDominationProfiles = UsesFactionMatchmaking && _matchProfiles.Any(profile => profile.GameType == 2);
             if (_maximumPlayers > SupportedMaximumPlayers(_applicationId, _gameType, hasDominationProfiles))
                 throw new IOException("Expanded retail Domination admission requires all ordered faction profiles.");
@@ -142,6 +142,12 @@ namespace Server.Medius
                 await DmeProgram.TcpServer.StartAsync(); lock (_gate) _ready = true;
             }
             catch { await DisposeAsync(); throw; }
+        }
+        void InitializeGameplayHello(GameplayBridgeResponse hello)
+        {
+            RequireLoadoutSelectionCapability(hello);
+            InitializeFactionMatchmaking(hello);
+            _supportsFragoKillBonus = hello.Capabilities.Contains("frago_kill_bonus_v1", StringComparer.Ordinal);
         }
         public static void RequireLoadoutSelectionCapability(GameplayBridgeResponse hello)
         {
@@ -219,17 +225,22 @@ namespace Server.Medius
                     reservation = new Reservation { Id = Id(), AccountId = character.Id, Account = session.AuthenticatedAccount, CharacterId = character.Id, Faction = character.Faction, Notify = notify, Client = client, Deadline = DateTime.UtcNow.AddSeconds(30) };
                     lock (_gate) { _reservations.Add(reservation.Id, reservation); _rewardOwners.Add(reservation.Id, reservation); }
                     var progressionCatalog = _store.ProgressionCatalog;
+                    var admissionCharacter = new Dictionary<string, object> {
+                        ["loadout_account_id"] = reservation.Account,
+                        ["leadership"] = character.Leadership == null ? null : new GameplayLeadershipRecord(character.Leadership),
+                        ["leadership_progression_enabled"] = progressionCatalog?.InitialLeadershipPoints.HasValue == true,
+                        ["account_id"] = progressionCatalog == null ? null : reservation.Account,
+                        ["progression"] = progressionCatalog == null ? null : new { experience = record.Experience, level = record.Level, skill_points = record.SkillPoints },
+                        ["skills"] = record.Skills, ["character_id"] = record.AccountId, ["name"] = record.Name,
+                        ["faction"] = record.Faction, ["head"] = record.HeadId, ["voice"] = record.VoiceId,
+                        ["universe_id"] = record.UniverseId, ["loadouts"] = admissionLoadouts
+                    };
+                    // Older workers reject unknown character fields even when their value is false.
+                    if (_supportsFragoKillBonus)
+                        admissionCharacter["frago_bonus_enabled"] = _applicationId == 20231 && progressionCatalog?.FragoBonusEnabled == true;
                     admittedReply = await _bridge.RequestControlAsync(new { v = 2, request_id = Id(), op = "reserve", reservation_id = reservation.Id,
                         world_id = (uint)World.WorldId, player_id = (ushort)client.DmeId, account_id = character.Id, session_key = client.SessionKey, access_key = client.Token,
-                        character = new {
-                            loadout_account_id = reservation.Account,
-                            leadership = character.Leadership == null ? null : new GameplayLeadershipRecord(character.Leadership),
-                            leadership_progression_enabled = progressionCatalog?.InitialLeadershipPoints.HasValue == true,
-                            account_id = progressionCatalog == null ? null : reservation.Account,
-                            progression = progressionCatalog == null ? null : new { experience = record.Experience, level = record.Level, skill_points = record.SkillPoints },
-                            skills = record.Skills, character_id = record.AccountId, name = record.Name, faction = record.Faction, head = record.HeadId, voice = record.VoiceId,
-                            universe_id = record.UniverseId, loadouts = admissionLoadouts
-                        } });
+                        character = admissionCharacter });
                     lock (_gate) admittedRouted = Route(admittedReply);
                 }
                 finally { _rewardSettlement.Release(); }
@@ -527,7 +538,7 @@ namespace Server.Medius
                     {
                         // Replacement reservations share the surviving round's native XP carry and result basis.
                         var result = _store.ApplyRewardForAccount(owner.Account, owner.CharacterId, reward.RewardId,
-                            $"world-{reward.WorldId}-{reward.MatchId}", reward.Kind, checked((int)reward.Units), reward.Leadership);
+                            $"world-{reward.WorldId}-{reward.MatchId}", reward.Kind, checked((int)reward.Units), reward.Leadership, reward.Frago);
                         if (result.Result != MagNetResult.Success)
                         { retry = true; Logger.Warn($"Gameplay reward not committed: player={owner.Client.DmeId} reason={result.Reason}"); break; }
                         // Publish the latest account record, not an older receipt snapshot.
@@ -554,6 +565,7 @@ namespace Server.Medius
                             ["progression"] = new { experience = (uint)result.Experience, level = result.Level, skill_points = result.SkillPoints },
                             ["match_experience"] = (uint)result.MatchExperience
                         };
+                        if (result.MatchFragoPoints is int fragoPoints) request["match_frago_points"] = (uint)fragoPoints;
                         if (result.Leadership is LeadershipRewardOutcome leadership)
                         {
                             request["leadership"] = new GameplayLeadershipRecord(leadership);

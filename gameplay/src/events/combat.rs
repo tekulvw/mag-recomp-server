@@ -265,9 +265,13 @@ pub(super) fn hit<W: Write>(
                     && active.team() != bot.team
                     && let Some(recipient) = progression::RewardRecipient::from_active(active)
                 {
-                    plan.combat
-                        .new_rewards
-                        .push(recipient.bot_killed(bot.object_index, bot.generation));
+                    let reward = ctx.engine.frago_kill_reward(
+                        recipient.bot_killed(bot.object_index, bot.generation),
+                        active,
+                        Some(crate::frago::point(bot.position)),
+                        plan.frago_frame(ctx.engine),
+                    );
+                    plan.combat.new_rewards.push(reward);
                 }
                 if damage.health_quarter_points == 0
                     && peer_target.is_none()

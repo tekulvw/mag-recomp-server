@@ -218,6 +218,8 @@ pub struct ObjectiveCatalog {
     network_type: u8,
     source: ObjectiveSource,
     pub(crate) objects: Vec<Objective>,
+    #[serde(default)]
+    pub(crate) frago: Option<crate::frago::Rules>,
     squads: Vec<Squad>,
     #[serde(default)]
     pub(crate) progression: Option<ObjectiveProgressionRule>,
@@ -434,6 +436,14 @@ impl ObjectiveCatalog {
                 let _scores = (rule.activation_score, rule.deactivation_score);
             }
             previous = Some(object.object_index);
+        }
+        if let Some(rules) = &self.frago {
+            if !matches!(self.game_type, 1 | 2)
+                || self.source.capture_qualification != "native_source_gameplay"
+            {
+                return Err("frago_source_gameplay_required");
+            }
+            rules.validate(&self.source, &indices, &self.map_name, self.game_type)?;
         }
         if let Some(rule) = &self.progression {
             let valid_refs = |refs: &[u16]| {
