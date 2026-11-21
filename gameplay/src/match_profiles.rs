@@ -82,6 +82,18 @@ impl Registry {
     ) -> Result<(), &'static str> {
         for profile in self.profiles.values() {
             bindings.validate_for(catalog, profile.vehicles.as_ref())?;
+            if let Some(world) = &profile.domination
+                && world.has_frag_ground_areas()
+            {
+                world.validate_frag_ground_dynamic(
+                    catalog,
+                    bindings,
+                    profile
+                        .vehicles
+                        .as_ref()
+                        .ok_or("domination_frag_ground_requires_vehicles")?,
+                )?;
+            }
             if let Some(rules) = profile
                 .domination
                 .as_ref()
@@ -545,6 +557,13 @@ impl Registry {
             items.retail_combat()?;
         }
         for loaded in self.profiles.values() {
+            if let Some(world) = &loaded.domination {
+                world.validate_frag_ground(
+                    items,
+                    loaded.collision.as_ref(),
+                    loaded.spawns.map_name(),
+                )?;
+            }
             if let Some(setup) = &loaded.acquisition {
                 setup.validate_frag_character_blast(items, loaded.collision.as_ref())?;
                 if setup.has_frag_ground_areas() {
@@ -654,6 +673,10 @@ impl Registry {
                 .acquisition
                 .as_ref()
                 .is_some_and(|setup| setup.has_frag_ground_areas())
+                || profile
+                    .domination
+                    .as_ref()
+                    .is_some_and(|world| world.has_frag_ground_areas())
         })
     }
 

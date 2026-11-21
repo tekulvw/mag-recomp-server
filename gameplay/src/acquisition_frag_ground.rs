@@ -1,4 +1,4 @@
-//! Source-bound Acquisition frag damage areas and overlap roots.
+//! Source-bound retail Ground frag damage areas and overlap roots.
 use crate::{
     acquisition_volume_damage::{Target, TargetKey, TargetKind},
     dynamic_collision::{self, Geometry, Pose},
@@ -10,12 +10,36 @@ use std::collections::BTreeSet;
 
 const ROLES: [u8; 3] = [3, 7, 9];
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+pub(crate) enum Scope {
+    #[serde(rename = "mag_acquisition_frag_ground_areas_v1")]
+    Acquisition,
+    #[serde(rename = "mag_domination_frag_ground_areas_v1")]
+    Domination,
+}
+
+impl Scope {
+    fn roles(self) -> &'static [u8] {
+        match self {
+            Self::Acquisition => &ROLES,
+            Self::Domination => &[3, 7],
+        }
+    }
+
+    fn placement_counts(self) -> [usize; 3] {
+        match self {
+            Self::Acquisition => [4, 8, 4],
+            Self::Domination => [8, 8, 0],
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Catalog {
-    schema: String,
+    schema: Scope,
     source: Source,
-    variants: [Variant; 9],
+    variants: Vec<Variant>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -51,6 +75,10 @@ fn digest(value: &str) -> bool {
 
 impl Catalog {
     pub(crate) fn from_bytes(raw: &[u8]) -> Result<Self, &'static str> {
+        Self::from_bytes_for(raw, Scope::Acquisition)
+    }
+
+    pub(crate) fn from_bytes_for(raw: &[u8], scope: Scope) -> Result<Self, &'static str> {
         if raw.len() > 16 * 1024 {
             return Err("acquisition_frag_ground_areas_limit");
         }
@@ -61,7 +89,7 @@ impl Catalog {
             .sort_by_key(|row| (row.spawn_type, row.faction));
         let source = &catalog.source;
         let mut templates = BTreeSet::new();
-        if catalog.schema != "mag_acquisition_frag_ground_areas_v1"
+        if catalog.schema != scope
             || ![
                 &source.retail_elf_sha256,
                 &source.retail_main_sha256,
@@ -75,8 +103,10 @@ impl Catalog {
                 .variants
                 .iter()
                 .map(|row| (row.spawn_type, row.faction))
-                .eq(ROLES
-                    .into_iter()
+                .eq(scope
+                    .roles()
+                    .iter()
+                    .copied()
                     .flat_map(|role| (0..3).map(move |faction| (role, faction))))
             || catalog.variants.iter().any(|row| {
                 row.vehicle_type_token == 0
@@ -107,6 +137,13 @@ impl Catalog {
         Ok(catalog)
     }
 
+    pub(crate) fn validate_main(&self, main: &str) -> Result<(), &'static str> {
+        if self.source.retail_main_sha256 != main {
+            return Err("acquisition_frag_ground_area_source_mismatch");
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate(
         &self,
         native_elf: &str,
@@ -132,7 +169,7 @@ impl Catalog {
                 .ok_or("acquisition_frag_ground_area_role_unbound")?;
             counts[role] += 1;
         }
-        if counts != [4, 8, 4] {
+        if counts != self.schema.placement_counts() {
             return Err("acquisition_frag_ground_area_role_unbound");
         }
         Ok(())
@@ -230,6 +267,19 @@ impl Catalog {
     }
 
     #[cfg(test)]
+    pub(crate) fn synthetic_domination(apc_token: u32, truck_token: u32) -> Self {
+        Self::from_bytes_for(
+            &serde_json::to_vec(&tests::fixture_for(
+                Scope::Domination,
+                [apc_token, truck_token, 0],
+            ))
+            .unwrap(),
+            Scope::Domination,
+        )
+        .unwrap()
+    }
+
+    #[cfg(test)]
     pub(crate) fn synthetic(apc_token: u32, truck_token: u32, escort_token: u32) -> Self {
         Self::from_bytes(
             &serde_json::to_vec(&tests::fixture([apc_token, truck_token, escort_token])).unwrap(),
@@ -244,10 +294,16 @@ mod tests {
     use serde_json::{Value, json};
 
     pub(super) fn fixture(tokens: [u32; 3]) -> Value {
+        fixture_for(Scope::Acquisition, tokens)
+    }
+
+    pub(super) fn fixture_for(scope: Scope, tokens: [u32; 3]) -> Value {
         let hash = "a".repeat(64);
         let variants: Vec<_> =
-            ROLES
-                .into_iter()
+            scope
+                .roles()
+                .iter()
+                .copied()
                 .zip(tokens)
                 .flat_map(|(role, token)| {
                     (0..3).map({
@@ -262,7 +318,10 @@ mod tests {
                 })
                 .collect();
         json!({
-            "schema":"mag_acquisition_frag_ground_areas_v1",
+            "schema":match scope {
+                Scope::Acquisition => "mag_acquisition_frag_ground_areas_v1",
+                Scope::Domination => "mag_domination_frag_ground_areas_v1",
+            },
             "source":{"retail_elf_sha256":hash,"retail_main_sha256":hash,"dynamic_catalog_sha256":hash,
                 "bounds_proof_sha256":hash,"wheel_overlap_proof_sha256":hash},
             "variants":variants,
@@ -284,6 +343,24 @@ mod tests {
             *changed.pointer_mut(path).unwrap() = value;
             assert!(Catalog::from_bytes(&serde_json::to_vec(&changed).unwrap()).is_err());
         }
+    }
+
+    #[test]
+    fn frag_ground_area_catalog_requires_exact_mode_and_source() {
+        let acquisition = fixture([3, 7, 9]);
+        let mut domination = acquisition.clone();
+        domination["schema"] = json!("mag_domination_frag_ground_areas_v1");
+        domination["variants"].as_array_mut().unwrap().truncate(6);
+        let read = |value: &Value, scope| {
+            Catalog::from_bytes_for(&serde_json::to_vec(value).unwrap(), scope)
+        };
+        let catalog = read(&domination, Scope::Domination).unwrap();
+        assert!(catalog.validate_main(&"a".repeat(64)).is_ok());
+        assert!(catalog.validate_main(&"b".repeat(64)).is_err());
+        assert!(read(&domination, Scope::Acquisition).is_err());
+        assert!(read(&acquisition, Scope::Domination).is_err());
+        domination["variants"][5]["spawn_type"] = json!(9);
+        assert!(read(&domination, Scope::Domination).is_err());
     }
 
     #[test]

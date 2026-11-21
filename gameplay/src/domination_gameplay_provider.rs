@@ -37,6 +37,68 @@ pub(crate) struct World {
 }
 
 impl World {
+    pub(crate) fn has_frag_ground_areas(&self) -> bool {
+        self.state.frag_ground_areas.is_some()
+    }
+
+    pub(crate) fn validate_frag_ground(
+        &self,
+        items: &crate::item_catalog::ItemCatalog,
+        collision: Option<&crate::collision::CollisionWorld>,
+        map: &str,
+    ) -> Result<(), &'static str> {
+        if !self.has_frag_ground_areas() {
+            return Ok(());
+        }
+        let collision = collision
+            .filter(|world| world.stats().triangles != 0 && world.metadata().map_name == map)
+            .ok_or("domination_frag_ground_requires_static_world")?;
+        crate::domination_gameplay_config::validate_frag_character_inputs(
+            items,
+            Some(collision),
+            map,
+        )?;
+        if [6, 24]
+            .into_iter()
+            .any(|row| self.state.filter_rows[row] & (1 << 22) == 0)
+        {
+            return Err("domination_frag_ground_collision_filter_required");
+        }
+        collision.validate_material_ray_bindings(
+            self.state.filter_rows[24],
+            &self
+                .state
+                .structural
+                .material_penetration_costs()
+                .keys()
+                .copied()
+                .collect(),
+            Some(&self.state.terrain_materials.material_slots()),
+        )
+    }
+
+    pub(crate) fn validate_frag_ground_dynamic(
+        &self,
+        catalog: &crate::dynamic_collision::Catalog,
+        bindings: &crate::dynamic_collision_runtime::RuntimeBindings,
+        ground: &crate::ground_vehicles::Catalog,
+    ) -> Result<(), &'static str> {
+        if let Some(areas) = &self.state.frag_ground_areas {
+            areas.validate_dynamic_parts(catalog, bindings, ground)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn frag_blast_collision(&self) -> BlastCollision<'_> {
+        BlastCollision {
+            filter_rows: &self.state.filter_rows,
+            limits: QueryLimits::default(),
+            sequences: &self.state.collisions,
+            material_costs: self.state.structural.material_penetration_costs(),
+            terrain_materials: Some(&self.state.terrain_materials),
+        }
+    }
+
     pub(crate) fn reset(&mut self) {
         self.runtime.reset();
         self.state.structural.reset();
@@ -114,6 +176,7 @@ pub(crate) struct State {
     pub(crate) hospital_rocket_ground: Option<Arc<crate::hospital_rocket_ground::Catalog>>,
     pub(crate) hospital_rocket_helo_areas: Option<Arc<crate::hospital_rocket_helo::Catalog>>,
     pub(crate) frag_character_blast: bool,
+    pub(crate) frag_ground_areas: Option<Arc<crate::acquisition_frag_ground::Catalog>>,
     pub(crate) projectile_contacts:
         Option<Arc<crate::domination_projectile_collision::ContactBindings>>,
     pub(crate) helo: Option<crate::domination_helo::FleetRuntime>,
