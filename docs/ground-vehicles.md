@@ -1,7 +1,7 @@
 # Retail ground-vehicle creation
 
 `--ground-vehicles /absolute/VEHICLES.json` enables an explicit external catalog
-for retail Acquisition. Loading requires the exact spawn catalog SHA256,
+for retail Acquisition or the qualified Domination profile scope. Loading requires the exact spawn catalog SHA256,
 verified native spawn pool identities, matching spawn tokens, active points and
 the configured side/faction. Missing or unverified bindings fail before startup.
 No vehicle IDs, properties or placements are inferred from authored row ordinals.
@@ -43,3 +43,20 @@ remain an explicit local allocation policy, separate from native spawn indices.
 Driving, turret equipment/combat, damage/repair, destruction and moving exits
 remain separate typed implementation work. A spawn row alone does not enable a
 vehicle. Native game acceptance, deployment and a release require their own review.
+
+## Admitted-seat visibility
+
+`project-retail-ground-seat-visibility.py` reads the original vehicle registry and the exact faction/modifier property member for each admitted seat. It expands authored physical seat counts and requires the runtime passenger/operator role to match the authored slot. The projection stores the original archive, registry and per-property member digests alongside an explicit `occupant_visible` boolean. It accepts the qualified Acquisition and Domination creation scopes; arbitrary scope names remain rejected.
+
+```sh
+python3 tools/extraction/project-retail-ground-seat-visibility.py \
+  --ground-catalog /absolute/GROUND.json \
+  --game-archive /absolute/game.psarc \
+  --output /absolute/UPGRADED-GROUND.json
+```
+
+The output must be outside the source checkout. Repeat with `--check` to verify exact reproduction. For Domination, passenger APC allocations supply the admitted seats; motor-pool source allocations without admitted seats produce no visibility rows. Providing this property does not enable driver or gunner control.
+
+A bound Structural objective with nonzero periodic area radius and damage requires complete visibility for every admitted ground seat before gameplay starts. The area scan can encounter any occupied seat before applying its distance test, so leaving one vehicle unqualified can interrupt processing even if it is far from the objective. Hidden passengers are skipped without damage while the scan cursor still advances. Maps with no enabled periodic Structural effect retain optional visibility compatibility.
+
+Updating a Domination ground catalog changes its bytes. Regenerate the paired ground-lifecycle projection with those exact upgraded ground files and update the gameplay configuration's lifecycle path and SHA256; retain the matching spawn catalogs and active-ability sidecars. An old lifecycle digest cannot bind upgraded ground data. These source checks remain separate from native live-match review.

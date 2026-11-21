@@ -582,8 +582,10 @@ impl Catalog {
     fn validate_seat_visibility(&self, visibility: &SeatVisibility) -> Result<(), &'static str> {
         let valid_hash =
             |hash: &str| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit());
-        if self.source.creation_scope.as_deref() != Some("native_vehicle_source_points")
-            || !valid_hash(&visibility.archive_sha256)
+        if !matches!(
+            self.source.creation_scope.as_deref(),
+            Some("native_vehicle_source_points" | "native_domination_vehicle_source_points")
+        ) || !valid_hash(&visibility.archive_sha256)
             || !valid_hash(&visibility.registry_member_sha256)
         {
             return Err("invalid_ground_seat_visibility_source");
@@ -618,6 +620,16 @@ impl Catalog {
             return Err("invalid_ground_seat_visibility_inventory");
         }
         Ok(())
+    }
+
+    pub(crate) fn has_qualified_mount_visibility(&self) -> bool {
+        // When present, the validated inventory covers every admitted seat.
+        self.seat_visibility.is_some()
+            || (self.driver_seats.is_empty()
+                && self
+                    .vehicles
+                    .iter()
+                    .all(|vehicle| vehicle.passenger_seats.is_empty()))
     }
 
     pub(crate) fn seat_occupant_visible(&self, vehicle_index: u16, seat: u8) -> Option<bool> {

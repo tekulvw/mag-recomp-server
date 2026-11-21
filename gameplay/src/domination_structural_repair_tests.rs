@@ -28,36 +28,7 @@ pub(crate) fn repair_fixture() -> Engine<Vec<u8>> {
         repair_ms: 1000,
         minimum_repair_ms: 1000,
     });
-    let states = [
-        "Inactive",
-        "Deactivated",
-        "Activating",
-        "Activated",
-        "Deactivating",
-        "Repairing",
-        "Repaired",
-        "Completed",
-        "Locked",
-        "Retaking",
-        "Retaken",
-        "CancelRetaken",
-    ];
-    let asset_hash = "a".repeat(64);
-    let pose = json!({"translation":[1.,2.,1.],"rotation":[[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]]});
-    let placements = ["0x0000000a", "0x0000000b"]
-        .map(|token| json!({"objective_token":token,"definition_token":"0x000000aa","pose":pose}));
-    let structural = Structural::from_json(&json!({
-        "schema":"mag_domination_structural_effect_inputs_v1","map":"synthetic",
-        "metadata_sha256":objectives.source().authored_catalog_sha256,"level_archive_sha256":asset_hash,
-        "level_clv_sha256":asset_hash,"global_data_sha256":asset_hash,"physics_sha256":asset_hash,
-        "collision_resources":{},"unresolved_collision_tokens":[],
-        "definitions":{"0x000000aa":{"definition_sha256":asset_hash,
-            "state_sequence_indices":BTreeMap::from_iter(states.map(|name| (name,-2))),
-            "sequence_tokens":[],"blast_properties":{"SubType":1,"FullDamageRadius":0.,
-                "HalfDamageRadius":0.,"DamageValue":0.,"MaterialPenetration":0.,
-                "CharacterDamageOverTimeRadius":0.,"CharacterDamageOverTimeValue":0.}}},
-        "placements":placements,"sequences":{}
-    }).to_string(), &objectives, "synthetic", &asset_hash, &asset_hash).unwrap();
+    let structural = structural_fixture(&objectives, 0., 0.);
     let (assets, terrain_materials) = terrain_and_assets(structural.catalog());
     let mut engine = engine();
     reserve(&mut engine, 0);
@@ -131,6 +102,67 @@ pub(crate) fn repair_fixture() -> Engine<Vec<u8>> {
         },
     });
     engine
+}
+
+fn structural_fixture(
+    objectives: &ObjectiveCatalog,
+    area_radius: f32,
+    area_value: f32,
+) -> Structural {
+    let states = [
+        "Inactive",
+        "Deactivated",
+        "Activating",
+        "Activated",
+        "Deactivating",
+        "Repairing",
+        "Repaired",
+        "Completed",
+        "Locked",
+        "Retaking",
+        "Retaken",
+        "CancelRetaken",
+    ];
+    let asset_hash = "a".repeat(64);
+    let pose = json!({"translation":[1.,2.,1.],"rotation":[[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]]});
+    let placements = ["0x0000000a", "0x0000000b"]
+        .map(|token| json!({"objective_token":token,"definition_token":"0x000000aa","pose":pose}));
+    Structural::from_json(&json!({
+        "schema":"mag_domination_structural_effect_inputs_v1","map":"synthetic",
+        "metadata_sha256":objectives.source().authored_catalog_sha256,"level_archive_sha256":asset_hash,
+        "level_clv_sha256":asset_hash,"global_data_sha256":asset_hash,"physics_sha256":asset_hash,
+        "collision_resources":{},"unresolved_collision_tokens":[],
+        "definitions":{"0x000000aa":{"definition_sha256":asset_hash,
+            "state_sequence_indices":BTreeMap::from_iter(states.map(|name| (name,-2))),
+            "sequence_tokens":[],"blast_properties":{"SubType":1,"FullDamageRadius":0.,
+                "HalfDamageRadius":0.,"DamageValue":0.,"MaterialPenetration":0.,
+                "CharacterDamageOverTimeRadius":area_radius,"CharacterDamageOverTimeValue":area_value}}},
+        "placements":placements,"sequences":{}
+    }).to_string(), objectives, "synthetic", &asset_hash, &asset_hash).unwrap()
+}
+
+#[test]
+fn domination_apc_startup_gate_requires_visibility_only_for_active_structural_area_damage() {
+    use crate::spawn_progression::tests::ground_vehicle_runtime::domination_apc_catalog;
+
+    let (runtime, ..) = fixture();
+    let objectives = &runtime.setup.catalog;
+    let unqualified = domination_apc_catalog(false);
+    for (radius, value) in [(0., 0.), (0., 5.), (5., 0.)] {
+        assert_eq!(
+            structural_fixture(objectives, radius, value).validate_ground_area_seats(&unqualified),
+            Ok(())
+        );
+    }
+    let active = structural_fixture(objectives, 5., 5.);
+    assert_eq!(
+        active.validate_ground_area_seats(&unqualified),
+        Err("domination_structural_ground_seat_visibility_required")
+    );
+    assert_eq!(
+        active.validate_ground_area_seats(&domination_apc_catalog(true)),
+        Ok(())
+    );
 }
 
 fn repair(engine: &mut Engine<Vec<u8>>, now_ms: u64) -> Result<Vec<OutboundMessage>, &'static str> {

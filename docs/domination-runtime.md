@@ -223,3 +223,7 @@ are tracked separately from the match-completion loop.
 Source checks and schema validation are not live-match acceptance. Client visual
 and behavior review remains pending; releases are cut manually by the human
 after that review.
+
+## APC passenger area-effect qualification
+
+Domination's qualified ground scope supports original physical-seat visibility through the shared [ground-vehicle projector](ground-vehicles.md#admitted-seat-visibility). Complete admitted-seat coverage is required when a bound Structural objective has enabled periodic area damage. Regenerate both ground and paired lifecycle bindings when adding visibility. Ordinary APC reinforcement and a due Structural scan share this qualified inventory; hidden passengers retain their health and mounting while the scan advances. This does not enable general driver or gunner authority.
