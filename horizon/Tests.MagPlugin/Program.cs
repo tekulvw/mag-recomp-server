@@ -55,6 +55,9 @@ Test("FRAGO failed commit, overflow and malformed receipt", LeadershipProgressio
 Test("FRAGO support reward bridge schema", LeadershipProgressionChecks.FragoActionBridgeSchema);
 Test("FRAGO support admission compatibility", LeadershipProgressionChecks.FragoActionAdmissionCapability);
 Test("FRAGO support durable XP and match points settlement", LeadershipProgressionChecks.FragoActionDurableSettlement);
+Test("repair reward catalog and bridge schema", LeadershipProgressionChecks.RepairRewardSchema);
+Test("repair reward admission compatibility", LeadershipProgressionChecks.RepairRewardAdmissionCompatibility);
+Test("repair reward durable XP and match points settlement", LeadershipProgressionChecks.RepairRewardDurableSettlement);
 Test("leadership terminal reward bridge schema", LeadershipProgressionChecks.BridgeSchema);
 Test("leadership authored creation and ordinary XP promotion", LeadershipProgressionChecks.CreationAndExperience);
 Test("leadership optional authored table validation", LeadershipProgressionChecks.CatalogValidation);

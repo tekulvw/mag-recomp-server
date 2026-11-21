@@ -313,6 +313,7 @@ impl<W: Write> Engine<W> {
             return Err("acquisition_structural_entry_unbound");
         }
         let mut changed = BTreeMap::new();
+        let mut repair_credit = None;
         let (op, reply, reason) = match input {
             StructuralInput::Interaction(request, actor, modifier) => {
                 let outcome =
@@ -347,6 +348,12 @@ impl<W: Write> Engine<W> {
             }
             StructuralInput::Repair(index, authority) => {
                 world.stage_repair(0x0c80_0000 | u32::from(index), authority)?;
+                let actor = self.active.as_ref().ok_or("no_reservation")?;
+                repair_credit = Some(self.plan_repair_credit(
+                    actor,
+                    leadership.modifiers(actor).value("kCharModRepairAmount"),
+                    self.frago_object_position(0x0c80_0000 | u32::from(index)),
+                )?);
                 ("acquisition_structural_repair", None, None)
             }
         };
@@ -365,6 +372,10 @@ impl<W: Write> Engine<W> {
             self.prepare_acquisition_character_callback(&native, now, |engine, native| {
                 let mut audit = Vec::new();
                 let mut messages = Vec::new();
+                if let Some(credit) = repair_credit {
+                    audit.push(credit.audit());
+                    messages.extend(engine.install_repair_credit(credit));
+                }
                 let mut frame = crate::acquisition_structural::Frame {
                     engine,
                     ground: &mut ground,

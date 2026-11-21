@@ -420,7 +420,17 @@ fn retail_hospital_repair_requires_bound_wire_tool_and_fans_out() {
     other.wire_profile = engine.wire_profile;
     engine.peers.insert(other.reservation.id.clone(), other);
 
-    assert!(repair(&mut engine).is_empty());
+    let messages = repair(&mut engine);
+    assert_eq!(messages.len(), 2);
+    assert!(
+        messages
+            .iter()
+            .all(|m| protocol::decode_hex(&m.payload_hex) == [2, 4, 0, 0, 1, 35, 1])
+    );
+    assert_eq!(
+        engine.active.as_ref().unwrap().reward_statistics.get(&35),
+        Some(&1)
+    );
     assert_eq!(health(&engine), 170.);
     let reporter = engine
         .active

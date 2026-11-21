@@ -48,8 +48,9 @@ Native terrain snapping and placement parity remain separate fidelity work.
 A missing current pose or unsupported family cannot qualify by guesswork.
 Ground-mounted character contexts resolve their current vehicle root; other
 unqualified mounted character roots are omitted from that position test. A known
-other context can still satisfy the source OR predicate. Family 33, repair/objective FRAGO families and leader tagged-completion stat 41
-remain separate work. Teammate healing and revival use the support path below.
+other context can still satisfy the source OR predicate. Family 33, remaining objective FRAGO contexts and leader tagged-completion
+stat 41 remain separate work. Ordinary Structural/Hospital repair units use
+the [repair work producer](repair-rewards.md). Teammate healing and revival use the support path below.
 
 Synthetic checks cover calculation, geometry, source binding, kill capture,
 rollback, immutable replay, zero and current-round publication. Private static
@@ -102,6 +103,6 @@ stores and ordinary support receipts remain readable by the updated server.
 Connected synthetic tests cover patient-only and healer-only range, accepted
 current movement, capability omission/false, exact identity replacement,
 record failure, repeat events, immutable ACK/stat3 publication and friendly-damage
-revival. Live in-match presentation and acceptance remain pending. Repair's
-separate fractional work counter and objective-action contexts are next gameplay
-work; restored HP must not be substituted for repair units.
+revival. Live in-match presentation and acceptance remain pending. Repair now uses its [separate work counter and recorded producer](repair-rewards.md);
+restored HP is not substituted for its units. Remaining objective-action
+contexts are separate gameplay work.

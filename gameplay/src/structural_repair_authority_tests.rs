@@ -62,6 +62,24 @@ fn catalog_value() -> Value {
 }
 
 fn load_catalog(raw: &Value) -> io::Result<RepairParameters> {
+    with_catalog_file(raw, |path| load_retail_repair_tool(path))
+}
+
+pub(crate) fn synthetic_repair_bunker_world() -> crate::structures::BunkerWorld {
+    // The empty bunker loader uses the prototype envelope. The test keeps
+    // the same synthetic tool binding and rates in that envelope.
+    let mut raw = catalog_value();
+    raw["application_id"] = json!(20230);
+    with_catalog_file(&raw, |path| {
+        crate::structures::BunkerWorld::without_bunkers(path)
+    })
+    .unwrap()
+}
+
+fn with_catalog_file<T>(
+    raw: &Value,
+    read: impl FnOnce(&std::path::Path) -> io::Result<T>,
+) -> io::Result<T> {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let path = std::env::temp_dir().join(format!(
         "mag-synthetic-structural-repair-{}-{}.json",
@@ -69,7 +87,7 @@ fn load_catalog(raw: &Value) -> io::Result<RepairParameters> {
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::write(&path, raw.to_string()).unwrap();
-    let result = load_retail_repair_tool(&path);
+    let result = read(&path);
     std::fs::remove_file(path).unwrap();
     result
 }

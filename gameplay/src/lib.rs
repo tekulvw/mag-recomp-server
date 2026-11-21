@@ -117,6 +117,7 @@ use event_decode::DecodedEvent;
 mod frago;
 mod leadership_auto_heal;
 mod leadership_auto_repair;
+mod repair_rewards;
 mod resources;
 mod world_tick;
 pub use resources::EngineResources;
@@ -219,6 +220,8 @@ pub struct Character {
     pub frago_bonus_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frago_action_bonus_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair_rewards_enabled: Option<bool>,
 }
 fn deserialize_skills<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -992,6 +995,7 @@ struct Active {
     reward_match_id: String,
     match_experience: u32,
     reward_statistics: std::collections::BTreeMap<u8, i32>,
+    repair_credit: repair_rewards::State,
     next_heal_allowed: Duration,
     projectiles: projectile::ProjectileFlights,
     projectile_replicas: projectile_replication::ProjectileReplicas,
@@ -1470,6 +1474,7 @@ impl<W: Write> Engine<W> {
                         loadout_refresh::CAPABILITY.into(),
                         frago::CAPABILITY.into(),
                         frago::ACTION_CAPABILITY.into(),
+                        repair_rewards::CAPABILITY.into(),
                     ];
                     if self.match_profiles.is_some() {
                         capabilities.push(match_profiles::CAPABILITY.into());
@@ -1753,6 +1758,7 @@ impl<W: Write> Engine<W> {
                     reward_match_id,
                     match_experience: participation.match_experience,
                     reward_statistics: participation.statistics,
+                    repair_credit: participation.repair_credit,
                     next_heal_allowed: Duration::ZERO,
                     projectiles: projectile::ProjectileFlights::default(),
                     projectile_replicas: projectile_replication::ProjectileReplicas::with_profile(
