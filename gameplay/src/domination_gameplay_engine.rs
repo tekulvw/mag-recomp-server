@@ -679,37 +679,54 @@ impl<E> Candidate<E> {
         // Bound complete packets under the existing 1397-byte replication
         // budget. Worst case is 216 bits per object with both sequence fields.
         const OBJECTIVES_PER_PACKET: usize = 48;
-        if self.sequences.iter().any(|sequence| {
-            !self
-                .deltas
-                .iter()
-                .any(|delta| delta.object_index == sequence.object_index)
-        }) {
+        if self
+            .deltas
+            .windows(2)
+            .any(|pair| pair[0].object_index >= pair[1].object_index)
+        {
+            return Err("invalid_objective_control_delta");
+        }
+        if self
+            .sequences
+            .windows(2)
+            .any(|pair| pair[0].object_index >= pair[1].object_index)
+        {
             return Err("invalid_objective_sequence_links");
         }
-        self.deltas
+
+        // Same-state entries can select playback without changing control fields.
+        // Keep each changed object's sequence with its control row.
+        let (linked, sequence_only): (Vec<_>, Vec<_>) =
+            self.sequences.iter().copied().partition(|row| {
+                self.deltas
+                    .binary_search_by_key(&row.object_index, |delta| delta.object_index)
+                    .is_ok()
+            });
+        let mut packets = self
+            .deltas
             .chunks(OBJECTIVES_PER_PACKET)
             .map(|entries| {
                 let first = entries.first().unwrap().object_index;
                 let last = entries.last().unwrap().object_index;
-                let sequences = self
-                    .sequences
-                    .iter()
-                    .copied()
-                    .filter(|row| (first..=last).contains(&row.object_index))
-                    .collect::<Vec<_>>();
+                let start = linked.partition_point(|row| row.object_index < first);
+                let end = linked.partition_point(|row| row.object_index <= last);
                 ObjectiveControlSnapshot {
                     sequence: 1,
                     timestamp_ms,
                     objectives: entries.to_vec(),
                 }
-                .encode_with_sequences_with_profile(&sequences, profile)
+                .encode_with_sequences_with_profile(&linked[start..end], profile)
             })
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        packets.extend(ObjectiveSequenceDelta::encode_batches(
+            &sequence_only,
+            timestamp_ms,
+            profile,
+        )?);
+        Ok(packets)
     }
 
-    /// Encode the committed state, timers, health and any sequence changes before
-    /// recording the complete candidate. Queueing remains with the owner.
+    /// Encode one control snapshot with any linked playback changes.
     pub fn objective_packet(
         &self,
         sequence: u32,

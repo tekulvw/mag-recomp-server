@@ -1376,8 +1376,8 @@ pub struct ObjectiveSequenceDelta {
 }
 
 impl ObjectiveSequenceDelta {
-    /// Sequence-only history updates for late join, after the base state
-    /// snapshot. Each entry uses 92 bits, and the same transport cap applies.
+    /// Sequence-only updates for unchanged control rows or late-join history.
+    /// Each entry uses 92 bits, and the same transport cap applies.
     pub(crate) fn encode_batches(
         sequences: &[Self],
         timestamp_ms: u32,
