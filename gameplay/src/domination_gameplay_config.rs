@@ -47,6 +47,7 @@ struct Core {
     scope: String,
     aircraft_links: PathBuf,
     hospital_hulks: PathBuf,
+    hospital_turrets: Option<PathBuf>,
     initial_filters: PathBuf,
     qualified_poses: PathBuf,
     ground_damage: PathBuf,
@@ -245,6 +246,14 @@ impl Configuration {
                 }
                 *input = directory.join(&*input);
             }
+            if let Some(path) = &mut core.hospital_turrets {
+                if path.as_os_str().is_empty() {
+                    return Err(io::Error::other(
+                        "empty_domination_hospital_turret_source_path",
+                    ));
+                }
+                *path = directory.join(&*path);
+            }
             if let Some(helo) = &mut core.helo {
                 for input in [
                     &mut helo.fleet,
@@ -355,6 +364,14 @@ fn read(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
 }
 
 impl Configuration {
+    pub(crate) fn hospital_turret_source(&self) -> io::Result<Option<Vec<u8>>> {
+        self.core
+            .as_ref()
+            .and_then(|core| core.hospital_turrets.as_ref())
+            .map(|path| read(path, 256 * 1024))
+            .transpose()
+    }
+
     pub(crate) fn build_for(
         &self,
         objectives: Arc<ObjectiveCatalog>,
@@ -767,7 +784,18 @@ impl<W: Write> Engine<W> {
             .ground_vehicles
             .as_ref()
             .ok_or_else(|| io::Error::other("domination_gameplay_requires_ground_catalog"))?;
+        let native_elf = objectives.source().source_image_sha256.clone();
         let world = config.build_for(objectives, spawns, bunkers, ground)?;
+        if let Some(source) = config.hospital_turret_source()? {
+            let rules = crate::hospital_turrets::qualify(
+                &source,
+                bunkers,
+                spawns,
+                &self.item_catalog,
+                &native_elf,
+            )?;
+            self.bunker_world.as_mut().unwrap().hospital_turrets = rules;
+        }
         world
             .configure_ground(self.ground_runtime.as_mut().unwrap())
             .map_err(io::Error::other)?;

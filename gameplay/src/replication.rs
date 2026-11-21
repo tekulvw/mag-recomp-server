@@ -1120,7 +1120,7 @@ impl CharacterRespawn {
         }
         bits.write(0, 1)?;
         if let Some((index, ownership)) = bunker_owner {
-            ownership.encode_at(index, &mut bits)?;
+            ownership.encode_at(index, None, &mut bits)?;
         }
         Ok(bits.finish())
     }
@@ -1734,6 +1734,17 @@ impl AlphaSeatTransition {
         ownership: Option<AlphaVehicleOwnership>,
         profile: crate::wire_profile::WireProfile,
     ) -> Result<Vec<u8>, &'static str> {
+        self.encode_bunker_with_definition(bunker_index, player, ownership, None, profile)
+    }
+
+    pub(crate) fn encode_bunker_with_definition(
+        &self,
+        bunker_index: u16,
+        player: u16,
+        ownership: Option<AlphaVehicleOwnership>,
+        definition: Option<crate::hospital_turret_wire::InventoryDefinition>,
+        profile: crate::wire_profile::WireProfile,
+    ) -> Result<Vec<u8>, &'static str> {
         if bunker_index >= 16 {
             return Err("invalid_bunker_index");
         }
@@ -1809,7 +1820,7 @@ impl AlphaSeatTransition {
                 owner,
                 turret_owner,
             })
-            .encode_at(bunker_index, &mut bits)?;
+            .encode_at(bunker_index, definition, &mut bits)?;
         Ok(bits.finish())
     }
 }
@@ -1856,17 +1867,30 @@ impl AlphaVehicleOwnership {
             timestamp_ms,
         }
         .encode(&mut bits)?;
-        self.encode_at(bunker_index, &mut bits)?;
+        self.encode_at(bunker_index, None, &mut bits)?;
         Ok(bits.finish())
     }
-    fn encode_at(&self, index: u16, bits: &mut BitWriter) -> Result<(), &'static str> {
+    fn encode_at(
+        &self,
+        index: u16,
+        definition: Option<crate::hospital_turret_wire::InventoryDefinition>,
+        bits: &mut BitWriter,
+    ) -> Result<(), &'static str> {
         bits.write(1, 1)?;
         bits.write(index.into(), 16)?;
         for field in 0..25 {
-            bits.write(u32::from([1, 6].contains(&field)), 1)?;
+            bits.write(
+                u32::from([1, 6].contains(&field) || (field == 10 && definition.is_some())),
+                1,
+            )?;
             match field {
                 1 => bits.write(self.owner.into(), 16)?,
                 6 => bits.write(self.turret_owner.into(), 16)?,
+                10 => {
+                    if let Some(definition) = definition {
+                        definition.encode(bits)?;
+                    }
+                }
                 _ => (),
             }
         }

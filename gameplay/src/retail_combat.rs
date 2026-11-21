@@ -117,6 +117,8 @@ macro_rules! authored_profile {
 }
 
 authored_profile!(RetailBulletMetadata {
+    #[serde(default)]
+    usage: RetailBulletUsage,
     ammo: RetailAmmoMetadata,
     damage: AuthoredDamage,
     effective_range: f64,
@@ -126,6 +128,14 @@ authored_profile!(RetailBulletMetadata {
     #[serde(default)]
     firearm: Option<RetailFirearmSchedule>,
 });
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RetailBulletUsage {
+    #[default]
+    Character,
+    HospitalPrimary,
+}
 
 /// Original disk weapon schedule, separate from configurable AI policy.
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -359,7 +369,10 @@ impl RetailCombatCatalog {
     }
 
     pub fn bullet_metadata(&self, item_id: u16) -> Option<&RetailBulletMetadata> {
-        self.0.bullets.get(&item_id)
+        self.0
+            .bullets
+            .get(&item_id)
+            .filter(|bullet| bullet.usage == RetailBulletUsage::Character)
     }
     pub fn melee(&self) -> &BTreeMap<u16, RetailMeleeMetadata> {
         &self.0.melee
@@ -404,9 +417,17 @@ impl RetailCombatCatalog {
         &self,
         item_id: u16,
     ) -> Result<&RetailBulletMetadata, RetailCombatError> {
+        self.bullet_metadata(item_id)
+            .ok_or(RetailCombatError::UnsupportedItem(item_id))
+    }
+    pub(crate) fn hospital_primary_for_damage(
+        &self,
+        item_id: u16,
+    ) -> Result<&RetailBulletMetadata, RetailCombatError> {
         self.0
             .bullets
             .get(&item_id)
+            .filter(|bullet| bullet.usage == RetailBulletUsage::HospitalPrimary)
             .ok_or(RetailCombatError::UnsupportedItem(item_id))
     }
     pub fn grenade_for_damage(
@@ -799,14 +820,40 @@ impl RetailBulletProfile {
         let p = catalog
             .bullet_for_damage(item_id)
             .map_err(|_| "unsupported_retail_bullet_weapon")?;
-        Ok(Self {
+        Ok(Self::from_metadata(item_id, p))
+    }
+    pub(crate) fn from_hospital_primary(
+        catalog: &RetailCombatCatalog,
+        qualified: crate::hospital_turrets::QualifiedPrimary,
+        request: &crate::bullet_hit::NetMessageHit,
+    ) -> Result<Self, &'static str> {
+        let equipped = qualified.equipped;
+        if equipped.inventory_update_id != qualified.definition_version {
+            return Err("stale_hospital_turret_inventory");
+        }
+        if request.gear_index != 0 || equipped.gear_slot != 0 {
+            return Err("unsupported_hospital_turret_gear");
+        }
+        if equipped.ammo_pool != 0 {
+            return Err("unsupported_hospital_turret_ammo_pool");
+        }
+        if request.fire_mode != 0 {
+            return Err("unsupported_hospital_turret_fire_mode");
+        }
+        let metadata = catalog
+            .hospital_primary_for_damage(qualified.item_id)
+            .map_err(|_| "unsupported_hospital_primary_bullet")?;
+        Ok(Self::from_metadata(qualified.item_id, metadata))
+    }
+    fn from_metadata(item_id: u16, p: &RetailBulletMetadata) -> Self {
+        Self {
             item_id,
             amount: p.damage.character as f32,
             pierce: p.damage.character_armor_pierce as f32,
             redux: p.damage.character_armor_reduction as f32,
             effective_range: p.effective_range as f32,
             max_range: p.max_range as f32,
-        })
+        }
     }
     pub fn item_id(self) -> u16 {
         self.item_id
@@ -878,5 +925,336 @@ mod incapacitated_body_tests {
         }
         metadata.body[0].incapacitated_multiplier = Some(0.0);
         assert!(validate(&metadata).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod hospital_primary_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn combat_catalog() -> RetailCombatCatalog {
+        let bullet = json!({
+            "authored_ref":"Synthetic:2","name":"synthetic_primary","definition":{},"source":{},"item_source":{},
+            "ammo":{"group":"hitscan_ammo","name":"synthetic_bullet","source":{},
+                "ammo_token_candidate":77,"ammo_token_verified_for_retail":false},
+            "damage":{"character":40.0,"characterAPierce":0.0,"characterARedux":0.0,"vehicle":50.0,
+                "vehicleAPierce":0.0,"vehicleARedux":0.0,"objective":0.0,"objectiveAPierce":0.0,
+                "objectiveARedux":0.0,"mine":0.0},
+            "effective_range":20.0,"max_range":80.0,"magazine_capacity":9,"initial_magazine_count":2
+        });
+        let mut mounted_bullet = bullet.clone();
+        mounted_bullet["authored_ref"] = json!("Synthetic:4");
+        mounted_bullet["name"] = json!("synthetic_mounted_primary");
+        mounted_bullet["usage"] = json!("hospital_primary");
+        RetailCombatCatalog::from_json(&json!({
+            "schema_version":2,"application_id":20231,"status":"synthetic",
+            "authority":{"bullet_damage":true,"armor_reduction":true,"body_damage":true,
+                "grenade_damage":false,"grenade_physics":false,"healing_schedule":false,"ammo_tokens":false},
+            "provenance":{},"bullets":{"2":bullet,"4":mounted_bullet},"armor":{
+                "3":{"authored_ref":"Synthetic:3","name":"synthetic_target_armor",
+                    "definition":{},"source":{},"item_source":{},"armor_type":1,"rating":2.0,
+                    "prevention":0.25,"coverage":[1.0,1.0,1.0,1.0],"armor_type_source":{}}
+            },"grenades":{},
+            "healing":{},"unsupported":{},"limitations":[],
+            "body":(0..16).map(|location| json!({"location":location,"armor_area":0,"multiplier":1.0,
+                "incapacitated_multiplier":1.0,"source":{}})).collect::<Vec<_>>()
+        }).to_string()).unwrap()
+    }
+
+    #[test]
+    fn mounted_primary_rows_are_unavailable_to_ordinary_damage_and_schedule() {
+        let catalog = combat_catalog();
+        assert!(catalog.bullet_metadata(2).is_some());
+        assert!(catalog.bullet_for_damage(2).is_ok());
+        assert!(catalog.bullet_metadata(4).is_none());
+        assert!(matches!(
+            catalog.bullet_for_damage(4),
+            Err(RetailCombatError::UnsupportedItem(4))
+        ));
+        use crate::replication::{
+            CharacterInventory, CharacterLoadout, InventoryHandle, InventoryItem,
+        };
+        let equipped = InventoryItem {
+            inventory_update_id: 1,
+            gear_slot: 0,
+            ammo_pool: 0,
+            ammo_count: 9,
+            reloading: false,
+        };
+        let mut slots = [None; 22];
+        slots[0] = Some(4);
+        let loadout = CharacterLoadout {
+            inventories: std::array::from_fn(|_| CharacterInventory {
+                update_id: 1,
+                slots,
+            }),
+            handle: InventoryHandle {
+                update_id: 1,
+                inventory_index: 0,
+            },
+            primary: equipped,
+            primary_equipped: true,
+        };
+        assert!(matches!(
+            RetailBulletProfile::from_equipped(&catalog, &loadout, equipped, 0, 0),
+            Err("unsupported_retail_bullet_weapon")
+        ));
+    }
+
+    #[test]
+    fn mounted_primary_cannot_be_saved_in_an_unselected_kit() {
+        let items = crate::item_catalog::ItemCatalog::from_value_for_application(
+            json!({
+                "schema_version":2,"application_id":20231,
+                "items":{"FactionItemList0:4":{
+                    "authored_ref":"FactionItemList0:4","faction_list":"FactionItemList0",
+                    "local_ordinal":4,"wire_item_id":null,"name":"synthetic_mounted_primary",
+                    "item_type":"kWeapon","definition":{"group":"weapons","name":"synthetic_mounted_primary"}
+                }},
+                "definitions":{"weapons":{"synthetic_mounted_primary":{"parameters":{"magazine_capacity":9}}}},
+                "resources":{}
+            }),
+            crate::blast_rules::CharacterBlastRules {
+                armor_rating_reduction: 0.,
+                armor_prevention_reduction: 0.,
+                hit_location: 3,
+                damage_type: 10,
+            },
+            20231,
+        ).unwrap().with_retail_combat(combat_catalog());
+        let mut saved = crate::loadouts::SavedLoadouts {
+            selected_index: 0,
+            update_ids: [1; 5],
+            inventories: [[None; 22]; 5],
+        };
+        saved.inventories[4][1] = Some(4);
+        assert_eq!(
+            items.validate_saved_item_bindings(&saved),
+            Err("saved_mounted_bullet_weapon")
+        );
+    }
+
+    #[test]
+    fn mounted_profile_requires_qualified_item_version_gear_pool_and_fire_mode() {
+        use crate::hospital_turrets::QualifiedPrimary;
+
+        let catalog = combat_catalog();
+        let hit = crate::bullet_hit::NetMessageHit::decode(
+            &crate::human_kill_reward_tests::native_hit(0x0380_0000, 10),
+        )
+        .unwrap();
+        let qualified = || QualifiedPrimary {
+            item_id: 4,
+            equipped: crate::replication::InventoryItem {
+                inventory_update_id: 2,
+                gear_slot: 0,
+                ammo_pool: 0,
+                ammo_count: 9,
+                reloading: false,
+            },
+            definition_version: 2,
+        };
+        let profile =
+            RetailBulletProfile::from_hospital_primary(&catalog, qualified(), &hit).unwrap();
+        assert_eq!(profile.item_id(), 4);
+        assert_eq!(
+            profile.raw_character_damage(1., 1., 3).unwrap().amount_hp,
+            40.
+        );
+
+        for item_id in [2, 5] {
+            let mut wrong = qualified();
+            wrong.item_id = item_id;
+            assert!(matches!(
+                RetailBulletProfile::from_hospital_primary(&catalog, wrong, &hit),
+                Err("unsupported_hospital_primary_bullet")
+            ));
+        }
+        let mut stale = qualified();
+        stale.equipped.inventory_update_id = 1;
+        assert!(matches!(
+            RetailBulletProfile::from_hospital_primary(&catalog, stale, &hit),
+            Err("stale_hospital_turret_inventory")
+        ));
+        let mut wrong_slot = qualified();
+        wrong_slot.equipped.gear_slot = 1;
+        assert!(matches!(
+            RetailBulletProfile::from_hospital_primary(&catalog, wrong_slot, &hit),
+            Err("unsupported_hospital_turret_gear")
+        ));
+        let mut unbound = qualified();
+        unbound.equipped.ammo_pool = 1;
+        assert!(matches!(
+            RetailBulletProfile::from_hospital_primary(&catalog, unbound, &hit),
+            Err("unsupported_hospital_turret_ammo_pool")
+        ));
+        let mut secondary = hit;
+        secondary.gear_index = 1;
+        assert!(matches!(
+            RetailBulletProfile::from_hospital_primary(&catalog, qualified(), &secondary),
+            Err("unsupported_hospital_turret_gear")
+        ));
+        let mut wrong_mode = hit;
+        wrong_mode.fire_mode = 1;
+        assert!(matches!(
+            RetailBulletProfile::from_hospital_primary(&catalog, qualified(), &wrong_mode),
+            Err("unsupported_hospital_turret_fire_mode")
+        ));
+    }
+
+    fn indexed_hospital_combat() -> crate::Engine<Vec<u8>> {
+        use crate::hospital_turrets::tests::{
+            enable_synthetic_hospital_turrets, equip_synthetic_hospital_turret,
+        };
+        let mut engine = crate::human_kill_reward_tests::fixture();
+        let hospital = crate::structures::domination_bunker_seat_tests::fixture();
+        engine.bunker_world = hospital.bunker_world;
+        let items = std::mem::replace(&mut engine.item_catalog, hospital.item_catalog);
+        let items = std::sync::Arc::try_unwrap(items).ok().unwrap();
+        engine.item_catalog = std::sync::Arc::new(items.with_retail_combat(combat_catalog()));
+        engine.match_started = true;
+        engine
+            .active
+            .as_mut()
+            .unwrap()
+            .reservation
+            .character
+            .faction = 0;
+        enable_synthetic_hospital_turrets(&mut engine);
+        equip_synthetic_hospital_turret(&mut engine, 5);
+        engine
+    }
+
+    #[test]
+    fn mounted_hit_uses_current_indexed_authority_armor_and_hostile_kill_transaction() {
+        use crate::{CharacterLife, human_kill_reward_tests::hit, progression::RewardKind};
+        let mut engine = indexed_hospital_combat();
+        let victim_id = "synthetic-reservation-0000";
+        let replies = hit(&mut engine, 71, 1000).unwrap();
+        assert!(
+            !replies.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&engine.writer)
+                .lines()
+                .last()
+                .unwrap()
+        );
+        let victim = &engine.peers[victim_id];
+        assert_eq!(victim.life.damage_health(), Some((4, 6))); // (40 - 2) * .75 = 28.5 HP.
+        assert_eq!(victim.last_damage.last_attacker, 0x0380_0001);
+        assert_eq!(victim.last_damage.last_source_object, u32::MAX);
+        assert_eq!(victim.last_damage.last_user_data, 71);
+
+        hit(&mut engine, 72, 1001).unwrap();
+        let victim = &engine.peers[victim_id];
+        assert!(matches!(
+            victim.life,
+            CharacterLife::Incapacitated { generation: 4, .. }
+        ));
+        assert_eq!(victim.reward_statistics.get(&12), Some(&1));
+        assert_eq!(
+            engine.active.as_ref().unwrap().reward_statistics.get(&10),
+            Some(&1)
+        );
+        let rewards = engine.pending_reward_batch();
+        assert_eq!(
+            rewards
+                .iter()
+                .filter(|event| event.kind == RewardKind::EnemyKilled && event.player_id == 1)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn mounted_hit_rejects_foreign_grant_and_rolls_back_when_recording_fails() {
+        use crate::human_kill_reward_tests::hit;
+        let mut engine = indexed_hospital_combat();
+        let victim_id = "synthetic-reservation-0000";
+        engine.active.as_mut().unwrap().mounted_bunker = Some(6);
+        hit(&mut engine, 80, 1000).unwrap();
+        assert_eq!(engine.peers[victim_id].life.damage_health(), Some((4, 120)));
+
+        engine.active.as_mut().unwrap().mounted_bunker = Some(5);
+        let packet = crate::human_kill_reward_tests::native_hit(0x0380_0000, 81);
+        let request = crate::bullet_hit::NetMessageHit::decode(&packet).unwrap();
+        assert!(
+            engine
+                .bullet_profile(engine.active.as_ref().unwrap(), &request)
+                .is_ok()
+        );
+        let recorded = engine.writer.len();
+        engine.max_log = engine.written;
+        assert!(matches!(
+            hit(&mut engine, 81, 1001),
+            Err("log_limit_reached")
+        ));
+        assert_eq!(engine.writer.len(), recorded);
+        assert_eq!(engine.peers[victim_id].life.damage_health(), Some((4, 120)));
+        assert!(engine.pending_reward_batch().is_empty());
+    }
+
+    #[test]
+    fn indexed_hospital_hit_requires_native_client_route_active_round_and_character() {
+        use crate::{BRIDGE_VERSION, Direction, Request, Transport, protocol};
+
+        let mut engine = indexed_hospital_combat();
+        let packet = crate::human_kill_reward_tests::native_hit(0x0380_0000, 91);
+        let mut target = crate::bullet_hit::NetMessageHit::decode(&packet).unwrap();
+        for defender in [0x0100_0000, 0x0200_0000, 0x0d80_0006] {
+            target.defender = defender;
+            assert!(matches!(
+                engine.bullet_profile(engine.active.as_ref().unwrap(), &target),
+                Err("hospital_primary_requires_character_target")
+            ));
+        }
+        assert!(serde_json::from_value::<Direction>(json!("server_to_client")).is_err());
+        for (time, plugin_id, started, denial, expected_hp) in [
+            (1000, Some(2), true, None, 120),
+            (
+                1001,
+                Some(1),
+                false,
+                Some("hospital_primary_requires_active_round"),
+                120,
+            ),
+            (1002, Some(1), true, None, 6),
+        ] {
+            engine.match_started = started;
+            let actor = engine.active.as_ref().unwrap();
+            let reply = engine.handle(
+                Request::Event {
+                    v: BRIDGE_VERSION,
+                    request_id: format!("synthetic-denied-mounted-hit-{time}"),
+                    reservation_id: actor.reservation.id.clone(),
+                    world_id: actor.reservation.world,
+                    player_id: actor.reservation.player,
+                    transport: Transport::Tcp,
+                    direction: Direction::ClientToServer,
+                    rt_type: 0x3d,
+                    plugin_id,
+                    payload_hex: protocol::encode_hex(&packet),
+                },
+                std::time::Duration::from_millis(time),
+                1,
+            );
+            assert!(reply.ok, "{:?}", reply.error);
+            let record: Value = serde_json::from_slice(
+                engine
+                    .writer
+                    .split(|&byte| byte == b'\n')
+                    .rfind(|line| !line.is_empty())
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(record["gameplay_denial"].as_str(), denial);
+            assert_eq!(
+                engine.peers["synthetic-reservation-0000"]
+                    .life
+                    .damage_health(),
+                Some((4, expected_hp))
+            );
+        }
     }
 }

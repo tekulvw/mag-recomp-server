@@ -85,6 +85,11 @@ def project(catalog_bytes, binding_bytes, bootstrap_bytes, bullet_witness_bytes,
         names = selection.get(group)
         check(isinstance(names, list) and names and all(isinstance(n, str) and n for n in names)
               and len(names) == len(set(names)), 'invalid_selection:' + group)
+    hospital_bullets = selection.get('hospital_bullets', [])
+    check(isinstance(hospital_bullets, list)
+          and all(isinstance(name, str) and name for name in hospital_bullets)
+          and len(hospital_bullets) == len(set(hospital_bullets)), 'invalid_selection:hospital_bullets')
+    check(not set(hospital_bullets).intersection(selection['bullets']), 'overlapping_combat_selection')
     check(isinstance(runtime_policy, dict)
           and runtime_policy.get('projectile_motion') == 'authenticated_owner_reports'
           and runtime_policy.get('grenade_token_basis') == 'expected_static_original_resources'
@@ -149,7 +154,7 @@ def project(catalog_bytes, binding_bytes, bootstrap_bytes, bullet_witness_bytes,
                 'objectiveARedux', 'mine')}
 
         bullets = {}
-        for name in selection['bullets']:
+        for name in selection['bullets'] + hospital_bullets:
             wire, weapon, out = item(name, 'weapons')
             ammunition, ammo_source = ammo(weapon, 'hitscan_ammo')
             p = weapon['parameters']
@@ -170,6 +175,8 @@ def project(catalog_bytes, binding_bytes, bootstrap_bytes, bullet_witness_bytes,
                                   'refire_seconds': schedule['refire_time'],
                                   'reload_seconds': schedule['reload_time'],
                                   'infinite_ammo': p['infinite_ammo']}
+            if name in hospital_bullets:
+                out['usage'] = 'hospital_primary'
             bullets[wire] = out
 
         melee = {}

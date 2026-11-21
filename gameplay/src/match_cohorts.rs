@@ -412,7 +412,7 @@ impl<W: Write> Engine<W> {
                     a.remember(wire)?;
                 }
                 if shared {
-                    a.pending_shared.pop_front();
+                    a.pop_shared();
                 } else {
                     a.pending_notifications.pop_front();
                 }

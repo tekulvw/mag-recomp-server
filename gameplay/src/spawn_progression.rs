@@ -8,11 +8,11 @@ pub(crate) mod tests;
 pub(super) use tests::{dispatch, engine, ready, reserve};
 
 impl<W: Write> Engine<W> {
-    pub(crate) fn advance_forward_spawns(&mut self, now: Duration) -> Result<(), &'static str> {
+    pub(crate) fn pending_forward_spawns(&self) -> Vec<spawn_catalog::ForwardSpawnBinding> {
         let (Some(catalog), Some(world)) = (&self.spawn_catalog, &self.objective_world) else {
-            return Ok(());
+            return Vec::new();
         };
-        let rules: Vec<_> = catalog
+        catalog
             .map_pool()
             .forward_spawns
             .iter()
@@ -21,7 +21,11 @@ impl<W: Write> Engine<W> {
                 world.state(rule.objective_index) == Some(replication::ObjectiveState::Completed)
                     && !catalog.forward_applied(*rule)
             })
-            .collect();
+            .collect()
+    }
+
+    pub(crate) fn advance_forward_spawns(&mut self, now: Duration) -> Result<(), &'static str> {
+        let rules = self.pending_forward_spawns();
         if rules.is_empty() {
             return Ok(());
         }

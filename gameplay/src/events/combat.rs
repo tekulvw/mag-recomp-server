@@ -6,6 +6,19 @@ pub(super) fn hit<W: Write>(
     plan: &mut EventPlan,
     request: bullet_hit::NetMessageHit,
 ) -> Result<Value, &'static str> {
+    let indexed_hospital = ctx.active.is_indexed_hospital_gunner();
+    if indexed_hospital
+        && (!ctx.accepted_client_route
+            || !ctx.engine.match_started
+            || !ctx.engine.round_combat_allowed(ctx.now))
+    {
+        plan.gameplay_denial = Some(if !ctx.accepted_client_route {
+            "hospital_primary_requires_native_client_route"
+        } else {
+            "hospital_primary_requires_active_round"
+        });
+        return Ok(json!({"type":"bullet_hit","target_id":request.defender}));
+    }
     if request.defender >> 24 == 2 && ctx.engine.domination_gameplay.is_some() {
         let result = if ctx.accepted_owner_route {
             ctx.engine
@@ -347,7 +360,7 @@ pub(super) fn hit<W: Write>(
             }
         }
     }
-    Ok(json!({"type":"bullet_hit","target_id":request.defender,
+    let mut audit = json!({"type":"bullet_hit","target_id":request.defender,
         "gear_index":request.gear_index,"magazine":request.fire_mode,
         "hit_location":request.hit_location,"client_data":request.client_data,
         "origin":request.hit_origin,"destination":request.hit_dest,
@@ -355,7 +368,13 @@ pub(super) fn hit<W: Write>(
         "weapon_item":profile_item,"damage_kind":damage_kind,"damage_calculation":damage_calculation,"applied_damage":applied,
         "hit_authority":"client_reported",
         "collision_audit":collision_audit(ctx.engine.collision_world.as_ref(), ctx.engine.map_name(), request.hit_origin, request.hit_dest),
-        "ammo_authority":"observed_only_no_fire_event"}))
+        "ammo_authority":"observed_only_no_fire_event"});
+    if indexed_hospital {
+        let audit = audit.as_object_mut().unwrap();
+        audit.remove("magazine");
+        audit.insert("fire_mode".into(), json!(request.fire_mode));
+    }
+    Ok(audit)
 }
 
 pub(super) fn fire_grenade<W: Write>(

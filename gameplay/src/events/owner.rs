@@ -155,6 +155,33 @@ fn plan_owner_report<W: Write>(
                     Err(code) => plan.gameplay_denial = Some(code),
                 }
             }
+            let mut hospital_rows = report.hospital_turrets.into_iter().filter(|row| {
+                let fields = row.fields;
+                fields.yaw.is_some()
+                    || fields.pitch.is_some()
+                    || fields.primary.is_some()
+                    || fields.secondary.is_some()
+                    || fields.overheat_info.is_some()
+            });
+            if let Some(row) = hospital_rows.next() {
+                if hospital_rows.next().is_some()
+                    || !ctx.accepted_owner_route
+                    || !ctx.engine.round_combat_allowed(ctx.now)
+                    || h.client_index != 0
+                    || h.nak_sequence != 0
+                    || h.sequence <= active.latest_owner_sequence
+                {
+                    plan.gameplay_denial = Some("hospital_turret_owner_report_not_allowed");
+                } else {
+                    match ctx.engine.prepare_hospital_turret_report(active, row, now) {
+                        Ok((turret, packets)) => {
+                            plan.hospital_turret = Some((row.index, turret));
+                            plan.hospital_aim_packets = packets;
+                        }
+                        Err(reason) => plan.gameplay_denial = Some(reason),
+                    }
+                }
+            }
             if !report.ground_vehicles.is_empty()
                 && h.client_index == 0
                 && h.nak_sequence == 0
