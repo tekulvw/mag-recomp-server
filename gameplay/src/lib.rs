@@ -50,6 +50,8 @@ pub mod bot_navigation;
 mod bot_objectives;
 pub mod bot_physics;
 pub mod bot_registry;
+pub mod bot_resupply;
+pub mod bot_resupply_catalog;
 mod bot_stat_publication;
 mod bot_traffic_costs;
 mod bot_traffic_flow;
@@ -1244,6 +1246,7 @@ pub struct Engine<W: Write> {
     incapacitation_rules: Option<incapacitation::Rules>,
     character_damage_rules: Option<character_damage_rules::Rules>,
     firearm_assists: firearm_assists::State,
+    bot_resupply: bot_resupply::State,
     pending_rewards: std::collections::BTreeMap<String, progression::RewardEvent>,
     reward_order: std::collections::VecDeque<String>,
     committed_rewards: std::collections::BTreeMap<String, progression::CommittedReward>,
