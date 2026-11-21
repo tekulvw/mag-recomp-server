@@ -1239,15 +1239,12 @@ impl<W: Write> Engine<W> {
                 .map(|(player, _)| player),
         )
     }
-    fn bullet_profile(
+    fn mounted_primary_profile(
         &self,
         active: &Active,
         request: &bullet_hit::NetMessageHit,
     ) -> Result<CharacterHitProfile, &'static str> {
         if self.is_ground_gunner(active) {
-            if request.defender >> 16 != 0x0380 {
-                return Err("ground_apc_primary_requires_character_target");
-            }
             let qualified = self.ground_primary_for_actor(active, request)?;
             return Ok(CharacterHitProfile::GroundApcPrimary(
                 retail_combat::RetailBulletProfile::from_ground_apc_primary(
@@ -1258,9 +1255,6 @@ impl<W: Write> Engine<W> {
             ));
         }
         if active.is_indexed_hospital_gunner() {
-            if request.defender >> 16 != 0x0380 {
-                return Err("hospital_primary_requires_character_target");
-            }
             let qualified = self.hospital_primary_for_actor(active, request)?;
             return Ok(CharacterHitProfile::HospitalPrimary(
                 retail_combat::RetailBulletProfile::from_hospital_primary(
@@ -1269,6 +1263,25 @@ impl<W: Write> Engine<W> {
                     request,
                 )?,
             ));
+        }
+        Err("ground_hit_requires_living_onfoot_actor")
+    }
+
+    fn bullet_profile(
+        &self,
+        active: &Active,
+        request: &bullet_hit::NetMessageHit,
+    ) -> Result<CharacterHitProfile, &'static str> {
+        let ground_gunner = self.is_ground_gunner(active);
+        if ground_gunner || active.is_indexed_hospital_gunner() {
+            if request.defender >> 16 != 0x0380 {
+                return Err(if ground_gunner {
+                    "ground_apc_primary_requires_character_target"
+                } else {
+                    "hospital_primary_requires_character_target"
+                });
+            }
+            return self.mounted_primary_profile(active, request);
         }
         if active.mounted_seat == Some(0) {
             let authority = self.alpha_turret_authority(active)?;

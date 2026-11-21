@@ -4,6 +4,7 @@
 //! and healing authority; schema4 adds slot-owned melee and facing rules.
 //! Projectile motion remains authenticated owner-reported.
 
+use crate::item_catalog::TargetDamageParameters;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -794,8 +795,7 @@ fn validate(value: &CatalogMetadata) -> Result<(), String> {
     Ok(())
 }
 
-/// Ordinary retail weapon profile. Ammo identity comes from its attested item
-/// definition; this path never accepts a wire ammo token or consumes ammunition.
+/// Qualified retail hitscan ammunition from an attested equipped item.
 #[derive(Clone, Copy, Debug)]
 pub struct RetailBulletProfile {
     item_id: u16,
@@ -804,6 +804,7 @@ pub struct RetailBulletProfile {
     redux: f32,
     effective_range: f32,
     max_range: f32,
+    vehicle_damage: TargetDamageParameters,
 }
 impl RetailBulletProfile {
     pub fn from_equipped(
@@ -898,10 +899,18 @@ impl RetailBulletProfile {
             redux: p.damage.character_armor_reduction as f32,
             effective_range: p.effective_range as f32,
             max_range: p.max_range as f32,
+            vehicle_damage: TargetDamageParameters {
+                amount: p.damage.vehicle as f32,
+                armor_pierce: p.damage.vehicle_armor_pierce as f32,
+                armor_redux: p.damage.vehicle_armor_reduction as f32,
+            },
         }
     }
     pub fn item_id(self) -> u16 {
         self.item_id
+    }
+    pub(crate) fn vehicle_damage(self) -> TargetDamageParameters {
+        self.vehicle_damage
     }
     pub fn raw_character_damage(
         self,
@@ -974,11 +983,11 @@ mod incapacitated_body_tests {
 }
 
 #[cfg(test)]
-mod hospital_primary_tests {
+pub(crate) mod hospital_primary_tests {
     use super::*;
     use serde_json::json;
 
-    fn combat_catalog() -> RetailCombatCatalog {
+    pub(crate) fn combat_catalog() -> RetailCombatCatalog {
         let bullet = json!({
             "authored_ref":"Synthetic:2","name":"synthetic_primary","definition":{},"source":{},"item_source":{},
             "ammo":{"group":"hitscan_ammo","name":"synthetic_bullet","source":{},
@@ -992,6 +1001,7 @@ mod hospital_primary_tests {
         mounted_bullet["authored_ref"] = json!("Synthetic:4");
         mounted_bullet["name"] = json!("synthetic_mounted_primary");
         mounted_bullet["usage"] = json!("hospital_primary");
+        mounted_bullet["damage"]["vehicle"] = json!(12.);
         let mut apc_bullet = bullet.clone();
         apc_bullet["authored_ref"] = json!("Synthetic:5");
         apc_bullet["name"] = json!("synthetic_apc_primary");

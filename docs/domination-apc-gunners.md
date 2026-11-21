@@ -57,14 +57,21 @@ packet bounds.
 
 ## Supported damage and acceptance
 
-Only the initialized primary, gear0, ammo pool0 and fire mode0 can enter the
-existing character armor, life, kill/stat and reward transaction. The native
-client Hit route accepts its existing TCP or UDP framing during an active combat
-round. The hit wire has no unique shot/grant identifier; current role checks do
-not claim to classify arbitrary unseen hit replays.
+Only the initialized primary, gear0, ammo pool0 and fire mode0 can enter a damage
+transaction. Character hits use existing armor, life, kill/stat and rewards.
+Domination type3 and type7 Ground targets use the existing vehicle damage,
+penetration, team, armor and body calculation, with recorded health/lifecycle
+publication. The current source APC armor absorbs these mounted primaries;
+operational type7 bodies can take damage. Their player seats remain unavailable.
 
-Type7 vehicles, secondary rockets and mounted fire against armored or Objective
-targets require separate support. Their authored data does not implicitly enable
-those paths. Reference seat transforms do not establish live model animation or
+Ground Hit accepts authenticated TCP or UDP framing as replacement compatibility
+policy, including existing on-foot shooters. The retail reliable small-message
+dispatch is verified; its final platform socket selection remains unresolved.
+Owner aim and motion reports keep their existing UDP route. The hit wire has no
+unique shot/grant identifier; current role checks do not claim to classify
+arbitrary unseen hit replays.
+
+Type7 gunner seats, secondary rockets, Helo and Objective targets require separate
+support. Reference seat transforms do not establish live model animation or
 muzzle placement. Native controls, first-report timing, visuals and presentation
 still require live-match review before a human cuts a release.

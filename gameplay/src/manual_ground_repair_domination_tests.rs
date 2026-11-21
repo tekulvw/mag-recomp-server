@@ -94,7 +94,7 @@ fn source_catalogs(
     (spawns, catalog)
 }
 
-fn fixture(attacking_faction: u8, team: u8) -> Engine<Vec<u8>> {
+pub(crate) fn fixture(attacking_faction: u8, team: u8) -> Engine<Vec<u8>> {
     let mut engine = repair_fixture();
     let (spawns, catalog) = source_catalogs(attacking_faction);
     let squad = u16::from(team) * 16;

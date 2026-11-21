@@ -8,12 +8,14 @@ pub(super) fn hit<W: Write>(
 ) -> Result<Value, &'static str> {
     let indexed_hospital = ctx.active.is_indexed_hospital_gunner();
     let ground_gunner = ctx.engine.is_ground_gunner(ctx.active);
+    let ground_target = request.defender >> 24 == 1;
+    let domination = ctx.engine.domination_gameplay.is_some();
     if ground_gunner {
         let denial = if !ctx.accepted_client_route {
             Some("ground_apc_primary_requires_native_client_route")
         } else if !ctx.engine.match_started || !ctx.engine.round_combat_allowed(ctx.now) {
             Some("ground_apc_primary_requires_active_round")
-        } else if request.defender >> 16 != 0x0380 {
+        } else if request.defender >> 16 != 0x0380 && !(domination && ground_target) {
             Some("ground_apc_primary_requires_character_target")
         } else {
             None
@@ -35,7 +37,7 @@ pub(super) fn hit<W: Write>(
         });
         return Ok(json!({"type":"bullet_hit","target_id":request.defender}));
     }
-    if request.defender >> 24 == 2 && ctx.engine.domination_gameplay.is_some() {
+    if request.defender >> 24 == 2 && domination {
         let result = if ctx.accepted_owner_route {
             ctx.engine
                 .prepare_domination_helo_hit(ctx.active, &request, ctx.now)
@@ -54,10 +56,8 @@ pub(super) fn hit<W: Write>(
             }
         });
     }
-    if request.defender >> 24 == 1
-        && (ctx.engine.acquisition_gameplay.is_some() || ctx.engine.domination_gameplay.is_some())
-    {
-        let result = if ctx.accepted_owner_route {
+    if ground_target && (ctx.engine.acquisition_gameplay.is_some() || domination) {
+        let result = if ctx.accepted_client_route {
             ctx.engine
                 .prepare_acquisition_ground_hit(ctx.active, &request, ctx.now)
         } else {
