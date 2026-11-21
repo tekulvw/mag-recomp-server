@@ -724,7 +724,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             "--ground-vehicles requires explicit retail application20231",
         ));
     }
-    let ground_vehicles = ground_vehicles_path
+    let mut ground_vehicles = ground_vehicles_path
         .as_ref()
         .map(|path| mag_gameplay::ground_vehicles::Catalog::load(path, &catalog))
         .transpose()?;
@@ -805,7 +805,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     catalog
         .validate_objectives(objective_catalog.as_ref())
         .map_err(io::Error::other)?;
-    let acquisition_setup = if let Some(path) = &acquisition_gameplay_path {
+    let (acquisition_config, acquisition_setup) = if let Some(path) = &acquisition_gameplay_path {
         if application_id != Some(20231) || catalog.match_profile().game_type != 1 {
             return Err(io::Error::other(
                 "Acquisition gameplay requires retail mode1",
@@ -840,8 +840,8 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         })?;
         let runtime = mag_gameplay::acquisition_ground_runtime::Runtime::from_catalog(vehicles)
             .map_err(io::Error::other)?;
-        let setup = mag_gameplay::acquisition_gameplay_config::Configuration::load(path)?
-            .build(&catalog, objectives, &runtime)?;
+        let config = mag_gameplay::acquisition_gameplay_config::Configuration::load(path)?;
+        let setup = config.build(&catalog, objectives, &runtime)?;
         validate_acquisition_static_partition(
             catalog.map_name(),
             &static_partitions,
@@ -853,7 +853,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         setup
             .validate_ground_hulk_templates(body_catalog)
             .map_err(io::Error::other)?;
-        Some(setup)
+        (Some(config), Some(setup))
     } else {
         if match_profiles_path.is_none()
             && objective_catalog
@@ -871,7 +871,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                 },
             ));
         }
-        None
+        (None, None)
     };
     let objective_info = objective_catalog.as_ref().map(|objectives| serde_json::json!({"path":objective_path,"object_count":objectives.object_count(),"source":objectives.source()}));
     let item_path = item_path
@@ -941,6 +941,15 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                 .validate_saved(faction, &saved)
                 .map_err(io::Error::other)?;
         }
+    }
+    if let Some(config) = acquisition_config {
+        // Direct Acquisition setup already requires both catalogs.
+        config.bind_ground_turrets(
+            ground_vehicles.as_mut().unwrap(),
+            &catalog,
+            &item_catalog,
+            objective_catalog.as_ref().unwrap(),
+        )?;
     }
     let item_catalog = Arc::new(item_catalog);
     let wire_profiles_path =
@@ -1133,7 +1142,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     } else {
         None
     };
-    let match_profiles = match_profiles_path
+    let mut match_profiles = match_profiles_path
         .as_ref()
         .map(mag_gameplay::match_profiles::Registry::load)
         .transpose()?;
@@ -1228,7 +1237,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             "platoon_leadership_requires_complete_active_abilities",
         ));
     }
-    if let Some(registry) = &match_profiles {
+    if let Some(registry) = &mut match_profiles {
         if leadership.is_some() && !native_leadership {
             return Err(io::Error::other(
                 "match_profiles_unsupported_leadership_policy",
@@ -1264,6 +1273,9 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                 &item_catalog,
                 wire_profiles.profile(20231).map_err(io::Error::other)?,
             )
+            .map_err(io::Error::other)?;
+        registry
+            .bind_ground_turrets(&item_catalog)
             .map_err(io::Error::other)?;
         if let Some((catalog, bindings)) = &dynamic_bodies {
             registry

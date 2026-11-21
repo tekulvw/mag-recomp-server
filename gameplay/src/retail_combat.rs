@@ -137,6 +137,7 @@ pub enum RetailBulletUsage {
     Character,
     HospitalPrimary,
     GroundApcPrimary,
+    GroundEscortPrimary,
 }
 
 /// Original disk weapon schedule, separate from configurable AI policy.
@@ -447,6 +448,13 @@ impl RetailCombatCatalog {
         item_id: u16,
     ) -> Result<&RetailBulletMetadata, RetailCombatError> {
         self.bullet_by_usage(item_id, RetailBulletUsage::GroundApcPrimary)
+            .ok_or(RetailCombatError::UnsupportedItem(item_id))
+    }
+    pub(crate) fn ground_escort_primary_for_damage(
+        &self,
+        item_id: u16,
+    ) -> Result<&RetailBulletMetadata, RetailCombatError> {
+        self.bullet_by_usage(item_id, RetailBulletUsage::GroundEscortPrimary)
             .ok_or(RetailCombatError::UnsupportedItem(item_id))
     }
     pub fn grenade_for_damage(
@@ -864,7 +872,7 @@ impl RetailBulletProfile {
             .map_err(|_| "unsupported_hospital_primary_bullet")?;
         Ok(Self::from_metadata(qualified.item_id, metadata))
     }
-    pub(crate) fn from_ground_apc_primary(
+    pub(crate) fn from_ground_primary(
         catalog: &RetailCombatCatalog,
         qualified: crate::ground_turrets::GroundQualifiedPrimary,
         request: &crate::bullet_hit::NetMessageHit,
@@ -873,6 +881,7 @@ impl RetailBulletProfile {
             item_id,
             equipped,
             definition_version,
+            kind,
         } = qualified;
         if equipped.inventory_update_id != definition_version {
             return Err("stale_ground_turret_inventory");
@@ -886,9 +895,15 @@ impl RetailBulletProfile {
         if request.fire_mode != 0 {
             return Err("unsupported_ground_turret_fire_mode");
         }
-        let metadata = catalog
-            .ground_apc_primary_for_damage(item_id)
-            .map_err(|_| "unsupported_ground_apc_primary_bullet")?;
+        use crate::ground_turrets::PolicyKind;
+        let metadata = match kind {
+            PolicyKind::Apc => catalog
+                .ground_apc_primary_for_damage(item_id)
+                .map_err(|_| "unsupported_ground_apc_primary_bullet"),
+            PolicyKind::Escort => catalog
+                .ground_escort_primary_for_damage(item_id)
+                .map_err(|_| "unsupported_ground_escort_primary_bullet"),
+        }?;
         Ok(Self::from_metadata(item_id, metadata))
     }
     fn from_metadata(item_id: u16, p: &RetailBulletMetadata) -> Self {
@@ -1009,11 +1024,15 @@ pub(crate) mod hospital_primary_tests {
         apc_bullet["damage"]["character"] = json!(48.);
         apc_bullet["damage"]["characterAPierce"] = json!(2.);
         apc_bullet["damage"]["characterARedux"] = json!(0.125);
+        let mut escort_bullet = bullet.clone();
+        escort_bullet["authored_ref"] = json!("Synthetic:6");
+        escort_bullet["name"] = json!("synthetic_escort_primary");
+        escort_bullet["usage"] = json!("ground_escort_primary");
         RetailCombatCatalog::from_json(&json!({
             "schema_version":2,"application_id":20231,"status":"synthetic",
             "authority":{"bullet_damage":true,"armor_reduction":true,"body_damage":true,
                 "grenade_damage":false,"grenade_physics":false,"healing_schedule":false,"ammo_tokens":false},
-            "provenance":{},"bullets":{"2":bullet,"4":mounted_bullet,"5":apc_bullet},"armor":{
+            "provenance":{},"bullets":{"2":bullet,"4":mounted_bullet,"5":apc_bullet,"6":escort_bullet},"armor":{
                 "3":{"authored_ref":"Synthetic:3","name":"synthetic_target_armor",
                     "definition":{},"source":{},"item_source":{},"armor_type":1,"rating":2.0,
                     "prevention":0.25,"coverage":[1.0,1.0,1.0,1.0],"armor_type_source":{}}
@@ -1022,6 +1041,56 @@ pub(crate) mod hospital_primary_tests {
             "body":(0..16).map(|location| json!({"location":location,"armor_area":0,"multiplier":1.0,
                 "incapacitated_multiplier":1.0,"source":{}})).collect::<Vec<_>>()
         }).to_string()).unwrap()
+    }
+
+    #[test]
+    fn ground_escort_catalog_cannot_be_used_as_ordinary_or_other_mounted_damage() {
+        let catalog = combat_catalog();
+        assert!(catalog.bullet_metadata(6).is_none());
+        assert!(catalog.bullet_for_damage(6).is_err());
+        assert!(catalog.hospital_primary_for_damage(6).is_err());
+        assert!(catalog.ground_apc_primary_for_damage(6).is_err());
+        assert!(catalog.is_mounted_bullet(6));
+        assert!(catalog.ground_escort_primary_for_damage(6).is_ok());
+        for item in [2, 4, 5] {
+            assert!(catalog.ground_escort_primary_for_damage(item).is_err());
+        }
+    }
+
+    #[test]
+    fn ground_primary_requires_the_catalog_usage_of_the_current_role() {
+        use crate::ground_turrets::{GroundQualifiedPrimary, PolicyKind};
+
+        let catalog = combat_catalog();
+        let hit = crate::bullet_hit::NetMessageHit::decode(
+            &crate::human_kill_reward_tests::native_hit(0x0380_0000, 10),
+        )
+        .unwrap();
+        let grant = |kind, item_id| GroundQualifiedPrimary {
+            kind,
+            item_id,
+            equipped: crate::replication::InventoryItem {
+                inventory_update_id: 3,
+                gear_slot: 0,
+                ammo_pool: 0,
+                ammo_count: 9,
+                reloading: false,
+            },
+            definition_version: 3,
+        };
+        let escort =
+            RetailBulletProfile::from_ground_primary(&catalog, grant(PolicyKind::Escort, 6), &hit)
+                .unwrap();
+        assert_eq!(escort.item_id(), 6);
+        assert_eq!(escort.vehicle_damage().amount, 50.);
+        assert!(matches!(
+            RetailBulletProfile::from_ground_primary(&catalog, grant(PolicyKind::Escort, 5), &hit),
+            Err("unsupported_ground_escort_primary_bullet")
+        ));
+        assert!(matches!(
+            RetailBulletProfile::from_ground_primary(&catalog, grant(PolicyKind::Apc, 6), &hit),
+            Err("unsupported_ground_apc_primary_bullet")
+        ));
     }
 
     #[test]
@@ -1057,8 +1126,9 @@ pub(crate) mod hospital_primary_tests {
                 item_id,
                 equipped,
                 definition_version,
+                kind: crate::ground_turrets::PolicyKind::Apc,
             };
-            RetailBulletProfile::from_ground_apc_primary(&catalog, qualified, hit)
+            RetailBulletProfile::from_ground_primary(&catalog, qualified, hit)
         };
         let raw = from_grant(5, equipped, 2, &hit)
             .unwrap()
@@ -1152,7 +1222,7 @@ pub(crate) mod hospital_primary_tests {
             primary: equipped,
             primary_equipped: true,
         };
-        for item in [4, 5] {
+        for item in [4, 5, 6] {
             loadout.inventories[0].slots[0] = Some(item);
             assert!(matches!(
                 RetailBulletProfile::from_equipped(&catalog, &loadout, equipped, 0, 0),
@@ -1163,7 +1233,7 @@ pub(crate) mod hospital_primary_tests {
 
     #[test]
     fn mounted_primary_cannot_be_saved_in_an_unselected_kit() {
-        let mounted_items = [4, 5].into_iter().map(|id| {
+        let mounted_items = [4, 5, 6].into_iter().map(|id| {
                     let reference = format!("FactionItemList0:{id}");
                     (reference.clone(), json!({
                         "authored_ref":reference,"faction_list":"FactionItemList0",
@@ -1191,7 +1261,7 @@ pub(crate) mod hospital_primary_tests {
             update_ids: [1; 5],
             inventories: [[None; 22]; 5],
         };
-        for item in [4, 5] {
+        for item in [4, 5, 6] {
             saved.inventories[4][1] = Some(item);
             assert_eq!(
                 items.validate_saved_item_bindings(&saved),

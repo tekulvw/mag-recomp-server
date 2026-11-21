@@ -7,16 +7,29 @@ pub(super) fn hit<W: Write>(
     request: bullet_hit::NetMessageHit,
 ) -> Result<Value, &'static str> {
     let indexed_hospital = ctx.active.is_indexed_hospital_gunner();
-    let ground_gunner = ctx.engine.is_ground_gunner(ctx.active);
+    let gunner_kind = ctx.engine.ground_gunner_kind(ctx.active);
+    let ground_gunner = gunner_kind.is_some();
     let ground_target = request.defender >> 24 == 1;
     let domination = ctx.engine.domination_gameplay.is_some();
-    if ground_gunner {
+    if let Some(kind) = gunner_kind {
+        use ground_turrets::PolicyKind;
         let denial = if !ctx.accepted_client_route {
-            Some("ground_apc_primary_requires_native_client_route")
+            Some(match kind {
+                PolicyKind::Apc => "ground_apc_primary_requires_native_client_route",
+                PolicyKind::Escort => "ground_escort_primary_requires_native_client_route",
+            })
         } else if !ctx.engine.match_started || !ctx.engine.round_combat_allowed(ctx.now) {
-            Some("ground_apc_primary_requires_active_round")
-        } else if request.defender >> 16 != 0x0380 && !(domination && ground_target) {
-            Some("ground_apc_primary_requires_character_target")
+            Some(match kind {
+                PolicyKind::Apc => "ground_apc_primary_requires_active_round",
+                PolicyKind::Escort => "ground_escort_primary_requires_active_round",
+            })
+        } else if request.defender >> 16 != 0x0380
+            && !(ground_target && ctx.engine.ground_gunner_accepts_ground_target(ctx.active))
+        {
+            Some(match kind {
+                PolicyKind::Apc => "ground_apc_primary_requires_character_target",
+                PolicyKind::Escort => "ground_escort_primary_requires_supported_target",
+            })
         } else {
             None
         };

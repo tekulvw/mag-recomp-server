@@ -988,6 +988,7 @@ enum CharacterHitProfile {
     Retail(retail_combat::RetailBulletProfile),
     HospitalPrimary(retail_combat::RetailBulletProfile),
     GroundApcPrimary(retail_combat::RetailBulletProfile),
+    GroundEscortPrimary(retail_combat::RetailBulletProfile),
     Melee(retail_melee::RetailMeleeProfile),
     Alpha(turret::AlphaMinigunProfile),
 }
@@ -1001,7 +1002,10 @@ impl CharacterHitProfile {
     fn item_id(&self) -> u16 {
         match self {
             Self::OnFoot(p) => p.item_id(),
-            Self::Retail(p) | Self::HospitalPrimary(p) | Self::GroundApcPrimary(p) => p.item_id(),
+            Self::Retail(p)
+            | Self::HospitalPrimary(p)
+            | Self::GroundApcPrimary(p)
+            | Self::GroundEscortPrimary(p) => p.item_id(),
             Self::Melee(p) => p.item_id(),
             Self::Alpha(p) => p.item_id(),
         }
@@ -1014,9 +1018,10 @@ impl CharacterHitProfile {
     ) -> Result<armor::RawCharacterDamage, &'static str> {
         match self {
             Self::OnFoot(p) => p.raw_character_damage(distance, scale, location),
-            Self::Retail(p) | Self::HospitalPrimary(p) | Self::GroundApcPrimary(p) => {
-                p.raw_character_damage(distance, scale, location)
-            }
+            Self::Retail(p)
+            | Self::HospitalPrimary(p)
+            | Self::GroundApcPrimary(p)
+            | Self::GroundEscortPrimary(p) => p.raw_character_damage(distance, scale, location),
             Self::Melee(p) => p.raw_character_damage(distance, scale, location),
             Self::Alpha(p) => p.raw_character_damage(distance, scale, location),
         }
@@ -1239,6 +1244,14 @@ impl<W: Write> Engine<W> {
                 .map(|(player, _)| player),
         )
     }
+    fn ground_gunner_accepts_ground_target(&self, actor: &Active) -> bool {
+        match self.ground_gunner_kind(actor) {
+            Some(ground_turrets::PolicyKind::Apc) => self.domination_gameplay.is_some(),
+            Some(ground_turrets::PolicyKind::Escort) => self.acquisition_gameplay.is_some(),
+            None => false,
+        }
+    }
+
     fn mounted_primary_profile(
         &self,
         active: &Active,
@@ -1246,13 +1259,18 @@ impl<W: Write> Engine<W> {
     ) -> Result<CharacterHitProfile, &'static str> {
         if self.is_ground_gunner(active) {
             let qualified = self.ground_primary_for_actor(active, request)?;
-            return Ok(CharacterHitProfile::GroundApcPrimary(
-                retail_combat::RetailBulletProfile::from_ground_apc_primary(
-                    self.item_catalog.retail_combat()?,
-                    qualified,
-                    request,
-                )?,
-            ));
+            let kind = qualified.kind;
+            let profile = retail_combat::RetailBulletProfile::from_ground_primary(
+                self.item_catalog.retail_combat()?,
+                qualified,
+                request,
+            )?;
+            return Ok(match kind {
+                ground_turrets::PolicyKind::Apc => CharacterHitProfile::GroundApcPrimary(profile),
+                ground_turrets::PolicyKind::Escort => {
+                    CharacterHitProfile::GroundEscortPrimary(profile)
+                }
+            });
         }
         if active.is_indexed_hospital_gunner() {
             let qualified = self.hospital_primary_for_actor(active, request)?;
@@ -1275,10 +1293,14 @@ impl<W: Write> Engine<W> {
         let ground_gunner = self.is_ground_gunner(active);
         if ground_gunner || active.is_indexed_hospital_gunner() {
             if request.defender >> 16 != 0x0380 {
-                return Err(if ground_gunner {
-                    "ground_apc_primary_requires_character_target"
-                } else {
-                    "hospital_primary_requires_character_target"
+                return Err(match self.ground_gunner_kind(active) {
+                    Some(ground_turrets::PolicyKind::Apc) => {
+                        "ground_apc_primary_requires_character_target"
+                    }
+                    Some(ground_turrets::PolicyKind::Escort) => {
+                        "ground_escort_primary_requires_character_target"
+                    }
+                    None => "hospital_primary_requires_character_target",
                 });
             }
             return self.mounted_primary_profile(active, request);

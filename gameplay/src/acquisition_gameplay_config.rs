@@ -40,6 +40,7 @@ pub struct Configuration {
     arrival_static: Option<Binding>,
     ground_capabilities: Vec<GroundCapability>,
     ground_damage: Option<crate::acquisition_ground_damage::Policy>,
+    ground_turrets: Option<PathBuf>,
     vehicle_reinforcement_intervals_ms: [u32; 2],
     structural: Option<crate::acquisition_structural::Files>,
 }
@@ -169,11 +170,14 @@ impl Configuration {
             .take(MAX_BYTES as u64 + 1)
             .read_to_string(&mut text)?;
         let mut result = Self::from_json(&text)?;
+        let directory = path
+            .parent()
+            .ok_or_else(|| io::Error::other("acquisition_config_directory_missing"))?;
         if let Some(structural) = &mut result.structural {
-            structural.resolve(
-                path.parent()
-                    .ok_or_else(|| io::Error::other("acquisition_config_directory_missing"))?,
-            );
+            structural.resolve(directory);
+        }
+        if let Some(source) = &mut result.ground_turrets {
+            *source = directory.join(&*source);
         }
         Ok(result)
     }
@@ -188,6 +192,13 @@ impl Configuration {
     }
 
     fn validate(&self) -> Result<(), &'static str> {
+        if self
+            .ground_turrets
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            return Err("empty_acquisition_ground_turret_source_path");
+        }
         if self.ground_damage.is_none() || self.arrival_static.is_none() {
             return Err("acquisition_core_resources_required");
         }
@@ -235,6 +246,43 @@ impl Configuration {
             || !(4..=32).contains(&self.ground_capabilities.len())
         {
             return Err("invalid_acquisition_configuration_inventory");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn ground_turret_source(&self) -> io::Result<Option<Vec<u8>>> {
+        const MAX_TURRET_BYTES: usize = 256 * 1024;
+        let Some(path) = &self.ground_turrets else {
+            return Ok(None);
+        };
+        let mut bytes = Vec::new();
+        File::open(path)?
+            .take(MAX_TURRET_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > MAX_TURRET_BYTES {
+            return Err(io::Error::other(
+                "acquisition_ground_turret_source_too_large",
+            ));
+        }
+        Ok(Some(bytes))
+    }
+
+    /// Bind the optional direct-worker Escort rules once both catalogs are loaded.
+    pub fn bind_ground_turrets(
+        &self,
+        grounds: &mut crate::ground_vehicles::Catalog,
+        spawns: &SpawnCatalog,
+        items: &crate::item_catalog::ItemCatalog,
+        objectives: &ObjectiveCatalog,
+    ) -> io::Result<()> {
+        if let Some(source) = self.ground_turret_source()? {
+            grounds.set_turret_policies(crate::ground_turrets::qualify(
+                &source,
+                grounds,
+                spawns,
+                items,
+                &objectives.source().source_image_sha256,
+            )?);
         }
         Ok(())
     }

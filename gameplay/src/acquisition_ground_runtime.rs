@@ -792,6 +792,9 @@ impl Runtime {
                 .delivered_inert_seconds
                 .ok_or("ground_delivery_timer_unavailable")?;
             v.state = 8;
+            if let Some(turret) = &mut v.turret {
+                turret.revoke();
+            }
             v.state_age_seconds = 0.;
             v.inert_seconds = seconds;
             Ok(vec![v.event(Effect::StateChanged(8))])

@@ -343,10 +343,29 @@ impl Runtime {
             && equipped.ammo_pool == 0
     }
 
+    /// Retail reports the selected, empty secondary inventory slot even
+    /// when the current definition grants only a primary weapon.
+    pub(crate) fn is_empty_secondary(&self, item: InventoryItem) -> bool {
+        self.items[1].is_none()
+            && item
+                == InventoryItem {
+                    inventory_update_id: self.version,
+                    gear_slot: 1,
+                    ammo_pool: 0,
+                    ammo_count: 0,
+                    reloading: false,
+                }
+    }
+
     pub(crate) fn report(&self, fields: Fields) -> Result<(Self, Fields), &'static str> {
-        if [fields.primary, fields.secondary]
+        if fields
+            .primary
             .into_iter()
-            .flatten()
+            .chain(
+                fields
+                    .secondary
+                    .filter(|item| !self.is_empty_secondary(*item)),
+            )
             .any(|item| {
                 item.inventory_update_id != self.version
                     || self
