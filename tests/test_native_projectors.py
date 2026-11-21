@@ -312,6 +312,29 @@ class NativeProjectorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'invalid_selection:ground_apc_bullets'):
             tool.project(catalog_raw, binding_raw, bootstrap_raw, bullet_raw, melee_raw, selection, policy)
         selection['ground_apc_bullets'] = [apc]
+        escort = 'invented_escort_primary'
+        catalog['items']['6'] = {'name': escort,
+            'definition': {'group': 'weapons', 'name': escort}, 'source': {'invented': True}}
+        catalog['definitions']['weapons'][escort] = definition(dict(bullet))
+        catalog_raw = encode(catalog)
+        report['catalog_sha256'] = sha(catalog_raw)
+        bootstrap['provenance']['catalog_sha256'] = sha(catalog_raw)
+        binding_raw, bootstrap_raw = encode(report), encode(bootstrap)
+        tool.BINDING_REPORT_SHA256, tool.BOOTSTRAP_SHA256 = map(sha, (binding_raw, bootstrap_raw))
+        selection['ground_escort_bullets'] = [escort]
+        result = tool.project(catalog_raw, binding_raw, bootstrap_raw, bullet_raw, melee_raw, selection, policy)
+        self.assertEqual(result['bullets']['6']['usage'], 'ground_escort_primary')
+        self.assertEqual(result['bullets']['5']['usage'], 'ground_apc_primary')
+        self.assertEqual(result['bullets']['4']['usage'], 'hospital_primary')
+        self.assertNotIn('usage', result['bullets']['0'])
+        for overlap in (names[0], mounted, apc):
+            selection['ground_escort_bullets'] = [overlap]
+            with self.assertRaisesRegex(ValueError, 'overlapping_combat_selection'):
+                tool.project(catalog_raw, binding_raw, bootstrap_raw, bullet_raw, melee_raw, selection, policy)
+        selection['ground_escort_bullets'] = [escort, escort]
+        with self.assertRaisesRegex(ValueError, 'invalid_selection:ground_escort_bullets'):
+            tool.project(catalog_raw, binding_raw, bootstrap_raw, bullet_raw, melee_raw, selection, policy)
+        selection['ground_escort_bullets'] = [escort]
         catalog['definitions']['weapons'][names[0]]['parameters']['effective_range'] = 32.
         changed = encode(catalog)
         with self.assertRaisesRegex(ValueError, 'catalog_hash_mismatch'):

@@ -115,8 +115,15 @@ impl<W: Write> Engine<W> {
                 rewards.insert(chain.arrival_token, witness);
             }
             entry_actors.insert(chain.arrival_token, delivery.driver);
-            // Replicate the delivered state and the explicit server-owner revoke.
-            *changes.entry(key.index).or_default() |= (1 << 1) | (1 << 5);
+            // Arrival publishes the inactive vehicle and both ownership revocations together.
+            let fields = changes.entry(key.index).or_default();
+            *fields |= (1 << 1) | (1 << 5);
+            if ground
+                .get(key.index)
+                .is_some_and(|vehicle| vehicle.turret.is_some())
+            {
+                *fields |= 1 << 6;
+            }
             audit.push(
                 json!({"op":"acquisition_delivery","objective":chain.arrival_token,
                 "vehicle":key.object_id(),"driver":delivery.driver}),

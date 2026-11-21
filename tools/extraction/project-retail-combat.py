@@ -85,17 +85,16 @@ def project(catalog_bytes, binding_bytes, bootstrap_bytes, bullet_witness_bytes,
         names = selection.get(group)
         check(isinstance(names, list) and names and all(isinstance(n, str) and n for n in names)
               and len(names) == len(set(names)), 'invalid_selection:' + group)
-    hospital_bullets = selection.get('hospital_bullets', [])
-    check(isinstance(hospital_bullets, list)
-          and all(isinstance(name, str) and name for name in hospital_bullets)
-          and len(hospital_bullets) == len(set(hospital_bullets)), 'invalid_selection:hospital_bullets')
-    check(not set(hospital_bullets).intersection(selection['bullets']), 'overlapping_combat_selection')
-    ground_apc_bullets = selection.get('ground_apc_bullets', [])
-    check(isinstance(ground_apc_bullets, list)
-          and all(isinstance(name, str) and name for name in ground_apc_bullets)
-          and len(ground_apc_bullets) == len(set(ground_apc_bullets)), 'invalid_selection:ground_apc_bullets')
-    check(not set(ground_apc_bullets).intersection(selection['bullets'] + hospital_bullets),
-          'overlapping_combat_selection')
+    mounted_bullets = {}
+    for group, usage in (('hospital_bullets', 'hospital_primary'),
+                         ('ground_apc_bullets', 'ground_apc_primary'),
+                         ('ground_escort_bullets', 'ground_escort_primary')):
+        names = selection.get(group, [])
+        check(isinstance(names, list) and all(isinstance(name, str) and name for name in names)
+              and len(names) == len(set(names)), 'invalid_selection:' + group)
+        check(not set(names).intersection(selection['bullets'])
+              and not set(names).intersection(mounted_bullets), 'overlapping_combat_selection')
+        mounted_bullets.update((name, usage) for name in names)
     check(isinstance(runtime_policy, dict)
           and runtime_policy.get('projectile_motion') == 'authenticated_owner_reports'
           and runtime_policy.get('grenade_token_basis') == 'expected_static_original_resources'
@@ -160,7 +159,7 @@ def project(catalog_bytes, binding_bytes, bootstrap_bytes, bullet_witness_bytes,
                 'objectiveARedux', 'mine')}
 
         bullets = {}
-        for name in selection['bullets'] + hospital_bullets + ground_apc_bullets:
+        for name in selection['bullets'] + list(mounted_bullets):
             wire, weapon, out = item(name, 'weapons')
             ammunition, ammo_source = ammo(weapon, 'hitscan_ammo')
             p = weapon['parameters']
@@ -181,10 +180,8 @@ def project(catalog_bytes, binding_bytes, bootstrap_bytes, bullet_witness_bytes,
                                   'refire_seconds': schedule['refire_time'],
                                   'reload_seconds': schedule['reload_time'],
                                   'infinite_ammo': p['infinite_ammo']}
-            if name in hospital_bullets:
-                out['usage'] = 'hospital_primary'
-            elif name in ground_apc_bullets:
-                out['usage'] = 'ground_apc_primary'
+            if name in mounted_bullets:
+                out['usage'] = mounted_bullets[name]
             bullets[wire] = out
 
         melee = {}

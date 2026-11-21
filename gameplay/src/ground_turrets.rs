@@ -1,4 +1,4 @@
-//! Qualified turret-zero authority for physical seat one of movable Domination APCs.
+//! Qualified turret-zero authority for physical seat one of movable Ground vehicles.
 use crate::{
     Active, Engine, Write, bullet_hit,
     ground_vehicles::{Catalog, OwnerUpdate, TurretUpdate},
@@ -65,8 +65,39 @@ struct Placement {
     faction: u8,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PolicyKind {
+    Apc,
+    Escort,
+}
+
+impl PolicyKind {
+    fn for_schema(schema: &str, game_type: i8) -> Result<Self, &'static str> {
+        match (schema, game_type) {
+            ("mag_domination_apc_turrets_v1", 2) => Ok(Self::Apc),
+            ("mag_acquisition_escort_turrets_v1", 1) => Ok(Self::Escort),
+            _ => Err("ground_turret_source_mismatch"),
+        }
+    }
+
+    fn spawn_type(self) -> u8 {
+        match self {
+            Self::Apc => 3,
+            Self::Escort => 9,
+        }
+    }
+
+    fn placements(self) -> usize {
+        match self {
+            Self::Apc => 8,
+            Self::Escort => 4,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Policy {
+    kind: PolicyKind,
     primary: u16,
     local_position_xyz: [f32; 3],
 }
@@ -122,18 +153,17 @@ impl Rules {
     ) -> Result<BTreeMap<u16, Policy>, &'static str> {
         let combat = items.retail_combat()?;
         let source = &self.source;
-        if self.schema != "mag_domination_apc_turrets_v1"
-            || spawns.match_profile().game_type != 2
-            || [
-                &source.item_catalog_sha256,
-                &source.retail_elf_sha256,
-                &source.retail_archive_sha256,
-                &source.retail_main_sha256,
-                &source.pose_proof_sha256,
-                &source.wire_proof_sha256,
-            ]
-            .into_iter()
-            .any(|digest| !valid_hash(digest))
+        let kind = PolicyKind::for_schema(&self.schema, spawns.match_profile().game_type)?;
+        if [
+            &source.item_catalog_sha256,
+            &source.retail_elf_sha256,
+            &source.retail_archive_sha256,
+            &source.retail_main_sha256,
+            &source.pose_proof_sha256,
+            &source.wire_proof_sha256,
+        ]
+        .into_iter()
+        .any(|digest| !valid_hash(digest))
             || native_elf != source.retail_elf_sha256
             || source.vehicle_type_token == 0
             || combat.provenance()["catalog_sha256"].as_str()
@@ -145,9 +175,13 @@ impl Rules {
         }
         let mut variants = BTreeMap::new();
         for variant in &self.variants {
-            let primary = combat
-                .ground_apc_primary_for_damage(variant.primary_item_id)
-                .map_err(|_| "ground_turret_primary_missing")?;
+            let primary = match kind {
+                PolicyKind::Apc => combat.ground_apc_primary_for_damage(variant.primary_item_id),
+                PolicyKind::Escort => {
+                    combat.ground_escort_primary_for_damage(variant.primary_item_id)
+                }
+            }
+            .map_err(|_| "ground_turret_primary_missing")?;
             let namespace = format!("FactionItemList{}:", u16::from(variant.faction) + 1);
             if variant.faction >= 3
                 || variant.seat_index != 1
@@ -184,7 +218,7 @@ impl Rules {
                 || !valid_hash(&profile.ground_catalog_sha256)
                 || !spawn_hashes.insert(&profile.spawn_catalog_sha256)
                 || !ground_hashes.insert(&profile.ground_catalog_sha256)
-                || profile.vehicles.len() != 8
+                || profile.vehicles.len() != kind.placements()
                 || profile.vehicles.iter().any(|vehicle| {
                     vehicle.vehicle_index >= 32
                         || vehicle.spawn_point_index >= 128
@@ -207,6 +241,15 @@ impl Rules {
             return Err("invalid_ground_turret_profile");
         }
         let active = active.ok_or("ground_turret_profile_required")?;
+        if kind == PolicyKind::Escort
+            && grounds
+                .creations()
+                .filter(|vehicle| grounds.source_spawn_type(vehicle) == Some(kind.spawn_type()))
+                .count()
+                != kind.placements()
+        {
+            return Err("ground_turret_placement_mismatch");
+        }
         active
             .vehicles
             .iter()
@@ -214,7 +257,10 @@ impl Rules {
                 let vehicle = grounds
                     .vehicle(row.vehicle_index)
                     .ok_or("ground_turret_placement_mismatch")?;
-                if grounds.source_spawn_type(vehicle) != Some(3)
+                if grounds.source_spawn_type(vehicle) != Some(kind.spawn_type())
+                    || (kind == PolicyKind::Escort
+                        && (vehicle.maximum_occupancy != Some(8)
+                            || !vehicle.passenger_seats.iter().copied().eq(2..=9)))
                     || grounds
                         .driver_seat(row.vehicle_index)
                         .is_none_or(|driver| driver.seat != 0)
@@ -237,6 +283,7 @@ impl Rules {
                 }
                 let variant = variants[&row.faction];
                 let policy = Policy {
+                    kind,
                     primary: variant.primary_item_id,
                     local_position_xyz: variant.local_position_xyz,
                 };
@@ -248,6 +295,7 @@ impl Rules {
 }
 
 pub(crate) struct GroundQualifiedPrimary {
+    pub(crate) kind: PolicyKind,
     pub(crate) item_id: u16,
     pub(crate) equipped: InventoryItem,
     pub(crate) definition_version: u8,
@@ -265,9 +313,12 @@ impl<W: Write> Engine<W> {
     }
 
     pub(crate) fn is_ground_gunner(&self, actor: &Active) -> bool {
-        actor.ground_seat.is_some_and(|seat| {
-            seat.seat == 1 && self.ground_turret_policy(seat.vehicle_index).is_some()
-        })
+        self.ground_gunner_kind(actor).is_some()
+    }
+
+    pub(crate) fn ground_gunner_kind(&self, actor: &Active) -> Option<PolicyKind> {
+        let seat = actor.ground_seat.filter(|seat| seat.seat == 1)?;
+        Some(self.ground_turret_policy(seat.vehicle_index)?.kind)
     }
 
     fn ground_turret(&self, index: u16) -> Option<&Turret> {
@@ -319,7 +370,11 @@ impl<W: Write> Engine<W> {
             .ground_turret(index)
             .and_then(|turret| turret.primary_for(actor))
             .ok_or("ground_turret_primary_not_initialized")?;
+        let kind = self
+            .ground_gunner_kind(actor)
+            .ok_or("ground_turret_seat_required")?;
         Ok(GroundQualifiedPrimary {
+            kind,
             item_id,
             equipped,
             definition_version,
@@ -370,10 +425,15 @@ impl<W: Write> Engine<W> {
         if !self.ground_gunner_authority(actor, index) {
             return Err("ground_turret_requires_living_exclusive_gunner");
         }
-        if row.turret.secondary.is_some() {
+        let turret = self.ground_turret(index).unwrap();
+        if row
+            .turret
+            .secondary
+            .is_some_and(|item| !turret.is_empty_secondary(item))
+        {
             return Err("unsupported_ground_turret_secondary");
         }
-        let (next, fields) = self.ground_turret(index).unwrap().report(row.turret)?;
+        let (next, fields) = turret.report(row.turret)?;
         let packets = TurretUpdate::encode_rows(
             1,
             now.as_millis() as u32,

@@ -253,49 +253,53 @@ impl Registry {
                 .as_ref()
                 .map(|p| ground_vehicles::Catalog::load(p, &spawns))
                 .transpose()?;
-            let acquisition = if let Some(path) = &source.acquisition_gameplay {
-                let world = collision.as_ref().ok_or_else(|| {
-                    io::Error::other("acquisition_gameplay_requires_collision_world")
-                })?;
-                if world.stats().triangles == 0 {
-                    return Err(io::Error::other(
-                        "acquisition_gameplay_requires_nonempty_collision_world",
-                    ));
-                }
-                let catalog = objectives
-                    .as_ref()
-                    .ok_or_else(|| io::Error::other("acquisition_gameplay_requires_objectives"))?;
-                let ground = vehicles.as_ref().ok_or_else(|| {
-                    io::Error::other("acquisition_gameplay_requires_ground_vehicles")
-                })?;
-                let runtime = acquisition_ground_runtime::Runtime::from_catalog(ground)
-                    .map_err(io::Error::other)?;
-                let setup = acquisition_gameplay_config::Configuration::load(path)?
-                    .build(&spawns, catalog, &runtime)?;
-                setup
-                    .validate_ground_drivers(ground)
-                    .map_err(io::Error::other)?;
-                if let Some(policy) = &setup.ground_damage {
-                    for creation in ground.creations() {
-                        policy
-                            .validate_vehicle(creation)
-                            .map_err(io::Error::other)?;
+            let (acquisition, acquisition_ground_turrets) =
+                if let Some(path) = &source.acquisition_gameplay {
+                    let world = collision.as_ref().ok_or_else(|| {
+                        io::Error::other("acquisition_gameplay_requires_collision_world")
+                    })?;
+                    if world.stats().triangles == 0 {
+                        return Err(io::Error::other(
+                            "acquisition_gameplay_requires_nonempty_collision_world",
+                        ));
                     }
-                }
-                Some(Arc::new(setup))
-            } else {
-                if objectives.as_ref().is_some_and(|catalog| {
-                    catalog.source().capture_qualification == "native_source_gameplay"
-                        && !(policy.game_type == 2 && source.domination_gameplay.is_some())
-                }) {
-                    return Err(io::Error::other(if policy.game_type == 2 {
-                        "domination_gameplay_configuration_required"
-                    } else {
-                        "acquisition_gameplay_configuration_required"
-                    }));
-                }
-                None
-            };
+                    let catalog = objectives.as_ref().ok_or_else(|| {
+                        io::Error::other("acquisition_gameplay_requires_objectives")
+                    })?;
+                    let ground = vehicles.as_ref().ok_or_else(|| {
+                        io::Error::other("acquisition_gameplay_requires_ground_vehicles")
+                    })?;
+                    let runtime = acquisition_ground_runtime::Runtime::from_catalog(ground)
+                        .map_err(io::Error::other)?;
+                    let config = acquisition_gameplay_config::Configuration::load(path)?;
+                    let setup = config.build(&spawns, catalog, &runtime)?;
+                    setup
+                        .validate_ground_drivers(ground)
+                        .map_err(io::Error::other)?;
+                    if let Some(policy) = &setup.ground_damage {
+                        for creation in ground.creations() {
+                            policy
+                                .validate_vehicle(creation)
+                                .map_err(io::Error::other)?;
+                        }
+                    }
+                    (
+                        Some(Arc::new(setup)),
+                        config.ground_turret_source()?.map(Arc::from),
+                    )
+                } else {
+                    if objectives.as_ref().is_some_and(|catalog| {
+                        catalog.source().capture_qualification == "native_source_gameplay"
+                            && !(policy.game_type == 2 && source.domination_gameplay.is_some())
+                    }) {
+                        return Err(io::Error::other(if policy.game_type == 2 {
+                            "domination_gameplay_configuration_required"
+                        } else {
+                            "acquisition_gameplay_configuration_required"
+                        }));
+                    }
+                    (None, None)
+                };
             let damage = source
                 .character_damage_rules
                 .as_ref()
@@ -342,7 +346,7 @@ impl Registry {
                     )?;
                     (Some(world), source, ground_turret_source)
                 } else {
-                    (None, None, None)
+                    (None, None, acquisition_ground_turrets)
                 };
             let ability_manifest = active_ability_config::manifest_path(
                 source.active_abilities,
@@ -437,12 +441,13 @@ impl Registry {
         Ok(())
     }
 
-    fn bind_ground_turrets(
+    /// Bind optional indexed Ground gunner rules before creating a match.
+    pub fn bind_ground_turrets(
         &mut self,
         items: &item_catalog::ItemCatalog,
     ) -> Result<(), &'static str> {
         for profile in self.profiles.values_mut() {
-            let Some(source) = profile.ground_turret_source.take() else {
+            let Some(source) = &profile.ground_turret_source else {
                 continue;
             };
             let grounds = profile
@@ -455,7 +460,7 @@ impl Registry {
                 .ok_or("ground_turret_objectives_required")?;
             grounds.set_turret_policies(
                 crate::ground_turrets::qualify(
-                    &source,
+                    source,
                     grounds,
                     &profile.spawns,
                     items,

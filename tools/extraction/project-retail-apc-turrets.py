@@ -53,16 +53,16 @@ def native_witness(elf):
             'branches': {hex(address): hex(target) for address, target in branches.items()}}
 
 
-def weapon_binding(catalog, ids, faction, name):
+def weapon_binding(catalog, ids, faction, name, vehicle='APC'):
     namespace = f'FactionItemList{faction + 1}:'
     refs = [ref for ref, item in catalog['items'].items()
             if ref.startswith(namespace) and item['name'] == name]
-    require(len(refs) == 1, 'missing or ambiguous original APC primary item')
+    require(len(refs) == 1, f'missing or ambiguous original {vehicle} primary item')
     ref = refs[0]
     item = catalog['items'][ref]
     require(item['authored_ref'] == ref and item['item_type'] == 'kWeapon'
             and item['definition'] == {'group': 'weapons', 'name': name}
-            and 0 < ids[ref] < 4096, 'wrong original APC item identity')
+            and 0 < ids[ref] < 4096, f'wrong original {vehicle} item identity')
     definitions = catalog['definitions']
     weapon = definitions['weapons'][name]['parameters']
     ammo_name = weapon['ammo_name']
@@ -71,7 +71,7 @@ def weapon_binding(catalog, ids, faction, name):
             and weapon['initial_fire_mode'] == 'kAuto'
             and list(modes) == ['FireModeTypeClass0']
             and modes['FireModeTypeClass0']['FireModeTypeClass']['fire_mode_value'] == 'kAuto'
-            and ammo_name in definitions['hitscan_ammo'], 'wrong original APC primary hitscan mode')
+            and ammo_name in definitions['hitscan_ammo'], f'wrong original {vehicle} primary hitscan mode')
     return {'faction': faction, 'name': name, 'authored_ref': ref, 'wire_id': ids[ref],
             'ammo_name': ammo_name, 'ammo_group': 'hitscan_ammo',
             'definition_slots': [ids[ref], None, None]}
@@ -273,6 +273,19 @@ def project_profiles(source, source_hash, pairs, vehicle_type):
     return sorted(profiles, key=lambda row: (row['map_name'], row['spawn_catalog_sha256']))
 
 
+def wire_proof(native, equipment, item_members, binding_hash):
+    return {'native': native, 'family': 1, 'allocations': 32, 'row_fields': 30, 'index_bits': 16,
+            'owner_fields': [1, 6], 'owner_bits': 16, 'yaw_field_bits': [8, 11],
+            'pitch_field_bits': [9, 10], 'overheat_field_bits': [21, 8],
+            'inventory_definition': {'field': 10, 'version_bits': 8, 'id_bits': 12, 'slots': 3,
+                                     'first_populated_version': 2},
+            'equipment': {'fields': [11, 12], 'version_bits': 8, 'gear_bits': 5,
+                          'ammo_pool_bits': 2, 'ammo_count_bits': 8, 'reloading_bits': 1},
+            'dynamics_fields': [25, 26, 27, 28, 29],
+            'mounted_primary': {'gear': 0, 'pool': 0, 'mode': 0, 'variants': equipment},
+            'item_members_sha256': item_members, 'item_bindings_sha256': binding_hash}
+
+
 def project(source_raw, catalog_raw, binding_raw, pairs, read_game, read_main, decode_model, native):
     source = parse(source_raw)
     require(source['format'] == 'mag_domination_ground_sources_v1'
@@ -289,16 +302,7 @@ def project(source_raw, catalog_raw, binding_raw, pairs, read_game, read_main, d
     pose = {'scope': 'retail_named_apc_seat_reference', 'models': models,
             'ground_source_sha256': source_hash, 'retail_main_sha256': MAIN_ARCHIVE_SHA256,
             'seat_lookup_span': native['spans']['named_seat_lookup']}
-    wire = {'native': native, 'family': 1, 'allocations': 32, 'row_fields': 30, 'index_bits': 16,
-            'owner_fields': [1, 6], 'owner_bits': 16, 'yaw_field_bits': [8, 11],
-            'pitch_field_bits': [9, 10], 'overheat_field_bits': [21, 8],
-            'inventory_definition': {'field': 10, 'version_bits': 8, 'id_bits': 12, 'slots': 3,
-                                     'first_populated_version': 2},
-            'equipment': {'fields': [11, 12], 'version_bits': 8, 'gear_bits': 5,
-                          'ammo_pool_bits': 2, 'ammo_count_bits': 8, 'reloading_bits': 1},
-            'dynamics_fields': [25, 26, 27, 28, 29],
-            'mounted_primary': {'gear': 0, 'pool': 0, 'mode': 0, 'variants': equipment},
-            'item_members_sha256': item_members, 'item_bindings_sha256': sha(binding_raw)}
+    wire = wire_proof(native, equipment, item_members, sha(binding_raw))
     rules = {'schema': 'mag_domination_apc_turrets_v1',
              'source': {'item_catalog_sha256': sha(catalog_raw), 'retail_elf_sha256': RETAIL_ELF_SHA256,
                         'retail_archive_sha256': GAME_ARCHIVE_SHA256, 'retail_main_sha256': MAIN_ARCHIVE_SHA256,

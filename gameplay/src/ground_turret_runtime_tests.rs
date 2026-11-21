@@ -8,10 +8,15 @@ use crate::{
 };
 
 pub(crate) fn opt_in<W: Write>(engine: &mut Engine<W>, index: u16) {
+    let kind = match engine.match_profile().game_type {
+        1 => PolicyKind::Escort,
+        _ => PolicyKind::Apc,
+    };
     let grounds = engine.ground_vehicles.as_mut().unwrap();
     grounds.set_turret_policies(BTreeMap::from([(
         index,
         Policy {
+            kind,
             primary: 5,
             local_position_xyz: [1., 2., 3.],
         },
@@ -505,4 +510,123 @@ fn ground_turret_current_pose_exit_and_remount_require_fresh_equipment() {
         engine.ground_turret_snapshot(8).unwrap().fields.yaw,
         row.fields.yaw
     );
+}
+
+#[test]
+fn ground_primary_only_accepts_current_native_empty_secondary_without_arming_it() {
+    use crate::{
+        hospital_turret_wire::{Fields, Yaw},
+        spawn_progression::tests::dynamic_bodies::acquisition_gameplay_tests::delivery::delivery_fixture,
+    };
+
+    for kind in [PolicyKind::Apc, PolicyKind::Escort] {
+        let (mut engine, index, now) = match kind {
+            PolicyKind::Apc => (driver_engine(8), 8, 20),
+            PolicyKind::Escort => (delivery_fixture(), 4, 3250),
+        };
+        opt_in(&mut engine, index);
+        ready_on_foot(&mut engine, 1, now - 5);
+        let position = engine.current_ground_vehicle(index).unwrap().position;
+        engine.active.as_mut().unwrap().tracking.server_position(
+            position,
+            crate::player_tracking::PositionOrigin::ServerExit,
+            now - 5,
+        );
+        mount(&mut engine, index, 1, now).unwrap();
+        let actor = engine.active.as_ref().unwrap();
+        assert_eq!(engine.ground_gunner_kind(actor), Some(kind));
+        let version = engine
+            .ground_turret_snapshot(index)
+            .unwrap()
+            .definition
+            .unwrap()
+            .version;
+        let empty = InventoryItem {
+            ammo_count: 0,
+            gear_slot: 1,
+            ..primary(version)
+        };
+        let mut row = TurretUpdate {
+            index,
+            driver_owner: None,
+            turret_owner: None,
+            definition: None,
+            fields: Fields {
+                secondary: Some(empty),
+                ..Default::default()
+            },
+        };
+        report(&mut engine, 10, row, None, now + 1).unwrap();
+        assert_eq!(
+            engine.ground_turret_snapshot(index).unwrap().fields,
+            Fields::default()
+        );
+
+        row.fields.primary = Some(primary(version));
+        row.fields.yaw = Some(Yaw::new(72).unwrap());
+        for (offset, item) in [
+            InventoryItem {
+                inventory_update_id: version - 1,
+                ..empty
+            },
+            InventoryItem {
+                gear_slot: 0,
+                ..empty
+            },
+            InventoryItem {
+                gear_slot: 2,
+                ..empty
+            },
+            InventoryItem {
+                ammo_pool: 1,
+                ..empty
+            },
+            InventoryItem {
+                ammo_count: 1,
+                ..empty
+            },
+            InventoryItem {
+                reloading: true,
+                ..empty
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            row.fields.secondary = Some(item);
+            report(
+                &mut engine,
+                11 + offset as u32,
+                row,
+                None,
+                now + 2 + offset as u64,
+            )
+            .unwrap();
+            assert_eq!(
+                engine.ground_turret_snapshot(index).unwrap().fields,
+                Fields::default()
+            );
+        }
+        row.fields.primary = Some(empty);
+        row.fields.secondary = None;
+        report(&mut engine, 18, row, None, now + 9).unwrap();
+        assert_eq!(
+            engine.ground_turret_snapshot(index).unwrap().fields,
+            Fields::default()
+        );
+
+        row.fields.primary = Some(primary(version));
+        row.fields.secondary = Some(empty);
+        report(&mut engine, 19, row, None, now + 10).unwrap();
+        let snapshot = engine.ground_turret_snapshot(index).unwrap();
+        assert_eq!(snapshot.definition.unwrap().items, [Some(5), None, None]);
+        assert_eq!(snapshot.fields, row.fields);
+        assert_eq!(
+            engine
+                .ground_turret(index)
+                .unwrap()
+                .primary_for(engine.active.as_ref().unwrap()),
+            Some((5, primary(version), version))
+        );
+    }
 }

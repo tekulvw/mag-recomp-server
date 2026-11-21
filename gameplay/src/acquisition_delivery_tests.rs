@@ -495,3 +495,135 @@ fn acquisition_delivery_completes_both_stages_publishes_victory_and_requeues() {
     assert!(engine.ground_vehicle_is_operational(4));
     assert_eq!(primary_assignment(&engine), a + 1);
 }
+
+#[test]
+fn escort_delivery_records_gunner_revoke_with_state_and_rolls_back_on_failure() {
+    for fail_record in [false, true] {
+        let mut engine = delivery_fixture();
+        position(&mut engine, 1000., 1040.);
+        crate::ground_turrets::tests::opt_in(&mut engine, 4);
+        reserve(&mut engine, 1);
+        let vehicle = engine.current_ground_vehicle(4).unwrap();
+        let gunner = engine.active.as_mut().unwrap();
+        ready(gunner);
+        gunner.life = CharacterLife::Alive {
+            generation: 1,
+            health_quarter_points: 400,
+        };
+        gunner.ground_vehicle_batch = 1;
+        gunner.tracking.server_position(
+            vehicle.position,
+            player_tracking::PositionOrigin::ServerExit,
+            3250,
+        );
+        let mount: Vec<_> = 0x0216u16
+            .to_be_bytes()
+            .into_iter()
+            .chain(vehicle.object_id().to_be_bytes())
+            .chain(1u32.to_be_bytes())
+            .chain(0x0380_0001u32.to_be_bytes())
+            .collect();
+        dispatch(&mut engine, &mount, 3250).unwrap();
+        let gunner = engine.active.as_ref().unwrap();
+        assert_eq!(gunner.ground_seat.unwrap().seat, 1);
+        assert_eq!(
+            engine.ground_gunner_kind(gunner),
+            Some(crate::ground_turrets::PolicyKind::Escort)
+        );
+        let turret = engine
+            .ground_runtime
+            .as_ref()
+            .unwrap()
+            .get(4)
+            .unwrap()
+            .turret
+            .as_ref()
+            .unwrap();
+        let version = turret.definition(true).version;
+        let (ready_turret, _) = turret
+            .report(crate::hospital_turret_wire::Fields {
+                primary: Some(replication::InventoryItem {
+                    inventory_update_id: version,
+                    gear_slot: 0,
+                    ammo_pool: 0,
+                    ammo_count: 20,
+                    reloading: false,
+                }),
+                ..Default::default()
+            })
+            .unwrap();
+        engine
+            .ground_runtime
+            .as_mut()
+            .unwrap()
+            .install_turret(4, ready_turret);
+        let before = engine.ground_runtime.clone();
+        let initial_score = engine.acquisition_round.as_ref().unwrap().points();
+        let initial_log = engine.writer.clone();
+        let driver_queue = engine.peers["synthetic-reservation-0000"]
+            .pending_shared
+            .clone();
+        if fail_record {
+            engine.max_log = engine.written;
+        }
+        let result = engine.tick_acquisition_objectives(Duration::from_millis(3400), 4);
+        if fail_record {
+            assert_eq!(result.err(), Some("log_limit_reached"));
+            assert_eq!(engine.ground_runtime, before);
+            assert_eq!(engine.writer, initial_log);
+            assert_eq!(
+                engine.acquisition_round.as_ref().unwrap().points(),
+                initial_score
+            );
+            assert_eq!(engine.active.as_ref().unwrap().ground_seat.unwrap().seat, 1);
+            assert_eq!(
+                engine.peers["synthetic-reservation-0000"].pending_shared,
+                driver_queue
+            );
+            continue;
+        }
+        result.unwrap();
+        let vehicle = engine.ground_runtime.as_ref().unwrap().get(4).unwrap();
+        assert_eq!(vehicle.state, 8);
+        let turret = vehicle.turret.as_ref().unwrap();
+        assert!(!turret.has_grant());
+        let (remount, definition) = turret.mount(engine.active.as_ref().unwrap()).unwrap();
+        assert_eq!(definition.version, version + 1);
+        assert!(
+            remount
+                .primary_for(engine.active.as_ref().unwrap())
+                .is_none()
+        );
+        assert!(engine.active.as_ref().unwrap().ground_seat.is_none());
+        let driver = &engine.peers["synthetic-reservation-0000"];
+        assert!(driver.ground_seat.is_none());
+        assert_eq!(
+            engine.acquisition_round.as_ref().unwrap().points(),
+            [initial_score[0], initial_score[1] - 600]
+        );
+        assert!(
+            driver
+                .pending_shared
+                .iter()
+                .skip(driver_queue.len())
+                .any(|packet| {
+                    let profile = engine.wire_profile;
+                    if !replication::ObjectUpdate::decode_with_profile(packet, profile)
+                        .is_ok_and(|update| update.header.object_type_mask == 1 << 1)
+                    {
+                        return false;
+                    }
+                    let mut reader = replication::BitReader::with_profile(packet, profile);
+                    reader.position = profile.header_bits();
+                    reader.read(1) == Ok(1)
+                        && reader.read(16) == Ok(4)
+                        && reader.read(2) == Ok(1)
+                        && reader.read(16) == Ok(0x105)
+                        && reader.read(4) == Ok(1)
+                        && reader.read(8) == Ok(8)
+                        && reader.read(1) == Ok(1)
+                        && reader.read(16) == Ok(u32::from(u16::MAX))
+                })
+        );
+    }
+}

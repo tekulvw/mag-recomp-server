@@ -196,8 +196,8 @@ impl<W: Write> Engine<W> {
         let policy = self
             .ground_damage_policy()
             .ok_or("acquisition_ground_damage_unconfigured")?;
-        let mounted_primary = self.domination_gameplay.is_some()
-            && (self.is_ground_gunner(actor) || actor.is_indexed_hospital_gunner());
+        let mounted_primary = self.ground_gunner_accepts_ground_target(actor)
+            || (self.domination_gameplay.is_some() && actor.is_indexed_hospital_gunner());
         if !actor.entered_game
             || !actor.ready_for_updates
             || !actor.life.is_alive()
@@ -241,7 +241,8 @@ impl<W: Write> Engine<W> {
         };
         let (CharacterHitProfile::Retail(profile)
         | CharacterHitProfile::HospitalPrimary(profile)
-        | CharacterHitProfile::GroundApcPrimary(profile)) = profile
+        | CharacterHitProfile::GroundApcPrimary(profile)
+        | CharacterHitProfile::GroundEscortPrimary(profile)) = profile
         else {
             return Err("unsupported_ground_bullet_weapon");
         };
