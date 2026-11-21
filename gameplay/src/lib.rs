@@ -2232,3 +2232,6 @@ mod objective_counter_tests;
 
 #[cfg(test)]
 mod script_objective_reward_tests;
+
+#[cfg(test)]
+mod objective_action_timing_event_tests;

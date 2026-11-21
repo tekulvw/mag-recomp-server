@@ -468,15 +468,14 @@ impl<W: Write> Engine<W> {
                     })))
             && let Some(actor) = objectives::actor(active)
         {
-            let modifier = plan
-                .leadership
-                .modifiers(active)
-                .value("kCharModDemolitionTime");
+            let timings = objectives::action_timing(active, &plan.leadership);
             if self.acquisition_gameplay.is_some() {
                 return self.event_acquisition_structural(
                     &event,
                     acquisition_gameplay_engine::StructuralInput::Interaction(
-                        *request, actor, modifier,
+                        *request,
+                        actor,
+                        timings.demolition,
                     ),
                     plan.leadership,
                     now,
@@ -487,7 +486,7 @@ impl<W: Write> Engine<W> {
                 &event,
                 *request,
                 actor,
-                modifier,
+                timings,
                 plan.leadership,
                 now,
                 wall_secs,

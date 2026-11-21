@@ -1,6 +1,17 @@
 //! Typed objective interaction replies and shared authoritative countdowns.
 use super::*;
-use crate::objective_control::{ObjectiveActor, ObjectiveWorld};
+use crate::objective_control::{ActionTimingModifiers, ObjectiveActor, ObjectiveWorld};
+
+pub(super) fn action_timing(
+    active: &Active,
+    leadership: &leadership_runtime::LeadershipPlan,
+) -> ActionTimingModifiers {
+    let modifiers = leadership.modifiers(active);
+    ActionTimingModifiers {
+        secure_and_hold: modifiers.value("kCharModSecureAndHoldTime"),
+        demolition: modifiers.value("kCharModDemolitionTime"),
+    }
+}
 
 pub(super) fn actor(active: &Active) -> Option<ObjectiveActor> {
     let CharacterLife::Alive { generation, .. } = active.life else {
@@ -43,15 +54,8 @@ pub(super) fn interaction<W: Write>(
     } else if let Some(actor) = actor(ctx.active) {
         if let Some(mut world) = ctx.engine.objective_world.clone() {
             let previous_owner = world.interaction_owner(request.target_object_id as u16);
-            let modifier = plan
-                .leadership
-                .modifiers(ctx.active)
-                .value("kCharModDemolitionTime");
-            let outcome = if modifier == 0.0 {
-                world.interact(request, actor, ctx.now)
-            } else {
-                world.interact_with_demolition_modifier(request, actor, ctx.now, modifier)
-            };
+            let timings = action_timing(ctx.active, &plan.leadership);
+            let outcome = world.interact_with_action_timing(request, actor, ctx.now, timings);
             if let Some(delta) = outcome.changed
                 && let Some((player, generation, trigger)) = previous_owner
                 && generation == actor.generation

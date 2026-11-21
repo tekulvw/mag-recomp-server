@@ -463,7 +463,7 @@ fn player_start_and_release_commit_synchronously_with_reply_and_provider_guard()
             trigger_index: trigger,
         },
         actor,
-        timer_modifier: 0.,
+        timer_modifier: -0.2,
     };
     let wrong_actor = root
         .runtime
@@ -491,6 +491,22 @@ fn player_start_and_release_commit_synchronously_with_reply_and_provider_guard()
         Some(ObjectiveState::Retaking)
     );
     assert_eq!(armed.candidate.deltas.len(), 1);
+    assert_eq!(armed.candidate.deltas[0].expiration_time_ms, 101 + 37);
+    let timed = root
+        .runtime
+        .stage_interaction_with_timing(
+            frame(101, &root.world, &root.spawns, &root.round),
+            command(Deactivate, 3, 0).request,
+            actor,
+            ActionTimingModifiers {
+                secure_and_hold: -0.5,
+                demolition: f32::NAN,
+            },
+            Spy::default(),
+        )
+        .unwrap();
+    assert_eq!(timed.reply.kind, Ack);
+    assert_eq!(timed.candidate.deltas[0].expiration_time_ms, 101 + 18);
     assert_eq!(root.world.state(1), Some(ObjectiveState::Completed));
     assert_eq!(armed.candidate.runtime.callbacks.pending_count(), 1);
 
