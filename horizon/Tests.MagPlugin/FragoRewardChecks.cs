@@ -6,6 +6,7 @@ using Server.Medius;
 internal static partial class LeadershipProgressionChecks
 {
     private const string FragoCapability = "frago_kill_bonus_v1";
+    private const string FragoActionCapability = "frago_action_bonus_v1";
 
     public static void FragoBridgeSchema()
     {
@@ -14,7 +15,7 @@ internal static partial class LeadershipProgressionChecks
         Check(Parse(RewardReply("enemy_killed", qualified), out _), "Qualified kill receipt rejected");
         foreach (string invalid in new[] { "false", "null", "1", "\"true\"", "{}" })
             Check(!Parse(RewardReply("enemy_killed", ",\"frago\":" + invalid), out _), "Malformed FRAGO fact accepted");
-        foreach (string kind in new[] { "enemy_finished", "teammate_healed", "match_minor_victory" })
+        foreach (string kind in new[] { "enemy_finished", "match_minor_victory" })
             Check(!Parse(RewardReply(kind, qualified), out _), "FRAGO fact accepted on another reward kind");
         var bulk = RewardReply("enemy_killed", qualified);
         bulk["rewards"]![0]!["units"] = 2;
@@ -48,13 +49,14 @@ internal static partial class LeadershipProgressionChecks
         }
     });
 
-    private static Task SettleFragoReply(LocalDmeHost host, JsonObject admission, string id, bool qualifying = true)
+    private static Task SettleFragoReply(LocalDmeHost host, JsonObject admission, string id, bool qualifying = true, string kind = "enemy_killed", int units = 1)
     {
-        var response = RewardReply("enemy_killed", qualifying ? ",\"frago\":true" : "");
+        var response = RewardReply(kind, qualifying ? ",\"frago\":true" : "");
         var reward = response["rewards"]![0]!;
         reward["reward_id"] = id;
+        reward["units"] = units;
         foreach (string key in new[] { "reservation_id", "world_id", "player_id" }) reward[key] = admission[key]!.DeepClone();
-        Check(Parse(response, out var parsed), "Synthetic kill reward rejected by bridge codec");
+        Check(Parse(response, out var parsed), "Synthetic reward rejected by bridge codec");
         return InvokeHost(host, "SettleRewardsAsync", parsed).WaitAsync(AdmissionTimeout);
     }
 
@@ -92,7 +94,7 @@ internal static partial class LeadershipProgressionChecks
                 Check((await BeginJoin(host, session).WaitAsync(AdmissionTimeout)).Result == 0, "Older-worker synthetic admission failed");
                 var character = bridge.Latest("reserve")["character"]!.AsObject();
                 Check(!character.ContainsKey("frago_bonus_enabled"), "New Horizon sent an unknown FRAGO admission field to an older worker");
-            }, capability).GetAwaiter().GetResult();
+            }, capability == null ? Array.Empty<string>() : new[] { capability }).GetAwaiter().GetResult();
         }
     });
 
@@ -171,7 +173,7 @@ internal static partial class LeadershipProgressionChecks
             "Visible uncertain FRAGO settlement did not replay its original XP and tally");
         before = File.ReadAllBytes(path);
         Check(Settle(store, "explicit-false", frago: false).Result != MagNetResult.Success &&
-            Settle(store, "wrong-kind", "teammate_healed").Result != MagNetResult.Success &&
+            Settle(store, "wrong-kind", "enemy_finished").Result != MagNetResult.Success &&
             Settle(store, "bulk", units: 2).Result != MagNetResult.Success && before.SequenceEqual(File.ReadAllBytes(path)),
             "Direct settlement accepted a malformed FRAGO fact");
 
@@ -200,5 +202,148 @@ internal static partial class LeadershipProgressionChecks
         try { store.ReadAll(); }
         catch (InvalidDataException) { return; }
         throw new Exception("FRAGO receipt was accepted without its immutable tally snapshot");
+    });
+
+    public static void FragoActionBridgeSchema()
+    {
+        foreach (var (kind, units, accepted) in new[] {
+            ("teammate_healed", 0, false), ("teammate_healed", 1, true), ("teammate_healed", 65535, true),
+            ("teammate_healed", 65536, false), ("teammate_resuscitated", 1, true), ("teammate_resuscitated", 2, false)
+        })
+        {
+            var response = RewardReply(kind, ",\"frago\":true");
+            response["rewards"]![0]!["units"] = units;
+            Check(Parse(response, out _) == accepted, $"Wrong contextual receipt validation for {kind} with {units} units");
+        }
+        Check(!Parse(RewardReply("teammate_resuscitated", ",\"frago\":false"), out _), "Explicit false accepted on revive");
+        Check(Parse(RewardReply("teammate_resuscitated", ""), out _), "Ordinary revive receipt rejected");
+    }
+
+    private static JsonObject FragoActionCatalog(string coefficient, float? resuscitations)
+    {
+        var catalog = FragoCatalog(coefficient);
+        if (resuscitations is float award) catalog["table"]!["Awards"]!["Resuscitations"] = award;
+        return catalog;
+    }
+
+    public static void FragoActionAdmissionCapability() => WithDirectory(directory =>
+    {
+        const string flag = "frago_action_bonus_enabled";
+        string path = Path.Combine(directory, "characters.json");
+        var authored = Load(directory, FragoActionCatalog("0", 0));
+        var missingRevive = Load(directory, FragoActionCatalog("0", null));
+        var missingCoefficient = Load(directory, FragoActionCatalog(null, 0));
+        var store = new LocalCharacterStore(path) { ProgressionCatalog = authored };
+        Create(store, "alpha", "Alpha");
+        foreach (string[] capabilities in new[] {
+            Array.Empty<string>(), new[] { FragoCapability }, new[] { FragoCapability, "FRAGO_ACTION_BONUS_V1" }
+        })
+        {
+            WithAdmission(store, async (host, bridge, session) =>
+            {
+                Check((await BeginJoin(host, session).WaitAsync(AdmissionTimeout)).Result == 0, "Older worker admission failed");
+                var character = bridge.Latest("reserve")["character"]!.AsObject();
+                Check(!character.ContainsKey(flag), "Older worker received an unknown action field");
+                Check((character["frago_bonus_enabled"]?.GetValue<bool>() == true) == capabilities.Contains(FragoCapability),
+                    "Older worker kill negotiation changed");
+            }, capabilities).GetAwaiter().GetResult();
+        }
+        WithAdmission(store, async (host, bridge, session) =>
+        {
+            store.ProgressionCatalog = missingRevive;
+            Check((await BeginJoin(host, session).WaitAsync(AdmissionTimeout)).Result == 0, "Missing-rule synthetic admission failed");
+            var disabled = bridge.Latest("reserve");
+            Check(disabled["character"]![flag]?.GetValue<bool>() == false &&
+                disabled["character"]!["frago_bonus_enabled"]?.GetValue<bool>() == true,
+                "Missing revive rule did not disable support independently of kills");
+            store.ProgressionCatalog = authored;
+            byte[] before = File.ReadAllBytes(path);
+            await SettleFragoReply(host, disabled, "unsolicited-heal", kind: "teammate_healed", units: 2);
+            Check(before.SequenceEqual(File.ReadAllBytes(path)) &&
+                !bridge.Requests.Any(request => request["op"]!.GetValue<string>() == "progression_committed"),
+                "A disabled reservation committed or acknowledged unsolicited support context");
+            await SettleFragoReply(host, disabled, "ordinary-heal", qualifying: false, kind: "teammate_healed", units: 2);
+            var ordinary = bridge.Latest("progression_committed");
+            Check(ordinary["match_experience"]!.GetValue<int>() == 1 && !ordinary.ContainsKey("match_frago_points"),
+                "Disabled support context changed ordinary heal XP");
+            await Release(host, disabled).WaitAsync(AdmissionTimeout);
+
+            store.ProgressionCatalog = missingCoefficient;
+            Check((await BeginJoin(host, session).WaitAsync(AdmissionTimeout)).Result == 0, "Missing-coefficient synthetic admission failed");
+            var withoutCoefficient = bridge.Latest("reserve");
+            Check(withoutCoefficient["character"]![flag]?.GetValue<bool>() == false, "Action enabled without coefficient");
+            await Release(host, withoutCoefficient).WaitAsync(AdmissionTimeout);
+
+            store.ProgressionCatalog = authored;
+            Check((await BeginJoin(host, session).WaitAsync(AdmissionTimeout)).Result == 0, "Authored zero support admission failed");
+            var enabled = bridge.Latest("reserve");
+            Check(enabled["character"]![flag]?.GetValue<bool>() == true && enabled["character"]!["frago_bonus_enabled"]?.GetValue<bool>() == true,
+                "Authored zero rules did not enable support and kills");
+            await SettleFragoReply(host, enabled, "zero-frago-revive", kind: "teammate_resuscitated");
+            var zero = bridge.Latest("progression_committed");
+            Check(zero["match_frago_points"]!.GetValue<int>() == 0 && zero["match_experience"]!.GetValue<int>() == 1,
+                "Zero qualified revive did not preserve ordinary XP or return an explicit tally");
+        }, FragoCapability, FragoActionCapability).GetAwaiter().GetResult();
+    });
+
+    public static void FragoActionDurableSettlement() => WithDirectory(directory =>
+    {
+        string path = Path.Combine(directory, "characters.json");
+        var authored = Load(directory, FragoActionCatalog("0.5", 11.5f));
+        var missingRevive = Load(directory, FragoActionCatalog("0.5", null));
+        var store = new LocalCharacterStore(path) { ProgressionCatalog = authored };
+        Create(store, "alpha", "Alpha");
+        Create(store, "beta", "Beta");
+        var other = JsonNode.Parse(File.ReadAllBytes(path))!["characters"]![1]!.DeepClone();
+        WithAdmission(store, async (host, bridge, session) =>
+        {
+            string match = $"world-{host.World.WorldId}-synthetic-match-123";
+            var seed = store.ApplyRewardForAccount("alpha", 1, "fraction", match, "teammate_healed", 1);
+            Check(seed.MatchFraction == 0.625f, "Whole heal carry setup failed");
+            Check((await BeginJoin(host, session).WaitAsync(AdmissionTimeout)).Result == 0, "Support synthetic admission failed");
+            var admitted = bridge.Latest("reserve");
+            await SettleFragoReply(host, admitted, "support-heal", kind: "teammate_healed", units: 7);
+            var heal = bridge.Latest("progression_committed");
+            Check(heal["match_experience"]!.GetValue<int>() == 7 && heal["match_frago_points"]!.GetValue<int>() == 2,
+                "Qualified heal failed to use variable units and prior carry");
+
+            store.ProgressionCatalog = missingRevive;
+            byte[] before = File.ReadAllBytes(path);
+            int requests = bridge.Requests.Count;
+            await SettleFragoReply(host, admitted, "support-revive", kind: "teammate_resuscitated");
+            Check(before.SequenceEqual(File.ReadAllBytes(path)) && bridge.Requests.Count == requests,
+                "Missing authored revive changed the store or acknowledged a qualified receipt");
+
+            store.ProgressionCatalog = authored;
+            await SettleFragoReply(host, admitted, "support-revive", kind: "teammate_resuscitated");
+            var revive = bridge.Latest("progression_committed");
+            Check(revive["match_experience"]!.GetValue<int>() == 23 && revive["match_frago_points"]!.GetValue<int>() == 7 &&
+                revive["progression"]!["level"]!.GetValue<int>() == 2 && revive["progression"]!["skill_points"]!.GetValue<int>() == 3 &&
+                revive["leadership"]!["leadership_level"]!.GetValue<int>() == 2 && !revive.ContainsKey("match_leadership_points"),
+                "Qualified revive failed to accumulate support XP, stat 3 and progression together");
+
+            await SettleFragoReply(host, admitted, "frago-kill");
+            var kill = bridge.Latest("progression_committed");
+            Check(kill["match_experience"]!.GetValue<int>() == 39 && kill["match_frago_points"]!.GetValue<int>() == 12,
+                "Kill and support contexts did not share the existing tally");
+            var reopened = new LocalCharacterStore(path) { ProgressionCatalog = authored };
+            var final = reopened.ApplyRewardForAccount("alpha", 1, "round-result", match, "match_minor_victory", 1);
+            Check(final.Experience == 43 && final.MatchFraction == 0.5f && final.MatchFragoPoints == null,
+                "Final award failed to use the accumulated battle XP while preserving carry");
+
+            store.ProgressionCatalog = missingRevive;
+            before = File.ReadAllBytes(path);
+            requests = bridge.Requests.Count;
+            await SettleFragoReply(host, admitted, "support-revive", qualifying: false, kind: "teammate_resuscitated");
+            await SettleFragoReply(host, admitted, "support-heal", kind: "teammate_healed", units: 8);
+            Check(before.SequenceEqual(File.ReadAllBytes(path)) && bridge.Requests.Count == requests,
+                "Context or quantity changed on a committed support receipt");
+            await SettleFragoReply(host, admitted, "support-revive", kind: "teammate_resuscitated");
+            var replay = bridge.Latest("progression_committed").DeepClone().AsObject();
+            replay["request_id"] = revive["request_id"]!.DeepClone();
+            Check(JsonNode.DeepEquals(revive, replay) && before.SequenceEqual(File.ReadAllBytes(path)),
+                "Finalized support replay did not return the original tally after removing the authored rule");
+            Check(JsonNode.DeepEquals(other, JsonNode.Parse(before)!["characters"]![1]), "Support rewards changed another account's row");
+        }, FragoCapability, FragoActionCapability).GetAwaiter().GetResult();
     });
 }

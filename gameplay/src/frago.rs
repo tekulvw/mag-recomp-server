@@ -1,8 +1,9 @@
-//! Source-bound contextual kill eligibility; XP arithmetic belongs to Horizon.
+//! Source-bound contextual reward eligibility; XP arithmetic belongs to Horizon.
 use super::*;
 use std::collections::BTreeSet;
 
 pub(crate) const CAPABILITY: &str = "frago_kill_bonus_v1";
+pub(crate) const ACTION_CAPABILITY: &str = "frago_action_bonus_v1";
 
 /// Accepted event poses precede queued damage, but install after recording.
 #[derive(Clone, Copy, Default)]
@@ -143,7 +144,7 @@ impl<W: Write> Engine<W> {
     }
     pub(crate) fn frago_kill_reward(
         &self,
-        mut event: progression::RewardEvent,
+        event: progression::RewardEvent,
         killer: &Active,
         context_position: Option<[f32; 3]>,
         frame: Frame<'_>,
@@ -159,6 +160,34 @@ impl<W: Write> Engine<W> {
         {
             return event;
         }
+        self.frago_contextual_reward(event, killer, context_position, frame)
+    }
+    pub(crate) fn frago_action_reward(
+        &self,
+        event: progression::RewardEvent,
+        actor: &Active,
+        context_position: Option<[f32; 3]>,
+        frame: Frame<'_>,
+    ) -> progression::RewardEvent {
+        if !event.kind.is_frago_action(event.units)
+            || !actor
+                .reservation
+                .character
+                .frago_action_bonus_enabled
+                .unwrap_or(false)
+            || actor.wire_profile.application_id() != 20231
+        {
+            return event;
+        }
+        self.frago_contextual_reward(event, actor, context_position, frame)
+    }
+    fn frago_contextual_reward(
+        &self,
+        mut event: progression::RewardEvent,
+        actor: &Active,
+        context_position: Option<[f32; 3]>,
+        frame: Frame<'_>,
+    ) -> progression::RewardEvent {
         let Some(rules) = self
             .objective_catalog
             .as_ref()
@@ -166,7 +195,7 @@ impl<W: Write> Engine<W> {
         else {
             return event;
         };
-        let squad = killer.squad_catalog.squad_index();
+        let squad = actor.squad_catalog.squad_index();
         let assignment = self
             .acquisition_gameplay
             .as_ref()
@@ -184,7 +213,7 @@ impl<W: Write> Engine<W> {
         } else {
             0x0c80_0000 | u32::from(assignment.primary_index)
         };
-        let actor_position = self.frago_character_position(killer, frame);
+        let actor_position = self.frago_character_position(actor, frame);
         for target in [assignment.tagged_object, primary] {
             if target == u32::MAX {
                 continue;

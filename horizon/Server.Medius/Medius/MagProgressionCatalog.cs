@@ -37,6 +37,7 @@ namespace Server.Medius
         public byte InitialSkillPoints { get; private set; }
         public uint? InitialLeadershipPoints { get; private set; }
         internal bool FragoBonusEnabled => _fragoBonusModifier.HasValue;
+        internal bool FragoActionBonusEnabled => FragoBonusEnabled && _optionalActionAwards.ContainsKey("teammate_resuscitated");
         private MagProgressionCatalog() { }
         public static MagProgressionCatalog Load(string path, int applicationId = 20230)
         {
@@ -212,8 +213,11 @@ namespace Server.Medius
         internal static bool IsFinalRewardKind(string kind) => kind != null && VictoryModifierKeys.ContainsKey(kind);
         internal static bool ValidKindUnits(string kind, int units) => units > 0 && units <= ushort.MaxValue &&
             (kind == "teammate_healed" || units == 1 && (kind == "enemy_killed" || kind != null && (ObjectiveAwardKeys.ContainsKey(kind) || OptionalActionAwardKeys.ContainsKey(kind) || IsFinalRewardKind(kind))));
+        internal static bool IsFragoSupportKind(string kind) => kind is "teammate_healed" or "teammate_resuscitated";
         internal static bool ValidFragoContext(string kind, int units, bool? frago) =>
-            frago == null || frago == true && kind == "enemy_killed" && units == 1;
+            frago == null || frago == true && (kind == "enemy_killed" || IsFragoSupportKind(kind)) && ValidKindUnits(kind, units);
+        internal bool CanApplyFragoBonus(string kind) =>
+            kind == "teammate_resuscitated" ? FragoActionBonusEnabled : FragoBonusEnabled;
         internal bool TryFinalAward(string kind, int units, int matchExperience, out int experience)
         {
             experience = 0;

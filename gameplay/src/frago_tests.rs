@@ -29,14 +29,7 @@ fn fixture() -> Engine<Vec<u8>> {
         spawn_progression::tests::dynamic_bodies::acquisition_gameplay_tests::capture_fixture();
     let mut e = human_kill_reward_tests::configured_fixture(base);
     e.match_started = true;
-    let map_name = e.map_name().to_owned();
-    let catalog = e.objective_catalog.as_mut().unwrap();
-    let input = json!({"schema_version":1,"map_name":"synthetic_arena","game_type":1,"source":{"authored_catalog_sha256":catalog.source().authored_catalog_sha256,
-        "progression_catalog_sha256":"b".repeat(64),"source_image_sha256":catalog.source().source_image_sha256},
-        "vehicle_range":7.,"objectives":catalog.objects.iter().map(|o|json!({"object_index":o.object_index,"position":[100.,3.,100.],"radius":5.})).collect::<Vec<_>>()});
-    let mut input = input;
-    input["map_name"] = json!(map_name);
-    catalog.frago = Some(serde_json::from_value(input).unwrap());
+    configure_geometry(&mut e);
     let killer = e.active.as_mut().unwrap();
     killer.reservation.character.frago_bonus_enabled = Some(true);
     killer.tracking.server_position(
@@ -72,6 +65,17 @@ fn fixture() -> Engine<Vec<u8>> {
         tagged_object: 0x0c80_0064,
     };
     e
+}
+
+pub(crate) fn configure_geometry(e: &mut Engine<Vec<u8>>) {
+    let map_name = e.map_name().to_owned();
+    let catalog = e.objective_catalog.as_mut().unwrap();
+    let input = json!({"schema_version":1,"map_name":"synthetic_arena","game_type":1,"source":{"authored_catalog_sha256":catalog.source().authored_catalog_sha256,
+        "progression_catalog_sha256":"b".repeat(64),"source_image_sha256":catalog.source().source_image_sha256},
+        "vehicle_range":7.,"objectives":catalog.objects.iter().map(|o|json!({"object_index":o.object_index,"position":[100.,3.,100.],"radius":5.})).collect::<Vec<_>>()});
+    let mut input = input;
+    input["map_name"] = json!(map_name);
+    catalog.frago = Some(serde_json::from_value(input).unwrap());
 }
 fn kill(e: &mut Engine<Vec<u8>>) -> progression::RewardEvent {
     let before: std::collections::BTreeSet<_> = e.pending_rewards.keys().cloned().collect();

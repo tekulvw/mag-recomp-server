@@ -527,7 +527,7 @@ namespace Server.Medius
                     return Deny("reward-receipt-mismatch");
                 return existing.Snapshot.Copy(true); // Historical response stays exact after further actions or purchases.
             }
-            if (frago == true && !catalog.FragoBonusEnabled) return Deny("frago-bonus-unavailable");
+            if (frago == true && !catalog.CanApplyFragoBonus(kind)) return Deny("frago-bonus-unavailable");
             if (document.RewardReceipts.Count >= MaximumRewardReceipts) return Deny("reward-receipt-ledger-full");
             string progressKey = MatchProgressKey(account, characterId, matchKey);
             document.MatchRewardProgress.TryGetValue(progressKey, out var progress);

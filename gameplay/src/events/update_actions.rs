@@ -288,11 +288,29 @@ pub(super) fn plan_healing_tick<W: Write>(
         {
             for (tick, units) in &receipts {
                 if *units > 0 {
-                    plan.combat.new_rewards.push(healer.event(
+                    let reward = healer.event(
                         format!("{}-{tick:02x}", effect.effect_id),
                         progression::RewardKind::TeammateHealed,
                         *units,
-                    ));
+                    );
+                    let frame = plan.frago_frame(ctx.engine);
+                    let current_healer = ctx
+                        .engine
+                        .active
+                        .iter()
+                        .chain(ctx.engine.peers.values())
+                        .find(|actor| healer.matches_active(actor));
+                    let reward = if let Some(actor) = current_healer {
+                        ctx.engine.frago_action_reward(
+                            reward,
+                            actor,
+                            ctx.engine.frago_character_position(active, frame),
+                            frame,
+                        )
+                    } else {
+                        reward
+                    };
+                    plan.combat.new_rewards.push(reward);
                 }
             }
         }

@@ -24,10 +24,9 @@ internal static partial class LeadershipProgressionChecks
         public ConcurrentQueue<JsonObject> Requests { get; } = new();
         public GameplayBridge Client { get; }
 
-        public FixtureBridge(string capability)
+        public FixtureBridge(string[] capabilities)
         {
-            _capabilities = new[] { "committed_loadout_selection_v1", "active_loadout_refresh_v1" };
-            if (capability != null) _capabilities = _capabilities.Append(capability).ToArray();
+            _capabilities = new[] { "committed_loadout_selection_v1", "active_loadout_refresh_v1" }.Concat(capabilities).ToArray();
             _listener.Start();
             Client = new GameplayBridge("127.0.0.1", ((IPEndPoint)_listener.LocalEndpoint).Port);
             _worker = AnswerAsync();
@@ -83,14 +82,14 @@ internal static partial class LeadershipProgressionChecks
         }
     }
 
-    private static async Task WithAdmission(LocalCharacterStore store, Func<LocalDmeHost, FixtureBridge, MagMlsSession, Task> test, string capability = null)
+    private static async Task WithAdmission(LocalCharacterStore store, Func<LocalDmeHost, FixtureBridge, MagMlsSession, Task> test, params string[] capabilities)
     {
         var settings = Server.Medius.Program.Settings;
         int previousApp = settings.MagApplicationId;
         settings.MagApplicationId = 20231;
         try
         {
-            await using var bridge = new FixtureBridge(capability);
+            await using var bridge = new FixtureBridge(capabilities);
             await using var host = new LocalDmeHost(bridge.Client, store);
             // Supply only an in-memory world and readiness. StartAsync would open production listeners.
             var hello = await bridge.Client.RequestHelloAsync(new { v = 2, request_id = "synthetic-hello", op = "hello" });

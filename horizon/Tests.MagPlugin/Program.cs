@@ -52,6 +52,9 @@ Test("FRAGO admission omits the field for older gameplay workers", LeadershipPro
 Test("FRAGO admission capability and zero award", LeadershipProgressionChecks.FragoAdmissionCapability);
 Test("FRAGO durable XP and match points settlement", LeadershipProgressionChecks.FragoDurableSettlement);
 Test("FRAGO failed commit, overflow and malformed receipt", LeadershipProgressionChecks.FragoFailedCommitAndOverflow);
+Test("FRAGO support reward bridge schema", LeadershipProgressionChecks.FragoActionBridgeSchema);
+Test("FRAGO support admission compatibility", LeadershipProgressionChecks.FragoActionAdmissionCapability);
+Test("FRAGO support durable XP and match points settlement", LeadershipProgressionChecks.FragoActionDurableSettlement);
 Test("leadership terminal reward bridge schema", LeadershipProgressionChecks.BridgeSchema);
 Test("leadership authored creation and ordinary XP promotion", LeadershipProgressionChecks.CreationAndExperience);
 Test("leadership optional authored table validation", LeadershipProgressionChecks.CatalogValidation);

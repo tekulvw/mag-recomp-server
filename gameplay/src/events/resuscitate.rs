@@ -106,18 +106,34 @@ pub(super) fn plan<W: Write>(
             payload_hex: protocol::encode_hex(&notice),
         });
     }
-    statistics::resuscitated(plan, healer);
-    let sequence = healer
-        .healing_sequence
-        .checked_add(1)
-        .ok_or("healing_sequence_exhausted")?;
-    plan.combat.new_healing_sequence = Some(sequence);
-    if let Some(recipient) = progression::RewardRecipient::from_active(healer) {
-        plan.combat.new_rewards.push(recipient.event(
-            format!("revive-{}-{sequence:016x}", healer.reservation.id),
-            progression::RewardKind::TeammateResuscitated,
-            1,
-        ));
+    // Retail uses the remembered attacker before changing the patient's life.
+    // Friendly damage suppresses credit, never the revival or notification.
+    if !ctx.engine.attacker_is_friendly(
+        patient.last_damage.last_attacker,
+        healer.reservation.world,
+        healer.team(),
+    ) {
+        statistics::resuscitated(plan, healer);
+        let sequence = healer
+            .healing_sequence
+            .checked_add(1)
+            .ok_or("healing_sequence_exhausted")?;
+        plan.combat.new_healing_sequence = Some(sequence);
+        if let Some(recipient) = progression::RewardRecipient::from_active(healer) {
+            let reward = recipient.event(
+                format!("revive-{}-{sequence:016x}", healer.reservation.id),
+                progression::RewardKind::TeammateResuscitated,
+                1,
+            );
+            let frame = plan.frago_frame(ctx.engine);
+            let reward = ctx.engine.frago_action_reward(
+                reward,
+                healer,
+                ctx.engine.frago_character_position(patient, frame),
+                frame,
+            );
+            plan.combat.new_rewards.push(reward);
+        }
     }
     Ok(
         json!({"type":"resuscitate","accepted":true,"healer":healer.reservation.player,

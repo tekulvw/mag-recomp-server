@@ -217,6 +217,8 @@ pub struct Character {
     pub leadership_progression_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frago_bonus_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frago_action_bonus_enabled: Option<bool>,
 }
 fn deserialize_skills<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -1467,6 +1469,7 @@ impl<W: Write> Engine<W> {
                         loadout_selection::CAPABILITY.into(),
                         loadout_refresh::CAPABILITY.into(),
                         frago::CAPABILITY.into(),
+                        frago::ACTION_CAPABILITY.into(),
                     ];
                     if self.match_profiles.is_some() {
                         capabilities.push(match_profiles::CAPABILITY.into());
@@ -2107,5 +2110,7 @@ mod leadership_auto_repair_tests;
 #[cfg(test)]
 mod leadership_progression_tests;
 
+#[cfg(test)]
+mod frago_support_tests;
 #[cfg(test)]
 mod frago_tests;
