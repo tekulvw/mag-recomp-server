@@ -264,10 +264,9 @@ impl<W: Write> Engine<W> {
     pub(crate) fn source_frag_owner_updates(&self) -> bool {
         self.frag_character_blast
             || self.ground_frag_areas().is_some()
-            || self
-                .domination_gameplay
-                .as_ref()
-                .is_some_and(|world| world.has_helo_frag_damage_areas())
+            || self.domination_gameplay.as_ref().is_some_and(|world| {
+                world.has_helo_frag_damage_areas() || world.has_hospital_blast_areas()
+            })
     }
 
     /// Explicit replacement gameplay configuration, separate from the native

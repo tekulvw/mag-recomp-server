@@ -372,6 +372,40 @@ struct Bunker {
     vehicle_state: VehicleState,
     turret_destruction_started: bool,
 }
+
+impl Bunker {
+    fn domination_damageable(&self) -> bool {
+        self.domination.is_some()
+            && self.vehicle_state == VehicleState::Operational
+            && !self.health.destroyed
+            && self.health.conditions() & 4 == 0
+    }
+
+    fn apply_vehicle_damage(
+        &mut self,
+        amount: f32,
+        attacker: u32,
+        location_and_type: u8,
+        user_data: u32,
+        now: Duration,
+    ) -> Result<Option<VehicleDamage>, &'static str> {
+        if amount == 0. {
+            return Ok(None);
+        }
+        self.health.damage(amount)?;
+        self.last_health_update = now;
+        self.damage = VehicleDamage {
+            last_location_and_type: location_and_type,
+            health_quarter_points: self.health.wire_health(),
+            conditions: self.health.conditions(),
+            last_attacker: attacker,
+            last_source_object: u32::MAX,
+            last_user_data: user_data,
+        };
+        Ok(Some(self.damage))
+    }
+}
+
 #[derive(Clone)]
 pub struct BunkerWorld {
     catalog: StructureCatalog,
@@ -383,10 +417,84 @@ pub struct BunkerWorld {
     pending_placements: usize,
     commands: BTreeMap<String, (u16, f32)>,
 }
+
+#[derive(Default)]
+pub(crate) struct HospitalDamagePatch {
+    changes: Vec<(u16, HospitalDamageState)>,
+}
+
+pub(crate) struct HospitalBlastDose {
+    pub(crate) vehicle_hp: f32,
+    pub(crate) radial_scale: f32,
+    pub(crate) source_team: u8,
+    pub(crate) attacker: u32,
+    pub(crate) location: u8,
+    pub(crate) user_data: u32,
+}
+
+pub(crate) struct HospitalBlastHit {
+    pub(crate) amount_hp: f32,
+    pub(crate) before_quarters: u16,
+    pub(crate) after_quarters: u16,
+}
+
+struct HospitalDamageState {
+    health: BunkerHealth,
+    damage: VehicleDamage,
+    last_health_update: Duration,
+}
+
+impl HospitalDamagePatch {
+    pub(crate) fn install(self, world: &mut BunkerWorld) {
+        for (index, state) in self.changes {
+            let bunker = world
+                .bunkers
+                .get_mut(&index)
+                .expect("prepared hospital damage target");
+            bunker.health = state.health;
+            bunker.damage = state.damage;
+            bunker.last_health_update = state.last_health_update;
+        }
+    }
+
+    pub(crate) fn encode(
+        &self,
+        now: Duration,
+        profile: crate::wire_profile::WireProfile,
+    ) -> Result<Option<Vec<u8>>, &'static str> {
+        if self.changes.is_empty() {
+            return Ok(None);
+        }
+        let deltas: Vec<_> = self
+            .changes
+            .iter()
+            .map(|(index, state)| BunkerDelta {
+                index: *index,
+                damage: state.damage,
+            })
+            .collect();
+        BunkerDelta::encode_list_with_profile(&deltas, 1, now.as_millis() as u32, profile).map(Some)
+    }
+}
 fn invalid(e: impl ToString) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, e.to_string())
 }
 impl BunkerWorld {
+    #[cfg(test)]
+    pub(crate) fn set_synthetic_hospital_transform(
+        &mut self,
+        index: u16,
+        transform: vehicle_exit::BunkerTransform,
+    ) {
+        self.bunkers
+            .get_mut(&index)
+            .unwrap()
+            .exit
+            .as_mut()
+            .unwrap()
+            .transform = transform;
+    }
+
     pub fn load(
         placements: impl AsRef<Path>,
         structures: impl AsRef<Path>,
@@ -634,36 +742,118 @@ impl BunkerWorld {
             .get_mut(&index)
             .filter(|bunker| bunker.domination.is_some())
             .ok_or("unknown_domination_hospital_bullet_target")?;
-        if bunker.vehicle_state != VehicleState::Operational
-            || bunker.health.destroyed
-            || bunker.health.conditions() & 4 != 0
-        {
+        if !bunker.domination_damageable() {
             return Err("domination_hospital_bullet_target_not_damageable");
         }
         if request.hit_location > 15 {
             return Err("invalid_domination_hospital_hit_location");
         }
-        if amount == 0.0 {
+        Ok(bunker
+            .apply_vehicle_damage(
+                amount,
+                attacker,
+                0x10 | request.hit_location,
+                request.client_data,
+                now,
+            )?
+            .map(|damage| DominationBunkerUpdate {
+                object_index: index,
+                state: None,
+                damage: Some(damage),
+                kills_occupants: false,
+                destroys_turret: false,
+                restores_turret: false,
+            }))
+    }
+
+    pub(crate) fn hospital_damageable(&self, index: u16) -> bool {
+        self.bunkers
+            .get(&index)
+            .is_some_and(Bunker::domination_damageable)
+    }
+
+    pub(crate) fn damageable_domination_hospitals(
+        &self,
+    ) -> impl Iterator<Item = DominationBunker<'_>> {
+        self.bunkers.iter().filter_map(|(&index, bunker)| {
+            bunker
+                .domination_damageable()
+                .then(|| self.domination_bunker(index))
+                .flatten()
+        })
+    }
+
+    pub(crate) fn apply_classified_hospital_blast(
+        &mut self,
+        index: u16,
+        dose: HospitalBlastDose,
+        now: Duration,
+    ) -> Result<Option<HospitalBlastHit>, &'static str> {
+        let bunker = self
+            .bunkers
+            .get_mut(&index)
+            .filter(|bunker| bunker.domination.is_some())
+            .ok_or("unknown_domination_hospital_blast_target")?;
+        if !bunker.domination_damageable() {
             return Ok(None);
         }
-        bunker.health.damage(amount)?;
-        bunker.last_health_update = now;
-        bunker.damage = VehicleDamage {
-            last_location_and_type: 0x10 | request.hit_location,
-            health_quarter_points: bunker.health.wire_health(),
-            conditions: bunker.health.conditions(),
-            last_attacker: attacker,
-            last_source_object: u32::MAX,
-            last_user_data: request.client_data,
+        if !(1..=6).contains(&dose.location) {
+            return Err("invalid_domination_hospital_hit_location");
+        }
+        let friendly_factor = if bunker.team == dose.source_team {
+            self.catalog.friendly_fire_multiplier()
+        } else {
+            1.
         };
-        Ok(Some(DominationBunkerUpdate {
-            object_index: index,
-            state: None,
-            damage: Some(bunker.damage),
-            kills_occupants: false,
-            destroys_turret: false,
-            restores_turret: false,
-        }))
+        let amount_hp = item_catalog::apply_vehicle_armor(
+            item_catalog::TargetDamageParameters {
+                amount: dose.vehicle_hp,
+                armor_pierce: 0.,
+                armor_redux: 0.,
+            },
+            dose.radial_scale,
+            friendly_factor,
+            self.catalog.armor(bunker.profile.armor_type)?,
+            self.catalog.body(dose.location)?,
+        )?;
+        let before_quarters = bunker.health.wire_health();
+        Ok(bunker
+            .apply_vehicle_damage(
+                amount_hp,
+                dose.attacker,
+                0xa0 | dose.location,
+                dose.user_data,
+                now,
+            )?
+            .map(|damage| HospitalBlastHit {
+                amount_hp,
+                before_quarters,
+                after_quarters: damage.health_quarter_points,
+            }))
+    }
+
+    pub(crate) fn hospital_damage_patch(
+        &self,
+        changed: &BTreeSet<u16>,
+    ) -> Result<HospitalDamagePatch, &'static str> {
+        let changes = changed
+            .iter()
+            .map(|index| {
+                let bunker = self
+                    .bunkers
+                    .get(index)
+                    .ok_or("unknown_domination_hospital_blast_target")?;
+                Ok((
+                    *index,
+                    HospitalDamageState {
+                        health: bunker.health,
+                        damage: bunker.damage,
+                        last_health_update: bunker.last_health_update,
+                    },
+                ))
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(HospitalDamagePatch { changes })
     }
 
     /// Family-13 Update advances the damage clock, then reconciles the
