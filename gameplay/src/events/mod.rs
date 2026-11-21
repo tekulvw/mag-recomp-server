@@ -70,6 +70,16 @@ struct EventPlan {
     parachute_spawn: Option<(u16, Duration, usize)>,
 }
 impl EventPlan {
+    fn frago_frame<'a, W: Write>(&'a self, engine: &'a Engine<W>) -> crate::frago::Frame<'a> {
+        crate::frago::Frame {
+            active_reservation: engine.active.as_ref().map(|a| a.reservation.id.as_str()),
+            position: self
+                .session
+                .client_position
+                .map(|(p, _)| crate::frago::point(p)),
+            ground: self.ground_runtime.as_ref(),
+        }
+    }
     fn new(active: &Active) -> Self {
         Self {
             combat: CombatChanges {

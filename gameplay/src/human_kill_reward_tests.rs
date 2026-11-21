@@ -308,7 +308,11 @@ fn grenade_captures_relation_before_armor_and_queue_does_not_rescale_or_commit_f
 }
 
 pub(crate) fn fixture() -> Engine<Vec<u8>> {
-    let mut engine = engine()
+    configured_fixture(engine())
+}
+
+pub(crate) fn configured_fixture(engine: Engine<Vec<u8>>) -> Engine<Vec<u8>> {
+    let mut engine = engine
         .with_incapacitation_rules(incapacitation::Rules {
             schema_version: 1,
             incapacitated_damage_threshold_hp: 83.0,

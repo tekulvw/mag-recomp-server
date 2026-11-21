@@ -16,7 +16,7 @@ import struct
 
 ROOT = Path(__file__).resolve().parents[2]
 RETAIL_SHA = '0089f0d6d17e48533ce7ff8d943dddd03487b925e7b04a1a055bfb907568694c'
-# Both retail SimObjective constructors load this f32 before the definition
+# Both retail ObjectiveProperties constructors load this f32 before the definition
 # property FRAGOBonusRange can replace it, including with an explicit zero.
 DEFAULT_RADIUS_VA = 0x1b3be68
 CATALOG_LIMIT = 8 * 1024**2
@@ -228,7 +228,7 @@ def project(objective_raw, authored_raw, progression_raw, default_radius):
         geometry.append({'object_index': index, 'position': objective_position(obj, placement), 'radius': radius})
 
     objective['frago'] = {
-        'schema_version': 1,
+        'schema_version': 1, 'map_name': name, 'game_type': mode,
         'source': {'authored_catalog_sha256': authored_sha,
                    'progression_catalog_sha256': sha(progression_raw),
                    'source_image_sha256': RETAIL_SHA},

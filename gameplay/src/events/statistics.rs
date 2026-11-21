@@ -95,11 +95,14 @@ fn died<W: Write>(
                 .checked_add(staged_deaths)
                 .filter(|value| *value > 0);
             if let Some(ordinal) = ordinal {
-                plan.combat.new_rewards.push(recipient.human_killed(
-                    &victim.reservation,
-                    generation,
-                    ordinal,
-                ));
+                let frame = plan.frago_frame(engine);
+                let reward = engine.frago_kill_reward(
+                    recipient.human_killed(&victim.reservation, generation, ordinal),
+                    killer,
+                    engine.frago_character_position(victim, frame),
+                    frame,
+                );
+                plan.combat.new_rewards.push(reward);
             } else {
                 // Continue damage/stat publication, but never alias a saturated
                 // or corrupt ordinal to a previous reward receipt.
@@ -385,9 +388,13 @@ pub(crate) fn plan_character_effect_consequences<W: Write>(
         if killer.team() != bot.target.squad.team()
             && let Some(recipient) = progression::RewardRecipient::from_active(killer)
         {
-            plan.combat
-                .new_rewards
-                .push(recipient.bot_killed(victim_id, generation));
+            let reward = engine.frago_kill_reward(
+                recipient.bot_killed(victim_id, generation),
+                killer,
+                bot.target.runtime.map(|r| crate::frago::point(r.position)),
+                plan.frago_frame(engine),
+            );
+            plan.combat.new_rewards.push(reward);
         }
     }
     // A bot-only world has no human counters or XP recipients to publish.

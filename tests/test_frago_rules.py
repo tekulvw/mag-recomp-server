@@ -41,6 +41,11 @@ def elf64_be(virtual_address):
 
 
 class FragoProjectionTests(unittest.TestCase):
+    def test_output_binds_geometry_to_the_selected_map_and_mode(self):
+        result = self.project()['frago']
+        self.assertEqual(result['map_name'], self.catalog['map_name'])
+        self.assertEqual(result['game_type'], self.catalog['game_type'])
+
     def setUp(self):
         self.digests = {'game.psarc': 'a' * 64, 'experience.zpr': 'b' * 64}
         defs = [
@@ -92,7 +97,7 @@ class FragoProjectionTests(unittest.TestCase):
         rules = result.pop('frago')
         self.assertEqual(result, self.catalog)
         self.assertEqual(rules, {
-            'schema_version': 1,
+            'schema_version': 1, 'map_name': self.catalog['map_name'], 'game_type': self.catalog['game_type'],
             'source': {'authored_catalog_sha256': sha(encode(self.authored)),
                        'progression_catalog_sha256': sha(encode(self.progression)),
                        'source_image_sha256': RETAIL_SHA},

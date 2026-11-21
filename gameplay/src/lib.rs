@@ -114,6 +114,7 @@ mod event_decode;
 mod events;
 pub mod fall_damage;
 use event_decode::DecodedEvent;
+mod frago;
 mod leadership_auto_heal;
 mod leadership_auto_repair;
 mod resources;
@@ -214,6 +215,8 @@ pub struct Character {
     /// Horizon advertises complete authored leadership settlement data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leadership_progression_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frago_bonus_enabled: Option<bool>,
 }
 fn deserialize_skills<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -393,6 +396,8 @@ pub enum Request {
         leadership: Option<leadership_runtime::LeadershipRecord>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         match_leadership_points: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        match_frago_points: Option<u32>,
     },
     DevelopmentSpawnTarget {
         v: u8,
@@ -735,6 +740,7 @@ impl Request {
                 match_experience,
                 leadership,
                 match_leadership_points,
+                match_frago_points,
                 ..
             } => {
                 if !identifier(reservation_id, 16) {
@@ -750,6 +756,7 @@ impl Request {
                 }
                 progression.validate()?;
                 leadership_progression::validate_snapshot(*leadership, *match_leadership_points)?;
+                frago::validate_snapshot(*match_frago_points, *match_experience)?;
                 if *match_experience > i32::MAX as u32 {
                     return Err("invalid_match_experience");
                 }
@@ -1459,6 +1466,7 @@ impl<W: Write> Engine<W> {
                     let mut capabilities = vec![
                         loadout_selection::CAPABILITY.into(),
                         loadout_refresh::CAPABILITY.into(),
+                        frago::CAPABILITY.into(),
                     ];
                     if self.match_profiles.is_some() {
                         capabilities.push(match_profiles::CAPABILITY.into());
@@ -2098,3 +2106,6 @@ mod leadership_auto_repair_tests;
 
 #[cfg(test)]
 mod leadership_progression_tests;
+
+#[cfg(test)]
+mod frago_tests;

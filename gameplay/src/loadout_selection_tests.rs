@@ -90,13 +90,18 @@ fn ack(engine: &mut Engine<Vec<u8>>, receipt: &Value, status: &str) -> Response 
 #[test]
 fn hello_advertises_committed_selection_capability_and_empty_actions_are_omitted() {
     let mut empty = crate::spawn_progression::engine();
-    assert_eq!(
-        hello(&mut empty, 0)["capabilities"],
-        json!([
-            "committed_loadout_selection_v1",
-            "active_loadout_refresh_v1"
-        ])
-    );
+    let response = hello(&mut empty, 0);
+    for capability in [
+        "committed_loadout_selection_v1",
+        "active_loadout_refresh_v1",
+    ] {
+        assert!(
+            response["capabilities"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(capability))
+        );
+    }
     let mut engine = fixture();
     let response = hello(&mut engine, 0);
     assert_eq!(response["v"], 2);

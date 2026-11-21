@@ -575,6 +575,7 @@ fn progression_receipts_do_not_increment_committed_finishing_or_resuscitation_co
                     match_experience: 47,
                     leadership: None,
                     match_leadership_points: None,
+                    match_frago_points: None,
                 },
                 Duration::from_secs(3),
                 1,

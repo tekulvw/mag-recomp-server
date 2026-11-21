@@ -90,6 +90,8 @@ pub struct RewardEvent {
     pub units: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leadership: Option<crate::leadership_progression::AwardContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frago: Option<bool>,
 }
 #[derive(Clone, Debug)]
 pub(crate) struct RewardRecipient {
@@ -159,6 +161,7 @@ impl RewardRecipient {
             kind,
             units,
             leadership: None,
+            frago: None,
         }
     }
 }
@@ -183,6 +186,7 @@ pub(crate) struct CommittedReward {
     pub match_experience: u32,
     pub leadership: Option<crate::leadership_runtime::LeadershipRecord>,
     pub match_leadership_points: Option<u32>,
+    pub match_frago_points: Option<u32>,
 }
 /// A new round remains distinct even if an abandoned reservation ID is reused.
 pub(crate) fn round_identity(reservation: &crate::Reservation, ordinal: u64) -> String {
@@ -260,6 +264,11 @@ impl<W: Write> Engine<W> {
         rewards: &[RewardEvent],
     ) -> Result<(), &'static str> {
         for reward in rewards {
+            if let Some(frago) = reward.frago
+                && (!frago || reward.kind != RewardKind::EnemyKilled || reward.units != 1)
+            {
+                return Err("invalid_frago_reward_context");
+            }
             if let Some(context) = reward.leadership {
                 context.validate()?;
                 if !reward.kind.is_match_result() || reward.units != 1 {
@@ -310,6 +319,7 @@ impl<W: Write> Engine<W> {
             match_experience,
             leadership,
             match_leadership_points,
+            match_frago_points,
             ..
         } = request
         else {
@@ -317,6 +327,7 @@ impl<W: Write> Engine<W> {
         };
         progression.validate()?;
         crate::leadership_progression::validate_snapshot(leadership, match_leadership_points)?;
+        crate::frago::validate_snapshot(match_frago_points, match_experience)?;
         if match_experience > i32::MAX as u32 {
             return Err("invalid_match_experience");
         }
@@ -328,6 +339,7 @@ impl<W: Write> Engine<W> {
             match_experience,
             leadership,
             match_leadership_points,
+            match_frago_points,
         };
         if let Some(previous) = self.committed_rewards.get(&reward_id) {
             return if previous == &receipt {
@@ -356,6 +368,12 @@ impl<W: Write> Engine<W> {
             }
         } else if match_leadership_points.is_some() {
             return Err("unexpected_match_leadership_points");
+        }
+        if pending.frago == Some(true) && match_frago_points.is_none() {
+            return Err("frago_snapshot_required");
+        }
+        if pending.frago.is_none() && match_frago_points.is_some() {
+            return Err("unexpected_match_frago_points");
         }
         let same_round = self.reward_match_id.as_deref() == Some(pending.match_id.as_str());
         let key = (
@@ -413,6 +431,14 @@ impl<W: Write> Engine<W> {
             && same_round
         {
             statistic_updates.push((7, points as i32));
+        }
+        if let Some(points) = match_frago_points
+            && same_round
+        {
+            statistic_updates.push((
+                3,
+                (points as i32).max(participation.statistics.get(&3).copied().unwrap_or(0)),
+            ));
         }
         let mut messages = Vec::new();
         let mut level_packet = None;
@@ -513,7 +539,7 @@ impl<W: Write> Engine<W> {
                 level_publications.push((actor.reservation.id.clone(), wire));
             }
         }
-        self.record(json!({"op":"progression_committed","reward_id":reward_id,"reservation_id":reservation_id,"progression":progression,"match_experience":match_experience,"leadership":leadership,"match_leadership_points":match_leadership_points,"messages":messages}),wall)?;
+        self.record(json!({"op":"progression_committed","reward_id":reward_id,"reservation_id":reservation_id,"progression":progression,"match_experience":match_experience,"leadership":leadership,"match_leadership_points":match_leadership_points,"match_frago_points":match_frago_points,"messages":messages}),wall)?;
         if let Some((state, match_total, leadership_update)) = updated {
             let reservation_id = recipient_id.as_ref().unwrap();
             let actor = if self
