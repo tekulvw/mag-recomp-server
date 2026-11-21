@@ -1,9 +1,13 @@
-//! Source-bound vehicle armor, hit areas, and ordinary on-foot firearm admission.
+//! Source-bound vehicle armor, hit areas, and equipped weapon admission.
 use crate::{
     acquisition_ground_runtime as ground, ground_vehicles, item_catalog::TargetDamageParameters, *,
 };
 use serde::Deserialize;
 use std::collections::BTreeSet;
+
+#[cfg(test)]
+#[path = "mounted_ground_primary_tests.rs"]
+mod mounted_primary_tests;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -192,10 +196,12 @@ impl<W: Write> Engine<W> {
         let policy = self
             .ground_damage_policy()
             .ok_or("acquisition_ground_damage_unconfigured")?;
+        let mounted_primary = self.domination_gameplay.is_some()
+            && (self.is_ground_gunner(actor) || actor.is_indexed_hospital_gunner());
         if !actor.entered_game
             || !actor.ready_for_updates
             || !actor.life.is_alive()
-            || actor.is_mounted()
+            || (actor.is_mounted() && !mounted_primary)
         {
             return Err("ground_hit_requires_living_onfoot_actor");
         }
@@ -228,23 +234,21 @@ impl<W: Write> Engine<W> {
         if vehicle.is_dying() {
             return Err("ground_bullet_target_is_dying");
         }
-        let CharacterHitProfile::Retail(profile) = self.bullet_profile(actor, request)? else {
+        let profile = if mounted_primary {
+            self.mounted_primary_profile(actor, request)?
+        } else {
+            self.bullet_profile(actor, request)?
+        };
+        let (CharacterHitProfile::Retail(profile)
+        | CharacterHitProfile::HospitalPrimary(profile)
+        | CharacterHitProfile::GroundApcPrimary(profile)) = profile
+        else {
             return Err("unsupported_ground_bullet_weapon");
         };
-        let ammo = &self
-            .item_catalog
-            .retail_combat()?
-            .bullet_for_damage(profile.item_id())
-            .map_err(|_| "unsupported_ground_bullet_weapon")?
-            .damage;
         let amount = policy.bullet_amount(
             creation.vehicle_type_token,
             creation.faction,
-            TargetDamageParameters {
-                amount: ammo.vehicle as f32,
-                armor_pierce: ammo.vehicle_armor_pierce as f32,
-                armor_redux: ammo.vehicle_armor_reduction as f32,
-            },
+            profile.vehicle_damage(),
             request.penetration_fraction(),
             request.hit_location,
             actor.team() == creation.team,

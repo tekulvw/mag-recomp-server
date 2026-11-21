@@ -65,8 +65,13 @@ identify arbitrary unseen hit replays. Grant versions are not reused within a
 hospital's match lifetime. Exhaustion rejects a new mount without changing
 occupancy.
 
-Damage uses the existing armor, character life, kill statistics and reward
-transaction. Aim, ownership, equipment, damage and late-join publication retain
+Character damage uses the existing armor, life, kill statistics and reward
+transaction. Qualified mounted primaries can also hit current Domination type3
+and type7 Ground vehicles through the existing vehicle-channel, penetration,
+team, armor and body transaction. Source APC armor absorbs these rounds;
+operational type7 bodies can take damage under the configured team rules.
+Ground Hit accepts authenticated TCP and UDP as explicit compatibility policy;
+owner reports remain UDP. Aim, ownership, equipment, damage and late-join publication retain
 the existing record-before-install and bounded packet/recipient checks. Two
 occupied hospitals retain independent indices and authority.
 
@@ -74,9 +79,10 @@ occupied hospitals retain independent indices and authority.
 
 The source qualification covers retail field widths, authored primary and
 secondary definitions, the named gunner seat fallback and the hulk's last yaw.
-Only primary hitscan character damage is enabled here. Secondary rockets,
-movable vehicle gunners, mounted fire against vehicles, heat simulation and
-native live-match presentation require their own qualification and acceptance.
+Primary hitscan supports characters and the scoped Domination Ground targets.
+Secondary rockets, heat simulation, Helo/Objective targets and native live-match
+presentation require their own qualification and acceptance. The independent
+APC gunner route is described in [Domination APC gunners](domination-apc-gunners.md).
 The secondary definition remains present because native local weapon creation
 and replicated equipment definition are separate paths.
 
