@@ -56,6 +56,35 @@ class GroundSeatVisibilityTests(unittest.TestCase):
                         dict(seat=4, occupant_visible=False)])
         ])
 
+    def test_domination_projects_only_the_eight_admitted_apc_passenger_inventories(self):
+        data = catalog()
+        data['source']['creation_scope'] = 'native_domination_vehicle_source_points'
+        data['driver_seats'] = []
+        # Type-7 motor-pool source points have no admitted seats. They must not
+        # acquire visibility rows merely because they have a vehicle allocation.
+        data['vehicles'] = [dict(index=index, vehicle_type_token=TOKEN,
+            faction=0, modifier=0, passenger_seats=list(range(2, 10)))
+            for index in range(8)] + [dict(index=index, vehicle_type_token=TOKEN ^ 1,
+            faction=0, modifier=0) for index in range(8, 16)]
+        resource = VEHICLE_RAW.replace(b'SeatCount = "3"', b'SeatCount = "8"')
+        rows = self.project(data, resource)['seat_visibility']['vehicles']
+        self.assertEqual([row['vehicle_index'] for row in rows], list(range(8)))
+        for row in rows:
+            self.assertEqual(row['seats'], [dict(seat=seat, occupant_visible=False)
+                                           for seat in range(2, 10)])
+        bad = resource.replace(b', occupantIsVisible = "false"', b'')
+        with self.assertRaisesRegex(ValueError, 'visibility'):
+            self.project(data, bad)
+        data['vehicles'][0]['passenger_seats'] = [1]
+        with self.assertRaisesRegex(ValueError, 'seat role'):
+            self.project(data, resource)
+
+    def test_unknown_scope_cannot_supply_seat_visibility(self):
+        data = catalog()
+        data['source']['creation_scope'] = 'unqualified'
+        with self.assertRaisesRegex(ValueError, 'ground-vehicle inventory'):
+            self.project(data, VEHICLE_RAW)
+
     def test_missing_visibility_and_runtime_seat_role_disagreement_fail_closed(self):
         changed = VEHICLE_RAW.replace(b', occupantIsVisible = "false"', b'')
         with self.assertRaisesRegex(ValueError, 'visibility'):

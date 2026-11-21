@@ -204,6 +204,27 @@ impl Structural {
         self.catalog.blast_properties(*token)
     }
 
+    pub(crate) fn validate_ground_area_seats(
+        &self,
+        grounds: &crate::ground_vehicles::Catalog,
+    ) -> Result<(), &'static str> {
+        if grounds.has_qualified_mount_visibility() {
+            return Ok(());
+        }
+        for (&index, &(_, class)) in &self.tokens {
+            if class != NativeClass::Structural {
+                continue;
+            }
+            let blast = self.blast_properties(index)?;
+            if blast.character_damage_over_time_radius != 0.0
+                && blast.character_damage_over_time_value != 0.0
+            {
+                return Err("domination_structural_ground_seat_visibility_required");
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn catalog(&self) -> &Catalog {
         &self.catalog
     }

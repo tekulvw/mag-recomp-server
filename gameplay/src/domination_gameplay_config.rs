@@ -372,6 +372,10 @@ impl Configuration {
             .map_err(io::Error::other)?;
         let sources =
             self.load_sources(objectives.clone(), spawns, NonZeroUsize::new(128).unwrap())?;
+        sources
+            .structural
+            .validate_ground_area_seats(grounds)
+            .map_err(io::Error::other)?;
         let ground_raw = read(&core.ground_damage, 256 * 1024)?;
         if format!("{:x}", Sha256::digest(&ground_raw)) != core.ground_damage_sha256 {
             return Err(io::Error::other("domination_ground_damage_source_mismatch"));

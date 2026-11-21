@@ -1,5 +1,7 @@
 use super::*;
-use crate::spawn_progression::tests::ground_vehicle_runtime::area_vehicle_fixture;
+use crate::spawn_progression::tests::ground_vehicle_runtime::{
+    area_vehicle_fixture, reinforced_domination_apc,
+};
 
 fn area() -> DamageWork {
     DamageWork::Area(AreaUpdate {
@@ -131,4 +133,33 @@ fn missing_or_invalid_ground_seat_visibility_stays_unqualified() {
             )
             .is_err()
     );
+}
+
+#[test]
+fn domination_apc_reinforcement_preserves_hidden_passenger_during_due_area_scan() {
+    let mut engine = reinforced_domination_apc();
+    let actor = engine.active.as_ref().unwrap();
+    let seat = actor
+        .ground_seat
+        .expect("APC reinforcement must board a passenger");
+    assert_eq!(seat.vehicle_index, 0);
+    assert_eq!(seat.seat, 9);
+    let health = actor
+        .life
+        .damage_health()
+        .expect("spawned passenger must be alive");
+    let mut state = AreaDamageState::default();
+    let mut native = engine.owned_acquisition_characters();
+    engine
+        .stage_domination_structural_damage(
+            &mut state,
+            &mut native,
+            Duration::from_millis(150),
+            &[area()],
+        )
+        .unwrap();
+    let actor = engine.active.as_ref().unwrap();
+    assert_eq!(actor.ground_seat, Some(seat));
+    assert_eq!(actor.life.damage_health(), Some(health));
+    assert_eq!(state.cursors[&120], 16);
 }

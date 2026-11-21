@@ -18,8 +18,9 @@ def project(ground, archive_sha256, read_member):
     source = ground['source']
     require(ground['format'] == 'mag_ground_vehicles' and ground['schema_version'] == 1
             and source['native_elf_sha256'] == COMMON['SUPPORTED_NATIVE_ELF_SHA256']
-            and source['creation_scope'] == 'native_vehicle_source_points'
-            and 'seat_visibility' not in ground, 'Require original Acquisition ground-vehicle inventory')
+            and source['creation_scope'] in ('native_vehicle_source_points',
+                                            'native_domination_vehicle_source_points')
+            and 'seat_visibility' not in ground, 'Require original qualified ground-vehicle inventory')
     registry_raw = read_member(REGISTRY)
     parse = HELPERS['parse_zpr']
     registry = HELPERS['vehicle_registry'](parse(registry_raw.decode()))

@@ -235,6 +235,123 @@ fn ground_vehicle_catalog_validates_complete_source_seat_visibility() {
     assert!(Catalog::from_json(&value.to_string(), spawns).is_err());
 }
 
+fn domination_apc_setup() -> (Engine<Vec<u8>>, Value) {
+    let mut engine = acquisition_entry::acquisition()
+        .with_match_limits(1, 64)
+        .unwrap();
+    let mut spawn = apc_spawn_json(1);
+    spawn["match_profile"]["game_type"] = json!(2);
+    spawn["maps"][0]["spawn_count"] = json!(16);
+    spawn["maps"][0]["locations"] = json!(
+        (0..16)
+            .map(|index| json!({
+                "index":index,"token":1000+index,
+                "kind":if index < 8 {"vehicle_passenger"} else {"unsupported"},
+                "position":{"x":100.,"y":3.,"z":100.}
+            }))
+            .collect::<Vec<_>>()
+    );
+    engine.spawn_catalog = Some(spawns(spawn).unwrap());
+    let mut value = catalog(&engine);
+    value["source"]["creation_scope"] = json!("native_domination_vehicle_source_points");
+    let template = value["vehicles"][0].clone();
+    value["vehicles"] = json!(
+        (0..16)
+            .map(|index| {
+                let mut vehicle = template.clone();
+                vehicle["index"] = json!(index);
+                vehicle["spawn_point_index"] = json!(index);
+                vehicle["spawn_point_token"] = json!(1000 + index);
+                if index < 8 {
+                    vehicle["passenger_seats"] = json!([2, 3, 4, 5, 6, 7, 8, 9]);
+                    vehicle["maximum_occupancy"] = json!(8);
+                    vehicle["passenger_exit_candidates"] =
+                        json!([{"ranking_offset":[1.,0.,0.],"position_offset":[3.,0.,0.]}]);
+                } else {
+                    vehicle["team"] = json!(1);
+                    vehicle["faction"] = json!(2);
+                }
+                vehicle
+            })
+            .collect::<Vec<_>>()
+    );
+    value["vehicle_sources"] = json!(
+        (0..16)
+            .map(|index| json!({
+                "vehicle_index":index,"spawn_point_index":index,"spawn_point_token":1000+index,
+                "vehicle_type_token":12345,"spawn_type":if index < 8 {3} else {7},
+                "user_class":u8::from(index >= 8),"source_family":35,"authored_active":true,
+                "team":u8::from(index >= 8)
+            }))
+            .collect::<Vec<_>>()
+    );
+    value["passenger_spawns"] = json!(
+        (0..8)
+            .map(|index| json!({
+                "spawn_point_index":index,"spawn_point_token":1000+index,"vehicle_index":index
+            }))
+            .collect::<Vec<_>>()
+    );
+    value["seat_visibility"] = json!({
+        "archive_sha256":"1".repeat(64),"registry_member_sha256":"2".repeat(64),
+        "vehicles":(0..8).map(|index| json!({
+            "vehicle_index":index,"properties_member_sha256":"3".repeat(64),
+            "seats":(2..10).map(|seat| json!({"seat":seat,"occupant_visible":false}))
+                .collect::<Vec<_>>()
+        })).collect::<Vec<_>>()
+    });
+    (engine, value)
+}
+
+pub(crate) fn domination_apc_catalog(visibility: bool) -> Catalog {
+    let (engine, mut value) = domination_apc_setup();
+    if !visibility {
+        value.as_object_mut().unwrap().remove("seat_visibility");
+    }
+    Catalog::from_json(&value.to_string(), engine.spawn_catalog.as_ref().unwrap()).unwrap()
+}
+
+#[test]
+fn domination_apc_catalog_requires_exact_visibility_when_provided() {
+    let (engine, mut value) = domination_apc_setup();
+    let spawns = engine.spawn_catalog.as_ref().unwrap();
+    let mut without = value.clone();
+    without.as_object_mut().unwrap().remove("seat_visibility");
+    Catalog::from_json(&without.to_string(), spawns).unwrap();
+    let complete = Catalog::from_json(&value.to_string(), spawns).unwrap();
+    assert_eq!(complete.seat_occupant_visible(7, 9), Some(false));
+    assert_eq!(complete.seat_occupant_visible(8, 9), None);
+    for foreign_or_duplicate in [8, 0] {
+        let mut invalid = value.clone();
+        invalid["seat_visibility"]["vehicles"][7]["vehicle_index"] = json!(foreign_or_duplicate);
+        assert_eq!(
+            Catalog::from_json(&invalid.to_string(), spawns)
+                .unwrap_err()
+                .to_string(),
+            "invalid_ground_seat_visibility_inventory"
+        );
+    }
+    let seats = value["seat_visibility"]["vehicles"][7]["seats"]
+        .as_array_mut()
+        .unwrap();
+    seats.pop().unwrap();
+    assert_eq!(
+        Catalog::from_json(&value.to_string(), spawns)
+            .unwrap_err()
+            .to_string(),
+        "invalid_ground_seat_visibility_inventory"
+    );
+}
+
+pub(crate) fn reinforced_domination_apc() -> Engine<Vec<u8>> {
+    let (engine, value) = domination_apc_setup();
+    let catalog =
+        Catalog::from_json(&value.to_string(), engine.spawn_catalog.as_ref().unwrap()).unwrap();
+    let mut engine = engine.with_ground_vehicles(catalog).unwrap();
+    spawn_apc(&mut engine, 0, 1, 0, 100);
+    engine
+}
+
 fn apc_spawn_json(faction: u8) -> Value {
     let mut value = spawn_json();
     value["active"]["available"] = json!([0, 1]);
@@ -295,6 +412,12 @@ fn spawn_apc(
     point: u16,
     now: u64,
 ) -> Vec<OutboundMessage> {
+    let game_type = engine
+        .spawn_catalog
+        .as_ref()
+        .unwrap()
+        .match_profile()
+        .game_type;
     reserve_faction(engine, player, faction);
     ready(engine.active.as_mut().unwrap());
     engine.active.as_mut().unwrap().claimed = Some(Claimed {
@@ -308,11 +431,16 @@ fn spawn_apc(
             defending_faction: (faction + 1) % 3,
             maximum_points: [100, 100],
             current_points: [100, 100],
-            game_type: 1,
+            game_type,
         },
     });
     engine.active.as_mut().unwrap().pending_shared.clear();
-    owner_update(engine, now, 0); // vehicle creations precede mounted spawn
+    // Vehicle creations precede mounted spawn, across as many batches as needed.
+    let batches = engine.ground_vehicles.as_ref().unwrap().batch_count() as u64;
+    for batch in 0..batches {
+        owner_update(engine, now + batch, 0);
+    }
+    let now = now + batches.saturating_sub(1);
     engine.active.as_mut().unwrap().selected_spawn = Some(protocol::CharacterSpawnSelection {
         spawn_point_index: point,
     });
