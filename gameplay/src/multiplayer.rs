@@ -1151,7 +1151,8 @@ impl<W: Write> Engine<W> {
                         || self
                             .bot_registry
                             .stats_publication
-                            .pending(a, &self.bot_registry.bots))
+                            .pending(a, &self.bot_registry.bots)
+                        || self.human_assists_pending(a))
                     && self.ground_vehicle_creation_complete(a.ground_vehicle_batch)
                     && (!requires_hospital_creation || a.emplacement_creation.is_some())
             })
@@ -1169,11 +1170,7 @@ impl<W: Write> Engine<W> {
             .collect::<Vec<_>>();
         let mut scheduling = ready
             .iter()
-            .map(|a| {
-                self.bot_registry
-                    .stats_publication
-                    .scheduling(&a.reservation.id)
-            })
+            .map(|a| (a.statistics_cursor, a.prefer_statistics))
             .collect::<Vec<_>>();
         let mut selected_stats = vec![std::collections::BTreeSet::new(); ready.len()];
         let mut next_cursor = self.shared_drain_cursor;
@@ -1183,9 +1180,8 @@ impl<W: Write> Engine<W> {
                 if messages.len() + planned.len() >= limit {
                     break 'drain;
                 }
-                let candidate = self.bot_registry.stats_publication.next(
+                let candidate = self.next_shared_statistic(
                     actor,
-                    &self.bot_registry.bots,
                     actor
                         .shared_frames_drained
                         .saturating_add(offsets[index] as u64),
@@ -1193,7 +1189,7 @@ impl<W: Write> Engine<W> {
                     &selected_stats[index],
                 );
                 let stat_packet = candidate
-                    .map(|candidate| candidate.totals.encode(candidate.slot, actor.wire_profile))
+                    .map(|candidate| candidate.encode(self, actor.wire_profile))
                     .transpose()?;
                 let shared = actor.pending_shared.get(offsets[index]);
                 // Alternate eligible application rows with reliable FIFO frames.
@@ -1225,8 +1221,8 @@ impl<W: Write> Engine<W> {
                 total += packet.len();
                 planned.push((actor.reservation.id.clone(), packet, stat));
                 if let Some(stat) = stat {
-                    selected_stats[index].insert(stat.slot);
-                    scheduling[index] = (stat.slot.wrapping_add(1), false);
+                    selected_stats[index].insert(stat.slot());
+                    scheduling[index] = (stat.slot().wrapping_add(1), false);
                 } else {
                     offsets[index] += 1;
                     sequences[index] += 1;
@@ -1265,15 +1261,15 @@ impl<W: Write> Engine<W> {
         }
         for (id, packet, stat) in planned {
             if let Some(stat) = stat {
-                self.bot_registry.stats_publication.sent(&id, stat);
+                self.commit_shared_statistic(&id, stat);
                 continue;
             }
-            self.bot_registry.stats_publication.replication_sent(&id);
             let actor = if self.active.as_ref().is_some_and(|a| a.reservation.id == id) {
                 self.active.as_mut().unwrap()
             } else {
                 self.peers.get_mut(&id).unwrap()
             };
+            actor.prefer_statistics = true;
             let correction = crate::correction_ack::owner_position_packet(
                 &packet,
                 actor.reservation.player,

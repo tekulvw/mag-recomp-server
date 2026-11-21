@@ -44,3 +44,6 @@ External source-data replays are retained privately. None of these checks claim
 native scoreboard presentation, client application acknowledgement, assist
 attribution, final-results bot rows, resupply or mode-objective bot AI.
 Releases require the maintainer's live-match review and manual action.
+
+The optional [firearm assist rules](firearm-assist-credit.md) add stat11 to bot
+totals. With those rules absent, the existing two-counter bot row is retained.

@@ -1023,6 +1023,7 @@ impl<W: Write> Engine<W> {
         native: &mut NativeMap,
     ) -> Vec<OutboundMessage> {
         candidate.state.install(self);
+        self.prune_firearm_assist_victims();
         *native = candidate.native;
         candidate.messages
     }

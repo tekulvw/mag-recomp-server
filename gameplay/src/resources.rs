@@ -171,6 +171,7 @@ impl<W: Write> Engine<W> {
             fall_damage_rules: None,
             incapacitation_rules: None,
             character_damage_rules: None,
+            firearm_assists: Default::default(),
             pending_rewards: Default::default(),
             reward_order: Default::default(),
             committed_rewards: Default::default(),

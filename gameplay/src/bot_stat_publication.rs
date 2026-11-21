@@ -10,8 +10,6 @@ pub(super) struct State {
 #[derive(Default)]
 struct Recipient {
     entries: BTreeMap<u16, Entry>,
-    cursor: u16,
-    prefer_statistics: bool,
 }
 
 struct Entry {
@@ -68,12 +66,6 @@ impl State {
             })
     }
 
-    pub(super) fn scheduling(&self, id: &str) -> (u16, bool) {
-        self.recipients
-            .get(id)
-            .map_or((0, false), |r| (r.cursor, r.prefer_statistics))
-    }
-
     pub(super) fn next(
         &self,
         actor: &Active,
@@ -110,14 +102,6 @@ impl State {
             && entry.allocation == candidate.allocation
         {
             entry.sent = Some(candidate.totals);
-            recipient.cursor = candidate.slot.wrapping_add(1);
-            recipient.prefer_statistics = false;
-        }
-    }
-
-    pub(super) fn replication_sent(&mut self, id: &str) {
-        if let Some(recipient) = self.recipients.get_mut(id) {
-            recipient.prefer_statistics = true;
         }
     }
 }
@@ -230,6 +214,7 @@ mod tests {
         engine.bot_registry.bots.get_mut(&slot).unwrap().firearm_kd =
             crate::bot_firearm_kd::Totals {
                 kills: 3,
+                assists: 0,
                 deaths: 2,
             };
         let reply = engine.drain_shared(Vec::new(), 1).unwrap();
@@ -252,6 +237,34 @@ mod tests {
             engine.active.as_ref().unwrap().replication_history.len(),
             history
         );
+    }
+
+    #[test]
+    fn firearm_assists_add_stat_11_only_after_creation_drains() {
+        let (engine, slot) = fixture();
+        let mut engine = engine
+            .with_firearm_assist_rules(crate::firearm_assists::Rules {
+                schema_version: 1,
+                application_id: 20231,
+                assist_timeout_ms: 17,
+            })
+            .unwrap();
+        fill(&mut engine, 40);
+        engine.tick_bots(Duration::ZERO, 1).unwrap();
+        engine
+            .bot_registry
+            .bots
+            .get_mut(&slot)
+            .unwrap()
+            .firearm_kd
+            .assists = 1;
+        assert!(stat_rows(&engine.drain_shared(Vec::new(), 1).unwrap()).is_empty());
+        let updated = engine.drain_shared(Vec::new(), 1).unwrap();
+        assert_eq!(
+            stat_rows(&updated),
+            [format!("0204{slot:04x}030a000b010c00")]
+        );
+        assert!(engine.drain_shared(Vec::new(), 1).unwrap().is_empty());
     }
 
     #[test]
@@ -341,6 +354,7 @@ mod tests {
         engine.bot_registry.bots.get_mut(&slot).unwrap().firearm_kd =
             crate::bot_firearm_kd::Totals {
                 kills: 3,
+                assists: 0,
                 deaths: 2,
             };
         engine.drain_shared(Vec::new(), 1).unwrap();
@@ -413,6 +427,7 @@ mod tests {
         engine.bot_registry.bots.get_mut(&slot).unwrap().firearm_kd =
             crate::bot_firearm_kd::Totals {
                 kills: 7,
+                assists: 0,
                 deaths: 4,
             };
         assert!(stat_rows(&engine.drain_shared(Vec::new(), 1).unwrap()).is_empty());
