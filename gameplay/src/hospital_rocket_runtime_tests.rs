@@ -146,7 +146,7 @@ fn hospital_rocket_retains_qualified_request_direction_inside_source_aim_cone() 
     assert_eq!(planned(request), point);
 }
 
-fn tick_fixture() -> Engine<Vec<u8>> {
+pub(crate) fn tick_fixture() -> Engine<Vec<u8>> {
     use std::sync::Arc;
 
     let mut engine = equipped_fixture();
@@ -236,25 +236,7 @@ fn tick_fixture() -> Engine<Vec<u8>> {
         collision::CollisionLimits::default(),
     )
     .unwrap();
-    let contact =
-        |layer| json!({"root_filter_info":layer,"child_filter_info":0,"convex_radius":0.});
-    let hospital: Vec<_> = (0..3)
-        .map(|faction| {
-            json!({
-                "binding":{"asset_sha256":digest,"faction":faction,"packfile_sha256":digest,
-                    "part_ids":["hospital-face"]},"contact":contact(22)
-            })
-        })
-        .collect();
-    let bindings = Arc::new(domination_projectile_collision::ContactBindings::from_json(json!({
-        "schema":"mag_domination_projectile_contacts_v1","map_name":engine.map_name(),
-        "retail_elf_sha256":digest,"proof_sha256":digest,"static_world_sha256":static_world.source_sha256(),
-        "dynamic_catalog_sha256":body_hash,"static_coverage_policy":"represented_reference_pose",
-        "ground_phantom_roots":["wheel"],"sequence":[{
-            "binding":{"source_sha256":digest,"neutral_sha256":digest,"collision_tag":9,
-                "part_ids":["test-wall"]},"contact":contact(9)}],
-        "hospital":hospital,"helo":[]
-    }).to_string().as_bytes()).unwrap());
+    let bindings = test_contact_bindings(&engine, static_world.source_sha256(), &body_hash);
     engine.collision_world = Some(static_world);
     let state = &mut engine.domination_gameplay.as_mut().unwrap().state;
     state.ground_respawn_physics = Some(Default::default());
@@ -268,7 +250,35 @@ fn tick_fixture() -> Engine<Vec<u8>> {
     engine
 }
 
-fn launch_for_tick(engine: &mut Engine<Vec<u8>>) {
+pub(crate) fn test_contact_bindings(
+    engine: &Engine<Vec<u8>>,
+    static_hash: &str,
+    body_hash: &str,
+) -> std::sync::Arc<domination_projectile_collision::ContactBindings> {
+    use std::sync::Arc;
+    let digest = "a".repeat(64);
+    let contact =
+        |layer| json!({"root_filter_info":layer,"child_filter_info":0,"convex_radius":0.});
+    let hospital: Vec<_> = (0..3)
+        .map(|faction| {
+            json!({
+                "binding":{"asset_sha256":digest,"faction":faction,"packfile_sha256":digest,
+                    "part_ids":["hospital-face"]},"contact":contact(22)
+            })
+        })
+        .collect();
+    Arc::new(domination_projectile_collision::ContactBindings::from_json(json!({
+        "schema":"mag_domination_projectile_contacts_v1","map_name":engine.map_name(),
+        "retail_elf_sha256":digest,"proof_sha256":digest,"static_world_sha256":static_hash,
+        "dynamic_catalog_sha256":body_hash,"static_coverage_policy":"represented_reference_pose",
+        "ground_phantom_roots":["wheel"],"sequence":[{
+            "binding":{"source_sha256":digest,"neutral_sha256":digest,"collision_tag":9,
+                "part_ids":["test-wall"]},"contact":contact(9)}],
+        "hospital":hospital,"helo":[]
+    }).to_string().as_bytes()).unwrap())
+}
+
+pub(crate) fn launch_for_tick(engine: &mut Engine<Vec<u8>>) {
     let request = launch_wire(engine, 3, 1);
     assert!(
         !spawn_progression::dispatch(engine, &request, 1000)
@@ -589,11 +599,10 @@ fn hospital_rocket_and_frag_reject_shared_wire_slot_conflicts_and_ignore_rocket_
     );
     assert!(matches!(flight(&engine), Slot::Flying(_)));
 
-    // Reuse an ordinary-compatible slot on a second world to test the inverse
-    // collision through the existing on-foot launch dispatcher.
+    // Use the fourth retail slot through the ordinary on-foot dispatcher.
     let mut engine = equipped_fixture();
     engine.item_catalog = human_kill_reward_tests::grenade_items_for_ground_test(10.);
-    let rocket = launch_wire(&engine, 0, 1);
+    let rocket = launch_wire(&engine, 3, 1);
     assert!(
         !spawn_progression::dispatch(&mut engine, &rocket, 1000)
             .unwrap()
@@ -613,7 +622,7 @@ fn hospital_rocket_and_frag_reject_shared_wire_slot_conflicts_and_ignore_rocket_
     actor.mounted_seat = None;
     actor.grenade_remaining = 1;
     actor.spawned_loadout = Some(kit);
-    let frag = launch_wire(&engine, 0, 4);
+    let frag = launch_wire(&engine, 3, 4);
     assert!(
         spawn_progression::dispatch(&mut engine, &frag, 1010)
             .unwrap()
@@ -621,7 +630,7 @@ fn hospital_rocket_and_frag_reject_shared_wire_slot_conflicts_and_ignore_rocket_
     );
     let actor = engine.active.as_ref().unwrap();
     assert_eq!(actor.grenade_remaining, 1);
-    assert!(actor.projectiles.get(0).is_none());
+    assert!(actor.projectiles.get(3).is_none());
     let last: Value = serde_json::from_str(
         String::from_utf8_lossy(&engine.writer)
             .lines()
@@ -630,6 +639,82 @@ fn hospital_rocket_and_frag_reject_shared_wire_slot_conflicts_and_ignore_rocket_
     )
     .unwrap();
     assert_eq!(last["gameplay_denial"], "projectile_slot_in_use");
+}
+
+#[test]
+fn retail_fourth_frag_occupancy_and_cleanup_block_hospital_rocket() {
+    let mut engine = equipped_fixture();
+    engine.item_catalog = human_kill_reward_tests::grenade_items_for_ground_test(10.);
+    let mut human = human_kill_reward_tests::fixture();
+    let mut kit = human
+        .active
+        .as_mut()
+        .unwrap()
+        .spawned_loadout
+        .take()
+        .unwrap();
+    kit.inventories[0].slots[4] = Some(4);
+    let actor = engine.active.as_mut().unwrap();
+    actor.mounted_bunker = None;
+    actor.mounted_seat = None;
+    actor.grenade_remaining = 1;
+    actor.spawned_loadout = Some(kit);
+    let frag = launch_wire(&engine, 3, 4);
+    let created = spawn_progression::dispatch(&mut engine, &frag, 1000).unwrap();
+    assert_eq!(created.len(), 1);
+    assert!(engine.active.as_ref().unwrap().projectiles.get(3).is_some());
+
+    // Present the same qualified gunner grant while the on-foot frag occupies
+    // the player's shared family-19 object identity.
+    let actor = engine.active.as_mut().unwrap();
+    actor.mounted_bunker = Some(5);
+    actor.mounted_seat = Some(0);
+    let rocket = launch_wire(&engine, 3, 1);
+    assert!(
+        spawn_progression::dispatch(&mut engine, &rocket, 1010)
+            .unwrap()
+            .is_empty()
+    );
+    let source_denial =
+        |engine: &Engine<Vec<u8>>| audit(engine, "event").pop().unwrap()["gameplay_denial"].clone();
+    assert_eq!(source_denial(&engine), "projectile_slot_in_use");
+
+    let owner = ProjectileOwnerDelta {
+        header: projectile_header(3, 20, 1100),
+        update: &ProjectileOwnerUpdate {
+            slot: 3,
+            object_index: engine.active.as_ref().unwrap().reservation.player,
+            fields: ProjectileOwnerFields {
+                state: Some(2),
+                position: Some(CharacterPosition {
+                    x: 1.,
+                    y: 2.,
+                    z: 3.,
+                }),
+                rotation_xyzw: None,
+            },
+        },
+    }
+    .encode_with_profile(engine.wire_profile)
+    .unwrap();
+    spawn_progression::dispatch(&mut engine, &owner, 1100).unwrap();
+    let actor = engine.active.as_ref().unwrap();
+    assert!(actor.projectiles.get(3).unwrap().completed);
+    assert!(engine.projectile_cleanup_pending(actor, 3));
+    assert!(
+        spawn_progression::dispatch(&mut engine, &rocket, 1101)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(source_denial(&engine), "projectile_cleanup_pending");
+    assert!(
+        !engine
+            .active
+            .as_ref()
+            .unwrap()
+            .hospital_rocket_flights
+            .occupies(3)
+    );
 }
 
 #[test]

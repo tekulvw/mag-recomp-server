@@ -127,6 +127,31 @@ impl Policy {
         )
     }
 
+    pub(crate) fn hospital_rocket_amount(
+        &self,
+        creation: &ground_vehicles::Creation,
+        raw_hp: f32,
+        radial_scale: f32,
+        location: u8,
+        friendly: bool,
+    ) -> Result<f32, &'static str> {
+        if !(1..=6).contains(&location) {
+            return Err("unsupported_vehicle_hit_location");
+        }
+        self.bullet_amount(
+            creation.vehicle_type_token,
+            creation.faction,
+            TargetDamageParameters {
+                amount: raw_hp,
+                armor_pierce: 0.0,
+                armor_redux: 0.0,
+            },
+            radial_scale,
+            location,
+            friendly,
+        )
+    }
+
     fn bullet_amount(
         &self,
         token: u32,
@@ -414,6 +439,45 @@ impl<W: Write> Engine<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rocket_uses_classified_vehicle_area_and_friendly_fire_before_armor() {
+        let mut areas = vec![serde_json::json!({"armor_area": 0, "multiplier": 1.0}); 16];
+        areas[5] = serde_json::json!({"armor_area": 2, "multiplier": 2.0});
+        let policy: Policy = serde_json::from_value(serde_json::json!({
+            "friendly_fire_multiplier": 0.5,
+            "profiles": [{
+                "vehicle_type_token": 19,
+                "faction": 1,
+                "max_health": 200.0,
+                "critical_loss_percent_per_second": 3.0,
+                "armor": {"rating": 10.0, "prevention": 0.5, "coverage": [0.0, 0.0, 0.5, 0.0]}
+            }],
+            "areas": areas
+        }))
+        .unwrap();
+        let creation: ground_vehicles::Creation = serde_json::from_value(serde_json::json!({
+            "index": 4, "spawn_point_index": 12, "spawn_point_token": 99,
+            "vehicle_type_token": 19, "faction": 1, "team": 0, "modifier": 0,
+            "position": {"x": 2.0, "y": 4.0, "z": 8.0},
+            "rotation": [0.0, 0.0, 0.0, 1.0],
+            "health_quarter_points": 800, "initial_state": 2,
+        }))
+        .unwrap();
+        assert_eq!(
+            policy.hospital_rocket_amount(&creation, 100.0, 0.5, 5, false),
+            Ok(60.0)
+        );
+        assert_eq!(
+            policy.hospital_rocket_amount(&creation, 100.0, 0.5, 5, true),
+            Ok(22.5)
+        );
+        assert!(
+            policy
+                .hospital_rocket_amount(&creation, 100.0, 0.5, 0, false)
+                .is_err()
+        );
+    }
 
     #[test]
     fn vehicle_hit_applies_friendly_fire_before_armor_without_character_range() {

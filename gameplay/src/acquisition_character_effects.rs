@@ -131,7 +131,7 @@ impl Plan {
 }
 /// The callback passes normalized displacement to the direction encoder with
 /// exponent 7. Each axis uses 9 magnitude bits and one sign bit.
-fn explosion_direction_user_data(vector: [f32; 3]) -> Result<u32, &'static str> {
+pub(crate) fn explosion_direction_user_data(vector: [f32; 3]) -> Result<u32, &'static str> {
     let length = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
     if !length.is_finite() {
         return Err("invalid_acquisition_explosion_direction");

@@ -22,7 +22,10 @@ impl<W: Write> Engine<W> {
         Ok((candidate, native))
     }
 
-    fn hospital_rocket_blast_attacker(&self, source: &LaunchSource) -> Result<u32, &'static str> {
+    pub(super) fn hospital_rocket_blast_attacker(
+        &self,
+        source: &LaunchSource,
+    ) -> Result<u32, &'static str> {
         if self.round_number != source.round
             || !self.active.iter().chain(self.peers.values()).any(|actor| {
                 actor.reservation.id == source.reservation

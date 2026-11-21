@@ -568,6 +568,8 @@ fn plan_grenade_blasts<W: Write>(
                 ))?,
             });
         }
+        let queue_limit = blast_visibility::MAX_BLAST_TARGETS
+            * usize::from(projectile::projectile_slot_count(ctx.engine.wire_profile));
         for terminal in &plan.audit.projectile_terminals {
             if terminal.reason != projectile::ProjectileTerminalReason::ReportedDetonation {
                 continue;
@@ -575,7 +577,7 @@ fn plan_grenade_blasts<W: Write>(
             let Some(blast) = terminal.position else {
                 continue;
             };
-            let checks = blast_visibility::resolve_grenade_blast_for_item(
+            let checks = blast_visibility::resolve_grenade_blast_for_item_with_profile(
                 ctx.engine.collision_world.as_ref(),
                 ctx.engine.map_name(),
                 terminal.slot,
@@ -584,10 +586,11 @@ fn plan_grenade_blasts<W: Write>(
                 &targets,
                 terminal.item_id,
                 &ctx.engine.item_catalog,
+                ctx.engine.wire_profile,
             )?;
             for check in checks {
                 if check.amount_hp > 0.0 {
-                    if grenade_queue.len() < blast_visibility::MAX_BLAST_TARGETS * 3 {
+                    if grenade_queue.len() < queue_limit {
                         grenade_queue.push_back(PendingDamage {
                             falling: false,
                             target_character_id: check.character_id,

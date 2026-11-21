@@ -1,9 +1,11 @@
 # Hospital secondary rocket support
 
 Domination hospital secondaries have optional server-owned launch, straight flight,
-contact, ordinary on-foot Character damage and reliable cleanup. They remain off
+contact, ordinary on-foot Character damage, optional qualified Ground damage
+and reliable cleanup. They remain off
 unless the selected profile explicitly supplies `core.hospital_turrets`,
-`core.hospital_rockets` and `core.projectile_contacts`. Direct Engine configuration
+`core.hospital_rockets` and `core.projectile_contacts`. Ground damage additionally
+requires `core.hospital_rocket_ground`. Direct Engine configuration
 and the match-profile registry validate the same source bindings. The CLI's
 `--validate-catalogs` path qualifies the weapon rules and contact inputs before
 advertising readiness, opening a listener or creating a log.
@@ -70,13 +72,38 @@ one layer-24 material ray. It commits health, armor, statistics, rewards and the
 terminal after one successful record. Exact launch reservation, world, round,
 match, Character and team guards prevent reused slots receiving credit. A dead
 or respawned source in that same reservation remains eligible for its shot.
-Mounted targets, Ground/Helo/objectives, blocked-ray native fallback and rocket
-kill-feed weapon indices remain outside this first consumer.
+The optional Ground consumer uses the independent vehicle dose and the original
+cached chassis thresholds for the six APC/motor-pool variants. Current model pose
+and blast origin determine native locations 1–6; a root's local collision offset
+is not the model origin. Solid overlaps are deduplicated, wheel phantoms are
+excluded under the pinned source contract, and one layer 24 material ray targets
+the vehicle anchor. Existing armor/friendly rules apply before the normal Ground
+critical/destruction/hulk/respawn lifecycle. Field 18 retains the established invalid
+Ground source word; projectile identity is recorded in audit. The final native
+source-word export remains unqualified.
+
+Character damage, optional Ground damage and terminal publication share one
+record and queue preflight. Insufficient capacity defers both health effects.
+Recorder refusal leaves both health states, the flight and queues unchanged.
+Helo, objectives, exposed mounted targets, blocked-ray native fallback and rocket
+kill-feed weapon indices remain separate.
+
+The maintained `tools/extraction/project-retail-hospital-rocket-ground-bounds.py`
+reads original chassis resources and verified source inputs to reproduce the
+external Ground rules and proof. It binds exact source roles, model packs,
+dynamic catalog and Ground policy; the runtime refuses inferred legacy roles or
+mismatched template/bounds inputs. Private staging supplies both current six-profile
+scopes with explicit rules. All authored thresholds and damage inputs remain in
+external files.
 
 ## Projectile libraries
 
 Retail replication supports all four registered projectile families across
-creation, owner decoding, late-join state and removal. The prototype retains three.
+creation, owner decoding, late-join state and removal. Ordinary frag admission,
+fuse/cleanup and optional blast resolution now use the configured profile too.
+Retail accepts slot 3; prototype and unprofiled legacy wrappers retain slots 0–2.
+Both frag-to-rocket and rocket-to-frag checks include live and pending cleanup
+identities. The exact native producer wrap cadence is not inferred.
 A syntactically valid fourth-family report cannot create a flight or damage
 source. Equipped launch is a separate authority gate. Existing owner-sequence
 behavior is retained.
@@ -94,8 +121,9 @@ association to the current physical allocation.
 the BVH, including their margins and stable instance/triangle IDs. Its root and
 explicit uniform child filter intersection is a represented-world replacement
 policy. It does not certify native collision-agent behavior. The scene supplements the
-admitted current Sequence and operational hospital/Helo meshes and dynamic solid
-roots. The binding pins static and dynamic catalog bytes,
+admitted Sequence playback poses, operational hospital/Helo meshes and dynamic
+solid roots. Sequence transforms are committed replacement playback/reference
+poses; they do not establish full native animation parity. The binding pins static and dynamic catalog bytes,
 source mesh identities and explicit child/margin metadata. The caller must
 supplement every eligible live partition and use the combined collector before
 interpreting a miss as clear flight.
@@ -124,11 +152,15 @@ step while leaving the Character movement solver unchanged.
 
 Synthetic tests exercise the profile boundaries, nearest-contact behavior,
 initial overlap, margins and filters, deterministic identities, work errors,
-straight flight, expiry and source-binding failures. The six-profile original-data replay covers equipped slot3 launch, live capsule
+straight flight, expiry and source-binding failures. The six-profile original-data replay covers equipped slot 3 launch, live capsule
 contact, lethal armor-aware damage, kill credit, terminal/inactive delivery and
 reuse, with separate dismount continuity. It uses scripted actor placement and
 leaves the separate optional incapacitation catalog disabled. Both six-profile
 startup scopes and native input remain separately identified in the evidence.
+A further six-profile replay adds current hostile APC and friendly motor-pool
+contacts to the same terminal and independently checks model areas, radial and
+armor arithmetic, field-18 damage/sentinel, unchanged post-cleanup HP and reuse.
+Those vehicle poses are scripted too; native driving remains separate.
 Original extraction and source replay are separate from native input and
 live-match acceptance.
 Releases remain manual after the maintainer's live-match review.

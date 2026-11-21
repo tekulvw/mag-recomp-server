@@ -111,6 +111,7 @@ pub(crate) struct State {
     pub(crate) assets: Arc<SequenceCollisionAssets>,
     pub(crate) hospital_hulks: Option<Arc<HospitalHulkAssets>>,
     pub(crate) hospital_turret_yaws: Arc<BTreeMap<u16, f32>>,
+    pub(crate) hospital_rocket_ground: Option<Arc<crate::hospital_rocket_ground::Catalog>>,
     pub(crate) projectile_contacts:
         Option<Arc<crate::domination_projectile_collision::ContactBindings>>,
     pub(crate) helo: Option<crate::domination_helo::FleetRuntime>,

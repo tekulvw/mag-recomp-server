@@ -20,6 +20,10 @@ use std::collections::{BTreeMap, BTreeSet};
 #[path = "hospital_rocket_damage.rs"]
 mod hospital_rocket_damage;
 
+#[path = "hospital_rocket_ground_damage.rs"]
+mod hospital_rocket_ground_damage;
+pub(crate) use hospital_rocket_ground_damage::{GroundRocketCandidate, GroundRocketDose};
+
 const CHARACTERS_PER_UPDATE: u16 = 16;
 const CHARACTER_FAMILY_CAPACITY: u16 = 256;
 const AREA_DAMAGE_COOLDOWN: Duration = Duration::from_secs(1);

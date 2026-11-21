@@ -2,7 +2,7 @@
 use super::*;
 use crate::{
     acquisition_volume_damage::{TargetKey, TargetKind},
-    domination_structural_world::BlastCollision,
+    domination_structural_world::{BlastCollision, GroundRocketCandidate, GroundRocketDose},
     dynamic_collision::QueryLimits,
     hospital_rockets::{Blast, Muzzle, MuzzleNode, Weapon},
     projectile::{
@@ -353,6 +353,12 @@ struct MotionInstallation {
     packet: Option<Vec<u8>>,
 }
 
+struct RocketEffects {
+    character: acquisition_character_effects::Candidate,
+    native: std::collections::BTreeMap<u32, acquisition_character_effects::NativeState>,
+    ground: Option<GroundRocketCandidate>,
+}
+
 impl<W: Write> Engine<W> {
     pub(crate) fn tick_hospital_rockets(
         &mut self,
@@ -571,12 +577,22 @@ impl<W: Write> Engine<W> {
             .ok_or("projectile_cleanup_time_overflow")?;
         let effects = self.prepare_rocket_effects(&flight, terminal.position, now);
         let (effects, damage_denial) = match effects {
-            Ok((candidate, native)) => {
-                self.check_acquisition_character_effects(&candidate, &native)?;
-                if candidate.check_extra_shared(self, world, 1).is_err() {
+            Ok(effects) => {
+                self.check_acquisition_character_effects(&effects.character, &effects.native)?;
+                let ground_packets = usize::from(
+                    effects
+                        .ground
+                        .as_ref()
+                        .is_some_and(|candidate| candidate.packet.is_some()),
+                );
+                if effects
+                    .character
+                    .check_extra_shared(self, world, 1 + ground_packets)
+                    .is_err()
+                {
                     return Ok(Vec::new());
                 }
-                (Some((candidate, native)), None)
+                (Some(effects), None)
             }
             Err(
                 "reward_outbox_full"
@@ -598,13 +614,28 @@ impl<W: Write> Engine<W> {
             json!({"op":"hospital_rocket_terminal","source":flight.source,
                 "coverage":"represented_world_reference_pose","terminal":terminal_reason,
                 "elapsed_ms":terminal.elapsed_ms,"position":terminal.position,
-                "effects":effects.as_ref().map(|(candidate,_)|candidate.audit()),
-                "messages":effects.as_ref().map(|(candidate,_)|candidate.messages()),
+                "effects":effects.as_ref().map(|effects|effects.character.audit()),
+                "ground_effects":effects.as_ref().and_then(|effects|effects.ground.as_ref()).map(|candidate|&candidate.audit),
+                "messages":effects.as_ref().map(|effects|effects.character.messages()),
                 "damage_denial":damage_denial,"packet":protocol::encode_hex(&packet)}),
             wall,
         )?;
-        let messages = effects.map_or_else(Vec::new, |(candidate, mut native)| {
-            self.install_character_effects_after_record(candidate, &mut native)
+        let messages = effects.map_or_else(Vec::new, |effects| {
+            let RocketEffects {
+                character,
+                mut native,
+                ground,
+            } = effects;
+            let messages = self.install_character_effects_after_record(character, &mut native);
+            if let Some(candidate) = ground {
+                if let Some(after) = candidate.after {
+                    self.ground_runtime = Some(after);
+                }
+                if let Some(packet) = candidate.packet {
+                    self.queue_rocket_packet(world, &packet);
+                }
+            }
+            messages
         });
         self.queue_rocket_packet(world, &packet);
         let slot = self.rocket_slot(&flight);
@@ -617,13 +648,7 @@ impl<W: Write> Engine<W> {
         flight: &Flight,
         position: [f64; 3],
         now: Duration,
-    ) -> Result<
-        (
-            acquisition_character_effects::Candidate,
-            std::collections::BTreeMap<u32, acquisition_character_effects::NativeState>,
-        ),
-        &'static str,
-    > {
+    ) -> Result<RocketEffects, &'static str> {
         let state = &self
             .domination_gameplay
             .as_ref()
@@ -633,19 +658,42 @@ impl<W: Write> Engine<W> {
         let sequences = state.collisions.clone();
         let costs = state.structural.material_penetration_costs().clone();
         let terrain = std::sync::Arc::clone(&state.terrain_materials);
-        self.prepare_hospital_rocket_character_blast(
+        let collision = BlastCollision {
+            filter_rows: &filter_rows,
+            limits: QueryLimits::default(),
+            sequences: &sequences,
+            material_costs: &costs,
+            terrain_materials: Some(&terrain),
+        };
+        let (character, native) = self.prepare_hospital_rocket_character_blast(
             &flight.source,
             position,
             flight.blast,
-            BlastCollision {
-                filter_rows: &filter_rows,
-                limits: QueryLimits::default(),
-                sequences: &sequences,
-                material_costs: &costs,
-                terrain_materials: Some(&terrain),
-            },
+            collision,
             now,
-        )
+        )?;
+        let ground = self
+            .hospital_rocket_ground
+            .as_ref()
+            .map(|rules| {
+                self.prepare_hospital_rocket_ground_blast(
+                    &flight.source,
+                    position,
+                    GroundRocketDose::from(flight.blast),
+                    rules,
+                    self.projectile_contacts
+                        .as_ref()
+                        .ok_or("hospital_rocket_contact_bindings_required")?,
+                    collision,
+                    now,
+                )
+            })
+            .transpose()?;
+        Ok(RocketEffects {
+            character,
+            native,
+            ground,
+        })
     }
 
     fn finish_rocket_cleanup(
@@ -860,4 +908,4 @@ fn rotate(rotation: [f64; 4], [x, y, z]: [f64; 3]) -> [f64; 3] {
 
 #[cfg(test)]
 #[path = "hospital_rocket_runtime_tests.rs"]
-mod tests;
+pub(crate) mod tests;

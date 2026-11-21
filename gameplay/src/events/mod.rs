@@ -155,7 +155,7 @@ struct CombatChanges {
     new_projectiles: Option<projectile::ProjectileFlights>,
     new_hospital_rocket: Option<(u8, hospital_rocket_runtime::Flight)>,
     projectile_replicas: projectile_replication::ProjectileReplicas,
-    projectile_cleanup: [Option<ProjectileCleanup>; 3],
+    projectile_cleanup: [Option<ProjectileCleanup>; projectile::MAX_PROJECTILE_SLOTS],
     projectile_publications: Vec<ProjectilePublication>,
     new_grenade_remaining: Option<u8>,
     new_grenade_damage: Option<std::collections::VecDeque<PendingDamage>>,

@@ -89,7 +89,7 @@ impl Resources {
 fn point(p: replication::CharacterPosition) -> [f64; 3] {
     [p.x.into(), p.y.into(), p.z.into()]
 }
-fn vehicle_pose(v: &ground_vehicles::Creation) -> Pose {
+pub(crate) fn vehicle_pose(v: &ground_vehicles::Creation) -> Pose {
     let transform = vehicle_exit::BunkerTransform {
         position: v.position,
         rotation_xyzw: v.rotation,

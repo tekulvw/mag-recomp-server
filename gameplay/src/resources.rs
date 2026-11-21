@@ -212,6 +212,7 @@ impl<W: Write> Engine<W> {
             domination_round: None,
             domination_gameplay: None,
             hospital_rockets: None,
+            hospital_rocket_ground: None,
             projectile_contacts: None,
             acquisition_gameplay: None,
             acquisition_effect_origin: std::sync::Arc::new(()),
