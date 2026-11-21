@@ -145,9 +145,11 @@ pub(super) struct WorldBot {
     pub(super) drop_approach_ready: bool,
     pub(super) drop_queue_since: Option<Duration>,
     pub(super) health: u16,
+    pub(super) damage_revision: u64,
     pub(super) damage: replication::CharacterDamage,
     pub(super) yaw: u16,
     pub(super) firearm: crate::bot_firearms::State,
+    pub(super) resupply: Option<crate::bot_resupply::Session>,
     pub(super) healing: crate::bot_healing::State,
     pub(super) move_attempted: bool,
     due_respawn_wave: Option<(u32, Duration)>,
@@ -400,6 +402,12 @@ impl BotRegistry {
     }
 }
 impl WorldBot {
+    fn apply_damage_health(&mut self, health: u16) {
+        if health < self.health {
+            self.damage_revision = self.damage_revision.wrapping_add(1);
+        }
+        self.health = health;
+    }
     pub(super) fn bind_delay_episode(&mut self, now: Duration, buffer: f64) {
         self.delay_episode = self.target.next_registry_drop(buffer).map(|p| {
             crate::bot_traffic_costs::Episode::new(
@@ -812,10 +820,11 @@ impl<W: Write> Engine<W> {
             {
                 return Err("stale_bot_damage");
             }
-            bot.health = damage.health_quarter_points;
+            bot.apply_damage_health(damage.health_quarter_points);
             bot.damage = damage;
             if bot.health == 0 {
                 bot.firearm = Default::default();
+                bot.resupply = None;
                 bot.healing = Default::default();
                 runtime.phase = BotPhase::Dead;
                 runtime.since = now;
@@ -1069,7 +1078,9 @@ impl<W: Write> Engine<W> {
                 bot.target.runtime = Some(runtime);
                 bot.due_respawn_wave = None;
                 bot.health = 400;
+                bot.damage_revision = 0;
                 bot.firearm = Default::default();
+                bot.resupply = None;
                 bot.healing = Default::default();
                 bot.damage = initial_damage();
                 bot.move_attempted = false;
@@ -1097,7 +1108,10 @@ impl<W: Write> Engine<W> {
                     json!({"op":"bot_respawn","object_index":id,"generation":runtime.generation}),
                 );
             }
-            if !self.bot_registry.config.as_ref().unwrap().autonomous && !bot.move_attempted {
+            if bot.resupply.is_none()
+                && !self.bot_registry.config.as_ref().unwrap().autonomous
+                && !bot.move_attempted
+            {
                 bot.move_attempted = true;
                 let slot = &self.bot_registry.config.as_ref().unwrap().slots[bot.slot];
                 if let Some(goal) = slot.goal {
@@ -1124,7 +1138,9 @@ impl<W: Write> Engine<W> {
                     }
                 }
             }
-            if matches!(bot.target.runtime.unwrap().phase, BotPhase::Relocating) {
+            if bot.resupply.is_none()
+                && matches!(bot.target.runtime.unwrap().phase, BotPhase::Relocating)
+            {
                 if let Some(mut step) = bot.target.movement_step_with_drop_admission(
                     1,
                     now,
@@ -1167,7 +1183,7 @@ impl<W: Write> Engine<W> {
                             _ => "objective_or_fixed_goal",
                         });
                     if let Some(hp) = step.health {
-                        bot.health = hp;
+                        bot.apply_damage_health(hp);
                         bot.damage.health_quarter_points = hp;
                     }
                     if let Some(yaw) = step.receipt["facing_yaw"].as_u64() {
@@ -1292,7 +1308,7 @@ impl<W: Write> Engine<W> {
             {
                 bot.target.runtime = Some(step.runtime);
                 if let Some(hp) = step.health {
-                    bot.health = hp;
+                    bot.apply_damage_health(hp);
                     bot.damage.health_quarter_points = hp;
                 }
                 if bot.health > 0 {
@@ -2458,9 +2474,11 @@ impl<W: Write> Engine<W> {
                     drop_approach_ready: false,
                     drop_queue_since: None,
                     health: 400,
+                    damage_revision: 0,
                     damage: initial_damage(),
                     yaw: 0,
                     firearm: Default::default(),
+                    resupply: None,
                     healing: Default::default(),
                     move_attempted: false,
                     due_respawn_wave: None,

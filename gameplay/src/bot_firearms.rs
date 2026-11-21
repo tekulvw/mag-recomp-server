@@ -6,6 +6,7 @@ mod recoil;
 use crate::actor_collision::Bounds;
 use crate::bot_registry::WorldBot;
 use crate::development_target::BotPhase;
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -97,9 +98,29 @@ struct Life {
     generation: u32,
     reservation: Option<String>,
 }
+pub(super) type EquipmentKey = (u32, u8, u8, u8, u16);
+
+pub(super) fn current_equipment_key(bot: &WorldBot) -> Option<EquipmentKey> {
+    let kit = &bot.target.loadout;
+    let item = kit
+        .inventories
+        .get(usize::from(kit.handle.inventory_index))?
+        .slots
+        .get(usize::from(kit.primary.gear_slot))
+        .copied()
+        .flatten()?;
+    Some((
+        bot.target.runtime?.generation,
+        kit.handle.update_id,
+        kit.handle.inventory_index,
+        kit.primary.gear_slot,
+        item,
+    ))
+}
+
 #[derive(Clone, Default)]
 pub(super) struct State {
-    equipment: Option<(u32, u8, u8, u8, u16)>,
+    equipment: Option<EquipmentKey>,
     pub(super) magazine: u32,
     pub(super) reserve: u32,
     reload_until: Option<Duration>,
@@ -131,9 +152,21 @@ impl State {
     pub(super) fn packed_pitch(&self) -> u8 {
         pack_pitch(self.pitch).unwrap_or(127)
     }
+    fn reserve_capacity(metadata: &retail_combat::RetailBulletMetadata) -> u32 {
+        metadata.magazine_capacity * metadata.initial_magazine_count.saturating_sub(1)
+    }
+    pub(super) fn is_resupply_dry(&self) -> bool {
+        self.equipment.is_some()
+            && self.magazine == 0
+            && self.reserve == 0
+            && self.reload_until.is_none()
+    }
+    pub(super) fn equipment_matches(&self, key: EquipmentKey) -> bool {
+        self.equipment == Some(key)
+    }
     fn bind(
         &mut self,
-        key: (u32, u8, u8, u8, u16),
+        key: EquipmentKey,
         p: &retail_combat::RetailBulletMetadata,
         recoil_profile: recoil::Profile,
         yaw: u16,
@@ -142,7 +175,7 @@ impl State {
             *self = Self {
                 equipment: Some(key),
                 magazine: p.magazine_capacity,
-                reserve: p.magazine_capacity * p.initial_magazine_count.saturating_sub(1),
+                reserve: Self::reserve_capacity(p),
                 yaw: f64::from(yaw) * std::f64::consts::TAU / 1024.,
                 recoil: recoil::State::new(recoil_profile),
                 recoil_profile: Some(recoil_profile),
@@ -369,30 +402,18 @@ impl<W: Write> Engine<W> {
         now: Duration,
         wall: u64,
     ) -> Result<Vec<OutboundMessage>, &'static str> {
+        let mut resupply_observations = BTreeMap::new();
+        let resupply_enabled = self.bot_resupply_enabled();
         // Invalidate even when unsafe/disabled: a new life or equipment version
         // must never publish the previous weapon's ammunition in a join snapshot.
         for bot in self.bot_registry.bots.values_mut() {
-            let kit = &bot.target.loadout;
-            let current = kit
-                .inventories
-                .get(usize::from(kit.handle.inventory_index))
-                .and_then(|i| i.slots.get(usize::from(kit.primary.gear_slot)))
-                .copied()
-                .flatten()
-                .map(|item| {
-                    (
-                        bot.target.runtime.unwrap().generation,
-                        kit.handle.update_id,
-                        kit.handle.inventory_index,
-                        kit.primary.gear_slot,
-                        item,
-                    )
-                });
-            if bot.health == 0
-                || bot
-                    .firearm
-                    .equipment
-                    .is_some_and(|old| Some(old) != current)
+            // Service cancellation records before a same-life equipment rebind.
+            if bot.resupply.is_none()
+                && (bot.health == 0
+                    || bot
+                        .firearm
+                        .equipment
+                        .is_some_and(|old| Some(old) != current_equipment_key(bot)))
             {
                 bot.firearm = Default::default();
             }
@@ -403,6 +424,7 @@ impl<W: Write> Engine<W> {
             .as_ref()
             .map(|c| c.firearms.clone())
         else {
+            self.tick_bot_resupply(now, wall, &resupply_observations)?;
             return Ok(Vec::new());
         };
         if !policy.enabled
@@ -415,6 +437,7 @@ impl<W: Write> Engine<W> {
                 .chain(self.peers.values())
                 .any(|a| a.ready_for_updates && a.initial_objects.is_some())
         {
+            self.tick_bot_resupply(now, wall, &resupply_observations)?;
             for bot in self.bot_registry.bots.values_mut() {
                 bot.firearm.target = None;
                 bot.firearm.last_tick = None;
@@ -423,6 +446,7 @@ impl<W: Write> Engine<W> {
         }
         let items = self.item_catalog.clone();
         let Ok(catalog) = items.retail_combat() else {
+            self.tick_bot_resupply(now, wall, &resupply_observations)?;
             return Ok(Vec::new());
         };
         let world = self
@@ -523,6 +547,12 @@ impl<W: Write> Engine<W> {
             }
             let kit = &bot.target.loadout;
             let equipped = kit.primary;
+            let servicing = bot.resupply.is_some();
+            let service_due = bot.resupply.is_some_and(|session| session.due(now));
+            let damage_revision = bot.damage_revision;
+            if servicing && current_equipment_key(bot) != bot.firearm.equipment {
+                continue;
+            }
             let profile = retail_combat::RetailBulletProfile::from_equipped(
                 catalog,
                 kit,
@@ -558,6 +588,16 @@ impl<W: Write> Engine<W> {
             let (profile, metadata, schedule, recoil_profile) = match supported {
                 Ok(v) => v,
                 Err(reason) => {
+                    if servicing {
+                        resupply_observations.insert(
+                            id,
+                            bot_resupply::Observation {
+                                ammo: None,
+                                threat: bot_resupply::Threat::Deferred,
+                                damage_revision,
+                            },
+                        );
+                    }
                     let s = &mut self.bot_registry.bots.get_mut(&id).unwrap().firearm;
                     if s.last_diagnostic
                         .is_none_or(|last| now.saturating_sub(last) >= Duration::from_secs(5))
@@ -569,14 +609,15 @@ impl<W: Write> Engine<W> {
                 }
             };
             let mut state = self.bot_registry.bots[&id].firearm.clone();
+            let equipment = (
+                me.life.generation,
+                kit.handle.update_id,
+                kit.handle.inventory_index,
+                equipped.gear_slot,
+                profile.item_id(),
+            );
             state.bind(
-                (
-                    me.life.generation,
-                    kit.handle.update_id,
-                    kit.handle.inventory_index,
-                    equipped.gear_slot,
-                    profile.item_id(),
-                ),
+                equipment,
                 metadata,
                 recoil_profile,
                 self.bot_registry.bots[&id].yaw,
@@ -585,10 +626,12 @@ impl<W: Write> Engine<W> {
                 .last_tick
                 .map_or(0., |last| now.saturating_sub(last).as_secs_f64().min(0.25));
             state.last_tick = Some(now);
-            let reload_changed = state.reload(now, schedule, metadata.magazine_capacity);
+            let reload_changed =
+                !servicing && state.reload(now, schedule, metadata.magazine_capacity);
             let reload_receipt=reload_changed.then(||json!({"op":"bot_firearm_reload","timestamp_ms":now.as_millis() as u64,"object_index":id,"generation":me.life.generation,"magazine":state.magazine,"reserve":state.reserve,"reloading":state.reload_until.is_some()}));
             let from = muzzle(me.feet);
             let mut blocked = None;
+            let mut threat = bot_resupply::Threat::Deferred;
             if state.target.as_ref().is_some_and(|life| {
                 !actors.iter().any(|a| {
                     a.life == *life
@@ -601,7 +644,7 @@ impl<W: Write> Engine<W> {
             }
             // Retain a current target instead of spending the last ray on
             // periodic reacquisition; every actual shot still gets fresh LOS.
-            if state.target.is_none() && now >= state.next_perception {
+            if state.target.is_none() && (now >= state.next_perception || service_due) {
                 state.next_perception = now + Duration::from_millis(policy.perception_interval_ms);
                 let mut candidates: Vec<_> = actors
                     .iter()
@@ -624,6 +667,7 @@ impl<W: Write> Engine<W> {
                         .then(a.life.id.cmp(&b.life.id))
                 });
                 let mut selected = None;
+                let mut confirmed_quiet = true;
                 for candidate in candidates.into_iter().take(policy.max_candidates_per_bot) {
                     match visible(
                         self.collision_world.as_ref(),
@@ -641,6 +685,7 @@ impl<W: Write> Engine<W> {
                             break;
                         }
                         Err(reason) => {
+                            confirmed_quiet &= matches!(reason, "world_blocked" | "body_blocked");
                             blocked = Some(reason);
                             if deferred(reason) {
                                 state.next_perception = now;
@@ -648,6 +693,9 @@ impl<W: Write> Engine<W> {
                             }
                         }
                     }
+                }
+                if selected.is_none() && confirmed_quiet {
+                    threat = bot_resupply::Threat::Quiet;
                 }
                 if selected != state.target {
                     if selected.is_some() {
@@ -671,6 +719,7 @@ impl<W: Write> Engine<W> {
                 .and_then(|life| actors.iter().find(|a| a.life == *life && a.health > 0))
                 .cloned()
             {
+                threat = bot_resupply::Threat::Enemy;
                 let to = torso(target.feet);
                 let moving = matches!(
                     self.bot_registry.bots[&id].target.runtime.unwrap().phase,
@@ -702,7 +751,8 @@ impl<W: Write> Engine<W> {
                 state.pitch += pitch_move;
                 let pitch_error = (pitch_delta - pitch_move).abs();
                 let aimed_end = aim_endpoint(from, state.yaw, state.pitch, length(from, to));
-                if policy.within_range(length(from, to), metadata.max_range)
+                if !servicing
+                    && policy.within_range(length(from, to), metadata.max_range)
                     && error <= policy.aim_tolerance_degrees.to_radians()
                     && pitch_error <= policy.aim_tolerance_degrees.to_radians()
                     && intersects(
@@ -991,6 +1041,20 @@ impl<W: Write> Engine<W> {
             if let Some(statistics) = assist_statistics {
                 messages.extend(statistics.commit(self));
             }
+            if resupply_enabled && (servicing || state.is_resupply_dry()) {
+                resupply_observations.insert(
+                    id,
+                    bot_resupply::Observation {
+                        ammo: Some(bot_resupply::AmmoBinding {
+                            equipment,
+                            ammo_pool: equipped.ammo_pool,
+                            reserve_cap: State::reserve_capacity(metadata),
+                        }),
+                        threat,
+                        damage_revision,
+                    },
+                );
+            }
             let bot = self.bot_registry.bots.get_mut(&id).unwrap();
             bot.firearm = state;
             if publish {
@@ -1000,6 +1064,7 @@ impl<W: Write> Engine<W> {
                 self.broadcast_bot_packet(packet);
             }
         }
+        self.tick_bot_resupply(now, wall, &resupply_observations)?;
         Ok(messages)
     }
 }

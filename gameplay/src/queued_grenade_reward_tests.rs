@@ -288,6 +288,195 @@ fn scheduler_fixture() -> (Engine<Vec<u8>>, u16) {
     (engine, shooter)
 }
 
+fn dry_resupply_fixture() -> (Engine<Vec<u8>>, u16) {
+    let (mut engine, shooter) = scheduler_fixture();
+    engine.active.as_mut().unwrap().life = CharacterLife::AwaitingRespawn { generation: 4 };
+    engine.tick_bot_firearms(Duration::ZERO, 1).unwrap();
+    let state = &mut engine.bot_registry.bots.get_mut(&shooter).unwrap().firearm;
+    assert_eq!((state.magazine, state.reserve), (9, 9));
+    state.magazine = 0;
+    state.reserve = 0;
+    (engine, shooter)
+}
+
+fn enable_synthetic_resupply(engine: &mut Engine<Vec<u8>>, shooter: u16) {
+    let origin = engine.bot_registry.bots[&shooter]
+        .target
+        .runtime
+        .unwrap()
+        .physical_position();
+    engine.install_synthetic_bot_resupply(bot_resupply_catalog::Catalog::synthetic(origin, 0.375));
+}
+
+#[test]
+fn bot_resupply_dry_idle_waits_then_refills_reserve_and_normally_fires() {
+    let (mut engine, shooter) = dry_resupply_fixture();
+    enable_synthetic_resupply(&mut engine, shooter);
+    let tick = |engine: &mut Engine<Vec<u8>>, ms| {
+        engine
+            .tick_bot_firearms(Duration::from_millis(ms), 1)
+            .unwrap();
+    };
+    tick(&mut engine, 1000);
+    let started = engine.bot_registry.bots[&shooter]
+        .resupply
+        .expect("AI Start");
+    tick(&mut engine, 1374);
+    assert_eq!(engine.bot_registry.bots[&shooter].resupply, Some(started));
+    let state = &engine.bot_registry.bots[&shooter].firearm;
+    assert_eq!((state.magazine, state.reserve), (0, 0));
+    tick(&mut engine, 1375);
+    assert!(engine.bot_registry.bots[&shooter].resupply.is_none());
+    let state = &engine.bot_registry.bots[&shooter].firearm;
+    assert_eq!((state.magazine, state.reserve), (0, 9));
+    tick(&mut engine, 1400);
+    let bot = &engine.bot_registry.bots[&shooter];
+    assert!(bot.firearm.item(bot.target.loadout.primary).reloading);
+    assert_eq!((bot.firearm.magazine, bot.firearm.reserve), (0, 9));
+    tick(&mut engine, 2400);
+    let bot = &engine.bot_registry.bots[&shooter];
+    assert!(!bot.firearm.item(bot.target.loadout.primary).reloading);
+    assert_eq!((bot.firearm.magazine, bot.firearm.reserve), (9, 0));
+    engine.active.as_mut().unwrap().life = CharacterLife::Alive {
+        generation: 4,
+        health_quarter_points: 120,
+    };
+    for ms in (2450..3300).step_by(50) {
+        tick(&mut engine, ms);
+    }
+    assert!(!engine.active.as_ref().unwrap().life.is_alive());
+    assert_eq!(engine.bot_registry.bots[&shooter].firearm.magazine, 8);
+}
+
+#[test]
+fn bot_resupply_pauses_fixed_move_and_cancels_for_displacement_inside_box() {
+    let (mut engine, shooter) = dry_resupply_fixture();
+    enable_synthetic_resupply(&mut engine, shooter);
+    engine.tick_bot_firearms(Duration::from_secs(1), 1).unwrap();
+    let slot = engine.bot_registry.bots[&shooter].slot;
+    let held = engine.bot_registry.bots[&shooter].resupply;
+    assert!(held.is_some());
+    engine.bot_registry.config.as_mut().unwrap().slots[slot].goal =
+        Some(replication::CharacterPosition {
+            x: 4.,
+            y: 0.,
+            z: 2.,
+        });
+    engine.tick_bots(Duration::from_millis(1200), 1).unwrap();
+    let bot = engine.bot_registry.bots.get_mut(&shooter).unwrap();
+    assert!(!bot.move_attempted);
+    assert!(matches!(
+        bot.target.runtime.unwrap().phase,
+        development_target::BotPhase::Complete
+    ));
+    assert_eq!(bot.resupply, held);
+    bot.target
+        .runtime
+        .as_mut()
+        .unwrap()
+        .physics_motion
+        .as_mut()
+        .unwrap()
+        .position[0] += 0.25;
+    engine
+        .tick_bot_firearms(Duration::from_millis(1375), 1)
+        .unwrap();
+    let bot = &engine.bot_registry.bots[&shooter];
+    assert!(bot.resupply.is_none());
+    assert_eq!((bot.firearm.magazine, bot.firearm.reserve), (0, 0));
+    assert!(String::from_utf8_lossy(&engine.writer).contains("moved_during_service"));
+}
+
+#[test]
+fn bot_resupply_ordinary_opt_out_and_refused_pulse_preserve_ammunition() {
+    let (mut disabled, shooter) = dry_resupply_fixture();
+    disabled
+        .tick_bot_firearms(Duration::from_secs(1), 1)
+        .unwrap();
+    disabled
+        .tick_bot_firearms(Duration::from_secs(2), 1)
+        .unwrap();
+    assert!(disabled.bot_registry.bots[&shooter].resupply.is_none());
+    assert_eq!(disabled.bot_registry.bots[&shooter].firearm.reserve, 0);
+
+    let (mut engine, shooter) = dry_resupply_fixture();
+    enable_synthetic_resupply(&mut engine, shooter);
+    engine.tick_bot_firearms(Duration::from_secs(1), 1).unwrap();
+    let before = engine.bot_registry.bots[&shooter].resupply.unwrap();
+    let queued = engine.active.as_ref().unwrap().pending_shared.clone();
+    engine.max_log = engine.written;
+    assert_eq!(
+        engine
+            .tick_bot_firearms(Duration::from_millis(1375), 1)
+            .unwrap_err(),
+        "log_limit_reached"
+    );
+    let bot = &engine.bot_registry.bots[&shooter];
+    assert_eq!(bot.resupply, Some(before));
+    assert_eq!((bot.firearm.magazine, bot.firearm.reserve), (0, 0));
+    assert_eq!(engine.active.as_ref().unwrap().pending_shared, queued);
+}
+
+#[test]
+fn bot_resupply_cancels_after_recorded_damage_even_if_healed_to_exact_prior_health() {
+    let (mut engine, shooter) = dry_resupply_fixture();
+    enable_synthetic_resupply(&mut engine, shooter);
+    let started = Duration::from_secs(1);
+    engine.tick_bot_firearms(started, 1).unwrap();
+    let bot = &engine.bot_registry.bots[&shooter];
+    assert!(bot.resupply.is_some());
+    let generation = bot.target.runtime.unwrap().generation;
+    let prior = bot.health;
+    let healed = replication::CharacterDamage {
+        health_quarter_points: prior,
+        ..bot.damage
+    };
+    let hurt = replication::CharacterDamage {
+        health_quarter_points: prior - 10,
+        ..healed
+    };
+    engine
+        .record(json!({"op":"synthetic_accepted_damage"}), 1)
+        .unwrap();
+    engine
+        .commit_bot_damage(shooter, generation, hurt, Duration::from_millis(1100))
+        .unwrap();
+    engine
+        .record(json!({"op":"synthetic_accepted_heal"}), 1)
+        .unwrap();
+    engine
+        .commit_bot_healing(shooter, generation, prior - 10, healed, 400)
+        .unwrap();
+    assert_eq!(engine.bot_registry.bots[&shooter].health, prior);
+    engine
+        .tick_bot_firearms(Duration::from_millis(1375), 1)
+        .unwrap();
+    let bot = &engine.bot_registry.bots[&shooter];
+    assert!(bot.resupply.is_none());
+    assert_eq!((bot.firearm.magazine, bot.firearm.reserve), (0, 0));
+    assert!(String::from_utf8_lossy(&engine.writer).contains("combat_interrupt"));
+}
+
+#[test]
+fn bot_resupply_refused_equipment_cancel_keeps_old_ammo_binding_stable() {
+    let (mut engine, shooter) = dry_resupply_fixture();
+    enable_synthetic_resupply(&mut engine, shooter);
+    engine.tick_bot_firearms(Duration::from_secs(1), 1).unwrap();
+    let bot = engine.bot_registry.bots.get_mut(&shooter).unwrap();
+    let session = bot.resupply.unwrap();
+    bot.target.loadout.handle.update_id += 1;
+    engine.max_log = engine.written;
+    assert_eq!(
+        engine
+            .tick_bot_firearms(Duration::from_millis(1375), 1)
+            .unwrap_err(),
+        "log_limit_reached"
+    );
+    let bot = &engine.bot_registry.bots[&shooter];
+    assert_eq!(bot.resupply, Some(session));
+    assert_eq!((bot.firearm.magazine, bot.firearm.reserve), (0, 0));
+}
+
 #[test]
 fn bot_firearm_kd_scheduler_counts_incapacitating_hit_once() {
     let (engine, shooter) = scheduler_fixture();
@@ -378,6 +567,88 @@ fn scheduler_bot_opponents() -> (Engine<Vec<u8>>, u16, u16) {
         engine.bot_registry.bots[&shooter].target.squad.team()
     );
     (engine, shooter, target)
+}
+
+#[test]
+fn bot_resupply_later_ordinary_shot_interrupts_fresh_due_observation() {
+    let (mut engine, opponent, servicing) = scheduler_bot_opponents();
+    let physical = engine.bot_registry.bots[&servicing]
+        .target
+        .runtime
+        .unwrap()
+        .physics_motion
+        .unwrap();
+    let terrain =
+        bot_physics::WorldTerrain::new(engine.collision_world.as_ref(), engine.map_name()).unwrap();
+    let grounded = terrain
+        .advance(physical, [0.; 3], 0.05, Default::default())
+        .unwrap();
+    assert!(grounded.grounded);
+    let enemy = engine.bot_registry.bots[&opponent]
+        .target
+        .runtime
+        .unwrap()
+        .physical_position();
+    let direct = (grounded.position[0] - enemy[0]).atan2(grounded.position[2] - enemy[2]);
+    let yaw = (direct.rem_euclid(std::f64::consts::TAU) * 1024. / std::f64::consts::TAU) as u16;
+    let adversary = engine.bot_registry.bots.get_mut(&opponent).unwrap();
+    adversary.yaw = yaw;
+    adversary.task.recovering = true;
+    let recipient = engine.bot_registry.bots.get_mut(&servicing).unwrap();
+    recipient.yaw = yaw; // Looks away from the opponent.
+    recipient.task.recovering = false;
+    recipient.target.runtime.as_mut().unwrap().physics_motion = Some(grounded);
+    recipient.health = 400;
+    recipient.damage.health_quarter_points = 400;
+    engine
+        .bot_registry
+        .config
+        .as_mut()
+        .unwrap()
+        .firearms
+        .acquisition_fov_degrees = 60.;
+    let tick = |engine: &mut Engine<Vec<u8>>, ms| {
+        engine
+            .tick_bot_firearms(Duration::from_millis(ms), 1)
+            .unwrap();
+    };
+    tick(&mut engine, 0);
+    let state = &mut engine
+        .bot_registry
+        .bots
+        .get_mut(&servicing)
+        .unwrap()
+        .firearm;
+    assert_eq!((state.magazine, state.reserve), (9, 9));
+    state.magazine = 0;
+    state.reserve = 0;
+    enable_synthetic_resupply(&mut engine, servicing);
+    tick(&mut engine, 1000);
+    assert!(engine.bot_registry.bots[&servicing].resupply.is_some());
+    engine
+        .bot_registry
+        .bots
+        .get_mut(&opponent)
+        .unwrap()
+        .task
+        .recovering = false;
+    tick(&mut engine, 1250); // Acquire; reaction delay prevents a same-sample shot.
+    assert_eq!(engine.bot_registry.bots[&servicing].health, 400);
+    engine.bot_registry.firearm_cursor = servicing; // Recipient observes quiet first.
+    tick(&mut engine, 1375);
+    let recipient = &engine.bot_registry.bots[&servicing];
+    assert_eq!(
+        recipient.health, 240,
+        "ordinary later shooter must land damage"
+    );
+    assert_eq!(
+        (recipient.firearm.magazine, recipient.firearm.reserve),
+        (0, 0)
+    );
+    assert!(recipient.resupply.is_none());
+    let log = String::from_utf8_lossy(&engine.writer);
+    assert!(log.contains("combat_interrupt"));
+    assert!(!log.contains("bot_resupply_pulse"));
 }
 
 fn firearm_assist_fixture(timeout_ms: u32) -> (Engine<Vec<u8>>, u16, u16) {

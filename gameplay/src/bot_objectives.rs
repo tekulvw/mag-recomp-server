@@ -409,6 +409,7 @@ pub(super) fn operator_action(
 fn operator_safe(bot: &crate::bot_registry::WorldBot) -> bool {
     let r = bot.target.runtime.unwrap();
     bot.health > 0
+        && bot.resupply.is_none()
         && r.physics_motion.is_some_and(|m| m.grounded)
         && !r.navmesh_state.on_player
         && !bot.drop_committed
@@ -1125,6 +1126,9 @@ impl<W: Write> Engine<W> {
             let Some(b) = self.bot_registry.bots.get_mut(&blocker) else {
                 continue;
             };
+            if b.resupply.is_some() {
+                continue;
+            }
             let r = b.target.runtime.unwrap();
             if source_queued_at.is_some()
                 && b.idle_queued_waiter(policy.arrival_m)
@@ -2353,6 +2357,9 @@ impl<W: Write> Engine<W> {
             let mut fresh = Vec::new();
             let mut retry = Vec::new();
             for (&id, b) in &self.bot_registry.bots {
+                if b.resupply.is_some() {
+                    continue;
+                }
                 let r = b.target.runtime.unwrap();
                 let t = &b.task;
                 let active_retreat = b
