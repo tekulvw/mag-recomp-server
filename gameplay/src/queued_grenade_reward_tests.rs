@@ -608,6 +608,343 @@ fn bot_resupply_approach_lost_token_preserves_a_newer_movement() {
 }
 
 #[test]
+fn bot_resupply_drop_trusted_child_retains_only_its_recorded_supply_parent() {
+    use development_bot_movement::{BotMove, BotMoveMode};
+    let (mut engine, shooter, _) = configured_approach_fixture();
+    engine.tick_bot_firearms(Duration::from_secs(1), 1).unwrap();
+    let mesh = engine.navmesh_world.as_ref().unwrap().clone();
+    let map = engine.map_name().to_owned();
+    let bot = engine.bot_registry.bots.get_mut(&shooter).unwrap();
+    let seek = bot.resupply_seek.as_ref().unwrap();
+    let from = bot.target.runtime.unwrap().position;
+    bot.target
+        .begin_registry_move(
+            mesh,
+            &map,
+            BotMove {
+                mode: BotMoveMode::Navmesh,
+                destination: replication::CharacterPosition {
+                    x: from.x - 2.,
+                    ..from
+                },
+                duration_ms: 3000,
+                update_ms: 250,
+                yaw: None,
+                sprint: false,
+            },
+            Duration::from_millis(1020),
+            bot.health,
+            None,
+        )
+        .unwrap();
+    assert!(!seek.owns(bot));
+    bot.target.set_registry_supply_parent("unrelated-parent");
+    assert!(!seek.owns(bot));
+    let parent = seek.parent_id().to_owned();
+    bot.target.set_registry_supply_parent(&parent);
+    assert!(seek.owns(bot));
+}
+
+fn pending_resupply_drop_fixture() -> (Engine<Vec<u8>>, u16, [f64; 3]) {
+    let (mut engine, shooter, center) = configured_approach_fixture();
+    engine.tick_bot_firearms(Duration::from_secs(1), 1).unwrap();
+    let bot = engine.bot_registry.bots.get_mut(&shooter).unwrap();
+    bot.resupply_seek
+        .as_mut()
+        .unwrap()
+        .mark_test_passage_pending(41);
+    (engine, shooter, center)
+}
+
+fn autonomous_planning_fixture() -> (Engine<Vec<u8>>, u16) {
+    let (mut engine, shooter, center) = configured_approach_fixture();
+    engine.bot_registry.config.as_mut().unwrap().autonomous = true;
+    let key = bot_resupply_catalog::Catalog::synthetic(center, 0.375)
+        .select(center)
+        .unwrap();
+    engine.install_synthetic_resupply_approach(
+        bot_resupply_approach_policy::Policy::synthetic(key, center).with_synthetic_drop(41),
+    );
+    (engine, shooter)
+}
+
+#[test]
+fn bot_resupply_drop_scheduler_reserves_idle_before_perception_without_starting_motion() {
+    let (mut engine, shooter) = autonomous_planning_fixture();
+    let now = Duration::from_secs(1);
+    engine.tick_bots(now, 1).unwrap();
+    let bot = &engine.bot_registry.bots[&shooter];
+    assert!(bot.resupply_planning.is_some());
+    assert!(bot.resupply_seek.is_none() && bot.resupply.is_none());
+    assert!(bot.target.registry_move_destination().is_none());
+    assert_eq!((bot.firearm.magazine, bot.firearm.reserve), (0, 0));
+
+    engine.tick_bot_firearms(now, 1).unwrap();
+    let bot = &engine.bot_registry.bots[&shooter];
+    assert!(bot.resupply_planning.is_none());
+    assert!(
+        bot.resupply_seek
+            .as_ref()
+            .is_some_and(|seek| seek.owns(bot))
+    );
+    assert!(bot.resupply.is_none());
+}
+
+#[test]
+fn bot_resupply_drop_planning_window_expires_without_quiet_and_leaves_tactical_cooldown() {
+    use crate::world_tick::WORLD_TICK_INTERVAL;
+    let (mut engine, shooter) = autonomous_planning_fixture();
+    let start = Duration::from_secs(1);
+    engine.tick_bots(start, 1).unwrap();
+    engine
+        .tick_bot_resupply(start, 1, &BTreeMap::new())
+        .unwrap();
+    let bot = &engine.bot_registry.bots[&shooter];
+    assert!(bot.resupply_planning.is_some());
+    assert!(bot.resupply_seek.is_none() && bot.resupply.is_none());
+
+    let expires = Duration::from_secs(3);
+    engine.tick_bots(expires, 1).unwrap();
+    let bot = &engine.bot_registry.bots[&shooter];
+    assert!(!bot.has_supply_action());
+    assert!(bot.resupply_planning_retry_at > expires + WORLD_TICK_INTERVAL);
+    engine.tick_bots(expires + WORLD_TICK_INTERVAL, 1).unwrap();
+    assert!(!engine.bot_registry.bots[&shooter].has_supply_action());
+    let audit = String::from_utf8_lossy(&engine.writer);
+    assert_eq!(audit.matches("bot_resupply_planning_started").count(), 1);
+    assert_eq!(audit.matches("planning_window_expired").count(), 1);
+}
+
+#[test]
+fn bot_resupply_drop_planning_does_not_preempt_a_running_route() {
+    use development_bot_movement::{BotMove, BotMoveMode};
+    let (mut engine, shooter) = autonomous_planning_fixture();
+    let mesh = engine.navmesh_world.as_ref().unwrap().clone();
+    let map = engine.map_name().to_owned();
+    let bot = engine.bot_registry.bots.get_mut(&shooter).unwrap();
+    let from = bot.target.runtime.unwrap().position;
+    bot.target
+        .begin_registry_move(
+            mesh,
+            &map,
+            BotMove {
+                mode: BotMoveMode::Navmesh,
+                destination: replication::CharacterPosition {
+                    x: from.x - 3.,
+                    ..from
+                },
+                duration_ms: 4000,
+                update_ms: 250,
+                yaw: None,
+                sprint: false,
+            },
+            Duration::from_millis(950),
+            bot.health,
+            None,
+        )
+        .unwrap();
+    let goal = bot.target.registry_move_destination();
+    engine
+        .tick_resupply_planning(Duration::from_secs(1), 1)
+        .unwrap();
+    let bot = &engine.bot_registry.bots[&shooter];
+    assert!(!bot.has_supply_action());
+    assert_eq!(bot.target.registry_move_destination(), goal);
+    assert!(matches!(
+        bot.target.runtime.unwrap().phase,
+        BotPhase::Relocating
+    ));
+}
+
+#[test]
+fn bot_resupply_drop_planning_record_refusal_leaves_idle_unreserved() {
+    let (mut engine, shooter) = autonomous_planning_fixture();
+    let bot = &engine.bot_registry.bots[&shooter];
+    let before = bot.target.runtime.unwrap().physical_position();
+    engine.max_log = engine.written;
+    assert_eq!(
+        engine
+            .tick_resupply_planning(Duration::from_secs(1), 1)
+            .unwrap_err(),
+        "log_limit_reached"
+    );
+    let bot = &engine.bot_registry.bots[&shooter];
+    assert!(!bot.has_supply_action());
+    assert_eq!(bot.target.runtime.unwrap().physical_position(), before);
+    assert_eq!((bot.firearm.magazine, bot.firearm.reserve), (0, 0));
+}
+
+#[test]
+fn bot_resupply_drop_queue_frozen_completion_requires_exact_clearance_before_continuation() {
+    let (mut engine, shooter, _) = pending_resupply_drop_fixture();
+    let bot = engine.bot_registry.bots.get_mut(&shooter).unwrap();
+    let origin = bot.target.runtime.unwrap().physical_position();
+    let parent = bot.resupply_seek.as_ref().unwrap().parent_id().to_owned();
+    bot.target.runtime.as_mut().unwrap().phase = BotPhase::Complete;
+    bot.drop_waiting = Some(41);
+    bot.resupply_seek
+        .as_mut()
+        .unwrap()
+        .passage_released(42, true);
+    engine
+        .tick_bot_firearms(Duration::from_millis(1050), 1)
+        .unwrap();
+    let bot = engine.bot_registry.bots.get_mut(&shooter).unwrap();
+    assert_eq!(
+        bot.resupply_seek.as_ref().unwrap().allowed_drop_id(),
+        Some(41)
+    );
+    assert!(bot.resupply.is_none());
+    assert_eq!(bot.firearm.reserve, 0);
+    assert_eq!(bot.target.runtime.unwrap().physical_position(), origin);
+
+    bot.drop_waiting = None;
+    bot.release_supply_passage(41, true);
+    engine
+        .tick_bot_firearms(Duration::from_millis(1100), 1)
+        .unwrap();
+    let bot = &engine.bot_registry.bots[&shooter];
+    let seek = bot.resupply_seek.as_ref().unwrap();
+    assert!(seek.owns(bot));
+    assert_eq!(seek.parent_id(), parent);
+    assert!(bot.resupply.is_none());
+    assert_eq!(bot.firearm.reserve, 0);
+    assert!(matches!(
+        bot.target.runtime.unwrap().phase,
+        BotPhase::Relocating
+    ));
+    assert_eq!(bot.target.registry_route().unwrap().start, origin);
+    assert!(String::from_utf8_lossy(&engine.writer).contains("bot_resupply_seek_continued"));
+}
+
+#[test]
+fn bot_resupply_drop_recorded_interruption_keeps_motion_until_safe_release() {
+    let (mut engine, shooter, _) = pending_resupply_drop_fixture();
+    let bot = engine.bot_registry.bots.get_mut(&shooter).unwrap();
+    let body = crate::bot_physics::Body::default();
+    let origin = bot.target.runtime.unwrap().physical_position();
+    let end = [origin[0], origin[1] - 2., origin[2]];
+    bot.drop_queue_passage = Some(DropPassage {
+        id: 41,
+        launch: origin,
+        landing: end,
+        phase: DropPhase::Traversing,
+        protected_bounds: crate::actor_collision::Bounds::body(origin, body)
+            .union(crate::actor_collision::Bounds::body(end, body)),
+        distance_to_launch: 0.,
+        route_distance_to_launch: 0.,
+    });
+    bot.drop_committed = true;
+    bot.drop_permit = Some(41);
+    bot.damage_revision += 1;
+    let goal = bot.target.registry_move_destination();
+    engine
+        .tick_resupply_drop_interruptions(Duration::from_millis(1050), 1)
+        .unwrap();
+    engine
+        .tick_bot_firearms(Duration::from_millis(1050), 1)
+        .unwrap();
+    let bot = engine.bot_registry.bots.get_mut(&shooter).unwrap();
+    let seek = bot.resupply_seek.as_ref().unwrap();
+    assert!(seek.cancellation_pending() && seek.owns(bot));
+    assert_eq!(bot.drop_permit, Some(41));
+    assert_eq!(bot.target.registry_move_destination(), goal);
+    assert!(bot.resupply.is_none());
+
+    bot.drop_committed = false;
+    bot.drop_permit = None;
+    bot.release_supply_passage(41, true);
+    engine
+        .tick_bot_firearms(Duration::from_millis(1100), 1)
+        .unwrap();
+    let bot = &engine.bot_registry.bots[&shooter];
+    assert!(!bot.has_supply_action());
+    assert!(bot.target.registry_move_destination().is_none());
+    assert_eq!((bot.firearm.magazine, bot.firearm.reserve), (0, 0));
+    let audit = String::from_utf8_lossy(&engine.writer);
+    assert_eq!(audit.matches("bot_resupply_seek_cancelled").count(), 1);
+    assert!(!audit.contains("bot_resupply_seek_continued"));
+}
+
+#[test]
+fn bot_resupply_drop_continuation_record_refusal_preserves_paused_parent() {
+    let (mut engine, shooter, _) = pending_resupply_drop_fixture();
+    let bot = engine.bot_registry.bots.get_mut(&shooter).unwrap();
+    bot.release_supply_passage(41, true);
+    let pending_goal = bot.target.registry_move_destination();
+    engine.max_log = engine.written;
+    assert_eq!(
+        engine
+            .tick_bot_firearms(Duration::from_millis(1050), 1)
+            .unwrap_err(),
+        "log_limit_reached"
+    );
+    let bot = &engine.bot_registry.bots[&shooter];
+    assert!(
+        bot.resupply_seek
+            .as_ref()
+            .is_some_and(|seek| seek.owns(bot))
+    );
+    assert!(matches!(
+        bot.target.runtime.unwrap().phase,
+        BotPhase::Complete
+    ));
+    assert_eq!(bot.target.registry_move_destination(), pending_goal);
+    assert!(bot.resupply.is_none());
+    assert_eq!((bot.firearm.magazine, bot.firearm.reserve), (0, 0));
+}
+
+#[test]
+fn bot_resupply_drop_route_requires_one_contiguous_matching_certificate_pair() {
+    use navmesh::WaypointKind::{DropEnd, DropStart, Walk};
+    let (engine, shooter, goal) = configured_approach_fixture();
+    let mesh = engine.navmesh_world.as_ref().unwrap();
+    let start = engine.bot_registry.bots[&shooter]
+        .target
+        .runtime
+        .unwrap()
+        .physical_position();
+    let mut route = mesh.route(start, goal, 0.75).unwrap();
+    let launch = [1., 1., 0.];
+    let landing = [1., 0., 0.];
+    route.waypoints = vec![start, launch, landing, route.projected_goal];
+    route.waypoint_kinds = vec![Walk, DropStart, DropEnd, Walk];
+    route.waypoint_drop_ids = vec![None, Some(41), Some(41), None];
+    let link = navmesh::DropLink {
+        id: 41,
+        world_sha256: route.world_sha256.clone(),
+        launch,
+        landing,
+        speed: 1.,
+        max_drop_height: 1.,
+        trajectory: Vec::new(),
+        trajectory_sha256: String::new(),
+    };
+    let accepts = |route: &navmesh::Route, id| {
+        development_bot_movement::matches_supply_route_passage(
+            route,
+            std::slice::from_ref(&link),
+            id,
+        )
+    };
+    assert!(accepts(&route, Some(41)));
+    assert!(!accepts(&route, None));
+    assert!(!accepts(&route, Some(42)));
+
+    let mut wrong_landing = route.clone();
+    wrong_landing.waypoints[2][0] += 0.125;
+    assert!(!accepts(&wrong_landing, Some(41)));
+    let mut unpaired = route.clone();
+    unpaired.waypoint_kinds[2] = Walk;
+    unpaired.waypoint_drop_ids[2] = None;
+    assert!(!accepts(&unpaired, Some(41)));
+    route.waypoint_kinds.splice(3..3, [DropStart, DropEnd]);
+    route.waypoint_drop_ids.splice(3..3, [Some(41), Some(41)]);
+    route.waypoints.splice(3..3, [launch, landing]);
+    assert!(!accepts(&route, Some(41)));
+}
+
+#[test]
 fn bot_resupply_approach_route_preparation_refuses_partial_truncated_and_drop_corridors() {
     let (engine, shooter, goal) = configured_approach_fixture();
     let mesh = engine.navmesh_world.as_ref().unwrap();

@@ -113,6 +113,7 @@ impl BotMove {
 #[derive(Clone)]
 pub(super) struct PendingMove {
     movement_id: String,
+    supply_parent: Option<String>,
     from: replication::CharacterPosition,
     movement: BotMove,
     navigation: Option<NavigationMove>,
@@ -291,6 +292,7 @@ impl<W: Write> Engine<W> {
             .insert(movement_id.clone(), movement.clone());
         target.pending_move = Some(PendingMove {
             movement_id,
+            supply_parent: None,
             from: runtime.position,
             movement,
             navigation,
@@ -386,6 +388,41 @@ pub(super) fn protected_drop_bounds(
         ],
     })
 }
+pub(super) fn matches_supply_route_passage(
+    route: &navmesh::Route,
+    links: &[navmesh::DropLink],
+    drop_id: Option<u32>,
+) -> bool {
+    use navmesh::WaypointKind::{DropEnd, DropStart, Walk};
+    let mut drop_span = None;
+    for (index, (&kind, &id)) in route
+        .waypoint_kinds
+        .iter()
+        .zip(&route.waypoint_drop_ids)
+        .enumerate()
+    {
+        match (kind, id, drop_id) {
+            (Walk, None, _) => {}
+            (DropStart, Some(id), Some(expected)) if id == expected && drop_span.is_none() => {
+                drop_span = Some(index);
+            }
+            (DropEnd, Some(id), Some(expected))
+                if id == expected && drop_span.is_some_and(|start| index == start + 1) => {}
+            _ => return false,
+        }
+    }
+    match (drop_id, drop_span) {
+        (None, None) => true,
+        (Some(id), Some(start)) => links.iter().any(|link| {
+            link.id == id
+                && route.waypoint_kinds.get(start + 1) == Some(&DropEnd)
+                && route.waypoints.get(start) == Some(&link.launch)
+                && route.waypoints.get(start + 1) == Some(&link.landing)
+        }),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 fn private_drop_trace(value: Value) {
     let Ok(path) = std::env::var("MAG_BOT_DROP_TRACE_PATH") else {
@@ -727,6 +764,7 @@ impl Target {
                 "population-egress-{}-{}",
                 self.object_index, runtime.generation
             ),
+            supply_parent: None,
             from: runtime.position,
             movement,
             navigation: Some(navigation),
@@ -844,8 +882,32 @@ impl Target {
         duration_ms: u32,
         now: Duration,
     ) -> Result<PreparedRegistryMove, &'static str> {
+        self.prepare_registry_supply_route(
+            mesh,
+            route,
+            requested_goal,
+            movement_id,
+            duration_ms,
+            now,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn prepare_registry_supply_route(
+        &self,
+        mesh: Arc<navmesh::NavMesh>,
+        route: navmesh::Route,
+        requested_goal: navmesh::Point,
+        parent_id: String,
+        duration_ms: u32,
+        now: Duration,
+        drop_id: Option<u32>,
+    ) -> Result<PreparedRegistryMove, &'static str> {
         let runtime = self.runtime.ok_or("bot_not_spawned")?;
-        if !matches!(runtime.phase, BotPhase::Complete)
+        let already_owned = self.owns_supply_parent(&parent_id);
+        if !(matches!(runtime.phase, BotPhase::Complete)
+            || (already_owned && matches!(runtime.phase, BotPhase::Relocating)))
             || route.start != runtime.physical_position()
             || route.requested_goal != requested_goal
             || route.status != navmesh::Status::Complete
@@ -854,13 +916,13 @@ impl Target {
             || route.waypoints.last() != Some(&route.projected_goal)
             || route.waypoint_kinds.len() != route.waypoints.len()
             || route.waypoint_drop_ids.len() != route.waypoints.len()
-            || route
-                .waypoint_kinds
-                .iter()
-                .any(|kind| *kind != navmesh::WaypointKind::Walk)
-            || route.waypoint_drop_ids.iter().any(Option::is_some)
+            || !matches_supply_route_passage(&route, &mesh.artifact().drop_links, drop_id)
         {
-            return Err("bot_resupply_seek_requires_complete_walk");
+            return Err(if drop_id.is_some() {
+                "bot_resupply_seek_requires_one_certified_drop"
+            } else {
+                "bot_resupply_seek_requires_complete_walk"
+            });
         }
         let movement = BotMove {
             mode: BotMoveMode::Navmesh,
@@ -871,17 +933,34 @@ impl Target {
             sprint: false,
         };
         let navigation = NavigationMove::from_complete_navmesh_route(mesh, route)?;
-        self.prepare_registry_move(movement, navigation, now, movement_id)
+        let movement_id = if already_owned {
+            format!(
+                "population-supply-child-{}-{}",
+                self.object_index,
+                now.as_millis()
+            )
+        } else {
+            parent_id.clone()
+        };
+        let mut prepared = self.prepare_registry_move(movement, navigation, now, movement_id)?;
+        prepared.pending.supply_parent = Some(parent_id);
+        Ok(prepared)
     }
 
-    pub(super) fn owns_registry_move(&self, movement_id: &str) -> bool {
+    pub(super) fn owns_supply_parent(&self, parent: &str) -> bool {
         self.pending_move
             .as_ref()
-            .is_some_and(|pending| pending.movement_id == movement_id)
+            .is_some_and(|pending| pending.supply_parent.as_deref() == Some(parent))
     }
 
-    pub(super) fn stop_owned_supply_walk(&mut self, movement_id: &str) -> bool {
-        if !self.owns_registry_move(movement_id) {
+    pub(super) fn set_registry_supply_parent(&mut self, parent: &str) {
+        if let Some(pending) = &mut self.pending_move {
+            pending.supply_parent = Some(parent.to_owned());
+        }
+    }
+
+    pub(super) fn stop_owned_supply_move(&mut self, parent: &str) -> bool {
+        if !self.owns_supply_parent(parent) {
             return false;
         }
         self.pending_move = None;
@@ -906,6 +985,7 @@ impl Target {
         movement.validate_from(runtime.position)?;
         let pending = PendingMove {
             movement_id,
+            supply_parent: None,
             from: runtime.position,
             movement,
             navigation: Some(navigation),
@@ -1009,6 +1089,7 @@ impl Target {
         }
         self.pending_move = Some(PendingMove {
             movement_id: format!("population-{}-{}", self.object_index, runtime.generation),
+            supply_parent: None,
             from: runtime.position,
             movement,
             navigation: Some(navigation),

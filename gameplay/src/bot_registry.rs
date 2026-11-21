@@ -151,6 +151,8 @@ pub(super) struct WorldBot {
     pub(super) firearm: crate::bot_firearms::State,
     pub(super) resupply: Option<crate::bot_resupply::Session>,
     pub(super) resupply_seek: Option<crate::bot_resupply::Seek>,
+    pub(super) resupply_planning: Option<crate::bot_resupply::PlanningReservation>,
+    pub(super) resupply_planning_retry_at: Duration,
     pub(super) healing: crate::bot_healing::State,
     pub(super) move_attempted: bool,
     due_respawn_wave: Option<(u32, Duration)>,
@@ -168,12 +170,30 @@ struct PassageLife {
 }
 struct PassageOwner {
     life: PassageLife,
+    supply_owner: Option<(u32, String)>,
     passage: DropPassage,
     last_position: replication::CharacterPosition,
     progress_at: Duration,
     entered: bool,
     cert_started: bool,
 }
+impl PassageOwner {
+    fn safely_cancel_supply_before_entry(
+        &self,
+        cancelled_parent: Option<&str>,
+        safe_outside: bool,
+    ) -> bool {
+        !self.cert_started
+            && safe_outside
+            && cancelled_parent.is_some()
+            && self
+                .supply_owner
+                .as_ref()
+                .map(|(_, parent)| parent.as_str())
+                == cancelled_parent
+    }
+}
+
 #[derive(Default)]
 struct PassageQueue {
     owner: Option<PassageOwner>,
@@ -304,6 +324,53 @@ fn initial_damage() -> replication::CharacterDamage {
     }
 }
 impl BotRegistry {
+    pub(super) fn supply_passage_obligation(
+        &self,
+        object_id: u16,
+        generation: u32,
+        drop_id: u32,
+    ) -> bool {
+        let Some(bot) = self.bots.get(&object_id) else {
+            return false;
+        };
+        let Some(runtime) = bot.target.runtime.filter(|r| r.generation == generation) else {
+            return false;
+        };
+        let life = PassageLife {
+            id: object_id,
+            generation,
+        };
+        if self.drop_queues.get(&drop_id).is_some_and(|queue| {
+            queue.waiting.contains(&life) || queue.holders().any(|owner| owner.life == life)
+        }) {
+            return true;
+        }
+        let buffer = self
+            .config
+            .as_ref()
+            .and_then(|config| config.objective_policy.as_ref())
+            .map_or(0., |policy| policy.drop_entry_buffer_m);
+        if bot
+            .drop_queue_passage
+            .is_some_and(|passage| passage.id == drop_id)
+        {
+            return true;
+        }
+        bot.target
+            .registry_drop_status(drop_id, buffer)
+            .filter(|passage| passage.id == drop_id)
+            .is_some_and(|passage| {
+                matches!(passage.phase, DropPhase::Traversing | DropPhase::Landed)
+                    || intersects(
+                        crate::actor_collision::Bounds::body(
+                            runtime.physical_position(),
+                            Default::default(),
+                        ),
+                        passage.protected_bounds,
+                    )
+            })
+    }
+
     pub(super) fn traffic_protected(&self, exclude: u16) -> Vec<crate::actor_collision::Bounds> {
         self.drop_queues
             .values()
@@ -404,7 +471,7 @@ impl BotRegistry {
 }
 impl WorldBot {
     pub(super) fn has_supply_action(&self) -> bool {
-        self.resupply.is_some() || self.resupply_seek.is_some()
+        self.resupply.is_some() || self.resupply_seek.is_some() || self.resupply_planning.is_some()
     }
     fn apply_damage_health(&mut self, health: u16) {
         if health < self.health {
@@ -471,6 +538,41 @@ impl WorldBot {
                     && distance(g, r.position) <= arrival
             })
     }
+    pub(super) fn supply_passage_seek(&self) -> Option<&crate::bot_resupply::Seek> {
+        self.resupply_seek
+            .as_ref()
+            .filter(|seek| seek.owns(self) && seek.allowed_drop_id().is_some())
+    }
+
+    fn supply_allows_passage(&self, drop_id: u32) -> bool {
+        !self.has_supply_action()
+            || self.supply_passage_seek().is_some_and(|seek| {
+                seek.allowed_drop_id() == Some(drop_id) && !seek.cancellation_pending()
+            })
+    }
+
+    fn release_supply_passage(&mut self, drop_id: u32, cleared: bool) {
+        // Freeze the still-owned parent at this safe pose. The seek must query a
+        // fresh walking continuation before it can follow another segment.
+        self.target.runtime.as_mut().unwrap().phase = BotPhase::Complete;
+        self.holding_access = None;
+        self.drop_approach_ready = false;
+        self.drop_queue_approach.clear();
+        self.drop_resume_failure_at = None;
+        self.drop_queue_passage = None;
+        self.drop_queue_since = None;
+        self.drop_holding_goal = None;
+        self.drop_resume = false;
+        self.drop_retreat = false;
+        self.drop_egress = false;
+        self.drop_reroute = false;
+        self.drop_retreat_preentry = false;
+        self.resupply_seek
+            .as_mut()
+            .unwrap()
+            .passage_released(drop_id, cleared);
+    }
+
     pub(super) fn planned_drop(&self, entry_buffer_m: f64) -> Option<DropPassage> {
         let runtime = self.target.runtime?;
         let route = self.target.registry_route()?;
@@ -830,6 +932,8 @@ impl<W: Write> Engine<W> {
                 bot.firearm = Default::default();
                 bot.resupply = None;
                 bot.resupply_seek = None;
+                bot.resupply_planning = None;
+                bot.resupply_planning_retry_at = Duration::ZERO;
                 bot.healing = Default::default();
                 runtime.phase = BotPhase::Dead;
                 runtime.since = now;
@@ -1031,6 +1135,8 @@ impl<W: Write> Engine<W> {
             }
         }
         self.queue_roster(now)?;
+        self.tick_resupply_planning(now, wall)?;
+        self.tick_resupply_drop_interruptions(now, wall)?;
         self.tick_drop_admissions(now, wall)?;
         self.tick_bot_objectives(now, wall, &actors)?;
         let mut packets = Vec::new();
@@ -1087,6 +1193,8 @@ impl<W: Write> Engine<W> {
                 bot.firearm = Default::default();
                 bot.resupply = None;
                 bot.resupply_seek = None;
+                bot.resupply_planning = None;
+                bot.resupply_planning_retry_at = Duration::ZERO;
                 bot.healing = Default::default();
                 bot.damage = initial_damage();
                 bot.move_attempted = false;
@@ -1402,10 +1510,37 @@ impl<W: Write> Engine<W> {
                 b.drop_approach_ready = false;
                 continue;
             }
-            if b.has_supply_action() {
+            if b.has_supply_action() && b.supply_passage_seek().is_none() {
                 continue;
             }
             let r = b.target.runtime.unwrap();
+            if let Some(seek) = b.supply_passage_seek()
+                && let Some(drop_id) = seek.allowed_drop_id()
+                && (seek.cancellation_pending() || b.drop_reroute)
+                && !owned.contains(&b.target.object_index)
+                && r.physics_motion.is_some_and(|m| m.grounded)
+                && !r.navmesh_state.on_player
+            {
+                let passage = b
+                    .drop_queue_passage
+                    .filter(|p| p.id == drop_id)
+                    .or_else(|| {
+                        b.target
+                            .registry_drop_status(drop_id, policy.drop_entry_buffer_m)
+                    });
+                if passage.is_none_or(|p| {
+                    !intersects(
+                        crate::actor_collision::Bounds::body(
+                            r.physical_position(),
+                            Default::default(),
+                        ),
+                        p.protected_bounds,
+                    )
+                }) {
+                    b.release_supply_passage(drop_id, false);
+                    continue;
+                }
+            }
             if let Some(p) = b
                 .target
                 .registry_aborted_drop_retreat(policy.drop_entry_buffer_m)
@@ -1471,6 +1606,7 @@ impl<W: Write> Engine<W> {
             .filter_map(|(&id, b)| {
                 b.planned_drop(policy.drop_entry_buffer_m)
                     .or(b.drop_queue_passage)
+                    .filter(|p| b.supply_allows_passage(p.id))
                     .map(|p| (id, p))
             })
             .collect();
@@ -1485,12 +1621,15 @@ impl<W: Write> Engine<W> {
                 policy.arrival_m,
                 now,
             );
-            let key = passages.get(&id).map(|p| crate::bot_traffic_costs::Key {
-                generation: r.generation,
-                objective: b.task.objective,
-                role_slot: b.role_slot,
-                passage: p.id,
-            });
+            let key = passages
+                .get(&id)
+                .filter(|_| !b.has_supply_action())
+                .map(|p| crate::bot_traffic_costs::Key {
+                    generation: r.generation,
+                    objective: b.task.objective,
+                    role_slot: b.role_slot,
+                    passage: p.id,
+                });
             if b.delay_episode.as_ref().is_some_and(|e| Some(e.key) != key) {
                 b.delay_episode = None;
                 b.reconsider = None;
@@ -1568,7 +1707,12 @@ impl<W: Write> Engine<W> {
             for (mut held, primary) in holders {
                 let owner = &mut held;
                 let b = self.bot_registry.bots.get_mut(&owner.life.id).filter(|b| {
-                    b.health > 0 && b.target.runtime.unwrap().generation == owner.life.generation
+                    b.health > 0
+                        && b.target.runtime.unwrap().generation == owner.life.generation
+                        && owner
+                            .supply_owner
+                            .as_ref()
+                            .is_none_or(|(allocation, _)| b.allocation_generation == *allocation)
                 });
                 let mut release = None;
                 if let Some(b) = b {
@@ -1624,7 +1768,38 @@ impl<W: Write> Engine<W> {
                     let blocked_outside =
                         blocked_preentry_can_yield(r, owner.passage.protected_bounds);
                     let clear_distance = distance(r.position, position(owner.passage.landing));
-                    if status.is_some_and(|p| p.phase == DropPhase::Retreated) && safe_outside {
+                    let cancelled_supply = b
+                        .supply_passage_seek()
+                        .filter(|seek| {
+                            seek.allowed_drop_id() == Some(drop_id) && seek.cancellation_pending()
+                        })
+                        .map(|seek| seek.parent_id());
+                    let release_cancelled =
+                        owner.safely_cancel_supply_before_entry(cancelled_supply, safe_outside);
+                    let matches_cancelled_parent = cancelled_supply.is_some()
+                        && owner
+                            .supply_owner
+                            .as_ref()
+                            .map(|(_, parent)| parent.as_str())
+                            == cancelled_supply;
+                    if matches_cancelled_parent
+                        && !owner.cert_started
+                        && inside
+                        && r.physics_motion.is_some_and(|m| m.grounded)
+                        && !r.navmesh_state.on_player
+                        && !b.drop_retreat_preentry
+                    {
+                        b.drop_retreat = true;
+                        b.drop_retreat_preentry = true;
+                        b.target.runtime.as_mut().unwrap().phase = BotPhase::Complete;
+                    }
+                    if release_cancelled {
+                        b.target.runtime.as_mut().unwrap().phase = BotPhase::Complete;
+                        release = Some("supply_cancelled_before_entry");
+                        released_clear.insert(owner.life.id);
+                    } else if status.is_some_and(|p| p.phase == DropPhase::Retreated)
+                        && safe_outside
+                    {
                         release = Some(if b.drop_retreat_preentry {
                             "preentry_retreat_clear"
                         } else {
@@ -1681,7 +1856,8 @@ impl<W: Write> Engine<W> {
                     let launch_component = mesh
                         .as_ref()
                         .and_then(|m| m.component_id(owner.passage.launch).ok());
-                    if let Some(b) = self.bot_registry.bots.get_mut(&owner.life.id)
+                    if owner.supply_owner.is_none()
+                        && let Some(b) = self.bot_registry.bots.get_mut(&owner.life.id)
                         && let Some(e) = b.delay_episode.take()
                         && reason == "cleared"
                     {
@@ -1725,6 +1901,29 @@ impl<W: Write> Engine<W> {
                         self.bot_registry.passage_last_clear.insert(drop_id, now);
                     }
                     if let Some(b) = self.bot_registry.bots.get_mut(&owner.life.id)
+                        && let Some((allocation, parent)) = owner.supply_owner.as_ref()
+                        && b.allocation_generation == *allocation
+                        && b.target
+                            .runtime
+                            .is_some_and(|r| r.generation == owner.life.generation)
+                        && b.supply_passage_seek()
+                            .is_some_and(|seek| seek.parent_id() == parent.as_str())
+                        && (reason == "cleared"
+                            || recovery
+                            || matches!(
+                                reason,
+                                "supply_cancelled_before_entry"
+                                    | "reroute_before_entry"
+                                    | "route_changed_before_entry"
+                            ))
+                    {
+                        let r = b.target.runtime.unwrap();
+                        b.cleared_drop_routes
+                            .insert(drop_id, (r.generation, r.since));
+                        b.release_supply_passage(drop_id, reason == "cleared");
+                        continue;
+                    }
+                    if let Some(b) = self.bot_registry.bots.get_mut(&owner.life.id)
                         && (reason == "cleared"
                             || recovery
                             || reason == "life_removed_noncollidable")
@@ -1765,8 +1964,11 @@ impl<W: Write> Engine<W> {
             }
             q.waiting.retain(|life| {
                 let Some(b) = self.bot_registry.bots.get_mut(&life.id) else { return false; };
-                if b.drop_reroute { return false; }
                 let r = b.target.runtime.unwrap();
+                if r.generation != life.generation || !b.supply_allows_passage(drop_id) {
+                    return false;
+                }
+                if b.drop_reroute { return false; }
                 let failed = self.bot_registry.failed_passages.get(&drop_id).is_some_and(|until|*until>now);
                 if failed && !b.drop_committed && r.physics_motion.is_some_and(|m|m.grounded) && !r.navmesh_state.on_player
                     && b.drop_queue_passage.is_some_and(|p| !intersects(crate::actor_collision::Bounds::body(r.physical_position(),Default::default()),p.protected_bounds)) {
@@ -2008,6 +2210,9 @@ impl<W: Write> Engine<W> {
                     );
                     q.owner = Some(PassageOwner {
                         life,
+                        supply_owner: b
+                            .supply_passage_seek()
+                            .map(|seek| (b.allocation_generation, seek.parent_id().to_owned())),
                         passage: p,
                         last_position: r.position,
                         progress_at: now,
@@ -2490,6 +2695,8 @@ impl<W: Write> Engine<W> {
                     firearm: Default::default(),
                     resupply: None,
                     resupply_seek: None,
+                    resupply_planning: None,
+                    resupply_planning_retry_at: Duration::ZERO,
                     healing: Default::default(),
                     move_attempted: false,
                     due_respawn_wave: None,
@@ -2707,10 +2914,24 @@ mod convoy_tests {
         );
     }
 
+    #[test]
+    fn supply_passage_cancellation_requires_exact_parent_and_safe_preentry() {
+        let mut owner = holder(1);
+        assert!(!owner.safely_cancel_supply_before_entry(None, true));
+        owner.supply_owner = Some((1, "supply:41".into()));
+        owner.cert_started = false;
+        assert!(owner.safely_cancel_supply_before_entry(Some("supply:41"), true));
+        assert!(!owner.safely_cancel_supply_before_entry(Some("supply:42"), true));
+        assert!(!owner.safely_cancel_supply_before_entry(Some("supply:41"), false));
+        owner.cert_started = true;
+        assert!(!owner.safely_cancel_supply_before_entry(Some("supply:41"), true));
+    }
+
     fn holder(id: u16) -> PassageOwner {
         let at = [80., 123., 173.];
         PassageOwner {
             life: PassageLife { id, generation: 1 },
+            supply_owner: None,
             // Queue-time snapshot: still reads as an approach from 10.9 m.
             passage: DropPassage {
                 id: 1,

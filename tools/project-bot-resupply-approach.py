@@ -70,13 +70,21 @@ def project(provider_raw, world_sha, parameters, query):
             "invalid projection radius")
     knobs = {key: parameters[key] for key in ("query_budget_per_tick", "retry_ms", "goal_radius_m",
                                              "max_route_length_m", "seek_max_duration_ms")}
-    require(set(parameters) == knobs.keys() | {"sample_offsets", "projection_radius_m"}
+    extra = {"allowed_drop_id", "planning_window_ms"} if ("allowed_drop_id" in parameters
+            or "planning_window_ms" in parameters) else set()
+    require(set(parameters) == knobs.keys() | {"sample_offsets", "projection_radius_m"} | extra
+            and (not extra or (integer(parameters["allowed_drop_id"], 1, 2**32-1)
+                 and integer(parameters["planning_window_ms"], 1_000, 10_000)
+                 and parameters["planning_window_ms"] <= knobs["seek_max_duration_ms"]
+                 and knobs["retry_ms"] < parameters["planning_window_ms"]))
             and integer(knobs["query_budget_per_tick"], 1, 16)
             and integer(knobs["retry_ms"], 1, 2**32-1)
             and integer(knobs["seek_max_duration_ms"], 1_000, 120_000)
             and number(knobs["goal_radius_m"]) and 0.05 <= knobs["goal_radius_m"] <= 5
             and number(knobs["max_route_length_m"]) and 0 < knobs["max_route_length_m"] <= 192,
             "invalid approach policy")
+    if extra:
+        knobs.update({key: parameters[key] for key in extra})
     projected, seen_keys = [], set()
     detour_sha = None
     require(isinstance(source["providers"], list) and 1 <= len(source["providers"]) <= 16,

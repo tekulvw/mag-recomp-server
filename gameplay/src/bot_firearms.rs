@@ -118,6 +118,35 @@ pub(super) fn current_equipment_key(bot: &WorldBot) -> Option<EquipmentKey> {
     ))
 }
 
+pub(super) fn resupply_planning_ammo(
+    items: &crate::item_catalog::ItemCatalog,
+    bot: &WorldBot,
+) -> Option<bot_resupply::AmmoBinding> {
+    let catalog = items.retail_combat().ok()?;
+    let kit = &bot.target.loadout;
+    let item = kit.primary;
+    let profile = retail_combat::RetailBulletProfile::from_equipped(
+        catalog,
+        kit,
+        item,
+        item.gear_slot,
+        item.ammo_pool,
+    )
+    .ok()?;
+    let metadata = catalog.bullet_metadata(profile.item_id())?;
+    if metadata.firearm?.infinite_ammo {
+        return None;
+    }
+    let equipment = current_equipment_key(bot)?;
+    let reserve_cap = State::reserve_capacity(metadata);
+    (bot.firearm.is_resupply_dry() && bot.firearm.equipment_matches(equipment) && reserve_cap > 0)
+        .then_some(bot_resupply::AmmoBinding {
+            equipment,
+            ammo_pool: item.ammo_pool,
+            reserve_cap,
+        })
+}
+
 #[derive(Clone, Default)]
 pub(super) struct State {
     equipment: Option<EquipmentKey>,
@@ -563,6 +592,7 @@ impl<W: Write> Engine<W> {
             let equipped = kit.primary;
             let servicing = bot.has_supply_action();
             let service_due = bot.resupply.is_some_and(|session| session.due(now))
+                || bot.resupply_planning.is_some()
                 || (bot.resupply_seek.is_some()
                     && matches!(bot.target.runtime.unwrap().phase, BotPhase::Complete));
             let damage_revision = bot.damage_revision;

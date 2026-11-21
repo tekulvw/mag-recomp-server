@@ -39,6 +39,30 @@ class ResupplyApproachProjectorTests(unittest.TestCase):
         self.assertEqual(policy["detour_sha256"], DETOUR)
         self.assertEqual(policy["seek_max_duration_ms"], 1900)
 
+    def test_optional_single_drop_is_explicit_and_preserves_walking_policy(self):
+        project = runpy.run_path(str(SCRIPT))["project"]
+        query = lambda *_: reply([(2, [1, 2, 3])])
+        walking = project(source(), WORLD, parameters(), query)
+        self.assertNotIn("allowed_drop_id", walking)
+        with self.assertRaises(ValueError):
+            project(source(), WORLD, {**parameters(), "allowed_drop_id": 57}, query)
+        enabled = {**parameters(), "allowed_drop_id": 57, "planning_window_ms": 1500}
+        drop = project(source(), WORLD, enabled, query)
+        self.assertEqual(drop.pop("allowed_drop_id"), 57)
+        self.assertEqual(drop.pop("planning_window_ms"), 1500)
+        self.assertEqual(drop, walking)
+        for value in (0, -1, True, "57", 2**32, [57, 58]):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                project(source(), WORLD, {**enabled, "allowed_drop_id": value}, query)
+        for value in (999, 10001, 1901, True, "1500"):
+            with self.subTest(window=value), self.assertRaises(ValueError):
+                project(source(), WORLD, {**enabled, "planning_window_ms": value}, query)
+        for retry in (1500, 1501):
+            with self.subTest(retry=retry), self.assertRaises(ValueError):
+                project(source(), WORLD, {**enabled, "retry_ms": retry}, query)
+        with self.assertRaises(ValueError):
+            project(source(), WORLD, {**parameters(), "planning_window_ms": 1500}, query)
+
     def test_rejects_absent_candidates_and_mismatched_query_provenance(self):
         project = runpy.run_path(str(SCRIPT))["project"]
         for response in (reply([]), reply([(2, [1, 2, 3])], "c" * 64)):
