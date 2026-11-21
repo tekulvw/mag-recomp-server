@@ -115,6 +115,8 @@ pub mod dummy;
 mod event_decode;
 mod events;
 pub mod fall_damage;
+mod firearm_assist_publication;
+pub mod firearm_assists;
 use event_decode::DecodedEvent;
 mod frago;
 mod ground_repair;
@@ -1053,6 +1055,8 @@ struct ProjectilePublication {
 struct Active {
     wire_profile: wire_profile::WireProfile,
     reservation: Reservation,
+    /// Recorded admission identity; remains stable across this actor's respawns.
+    allocation_sequence: u64,
     modifiers: skill_catalog::OwnedModifiers,
     leadership: Option<leadership_runtime::CachedLeadership>,
     /// Saved leadership level, including the native policy's fallback record.
@@ -1101,6 +1105,10 @@ struct Active {
     pending_shared: std::collections::VecDeque<Vec<u8>>,
     /// Successfully recorded FIFO frames consumed by this reservation.
     shared_frames_drained: u64,
+    statistics_cursor: u16,
+    prefer_statistics: bool,
+    pending_firearm_assist_rows:
+        std::collections::BTreeMap<u16, firearm_assist_publication::Pending>,
     /// Contiguous one-time hospital bootstrap inside the reliable FIFO.
     hospital_bootstrap: std::ops::Range<usize>,
     /// Health replies must join the FIFO until scheduled health drains.
@@ -1235,6 +1243,7 @@ pub struct Engine<W: Write> {
     fall_damage_rules: Option<fall_damage::Rules>,
     incapacitation_rules: Option<incapacitation::Rules>,
     character_damage_rules: Option<character_damage_rules::Rules>,
+    firearm_assists: firearm_assists::State,
     pending_rewards: std::collections::BTreeMap<String, progression::RewardEvent>,
     reward_order: std::collections::VecDeque<String>,
     committed_rewards: std::collections::BTreeMap<String, progression::CommittedReward>,

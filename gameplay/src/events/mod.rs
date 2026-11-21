@@ -16,8 +16,8 @@ mod resuscitate;
 mod seats;
 mod statistics;
 pub(crate) use statistics::{
-    CharacterEffectConsequences, CharacterEffectInput, plan_bot_killed_human,
-    plan_character_effect_consequences,
+    CharacterEffectConsequences, CharacterEffectInput, plan_bot_firearm_assists,
+    plan_bot_killed_human, plan_character_effect_consequences,
 };
 mod update_actions;
 
@@ -166,6 +166,7 @@ struct CombatChanges {
     peer_damage: Vec<(String, u32, replication::CharacterDamage)>,
     bot_damage: Vec<(u16, u32, replication::CharacterDamage)>,
     bot_firearm_kd: Option<bot_firearm_kd::Plan>,
+    firearm_assists: Option<firearm_assists::Plan>,
     death_notifications: Vec<death_notifications::Plan>,
     new_damage_model: Option<replication::CharacterDamage>,
     revived_peer: Option<(String, u32, replication::CharacterDamage)>,
@@ -559,6 +560,9 @@ impl<W: Write> Engine<W> {
             plan.combat.new_rewards.clear();
         }
         self.check_reward_capacity(&plan.combat.new_rewards)?;
+        if let Some(assists) = &plan.combat.firearm_assists {
+            assists.check_before_record(self)?;
+        }
         let gameplay_denial = plan.gameplay_denial.or_else(|| {
             if decoded_log["type"] == "command_ability" && decoded_log["accepted"] == false {
                 decoded_log["reason"].as_str()
@@ -583,6 +587,7 @@ impl<W: Write> Engine<W> {
                 "new_life":plan.combat.new_life.map(|life|format!("{life:?}")),
                 "death_notifications": plan.combat.death_notifications.iter().map(|p| p.audit()).collect::<Vec<_>>(),
                 "bot_firearm_kd": plan.combat.bot_firearm_kd.as_ref().map(bot_firearm_kd::Plan::audit),
+                "firearm_assists": plan.combat.firearm_assists.as_ref().map(firearm_assists::Plan::audit),
                 "ordered_health": plan.replication.ordered_health.as_ref().map(|p| protocol::encode_hex(p)),
                 "domination_sequence_batches": plan.replication.domination_sequence_batches.iter()
                     .map(|packet| protocol::encode_hex(packet)).collect::<Vec<_>>(),
@@ -803,6 +808,7 @@ impl<W: Write> Engine<W> {
         if let Some((id, generation, damage)) = plan.combat.revived_peer {
             let peer = self.peers.get_mut(&id).ok_or("stale_revive_patient")?;
             peer.commit_revive(generation, damage)?;
+            self.firearm_assists.forget_victim(peer.reservation.player);
         }
         for (id, life) in plan.combat.peer_lives {
             if let Some(peer) = self.peers.get_mut(&id) {
@@ -1348,6 +1354,10 @@ impl<W: Write> Engine<W> {
         if let Some(active) = self.active.as_mut() {
             active.queue_hospital_bootstrap(plan.hospital_late_join);
         }
+        if let Some(assists) = plan.combat.firearm_assists {
+            assists.install(self)?;
+        }
+        self.prune_firearm_assist_victims();
         Ok(plan.messages)
     }
 }

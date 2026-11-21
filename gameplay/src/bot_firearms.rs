@@ -809,6 +809,8 @@ impl<W: Write> Engine<W> {
             let mut death_notification = None;
             let mut bot_kd = None;
             let mut human_death = None;
+            let mut firearm_assists = None;
+            let mut assist_statistics = None;
             if let Some((target, hit, (calculation, amount, resolved), aimed_end)) = shot {
                 let shot_receipt = receipts.len();
                 receipts.push(json!({"op":"bot_firearm_shot","timestamp_ms":now.as_millis() as u64,"object_index":id,"generation":me.life.generation,
@@ -817,6 +819,30 @@ impl<W: Write> Engine<W> {
                     "recoil_pitch_degrees":state.recoil.pitch_degrees,"recoil_yaw_degrees":state.recoil.yaw_degrees,"spread_degrees":state.recoil.width_degrees(recoil_profile),"recoil_compensation_per_mille":policy.recoil_compensation_per_mille,
                     "distance_m":length(from,torso(target.feet)),"accuracy_per_mille":policy.accuracy_at(length(from,torso(target.feet)),metadata.max_range),
                     "health_before":target.health,"health_after":if hit {resolved.map_or(target.health,|d|d.health_quarter_points)} else {target.health}}));
+                if hit
+                    && let Some(assists) = firearm_assists::Plan::prepare(
+                        self,
+                        world,
+                        now,
+                        firearm_assists::Fighter {
+                            index: id,
+                            reservation: None,
+                            generation: me.life.generation,
+                        },
+                        firearm_assists::Fighter {
+                            index: target.life.id,
+                            reservation: target.life.reservation.as_deref(),
+                            generation: target.life.generation,
+                        },
+                        resolved.is_some_and(|damage| damage.health_quarter_points == 0),
+                    )
+                {
+                    receipts[shot_receipt]["firearm_assists"] = json!(assists.audit());
+                    if assists.humans().next().is_some() {
+                        assist_statistics = Some(events::plan_bot_firearm_assists(self, &assists)?);
+                    }
+                    firearm_assists = Some(assists);
+                }
                 if hit && let Some(mut damage) = resolved {
                     let mut human_life = None;
                     if let Some(reservation) = &target.life.reservation {
@@ -913,6 +939,9 @@ impl<W: Write> Engine<W> {
                     .encode_with_profile(self.wire_profile)
                 })
                 .transpose()?;
+            if let Some(assists) = &firearm_assists {
+                assists.check_before_record(self)?;
+            }
             for receipt in receipts {
                 self.record(receipt, wall)?;
             }
@@ -956,6 +985,12 @@ impl<W: Write> Engine<W> {
             } else {
                 None
             };
+            if let Some(assists) = firearm_assists {
+                assists.install(self)?;
+            }
+            if let Some(statistics) = assist_statistics {
+                messages.extend(statistics.commit(self));
+            }
             let bot = self.bot_registry.bots.get_mut(&id).unwrap();
             bot.firearm = state;
             if publish {

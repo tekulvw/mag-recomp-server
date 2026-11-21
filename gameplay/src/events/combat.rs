@@ -251,6 +251,30 @@ pub(super) fn hit<W: Write>(
             };
             Ok::<_, &'static str>(Some((amount, damage)))
         })();
+        if ordinary_retail_firearm
+            && ctx.accepted_client_route
+            && let Ok(effect) = &resolved
+            && let Some(target) = peer_target
+                .map(firearm_assists::Fighter::human)
+                .or_else(|| {
+                    registry_target.map(|bot| firearm_assists::Fighter {
+                        index: bot.object_index,
+                        reservation: None,
+                        generation: bot.generation,
+                    })
+                })
+            && let Some(assists) = firearm_assists::Plan::prepare(
+                ctx.engine,
+                active.reservation.world,
+                now,
+                firearm_assists::Fighter::human(active),
+                target,
+                effect.is_some_and(|(_, damage)| damage.health_quarter_points == 0),
+            )
+        {
+            statistics::firearm_assists(plan, &assists);
+            plan.combat.firearm_assists = Some(assists);
+        }
         match resolved {
             Err(code) => plan.gameplay_denial = Some(code),
             Ok(None) => (),

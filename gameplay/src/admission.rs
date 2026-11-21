@@ -199,6 +199,7 @@ impl<W: Write> Engine<W> {
             .or(candidate.character.leadership)
             .map_or(1, |record| record.leadership_level);
         self.active = Some(Active {
+            allocation_sequence: self.sequence,
             wire_profile: self.wire_profile,
             reservation: candidate,
             modifiers,
@@ -252,6 +253,9 @@ impl<W: Write> Engine<W> {
             outbound_sequence: 0,
             pending_shared: std::collections::VecDeque::new(),
             shared_frames_drained: 0,
+            statistics_cursor: 0,
+            prefer_statistics: false,
+            pending_firearm_assist_rows: Default::default(),
             hospital_bootstrap: 0..0,
             ordered_health_pending: false,
             replication_backlogged: false,

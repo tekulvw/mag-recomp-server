@@ -8,6 +8,7 @@ const DEATHS: u8 = 12;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Totals {
     pub(super) kills: i32,
+    pub(super) assists: i32,
     pub(super) deaths: i32,
 }
 
@@ -16,19 +17,25 @@ impl Totals {
         self,
         index: u16,
         profile: wire_profile::WireProfile,
+        include_assists: bool,
     ) -> Result<Vec<u8>, &'static str> {
+        let mut stats = vec![protocol::StatValue {
+            stat: KILLS,
+            value: self.kills,
+        }];
+        if include_assists {
+            stats.push(protocol::StatValue {
+                stat: firearm_assists::STAT,
+                value: self.assists,
+            });
+        }
+        stats.push(protocol::StatValue {
+            stat: DEATHS,
+            value: self.deaths,
+        });
         protocol::StatUpdate {
             character_index: index,
-            stats: vec![
-                protocol::StatValue {
-                    stat: KILLS,
-                    value: self.kills,
-                },
-                protocol::StatValue {
-                    stat: DEATHS,
-                    value: self.deaths,
-                },
-            ],
+            stats,
         }
         .encode_with_profile(profile)
     }
@@ -92,10 +99,15 @@ impl Plan {
             let before = bot.firearm_kd;
             let after = Totals {
                 kills: before.kills.saturating_add(i32::from(is_kill)),
+                assists: before.assists,
                 deaths: before.deaths.saturating_add(i32::from(!is_kill)),
             };
             // Validate the bounded absolute row before the firearm commits.
-            after.encode(life.index, engine.wire_profile)?;
+            after.encode(
+                life.index,
+                engine.wire_profile,
+                engine.firearm_assists.enabled(),
+            )?;
             changes.push(Change {
                 life,
                 allocation_generation: bot.allocation_generation,

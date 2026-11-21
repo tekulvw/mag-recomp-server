@@ -4,10 +4,9 @@ use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 
 // Original retail CharacterStatType table / scoreboard receiver. These are wire
-// identities, not configurable balance values. Assist awards require their own
-// contribution resolver; a zero here does not manufacture an assist.
+// identities, not configurable balance values.
 const KILLS: u8 = 10;
-const ASSISTS: u8 = 11;
+use firearm_assists::STAT as ASSISTS;
 const DEATHS: u8 = 12;
 const SUICIDES: u8 = 13;
 const FRIENDLY_KILLS: u8 = 14;
@@ -24,6 +23,32 @@ fn increment(plan: &mut EventPlan, actor: &Active, stat: u8) {
         .entry((actor.reservation.id.clone(), stat))
         .or_default();
     *value = value.saturating_add(1);
+}
+
+pub(super) fn firearm_assists(plan: &mut EventPlan, assists: &firearm_assists::Plan) {
+    for reservation in assists.humans() {
+        let value = plan
+            .statistics
+            .increments
+            .entry((reservation.to_owned(), ASSISTS))
+            .or_default();
+        *value = value.saturating_add(1);
+    }
+}
+
+pub(crate) fn plan_bot_firearm_assists<W: Write>(
+    engine: &Engine<W>,
+    assists: &firearm_assists::Plan,
+) -> Result<CharacterEffectConsequences, &'static str> {
+    let mut plan = EventPlan::default();
+    firearm_assists(&mut plan, assists);
+    stage_with_source(engine, &mut plan, true)?;
+    Ok(CharacterEffectConsequences {
+        statistics: plan.statistics,
+        rewards: Vec::new(),
+        messages: plan.messages,
+        denial: None,
+    })
 }
 /// The represented opposing target has no authenticated victim account. Its
 /// accepted lethal hit still counts for the attacking character, as native does.
@@ -256,7 +281,10 @@ fn stage_with_source<W: Write>(
     let initial = plan.replication.initial_objects.is_some();
     for actor in &actors {
         let changed = plan.statistics.updates.get(&actor.reservation.id);
-        if changed.is_none() && !initial {
+        // An assist-only change uses the creation-ordered shared reply budget.
+        // Existing full rows retain the current absolute assist value.
+        if !initial && changed.is_none_or(|stats| stats.len() == 1 && stats.contains_key(&ASSISTS))
+        {
             continue;
         }
         if actor.initial_objects.is_none()

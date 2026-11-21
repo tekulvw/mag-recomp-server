@@ -131,6 +131,7 @@ fn bot_firearm_kd_counts_registered_bot_death_once() {
     native_firearm_hit(&mut engine, target);
     let totals = crate::bot_firearm_kd::Totals {
         kills: 0,
+        assists: 0,
         deaths: 1,
     };
     assert_eq!(engine.bot_registry.bots[&target].firearm_kd, totals);
@@ -321,6 +322,7 @@ fn bot_firearm_kd_scheduler_counts_incapacitating_hit_once() {
         engine.bot_registry.bots[&shooter].firearm_kd,
         crate::bot_firearm_kd::Totals {
             kills: 1,
+            assists: 0,
             deaths: 0
         }
     );
@@ -351,7 +353,9 @@ fn scheduler_bot_opponents() -> (Engine<Vec<u8>>, u16, u16) {
     engine.bot_registry.total = 3;
     let items = engine.item_catalog.clone();
     // Reconcile using the bootstrap catalog; the scheduler uses the fixture rifle below.
-    let bootstraps = super::identity_tests::engine("Synthetic Bot Opponent");
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let bootstraps = super::identity_tests::engine(&format!("Synthetic Bot Opponent {id}"));
     engine.item_catalog = bootstraps.item_catalog;
     engine
         .reconcile_bot_population(Duration::ZERO, 1, &mut Default::default())
@@ -374,6 +378,350 @@ fn scheduler_bot_opponents() -> (Engine<Vec<u8>>, u16, u16) {
         engine.bot_registry.bots[&shooter].target.squad.team()
     );
     (engine, shooter, target)
+}
+
+fn firearm_assist_fixture(timeout_ms: u32) -> (Engine<Vec<u8>>, u16, u16) {
+    let (mut engine, shooter, target) = scheduler_bot_opponents();
+    engine = engine
+        .with_firearm_assist_rules(crate::firearm_assists::Rules {
+            schema_version: 1,
+            application_id: 20231,
+            assist_timeout_ms: timeout_ms,
+        })
+        .unwrap();
+    let ally_team = engine.bot_registry.bots[&shooter].target.squad.team();
+    let squad = engine
+        .spawn_catalog
+        .as_ref()
+        .unwrap()
+        .for_squad(u16::from(ally_team) * 16)
+        .unwrap();
+    let human = engine.active.as_mut().unwrap();
+    human.squad_catalog = std::sync::Arc::new(squad);
+    human.life = CharacterLife::Alive {
+        generation: 4,
+        health_quarter_points: 400,
+    };
+    (engine, shooter, target)
+}
+
+fn zero_damage_firearm_hit(target: u16) -> Vec<u8> {
+    let mut hit = crate::human_kill_reward_tests::native_hit(0x03800000 | u32::from(target), 77);
+    // Existing 020f fixture geometry is valid for the ordinary profile, but the
+    // zero penetration field produces a zero HP hit before the bot kills it.
+    hit[37..39].copy_from_slice(&[0, 0]);
+    hit
+}
+
+#[test]
+fn firearm_assists_human_zero_damage_then_bot_terminal_counts_once() {
+    let (mut engine, shooter, target) = firearm_assist_fixture(901);
+    let hit = zero_damage_firearm_hit(target);
+    dispatch(&mut engine, &hit, 1).unwrap();
+    assert_eq!(engine.bot_registry.bots[&target].health, 120);
+    let mut messages = Vec::new();
+    for ms in (50..900).step_by(50) {
+        messages.extend(
+            engine
+                .tick_bot_firearms(Duration::from_millis(ms), 1)
+                .unwrap(),
+        );
+    }
+    assert_eq!(engine.bot_registry.bots[&target].health, 0);
+    assert_eq!(engine.bot_registry.bots[&shooter].firearm_kd.kills, 1);
+    assert_eq!(
+        engine.active.as_ref().unwrap().reward_statistics.get(&11),
+        Some(&1)
+    );
+    let messages = engine.drain_shared(messages, 1).unwrap();
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message.payload_hex == "02040000010b01")
+            .count(),
+        1
+    );
+    assert!(engine.pending_reward_batch().is_empty());
+}
+
+fn assist_bot(engine: &Engine<Vec<u8>>, index: u16) -> firearm_assists::Fighter<'_> {
+    firearm_assists::Fighter {
+        index,
+        reservation: None,
+        generation: engine.bot_registry.bots[&index]
+            .target
+            .runtime
+            .unwrap()
+            .generation,
+    }
+}
+
+fn preview_bot_terminal(
+    engine: &Engine<Vec<u8>>,
+    killer: u16,
+    victim: u16,
+    now: Duration,
+) -> firearm_assists::Plan {
+    firearm_assists::Plan::prepare(
+        engine,
+        1,
+        now,
+        assist_bot(engine, killer),
+        assist_bot(engine, victim),
+        true,
+    )
+    .unwrap()
+}
+
+#[test]
+fn firearm_assists_zero_retains_same_millisecond_and_expires_next_millisecond() {
+    let (mut engine, shooter, target) = firearm_assist_fixture(0);
+    dispatch(&mut engine, &zero_damage_firearm_hit(target), 1).unwrap();
+    assert_eq!(
+        preview_bot_terminal(&engine, shooter, target, Duration::from_micros(1999))
+            .audit()
+            .len(),
+        1
+    );
+    assert!(
+        preview_bot_terminal(&engine, shooter, target, Duration::from_millis(2))
+            .audit()
+            .is_empty()
+    );
+}
+
+#[test]
+fn firearm_assists_ignore_refused_reports_and_survive_only_the_same_attacker_allocation() {
+    let (mut refused, shooter, target) = firearm_assist_fixture(50);
+    let hit = zero_damage_firearm_hit(target);
+    refused.max_log = refused.written;
+    assert_eq!(
+        dispatch(&mut refused, &hit, 1).unwrap_err(),
+        "log_limit_reached"
+    );
+    assert!(
+        preview_bot_terminal(&refused, shooter, target, Duration::from_millis(2))
+            .audit()
+            .is_empty()
+    );
+
+    let (mut engine, shooter, target) = firearm_assist_fixture(50);
+    dispatch(&mut engine, &zero_damage_firearm_hit(target), 1).unwrap();
+    let source = engine.active.as_mut().unwrap();
+    source.life = CharacterLife::Alive {
+        generation: 5,
+        health_quarter_points: 400,
+    };
+    let now = Duration::from_millis(51);
+    assert_eq!(
+        preview_bot_terminal(&engine, shooter, target, now)
+            .audit()
+            .len(),
+        1
+    );
+    // A fresh recorded admission can reuse the same string after the old
+    // fixed-world release tombstone has aged out. Its allocation is distinct.
+    engine.active.as_mut().unwrap().allocation_sequence += 1;
+    assert!(
+        preview_bot_terminal(&engine, shooter, target, now)
+            .audit()
+            .is_empty()
+    );
+}
+
+#[test]
+fn firearm_assists_reject_stale_detached_plans_after_revision_round_or_victim_life_changes() {
+    let (mut engine, shooter, target) = firearm_assist_fixture(50);
+    let now = Duration::from_millis(1);
+    let prepare = |engine: &Engine<Vec<u8>>| {
+        firearm_assists::Plan::prepare(
+            engine,
+            1,
+            now,
+            firearm_assists::Fighter::human(engine.active.as_ref().unwrap()),
+            assist_bot(engine, target),
+            false,
+        )
+        .unwrap()
+    };
+    let stale = prepare(&engine);
+    dispatch(&mut engine, &zero_damage_firearm_hit(target), 1).unwrap();
+    assert_eq!(stale.install(&mut engine), Err("stale_firearm_assist_plan"));
+    assert_eq!(
+        preview_bot_terminal(&engine, shooter, target, now)
+            .audit()
+            .len(),
+        1
+    );
+
+    let stale = prepare(&engine);
+    engine.round_number += 1;
+    assert_eq!(stale.install(&mut engine), Err("stale_firearm_assist_plan"));
+    let stale = prepare(&engine);
+    let bot = engine.bot_registry.bots.get_mut(&target).unwrap();
+    bot.target.runtime.as_mut().unwrap().generation += 1;
+    assert_eq!(stale.install(&mut engine), Err("stale_firearm_assist_plan"));
+}
+
+fn bot_first_assist_hit(engine: &mut Engine<Vec<u8>>, target: u16) -> u64 {
+    let bot = engine.bot_registry.bots.get_mut(&target).unwrap();
+    bot.health = 240;
+    bot.damage.health_quarter_points = 240;
+    for ms in (50..900).step_by(50) {
+        engine
+            .tick_bot_firearms(Duration::from_millis(ms), 1)
+            .unwrap();
+        if engine.bot_registry.bots[&target].health == 80 {
+            return ms;
+        }
+    }
+    panic!("the allied bot did not land its admitted shot");
+}
+
+#[test]
+fn firearm_assists_bot_hit_then_human_terminal_counts_bot() {
+    let (mut engine, shooter, target) = firearm_assist_fixture(901);
+    let ms = bot_first_assist_hit(&mut engine, target);
+    let wire = crate::human_kill_reward_tests::native_hit(0x03800000 | u32::from(target), 77);
+    dispatch(&mut engine, &wire, ms + 1).unwrap();
+    assert_eq!(engine.bot_registry.bots[&target].health, 0);
+    assert_eq!(engine.bot_registry.bots[&shooter].firearm_kd.assists, 1);
+    assert_eq!(engine.bot_registry.bots[&shooter].firearm_kd.kills, 0);
+    dispatch(&mut engine, &wire, ms + 2).unwrap();
+    assert_eq!(engine.bot_registry.bots[&shooter].firearm_kd.assists, 1);
+}
+
+#[test]
+fn firearm_assists_stale_terminal_cannot_overwrite_newer_bot_totals() {
+    let (mut engine, shooter, target) = firearm_assist_fixture(901);
+    let now = Duration::from_millis(bot_first_assist_hit(&mut engine, target) + 1);
+    let terminal = firearm_assists::Plan::prepare(
+        &engine,
+        1,
+        now,
+        firearm_assists::Fighter::human(engine.active.as_ref().unwrap()),
+        assist_bot(&engine, target),
+        true,
+    )
+    .unwrap();
+    assert_eq!(terminal.audit().len(), 1);
+    terminal.check_before_record(&engine).unwrap();
+    let victim = &engine.bot_registry.bots[&target];
+    let generation = victim.target.runtime.unwrap().generation;
+    let damage = replication::CharacterDamage {
+        health_quarter_points: 0,
+        ..victim.damage
+    };
+    engine
+        .commit_bot_damage(target, generation, damage, now)
+        .unwrap();
+    engine
+        .bot_registry
+        .bots
+        .get_mut(&shooter)
+        .unwrap()
+        .firearm_kd
+        .assists = 3;
+    assert_eq!(
+        terminal.install(&mut engine),
+        Err("stale_firearm_assist_plan")
+    );
+    assert_eq!(engine.bot_registry.bots[&shooter].firearm_kd.assists, 3);
+}
+
+#[test]
+fn firearm_assists_four_contributors_reach_seven_recipients_within_shared_budget() {
+    let (engine, shooter) = scheduler_fixture();
+    let mut engine = engine
+        .with_firearm_assist_rules(firearm_assists::Rules {
+            schema_version: 1,
+            application_id: 20231,
+            assist_timeout_ms: 123,
+        })
+        .unwrap();
+    engine.maximum_players = 8;
+    let admitted_shooter = engine.bot_registry.bots[&shooter].clone();
+    let team = admitted_shooter.target.squad.team();
+    let squad = std::sync::Arc::new(
+        engine
+            .spawn_catalog
+            .as_ref()
+            .unwrap()
+            .for_squad(u16::from(team) * 16)
+            .unwrap(),
+    );
+    for player in 2..8 {
+        reserve(&mut engine, player);
+        let actor = engine.active.as_mut().unwrap();
+        ready(actor);
+        actor.squad_catalog = squad.clone();
+        actor.life = CharacterLife::Alive {
+            generation: 1,
+            health_quarter_points: 400,
+        };
+    }
+    // The two-player scheduler fixture shrinks its bot population during the
+    // earlier reservations. Retain its actual fighter as the eighth participant.
+    engine.bot_registry.total = 8;
+    engine.bot_registry.bots.insert(shooter, admitted_shooter);
+    let victim_id = "synthetic-reservation-0000";
+    let now = Duration::from_millis(1);
+    for player in 2..6 {
+        let contributor = &engine.peers[&format!("synthetic-reservation-{player:04}")];
+        let assist = firearm_assists::Plan::prepare(
+            &engine,
+            1,
+            now,
+            firearm_assists::Fighter::human(contributor),
+            firearm_assists::Fighter::human(&engine.peers[victim_id]),
+            false,
+        )
+        .unwrap();
+        assist.install(&mut engine).unwrap();
+    }
+    let victim = &engine.peers[victim_id];
+    let terminal = firearm_assists::Plan::prepare(
+        &engine,
+        1,
+        now,
+        assist_bot(&engine, shooter),
+        firearm_assists::Fighter::human(victim),
+        true,
+    )
+    .unwrap();
+    assert_eq!(terminal.audit().len(), 4);
+    let stats = events::plan_bot_firearm_assists(&engine, &terminal).unwrap();
+    let death = events::plan_bot_killed_human(&engine, victim, 4).unwrap();
+    terminal.check_before_record(&engine).unwrap();
+    engine
+        .record(
+            json!({"op":"synthetic_bot_firearm_terminal","firearm_assists":terminal.audit()}),
+            1,
+        )
+        .unwrap();
+    let victim = engine.peers.get_mut(victim_id).unwrap();
+    let model = replication::CharacterDamage {
+        health_quarter_points: 0,
+        ..victim.last_damage
+    };
+    victim.apply_peer_damage(4, model, now).unwrap();
+    terminal.install(&mut engine).unwrap();
+    let mut direct = death.install(&mut engine).unwrap();
+    direct.extend(stats.commit(&mut engine));
+    let mut messages = engine.drain_shared(direct, 1).unwrap();
+    assert!(messages.len() <= 32);
+    let rest = engine.drain_shared(Vec::new(), 1).unwrap();
+    assert!(rest.len() <= 32);
+    messages.extend(rest);
+    for contributor in 2..6 {
+        let row = format!("0204{contributor:04x}010b01");
+        let recipients: std::collections::BTreeSet<_> = messages
+            .iter()
+            .filter(|message| message.payload_hex == row)
+            .map(|message| message.player_id)
+            .collect();
+        assert_eq!(recipients, [0, 2, 3, 4, 5, 6, 7].into_iter().collect());
+    }
 }
 
 #[test]

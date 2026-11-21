@@ -473,6 +473,94 @@ fn initial_collapse_death_counter_survives_finish_and_counts_a_new_collapse_afte
 }
 
 #[test]
+fn firearm_assists_discard_credit_from_another_damage_path_before_same_life_revive() {
+    use firearm_assists::{Fighter, Plan, Rules};
+
+    let mut engine = two_actors(0.4)
+        .with_firearm_assist_rules(Rules {
+            schema_version: 1,
+            application_id: 20231,
+            assist_timeout_ms: 8000,
+        })
+        .unwrap();
+    engine.match_started = true;
+    engine.maximum_players = 4;
+    reserve(&mut engine, 2);
+    let opposing = engine
+        .spawn_catalog
+        .as_ref()
+        .unwrap()
+        .for_squad(16)
+        .unwrap();
+    let mut contributor = engine.active.take().unwrap();
+    ready(&mut contributor);
+    contributor.squad_catalog = Arc::new(opposing);
+    contributor.life = CharacterLife::Alive {
+        generation: 4,
+        health_quarter_points: 400,
+    };
+    let contributor_id = contributor.reservation.id.clone();
+    engine.peers.insert(contributor_id.clone(), contributor);
+    engine.active = engine.peers.remove("synthetic-reservation-0001");
+    let contribution = Plan::prepare(
+        &engine,
+        1,
+        Duration::from_millis(1),
+        Fighter::human(&engine.peers[&contributor_id]),
+        Fighter::human(patient(&engine)),
+        false,
+    )
+    .unwrap();
+    contribution.install(&mut engine).unwrap();
+    let preview = |engine: &Engine<Vec<u8>>| {
+        Plan::prepare(
+            engine,
+            1,
+            Duration::from_millis(2001),
+            Fighter::human(engine.active.as_ref().unwrap()),
+            Fighter::human(patient(engine)),
+            true,
+        )
+        .unwrap()
+        .audit()
+    };
+    assert_eq!(preview(&engine).len(), 1);
+
+    // A queued hit uses the normal damage transaction without entering the
+    // ordinary-firearm contribution route. The original victim life is revived.
+    dispatch_pending_damage(&mut engine, 40.0, 1000);
+    assert_downed(&engine, Duration::from_secs(8));
+    dispatch(&mut engine, &request(0x03800000), 2000).unwrap();
+    assert!(matches!(
+        patient(&engine).life,
+        CharacterLife::Alive { generation: 4, .. }
+    ));
+    assert!(preview(&engine).is_empty());
+    assert!(
+        !engine.peers[&contributor_id]
+            .reward_statistics
+            .contains_key(&11)
+    );
+
+    let stale = Plan::prepare(
+        &engine,
+        1,
+        Duration::from_millis(2002),
+        Fighter::human(&engine.peers[&contributor_id]),
+        Fighter::human(patient(&engine)),
+        false,
+    )
+    .unwrap();
+    dispatch_pending_damage(&mut engine, 70.0, 3000);
+    dispatch(&mut engine, &request(0x03800000), 4000).unwrap();
+    assert!(matches!(
+        patient(&engine).life,
+        CharacterLife::Alive { generation: 4, .. }
+    ));
+    assert_eq!(stale.install(&mut engine), Err("stale_firearm_assist_plan"));
+}
+
+#[test]
 fn duration_admission_uses_inherited_leadership_snapshot_without_mutating_owned_modifiers() {
     let catalog = leadership_passives::LeadershipCatalog::from_json(&json!({
         "schema_version":1,"application_id":20231,
