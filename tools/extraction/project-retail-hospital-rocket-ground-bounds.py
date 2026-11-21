@@ -38,11 +38,11 @@ def thresholds(center_z, half_extent_z):
             f32(f32(model_center + model_radius) * coefficient))
 
 
-def select_variants(source_rows, bindings):
-    tokens = {source_token(role): role for role in ROLE}
+def select_variants(source_rows, bindings, *, roles=ROLE):
+    tokens = {source_token(role): role for role in roles}
     source_by_template = {}
     for row in source_rows:
-        if row['vehicle_type'] not in ROLE:
+        if row['vehicle_type'] not in roles:
             continue
         template = Path(row['PropertiesFileName']).stem
         require(template and template not in source_by_template, 'duplicate Ground chassis source')
@@ -53,14 +53,14 @@ def select_variants(source_rows, bindings):
         role = tokens.get(binding['vehicle_type_token'])
         if role is None:
             continue
-        key = (ROLE[role], binding['faction'])
+        key = (roles[role], binding['faction'])
         template = binding['template']
         source = source_by_template.get(template)
         require(key not in result and template not in projected and source is not None
                 and source['vehicle_type'] == role, 'duplicate or mismatched Ground chassis binding')
         projected.add(template)
         result[key] = (key[0], binding, source)
-    require(set(result) == {(kind, faction) for kind in ROLE.values() for faction in range(3)}
+    require(set(result) == {(kind, faction) for kind in roles.values() for faction in range(3)}
             and set(source_by_template) == projected, 'incomplete Ground rocket chassis inventory')
     return [result[key] for key in sorted(result)]
 
@@ -70,7 +70,14 @@ def verify_source_projection(raw, dynamic):
             'Ground catalog uses a different source projection')
 
 
-def read_chassis(archive, source):
+def ground_chassis_entry(entries, expected_sha):
+    selected = [entry for entry in entries if entry['collision_tag'] in (0, 9)]
+    require(len(selected) == 1 and selected[0]['sha256'] == expected_sha,
+            'unqualified original Ground chassis selection')
+    return selected[0]
+
+
+def read_chassis(archive, source, *, select_operational=False):
     sys.path.insert(0, str(HERE.parents[1] / 'tools/collision'))
     from packfile import parse_packfile
     from zrb_records import parse
@@ -81,9 +88,14 @@ def read_chassis(archive, source):
     rows = [record for record in parse(raw, retail13_compat=True)['records']
             if record['class_token'] == '2a8bdf5a'
             and record['name_token'] == source['resource_token']]
-    require(len(rows) == 1 and rows[0]['physics_resource_type'] == 0
-            and len(rows[0]['packfiles']) == 1, 'expected one original Ground chassis pack')
-    entry = rows[0]['packfiles'][0]
+    require(len(rows) == 1 and rows[0]['physics_resource_type'] == 0,
+            'expected one original Ground chassis resource')
+    entries = rows[0]['packfiles']
+    if select_operational:
+        entry = ground_chassis_entry(entries, source['packfile_sha256'])
+    else:
+        require(len(entries) == 1, 'expected one original Ground chassis pack')
+        entry = entries[0]
     offset = entry['offset']
     pack = raw[offset:offset + entry['bytes']]
     require(sha(pack) == entry['sha256'] == source['packfile_sha256'],

@@ -127,7 +127,7 @@ impl Policy {
         )
     }
 
-    pub(crate) fn hospital_rocket_amount(
+    pub(crate) fn classified_vehicle_blast_amount(
         &self,
         creation: &ground_vehicles::Creation,
         raw_hp: f32,
@@ -465,16 +465,16 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(
-            policy.hospital_rocket_amount(&creation, 100.0, 0.5, 5, false),
+            policy.classified_vehicle_blast_amount(&creation, 100.0, 0.5, 5, false),
             Ok(60.0)
         );
         assert_eq!(
-            policy.hospital_rocket_amount(&creation, 100.0, 0.5, 5, true),
+            policy.classified_vehicle_blast_amount(&creation, 100.0, 0.5, 5, true),
             Ok(22.5)
         );
         assert!(
             policy
-                .hospital_rocket_amount(&creation, 100.0, 0.5, 0, false)
+                .classified_vehicle_blast_amount(&creation, 100.0, 0.5, 0, false)
                 .is_err()
         );
     }

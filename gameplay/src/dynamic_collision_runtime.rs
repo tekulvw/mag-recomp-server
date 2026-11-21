@@ -66,6 +66,10 @@ pub(crate) struct Resources {
     bindings: RuntimeBindings,
 }
 impl Resources {
+    pub(crate) fn bindings(&self) -> &RuntimeBindings {
+        &self.bindings
+    }
+
     pub(crate) fn validate_profiles(
         &self,
         registry: &match_profiles::Registry,

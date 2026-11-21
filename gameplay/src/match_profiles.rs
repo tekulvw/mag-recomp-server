@@ -105,6 +105,16 @@ impl Registry {
             }
             if let Some(setup) = &profile.acquisition {
                 setup.validate_ground_hulk_templates(catalog)?;
+                if setup.has_frag_ground_areas() {
+                    setup.validate_frag_ground_dynamic(
+                        catalog,
+                        bindings,
+                        profile
+                            .vehicles
+                            .as_ref()
+                            .ok_or("acquisition_frag_ground_requires_vehicles")?,
+                    )?;
+                }
             }
         }
         Ok(())
@@ -537,6 +547,20 @@ impl Registry {
         for loaded in self.profiles.values() {
             if let Some(setup) = &loaded.acquisition {
                 setup.validate_frag_character_blast(items, loaded.collision.as_ref())?;
+                if setup.has_frag_ground_areas() {
+                    setup.validate_frag_ground(
+                        items,
+                        loaded.collision.as_ref(),
+                        loaded
+                            .vehicles
+                            .as_ref()
+                            .ok_or("acquisition_frag_ground_requires_vehicles")?,
+                        loaded
+                            .objectives
+                            .as_ref()
+                            .ok_or("acquisition_frag_ground_requires_objectives")?,
+                    )?;
+                }
             }
             if loaded
                 .domination
@@ -622,6 +646,15 @@ impl Registry {
         self.profiles
             .values()
             .any(|profile| profile.hospital_rockets.is_some())
+    }
+
+    pub fn has_frag_ground_areas(&self) -> bool {
+        self.profiles.values().any(|profile| {
+            profile
+                .acquisition
+                .as_ref()
+                .is_some_and(|setup| setup.has_frag_ground_areas())
+        })
     }
 
     pub fn has_frag_character_blast(&self) -> bool {

@@ -43,6 +43,7 @@ pub struct Configuration {
     ground_turrets: Option<PathBuf>,
     #[serde(default)]
     frag_character_blast: bool,
+    frag_ground_areas: Option<PathBuf>,
     vehicle_reinforcement_intervals_ms: [u32; 2],
     structural: Option<crate::acquisition_structural::Files>,
 }
@@ -181,6 +182,9 @@ impl Configuration {
         if let Some(source) = &mut result.ground_turrets {
             *source = directory.join(&*source);
         }
+        if let Some(source) = &mut result.frag_ground_areas {
+            *source = directory.join(&*source);
+        }
         Ok(result)
     }
 
@@ -200,6 +204,13 @@ impl Configuration {
             .is_some_and(|path| path.as_os_str().is_empty())
         {
             return Err("empty_acquisition_ground_turret_source_path");
+        }
+        if self
+            .frag_ground_areas
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            return Err("empty_acquisition_frag_ground_areas_path");
         }
         if self.ground_damage.is_none() || self.arrival_static.is_none() {
             return Err("acquisition_core_resources_required");
@@ -304,6 +315,14 @@ impl Configuration {
             .as_ref()
             .map(|paths| paths.load(objective_catalog, spawns))
             .transpose()?;
+        if let Some(path) = &self.frag_ground_areas {
+            let mut raw = Vec::new();
+            File::open(path)?.take(16_385).read_to_end(&mut raw)?;
+            setup.frag_ground_areas = Some(std::sync::Arc::new(
+                crate::acquisition_frag_ground::Catalog::from_bytes(&raw)
+                    .map_err(io::Error::other)?,
+            ));
+        }
         setup
             .validate_structural(objective_catalog)
             .map_err(io::Error::other)?;
@@ -587,6 +606,7 @@ impl Configuration {
             ground_capabilities,
             ground_damage: self.ground_damage.clone(),
             frag_character_blast: self.frag_character_blast,
+            frag_ground_areas: None,
             vehicle_reinforcement_intervals_ms: self.vehicle_reinforcement_intervals_ms,
             structural: None,
         })

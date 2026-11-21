@@ -252,7 +252,7 @@ fn plan_owner_report<W: Write>(
                     plan.combat.observed_secondary = fields.secondary;
                     plan.combat.primary_equipped = fields.primary_equipped;
                 }
-                if ctx.engine.frag_character_blast
+                if ctx.engine.source_frag_owner_updates()
                     && ctx.accepted_owner_route
                     && h.sequence > active.latest_owner_sequence
                     && !active.is_mounted()
@@ -260,7 +260,7 @@ fn plan_owner_report<W: Write>(
                     accepted_stance = active.owner_presentation(&fields).state.map(|s| s.stance);
                 }
                 if let CharacterLife::Alive { generation, .. } = active.life
-                    && (!ctx.engine.frag_character_blast
+                    && (!ctx.engine.source_frag_owner_updates()
                         || h.sequence > active.latest_owner_sequence)
                 {
                     let mut flights = active.projectiles.clone();
@@ -468,7 +468,44 @@ fn plan_grenade_blasts<W: Write>(
             }
         }
     }
-    if admitted_owner_blast && ctx.engine.ground_damage_policy().is_some() && detonated {
+    if admitted_owner_blast
+        && detonated
+        && ctx
+            .engine
+            .acquisition_gameplay
+            .as_ref()
+            .is_some_and(|runtime| runtime.setup.has_frag_ground_areas())
+    {
+        let result = plan
+            .ground_runtime
+            .as_ref()
+            .or(ctx.engine.ground_runtime.as_ref())
+            .ok_or("ground_vehicle_runtime_required")
+            .and_then(|staged| {
+                ctx.engine.prepare_acquisition_ground_frag(
+                    active,
+                    staged,
+                    plan.session.client_position.map(|(position, _)| position),
+                    &plan.audit.projectile_terminals,
+                    ctx.now,
+                )
+            });
+        match result {
+            Ok(effect) => {
+                if let Some(after) = effect.after {
+                    plan.ground_runtime = Some(after);
+                }
+                plan.ground_damage_relay = effect.packet;
+                plan.audit.ground_grenade_checks = effect.audit;
+            }
+            Err(error) => {
+                plan.gameplay_denial.get_or_insert(error);
+                plan.audit
+                    .ground_grenade_checks
+                    .push(json!({"error":error}));
+            }
+        }
+    } else if admitted_owner_blast && ctx.engine.ground_damage_policy().is_some() && detonated {
         let motion_staged = plan.ground_runtime.is_some();
         let mut candidate = plan
             .ground_runtime

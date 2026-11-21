@@ -134,6 +134,7 @@ pub fn drop_passages_exclusive(
 ) -> bool {
     bot_traffic_flow::passages_exclusive(a, b, entry_buffer_m)
 }
+mod acquisition_frag_ground;
 pub mod character_damage_rules;
 mod character_frag_damage;
 pub mod domination_helo;

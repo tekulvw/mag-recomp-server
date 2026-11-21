@@ -701,7 +701,7 @@ impl Runtime {
         self.apply_weapon_damage(key, amount_hp, attacker, 0xa0, 0)
     }
 
-    pub(crate) fn apply_hospital_rocket_damage(
+    pub(crate) fn apply_classified_vehicle_blast_damage(
         &mut self,
         key: Key,
         amount_hp: f32,

@@ -13,6 +13,8 @@ use crate::{
 use std::collections::BTreeMap;
 
 const FIRST_CAPTURE: u16 = 100;
+#[path = "acquisition_frag_ground_damage_tests.rs"]
+mod frag_ground_damage;
 #[path = "acquisition_hold_exit_tests.rs"]
 mod hold_exits;
 
@@ -394,6 +396,7 @@ fn acquisition_setup_fixture(
             structural: None,
             ground_damage,
             frag_character_blast: false,
+            frag_ground_areas: None,
         },
     )
 }
