@@ -3,6 +3,8 @@ use super::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+pub(super) const MAX_PENDING_NOTIFICATIONS: usize = 128;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MatchTerminal {
@@ -55,7 +57,7 @@ impl Active {
     }
 
     pub(crate) fn queue_round(&mut self, publication: Publication) {
-        if self.pending_notifications.len() >= 128 {
+        if self.pending_notifications.len() >= MAX_PENDING_NOTIFICATIONS {
             self.replication_backlogged = true;
         } else {
             self.pending_notifications.push_back(publication);

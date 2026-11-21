@@ -16,18 +16,20 @@ namespace Server.Medius
         bool IsLiveCohort(Reservation r) => r.Client.DmeWorld == AdmissionWorld && (!_independentMatchCohorts || !_admissionTerminal);
         bool IsResultsCohort(Reservation r) => _independentMatchCohorts && !IsLiveCohort(r);
         bool IsArchivedTransport(Reservation r) => _independentMatchCohorts && r.Client.DmeWorld != AdmissionWorld;
+        bool HasResultsCapacity() =>
+            _reservations.Values.Select(r => r.Client.DmeWorld).Distinct().Count() <= MaximumResultsCohorts;
 
         // Called under _gate. Retained result transports occupy their own slot
         // namespace and continue to use the original subscribed wire world.
         bool AdvanceTerminalCohort()
         {
             if (!_admissionTerminal) return true;
-            if (_reservations.Values.Select(r => r.Client.DmeWorld).Distinct().Count() > MaximumResultsCohorts)
-                return false;
+            if (!HasResultsCapacity()) return false;
             foreach (var r in _reservations.Values.Where(r => r.Client.DmeWorld == AdmissionWorld))
             {
                 _loadoutSelections.Forget(r.Id);
                 _loadoutRefreshes.Forget(r.Id);
+                _progressionRefreshes.Remove(r.Id);
             }
             _admissionWorld = World.CreateLocalCohort();
             _admissionTerminal = false;
@@ -43,6 +45,11 @@ namespace Server.Medius
 
         async Task ReleaseReservationsAsync(Reservation[] reservations)
         {
+            if (InRegistry)
+            {
+                await Task.WhenAll(reservations.Select(ReleaseAsync));
+                return;
+            }
             // Retired transports already defer their remote release. Close them
             // concurrently so their separate TCP/UDP shutdowns do not accumulate.
             Reservation[] results;

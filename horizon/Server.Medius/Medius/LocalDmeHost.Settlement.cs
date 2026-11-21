@@ -90,7 +90,7 @@ namespace Server.Medius
         {
             PendingRelease[] pending;
             var deadline = DateTime.UtcNow.AddSeconds(4);
-            lock (_gate) pending = _pendingReleases.Values.Where(p => IsResultsCohort(p.Reservation)).ToArray();
+            lock (_gate) pending = _pendingReleases.Values.Where(p => InRegistry || IsResultsCohort(p.Reservation)).ToArray();
             foreach (var batch in pending.Chunk(ReleaseRetryBatchSize))
             {
                 if (DateTime.UtcNow >= deadline) return;

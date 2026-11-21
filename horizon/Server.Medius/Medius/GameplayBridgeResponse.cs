@@ -49,7 +49,7 @@ namespace Server.Medius {
    string.Equals(AccountId,account,StringComparison.Ordinal)&&CharacterId==character;
   internal bool Same(GameplayLoadoutSelection other)=>other!=null&&SelectionId==other.SelectionId&&ReservationId==other.ReservationId&&WorldId==other.WorldId&&PlayerId==other.PlayerId&&AccountId==other.AccountId&&CharacterId==other.CharacterId&&Revision==other.Revision&&InventoryIndex==other.InventoryIndex;
  }
- public enum GameplayBridgeFailure { None, Timeout, Unavailable, InvalidRequest, MalformedResponse }
+ public enum GameplayBridgeFailure { None, Timeout, Unavailable, InvalidRequest, MalformedResponse, WorkerIdentityMismatch }
  public sealed class GameplayMatchTerminal {
   public uint WorldId {get;}
   public string MatchId {get;}
@@ -70,9 +70,11 @@ namespace Server.Medius {
   public IReadOnlyList<string> Capabilities {get;}
   public IReadOnlyList<MagMatchProfile> MatchProfiles {get;}
   public GameplaySelectedMatch SelectedMatch {get;}
+  public GameplayWorkerIdentity WorkerIdentity {get;}
   public bool SupportsActiveLoadoutRefresh => Capabilities.Contains("active_loadout_refresh_v1",StringComparer.Ordinal);
   public bool SupportsCommittedLoadoutSelections => Capabilities.Contains("committed_loadout_selection_v1",StringComparer.Ordinal);
-  internal GameplayBridgeResponse(bool ok,string error,IReadOnlyList<GameplayBridgeMessage> messages,GameplayBridgeFailure failure=GameplayBridgeFailure.None,IReadOnlyList<GameplayReward> rewards=null,GameplayMatchTerminal matchTerminal=null,IReadOnlyList<GameplayLoadoutSelection> loadoutSelections=null,IReadOnlyList<string> capabilities=null,IReadOnlyList<MagMatchProfile> matchProfiles=null,GameplaySelectedMatch selectedMatch=null){MatchProfiles=matchProfiles??Array.Empty<MagMatchProfile>();SelectedMatch=selectedMatch;LoadoutSelections=loadoutSelections??Array.Empty<GameplayLoadoutSelection>();Capabilities=capabilities??Array.Empty<string>();Ok=ok;Error=error;Messages=messages;Failure=failure;Rewards=rewards??Array.Empty<GameplayReward>();MatchTerminal=matchTerminal;}
+  public bool SupportsWorkerRegistry => Capabilities.Contains("worker_registry_v1",StringComparer.Ordinal);
+  internal GameplayBridgeResponse(bool ok,string error,IReadOnlyList<GameplayBridgeMessage> messages,GameplayBridgeFailure failure=GameplayBridgeFailure.None,IReadOnlyList<GameplayReward> rewards=null,GameplayMatchTerminal matchTerminal=null,IReadOnlyList<GameplayLoadoutSelection> loadoutSelections=null,IReadOnlyList<string> capabilities=null,IReadOnlyList<MagMatchProfile> matchProfiles=null,GameplaySelectedMatch selectedMatch=null,GameplayWorkerIdentity workerIdentity=null){MatchProfiles=matchProfiles??Array.Empty<MagMatchProfile>();SelectedMatch=selectedMatch;WorkerIdentity=workerIdentity;LoadoutSelections=loadoutSelections??Array.Empty<GameplayLoadoutSelection>();Capabilities=capabilities??Array.Empty<string>();Ok=ok;Error=error;Messages=messages;Failure=failure;Rewards=rewards??Array.Empty<GameplayReward>();MatchTerminal=matchTerminal;}
   internal static GameplayBridgeResponse Failed(GameplayBridgeFailure failure,long elapsed)=>new GameplayBridgeResponse(false,null,Array.Empty<GameplayBridgeMessage>(),failure){ElapsedMilliseconds=elapsed};
  }
  /// <summary>Strict bridge v2 reply codec. Event and release replies may carry bounded, independently addressed reliable messages.</summary>
@@ -107,9 +109,18 @@ namespace Server.Medius {
     bool hasCapabilities=root.TryGetProperty("capabilities",out var capabilities);
     bool hasProfiles=root.TryGetProperty("match_profiles",out var profiles);
     bool hasSelectedMatch=root.TryGetProperty("selected_match",out var selectedMatch);
-    var fields=new List<string>{"v","request_id","ok","error","messages"};if(hasProfiles)fields.Add("match_profiles");if(hasSelectedMatch)fields.Add("selected_match");if(hasSelections)fields.Add("loadout_selections");if(hasCapabilities)fields.Add("capabilities");if(hasRewards)fields.Add("rewards");if(hasTerminal)fields.Add("match_terminal");
+    bool hasWorkerIdentity=root.TryGetProperty("worker_identity",out var workerIdentity);
+    var fields=new List<string>{"v","request_id","ok","error","messages"};if(hasProfiles)fields.Add("match_profiles");if(hasSelectedMatch)fields.Add("selected_match");if(hasSelections)fields.Add("loadout_selections");if(hasCapabilities)fields.Add("capabilities");if(hasRewards)fields.Add("rewards");if(hasTerminal)fields.Add("match_terminal");if(hasWorkerIdentity)fields.Add("worker_identity");
     if(!ExactFields(root,fields.ToArray())||!root.GetProperty("v").TryGetInt32(out var version)||version!=2||
      root.GetProperty("request_id").ValueKind!=JsonValueKind.String||root.GetProperty("request_id").GetString()!=requestId)return false;
+    GameplayWorkerIdentity parsedIdentity=null;
+    if(hasWorkerIdentity) {
+     if(!ExactFields(workerIdentity,"worker_id","incarnation_id"))return false;
+     var workerId=workerIdentity.GetProperty("worker_id").GetString();
+     var incarnationId=workerIdentity.GetProperty("incarnation_id").GetString();
+     if(!GameplayWorkerIdentity.IsValidIdentifier(workerId)||!GameplayWorkerIdentity.IsValidIdentifier(incarnationId))return false;
+     parsedIdentity=new GameplayWorkerIdentity(workerId,incarnationId);
+    }
     var ok=root.GetProperty("ok");if(ok.ValueKind!=JsonValueKind.True&&ok.ValueKind!=JsonValueKind.False)return false;
     var error=root.GetProperty("error");if(error.ValueKind!=JsonValueKind.Null&&error.ValueKind!=JsonValueKind.String)return false;
     bool success=ok.GetBoolean();if(success&&error.ValueKind!=JsonValueKind.Null)return false;
@@ -181,7 +192,7 @@ namespace Server.Medius {
     IReadOnlyList<MagMatchProfile> parsedProfiles=Array.Empty<MagMatchProfile>();GameplaySelectedMatch parsedMatch=null;
     if(hasProfiles&&!GameplayMatchProfileCodec.Profiles(profiles,success,out parsedProfiles))return false;
     if(hasSelectedMatch&&!GameplayMatchProfileCodec.Selection(selectedMatch,success,out parsedMatch))return false;
-    response=new GameplayBridgeResponse(success,error.ValueKind==JsonValueKind.String?error.GetString():null,parsed.AsReadOnly(),rewards:parsedRewards.AsReadOnly(),matchTerminal:parsedTerminal,loadoutSelections:parsedSelections.AsReadOnly(),capabilities:parsedCapabilities.AsReadOnly(),matchProfiles:parsedProfiles,selectedMatch:parsedMatch);return true;
+    response=new GameplayBridgeResponse(success,error.ValueKind==JsonValueKind.String?error.GetString():null,parsed.AsReadOnly(),rewards:parsedRewards.AsReadOnly(),matchTerminal:parsedTerminal,loadoutSelections:parsedSelections.AsReadOnly(),capabilities:parsedCapabilities.AsReadOnly(),matchProfiles:parsedProfiles,selectedMatch:parsedMatch,workerIdentity:parsedIdentity);return true;
    }catch(Exception e)when(e is JsonException||e is InvalidOperationException||e is FormatException||e is ArgumentException){return false;}
   }
  }

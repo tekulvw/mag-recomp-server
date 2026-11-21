@@ -1,0 +1,21 @@
+# Build from the public repository root. The check uses only invented data and loopback endpoints.
+FROM rust:1.99.0-slim-bookworm@sha256:2c3a22f0a5533ea2dd5a16627bc841228151faa2d4de2644ac9987e4a2f1f2fa AS workers
+RUN apt-get update && apt-get install -y --no-install-recommends g++ ca-certificates && rm -rf /var/lib/apt/lists/*
+WORKDIR /src/gameplay
+COPY gameplay/Cargo.toml gameplay/Cargo.lock gameplay/build.rs ./
+COPY gameplay/src/ src/
+COPY gameplay/vendor/ vendor/
+COPY gameplay/data/synthetic-bot-objective-policy.json gameplay/data/synthetic-wire-profiles.json gameplay/data/synthetic-movement-metadata.json data/
+COPY gameplay/tests/support/synthetic_runtime_catalogs.rs tests/support/
+COPY tests/registry_fixture.rs examples/
+RUN cargo build --locked --bin mag-gameplay \
+    && MAG_REGISTRY_TEST_CATALOGS=/opt/mag-registry-catalogs cargo run --locked --example registry_fixture
+
+FROM mcr.microsoft.com/dotnet/sdk:10.0@sha256:e70cdb7f80b0348f5cb85f19a8f670fca061f033d57eed12fa003d58b0e06317 AS check
+WORKDIR /src/horizon
+COPY horizon/ .
+RUN dotnet build Tests.MagPlugin/Tests.MagPlugin.csproj -c Release
+COPY --from=workers /src/gameplay/target/debug/mag-gameplay /usr/local/bin/mag-gameplay
+COPY --from=workers /opt/mag-registry-catalogs /opt/mag-registry-catalogs
+RUN MAG_REGISTRY_TEST_BINARY=/usr/local/bin/mag-gameplay MAG_REGISTRY_TEST_CATALOGS=/opt/mag-registry-catalogs \
+    dotnet run --project Tests.MagPlugin/Tests.MagPlugin.csproj -c Release --no-build -- "configured registry real workers"

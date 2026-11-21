@@ -60,6 +60,8 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
       - run: docker build --target check horizon
+      - name: Check configured worlds against independent Rust workers
+        run: docker build --target check --file tests/Dockerfile.world-registry .
   chart:
     runs-on: mag-recomp-server
     steps:
