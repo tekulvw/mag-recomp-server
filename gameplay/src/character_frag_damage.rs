@@ -38,26 +38,31 @@ impl<W: Write> Engine<W> {
         if terminals.peek().is_none() {
             return Ok(FragDamagePlan::default());
         }
-        let state = &self
-            .domination_gameplay
-            .as_ref()
-            .ok_or("frag_character_blast_requires_domination")?
-            .state;
+        let collision = if let Some(runtime) = &self.acquisition_gameplay {
+            runtime
+                .blast_collision()
+                .ok_or("acquisition_frag_character_blast_requires_structural")?
+        } else {
+            let state = &self
+                .domination_gameplay
+                .as_ref()
+                .ok_or("frag_character_blast_world_required")?
+                .state;
+            BlastCollision {
+                filter_rows: &state.filter_rows,
+                limits: Default::default(),
+                sequences: &state.collisions,
+                material_costs: state.structural.material_penetration_costs(),
+                terrain_materials: Some(&state.terrain_materials),
+            }
+        };
         let snapshot = self.owner_collision_snapshot(
-            state.filter_rows[6],
+            collision.filter_rows[6],
             OwnerCollisionView {
                 active_position: frame.pose.position,
                 ground: frame.ground,
             },
         )?;
-        let collision = BlastCollision {
-            filter_rows: &state.filter_rows,
-            limits: Default::default(),
-            sequences: &state.collisions,
-            material_costs: state.structural.material_penetration_costs(),
-            terrain_materials: Some(&state.terrain_materials),
-        };
-
         let catalog = self.item_catalog.retail_combat()?;
         let rules = self.item_catalog.character_blast_rules();
         let mut plan = FragDamagePlan::default();
@@ -183,6 +188,33 @@ mod tests {
 
     fn fixture() -> Engine<Vec<u8>> {
         let mut engine = rocket_fixture::tick_fixture();
+        prime_frag(&mut engine);
+        engine
+    }
+
+    fn acquisition_fixture() -> Engine<Vec<u8>> {
+        let mut engine = acquisition_structural::connected_tests::fixture();
+        std::sync::Arc::get_mut(&mut engine.acquisition_gameplay.as_mut().unwrap().setup)
+            .unwrap()
+            .filter_rows[24] |= 1;
+        let mut target = human_kill_reward_tests::fixture().active.take().unwrap();
+        target.reservation.id = "synthetic-rocket-target".to_owned();
+        target.reservation.player = 1;
+        target.wire_profile = engine.wire_profile;
+        let spawns = engine.spawn_catalog.as_ref().unwrap();
+        let source = engine.active.as_mut().unwrap();
+        target.squad_catalog =
+            std::sync::Arc::new(spawns.for_squad(u16::from(1 - source.team()) * 16).unwrap());
+        let batches = engine.ground_vehicles.as_ref().unwrap().batch_count();
+        source.ground_vehicle_batch = batches;
+        target.ground_vehicle_batch = batches;
+        engine.peers.insert(target.reservation.id.clone(), target);
+        engine.collision_world = Some(wall_at(&engine, 5., Some(255)));
+        prime_frag(&mut engine);
+        engine
+    }
+
+    fn prime_frag(engine: &mut Engine<Vec<u8>>) {
         engine.frag_character_blast = true;
         engine.development_grenade_radius = false;
         engine.item_catalog = human_kill_reward_tests::grenade_items_with_cover();
@@ -211,6 +243,10 @@ mod tests {
             1,
         );
         let target = engine.peers.get_mut("synthetic-rocket-target").unwrap();
+        target.life = CharacterLife::Alive {
+            generation: 4,
+            health_quarter_points: 400,
+        };
         target.owner_fields.state = Some(replication::CharacterState {
             state: 1,
             stance: 0,
@@ -225,10 +261,9 @@ mod tests {
             player_tracking::PositionOrigin::ServerSpawn,
             1,
         );
-        let wire = rocket_fixture::launch_wire(&engine, 3, 4);
-        assert!(!dispatch(&mut engine, &wire, 1000).unwrap().is_empty());
+        let wire = rocket_fixture::launch_wire(engine, 3, 4);
+        assert!(!dispatch(engine, &wire, 1000).unwrap().is_empty());
         assert!(engine.active.as_ref().unwrap().projectiles.get(3).is_some());
-        engine
     }
 
     fn update(engine: &Engine<Vec<u8>>, stamp: u32, pose: bool, terminal: bool) -> Vec<u8> {
@@ -342,13 +377,21 @@ mod tests {
     }
 
     fn wall(engine: &Engine<Vec<u8>>) -> collision::CollisionWorld {
+        wall_at(engine, 1.5, Some(255))
+    }
+
+    fn wall_at(
+        engine: &Engine<Vec<u8>>,
+        x: f32,
+        material: Option<u8>,
+    ) -> collision::CollisionWorld {
         collision::CollisionWorld::from_bytes(
             json!({
                 "format":"mag_collision_world","schema_version":1,"coordinate_space":"world",
                 "metadata":{"map_name":engine.map_name(),"build":"synthetic",
                     "coverage":"provisional","provenance":["synthetic"],"unknowns":[]},
-                "instances":[{"id":"frag-wall","vertices_xyz":[[1.5,1.,0.],[1.5,1.,2.],[1.5,5.,1.]],
-                    "triangles":[[0,1,2]],"material_index":255,
+                "instances":[{"id":"frag-wall","vertices_xyz":[[x,1.,0.],[x,1.,2.],[x,5.,1.]],
+                    "triangles":[[0,1,2]],"material_index":material,
                     "collision":{"filter_info":9,"ray_child_filter_info":0,"convex_radius":0.,
                         "provenance":"synthetic","child_filter_policy":"uniform"}}]
             })
@@ -357,6 +400,110 @@ mod tests {
             collision::CollisionLimits::default(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn acquisition_frag_uses_the_current_structural_frame_at_fuse() {
+        let mut engine = acquisition_fixture();
+        let terminal = update(&engine, 1100, false, true);
+        dispatch(&mut engine, &terminal, 1100).unwrap();
+        assert!(
+            engine
+                .active
+                .as_ref()
+                .unwrap()
+                .projectiles
+                .get(3)
+                .unwrap()
+                .completed
+        );
+        assert_eq!(
+            health(&engine.peers["synthetic-rocket-target"]),
+            330,
+            "{}",
+            last_event(&engine)
+        );
+        let damage = engine.peers["synthetic-rocket-target"].last_damage;
+        assert_eq!(damage.last_source_object, 0x1380_0000);
+        assert_eq!(damage.last_user_data, 128 << 20);
+    }
+
+    #[test]
+    fn acquisition_frag_rejects_unannotated_world_and_missing_structural_provider_at_startup() {
+        let mut engine = acquisition_fixture();
+        let unannotated = wall_at(&engine, 1.5, None);
+        let setup =
+            std::sync::Arc::get_mut(&mut engine.acquisition_gameplay.as_mut().unwrap().setup)
+                .unwrap();
+        assert!(!setup.frag_character_blast);
+        assert!(
+            setup
+                .validate_frag_character_blast(&engine.item_catalog, Some(&unannotated))
+                .is_ok()
+        );
+        setup.frag_character_blast = true;
+        assert!(
+            setup
+                .validate_frag_character_blast(
+                    &engine.item_catalog,
+                    engine.collision_world.as_ref()
+                )
+                .is_ok()
+        );
+        assert_eq!(
+            setup.validate_frag_character_blast(&engine.item_catalog, None),
+            Err("frag_character_blast_requires_static_world")
+        );
+        assert_eq!(
+            setup.validate_frag_character_blast(&engine.item_catalog, Some(&unannotated)),
+            Err("static_material_binding_required")
+        );
+        setup.structural = None;
+        assert_eq!(
+            setup.validate_frag_character_blast(
+                &engine.item_catalog,
+                engine.collision_world.as_ref()
+            ),
+            Err("acquisition_frag_character_blast_requires_structural")
+        );
+    }
+
+    #[test]
+    fn acquisition_frag_uses_static_material_cover() {
+        let mut engine = acquisition_fixture();
+        engine.collision_world = Some(wall(&engine));
+        let terminal = update(&engine, 1100, false, true);
+        dispatch(&mut engine, &terminal, 1100).unwrap();
+        assert!(
+            engine
+                .active
+                .as_ref()
+                .unwrap()
+                .projectiles
+                .get(3)
+                .unwrap()
+                .completed
+        );
+        assert_eq!(health(&engine.peers["synthetic-rocket-target"]), 400);
+        assert!(last_event(&engine)["gameplay_denial"].is_null());
+    }
+
+    #[test]
+    fn acquisition_frag_recorder_refusal_preserves_owner_flight_and_damage_state() {
+        let mut engine = acquisition_fixture();
+        let terminal = update(&engine, 1100, true, true);
+        engine.max_log = engine.written;
+        assert_eq!(
+            dispatch(&mut engine, &terminal, 1100).unwrap_err(),
+            "log_limit_reached"
+        );
+        let source = engine.active.as_ref().unwrap();
+        assert_eq!(source.tracking.sample.unwrap().position.x, 20.);
+        assert!(!source.projectiles.get(3).unwrap().completed);
+        assert!(!engine.projectile_cleanup_pending(source, 3));
+        assert!(source.grenade_damage.is_empty());
+        assert_eq!(health(source), 400);
+        assert_eq!(health(&engine.peers["synthetic-rocket-target"]), 400);
     }
 
     #[test]

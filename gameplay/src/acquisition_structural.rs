@@ -140,6 +140,27 @@ pub struct Setup {
 }
 
 impl Setup {
+    pub(crate) fn validate_frag_character_inputs(
+        &self,
+        items: &crate::item_catalog::ItemCatalog,
+        world: Option<&crate::collision::CollisionWorld>,
+        row: u32,
+    ) -> Result<(), &'static str> {
+        crate::domination_gameplay_config::validate_frag_character_inputs(
+            items,
+            world,
+            &self.bindings.map,
+        )?;
+        let world = world.ok_or("frag_character_blast_requires_static_world")?;
+        let known = self
+            .playback
+            .material_penetration_costs()
+            .keys()
+            .copied()
+            .collect();
+        world.validate_material_ray_bindings(row, &known, Some(&self.terrain.material_slots()))
+    }
+
     pub(crate) fn validate_native_objectives(
         &self,
         objectives: &ObjectiveCatalog,

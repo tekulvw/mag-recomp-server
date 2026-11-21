@@ -41,6 +41,8 @@ pub struct Configuration {
     ground_capabilities: Vec<GroundCapability>,
     ground_damage: Option<crate::acquisition_ground_damage::Policy>,
     ground_turrets: Option<PathBuf>,
+    #[serde(default)]
+    frag_character_blast: bool,
     vehicle_reinforcement_intervals_ms: [u32; 2],
     structural: Option<crate::acquisition_structural::Files>,
 }
@@ -584,6 +586,7 @@ impl Configuration {
             arrival_static,
             ground_capabilities,
             ground_damage: self.ground_damage.clone(),
+            frag_character_blast: self.frag_character_blast,
             vehicle_reinforcement_intervals_ms: self.vehicle_reinforcement_intervals_ms,
             structural: None,
         })

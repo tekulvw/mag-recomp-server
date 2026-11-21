@@ -20,6 +20,8 @@ use std::{
 };
 
 const MAX_CONFIG_SIZE: u64 = 256 * 1024;
+const MATERIAL_PROJECTION_PROVENANCE: &str =
+    "Retail resource subpart material slots and original terrain roots";
 const RETAIL_ELF_SHA256: &str = "0089f0d6d17e48533ce7ff8d943dddd03487b925e7b04a1a055bfb907568694c";
 
 /// Resolve the required map sidecar for a source gameplay provider. The
@@ -168,6 +170,43 @@ struct StaticRayReceipt {
     output_mesh_count: usize,
     reference_parent_root_count: usize,
     source_mesh_filter_counts: Vec<FilterCount>,
+    #[serde(default)]
+    material_projection: Option<StaticRayMaterialProjection>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StaticRayMaterialProjection {
+    provenance: String,
+    compiled_slot_mesh_counts: BTreeMap<u8, usize>,
+    terrain_mesh_count: usize,
+}
+
+impl StaticRayReceipt {
+    fn validate_material_projection(&self) -> io::Result<()> {
+        let Some(projection) = &self.material_projection else {
+            return Ok(());
+        };
+        let output = projection.compiled_slot_mesh_counts.iter().try_fold(
+            projection.terrain_mesh_count,
+            |total, (&slot, &count)| {
+                if (slot <= 26 || slot == 255) && count != 0 {
+                    total.checked_add(count)
+                } else {
+                    None
+                }
+            },
+        );
+        if projection.provenance != MATERIAL_PROJECTION_PROVENANCE
+            || projection.compiled_slot_mesh_counts.is_empty()
+            || output != Some(self.output_mesh_count)
+        {
+            return Err(invalid(
+                "active_ability_static_ray_material_projection_invalid",
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn read_bounded(path: &Path) -> io::Result<Vec<u8>> {
@@ -322,7 +361,7 @@ fn validate_sources(
     {
         return Err(invalid("active_ability_static_ray_coverage_invalid"));
     }
-    Ok(())
+    scene.validate_material_projection()
 }
 
 struct Loaded {
@@ -525,6 +564,45 @@ fn validate_damage_trigger_bindings(rules: &[Rule], objectives: &[Objective]) ->
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn static_ray_receipt_checks_optional_native_material_inventory() {
+        let digest = "a".repeat(64);
+        let mut receipt = json!({
+            "schema_version":1, "map_name":"synthetic",
+            "source_archive_sha256":digest, "source_clv_sha256":digest,
+            "source_elf_sha256":digest, "source_world_sha256":digest,
+            "source_assembly_sha256":digest, "source_root_inventory_sha256":digest,
+            "world_sha256":digest, "world_y_bounds":[0.,100.],
+            "root_count":1, "source_mesh_count":4, "output_mesh_count":3,
+            "reference_parent_root_count":0, "source_mesh_filter_counts":[],
+        });
+        let validate = |receipt| {
+            serde_json::from_value::<StaticRayReceipt>(receipt)
+                .unwrap()
+                .validate_material_projection()
+        };
+        assert!(validate(receipt.clone()).is_ok());
+
+        let valid = json!({
+            "provenance":MATERIAL_PROJECTION_PROVENANCE,
+            "compiled_slot_mesh_counts":{"1":1,"255":1},
+            "terrain_mesh_count":1,
+        });
+        receipt["material_projection"] = valid.clone();
+        assert!(validate(receipt.clone()).is_ok());
+        for (field, value) in [
+            ("provenance", json!("unknown receipt")),
+            ("compiled_slot_mesh_counts", json!({"27":2})),
+            ("compiled_slot_mesh_counts", json!({"1":2,"255":0})),
+            ("terrain_mesh_count", json!(2)),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            receipt["material_projection"] = invalid;
+            assert!(validate(receipt.clone()).is_err());
+        }
+    }
 
     fn map_bindings_fixture(version: u32) -> serde_json::Value {
         json!({
