@@ -115,6 +115,7 @@ mod events;
 pub mod fall_damage;
 use event_decode::DecodedEvent;
 mod frago;
+mod ground_repair;
 mod leadership_auto_heal;
 mod leadership_auto_repair;
 mod repair_rewards;
@@ -2120,3 +2121,9 @@ mod leadership_progression_tests;
 mod frago_support_tests;
 #[cfg(test)]
 mod frago_tests;
+
+#[cfg(test)]
+mod manual_ground_repair_tests;
+
+#[cfg(test)]
+mod manual_ground_repair_domination_tests;

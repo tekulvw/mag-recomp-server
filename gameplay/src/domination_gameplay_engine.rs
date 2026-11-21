@@ -873,7 +873,7 @@ fn apply_effects<E: ExternalEffects>(
 
 #[cfg(test)]
 #[path = "domination_gameplay_engine_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 /// Collects the concrete provider's outbound traffic and owned world changes.
 /// The install closure only moves already-prepared worlds into their owners.
