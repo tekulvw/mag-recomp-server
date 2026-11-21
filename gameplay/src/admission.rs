@@ -251,6 +251,7 @@ impl<W: Write> Engine<W> {
             replication_history: Vec::new(),
             outbound_sequence: 0,
             pending_shared: std::collections::VecDeque::new(),
+            shared_frames_drained: 0,
             hospital_bootstrap: 0..0,
             ordered_health_pending: false,
             replication_backlogged: false,

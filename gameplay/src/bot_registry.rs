@@ -95,6 +95,7 @@ pub(crate) struct BotRegistry {
     pub(super) bots: BTreeMap<u16, WorldBot>,
     generations: BTreeMap<u16, u32>,
     known: BTreeMap<String, BTreeSet<u16>>,
+    pub(super) stats_publication: crate::bot_stat_publication::State,
     reservations: BTreeMap<u16, (crate::actor_collision::Bounds, Duration)>,
     last_wait_receipt: Option<Duration>,
     collision_evidence: Option<String>,
@@ -111,6 +112,8 @@ pub(crate) struct BotRegistry {
 #[derive(Clone)]
 pub(super) struct WorldBot {
     name_index: u16,
+    pub(super) allocation_generation: u32,
+    pub(super) firearm_kd: crate::bot_firearm_kd::Totals,
     pub(super) target: Target,
     pub(super) slot: usize,
     pub(super) role_slot: u8,
@@ -917,6 +920,7 @@ impl<W: Write> Engine<W> {
             for known in self.bot_registry.known.values_mut() {
                 known.remove(&index);
             }
+            self.bot_registry.stats_publication.retire(index);
             self.queue_roster(now)?;
         }
         Ok(())
@@ -976,13 +980,19 @@ impl<W: Write> Engine<W> {
         self.bot_registry
             .known
             .retain(|id, _| recipients.contains(id));
+        self.bot_registry
+            .stats_publication
+            .retain_recipients(&recipients);
         for id in recipients {
             let known = self.bot_registry.known.entry(id.clone()).or_default();
             let mut packets = Vec::new();
             for (&index, bot) in &self.bot_registry.bots {
                 if !known.contains(&index) {
-                    packets.push(bot.snapshot(now, self.wire_profile)?);
-                    known.insert(index);
+                    packets.push((
+                        index,
+                        bot.allocation_generation,
+                        bot.snapshot(now, self.wire_profile)?,
+                    ));
                 }
             }
             let recipient = self
@@ -991,8 +1001,19 @@ impl<W: Write> Engine<W> {
                 .filter(|a| a.reservation.id == id)
                 .or_else(|| self.peers.get_mut(&id))
                 .unwrap();
-            for packet in packets {
+            for (index, allocation, packet) in packets {
+                let queued = recipient.pending_shared.len();
+                let through = recipient
+                    .shared_frames_drained
+                    .checked_add(queued as u64 + 1)
+                    .ok_or("bot_snapshot_queue_position_exhausted")?;
                 recipient.queue_shared(packet);
+                if recipient.pending_shared.len() > queued {
+                    known.insert(index);
+                    self.bot_registry
+                        .stats_publication
+                        .register(&id, index, allocation, through);
+                }
             }
         }
         self.queue_roster(now)?;
@@ -2392,6 +2413,8 @@ impl<W: Write> Engine<W> {
                 index,
                 WorldBot {
                     name_index,
+                    allocation_generation: generation,
+                    firearm_kd: Default::default(),
                     target: Target {
                         object_index: index,
                         display_name: Some(display_name),
@@ -2462,6 +2485,7 @@ impl<W: Write> Engine<W> {
     pub(super) fn clear_bot_world(&mut self) {
         self.bot_registry.bots.clear();
         self.bot_registry.known.clear();
+        self.bot_registry.stats_publication = Default::default();
         self.bot_registry.reservations.clear();
         self.bot_registry.director = Default::default();
         self.bot_registry.drop_queues.clear();

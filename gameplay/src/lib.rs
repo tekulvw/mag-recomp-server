@@ -42,6 +42,7 @@ pub mod ballistics;
 pub mod blast_rules;
 pub mod blast_visibility;
 pub mod bootstrap_loadouts;
+mod bot_firearm_kd;
 pub mod bot_firearms;
 pub mod bot_healing;
 pub mod bot_names;
@@ -49,6 +50,7 @@ pub mod bot_navigation;
 mod bot_objectives;
 pub mod bot_physics;
 pub mod bot_registry;
+mod bot_stat_publication;
 mod bot_traffic_costs;
 mod bot_traffic_flow;
 pub mod bullet_hit;
@@ -1097,6 +1099,8 @@ struct Active {
     replication_history: Vec<Vec<u8>>,
     outbound_sequence: u32,
     pending_shared: std::collections::VecDeque<Vec<u8>>,
+    /// Successfully recorded FIFO frames consumed by this reservation.
+    shared_frames_drained: u64,
     /// Contiguous one-time hospital bootstrap inside the reliable FIFO.
     hospital_bootstrap: std::ops::Range<usize>,
     /// Health replies must join the FIFO until scheduled health drains.

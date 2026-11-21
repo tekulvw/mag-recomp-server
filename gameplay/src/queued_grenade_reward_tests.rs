@@ -126,6 +126,311 @@ fn native_firearm_hit(engine: &mut Engine<Vec<u8>>, target: u16) {
 }
 
 #[test]
+fn bot_firearm_kd_counts_registered_bot_death_once() {
+    let (mut engine, target) = firearm_fixture(false);
+    native_firearm_hit(&mut engine, target);
+    let totals = crate::bot_firearm_kd::Totals {
+        kills: 0,
+        deaths: 1,
+    };
+    assert_eq!(engine.bot_registry.bots[&target].firearm_kd, totals);
+    let wire = crate::human_kill_reward_tests::native_hit(0x0380_0000 | u32::from(target), 17);
+    assert!(dispatch(&mut engine, &wire, 1001).unwrap().is_empty());
+    assert_eq!(engine.bot_registry.bots[&target].firearm_kd, totals);
+}
+
+#[test]
+fn bot_firearm_kd_human_hit_keeps_totals_on_refusal_and_nonlethal_damage() {
+    let (mut engine, target) = firearm_fixture(false);
+    let hit = crate::human_kill_reward_tests::native_hit(0x0380_0000 | u32::from(target), 17);
+    engine.max_log = engine.written;
+    assert_eq!(
+        dispatch(&mut engine, &hit, 1000).unwrap_err(),
+        "log_limit_reached"
+    );
+    assert_eq!(engine.bot_registry.bots[&target].health, 120);
+    assert_eq!(
+        engine.bot_registry.bots[&target].firearm_kd,
+        Default::default()
+    );
+    assert!(engine.pending_reward_batch().is_empty());
+
+    let (mut engine, target) = firearm_fixture(false);
+    let hit = crate::human_kill_reward_tests::native_hit(0x0380_0000 | u32::from(target), 17);
+    let bot = engine.bot_registry.bots.get_mut(&target).unwrap();
+    bot.health = 400;
+    bot.damage.health_quarter_points = 400;
+    dispatch(&mut engine, &hit, 1001).unwrap();
+    assert_eq!(engine.bot_registry.bots[&target].health, 240);
+    assert_eq!(
+        engine.bot_registry.bots[&target].firearm_kd,
+        Default::default()
+    );
+}
+
+#[test]
+fn bot_firearm_kd_survives_respawn_but_not_a_new_allocation() {
+    let (mut engine, target) = firearm_fixture(false);
+    let initial = &engine.bot_registry.bots[&target];
+    let old_life = crate::bot_firearm_kd::Life {
+        index: target,
+        generation: initial.target.runtime.unwrap().generation,
+        team: initial.target.squad.team(),
+        health: initial.health,
+    };
+    let allocation = initial.allocation_generation;
+    let staged = crate::bot_firearm_kd::Plan::prepare(&engine, 1, None, Some(old_life)).unwrap();
+    assert_eq!(
+        staged.install(&mut engine).err(),
+        Some("stale_bot_firearm_kd_plan")
+    );
+
+    native_firearm_hit(&mut engine, target);
+    engine.team_waves[usize::from(old_life.team)] = Some(TeamWaveClock {
+        first_deadline: Duration::from_millis(1050),
+        period: Duration::from_secs(10),
+    });
+    engine.tick_bots(Duration::from_millis(1100), 1).unwrap();
+    let respawned = &engine.bot_registry.bots[&target];
+    assert_eq!(respawned.health, 400);
+    assert_eq!(
+        respawned.target.runtime.unwrap().generation,
+        old_life.generation + 1
+    );
+    assert_eq!(respawned.allocation_generation, allocation);
+    assert_eq!(respawned.firearm_kd.deaths, 1);
+    assert_eq!(
+        crate::bot_firearm_kd::Plan::prepare(
+            &engine,
+            1,
+            None,
+            Some(crate::bot_firearm_kd::Life {
+                health: respawned.health,
+                ..old_life
+            })
+        )
+        .err(),
+        Some("stale_bot_firearm_kd_life")
+    );
+
+    engine
+        .retire_bot_for_human(target, Duration::from_millis(1200), 1)
+        .unwrap();
+    let bootstraps = super::identity_tests::engine("Synthetic Bot Reallocation");
+    engine.item_catalog = bootstraps.item_catalog;
+    engine
+        .reconcile_bot_population(Duration::from_millis(1200), 1, &mut Default::default())
+        .unwrap();
+    let replacement = &engine.bot_registry.bots[&target];
+    assert!(replacement.allocation_generation > allocation);
+    assert_eq!(replacement.firearm_kd, Default::default());
+    engine.clear_bot_world();
+    assert!(engine.bot_registry.bots.is_empty());
+}
+
+fn scheduler_fixture() -> (Engine<Vec<u8>>, u16) {
+    let (mut engine, shooter) = firearm_fixture(false);
+    engine.item_catalog = crate::human_kill_reward_tests::bot_firearm_items();
+    engine.match_started = true;
+    engine.bot_registry.config.as_mut().unwrap().firearms = crate::bot_firearms::Policy {
+        reaction_ms: 1,
+        turn_degrees_per_second: 720.,
+        aim_tolerance_degrees: 15.,
+        accuracy_per_mille: 1000,
+        far_accuracy_per_mille: 1000,
+        acquisition_fov_degrees: 360.,
+        ..Default::default()
+    };
+    let actor = engine.active.as_mut().unwrap();
+    actor.life = CharacterLife::Alive {
+        generation: 4,
+        health_quarter_points: 120,
+    };
+    actor.owner_fields.state = Some(replication::CharacterState {
+        state: 1,
+        stance: 0,
+        user_data: [0; 3],
+    });
+    actor.tracking.server_position(
+        replication::CharacterPosition {
+            x: 2.,
+            y: 0.,
+            z: 6.,
+        },
+        player_tracking::PositionOrigin::ServerSpawn,
+        0,
+    );
+    let runtime = engine.bot_registry.bots[&shooter].target.runtime.unwrap();
+    let world =
+        bot_physics::WorldTerrain::new(engine.collision_world.as_ref(), engine.map_name()).unwrap();
+    let motion = world
+        .advance(
+            runtime.physics_motion.unwrap(),
+            [0.; 3],
+            0.05,
+            Default::default(),
+        )
+        .unwrap();
+    engine
+        .bot_registry
+        .bots
+        .get_mut(&shooter)
+        .unwrap()
+        .target
+        .runtime
+        .as_mut()
+        .unwrap()
+        .physics_motion = Some(motion);
+    assert!(crate::bot_firearms::safe(
+        &engine.bot_registry.bots[&shooter]
+    ));
+    (engine, shooter)
+}
+
+#[test]
+fn bot_firearm_kd_scheduler_counts_incapacitating_hit_once() {
+    let (engine, shooter) = scheduler_fixture();
+    let mut engine = engine
+        .with_incapacitation_rules(incapacitation::Rules {
+            schema_version: 1,
+            incapacitated_damage_threshold_hp: 83.,
+            incapacitated_duration_seconds: 7.,
+            excluded_character_states: vec![22],
+        })
+        .unwrap();
+    let mut death_rows = Vec::new();
+    for ms in (50..500).step_by(50) {
+        death_rows.extend(
+            engine
+                .tick_bot_firearms(Duration::from_millis(ms), 1)
+                .unwrap(),
+        );
+    }
+    let victim = engine.active.as_ref().unwrap();
+    assert!(
+        matches!(
+            victim.life,
+            CharacterLife::Incapacitated { generation: 4, .. }
+        ),
+        "{}",
+        String::from_utf8_lossy(&engine.writer)
+    );
+    assert_eq!(victim.reward_statistics.get(&12), Some(&1));
+    assert!(!victim.reward_statistics.contains_key(&10));
+    assert_eq!(
+        engine.bot_registry.bots[&shooter].firearm_kd,
+        crate::bot_firearm_kd::Totals {
+            kills: 1,
+            deaths: 0
+        }
+    );
+    assert_eq!(death_rows.len(), 1);
+    assert_eq!(death_rows[0].payload_hex, "02040000030a000b000c01");
+    assert!(engine.pending_reward_batch().is_empty());
+    engine
+        .tick_incapacitation(Duration::from_secs(10), 1)
+        .unwrap();
+    assert!(matches!(
+        engine.active.as_ref().unwrap().life,
+        CharacterLife::AwaitingRespawn { generation: 4 }
+    ));
+    assert_eq!(
+        engine.active.as_ref().unwrap().reward_statistics.get(&12),
+        Some(&1)
+    );
+    assert_eq!(engine.bot_registry.bots[&shooter].firearm_kd.kills, 1);
+}
+
+fn scheduler_bot_opponents() -> (Engine<Vec<u8>>, u16, u16) {
+    let (mut engine, shooter) = scheduler_fixture();
+    let human_squad = engine.spawn_catalog.as_ref().unwrap().for_squad(0).unwrap();
+    let observer = engine.active.as_mut().unwrap();
+    observer.life = CharacterLife::AwaitingRespawn { generation: 4 };
+    observer.squad_catalog = std::sync::Arc::new(human_squad);
+    engine.maximum_players = 4;
+    engine.bot_registry.total = 3;
+    let items = engine.item_catalog.clone();
+    // Reconcile using the bootstrap catalog; the scheduler uses the fixture rifle below.
+    let bootstraps = super::identity_tests::engine("Synthetic Bot Opponent");
+    engine.item_catalog = bootstraps.item_catalog;
+    engine
+        .reconcile_bot_population(Duration::ZERO, 1, &mut Default::default())
+        .unwrap();
+    engine.item_catalog = items;
+    let target = *engine
+        .bot_registry
+        .bots
+        .keys()
+        .find(|&&index| index != shooter)
+        .unwrap();
+    let kit = engine.bot_registry.bots[&shooter].target.loadout.clone();
+    let target_bot = engine.bot_registry.bots.get_mut(&target).unwrap();
+    target_bot.target.loadout = kit;
+    target_bot.health = 120;
+    target_bot.damage.health_quarter_points = 120;
+    target_bot.task.recovering = true;
+    assert_ne!(
+        target_bot.target.squad.team(),
+        engine.bot_registry.bots[&shooter].target.squad.team()
+    );
+    (engine, shooter, target)
+}
+
+#[test]
+fn bot_firearm_kd_scheduler_updates_both_bot_allocations_after_record() {
+    let (mut engine, shooter, target) = scheduler_bot_opponents();
+    let fired_at = (50..900).step_by(50).find(|&ms| {
+        engine
+            .tick_bot_firearms(Duration::from_millis(ms), 1)
+            .unwrap();
+        engine.bot_registry.bots[&target].health == 0
+    });
+    assert_eq!(
+        engine.bot_registry.bots[&shooter].firearm_kd.kills,
+        1,
+        "{}",
+        String::from_utf8_lossy(&engine.writer)
+    );
+    assert_eq!(engine.bot_registry.bots[&target].firearm_kd.deaths, 1);
+    assert!(engine.active.as_ref().unwrap().reward_statistics.is_empty());
+    assert!(engine.pending_reward_batch().is_empty());
+
+    let (mut engine, shooter, target) = scheduler_bot_opponents();
+    let fired_at = fired_at.unwrap();
+    for ms in (50..fired_at).step_by(50) {
+        engine
+            .tick_bot_firearms(Duration::from_millis(ms), 1)
+            .unwrap();
+    }
+    let before_queues = engine.active.as_ref().unwrap().pending_shared.clone();
+    let before_ammo = engine.bot_registry.bots[&shooter].firearm.magazine;
+    engine.max_log = engine.written;
+    assert_eq!(
+        engine
+            .tick_bot_firearms(Duration::from_millis(fired_at), 1)
+            .unwrap_err(),
+        "log_limit_reached"
+    );
+    assert_eq!(engine.bot_registry.bots[&target].health, 120);
+    assert_eq!(
+        engine.bot_registry.bots[&target].firearm_kd,
+        Default::default()
+    );
+    assert_eq!(
+        engine.bot_registry.bots[&shooter].firearm_kd,
+        Default::default()
+    );
+    assert_eq!(
+        engine.bot_registry.bots[&shooter].firearm.magazine,
+        before_ammo
+    );
+    assert_eq!(
+        engine.active.as_ref().unwrap().pending_shared,
+        before_queues
+    );
+}
+
+#[test]
 fn friendly_native_hit_records_bot_friendly_kill_without_enemy_xp() {
     let (mut engine, target) = firearm_fixture(true);
     assert_eq!(

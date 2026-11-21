@@ -293,6 +293,22 @@ pub(super) fn hit<W: Write>(
                 {
                     plan.combat.death_notifications.push(notification);
                 }
+                if ordinary_retail_firearm
+                    && damage.health_quarter_points == 0
+                    && let Some(bot) = registry_target
+                {
+                    plan.combat.bot_firearm_kd = Some(bot_firearm_kd::Plan::prepare(
+                        ctx.engine,
+                        active.reservation.world,
+                        None,
+                        Some(bot_firearm_kd::Life {
+                            index: bot.object_index,
+                            generation: bot.generation,
+                            team: bot.team,
+                            health: bot.health_quarter_points,
+                        }),
+                    )?);
+                }
                 if damage.health_quarter_points == 0 && peer_target.is_none() {
                     statistics::target_killed(
                         plan,

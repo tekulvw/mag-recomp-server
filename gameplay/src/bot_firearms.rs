@@ -190,6 +190,18 @@ struct Actor {
     health: u16,
     armor: Option<armor::ArmorProfile>,
 }
+
+impl Actor {
+    fn bot_stat_life(&self) -> bot_firearm_kd::Life {
+        bot_firearm_kd::Life {
+            index: self.life.id,
+            generation: self.life.generation,
+            team: self.team,
+            health: self.health,
+        }
+    }
+}
+
 pub(super) fn safe(bot: &WorldBot) -> bool {
     let r = bot.target.runtime.unwrap();
     bot.health > 0
@@ -413,14 +425,18 @@ impl<W: Write> Engine<W> {
         let Ok(catalog) = items.retail_combat() else {
             return Ok(Vec::new());
         };
+        let world = self
+            .active
+            .as_ref()
+            .or_else(|| self.peers.values().next())
+            .ok_or("bot_firearm_world_unavailable")?
+            .reservation
+            .world;
         let leadership = self.plan_leadership(now)?;
         let mut actors = Vec::new();
-        for a in self
-            .active
-            .iter()
-            .chain(self.peers.values())
-            .filter(|a| a.entered_game && a.ready_for_updates && !a.is_mounted())
-        {
+        for a in self.active.iter().chain(self.peers.values()).filter(|a| {
+            a.reservation.world == world && a.entered_game && a.ready_for_updates && !a.is_mounted()
+        }) {
             let CharacterLife::Alive {
                 generation,
                 health_quarter_points,
@@ -745,16 +761,11 @@ impl<W: Write> Engine<W> {
                                 let resolved = damage::resolve_character_hit(
                                     profile.raw_character_damage(length(from, to) as f32, 1., 0)?,
                                     target.armor.unwrap().with_incoming_base(
-                                        self.active
-                                            .as_ref()
-                                            .or_else(|| self.peers.values().next())
-                                            .map_or(1.0, |a| {
-                                                self.character_incoming_base(
-                                                    0x0380_0000 | u32::from(id),
-                                                    0x0380_0000 | u32::from(target.life.id),
-                                                    a.reservation.world,
-                                                )
-                                            }),
+                                        self.character_incoming_base(
+                                            0x0380_0000 | u32::from(id),
+                                            0x0380_0000 | u32::from(target.life.id),
+                                            world,
+                                        ),
                                     )?,
                                     damage::DamageKind::Bullet,
                                     0x03800000 | u32::from(id),
@@ -796,7 +807,10 @@ impl<W: Write> Engine<W> {
             // Record before committing ammunition, health, or outgoing packets.
             let mut pending_damage = None;
             let mut death_notification = None;
+            let mut bot_kd = None;
+            let mut human_death = None;
             if let Some((target, hit, (calculation, amount, resolved), aimed_end)) = shot {
+                let shot_receipt = receipts.len();
                 receipts.push(json!({"op":"bot_firearm_shot","timestamp_ms":now.as_millis() as u64,"object_index":id,"generation":me.life.generation,
                     "target":target.life.id,"target_generation":target.life.generation,"weapon_item":profile.item_id(),"magazine":state.magazine,"reserve":state.reserve,
                     "origin":from,"destination":torso(target.feet),"aim_endpoint":aimed_end,"yaw_radians":state.yaw,"pitch_radians":state.pitch,"hit":hit,"amount_hp":if hit {amount} else {0.},"damage_calculation":calculation,
@@ -810,31 +824,73 @@ impl<W: Write> Engine<W> {
                             .active
                             .iter()
                             .chain(self.peers.values())
-                            .find(|a| a.reservation.id == *reservation)
+                            .find(|a| {
+                                a.reservation.id == *reservation && a.reservation.world == world
+                                    && a.reservation.player == target.life.id && a.team() == target.team
+                                    && matches!(a.life, CharacterLife::Alive {generation, health_quarter_points}
+                                        if generation == target.life.generation && health_quarter_points == target.health && health_quarter_points > 0)
+                            })
                             .ok_or("stale_bot_firearm_target")?;
                         let (model, life) = self.plan_human_damage(victim, amount, damage, now)?;
                         damage = model;
                         human_life = Some(life);
                         receipts.push(json!({"op":"bot_firearm_lifecycle_planned","reservation_id":reservation,"life":format!("{life:?}"),"conditions":damage.conditions}));
-                    }
-                    if let Some(world) = self.active.as_ref().map(|a| a.reservation.world) {
-                        death_notification = self.plan_firearm_death(
-                            world,
-                            id,
-                            target.life.id,
-                            profile.item_id(),
-                            0,
-                            damage,
-                        )?;
-                        if let Some(plan) = &death_notification {
-                            receipts.push(json!({"op":"bot_firearm_death_planned","timestamp_ms":now.as_millis() as u64,"notification":plan.audit()}));
+                        if damage.health_quarter_points == 0 {
+                            for removal in victim.projectile_replicas.clone().take_all_removals() {
+                                removal.encode_with_profile(
+                                    1,
+                                    now.as_millis() as u32,
+                                    victim.wire_profile,
+                                )?;
+                            }
+                            human_death = Some(events::plan_bot_killed_human(
+                                self,
+                                victim,
+                                target.life.generation,
+                            )?);
                         }
                     }
-                    pending_damage = Some((target, damage, human_life));
+                    death_notification = self.plan_firearm_death(
+                        world,
+                        id,
+                        target.life.id,
+                        profile.item_id(),
+                        0,
+                        damage,
+                    )?;
+                    if let Some(plan) = &death_notification {
+                        receipts.push(json!({"op":"bot_firearm_death_planned","timestamp_ms":now.as_millis() as u64,"notification":plan.audit()}));
+                    }
+                    if damage.health_quarter_points == 0 {
+                        let plan = bot_firearm_kd::Plan::prepare(
+                            self,
+                            world,
+                            (me.team != target.team).then(|| me.bot_stat_life()),
+                            target
+                                .life
+                                .reservation
+                                .is_none()
+                                .then(|| target.bot_stat_life()),
+                        )?;
+                        receipts[shot_receipt]["bot_firearm_kd"] = json!(plan.audit());
+                        bot_kd = Some(plan);
+                    }
+                    let packet = replication::CharacterDamageUpdate {
+                        sequence: 2,
+                        timestamp_ms: now.as_millis() as u32,
+                        object_index: target.life.id,
+                        damage,
+                        forced_state: (damage.health_quarter_points == 0).then_some(
+                            replication::CharacterState {
+                                state: 7,
+                                stance: 0,
+                                user_data: [0; 3],
+                            },
+                        ),
+                    }
+                    .encode_with_profile(self.wire_profile)?;
+                    pending_damage = Some((target, damage, human_life, packet));
                 }
-            }
-            for receipt in receipts {
-                self.record(receipt, wall)?;
             }
             let fields = player_tracking::ClientCharacterFields {
                 yaw: Some(yaw),
@@ -846,7 +902,7 @@ impl<W: Write> Engine<W> {
                 }),
                 ..Default::default()
             };
-            let packet = publish
+            let owner_packet = publish
                 .then(|| {
                     replication::multiplayer::CharacterOwnerDelta {
                         sequence: 2,
@@ -857,29 +913,10 @@ impl<W: Write> Engine<W> {
                     .encode_with_profile(self.wire_profile)
                 })
                 .transpose()?;
-            let bot = self.bot_registry.bots.get_mut(&id).unwrap();
-            bot.firearm = state;
-            if publish {
-                bot.yaw = yaw;
+            for receipt in receipts {
+                self.record(receipt, wall)?;
             }
-            if let Some(packet) = packet {
-                self.broadcast_bot_packet(packet);
-            }
-            if let Some((target, damage, human_life)) = pending_damage {
-                let packet = replication::CharacterDamageUpdate {
-                    sequence: 2,
-                    timestamp_ms: now.as_millis() as u32,
-                    object_index: target.life.id,
-                    damage,
-                    forced_state: (damage.health_quarter_points == 0).then_some(
-                        replication::CharacterState {
-                            state: 7,
-                            stance: 0,
-                            user_data: [0; 3],
-                        },
-                    ),
-                }
-                .encode_with_profile(self.wire_profile)?;
+            let damage_packet = if let Some((target, damage, human_life, packet)) = pending_damage {
                 if let Some(reservation) = &target.life.reservation {
                     if let Some(plan) = death_notification.take() {
                         self.commit_firearm_death(plan, damage, now)?;
@@ -901,18 +938,31 @@ impl<W: Write> Engine<W> {
                             .ok_or("stale_bot_firearm_target")?;
                         victim.life = life;
                     }
-                    if damage.health_quarter_points == 0 {
-                        messages.extend(events::bot_killed_human(self, reservation)?);
-                    }
                 } else if let Some(plan) = death_notification.take() {
                     self.commit_firearm_death(plan, damage, now)?;
                 } else {
                     self.commit_bot_damage(target.life.id, target.life.generation, damage, now)?;
                 }
-                self.broadcast_bot_packet(packet);
+                if let Some(kd) = bot_kd {
+                    kd.install(self)?;
+                }
+                if let Some(death) = human_death {
+                    messages.extend(death.install(self)?);
+                }
                 if let Some(actor) = actors.iter_mut().find(|a| a.life == target.life) {
                     actor.health = damage.health_quarter_points;
                 }
+                Some(packet)
+            } else {
+                None
+            };
+            let bot = self.bot_registry.bots.get_mut(&id).unwrap();
+            bot.firearm = state;
+            if publish {
+                bot.yaw = yaw;
+            }
+            for packet in owner_packet.into_iter().chain(damage_packet) {
+                self.broadcast_bot_packet(packet);
             }
         }
         Ok(messages)

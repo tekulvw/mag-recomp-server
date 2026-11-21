@@ -111,33 +111,42 @@ fn died<W: Write>(
         }
     }
 }
-/// World bot damage has no authenticated killer account. Reuse the native
-/// death statistic and normal scoreboard row, without granting human kill/XP.
-pub(crate) fn bot_killed_human<W: Write>(
-    engine: &mut Engine<W>,
-    reservation: &str,
-) -> Result<Vec<OutboundMessage>, &'static str> {
-    let victim = engine
-        .active
-        .as_mut()
-        .filter(|a| a.reservation.id == reservation)
-        .or_else(|| engine.peers.get_mut(reservation))
-        .ok_or("missing_bot_victim")?;
-    let deaths = victim.reward_statistics.entry(DEATHS).or_default();
-    *deaths = deaths.saturating_add(1);
+pub(crate) struct BotKilledHuman {
+    reservation: String,
+    world: u32,
+    player: u16,
+    generation: u32,
+    previous: i32,
+    deaths: i32,
+    messages: Vec<OutboundMessage>,
+}
+
+/// Prepare only the authenticated victim's death statistic and scoreboard row.
+pub(crate) fn plan_bot_killed_human<W: Write>(
+    engine: &Engine<W>,
+    victim: &Active,
+    generation: u32,
+) -> Result<BotKilledHuman, &'static str> {
+    let previous = victim.reward_statistics.get(&DEATHS).copied().unwrap_or(0);
+    let deaths = previous.saturating_add(1);
     let world = victim.reservation.world;
+    let player = victim.reservation.player;
     let wire = protocol::StatUpdate {
-        character_index: victim.reservation.player,
+        character_index: player,
         stats: [KILLS, ASSISTS, DEATHS]
             .into_iter()
             .map(|stat| protocol::StatValue {
                 stat,
-                value: victim.reward_statistics.get(&stat).copied().unwrap_or(0),
+                value: if stat == DEATHS {
+                    deaths
+                } else {
+                    victim.reward_statistics.get(&stat).copied().unwrap_or(0)
+                },
             })
             .collect(),
     }
     .encode_with_profile(victim.wire_profile)?;
-    Ok(engine
+    let messages = engine
         .active
         .iter()
         .chain(engine.peers.values())
@@ -151,7 +160,36 @@ pub(crate) fn bot_killed_human<W: Write>(
             plugin_id: 1,
             payload_hex: protocol::encode_hex(&wire),
         })
-        .collect())
+        .collect();
+    Ok(BotKilledHuman {
+        reservation: victim.reservation.id.clone(),
+        world,
+        player,
+        generation,
+        previous,
+        deaths,
+        messages,
+    })
+}
+
+impl BotKilledHuman {
+    pub(crate) fn install<W: Write>(
+        self,
+        engine: &mut Engine<W>,
+    ) -> Result<Vec<OutboundMessage>, &'static str> {
+        let victim = engine.active.as_mut().filter(|actor| actor.reservation.id == self.reservation)
+            .or_else(|| engine.peers.get_mut(&self.reservation))
+            .filter(|actor| {
+                actor.reservation.world == self.world && actor.reservation.player == self.player
+                    && matches!(actor.life,
+                        CharacterLife::Incapacitated { generation, .. }
+                        | CharacterLife::AwaitingRespawn { generation } if generation == self.generation)
+                    && actor.reward_statistics.get(&DEATHS).copied().unwrap_or(0) == self.previous
+            })
+            .ok_or("stale_bot_victim_statistic")?;
+        victim.reward_statistics.insert(DEATHS, self.deaths);
+        Ok(self.messages)
+    }
 }
 pub(super) fn stage<W: Write>(
     engine: &Engine<W>,
