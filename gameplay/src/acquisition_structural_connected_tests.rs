@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 const INDEX: u16 = 120;
 const TARGET: u32 = 0x0c80_0078;
 
-fn terrain_and_assets(
+pub(crate) fn terrain_and_assets(
     catalog: &Catalog,
 ) -> (Arc<SequenceCollisionAssets>, Arc<TerrainMaterialGrid>) {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -30,7 +30,7 @@ fn terrain_and_assets(
     std::fs::write(
         root.join("index.json"),
         json!({
-            "schema":"mag_domination_structural_collision_v1", "map":"synthetic_arena",
+            "schema":"mag_domination_structural_collision_v1", "map":catalog.map,
             "level_archive_sha256":"a".repeat(64),"physics_sha256":"a".repeat(64),
             "geometry_sha256":"a".repeat(64),"resources":{},"parent_reference_poses":{}
         })
@@ -43,7 +43,7 @@ fn terrain_and_assets(
     std::fs::write(
         root.join("terrain.json"),
         json!({
-            "schema":"mag_domination_terrain_material_grid_v1", "map":"synthetic_arena",
+            "schema":"mag_domination_terrain_material_grid_v1", "map":catalog.map,
             "level_archive_sha256":"a".repeat(64),"level_clv_sha256":"a".repeat(64),
             "retail_elf_sha256":"3".repeat(64),"columns":8,"cell_size":128.,"tile_width":512,
             "materials_sha256":format!("{:x}",Sha256::digest(&pixels)),"byte_count":pixels.len(),
@@ -582,4 +582,232 @@ fn late_join_gets_completed_state_and_reset_restores_native_structure() {
             .current_structural_sequences()
             .is_empty()
     );
+}
+
+fn repair_credit_fixture(modifier: f32) -> crate::Engine<Vec<u8>> {
+    let mut engine = fixture();
+    interact(&mut engine, Kind::Activate, 1, 100).unwrap();
+    tick(&mut engine, 110);
+    tick(&mut engine, 130);
+    defender(&mut engine);
+    crate::frago_tests::configure_geometry(&mut engine);
+    let actor = engine.active.as_mut().unwrap();
+    actor.reservation.character.account_id = Some("synthetic-repairer".into());
+    actor.reservation.character.progression =
+        Some(crate::progression::ProgressionSnapshot::default());
+    actor.reservation.character.repair_rewards_enabled = Some(true);
+    actor.reservation.character.frago_action_bonus_enabled = Some(true);
+    actor.modifiers = crate::skill_catalog::SkillCatalog::from_value(json!({
+        "schema_version":2,"application_id":20231,"table":{"Skills":{
+            "MagCharacterSkill1":{"MagCharacterSkill":{"Default":{"Modifier":"kCharModRepairAmount","ModifierValue":modifier},"Green":{"Available":true},"Black":{"Available":true},"Red":{"Available":true}}}
+        }}
+    })).unwrap().resolve(actor.reservation.character.faction,&[2,0,0,0,0]).unwrap();
+    let squad = actor.squad_catalog.squad_index();
+    engine
+        .acquisition_gameplay
+        .as_mut()
+        .unwrap()
+        .state
+        .squad_mut(squad)
+        .unwrap()
+        .assignment = crate::acquisition_objective_runtime::Assignment {
+        primary_index: u16::MAX,
+        tagged_object: TARGET,
+    };
+    engine
+}
+
+#[test]
+fn accepted_repair_work_credits_fractional_units_before_any_structural_hp_batch() {
+    let mut e = repair_credit_fixture(-0.75);
+    let before = row(&e).health_percent;
+    for i in 1..=4 {
+        repair(&mut e, 130 + i, Transport::Tcp).unwrap();
+        assert_eq!(row(&e).health_percent, before);
+        let actor = e.active.as_ref().unwrap();
+        assert_eq!(
+            actor.repair_credit.carry,
+            if i == 4 { 0. } else { i as f32 * 0.25 }
+        );
+        assert_eq!(actor.repair_credit.sequence, i);
+        assert_eq!(
+            actor.reward_statistics.get(&35).copied().unwrap_or(0),
+            if i == 4 { 1 } else { 0 }
+        );
+        assert_eq!(e.pending_reward_batch().len(), usize::from(i == 4));
+    }
+    let reward = e.pending_reward_batch().pop().unwrap();
+    assert_eq!(reward.kind, crate::progression::RewardKind::RepairUnits);
+    assert_eq!(reward.units, 1);
+    assert_eq!(reward.frago, Some(true));
+}
+
+#[test]
+fn failed_repair_record_or_wrong_route_does_not_consume_work_and_retry_is_once() {
+    let mut e = repair_credit_fixture(-0.5);
+    repair(&mut e, 131, Transport::Udp).unwrap();
+    assert_eq!(
+        e.active.as_ref().unwrap().repair_credit,
+        crate::repair_rewards::State::default()
+    );
+    let max = e.max_log;
+    e.max_log = e.written;
+    assert_eq!(
+        repair(&mut e, 132, Transport::Tcp).err(),
+        Some("log_limit_reached")
+    );
+    assert_eq!(
+        e.active.as_ref().unwrap().repair_credit,
+        crate::repair_rewards::State::default()
+    );
+    assert!(e.pending_reward_batch().is_empty());
+    e.max_log = max;
+    e.failed = false;
+    repair(&mut e, 132, Transport::Tcp).unwrap();
+    assert_eq!(e.active.as_ref().unwrap().repair_credit.carry, 0.5);
+    assert!(e.pending_reward_batch().is_empty());
+    repair(&mut e, 133, Transport::Tcp).unwrap();
+    assert_eq!(e.pending_reward_batch().len(), 1);
+    assert_eq!(
+        e.active.as_ref().unwrap().reward_statistics.get(&35),
+        Some(&1)
+    );
+}
+
+#[test]
+fn unsupported_repair_xp_admission_keeps_gameplay_stat_without_a_new_receipt_kind() {
+    let mut e = repair_credit_fixture(0.);
+    e.active
+        .as_mut()
+        .unwrap()
+        .reservation
+        .character
+        .repair_rewards_enabled = None;
+    repair(&mut e, 131, Transport::Tcp).unwrap();
+    assert_eq!(
+        e.active.as_ref().unwrap().reward_statistics.get(&35),
+        Some(&1)
+    );
+    assert!(e.pending_reward_batch().is_empty());
+}
+
+#[test]
+fn repair_ack_does_not_increment_the_gameplay_owned_stat35_again() {
+    let mut e = repair_credit_fixture(0.);
+    repair(&mut e, 131, Transport::Tcp).unwrap();
+    let reward = e.pending_reward_batch().pop().unwrap();
+    let ack = json!({"op":"progression_committed","v":crate::BRIDGE_VERSION,"request_id":"repair-ack",
+        "reservation_id":reward.reservation_id,"world_id":reward.world_id,"player_id":reward.player_id,
+        "reward_id":reward.reward_id,"progression":{"experience":4,"level":1,"skill_points":0},
+        "match_experience":4,"match_frago_points":2});
+    for _ in 0..2 {
+        let response = e.handle(
+            serde_json::from_value(ack.clone()).unwrap(),
+            Duration::from_millis(140),
+            1,
+        );
+        assert!(response.ok, "{:?}", response.error);
+    }
+    assert_eq!(
+        e.active.as_ref().unwrap().reward_statistics.get(&35),
+        Some(&1)
+    );
+    assert_eq!(
+        e.active.as_ref().unwrap().reward_statistics.get(&3),
+        Some(&2)
+    );
+    assert!(e.pending_reward_batch().is_empty());
+}
+
+#[test]
+fn same_match_repair_carry_follows_character_identity_without_slot_inheritance() {
+    for replacement in [false, true] {
+        let mut e = repair_credit_fixture(0.25);
+        repair(&mut e, 131, Transport::Tcp).unwrap();
+        let mut character = e.active.as_ref().unwrap().reservation.character.clone();
+        let state = e.active.as_ref().unwrap().repair_credit;
+        let reply = e.handle(
+            crate::Request::Release {
+                v: crate::BRIDGE_VERSION,
+                request_id: "release-repair".into(),
+                reservation_id: "synthetic-reservation-0001".into(),
+            },
+            Duration::from_millis(140),
+            1,
+        );
+        assert!(reply.ok, "{:?}", reply.error);
+        if replacement {
+            character.account_id = Some("replacement-account".into());
+        }
+        let tools = Arc::clone(&e.item_catalog);
+        e.item_catalog=crate::spawn_progression::tests::dynamic_bodies::acquisition_gameplay_tests::capture_fixture().item_catalog;
+        let reply = e.handle(
+            crate::Request::Reserve {
+                v: crate::BRIDGE_VERSION,
+                request_id: "rejoin-repair".into(),
+                reservation_id: "synthetic-rejoined-repairer".into(),
+                world_id: 1,
+                player_id: 1,
+                account_id: 2,
+                session_key: "aaaaaaaaaaaaaaaa".into(),
+                access_key: "bbbbbbbbbbbbbbbb".into(),
+                character,
+            },
+            Duration::from_millis(150),
+            1,
+        );
+        e.item_catalog = tools;
+        assert!(reply.ok, "{:?}", reply.error);
+        let actor = e.active.as_ref().unwrap();
+        assert_eq!(
+            actor.repair_credit,
+            if replacement {
+                crate::repair_rewards::State::default()
+            } else {
+                state
+            }
+        );
+        assert_eq!(
+            actor.reward_statistics.get(&35),
+            if replacement { None } else { Some(&1) }
+        );
+    }
+}
+
+#[test]
+fn full_reward_outbox_cannot_commit_repair_queue_or_work_before_retry() {
+    let mut e = repair_credit_fixture(0.);
+    let recipient =
+        crate::progression::RewardRecipient::from_active(e.active.as_ref().unwrap()).unwrap();
+    e.commit_rewards(
+        (0..crate::progression::MAX_PENDING_REWARDS)
+            .map(|i| {
+                recipient.event(
+                    format!("synthetic-pending-{i}"),
+                    crate::progression::RewardKind::EnemyFinished,
+                    1,
+                )
+            })
+            .collect(),
+    );
+    assert_eq!(
+        repair(&mut e, 131, Transport::Tcp).err(),
+        Some("reward_outbox_full")
+    );
+    assert_eq!(
+        e.active.as_ref().unwrap().repair_credit,
+        crate::repair_rewards::State::default()
+    );
+    assert!(
+        !e.active
+            .as_ref()
+            .unwrap()
+            .reward_statistics
+            .contains_key(&35)
+    );
+    e.pending_rewards.clear();
+    e.reward_order.clear();
+    repair(&mut e, 131, Transport::Tcp).unwrap();
+    assert_eq!(e.pending_reward_batch().len(), 1);
+    assert_eq!(e.active.as_ref().unwrap().repair_credit.sequence, 1);
 }

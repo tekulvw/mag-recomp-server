@@ -102,6 +102,11 @@ impl<W: Write> Engine<W> {
             .filter(|_| frame.active_reservation == Some(actor.reservation.id.as_str()))
             .or_else(|| actor.tracking.sample.map(|s| point(s.position)))
     }
+    pub(crate) fn frago_object_position(&self, target: u32) -> Option<[f32; 3]> {
+        let rules = self.objective_catalog.as_ref()?.frago.as_ref()?;
+        self.frago_target(rules, target, Frame::default())
+            .map(|(p, _)| p)
+    }
     fn frago_target(
         &self,
         rules: &Rules,

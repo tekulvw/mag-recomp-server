@@ -2,6 +2,9 @@ use super::*;
 use crate::{acquisition_round::Rules, protocol};
 use serde_json::json;
 
+#[path = "domination_structural_repair_tests.rs"]
+mod structural_repair;
+
 const FSP: u32 = 203;
 const FIRST: u32 = 10;
 const NEXT: u32 = 11;

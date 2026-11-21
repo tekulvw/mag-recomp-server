@@ -668,6 +668,7 @@ actor_effect_state! {
     last_damage: replication::CharacterDamage,
     healing: Option<progression::HealingSession>,
     reward_statistics: std::collections::BTreeMap<u8, i32>,
+    repair_credit: crate::repair_rewards::State,
     projectiles: projectile::ProjectileFlights,
     projectile_replicas: projectile_replication::ProjectileReplicas,
     projectile_publications: Vec<ProjectilePublication>,

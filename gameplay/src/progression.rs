@@ -40,6 +40,7 @@ pub enum RewardKind {
     EnemyFinished,
     TeammateHealed,
     TeammateResuscitated,
+    RepairUnits,
     PrimaryObjectiveActivated,
     PrimaryObjectiveSecured,
     PrimaryObjectiveCompleted,
@@ -54,7 +55,7 @@ pub enum RewardKind {
 impl RewardKind {
     pub(crate) fn is_frago_action(self, units: u32) -> bool {
         match self {
-            Self::TeammateHealed => (1..=u32::from(u16::MAX)).contains(&units),
+            Self::TeammateHealed | Self::RepairUnits => (1..=u32::from(u16::MAX)).contains(&units),
             Self::TeammateResuscitated => units == 1,
             _ => false,
         }
@@ -221,6 +222,7 @@ pub(crate) type ParticipantKey = (u32, String, u32);
 pub(crate) struct RoundParticipation {
     pub match_experience: u32,
     pub statistics: std::collections::BTreeMap<u8, i32>,
+    pub repair_credit: crate::repair_rewards::State,
 }
 pub(crate) fn participant_key(reservation: &crate::Reservation) -> Option<ParticipantKey> {
     Some((
@@ -264,6 +266,7 @@ impl<W: Write> Engine<W> {
                 RoundParticipation {
                     match_experience: actor.match_experience,
                     statistics: actor.reward_statistics.clone(),
+                    repair_credit: actor.repair_credit,
                 },
             );
         }
@@ -415,6 +418,7 @@ impl<W: Write> Engine<W> {
             RoundParticipation {
                 match_experience: actor.match_experience,
                 statistics: actor.reward_statistics.clone(),
+                repair_credit: actor.repair_credit,
             }
         } else if same_round {
             self.round_participants

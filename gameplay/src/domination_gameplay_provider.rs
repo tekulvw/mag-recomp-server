@@ -1616,20 +1616,30 @@ impl<W: Write> Engine<W> {
             .as_ref()
             .map(BunkerWorld::repair_tool_profile);
         let (authority, leadership) = self.plan_structural_repair_authority(tool, now)?;
+        let active = self.active.as_ref().ok_or("no_reservation")?;
+        // The live Domination runtime supplies the squad's current FRAGO assignment.
+        let credit = self.plan_repair_credit(
+            active,
+            leadership.modifiers(active).value("kCharModRepairAmount"),
+            self.frago_object_position(request.target_object_id),
+        );
         let mut world = self
             .domination_gameplay
             .take()
             .ok_or("domination_gameplay_configuration_required")?;
         let result = self.commit_domination_gameplay(
             &mut world.runtime, now, wall, BTreeMap::new(),
-            |_, _, runtime, frame| {
+            |engine, _, runtime, frame| {
                 let candidate = runtime.stage_repair(frame, request.target_object_id, authority)?;
+                let credit = credit?;
+                let audit = json!({"op":"domination_structural_repair",
+                    "reservation_id":event.reservation_id,"world_id":event.world_id,"player_id":event.player_id,
+                    "target":request.target_object_id,"payload_hex":event.payload_hex.to_ascii_lowercase(),
+                    "leadership_changes":leadership.audit(),"repair_credit":credit.audit()});
+                let messages = engine.install_repair_credit(credit);
                 Ok((candidate, EffectsCommit {
-                    audit: vec![json!({"op":"domination_structural_repair",
-                        "reservation_id":event.reservation_id,"world_id":event.world_id,"player_id":event.player_id,
-                        "target":request.target_object_id,"payload_hex":event.payload_hex.to_ascii_lowercase(),
-                        "leadership_changes":leadership.audit()})],
-                    messages: Vec::new(),
+                    audit: vec![audit],
+                    messages,
                     packets: Vec::new(),
                     install: |engine: &mut Self| {
                         engine.commit_leadership(leadership);

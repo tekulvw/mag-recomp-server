@@ -1228,6 +1228,8 @@ impl<W: Write> Engine<W> {
         let critical = false;
         let mut raw = None;
         let mut repair_mount_distance = None;
+        let mut repair_leadership = None;
+        let mut repair_credit_input = None;
         let (target, amount, location, userdata, kind) = match message {
             protocol::GameMessage::Repair(r) => (r.target_object_id, 0.0, 0, 0, 0),
             protocol::GameMessage::Hit(r) if r.defender & 0xff000000 == 0x0d000000 => {
@@ -1343,11 +1345,27 @@ impl<W: Write> Engine<W> {
                             .fold(f32::INFINITY, f32::min)
                     })
                     .filter(|distance| distance.is_finite());
-                amount = w.catalog.repair_amount(
-                    &bunker.profile,
-                    active.modifiers.value("kCharModRepairAmount"),
-                )?;
+                if retail_hospital_repair {
+                    repair_leadership = Some(self.plan_leadership(now)?);
+                }
+                let modifier = repair_leadership
+                    .as_ref()
+                    .map_or(active.modifiers, |plan| plan.modifiers(active))
+                    .value("kCharModRepairAmount");
+                amount = w.catalog.repair_amount(&bunker.profile, modifier)?;
                 next.health.repair(amount)?;
+                // The health change is measured before quarter-point wire projection.
+                if retail_hospital_repair
+                    && next.health.hp() > bunker.health.hp()
+                    && !self.attacker_is_friendly(
+                        bunker.damage.last_attacker,
+                        active.reservation.world,
+                        active.team(),
+                    )
+                {
+                    let position = w.domination_bunker(index).map(|b| frago::point(b.position));
+                    repair_credit_input = Some((modifier, position));
+                }
             } else {
                 if bunker.health.hp() == 0.0 {
                     return Err("bunker_destroyed");
@@ -1409,16 +1427,43 @@ impl<W: Write> Engine<W> {
         let id = active.reservation.id.clone();
         let world = active.reservation.world;
         let player = active.reservation.player;
+        let event_type = if repair {
+            "repair"
+        } else if critical {
+            "bunker_critical_decay"
+        } else {
+            "bunker_hit"
+        };
         match result {
             Err(code) => {
-                self.record(json!({"op":"structure_event","reservation_id":id,"type":if repair {"repair"}else if critical {"bunker_critical_decay"}else{"bunker_hit"},"target_object_id":target,"gameplay_denial":code}),wall)?;
+                self.record(
+                    json!({"op":"structure_event", "reservation_id":id, "type":event_type,
+                        "target_object_id":target, "gameplay_denial":code}),
+                    wall,
+                )?;
                 if pending && code != "bunker_requires_living_ready_actor" {
                     self.pending_bunker_damage.pop_front();
                 }
                 Ok(Some(Vec::new()))
             }
             Ok((index, next, amount, packet, retail_hospital_repair)) => {
-                self.record(json!({"op":"structure_event","reservation_id":id,"type":if repair {"repair"}else if critical {"bunker_critical_decay"}else{"bunker_hit"},"target_object_id":target,"catalog_id":next.id,"amount_hp":amount,"health_hp":next.health.hp(),"health_quarter_points":next.damage.health_quarter_points,"conditions":next.damage.conditions,"repair_mount_distance":repair_mount_distance,"policy":"native_vehicle_armor_float_health_client_repair_target"}),wall)?;
+                let repair_credit = repair_credit_input
+                    .map(|(modifier, position)| self.plan_repair_credit(active, modifier, position))
+                    .transpose()?;
+                let mut audit = json!({
+                    "op":"structure_event", "reservation_id":id, "type":event_type,
+                    "target_object_id":target, "catalog_id":next.id, "amount_hp":amount,
+                    "health_hp":next.health.hp(), "health_quarter_points":next.damage.health_quarter_points,
+                    "conditions":next.damage.conditions, "repair_mount_distance":repair_mount_distance,
+                    "policy":"native_vehicle_armor_float_health_client_repair_target",
+                });
+                if let Some(leadership) = &repair_leadership {
+                    audit["leadership_changes"] = json!(leadership.audit());
+                }
+                if let Some(credit) = &repair_credit {
+                    audit["repair_credit"] = credit.audit();
+                }
+                self.record(audit, wall)?;
                 if !retail_hospital_repair {
                     self.active.as_mut().unwrap().remember(packet.clone())?;
                 }
@@ -1445,6 +1490,9 @@ impl<W: Write> Engine<W> {
                     self.pending_bunker_damage.pop_front();
                 }
                 if retail_hospital_repair {
+                    if let Some(leadership) = repair_leadership {
+                        self.commit_leadership(leadership);
+                    }
                     for recipient in self
                         .active
                         .iter_mut()
@@ -1455,7 +1503,9 @@ impl<W: Write> Engine<W> {
                     {
                         recipient.queue_shared(packet.clone());
                     }
-                    return Ok(Some(Vec::new()));
+                    let messages = repair_credit
+                        .map_or_else(Vec::new, |plan| self.install_repair_credit(plan));
+                    return Ok(Some(messages));
                 }
                 Ok(Some(vec![OutboundMessage {
                     reservation_id: id,
@@ -1472,6 +1522,10 @@ impl<W: Write> Engine<W> {
 #[cfg(test)]
 #[path = "bunker_team_tests.rs"]
 mod bunker_team_tests;
+
+#[cfg(test)]
+#[path = "hospital_repair_credit_tests.rs"]
+mod hospital_repair_credit_tests;
 
 #[cfg(test)]
 #[path = "alpha_mount_team_tests.rs"]
