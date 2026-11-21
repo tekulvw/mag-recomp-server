@@ -3,7 +3,7 @@ use super::*;
 use crate::spawn_progression::{dispatch, engine, ready, reserve};
 use std::sync::Arc;
 
-fn rules() -> incapacitation::Rules {
+pub(crate) fn rules() -> incapacitation::Rules {
     incapacitation::Rules {
         schema_version: 1,
         incapacitated_damage_threshold_hp: 83.0,
@@ -46,7 +46,7 @@ fn two_actors(restore: f32) -> Engine<Vec<u8>> {
     )
 }
 
-fn two_actors_from_engine(mut engine: Engine<Vec<u8>>, restore: f32) -> Engine<Vec<u8>> {
+pub(crate) fn two_actors_from_engine(mut engine: Engine<Vec<u8>>, restore: f32) -> Engine<Vec<u8>> {
     reserve(&mut engine, 0);
     reserve(&mut engine, 1);
     let shared = Arc::new(engine.spawn_catalog.as_ref().unwrap().for_squad(0).unwrap());
@@ -542,6 +542,14 @@ fn progression_receipts_do_not_increment_committed_finishing_or_resuscitation_co
         if kind == progression::RewardKind::EnemyFinished {
             dispatch_pending_damage(&mut engine, 83.0, 2000);
         } else {
+            // Exercise earned revival credit: this damage came from outside
+            // the healer's actual team, not the synthetic damage sender above.
+            engine
+                .peers
+                .get_mut("synthetic-reservation-0000")
+                .unwrap()
+                .last_damage
+                .last_attacker = 0x0380_0002;
             dispatch(&mut engine, &request(0x0380_0000), 2000).unwrap();
         }
         assert_eq!(
@@ -827,4 +835,46 @@ fn revive_accepts_both_authenticated_transports_but_never_server_originated_requ
         "transport":"tcp","direction":"server_to_client","rt_type":61,"plugin_id":1,
         "payload_hex":"021c03800000"});
     assert!(parse_request(invalid_direction.to_string().as_bytes()).is_err());
+}
+
+#[test]
+fn friendly_damage_revive_restores_health_and_notice_without_earned_credit() {
+    let mut engine = two_actors(0.4);
+    engine
+        .active
+        .as_mut()
+        .unwrap()
+        .reservation
+        .character
+        .account_id = Some("synthetic-healer".into());
+    down_patient(&mut engine, Duration::ZERO);
+    engine
+        .peers
+        .get_mut("synthetic-reservation-0000")
+        .unwrap()
+        .last_damage
+        .last_attacker = 0x0380_0001;
+    let messages = dispatch(&mut engine, &request(0x0380_0000), 1000).unwrap();
+    assert!(matches!(
+        patient(&engine).life,
+        CharacterLife::Alive {
+            health_quarter_points: 240,
+            ..
+        }
+    ));
+    assert!(
+        messages
+            .iter()
+            .any(|m| protocol::decode_hex(&m.payload_hex).starts_with(&[0x01, 0xff]))
+    );
+    assert!(engine.pending_reward_batch().is_empty());
+    assert!(
+        !engine
+            .active
+            .as_ref()
+            .unwrap()
+            .reward_statistics
+            .contains_key(&34)
+    );
+    assert_eq!(patient(&engine).last_damage.last_attacker, 0x0380_0001);
 }

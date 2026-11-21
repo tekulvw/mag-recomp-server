@@ -52,6 +52,13 @@ pub enum RewardKind {
     MatchMinorDefeat,
 }
 impl RewardKind {
+    pub(crate) fn is_frago_action(self, units: u32) -> bool {
+        match self {
+            Self::TeammateHealed => (1..=u32::from(u16::MAX)).contains(&units),
+            Self::TeammateResuscitated => units == 1,
+            _ => false,
+        }
+    }
     pub(crate) fn statistic(self) -> Option<u8> {
         match self {
             // Gameplay commits own kills, finishing moves (24) and revives (34).
@@ -103,6 +110,16 @@ pub(crate) struct RewardRecipient {
     pub character_id: u32,
 }
 impl RewardRecipient {
+    /// Deferred effects retain ordinary credit identity, but new context must
+    /// come from the same currently allocated character and round.
+    pub(crate) fn matches_active(&self, active: &Active) -> bool {
+        self.match_id == active.reward_match_id
+            && self.reservation_id == active.reservation.id
+            && self.world_id == active.reservation.world
+            && self.player_id == active.reservation.player
+            && active.reservation.character.account_id.as_deref() == Some(self.account_id.as_str())
+            && active.reservation.character.character_id == Some(self.character_id)
+    }
     pub(crate) fn from_active(active: &Active) -> Option<Self> {
         let character = &active.reservation.character;
         Some(Self {
@@ -265,7 +282,9 @@ impl<W: Write> Engine<W> {
     ) -> Result<(), &'static str> {
         for reward in rewards {
             if let Some(frago) = reward.frago
-                && (!frago || reward.kind != RewardKind::EnemyKilled || reward.units != 1)
+                && (!frago
+                    || !(reward.kind == RewardKind::EnemyKilled && reward.units == 1
+                        || reward.kind.is_frago_action(reward.units)))
             {
                 return Err("invalid_frago_reward_context");
             }

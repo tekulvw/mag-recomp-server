@@ -19,7 +19,7 @@ namespace Server.Medius
     /// <summary>One shared local Horizon world; each member has a Rust-acknowledged reservation.</summary>
     public sealed partial class LocalDmeHost : Server.Dme.ILocalGameplaySink, IAsyncDisposable
     {
-        sealed class Reservation { public string Id; public uint AccountId; public string Account; public uint CharacterId; public Action<MagCharacterRecord> Notify; public DmeClient Client; public DateTime Deadline; public byte Faction; public bool Accepted; public bool Claimed; public bool Invalidated; public string ReleaseReason; public string TerminalMatchId; }
+        sealed class Reservation { public string Id; public uint AccountId; public string Account; public uint CharacterId; public Action<MagCharacterRecord> Notify; public DmeClient Client; public DateTime Deadline; public byte Faction; public bool Accepted; public bool Claimed; public bool Invalidated; public string ReleaseReason; public string TerminalMatchId; public bool FragoActionBonusEnabled; }
         sealed class PendingRelease { public Reservation Reservation; public string RequestId; public DateTime NextAttempt; public DateTime? FirstRejected; }
         static readonly IInternalLogger Logger = InternalLoggerFactory.GetInstance<LocalDmeHost>();
         readonly int _applicationId;
@@ -56,6 +56,7 @@ namespace Server.Medius
         Task _worldStreamWorker = Task.CompletedTask;
         bool _worldStreamHealthy;
         bool _supportsFragoKillBonus;
+        bool _supportsFragoActionBonus;
         bool _ready; bool _started; bool _disposed;
         public Server.Dme.Models.World World { get; private set; }
         public bool IsReady { get { lock (_gate) return _ready && _worldStreamHealthy && !_disposed; } }
@@ -148,6 +149,7 @@ namespace Server.Medius
             RequireLoadoutSelectionCapability(hello);
             InitializeFactionMatchmaking(hello);
             _supportsFragoKillBonus = hello.Capabilities.Contains("frago_kill_bonus_v1", StringComparer.Ordinal);
+            _supportsFragoActionBonus = hello.Capabilities.Contains("frago_action_bonus_v1", StringComparer.Ordinal);
         }
         public static void RequireLoadoutSelectionCapability(GameplayBridgeResponse hello)
         {
@@ -222,9 +224,13 @@ namespace Server.Medius
                     var allocation = await World.OnJoinGameRequest(new MediusServerJoinGameRequest { ConnectInfo = new NetConnectionInfo { SessionKey = session.SessionKey } });
                     if (allocation.Confirmation != MGCL_ERROR_CODE.MGCL_SUCCESS || !World.Clients.TryGetValue(allocation.DmeClientIndex, out client)) return failure;
                     client.ApplicationId = _applicationId;
-                    reservation = new Reservation { Id = Id(), AccountId = character.Id, Account = session.AuthenticatedAccount, CharacterId = character.Id, Faction = character.Faction, Notify = notify, Client = client, Deadline = DateTime.UtcNow.AddSeconds(30) };
-                    lock (_gate) { _reservations.Add(reservation.Id, reservation); _rewardOwners.Add(reservation.Id, reservation); }
                     var progressionCatalog = _store.ProgressionCatalog;
+                    reservation = new Reservation {
+                        Id = Id(), AccountId = character.Id, Account = session.AuthenticatedAccount, CharacterId = character.Id,
+                        Faction = character.Faction, Notify = notify, Client = client, Deadline = DateTime.UtcNow.AddSeconds(30),
+                        FragoActionBonusEnabled = _supportsFragoActionBonus && _applicationId == 20231 && progressionCatalog?.FragoActionBonusEnabled == true
+                    };
+                    lock (_gate) { _reservations.Add(reservation.Id, reservation); _rewardOwners.Add(reservation.Id, reservation); }
                     var admissionCharacter = new Dictionary<string, object> {
                         ["loadout_account_id"] = reservation.Account,
                         ["leadership"] = character.Leadership == null ? null : new GameplayLeadershipRecord(character.Leadership),
@@ -238,6 +244,8 @@ namespace Server.Medius
                     // Older workers reject unknown character fields even when their value is false.
                     if (_supportsFragoKillBonus)
                         admissionCharacter["frago_bonus_enabled"] = _applicationId == 20231 && progressionCatalog?.FragoBonusEnabled == true;
+                    if (_supportsFragoActionBonus)
+                        admissionCharacter["frago_action_bonus_enabled"] = reservation.FragoActionBonusEnabled;
                     admittedReply = await _bridge.RequestControlAsync(new { v = 2, request_id = Id(), op = "reserve", reservation_id = reservation.Id,
                         world_id = (uint)World.WorldId, player_id = (ushort)client.DmeId, account_id = character.Id, session_key = client.SessionKey, access_key = client.Token,
                         character = admissionCharacter });
@@ -527,6 +535,8 @@ namespace Server.Medius
                             reward.WorldId != (uint)World.WorldId || reward.PlayerId != (ushort)owner.Client.DmeId ||
                             reward.AccountId != owner.Account || reward.CharacterId != owner.CharacterId)
                         { _rewardRetry = true; Logger.Warn("Gameplay reward rejected: admission identity mismatch"); return; }
+                        if (reward.Frago == true && MagProgressionCatalog.IsFragoSupportKind(reward.Kind) && !owner.FragoActionBonusEnabled)
+                        { _rewardRetry = true; Logger.Warn("Gameplay reward rejected: FRAGO support was disabled at admission"); return; }
                         owners.Add((reward, owner));
                     }
                 }
