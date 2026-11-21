@@ -6,7 +6,7 @@
 use crate::{
     ground_vehicles::OwnerDynamics,
     player_tracking::ClientCharacterFields,
-    projectile::ProjectileOwnerUpdate,
+    projectile::{ProjectileOwnerUpdate, projectile_slot_count},
     replication::{BitReader, ObjectUpdate},
     turret::ClientTurretFields,
 };
@@ -151,7 +151,7 @@ impl TypedOwnerUpdateFields {
                         expected_character_index,
                     )?)
                 }
-                16..=18 => {
+                16..=19 if object_type - 16 < usize::from(projectile_slot_count(profile)) => {
                     if bits.read(16)? != u32::from(expected_character_index) {
                         return Err("unowned_projectile_update");
                     }
@@ -172,5 +172,120 @@ impl TypedOwnerUpdateFields {
             return Err("trailing_client_update_bits");
         }
         Ok(fields)
+    }
+}
+
+#[cfg(test)]
+mod projectile_family_tests {
+    use super::*;
+    use crate::{
+        projectile::ProjectileOwnerFields,
+        replication::{BitWriter, UpdateHeader},
+        wire_profile::{WireProfile, WireProfileCatalog},
+    };
+
+    #[test]
+    fn retail_fourth_projectile_owner_report_uses_the_common_fields() {
+        let retail = WireProfileCatalog::embedded().profile(20231).unwrap();
+        let header = UpdateHeader {
+            sequence: 1,
+            nak_sequence: 0,
+            client_index: 0,
+            object_type_mask: (1 << 16) | (1 << 19),
+            timestamp_ms: 41,
+        };
+        let mut bits = BitWriter::with_profile(retail);
+        header.encode(&mut bits).unwrap();
+        for state in [1, 2] {
+            bits.write(1, 1).unwrap();
+            bits.write(7, 16).unwrap();
+            ProjectileOwnerFields {
+                state: Some(state),
+                ..Default::default()
+            }
+            .encode_fields(&mut bits)
+            .unwrap();
+            bits.write(0, 1).unwrap();
+        }
+        let wire = bits.finish();
+        let update = ObjectUpdate::decode_with_profile(&wire, retail).unwrap();
+        assert!(matches!(
+            TypedOwnerUpdateFields::decode_with_profile(&update, 8, retail),
+            Err("unowned_projectile_update")
+        ));
+        let fields = TypedOwnerUpdateFields::decode_with_profile(&update, 7, retail).unwrap();
+        assert_eq!(
+            fields
+                .projectiles
+                .iter()
+                .map(|row| (row.slot, row.object_index, row.fields.state))
+                .collect::<Vec<_>>(),
+            [(0, 7, Some(1)), (3, 7, Some(2))]
+        );
+
+        let legacy =
+            ClientCharacterFields::decode_for_owner_with_profile(&update, 7, retail).unwrap();
+        assert_eq!(legacy.projectiles.len(), 2);
+        assert_eq!(legacy.projectiles[1].slot, 3);
+        assert_eq!(legacy.projectiles[1].fields.state, Some(2));
+
+        let prototype = WireProfile::prototype();
+        assert!(
+            header
+                .encode(&mut BitWriter::with_profile(prototype))
+                .is_err()
+        );
+        assert!(TypedOwnerUpdateFields::decode_with_profile(&update, 7, prototype).is_err());
+    }
+
+    #[test]
+    fn retail_fourth_projectile_report_cannot_create_an_unadmitted_flight() {
+        use crate::{
+            spawn_progression::tests::dispatch,
+            spawn_progression::tests::ground_vehicle_runtime::domination_ground_driver::{
+                driver_engine, ready_on_foot,
+            },
+        };
+
+        let mut engine = driver_engine(8);
+        ready_on_foot(&mut engine, 0, 100);
+        let profile = engine.wire_profile;
+        assert_eq!(profile.application_id(), 20231);
+        let actor = engine.active.as_ref().unwrap();
+        let sequence = actor.latest_owner_sequence + 1;
+        let mut bits = BitWriter::with_profile(profile);
+        UpdateHeader {
+            sequence,
+            nak_sequence: 0,
+            client_index: 0,
+            object_type_mask: 1 << 19,
+            timestamp_ms: 110,
+        }
+        .encode(&mut bits)
+        .unwrap();
+        bits.write(1, 1).unwrap();
+        bits.write(u32::from(actor.reservation.player), 16).unwrap();
+        ProjectileOwnerFields {
+            state: Some(2),
+            ..Default::default()
+        }
+        .encode_fields(&mut bits)
+        .unwrap();
+        bits.write(0, 1).unwrap();
+
+        let rewards = engine.pending_reward_batch().len();
+        dispatch(&mut engine, &bits.finish(), 110).unwrap();
+        let actor = engine.active.as_ref().unwrap();
+        assert_eq!(actor.latest_owner_sequence, sequence);
+        assert!(actor.projectiles.get(3).is_none());
+        assert!(actor.projectile_cleanup.iter().all(Option::is_none));
+        assert!(
+            actor
+                .projectile_replicas
+                .snapshot_packets(110)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(engine.pending_reward_batch().len(), rewards);
     }
 }
