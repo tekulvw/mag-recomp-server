@@ -168,6 +168,7 @@ pub struct Vehicle {
     driver_position_at_ms: Option<u64>,
     driver_position_credit_m: f64,
     pub(crate) driver_controls: DriverControls,
+    pub(crate) turret: Option<crate::hospital_turrets::Runtime>,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct DriverControls {
@@ -261,6 +262,7 @@ impl Runtime {
             let spawn_type = catalog.source_spawn_type(creation);
             runtime.insert_creation(creation, spawn_type)?;
         }
+        runtime.configure_turrets(catalog);
         Ok(runtime)
     }
     /// Explicit bindings are useful for a source adapter or synthetic fixtures;
@@ -333,11 +335,42 @@ impl Runtime {
             driver_position_at_ms: None,
             driver_position_credit_m: 0.,
             driver_controls: DriverControls::default(),
+            turret: None,
         };
         self.initial.insert(creation.index, vehicle.clone());
         self.vehicles.insert(creation.index, vehicle);
         Ok(())
     }
+    pub(crate) fn configure_turrets(&mut self, catalog: &ground_vehicles::Catalog) {
+        for vehicles in [&mut self.initial, &mut self.vehicles] {
+            for (&index, vehicle) in vehicles {
+                vehicle.turret = catalog
+                    .turret_policy(index)
+                    .map(crate::ground_turrets::Policy::initial_turret);
+            }
+        }
+    }
+
+    pub(crate) fn install_turret(&mut self, index: u16, turret: crate::hospital_turrets::Runtime) {
+        if let Some(current) = self
+            .vehicles
+            .get_mut(&index)
+            .and_then(|vehicle| vehicle.turret.as_mut())
+        {
+            *current = turret;
+        }
+    }
+
+    pub(crate) fn revoke_turret(&mut self, index: u16) {
+        if let Some(turret) = self
+            .vehicles
+            .get_mut(&index)
+            .and_then(|vehicle| vehicle.turret.as_mut())
+        {
+            turret.revoke();
+        }
+    }
+
     pub fn get(&self, index: u16) -> Option<&Vehicle> {
         self.vehicles.get(&index)
     }
@@ -530,6 +563,9 @@ impl Runtime {
             }
             let direct = matches!(v.state, 0 | 1 | 4 | 5 | 6);
             if direct || (!initial && v.is_dead()) {
+                if let Some(turret) = &mut v.turret {
+                    turret.revoke();
+                }
                 v.pose = source.pose;
                 v.driver_position_at_ms = None;
                 v.driver_position_credit_m = 0.;
@@ -822,6 +858,9 @@ impl Runtime {
                 v.state = if v.vaporize_on_death { 5 } else { 4 };
                 v.state_age_seconds = 0.;
                 v.pending_death = false;
+                if let Some(turret) = &mut v.turret {
+                    turret.revoke();
+                }
                 events.push(v.event(Effect::StateChanged(v.state)));
                 events.push(v.event(Effect::VehicleDestroyed {
                     attacker: v.last_attacker,
@@ -834,6 +873,9 @@ impl Runtime {
             }
             if v.state == 2 && v.body == Body::Operational && v.is_dying() {
                 v.state = 3;
+                if let Some(turret) = &mut v.turret {
+                    turret.revoke();
+                }
                 v.state_age_seconds = 0.;
                 events.push(v.event(Effect::StateChanged(3)));
             }

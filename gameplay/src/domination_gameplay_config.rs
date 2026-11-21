@@ -48,6 +48,7 @@ struct Core {
     aircraft_links: PathBuf,
     hospital_hulks: PathBuf,
     hospital_turrets: Option<PathBuf>,
+    ground_turrets: Option<PathBuf>,
     initial_filters: PathBuf,
     qualified_poses: PathBuf,
     ground_damage: PathBuf,
@@ -254,6 +255,14 @@ impl Configuration {
                 }
                 *path = directory.join(&*path);
             }
+            if let Some(path) = &mut core.ground_turrets {
+                if path.as_os_str().is_empty() {
+                    return Err(io::Error::other(
+                        "empty_domination_ground_turret_source_path",
+                    ));
+                }
+                *path = directory.join(&*path);
+            }
             if let Some(helo) = &mut core.helo {
                 for input in [
                     &mut helo.fleet,
@@ -368,6 +377,14 @@ impl Configuration {
         self.core
             .as_ref()
             .and_then(|core| core.hospital_turrets.as_ref())
+            .map(|path| read(path, 256 * 1024))
+            .transpose()
+    }
+
+    pub(crate) fn ground_turret_source(&self) -> io::Result<Option<Vec<u8>>> {
+        self.core
+            .as_ref()
+            .and_then(|core| core.ground_turrets.as_ref())
             .map(|path| read(path, 256 * 1024))
             .transpose()
     }
@@ -795,6 +812,21 @@ impl<W: Write> Engine<W> {
                 &native_elf,
             )?;
             self.bunker_world.as_mut().unwrap().hospital_turrets = rules;
+        }
+        if let Some(source) = config.ground_turret_source()? {
+            let grounds = self.ground_vehicles.as_mut().unwrap();
+            let policies = crate::ground_turrets::qualify(
+                &source,
+                grounds,
+                spawns,
+                &self.item_catalog,
+                &native_elf,
+            )?;
+            grounds.set_turret_policies(policies);
+            self.ground_runtime
+                .as_mut()
+                .unwrap()
+                .configure_turrets(grounds);
         }
         world
             .configure_ground(self.ground_runtime.as_mut().unwrap())

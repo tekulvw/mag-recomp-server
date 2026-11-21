@@ -836,7 +836,7 @@ impl CharacterInventory {
     }
 }
 /// This index selects a gear slot in the current inventory, not a global item ID.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InventoryItem {
     pub inventory_update_id: u8,
     pub gear_slot: u8,

@@ -210,6 +210,15 @@ fn ground_mount<W: Write>(
     let vehicle = current_vehicle.as_ref();
     let driver = ctx.engine.ground_driver_seat(request.vehicle_id as u16);
     let takes_driver = driver.is_some_and(|d| u32::from(d.seat) == request.seat_id);
+    let takes_gunner = request.seat_id == 1
+        && ctx
+            .engine
+            .ground_turret_policy(request.vehicle_id as u16)
+            .is_some();
+    let leaves_gunner = ctx.engine.is_ground_gunner(active)
+        && active
+            .ground_seat
+            .is_some_and(|seat| seat.vehicle_index == request.vehicle_id as u16);
     let leaves_driver = active.ground_seat.is_some_and(|seat| {
         seat.vehicle_index == request.vehicle_id as u16
             && driver.is_some_and(|d| d.seat == seat.seat)
@@ -217,14 +226,20 @@ fn ground_mount<W: Write>(
     let same_vehicle_switch = active.ground_seat.is_some_and(|seat| {
         seat.vehicle_index == request.vehicle_id as u16 && u32::from(seat.seat) != request.seat_id
     });
-    let denial = if (takes_driver || leaves_driver)
+    let denial = if (takes_gunner || leaves_gunner)
+        && (!ctx.accepted_client_route || !ctx.engine.round_combat_allowed(ctx.now))
+    {
+        Some("ground_turret_mount_not_allowed")
+    } else if (takes_driver || leaves_driver)
         && (!ctx.accepted_client_route || ctx.engine.match_terminal.is_some())
     {
         Some("ground_driver_mount_not_allowed")
     } else if request.character_id != (0x03800000 | u32::from(active.reservation.player))
         || vehicle.is_none_or(|v| {
             v.object_id() != request.vehicle_id
-                || (!takes_driver && !v.passenger_seats.contains(&(request.seat_id as u8)))
+                || (!takes_driver
+                    && !takes_gunner
+                    && !v.passenger_seats.contains(&(request.seat_id as u8)))
         })
         || request.seat_id >= 16
     {
@@ -280,6 +295,19 @@ fn ground_mount<W: Write>(
             vehicle_index: vehicle.unwrap().index,
             seat: request.seat_id as u8,
         };
+        let turret = if takes_gunner || leaves_gunner {
+            match stage_ground_turret_seat(ctx, plan, seat.vehicle_index, takes_gunner) {
+                Ok(update) => Some(update),
+                Err(reason) => {
+                    plan.gameplay_denial = Some(reason);
+                    return Ok(
+                        json!({"type":"mount_seat","vehicle_id":request.vehicle_id,"seat_id":request.seat_id,"transition_sent":false}),
+                    );
+                }
+            }
+        } else {
+            None
+        };
         let authority = if takes_driver {
             // In this server the authenticated reservation slot is also the
             // assigned connection client index.
@@ -296,23 +324,62 @@ fn ground_mount<W: Write>(
         } else {
             None
         };
-        let packet = ground_seats::transition(
+        let packet = ground_seats::transition_with_turret(
             ctx.next_sequence,
             ctx.now.as_millis() as u32,
             active.reservation.player,
             seat.character_state(),
             None,
-            authority,
+            (authority, turret),
             ctx.engine.wire_profile,
         )?;
         plan.outgoing = Some(packet.clone());
         plan.replication.seat_transition = Some(packet);
         plan.session.new_ground_seat = Some(Some(seat));
+        if takes_gunner {
+            plan.session.server_position = Some((
+                ctx.engine.ground_seat_position(seat)?,
+                player_tracking::PositionOrigin::ServerMount,
+            ));
+        }
     }
     Ok(
         json!({"type":"mount_seat","vehicle_id":request.vehicle_id,"seat_id":request.seat_id,"transition_sent":plan.replication.seat_transition.is_some()}),
     )
 }
+fn stage_ground_turret_seat<W: Write>(
+    ctx: &PlanningContext<'_, W>,
+    plan: &mut EventPlan,
+    index: u16,
+    entering: bool,
+) -> Result<ground_vehicles::TurretUpdate, &'static str> {
+    ctx.engine
+        .check_hospital_turret_queue(
+            ctx.engine
+                .peers
+                .values()
+                .filter(|peer| peer.initial_objects.is_some()),
+            1,
+            |_| 0,
+        )
+        .map_err(|_| "ground_turret_publication_budget_exceeded")?;
+    let (turret, definition) = ctx
+        .engine
+        .ground_turret_seat_change(ctx.active, index, entering)?;
+    plan.ground_turret = Some((index, turret));
+    Ok(ground_vehicles::TurretUpdate {
+        index,
+        driver_owner: None,
+        turret_owner: Some(if entering {
+            ctx.active.reservation.player
+        } else {
+            u16::MAX
+        }),
+        definition,
+        fields: Default::default(),
+    })
+}
+
 fn ground_dismount<W: Write>(
     ctx: &PlanningContext<'_, W>,
     plan: &mut EventPlan,
@@ -327,7 +394,12 @@ fn ground_dismount<W: Write>(
         .engine
         .ground_driver_seat(request.vehicle_id as u16)
         .filter(|d| u32::from(d.seat) == request.seat_id);
-    if driver.is_some() && !ctx.accepted_client_route {
+    let gunner = request.seat_id == 1
+        && ctx
+            .engine
+            .ground_turret_policy(request.vehicle_id as u16)
+            .is_some();
+    if (driver.is_some() || gunner) && !ctx.accepted_client_route {
         plan.gameplay_denial = Some("ground_driver_dismount_not_allowed");
     } else if request.character_id != (0x03800000 | u32::from(active.reservation.player)) {
         plan.gameplay_denial = Some("invalid_ground_exit_target");
@@ -348,6 +420,19 @@ fn ground_dismount<W: Write>(
             .ok_or("ground_exit_policy_required")
             .and_then(|vehicle| ctx.engine.ground_exit(&vehicle, active.reservation.player));
         if let Ok(mut exit) = exit {
+            let turret = if gunner {
+                match stage_ground_turret_seat(ctx, plan, request.vehicle_id as u16, false) {
+                    Ok(update) => Some(update),
+                    Err(reason) => {
+                        plan.gameplay_denial = Some(reason);
+                        return Ok(
+                            json!({"type":"dismount_seat","vehicle_id":request.vehicle_id,"seat_id":request.seat_id,"transition_sent":false}),
+                        );
+                    }
+                }
+            } else {
+                None
+            };
             if request.camera_yaw <= 360 {
                 exit.packed_yaw = request.packed_yaw();
             }
@@ -356,13 +441,16 @@ fn ground_dismount<W: Write>(
                 stance: 0,
                 user_data: [0; 3],
             };
-            let packet = ground_seats::transition(
+            let packet = ground_seats::transition_with_turret(
                 ctx.next_sequence,
                 ctx.now.as_millis() as u32,
                 active.reservation.player,
                 state,
                 Some(exit),
-                driver.map(|d| (d.vehicle_index, ground_vehicles::SERVER_OWNER)),
+                (
+                    driver.map(|d| (d.vehicle_index, ground_vehicles::SERVER_OWNER)),
+                    turret,
+                ),
                 ctx.engine.wire_profile,
             )?;
             plan.outgoing = Some(packet.clone());

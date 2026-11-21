@@ -118,7 +118,7 @@ fn domination_apc_driver_admission_uses_source_kind_in_each_layout() {
     }
 }
 
-fn driver_engine(first_apc: u16) -> Engine<Vec<u8>> {
+pub(crate) fn driver_engine(first_apc: u16) -> Engine<Vec<u8>> {
     let (engine, source) = driver_setup(first_apc);
     let catalog =
         Catalog::from_json(&source.to_string(), engine.spawn_catalog.as_ref().unwrap()).unwrap();
@@ -129,7 +129,7 @@ fn driver_engine(first_apc: u16) -> Engine<Vec<u8>> {
         .with_collision_world(floor)
 }
 
-fn ready_on_foot(engine: &mut Engine<Vec<u8>>, player: u16, now: u64) {
+pub(crate) fn ready_on_foot(engine: &mut Engine<Vec<u8>>, player: u16, now: u64) {
     reserve_faction(engine, player, 1);
     let actor = engine.active.as_mut().unwrap();
     ready(actor);

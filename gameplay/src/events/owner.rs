@@ -182,6 +182,25 @@ fn plan_owner_report<W: Write>(
                     }
                 }
             }
+            match report.ground_turrets.as_slice() {
+                [] => (),
+                [row]
+                    if ctx.accepted_owner_route
+                        && ctx.engine.round_combat_allowed(ctx.now)
+                        && h.client_index == 0
+                        && h.nak_sequence == 0
+                        && h.sequence > active.latest_owner_sequence =>
+                {
+                    match ctx.engine.prepare_ground_turret_report(active, *row, now) {
+                        Ok((turret, packets)) => {
+                            plan.ground_turret = Some((row.dynamics.index, turret));
+                            plan.ground_turret_packets = packets;
+                        }
+                        Err(reason) => plan.gameplay_denial = Some(reason),
+                    }
+                }
+                _ => plan.gameplay_denial = Some("ground_turret_owner_report_not_allowed"),
+            }
             if !report.ground_vehicles.is_empty()
                 && h.client_index == 0
                 && h.nak_sequence == 0

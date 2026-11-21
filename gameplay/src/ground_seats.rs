@@ -21,6 +21,21 @@ impl Active {
     }
 }
 impl<W: Write> Engine<W> {
+    pub(crate) fn ground_seat_position(
+        &self,
+        seat: PassengerSeat,
+    ) -> Result<replication::CharacterPosition, &'static str> {
+        let vehicle = self
+            .current_ground_vehicle(seat.vehicle_index)
+            .ok_or("dynamic_body_mount_vehicle_unavailable")?;
+        if seat.seat == 1
+            && let Some(turret) = self.ground_turret_policy(seat.vehicle_index)
+        {
+            return turret.position(&vehicle);
+        }
+        Ok(vehicle.position)
+    }
+
     pub(crate) fn ground_exit(
         &self,
         vehicle: &ground_vehicles::Creation,
@@ -207,6 +222,26 @@ pub(crate) fn transition(
     authority: Option<(u16, u16)>,
     profile: wire_profile::WireProfile,
 ) -> Result<Vec<u8>, &'static str> {
+    transition_with_turret(
+        sequence,
+        timestamp_ms,
+        player,
+        state,
+        exit,
+        (authority, None),
+        profile,
+    )
+}
+
+pub(crate) fn transition_with_turret(
+    sequence: u32,
+    timestamp_ms: u32,
+    player: u16,
+    state: replication::CharacterState,
+    exit: Option<vehicle_exit::BunkerExit>,
+    (authority, turret): (Option<(u16, u16)>, Option<ground_vehicles::TurretUpdate>),
+    profile: wire_profile::WireProfile,
+) -> Result<Vec<u8>, &'static str> {
     if sequence <= 1 || player >= 256 {
         return Err("invalid_ground_seat_transition");
     }
@@ -215,11 +250,20 @@ pub(crate) fn transition(
         sequence,
         nak_sequence: 0,
         client_index: 0,
-        object_type_mask: (1 << 3) | (u32::from(authority.is_some()) << 1),
+        object_type_mask: (1 << 3) | (u32::from(authority.is_some() || turret.is_some()) << 1),
         timestamp_ms,
     }
     .encode(&mut bits)?;
-    if let Some((vehicle, owner)) = authority {
+    if let Some(mut turret) = turret {
+        if let Some((index, owner)) = authority {
+            if index != turret.index {
+                return Err("ground_seat_authority_index_mismatch");
+            }
+            turret.driver_owner = Some(owner);
+        }
+        turret.write_row(&mut bits)?;
+        bits.write(0, 1)?;
+    } else if let Some((vehicle, owner)) = authority {
         ground_vehicles::write_owner_field(&mut bits, vehicle, owner)?;
     }
     bits.write(1, 1)?;

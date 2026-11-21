@@ -290,11 +290,7 @@ impl<W: Write> Engine<W> {
                 CharacterLife::AwaitingRespawn { generation } => (generation, true),
             };
             let position = if let Some(seat) = actor.ground_seat {
-                point(
-                    self.current_ground_vehicle(seat.vehicle_index)
-                        .ok_or("dynamic_body_mount_vehicle_unavailable")?
-                        .position,
-                )
+                point(self.ground_seat_position(seat)?)
             } else if let (Some(index), Some(seat)) = (actor.mounted_bunker, actor.mounted_seat) {
                 point(self.domination_bunker_seat_position(index, seat)?)
             } else if actor.helo_seat.is_some() {

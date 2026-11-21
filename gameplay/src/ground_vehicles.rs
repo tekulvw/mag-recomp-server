@@ -1,7 +1,9 @@
 //! Retail type1 ground-vehicle creation from explicit external bindings.
+use crate::hospital_turret_wire::{Fields, InventoryDefinition};
 use crate::replication::{
     BitReader, BitWriter, CharacterPosition, ObjectUpdate, UpdateHeader, VehicleDamage,
 };
+use crate::wire_profile::WireProfile;
 use serde::Deserialize;
 use std::collections::BTreeSet;
 use std::{
@@ -13,7 +15,13 @@ use std::{
 #[path = "acquisition_arrival_static.rs"]
 pub mod arrival_static;
 
+#[cfg(test)]
+#[path = "ground_turret_wire_tests.rs"]
+mod gunner_wire_tests;
+
 pub(crate) const SERVER_OWNER: u16 = 0x105;
+const VEHICLE_FIELDS: usize = 25;
+const GROUND_FIELDS: usize = 30;
 
 /// Sparse dynamics from a retail type1 owner report. Rotation components are
 /// decoded at their wire precision. The authority layer must validate and
@@ -94,53 +102,173 @@ impl OwnerDynamics {
     }
 
     pub(crate) fn decode_list(bits: &mut BitReader<'_>) -> Result<Vec<Self>, &'static str> {
-        if bits.profile.application_id() != 20231 {
-            return Err("unsupported_client_object_type");
+        Ok(decode_owner_list(bits, false)?
+            .into_iter()
+            .map(|report| report.dynamics)
+            .collect())
+    }
+
+    fn read_fields(index: u16, bits: &mut BitReader<'_>) -> Result<Self, &'static str> {
+        let mut report = Self {
+            index,
+            ..Self::default()
+        };
+        if bits.read(1)? != 0 {
+            let x = bits.read(16)? as f32 / 32.;
+            let y = read_signed_fixed(bits, 16, 32.)?;
+            let z = bits.read(16)? as f32 / 32.;
+            report.position = Some(CharacterPosition { x, y, z });
         }
-        let mut reports = Vec::new();
-        let mut seen = 0u32;
-        while bits.read(1)? != 0 {
-            let index = bits.read(16)? as u16;
-            if index >= 32 {
-                return Err("ground_vehicle_owner_index_out_of_range");
+        if bits.read(1)? != 0 {
+            let mut rotation = [0.; 4];
+            for value in &mut rotation {
+                *value = read_signed_fixed(bits, 10, 256.)?;
             }
-            let id = 1 << index;
-            if seen & id != 0 {
-                return Err("duplicate_ground_vehicle_owner_update");
-            }
-            seen |= id;
-            if bits.read(25)? != 0 {
-                return Err("unsupported_client_ground_vehicle_field");
-            }
-            let mut report = Self {
-                index,
-                ..Self::default()
-            };
-            if bits.read(1)? != 0 {
-                let x = bits.read(16)? as f32 / 32.;
-                let y = read_signed_fixed(bits, 16, 32.)?;
-                let z = bits.read(16)? as f32 / 32.;
-                report.position = Some(CharacterPosition { x, y, z });
-            }
-            if bits.read(1)? != 0 {
-                let mut rotation = [0.; 4];
-                for value in &mut rotation {
-                    *value = read_signed_fixed(bits, 10, 256.)?;
+            report.rotation_xyzw = Some(rotation);
+        }
+        if bits.read(1)? != 0 {
+            report.brake = Some(bits.read(1)? != 0);
+        }
+        if bits.read(1)? != 0 {
+            report.throttle = Some(read_signed_fixed(bits, 9, 256.)?);
+        }
+        if bits.read(1)? != 0 {
+            report.smoke_screen = Some(bits.read(1)? != 0);
+        }
+        Ok(report)
+    }
+}
+
+/// One Ground object and its independent driver and turret components.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct OwnerUpdate {
+    pub dynamics: OwnerDynamics,
+    pub turret: Fields,
+}
+
+pub(crate) fn decode_owner_updates(
+    bits: &mut BitReader<'_>,
+) -> Result<Vec<OwnerUpdate>, &'static str> {
+    decode_owner_list(bits, true)
+}
+
+fn decode_owner_list(
+    bits: &mut BitReader<'_>,
+    allow_turret: bool,
+) -> Result<Vec<OwnerUpdate>, &'static str> {
+    if bits.profile.application_id() != 20231 {
+        return Err("unsupported_client_object_type");
+    }
+    let mut reports = Vec::new();
+    let mut seen = 0;
+    while bits.read(1)? != 0 {
+        let index = bits.read(16)? as u16;
+        claim_owner_index(index, &mut seen)?;
+        let mut turret = Fields::default();
+        if allow_turret {
+            for field in 0..VEHICLE_FIELDS {
+                if bits.read(1)? != 0 && !turret.read_present(field, bits)? {
+                    return Err("unsupported_client_ground_vehicle_field");
                 }
-                report.rotation_xyzw = Some(rotation);
             }
-            if bits.read(1)? != 0 {
-                report.brake = Some(bits.read(1)? != 0);
-            }
-            if bits.read(1)? != 0 {
-                report.throttle = Some(read_signed_fixed(bits, 9, 256.)?);
-            }
-            if bits.read(1)? != 0 {
-                report.smoke_screen = Some(bits.read(1)? != 0);
-            }
-            reports.push(report);
+        } else if bits.read(VEHICLE_FIELDS)? != 0 {
+            return Err("unsupported_client_ground_vehicle_field");
         }
-        Ok(reports)
+        reports.push(OwnerUpdate {
+            dynamics: OwnerDynamics::read_fields(index, bits)?,
+            turret,
+        });
+    }
+    Ok(reports)
+}
+
+fn claim_owner_index(index: u16, seen: &mut u32) -> Result<(), &'static str> {
+    let id = 1u32
+        .checked_shl(index.into())
+        .ok_or("ground_vehicle_owner_index_out_of_range")?;
+    if *seen & id != 0 {
+        return Err("duplicate_ground_vehicle_owner_update");
+    }
+    *seen |= id;
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct TurretUpdate {
+    pub index: u16,
+    pub driver_owner: Option<u16>,
+    pub turret_owner: Option<u16>,
+    pub definition: Option<InventoryDefinition>,
+    pub fields: Fields,
+}
+
+impl TurretUpdate {
+    /// Write one Ground row. The containing update terminates its family list.
+    pub(crate) fn write_row(self, bits: &mut BitWriter) -> Result<(), &'static str> {
+        if bits.profile.application_id() != 20231 {
+            return Err("unsupported_ground_turret_wire_profile");
+        }
+        claim_owner_index(self.index, &mut 0)?;
+        bits.write(1, 1)?;
+        bits.write(self.index.into(), 16)?;
+        for field in 0..GROUND_FIELDS {
+            if !self.write_field(field, bits)? {
+                bits.write(0, 1)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Write only a turret or owner field when assembling a complete Ground row.
+    pub(crate) fn write_field(
+        self,
+        field: usize,
+        bits: &mut BitWriter,
+    ) -> Result<bool, &'static str> {
+        let owner = match field {
+            1 => self.driver_owner,
+            6 => self.turret_owner,
+            _ => return self.fields.write_field(field, self.definition, bits),
+        };
+        bits.write(u32::from(owner.is_some()), 1)?;
+        if let Some(owner) = owner {
+            bits.write(owner.into(), 16)?;
+        }
+        Ok(true)
+    }
+
+    /// At most 32 complete sparse rows fit into one retail replication packet.
+    pub(crate) fn encode_rows(
+        sequence: u32,
+        timestamp_ms: u32,
+        rows: &[Self],
+        profile: WireProfile,
+    ) -> Result<Vec<Vec<u8>>, &'static str> {
+        if profile.application_id() != 20231 {
+            return Err("unsupported_ground_turret_wire_profile");
+        }
+        if sequence == 0 {
+            return Err("invalid_ground_turret_sequence");
+        }
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut bits = BitWriter::with_profile(profile);
+        UpdateHeader {
+            sequence,
+            nak_sequence: 0,
+            client_index: 0,
+            object_type_mask: 1 << 1,
+            timestamp_ms,
+        }
+        .encode(&mut bits)?;
+        let mut seen = 0;
+        for row in rows {
+            claim_owner_index(row.index, &mut seen)?;
+            row.write_row(&mut bits)?;
+        }
+        bits.write(0, 1)?;
+        Ok(vec![bits.finish()])
     }
 }
 
@@ -309,6 +437,8 @@ struct OccupantVisibility {
 pub struct Catalog {
     #[serde(skip)]
     raw_sha256: String,
+    #[serde(skip)]
+    turret_policies: std::collections::BTreeMap<u16, crate::ground_turrets::Policy>,
     format: String,
     schema_version: u32,
     source: Source,
@@ -344,6 +474,21 @@ impl Catalog {
         value.vehicles.sort_by_key(|v| v.index);
         Ok(value)
     }
+    pub(crate) fn has_turrets(&self) -> bool {
+        !self.turret_policies.is_empty()
+    }
+
+    pub(crate) fn turret_policy(&self, index: u16) -> Option<crate::ground_turrets::Policy> {
+        self.turret_policies.get(&index).copied()
+    }
+
+    pub(crate) fn set_turret_policies(
+        &mut self,
+        policies: std::collections::BTreeMap<u16, crate::ground_turrets::Policy>,
+    ) {
+        self.turret_policies = policies;
+    }
+
     pub(crate) fn raw_sha256(&self) -> &str {
         &self.raw_sha256
     }
@@ -646,6 +791,9 @@ impl Catalog {
     }
 
     pub(crate) fn seat_occupant_visible(&self, vehicle_index: u16, seat: u8) -> Option<bool> {
+        if seat == 1 && self.turret_policy(vehicle_index).is_some() {
+            return Some(false);
+        }
         self.seat_visibility
             .as_ref()?
             .vehicles
@@ -845,7 +993,7 @@ impl<W: io::Write> crate::Engine<W> {
                     .ok_or("ground_vehicle_runtime_required")
             })
             .collect::<Result<Vec<_>, _>>()?;
-        encode_list(sequence, timestamp_ms, &vehicles, |vehicle, bits| {
+        let packet = encode_list(sequence, timestamp_ms, &vehicles, |vehicle, bits| {
             vehicle.validate_runtime()?;
             let current = runtime
                 .get(vehicle.index)
@@ -856,8 +1004,13 @@ impl<W: io::Write> crate::Engine<W> {
                 self.ground_driver_owner(vehicle.index)
                     .unwrap_or(SERVER_OWNER),
                 current.driver_controls,
+                self.ground_turret_snapshot(vehicle.index),
             )
-        })
+        })?;
+        if packet.len() > 1397 {
+            return Err("ground_creation_packet_exceeds_budget");
+        }
+        Ok(packet)
     }
     pub fn with_ground_vehicles(mut self, catalog: Catalog) -> Result<Self, &'static str> {
         if self.wire_profile.application_id() != 20231
@@ -963,6 +1116,7 @@ impl Creation {
             self.damage(u32::MAX),
             SERVER_OWNER,
             Default::default(),
+            None,
         )
     }
     fn damage(&self, last_attacker: u32) -> VehicleDamage {
@@ -981,6 +1135,7 @@ impl Creation {
         damage: VehicleDamage,
         owner: u16,
         controls: crate::acquisition_ground_runtime::DriverControls,
+        turret: Option<TurretUpdate>,
     ) -> Result<(), &'static str> {
         let fields = [0, 1, 3, 4, 5, 6, 7, 18, 19, 20, 25, 26]
             .into_iter()
@@ -989,7 +1144,7 @@ impl Creation {
             | (u32::from(controls.brake.is_some()) << 27)
             | (u32::from(controls.throttle.is_some()) << 28)
             | (u32::from(controls.smoke_screen.is_some()) << 29);
-        self.encode_masked_fields(bits, damage, fields, owner, controls)
+        self.encode_masked_fields(bits, damage, fields, owner, controls, turret)
     }
     fn encode_masked_fields(
         &self,
@@ -998,10 +1153,17 @@ impl Creation {
         mask: u32,
         owner: u16,
         controls: crate::acquisition_ground_runtime::DriverControls,
+        turret: Option<TurretUpdate>,
     ) -> Result<(), &'static str> {
         bits.write(1, 1)?;
         bits.write(self.index.into(), 16)?;
         for field in 0..30 {
+            if field != 1
+                && let Some(turret) = turret
+                && turret.write_field(field, bits)?
+            {
+                continue;
+            }
             let present = mask & (1 << field) != 0;
             bits.write(u32::from(present), 1)?;
             if !present {
@@ -1065,7 +1227,7 @@ pub(crate) fn encode_runtime_delta(
     sequence: u32,
     timestamp_ms: u32,
 ) -> Result<Vec<u8>, &'static str> {
-    let allowed = (1 << 1) | (1 << 5) | (1 << 18) | (1 << 25) | (1 << 26);
+    let allowed = (1 << 1) | (1 << 5) | (1 << 6) | (1 << 18) | (1 << 25) | (1 << 26);
     if changes.is_empty() || changes.len() > 32 {
         return Err("invalid_ground_vehicle_delta");
     }
@@ -1074,6 +1236,7 @@ pub(crate) fn encode_runtime_delta(
     for &(index, mask) in changes {
         if mask == 0
             || mask & !allowed != 0
+            || (mask & (1 << 6) != 0 && catalog.turret_policy(index).is_none())
             || (mask & (1 << 1) != 0
                 && !catalog
                     .driver_seats
@@ -1112,6 +1275,7 @@ pub(crate) fn encode_runtime_delta(
             masks[&vehicle.index],
             SERVER_OWNER,
             Default::default(),
+            None,
         )
     })
 }

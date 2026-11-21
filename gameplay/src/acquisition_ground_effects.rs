@@ -175,6 +175,11 @@ impl<W: Write> Engine<W> {
                 Effect::StateChanged(state) => {
                     let mask = output.changes.entry(key.index).or_default();
                     *mask |= 1 << 5;
+                    if matches!(state, 3 | 4 | 5 | 7)
+                        && self.ground_turret_policy(key.index).is_some()
+                    {
+                        *mask |= 1 << 6;
+                    }
                     if matches!(state, 4 | 5 | 7) && self.ground_driver_seat(key.index).is_some() {
                         *mask |= 1 << 1;
                     }
