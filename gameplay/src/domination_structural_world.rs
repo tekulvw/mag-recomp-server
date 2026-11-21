@@ -31,7 +31,9 @@ pub(crate) use hospital_rocket_ground_damage::{GroundRocketCandidate, GroundRock
 
 #[path = "hospital_rocket_helo_damage.rs"]
 pub(crate) mod hospital_rocket_helo_damage;
-pub(crate) use hospital_rocket_helo_damage::{HeloRocketCandidate, HeloRocketDose};
+pub(crate) use hospital_rocket_helo_damage::{
+    HeloBlastCandidate as HeloRocketCandidate, HeloVehicleDose as HeloRocketDose,
+};
 
 const CHARACTERS_PER_UPDATE: u16 = 16;
 const CHARACTER_FAMILY_CAPACITY: u16 = 256;

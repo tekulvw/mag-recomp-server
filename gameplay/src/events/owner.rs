@@ -470,6 +470,24 @@ fn plan_grenade_blasts<W: Write>(
     }
     let ground_damage_configured = ctx.engine.ground_damage_policy().is_some();
     let source_ground_frag = ctx.engine.ground_frag_areas().is_some();
+    let source_helo_frag = ctx
+        .engine
+        .domination_gameplay
+        .as_ref()
+        .is_some_and(|world| world.has_helo_frag_damage_areas());
+    let typed_helo = (admitted_owner_blast && detonated && source_helo_frag).then(|| {
+        // Helo rays must see the same accepted pre-damage Ground motion
+        // used by the Character and Ground blast candidates.
+        ctx.engine.prepare_domination_source_helo_frags(
+            active,
+            &plan.audit.projectile_terminals,
+            crate::dynamic_collision_runtime::OwnerCollisionView {
+                active_position: plan.session.client_position.map(|(position, _)| position),
+                ground: plan.ground_runtime.as_ref(),
+            },
+            ctx.now,
+        )
+    });
     if admitted_owner_blast && detonated && source_ground_frag {
         let result = plan
             .ground_runtime
@@ -502,39 +520,57 @@ fn plan_grenade_blasts<W: Write>(
         }
     } else if admitted_owner_blast && detonated && ground_damage_configured {
         let motion_staged = plan.ground_runtime.is_some();
-        let mut candidate = plan
-            .ground_runtime
-            .take()
+        let baseline = if source_helo_frag {
+            plan.ground_runtime.clone()
+        } else {
+            plan.ground_runtime.take()
+        };
+        let result = baseline
             .or_else(|| ctx.engine.ground_runtime.clone())
-            .ok_or("ground_vehicle_runtime_required")?;
-        let (packet, audit) = ctx.engine.stage_ground_grenade_damage(
-            &mut candidate,
-            active,
-            &plan.audit.projectile_terminals,
-            ctx.now,
-        )?;
-        if motion_staged || packet.is_some() {
-            plan.ground_runtime = Some(candidate);
+            .ok_or("ground_vehicle_runtime_required")
+            .and_then(|mut candidate| {
+                let (packet, audit) = ctx.engine.stage_ground_grenade_damage(
+                    &mut candidate,
+                    active,
+                    &plan.audit.projectile_terminals,
+                    ctx.now,
+                )?;
+                Ok((candidate, packet, audit))
+            });
+        match result {
+            Ok((candidate, packet, audit)) => {
+                if motion_staged || packet.is_some() {
+                    plan.ground_runtime = Some(candidate);
+                }
+                plan.ground_damage_relay = packet;
+                plan.audit.ground_grenade_checks = audit;
+            }
+            Err(error) if source_helo_frag => {
+                plan.gameplay_denial.get_or_insert(error);
+                plan.audit
+                    .ground_grenade_checks
+                    .push(json!({"error":error}));
+            }
+            Err(error) => return Err(error),
         }
-        plan.ground_damage_relay = packet;
-        plan.audit.ground_grenade_checks = audit;
     }
-    if admitted_owner_blast && detonated && ground_damage_configured {
-        match ctx.engine.prepare_domination_helo_grenades(
-            active,
-            &plan.audit.projectile_terminals,
-            ctx.now,
-        ) {
+    if admitted_owner_blast && detonated && (ground_damage_configured || source_helo_frag) {
+        let helo = typed_helo.unwrap_or_else(|| {
+            ctx.engine.prepare_domination_helo_grenades(
+                active,
+                &plan.audit.projectile_terminals,
+                ctx.now,
+            )
+        });
+        match helo {
             Ok(Some(helo)) => {
                 plan.helo_runtime = Some(helo.fleet);
                 plan.helo_damage_relay.extend(helo.packets);
+                plan.helo_damage_requires_creation = source_helo_frag;
                 plan.audit.helo_grenade_checks = helo.audit;
             }
             Ok(None) => (),
-            // An unavailable Helo query can share the same scene failure as
-            // the opted-in Ground query. Keep the admitted terminal and other
-            // successfully prepared effects in that owner event.
-            Err(error) if source_ground_frag => {
+            Err(error) if source_ground_frag || source_helo_frag => {
                 plan.gameplay_denial.get_or_insert(error);
                 plan.audit.helo_grenade_checks.push(json!({"error":error}));
             }

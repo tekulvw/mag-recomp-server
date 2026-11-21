@@ -21,6 +21,17 @@ pub(crate) use statistics::{
 };
 mod update_actions;
 
+#[cfg(test)]
+#[path = "../helo_frag_publication_tests.rs"]
+mod helo_frag_publication_tests;
+
+fn source_helo_damage_recipient(actor: &Active, world: u32) -> bool {
+    actor.reservation.world == world
+        && actor.initial_objects.is_some()
+        && actor.ready_for_updates
+        && actor.helo_creation_sent
+}
+
 pub(super) struct EventInput {
     pub reservation_id: String,
     pub world_id: u32,
@@ -55,6 +66,7 @@ struct EventPlan {
     strategic_waves: Option<[Option<TeamWaveClock>; 2]>,
     squad_order_candidate: Option<crate::squad_order_engine::Candidate>,
     helo_damage_relay: Vec<Vec<u8>>,
+    helo_damage_requires_creation: bool,
     hospital_turret: Option<(u16, crate::hospital_turrets::Runtime)>,
     hospital_aim_packets: Vec<Vec<u8>>,
     hospital_late_join: Vec<Vec<u8>>,
@@ -657,9 +669,17 @@ impl<W: Write> Engine<W> {
                 loses_life || loses_vehicle
             })
             .count();
+        let helo_world = self.active.as_ref().map(|actor| actor.reservation.world);
         let baseline = |actor: &Active| {
             let grenade_relays = if actor.ready_for_updates {
-                usize::from(plan.ground_damage_relay.is_some()) + plan.helo_damage_relay.len()
+                let receives_helo = !plan.helo_damage_requires_creation
+                    || helo_world.is_some_and(|world| source_helo_damage_recipient(actor, world));
+                usize::from(plan.ground_damage_relay.is_some())
+                    + if receives_helo {
+                        plan.helo_damage_relay.len()
+                    } else {
+                        0
+                    }
             } else {
                 0
             };
@@ -1174,7 +1194,18 @@ impl<W: Write> Engine<W> {
             world.state.helo = Some(runtime);
         }
         for packet in plan.helo_damage_relay {
-            self.broadcast_bot_packet(packet);
+            if plan.helo_damage_requires_creation {
+                for actor in self
+                    .peers
+                    .values_mut()
+                    .chain(self.active.iter_mut())
+                    .filter(|actor| source_helo_damage_recipient(actor, event.world_id))
+                {
+                    actor.queue_shared(packet.clone());
+                }
+            } else {
+                self.broadcast_bot_packet(packet);
+            }
         }
         // Manual seat transitions already carry the same-frame vehicle
         // ownership correction. Incapacitation clears it with a shared delta.
