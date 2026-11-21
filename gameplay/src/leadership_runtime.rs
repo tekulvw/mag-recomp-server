@@ -501,6 +501,32 @@ impl<W: Write> Engine<W> {
             _ => members[0],
         }
     }
+    /// Resolve the leader identity published for this squad at the callback.
+    /// The first-member case follows the replacement's existing wire policy.
+    pub(crate) fn objective_counter_leader(&self, squad: u16) -> Option<&Active> {
+        let held = match self
+            .leadership
+            .as_ref()
+            .filter(|r| r.policy.native().is_some())
+        {
+            Some(runtime) => Some(runtime.squad_leaders.get(&squad)?),
+            None => None,
+        };
+        let player = held.map_or_else(
+            || self.squad_leader_index(squad, &self.squad_members(squad, None)),
+            |leader| leader.player,
+        );
+        self.active.iter().chain(self.peers.values()).find(|actor| {
+            actor.reservation.player == player
+                && actor.squad_catalog.squad_index() == squad
+                && actor.entered_game
+                && actor.claimed.is_some()
+                && held.is_none_or(|leader| {
+                    leader.world == actor.reservation.world
+                        && leader.reservation == actor.reservation.id
+                })
+        })
+    }
     /// Platoon field 8 publishes the elected character slot or the vacancy sentinel.
     pub(crate) fn platoon_leader_index(&self, platoon: u16) -> u16 {
         self.leadership
@@ -783,5 +809,67 @@ impl<W: Write> Engine<W> {
                 a.leadership = Some(p.cache);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod objective_counter_leader_tests {
+    use super::*;
+
+    fn held_fixture() -> (Engine<Vec<u8>>, u16) {
+        let mut engine = crate::extended_objective_reward_tests::fixture(3, 4);
+        engine.leadership = crate::active_ability_engine_tests::configured().leadership;
+        let actor = engine.active.as_ref().unwrap();
+        let squad = actor.squad_catalog.squad_index();
+        let leader = Leader::from_actor(actor);
+        engine
+            .leadership
+            .as_mut()
+            .unwrap()
+            .squad_leaders
+            .insert(squad, leader);
+        (engine, squad)
+    }
+
+    #[test]
+    fn held_leader_keeps_counter_credit_without_life_or_nomination_rechecks() {
+        let (mut engine, squad) = held_fixture();
+        let actor = engine.active.as_mut().unwrap();
+        actor.life = CharacterLife::AwaitingRespawn { generation: 1 };
+        actor.nominations = 0;
+        let actor = engine.active.as_ref().unwrap();
+        assert!(std::ptr::eq(
+            engine.objective_counter_leader(squad).unwrap(),
+            actor
+        ));
+        assert!(engine.objective_counter_leader(squad ^ 16).is_none());
+    }
+
+    #[test]
+    fn held_slot_does_not_transfer_counter_credit_to_a_replacement_reservation() {
+        let (mut engine, squad) = held_fixture();
+        engine.active.as_mut().unwrap().reservation.id = "synthetic-replacement".into();
+        assert!(engine.objective_counter_leader(squad).is_none());
+    }
+
+    #[test]
+    fn native_vacancy_does_not_use_the_first_member_wire_fallback() {
+        let (mut engine, squad) = held_fixture();
+        engine.leadership.as_mut().unwrap().squad_leaders.clear();
+        assert_ne!(engine.squad_members(squad, None)[0], u16::MAX);
+        assert!(engine.objective_counter_leader(squad).is_none());
+    }
+
+    #[test]
+    fn default_policy_uses_the_published_member_if_the_character_is_allocated() {
+        let mut engine = crate::extended_objective_reward_tests::fixture(3, 4);
+        let actor = engine.active.as_ref().unwrap();
+        let squad = actor.squad_catalog.squad_index();
+        assert!(std::ptr::eq(
+            engine.objective_counter_leader(squad).unwrap(),
+            actor
+        ));
+        engine.active.as_mut().unwrap().claimed = None;
+        assert!(engine.objective_counter_leader(squad).is_none());
     }
 }

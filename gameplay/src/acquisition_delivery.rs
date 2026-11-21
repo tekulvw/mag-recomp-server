@@ -25,7 +25,11 @@ struct Delivery {
 
 /// Frozen mounted pose with the exact pending request that may consume it.
 pub(crate) struct RewardWitness {
-    pub recipient: progression::RewardRecipient,
+    pub recipient: Option<progression::RewardRecipient>,
+    pub reservation_id: String,
+    pub world: u32,
+    pub player: u16,
+    pub match_id: String,
     pub position: Option<[f32; 3]>,
     pub target_version: u64,
     pub timestamp_ms: u32,

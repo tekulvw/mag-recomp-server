@@ -69,10 +69,7 @@ pub(super) fn interaction<W: Write>(
             reply_trigger_index = outcome.reply_trigger_index;
             changed = outcome.changed;
             if accepted {
-                world.attribute_operation(
-                    request.target_object_id as u16,
-                    progression::RewardRecipient::from_active(ctx.active),
-                );
+                world.attribute_operation(request.target_object_id as u16, ctx.active);
                 plan.objective_world = Some(world);
             }
         }

@@ -188,3 +188,31 @@ fn accepted_delivery_callback_uses_current_assignment_and_its_frozen_mounted_pos
         assert_eq!(e.pending_reward_batch()[0].frago, expected);
     }
 }
+
+#[test]
+fn delivery_tagged_completion_is_independent_of_account_and_xp_admission() {
+    let mut e = fixture();
+    e.acquisition_gameplay
+        .as_mut()
+        .unwrap()
+        .state
+        .squad_mut(0)
+        .unwrap()
+        .assignment
+        .tagged_object = 0x0c80_0065;
+    let a = e.active.as_mut().unwrap();
+    a.reservation.character.account_id = None;
+    a.reservation.character.character_id = None;
+    a.reservation.character.extended_objective_rewards_enabled = None;
+    tick(&mut e).unwrap();
+    assert_eq!(
+        e.active.as_ref().unwrap().reward_statistics.get(&41),
+        Some(&1)
+    );
+    assert!(e.pending_reward_batch().is_empty());
+    tick(&mut e).unwrap();
+    assert_eq!(
+        e.active.as_ref().unwrap().reward_statistics.get(&41),
+        Some(&1)
+    );
+}

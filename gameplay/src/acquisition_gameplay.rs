@@ -90,6 +90,12 @@ pub struct Gameplay {
 #[derive(Clone, Copy, Debug)]
 pub enum Effect<'a> {
     Blockers(Key),
+    CaptureCompleted {
+        object_index: u16,
+        actor_index: u16,
+        squads: &'a BTreeMap<u16, Squad>,
+        vehicle_capture: bool,
+    },
     ScoreDeduction {
         team: u8,
         /// Native signed-low16 operand. A positive value deducts points.
@@ -313,6 +319,18 @@ impl Gameplay {
         entry: &Entry,
         ground: &mut Runtime,
         rates: &mut Rates,
+        apply: impl FnMut(&mut Runtime, Effect<'_>) -> Result<(), &'static str>,
+    ) -> Result<Publication, &'static str> {
+        self.apply_entry_with_capture(catalog, entry, ground, rates, false, apply)
+    }
+
+    pub(crate) fn apply_entry_with_capture(
+        &mut self,
+        catalog: &Catalog,
+        entry: &Entry,
+        ground: &mut Runtime,
+        rates: &mut Rates,
+        qualified_capture: bool,
         mut apply: impl FnMut(&mut Runtime, Effect<'_>) -> Result<(), &'static str>,
     ) -> Result<Publication, &'static str> {
         if self.controller != catalog.fingerprint() {
@@ -362,6 +380,23 @@ impl Gameplay {
         } else {
             None
         };
+
+        if qualified_capture
+            && state == ObjectiveState::Completed
+            && previous != ObjectiveState::Completed
+            && objective.state.target == ObjectiveState::Completed as i32
+            && entry.actor_index != u16::MAX
+        {
+            apply(
+                ground,
+                Effect::CaptureCompleted {
+                    object_index: objective.replication.object_index,
+                    actor_index: entry.actor_index,
+                    squads: &self.squads,
+                    vehicle_capture: fsp_active.is_some_and(|(_, active)| active),
+                },
+            )?;
+        }
 
         if entry.state == EnteredState::Completed
             && objective.fsp.is_none()
@@ -536,5 +571,71 @@ fn character_object_id(actor_index: u16) -> u32 {
         u32::MAX
     } else {
         0x0380_0000 | u32::from(actor_index)
+    }
+}
+
+#[cfg(test)]
+mod capture_effect_tests {
+    use super::*;
+    use crate::spawn_progression::tests::dynamic_bodies::acquisition_gameplay_tests::capture_fixture;
+
+    #[test]
+    fn authored_escort_capture_effect_follows_fsp_and_precedes_controller_refresh() {
+        let engine = capture_fixture();
+        let runtime = engine.acquisition_gameplay.as_ref().unwrap();
+        let catalog = &runtime.setup.controller;
+        let entry = Entry {
+            objective_token: 100,
+            state: EnteredState::Completed,
+            actor_index: 2,
+            timestamp_ms: 100,
+        };
+
+        for qualified_capture in [false, true] {
+            let mut gameplay = runtime.state.clone();
+            gameplay
+                .request_state(entry.objective_token, ObjectiveState::Completed)
+                .unwrap();
+            let assignment = gameplay.squad(0).unwrap().assignment;
+            let mut ground = engine.ground_runtime.clone().unwrap();
+            let mut effects = Vec::new();
+            gameplay
+                .apply_entry_with_capture(
+                    catalog,
+                    &entry,
+                    &mut ground,
+                    &mut Rates::default(),
+                    qualified_capture,
+                    |ground, effect| {
+                        assert!(ground.get(4).unwrap().spawn_cycle_enabled);
+                        effects.push(match effect {
+                            Effect::Blockers(_) => "blockers",
+                            Effect::CaptureCompleted {
+                                object_index,
+                                actor_index,
+                                squads,
+                                vehicle_capture,
+                            } => {
+                                assert_eq!((object_index, actor_index), (100, 2));
+                                assert_eq!(squads[&0].assignment, assignment);
+                                assert!(vehicle_capture);
+                                "capture"
+                            }
+                            Effect::Volume { .. } => "script",
+                            unexpected => panic!("unexpected effect {unexpected:?}"),
+                        });
+                        Ok(())
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                effects,
+                if qualified_capture {
+                    vec!["blockers", "capture", "script"]
+                } else {
+                    vec!["blockers", "script"]
+                }
+            );
+        }
     }
 }

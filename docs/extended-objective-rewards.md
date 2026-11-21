@@ -27,3 +27,5 @@ No saved fields or schema version are added. Updated readers recognize the addit
 ## Qualification boundary
 
 Retail code and authored rules were verified privately; public fixtures are synthetic. New map-data formats are unnecessary: the existing reward classifier already carries subtype, and the progression extractor already preserves these authored amounts. All original archives, populated catalogs and raw evidence remain private. Source tests, offline startup and profile selection do not establish native live-match acceptance. Releases remain manual after human review.
+
+The follow-on [objective completion counters](objective-completion-counters.md) implement zero-XP tagged, capture and repair completion ownership, and correct the rebuilt-defuse callback to existing ChargeDefused XP.

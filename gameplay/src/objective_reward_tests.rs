@@ -418,7 +418,7 @@ fn acquisition_native_charge_uses_recorded_base_and_context_rewards_without_a_le
 }
 
 #[test]
-fn rebuilt_structure_defuse_returns_to_repaired_without_fresh_defuse_xp() {
+fn rebuilt_structure_defuse_returns_to_repaired_and_earns_defuse_xp() {
     let mut e = fixture();
     let mut catalog = e.objective_catalog.clone().unwrap();
     catalog.objects[0].initial_state = replication::ObjectiveState::Repaired as u8;
@@ -453,7 +453,7 @@ fn rebuilt_structure_defuse_returns_to_repaired_without_fresh_defuse_xp() {
             .iter()
             .map(|r| r.kind)
             .collect::<Vec<_>>(),
-        [Kind::ChargePlanted]
+        [Kind::ChargePlanted, Kind::ChargeDefused]
     );
 }
 

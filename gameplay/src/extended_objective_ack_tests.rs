@@ -207,3 +207,61 @@ fn previous_round_ack_updates_account_experience_without_touching_new_round_coun
     assert_eq!(actor.match_experience, 11);
     assert_eq!(actor.reward_statistics, new_round_stats);
 }
+
+#[test]
+fn gameplay_objective_counters_follow_same_character_rejoin_and_new_round() {
+    let mut engine = fixture(3, 4);
+    let actor = engine.active.as_ref().unwrap();
+    let player = actor.reservation.player;
+    let original = progression::RewardRecipient::from_active(actor)
+        .unwrap()
+        .event("synthetic-counter-owner".into(), RewardKind::EnemyKilled, 1);
+    let character = actor.reservation.character.clone();
+    let account = actor.reservation.account;
+    let mut native = engine.owned_acquisition_characters();
+    let candidate = engine
+        .prepare_acquisition_character_callback(&native, Duration::ZERO, |engine, _| {
+            let effects = engine.stage_objective_counters(
+                player,
+                120,
+                &[43, 58],
+                true,
+                &[(
+                    0,
+                    acquisition_objective_runtime::Assignment {
+                        primary_index: u16::MAX,
+                        tagged_object: 0x0c80_0078,
+                    },
+                )],
+            )?;
+            Ok((effects.audit, effects.messages))
+        })
+        .unwrap();
+    engine
+        .record_acquisition_character_effects(candidate, &mut native, 1)
+        .unwrap();
+    let expected = std::collections::BTreeMap::from([(41, 1), (43, 1), (58, 1)]);
+    let mut other = character.clone();
+    other.account_id = Some("synthetic-counter-peer".into());
+    other.character_id = Some(2);
+    reserve(&mut engine, PEER, 1, 2, other);
+    release(&mut engine, &original);
+    assert_eq!(
+        engine.round_participants[&(1, original.account_id.clone(), original.character_id)]
+            .statistics,
+        expected
+    );
+    assert!(actor_for(&engine, PEER).reward_statistics.is_empty());
+    reserve(&mut engine, RECONNECTED, 2, account, character.clone());
+    assert_eq!(actor_for(&engine, RECONNECTED).reward_statistics, expected);
+    assert!(engine.pending_reward_batch().is_empty());
+    let mut reconnect = original.clone();
+    reconnect.reservation_id = RECONNECTED.into();
+    release(&mut engine, &reconnect);
+    let mut peer = original;
+    peer.reservation_id = PEER.into();
+    release(&mut engine, &peer);
+    assert!(engine.round_participants.is_empty());
+    reserve(&mut engine, RECONNECTED, 2, account, character);
+    assert!(actor_for(&engine, RECONNECTED).reward_statistics.is_empty());
+}
