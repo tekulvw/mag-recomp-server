@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 
 pub(crate) const CAPABILITY: &str = "frago_kill_bonus_v1";
 pub(crate) const ACTION_CAPABILITY: &str = "frago_action_bonus_v1";
+pub(crate) const OBJECTIVE_CAPABILITY: &str = "frago_objective_bonus_v1";
 
 /// Accepted event poses precede queued damage, but install after recording.
 #[derive(Clone, Copy, Default)]
@@ -11,6 +12,7 @@ pub(crate) struct Frame<'a> {
     pub active_reservation: Option<&'a str>,
     pub position: Option<[f32; 3]>,
     pub ground: Option<&'a acquisition_ground_runtime::Runtime>,
+    pub helo: Option<&'a domination_helo::FleetRuntime>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -128,12 +130,9 @@ impl<W: Write> Engine<W> {
                 .or(self.ground_runtime.as_ref())?
                 .get(index)
                 .map(|v| (point(v.pose.position), rules.vehicle_range)),
-            0x0280_0000 => self
-                .domination_gameplay
-                .as_ref()?
-                .state
+            0x0280_0000 => frame
                 .helo
-                .as_ref()?
+                .or_else(|| self.domination_gameplay.as_ref()?.state.helo.as_ref())?
                 .carriers
                 .iter()
                 .find(|c| c.source.object_index == index)?
@@ -186,12 +185,63 @@ impl<W: Write> Engine<W> {
         }
         self.frago_contextual_reward(event, actor, context_position, frame)
     }
+    pub(crate) fn frago_assignment(
+        &self,
+        actor: &Active,
+    ) -> Option<acquisition_objective_runtime::Assignment> {
+        let squad = actor.squad_catalog.squad_index();
+        self.acquisition_gameplay
+            .as_ref()
+            .and_then(|r| r.state.squad(squad).map(|s| s.assignment))
+            .or_else(|| {
+                self.domination_gameplay
+                    .as_ref()
+                    .and_then(|r| r.squad_assignment(squad))
+            })
+    }
+    /// Native callbacks may own a detached world, including its current assignment.
+    pub(crate) fn frago_objective_reward(
+        &self,
+        event: progression::RewardEvent,
+        actor: &Active,
+        context_position: Option<[f32; 3]>,
+        assignment: Option<acquisition_objective_runtime::Assignment>,
+        frame: Frame<'_>,
+    ) -> progression::RewardEvent {
+        if !event.kind.is_frago_objective(event.units)
+            || !actor
+                .reservation
+                .character
+                .frago_objective_bonus_enabled
+                .unwrap_or(false)
+            || actor.wire_profile.application_id() != 20231
+        {
+            return event;
+        }
+        self.frago_with_assignment(event, actor, context_position, frame, assignment)
+    }
     fn frago_contextual_reward(
+        &self,
+        event: progression::RewardEvent,
+        actor: &Active,
+        context_position: Option<[f32; 3]>,
+        frame: Frame<'_>,
+    ) -> progression::RewardEvent {
+        self.frago_with_assignment(
+            event,
+            actor,
+            context_position,
+            frame,
+            self.frago_assignment(actor),
+        )
+    }
+    fn frago_with_assignment(
         &self,
         mut event: progression::RewardEvent,
         actor: &Active,
         context_position: Option<[f32; 3]>,
         frame: Frame<'_>,
+        assignment: Option<acquisition_objective_runtime::Assignment>,
     ) -> progression::RewardEvent {
         let Some(rules) = self
             .objective_catalog
@@ -200,16 +250,6 @@ impl<W: Write> Engine<W> {
         else {
             return event;
         };
-        let squad = actor.squad_catalog.squad_index();
-        let assignment = self
-            .acquisition_gameplay
-            .as_ref()
-            .and_then(|r| r.state.squad(squad).map(|s| s.assignment))
-            .or_else(|| {
-                self.domination_gameplay
-                    .as_ref()
-                    .and_then(|r| r.squad_assignment(squad))
-            });
         let Some(assignment) = assignment else {
             return event;
         };

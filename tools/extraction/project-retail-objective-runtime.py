@@ -116,7 +116,8 @@ def attach_trigger_volumes(graph, rules, volumes):
     return rules
 
 
-def reward_rules(graph):
+def reward_rules(graph, supported_classes=(
+        'ObjectiveSecureAndHoldProperties', 'ObjectiveDemolitionStructuralProperties')):
     """Keep authored reward classification on disk, including unlinked proxies.
 
     DemolitionStructural's reviewed native virtual type is 1. The Boolean
@@ -136,8 +137,7 @@ def reward_rules(graph):
     for row in graph['objectives']['instances']:
         definition = definitions[token(row['definition_token'])]
         class_name = definition['class_name']
-        if class_name not in (
-                'ObjectiveSecureAndHoldProperties', 'ObjectiveDemolitionStructuralProperties'):
+        if class_name not in supported_classes:
             continue
         prop = dict(definition['fields'])
         # Preserve any authored per-instance enum override, with the same

@@ -201,47 +201,7 @@ impl<W: Write> Engine<W> {
                 let Some(recipient) = progression::RewardRecipient::from_active(actor) else {
                     continue;
                 };
-                for (entry, (index, category)) in catalog
-                    .end_reward_objectives(actor.squad_catalog.squad_index())?
-                    .into_iter()
-                    .enumerate()
-                {
-                    let kind = match category {
-                        0 => progression::RewardKind::PrimaryObjectiveCompleted,
-                        2 | 3 => progression::RewardKind::SecondaryObjectiveCompleted,
-                        _ => continue,
-                    };
-                    let state = self
-                        .objective_world
-                        .as_ref()
-                        .and_then(|world| world.state(index));
-                    let eligible = state.is_some_and(|state| {
-                        if actor.team() == 0 {
-                            matches!(
-                                state,
-                                replication::ObjectiveState::Completed
-                                    | replication::ObjectiveState::Locked
-                            )
-                        } else {
-                            matches!(
-                                state,
-                                replication::ObjectiveState::Inactive
-                                    | replication::ObjectiveState::Deactivated
-                                    | replication::ObjectiveState::Repaired
-                            )
-                        }
-                    });
-                    if eligible {
-                        rewards.push(recipient.event(
-                            format!(
-                                "end-objective-{:016x}-{}-{index}-{entry}",
-                                self.round_number, actor.reservation.id
-                            ),
-                            kind,
-                            1,
-                        ));
-                    }
-                }
+                rewards.extend(self.end_objective_rewards(actor)?);
                 rewards.push(self.match_result_reward(actor, &recipient, end));
             }
         }
@@ -316,7 +276,11 @@ impl<W: Write> Engine<W> {
         } else {
             None
         };
-        self.check_reward_capacity(&rewards)?;
+        if notice.is_some() {
+            self.check_terminal_reward_capacity(&rewards)?;
+        } else {
+            self.check_reward_capacity(&rewards)?;
+        }
         let changed = self.round.scores != next.scores
             || !effects.is_empty()
             || notice.is_some()

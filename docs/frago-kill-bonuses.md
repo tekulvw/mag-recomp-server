@@ -104,5 +104,7 @@ Connected synthetic tests cover patient-only and healer-only range, accepted
 current movement, capability omission/false, exact identity replacement,
 record failure, repeat events, immutable ACK/stat3 publication and friendly-damage
 revival. Live in-match presentation and acceptance remain pending. Repair now uses its [separate work counter and recorded producer](repair-rewards.md);
-restored HP is not substituted for its units. Remaining objective-action
-contexts are separate gameplay work.
+restored HP is not substituted for its units. The six existing objective-action
+and endgame kinds now use [objective settlement and independent FRAGO negotiation](objective-frago-rewards.md).
+Structural destruction, delivery and qualified Precision latch attribution remain
+separate gameplay work.

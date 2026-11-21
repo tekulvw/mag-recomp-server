@@ -634,6 +634,23 @@ impl Runtime {
         {
             self.stage_fsp(entry, token, spawn, frame)?;
         }
+        let assignment = frame
+            .engine
+            .active
+            .iter()
+            .chain(frame.engine.peers.values())
+            .find(|a| Some(a.reservation.player) == entry.reward_actor)
+            .and_then(|a| frame.engine.frago_assignment(a));
+        frame
+            .audit
+            .extend(frame.engine.stage_native_objective_rewards(
+                entry,
+                assignment,
+                crate::frago::Frame {
+                    ground: Some(frame.ground),
+                    ..Default::default()
+                },
+            )?);
         if entry.requires_authored_explosion() {
             let request = self.setup.playback.explosion(token, entry)?;
             if request.properties.damage_value != 0. {

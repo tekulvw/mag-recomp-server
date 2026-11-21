@@ -225,8 +225,12 @@ namespace Server.Medius
             (kind is "teammate_healed" or RepairRewardKind ||
                 units == 1 && (kind == "enemy_killed" || kind != null && (ObjectiveAwardKeys.ContainsKey(kind) || OptionalActionAwardKeys.ContainsKey(kind) || IsFinalRewardKind(kind))));
         internal static bool IsFragoSupportKind(string kind) => kind is "teammate_healed" or "teammate_resuscitated" or RepairRewardKind;
+        internal static bool IsFragoObjectiveKind(string kind) =>
+            kind is "primary_objective_activated" or "primary_objective_secured" or
+                "primary_objective_completed" or "secondary_objective_completed" or "charge_planted" or "charge_defused";
         internal static bool ValidFragoContext(string kind, int units, bool? frago) =>
-            frago == null || frago == true && (kind == "enemy_killed" || IsFragoSupportKind(kind)) && ValidKindUnits(kind, units);
+            frago == null || frago == true &&
+            (kind == "enemy_killed" || IsFragoSupportKind(kind) || IsFragoObjectiveKind(kind)) && ValidKindUnits(kind, units);
         internal bool CanApplyFragoBonus(string kind) => kind switch {
             "teammate_resuscitated" => FragoActionBonusEnabled,
             RepairRewardKind => FragoBonusEnabled && RepairRewardsEnabled,

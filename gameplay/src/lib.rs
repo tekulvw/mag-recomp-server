@@ -118,6 +118,7 @@ mod frago;
 mod ground_repair;
 mod leadership_auto_heal;
 mod leadership_auto_repair;
+mod objective_rewards;
 mod repair_rewards;
 mod resources;
 mod world_tick;
@@ -221,6 +222,8 @@ pub struct Character {
     pub frago_bonus_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frago_action_bonus_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frago_objective_bonus_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repair_rewards_enabled: Option<bool>,
 }
@@ -1475,6 +1478,7 @@ impl<W: Write> Engine<W> {
                         loadout_refresh::CAPABILITY.into(),
                         frago::CAPABILITY.into(),
                         frago::ACTION_CAPABILITY.into(),
+                        frago::OBJECTIVE_CAPABILITY.into(),
                         repair_rewards::CAPABILITY.into(),
                     ];
                     if self.match_profiles.is_some() {
@@ -2127,3 +2131,6 @@ mod manual_ground_repair_tests;
 
 #[cfg(test)]
 mod manual_ground_repair_domination_tests;
+
+#[cfg(test)]
+mod objective_reward_tests;

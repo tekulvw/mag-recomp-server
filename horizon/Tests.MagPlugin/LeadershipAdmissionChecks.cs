@@ -82,11 +82,14 @@ internal static partial class LeadershipProgressionChecks
         }
     }
 
-    private static async Task WithAdmission(LocalCharacterStore store, Func<LocalDmeHost, FixtureBridge, MagMlsSession, Task> test, params string[] capabilities)
+    private static Task WithAdmission(LocalCharacterStore store, Func<LocalDmeHost, FixtureBridge, MagMlsSession, Task> test, params string[] capabilities) =>
+        WithAdmission(store, test, 20231, capabilities);
+
+    private static async Task WithAdmission(LocalCharacterStore store, Func<LocalDmeHost, FixtureBridge, MagMlsSession, Task> test, int applicationId, params string[] capabilities)
     {
         var settings = Server.Medius.Program.Settings;
         int previousApp = settings.MagApplicationId;
-        settings.MagApplicationId = 20231;
+        settings.MagApplicationId = applicationId;
         try
         {
             await using var bridge = new FixtureBridge(capabilities);
@@ -94,8 +97,8 @@ internal static partial class LeadershipProgressionChecks
             // Supply only an in-memory world and readiness. StartAsync would open production listeners.
             var hello = await bridge.Client.RequestHelloAsync(new { v = 2, request_id = "synthetic-hello", op = "hello" });
             typeof(LocalDmeHost).GetMethod("InitializeGameplayHello", HostInternals)!.Invoke(host, new object[] { hello });
-            var manager = new Server.Dme.MediusManager(20231) { LocalOnly = true };
-            typeof(LocalDmeHost).GetProperty(nameof(LocalDmeHost.World))!.SetValue(host, new Server.Dme.Models.World(manager, 20231, 8));
+            var manager = new Server.Dme.MediusManager(applicationId) { LocalOnly = true };
+            typeof(LocalDmeHost).GetProperty(nameof(LocalDmeHost.World))!.SetValue(host, new Server.Dme.Models.World(manager, applicationId, 8));
             typeof(LocalDmeHost).GetField("_ready", HostInternals)!.SetValue(host, true);
             typeof(LocalDmeHost).GetField("_worldStreamHealthy", HostInternals)!.SetValue(host, true);
 
@@ -104,13 +107,13 @@ internal static partial class LeadershipProgressionChecks
             var ticket = registry.IssueForAccount("alpha", 1, 1, now);
             var session = new MagMlsSession { CharacterStore = store };
             var connect = new RT_MSG_CLIENT_CONNECT_TCP {
-                AppId = 20231, TargetWorldId = 1, AccessToken = ticket.AccessToken, SessionKey = ticket.SessionKey
+                AppId = applicationId, TargetWorldId = 1, AccessToken = ticket.AccessToken, SessionKey = ticket.SessionKey
             };
             Check(session.TryBind(connect, registry, "synthetic-channel", now) && session.Accept(now) && session.CompleteTransport(now),
                 "Synthetic MLS transport setup failed");
             foreach (var message in new MagMessage[] { new MagHello(), new MagProtocolInfo { ProtocolVersion = settings.MagProtocolVersion } })
             {
-                byte[] payload = MagMessageCodec.SerializeForApplication(message, 20231);
+                byte[] payload = MagMessageCodec.SerializeForApplication(message, applicationId);
                 using var buffer = new MemoryStream();
                 using (var writer = new BinaryWriter(buffer, Encoding.UTF8, leaveOpen: true))
                 { writer.Write((ushort)payload.Length); writer.Write((byte)0); writer.Write(payload); }
@@ -125,8 +128,13 @@ internal static partial class LeadershipProgressionChecks
         finally { settings.MagApplicationId = previousApp; }
     }
 
-    private static Task<MagJoinGameResponse> BeginJoin(LocalDmeHost host, MagMlsSession session) =>
-        host.JoinAsync(session, new MagRetailJoinGameRequest { Preference = 1, Value = (uint)Server.Medius.Program.Settings.MagGameType });
+    private static Task<MagJoinGameResponse> BeginJoin(LocalDmeHost host, MagMlsSession session)
+    {
+        var request = session.ApplicationId == 20231 ? new MagRetailJoinGameRequest() : new MagJoinGameRequest();
+        request.Preference = 1;
+        request.Value = (uint)Server.Medius.Program.Settings.MagGameType;
+        return host.JoinAsync(session, request);
+    }
 
     private static Task InvokeHost(LocalDmeHost host, string method, object argument) =>
         (Task)typeof(LocalDmeHost).GetMethod(method, HostInternals)!.Invoke(host, new[] { argument })!;

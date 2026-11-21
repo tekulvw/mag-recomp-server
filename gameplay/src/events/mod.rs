@@ -78,6 +78,7 @@ impl EventPlan {
                 .client_position
                 .map(|(p, _)| crate::frago::point(p)),
             ground: self.ground_runtime.as_ref(),
+            ..Default::default()
         }
     }
     fn new(active: &Active) -> Self {

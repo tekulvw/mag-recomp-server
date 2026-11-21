@@ -7,6 +7,9 @@ use sha2::{Digest, Sha256};
 use std::{io::Write, time::Duration};
 pub const MAX_PENDING_REWARDS: usize = 256;
 pub const MAX_REWARD_BATCH: usize = 32;
+// One terminal callback per bounded human, with up to 128 authored objective
+// vector rows (repetitions included) and one result. Wire batches stay at 32.
+const MAX_TERMINAL_REWARDS: usize = crate::MAX_MATCH_PLAYERS * (128 + 1);
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProgressionSnapshot {
@@ -60,6 +63,18 @@ impl RewardKind {
             _ => false,
         }
     }
+    pub(crate) fn is_frago_objective(self, units: u32) -> bool {
+        units == 1
+            && matches!(
+                self,
+                Self::PrimaryObjectiveActivated
+                    | Self::PrimaryObjectiveSecured
+                    | Self::PrimaryObjectiveCompleted
+                    | Self::SecondaryObjectiveCompleted
+                    | Self::ChargePlanted
+                    | Self::ChargeDefused
+            )
+    }
     pub(crate) fn statistic(self) -> Option<u8> {
         match self {
             // Gameplay commits own kills, finishing moves (24) and revives (34).
@@ -73,6 +88,12 @@ impl RewardKind {
             Self::ChargeDefused => Some(62),
             _ => None,
         }
+    }
+    fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::PrimaryObjectiveCompleted | Self::SecondaryObjectiveCompleted
+        ) || self.is_match_result()
     }
     pub(crate) fn is_match_result(self) -> bool {
         matches!(
@@ -283,11 +304,31 @@ impl<W: Write> Engine<W> {
         &self,
         rewards: &[RewardEvent],
     ) -> Result<(), &'static str> {
+        self.check_reward_capacity_for(rewards, false)
+    }
+    pub(crate) fn check_terminal_reward_capacity(
+        &self,
+        rewards: &[RewardEvent],
+    ) -> Result<(), &'static str> {
+        if rewards
+            .iter()
+            .any(|r| !r.kind.is_terminal() || r.units != 1)
+        {
+            return Err("invalid_terminal_reward");
+        }
+        self.check_reward_capacity_for(rewards, true)
+    }
+    fn check_reward_capacity_for(
+        &self,
+        rewards: &[RewardEvent],
+        terminal: bool,
+    ) -> Result<(), &'static str> {
         for reward in rewards {
             if let Some(frago) = reward.frago
                 && (!frago
                     || !(reward.kind == RewardKind::EnemyKilled && reward.units == 1
-                        || reward.kind.is_frago_action(reward.units)))
+                        || reward.kind.is_frago_action(reward.units)
+                        || reward.kind.is_frago_objective(reward.units)))
             {
                 return Err("invalid_frago_reward_context");
             }
@@ -305,7 +346,18 @@ impl<W: Write> Engine<W> {
                     && !self.committed_rewards.contains_key(&r.reward_id)
             })
             .count();
-        if self.pending_rewards.len() + additional > MAX_PENDING_REWARDS {
+        let pending_terminal = self
+            .pending_rewards
+            .values()
+            .filter(|r| r.kind.is_terminal())
+            .count();
+        let pending_ordinary = self.pending_rewards.len() - pending_terminal;
+        let ordinary = pending_ordinary + if terminal { 0 } else { additional };
+        let terminal = pending_terminal + if terminal { additional } else { 0 };
+        if ordinary > MAX_PENDING_REWARDS
+            || terminal > MAX_TERMINAL_REWARDS
+            || self.pending_rewards.len() + additional > MAX_PENDING_REWARDS + MAX_TERMINAL_REWARDS
+        {
             Err("reward_outbox_full")
         } else {
             Ok(())

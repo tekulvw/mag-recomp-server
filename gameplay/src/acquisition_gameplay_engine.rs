@@ -588,6 +588,7 @@ impl<W: Write> Engine<W> {
             if abilities_enabled {
                 stage_objective_observations(engine, &mut runtime, &mut world, now, &mut changed, &mut entry_actors)?;
             }
+            audit.extend(engine.stage_acquisition_capture_rewards(world.take_reward_actions(), &runtime, &ground)?);
             if let Some(structural) = &mut runtime.structural {
                 let mut frame = crate::acquisition_structural::Frame {
                     engine,

@@ -82,6 +82,8 @@ struct NativeObjective {
     damage_health: f32,
     was_repaired: bool,
     autonomous_arming: bool,
+    reward_attacker: Option<u16>,
+    reward_defender: Option<u16>,
     pending: Option<NativePending>,
 }
 
@@ -105,6 +107,9 @@ pub struct NativeEntry {
     pub previous: ObjectiveState,
     pub delta: ObjectiveControlDelta,
     pub actor_generation: Option<u32>,
+    /// Qualified ordinary stat-callback actor, independent of the wire actor.
+    /// Precision, scripts and damage-trigger latch attribution remain unqualified.
+    pub reward_actor: Option<u16>,
     pub active_trigger_index: Option<u8>,
 }
 
@@ -162,6 +167,8 @@ impl ObjectiveWorld {
                             damage_health,
                             was_repaired: initial == ObjectiveState::Repaired,
                             autonomous_arming: false,
+                            reward_attacker: None,
+                            reward_defender: None,
                             pending: None,
                         }
                     });
@@ -273,6 +280,7 @@ impl ObjectiveWorld {
         let object = self.objects.get_mut(&index)?;
         let mut mode = object.native.take()?;
         let previous = object.state;
+        let scripted = matches!(mode.pending, Some(NativePending::Script(..)));
         let active_trigger_index = if matches!(mode.pending, Some(NativePending::Precision(_))) {
             None
         } else {
@@ -287,6 +295,15 @@ impl ObjectiveWorld {
             &mut self.reward_actions,
         );
         let class = mode.class;
+        let reward_actor = match class {
+            NativeClass::SecureHold if !scripted => Some(object.state.state_actor.actor_index),
+            NativeClass::Structural => match object.state.state_actor.state {
+                ObjectiveState::Activated | ObjectiveState::Completed => mode.reward_attacker,
+                ObjectiveState::Deactivated | ObjectiveState::Repaired => mode.reward_defender,
+                _ => None,
+            },
+            _ => None,
+        };
         object.native = Some(mode);
         if previous == object.state {
             return None;
@@ -298,6 +315,7 @@ impl ObjectiveWorld {
                 previous: previous.state_actor.state,
                 delta: object.state,
                 actor_generation: generation,
+                reward_actor,
                 active_trigger_index,
             });
         }
@@ -419,6 +437,7 @@ impl ObjectiveWorld {
                 previous,
                 delta: object.state,
                 actor_generation: source.map(|actor| actor.generation),
+                reward_actor: None,
                 active_trigger_index: None,
             };
             published = Some(entry.delta);
@@ -471,6 +490,7 @@ impl ObjectiveWorld {
             previous,
             delta: object.state,
             actor_generation: None,
+            reward_actor: None,
             active_trigger_index: None,
         }))
     }
@@ -516,6 +536,8 @@ impl ObjectiveWorld {
         // Retail synchronous SetTargetStateId replaces an unstarted async script request.
         mode.pending = None;
         mode.autonomous_arming = true;
+        mode.reward_attacker = None;
+        mode.reward_defender = None;
         object.fuse = None;
         object.operation = Some(Operation {
             started_at: now,
@@ -537,6 +559,7 @@ impl ObjectiveWorld {
             previous,
             delta,
             actor_generation: Some(actor.generation),
+            reward_actor: None,
             active_trigger_index: Some(trigger),
         });
         self.pristine = false;
@@ -1285,6 +1308,8 @@ fn tick_native(
     let previous = object.state.state_actor.state;
     match mode.pending.take() {
         Some(NativePending::Script(target, actor)) => {
+            mode.reward_attacker = None;
+            mode.reward_defender = None;
             set_native_state(
                 object,
                 target,
@@ -1303,6 +1328,10 @@ fn tick_native(
             return actor.and_then(|actor| u32::try_from(actor.generation).ok());
         }
         Some(NativePending::Precision(source)) => {
+            // The desired-Completed cascade bypasses intermediate activation
+            // stats. Its final actor requires side-resolved native latch data.
+            mode.reward_attacker = None;
+            mode.reward_defender = None;
             if let Some(next) = advance_precision(object, source, now) {
                 enter_structural(object, mode, previous);
                 if next != ObjectiveState::Completed {
@@ -1346,6 +1375,15 @@ fn tick_native(
             {
                 if let Some(operation) = object.operation.as_mut() {
                     operation.recipient = recipient;
+                }
+                match (kind, object.state.state_actor.state) {
+                    (ObjectiveInteractionKind::Activate, ObjectiveState::Activating) => {
+                        mode.reward_attacker = Some(actor.player)
+                    }
+                    (ObjectiveInteractionKind::Deactivate, ObjectiveState::Deactivating) => {
+                        mode.reward_defender = Some(actor.player)
+                    }
+                    _ => {}
                 }
                 enter_structural(object, mode, previous);
                 return source_generation(object, Some(actor.generation), fuse.as_ref());
@@ -1570,7 +1608,7 @@ fn tick_demolition(
         .is_some_and(|fuse| now >= fuse.deadline)
     {
         let fuse = object.fuse.take().unwrap();
-        if state == ObjectiveState::Activated {
+        if state == ObjectiveState::Activated && native_was_repaired.is_none() {
             emit_objective_reward(object, &fuse, RewardKind::PrimaryObjectiveSecured, rewards);
         }
         object.state.state_actor = ObjectiveStateActor {
@@ -1610,13 +1648,17 @@ fn tick_demolition(
             }
         } else if now >= operation.deadline {
             if state == ObjectiveState::Activating {
-                emit_objective_reward(object, &operation, RewardKind::ChargePlanted, rewards);
-                emit_objective_reward(
-                    object,
-                    &operation,
-                    RewardKind::PrimaryObjectiveActivated,
-                    rewards,
-                );
+                // Native class-entry consumers settle stats in callback order.
+                // The legacy queue is drained only by the legacy objective driver.
+                if native_was_repaired.is_none() {
+                    emit_objective_reward(object, &operation, RewardKind::ChargePlanted, rewards);
+                    emit_objective_reward(
+                        object,
+                        &operation,
+                        RewardKind::PrimaryObjectiveActivated,
+                        rewards,
+                    );
+                }
                 object.fuse = Some(Operation {
                     deadline: now.saturating_add(Duration::from_millis(rule.detonate_ms.into())),
                     ..operation
@@ -1624,13 +1666,15 @@ fn tick_demolition(
                 // Native fresh Activated entry starts its fuse at actual entry time.
                 armed_state(object, now);
             } else {
-                emit_objective_reward(object, &operation, RewardKind::ChargeDefused, rewards);
-                emit_objective_reward(
-                    object,
-                    &operation,
-                    RewardKind::PrimaryObjectiveActivated,
-                    rewards,
-                );
+                if native_was_repaired.is_none() {
+                    emit_objective_reward(object, &operation, RewardKind::ChargeDefused, rewards);
+                    emit_objective_reward(
+                        object,
+                        &operation,
+                        RewardKind::PrimaryObjectiveActivated,
+                        rewards,
+                    );
+                }
                 object.state.state_actor = ObjectiveStateActor {
                     state: if native_was_repaired == Some(true) {
                         ObjectiveState::Repaired
