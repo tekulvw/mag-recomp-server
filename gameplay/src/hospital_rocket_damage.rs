@@ -51,22 +51,61 @@ impl<W: Write> Engine<W> {
         blast: Blast,
         collision: BlastCollision<'_>,
     ) -> Result<Vec<(character::Target, character::Request)>, &'static str> {
-        let origin_f32 = origin.map(|component| component as f32);
-        if !origin_f32.into_iter().all(f32::is_finite)
-            || !blast.character_hp.is_finite()
-            || blast.character_hp <= 0.
-            || !blast.half_radius_m.is_finite()
-            || !blast.outer_radius_m.is_finite()
-            || blast.half_radius_m <= 0.
-            || blast.outer_radius_m <= blast.half_radius_m
-            || !blast.material_penetration.is_finite()
-            || blast.material_penetration < 0.
-        {
+        if !blast.character_hp.is_finite() || blast.character_hp <= 0. {
             return Err("invalid_hospital_rocket_character_blast");
         }
+        let shape = CharacterBlastShape {
+            origin,
+            half_radius_m: blast.half_radius_m,
+            outer_radius_m: blast.outer_radius_m,
+            material_penetration: blast.material_penetration,
+        };
         let snapshot = self.dynamic_collision_snapshot(collision.filter_rows[6])?;
-        if snapshot.context().0.world_id != source.world {
-            return Err("stale_hospital_rocket_character_source");
+        Ok(self
+            .collect_character_blast(
+                source.world,
+                shape,
+                collision,
+                &snapshot,
+                OnFootBlastPose::default(),
+            )?
+            .into_iter()
+            .map(|sample| {
+                (
+                    sample.target,
+                    character::Request::HospitalRocketExplosion {
+                        raw_hp: blast.character_hp * sample.scale,
+                        from_direction: sample.direction,
+                        attacker,
+                        projectile_id: source.projectile_id,
+                    },
+                )
+            })
+            .collect())
+    }
+
+    pub(crate) fn collect_character_blast(
+        &self,
+        world: u32,
+        shape: CharacterBlastShape,
+        collision: BlastCollision<'_>,
+        snapshot: &dynamic_collision::Snapshot,
+        accepted: OnFootBlastPose,
+    ) -> Result<Vec<CharacterBlastObservation>, &'static str> {
+        let origin = shape.origin;
+        let origin_f32 = origin.map(|component| component as f32);
+        if !origin_f32.into_iter().all(f32::is_finite)
+            || !shape.half_radius_m.is_finite()
+            || !shape.outer_radius_m.is_finite()
+            || shape.half_radius_m <= 0.
+            || shape.outer_radius_m <= shape.half_radius_m
+            || !shape.material_penetration.is_finite()
+            || shape.material_penetration < 0.
+        {
+            return Err("invalid_character_blast_shape");
+        }
+        if snapshot.context().0.world_id != world {
+            return Err("stale_character_blast_world");
         }
         let scene = self
             .collision_world
@@ -74,9 +113,9 @@ impl<W: Write> Engine<W> {
             .filter(|scene| {
                 scene.stats().triangles != 0 && scene.metadata().map_name == self.map_name()
             })
-            .ok_or("hospital_rocket_character_static_collision_required")?;
+            .ok_or("character_blast_static_collision_required")?;
         let sphere = Geometry::Sphere {
-            radius: f64::from(blast.outer_radius_m),
+            radius: f64::from(shape.outer_radius_m),
         };
         let mut overlap_budget = collision.limits.max_support_points;
         let mut static_budget = 1_000_000;
@@ -99,26 +138,24 @@ impl<W: Write> Engine<W> {
             {
                 continue;
             }
-            let Some((BlastTarget::Character(target), anchor)) =
-                self.domination_blast_target(body.target, source.world)?
+            let Some((target, anchor)) =
+                self.domination_character_blast_anchor(body.target, world, accepted)?
             else {
                 continue;
             };
             let (displacement, distance_squared) = separation(origin_f32, anchor)?;
-            let scale = armor::native_radial_scale(
-                distance_squared.sqrt(),
-                blast.half_radius_m,
-                blast.outer_radius_m,
-            )?;
+            let distance = distance_squared.sqrt();
+            let scale =
+                armor::native_radial_scale(distance, shape.half_radius_m, shape.outer_radius_m)?;
             if scale <= 0.
                 || !collision.clear_path(
                     scene,
-                    &snapshot,
+                    snapshot,
                     BlastRay {
                         start: origin,
                         end: anchor.map(f64::from),
                         excludes: [Some(body.target.key.id), None],
-                        penetration: blast.material_penetration,
+                        penetration: shape.material_penetration,
                         zero_penetration_strike: false,
                         filter_static: true,
                     },
@@ -128,15 +165,12 @@ impl<W: Write> Engine<W> {
                 continue;
             }
             admitted.insert(key);
-            effects.push((
+            effects.push(CharacterBlastObservation {
                 target,
-                character::Request::HospitalRocketExplosion {
-                    raw_hp: blast.character_hp * scale,
-                    from_direction: direction(displacement, distance_squared),
-                    attacker,
-                    projectile_id: source.projectile_id,
-                },
-            ));
+                distance,
+                scale,
+                direction: direction(displacement, distance_squared),
+            });
         }
         Ok(effects)
     }

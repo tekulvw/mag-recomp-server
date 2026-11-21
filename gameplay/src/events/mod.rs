@@ -224,6 +224,7 @@ struct EventAudit {
     projectile_terminals: Vec<projectile::ProjectileTerminal>,
     grenade_blast_checks: Vec<blast_visibility::GrenadeBlastCheck>,
     ground_grenade_checks: Vec<Value>,
+    native_grenade_character_checks: Vec<Value>,
     helo_grenade_checks: Vec<Value>,
     applied_damage: Option<Value>,
     falling_damage: Option<fall_damage::FallDamage>,
@@ -800,7 +801,11 @@ impl<W: Write> Engine<W> {
             && let Some(fields) = &report.character
         {
             let fields = active.owner_presentation(fields);
-            if fields.state.is_some() {
+            if fields.state.is_some()
+                && (!self.frag_character_blast
+                    || (matches!(event.transport, Transport::Udp)
+                        && matches!(event.direction, Direction::ClientToServer)))
+            {
                 active.owner_fields.state = fields.state;
                 active.revive_state_pending = false;
             }

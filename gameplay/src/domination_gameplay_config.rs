@@ -50,6 +50,8 @@ struct Core {
     hospital_turrets: Option<PathBuf>,
     hospital_rockets: Option<PathBuf>,
     hospital_rocket_ground: Option<PathBuf>,
+    #[serde(default)]
+    frag_character_blast: bool,
     projectile_contacts: Option<PathBuf>,
     ground_turrets: Option<PathBuf>,
     initial_filters: PathBuf,
@@ -822,6 +824,7 @@ impl Configuration {
                 hospital_hulks: Some(Arc::new(hospital_assets)),
                 hospital_turret_yaws: Arc::new(yaws),
                 hospital_rocket_ground,
+                frag_character_blast: core.frag_character_blast,
                 projectile_contacts,
                 helo,
                 helo_collision,
@@ -889,6 +892,19 @@ impl<W: Write> Engine<W> {
             .ok_or_else(|| io::Error::other("domination_gameplay_requires_ground_catalog"))?;
         let native_elf = objectives.source().source_image_sha256.clone();
         let world = config.build_for(objectives, spawns, bunkers, ground)?;
+        if world.state.frag_character_blast {
+            if self.dynamic_body_resources.is_none() {
+                return Err(io::Error::other(
+                    "frag_character_blast_requires_dynamic_bodies",
+                ));
+            }
+            validate_frag_character_inputs(
+                &self.item_catalog,
+                self.collision_world.as_ref(),
+                spawns.map_name(),
+            )
+            .map_err(io::Error::other)?;
+        }
         let hospital_source = config.hospital_turret_source()?;
         let hospital_rockets = config
             .hospital_rocket_source()?
@@ -964,9 +980,30 @@ impl<W: Write> Engine<W> {
         self.projectile_contacts = world.state.projectile_contacts.clone();
         self.hospital_rockets = hospital_rockets;
         self.hospital_rocket_ground = world.state.hospital_rocket_ground.clone();
+        self.frag_character_blast = world.state.frag_character_blast;
         self.domination_gameplay = Some(world);
         Ok(self)
     }
+}
+
+/// The source profile already owns the filter rows, material/terrain mapping
+/// and Sequence resources. Require the remaining explicit Character inputs
+/// before advertising or installing its opt-in.
+pub(crate) fn validate_frag_character_inputs(
+    items: &crate::item_catalog::ItemCatalog,
+    collision: Option<&crate::collision::CollisionWorld>,
+    map: &str,
+) -> Result<(), &'static str> {
+    collision
+        .filter(|world| world.metadata().map_name == map && world.stats().triangles != 0)
+        .ok_or("frag_character_blast_requires_static_world")?;
+    if items.application_id() != 20231 {
+        return Err("frag_character_blast_requires_retail_items");
+    }
+    items
+        .retail_combat()?
+        .validate_frag_character_blast()
+        .map_err(|_| "frag_character_blast_metadata_required")
 }
 
 fn json_file<T: serde::de::DeserializeOwned>(path: &Path, limit: usize) -> io::Result<T> {
@@ -1073,6 +1110,20 @@ mod tests {
             let parsed: Core = serde_json::from_value(value).unwrap();
             assert_eq!(parsed.validate_scope().is_ok(), valid);
         }
+    }
+
+    #[test]
+    fn frag_character_scope_is_explicit_and_independent_of_rockets() {
+        let base = core();
+        let legacy: Core = serde_json::from_value(base.clone()).unwrap();
+        assert!(!legacy.frag_character_blast);
+        let mut enabled = base;
+        enabled["frag_character_blast"] = true.into();
+        let parsed: Core = serde_json::from_value(enabled).unwrap();
+        assert!(parsed.frag_character_blast);
+        assert!(parsed.hospital_rockets.is_none());
+        assert!(parsed.projectile_contacts.is_none());
+        assert!(parsed.validate_scope().is_ok());
     }
 
     #[test]

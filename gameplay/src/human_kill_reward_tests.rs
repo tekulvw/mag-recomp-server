@@ -7,21 +7,26 @@ fn combat_items() -> Arc<item_catalog::ItemCatalog> {
     combat_items_with_grenade(false)
 }
 fn combat_items_with_grenade(grenade: bool) -> Arc<item_catalog::ItemCatalog> {
-    combat_fixture_items(grenade, 0.0, 0.0)
+    combat_fixture_items(grenade, 0.0, 0.0, None)
 }
 
 pub(crate) fn combat_items_for_ground_test(vehicle_hp: f32) -> Arc<item_catalog::ItemCatalog> {
-    combat_fixture_items(false, vehicle_hp, 0.0)
+    combat_fixture_items(false, vehicle_hp, 0.0, None)
 }
 
 pub(crate) fn grenade_items_for_ground_test(vehicle_hp: f32) -> Arc<item_catalog::ItemCatalog> {
-    combat_fixture_items(true, 0.0, vehicle_hp)
+    combat_fixture_items(true, 0.0, vehicle_hp, None)
+}
+
+pub(crate) fn grenade_items_with_cover() -> Arc<item_catalog::ItemCatalog> {
+    combat_fixture_items(true, 0.0, 0.0, Some(1.25))
 }
 
 fn combat_fixture_items(
     grenade: bool,
     vehicle_hp: f32,
     grenade_vehicle_hp: f32,
+    material_penetration: Option<f64>,
 ) -> Arc<item_catalog::ItemCatalog> {
     let items = item_catalog::ItemCatalog::from_value_for_application(json!({
         "schema_version":2,"application_id":20231,
@@ -77,6 +82,9 @@ fn combat_fixture_items(
                 "linearDamping":0.0,"linearDampingOnGround":0.0,"angularDamping":0.0,"angularDampingOnGround":0.0,
                 "fBounceDampingDefault":0.0,"fBounceDampingCharacter":0.0,"m_fLoftAngle":0.0,
                 "random_rotation_range":0.0,"propulsion_strategy":"kWepPropulsionStrategyThrown"}});
+        if let Some(penetration) = material_penetration {
+            metadata["grenades"]["4"]["material_penetration"] = json!(penetration);
+        }
     }
     let combat = retail_combat::RetailCombatCatalog::from_json(&metadata.to_string()).unwrap();
     Arc::new(items.with_retail_armory(armory).with_retail_combat(combat))

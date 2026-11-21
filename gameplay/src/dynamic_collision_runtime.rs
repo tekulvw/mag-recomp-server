@@ -6,6 +6,13 @@ use crate::{
     *,
 };
 use serde::Deserialize;
+
+#[derive(Clone, Copy)]
+pub(crate) struct OwnerCollisionView<'a> {
+    pub(crate) active_position: Option<replication::CharacterPosition>,
+    pub(crate) ground: Option<&'a acquisition_ground_runtime::Runtime>,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VehicleBinding {
@@ -231,6 +238,25 @@ impl<W: Write> Engine<W> {
         current_filter_row6: u32,
         excluded_character: Option<u16>,
     ) -> Result<Snapshot, &'static str> {
+        self.build_dynamic_collision_snapshot(current_filter_row6, excluded_character, None)
+    }
+
+    /// The current owner event may already have admitted movement into its
+    /// plan. This snapshot is local to that plan and has no live origin binding.
+    pub(crate) fn owner_collision_snapshot(
+        &self,
+        current_filter_row6: u32,
+        view: OwnerCollisionView<'_>,
+    ) -> Result<Snapshot, &'static str> {
+        self.build_dynamic_collision_snapshot(current_filter_row6, None, Some(view))
+    }
+
+    fn build_dynamic_collision_snapshot(
+        &self,
+        current_filter_row6: u32,
+        excluded_character: Option<u16>,
+        owner: Option<OwnerCollisionView<'_>>,
+    ) -> Result<Snapshot, &'static str> {
         if self.failed {
             return Err("engine_unavailable");
         }
@@ -251,6 +277,9 @@ impl<W: Write> Engine<W> {
             world_id: first.reservation.world,
             incarnation: self.round_number.max(1),
         };
+        let ground = owner
+            .and_then(|view| view.ground)
+            .or(self.ground_runtime.as_ref());
         let mut roster = Vec::new();
         let mut rows = Vec::new();
         let mut character = |id: u16,
@@ -276,7 +305,12 @@ impl<W: Write> Engine<W> {
             )?);
             Ok(())
         };
-        for actor in self.active.iter().chain(self.peers.values()) {
+        let actors = self
+            .active
+            .iter()
+            .map(|actor| (actor, true))
+            .chain(self.peers.values().map(|actor| (actor, false)));
+        for (actor, active) in actors {
             if actor.reservation.world != world.world_id {
                 return Err("dynamic_body_world_mismatch");
             }
@@ -290,15 +324,22 @@ impl<W: Write> Engine<W> {
                 CharacterLife::AwaitingRespawn { generation } => (generation, true),
             };
             let position = if let Some(seat) = actor.ground_seat {
-                point(self.ground_seat_position(seat)?)
+                point(self.ground_seat_position_in(
+                    seat,
+                    ground.ok_or("dynamic_body_mount_vehicle_unavailable")?,
+                )?)
             } else if let (Some(index), Some(seat)) = (actor.mounted_bunker, actor.mounted_seat) {
                 point(self.domination_bunker_seat_position(index, seat)?)
             } else if actor.helo_seat.is_some() {
                 point(Self::domination_helo_passenger_position(actor)?)
             } else if actor.mounted_seat.is_some() {
                 return Err("dynamic_body_mount_pose_unqualified");
-            } else if let Some(sample) = actor.tracking.sample {
-                point(sample.position)
+            } else if let Some(position) = owner
+                .filter(|_| active)
+                .and_then(|view| view.active_position)
+                .or(actor.tracking.sample.map(|sample| sample.position))
+            {
+                point(position)
             } else if matches!(actor.life, CharacterLife::AwaitingFirstSpawn) {
                 [0.; 3]
             } else {
@@ -351,14 +392,13 @@ impl<W: Write> Engine<W> {
             )?;
         }
         if let Some(vehicles) = &self.ground_vehicles {
+            let ground = ground.ok_or("dynamic_ground_authority_unavailable")?;
             for v in vehicles.creations() {
-                let runtime = self
-                    .ground_runtime
-                    .as_ref()
-                    .and_then(|r| r.get(v.index))
+                let runtime = ground
+                    .get(v.index)
                     .ok_or("dynamic_ground_authority_unavailable")?;
                 let current = self
-                    .current_ground_vehicle(v.index)
+                    .current_ground_vehicle_in(v.index, ground)
                     .ok_or("dynamic_ground_authority_unavailable")?;
                 let target = Target {
                     key: TargetKey {
@@ -385,8 +425,12 @@ impl<W: Write> Engine<W> {
         }
         // There is no accepted mine creation/registry in this Engine. These empty
         // owned mine rows do not claim support for native mines or unknown input.
-        Snapshot::capture(world, self.sequence, &roster, rows, current_filter_row6)
-            .map(|v| v.bind_engine(&resources.origin))
+        let snapshot = Snapshot::capture(world, self.sequence, &roster, rows, current_filter_row6)?;
+        Ok(if owner.is_some() {
+            snapshot
+        } else {
+            snapshot.bind_engine(&resources.origin)
+        })
     }
     /// The callback owner must check this while serializing actual authority,
     /// before record/install. The caller must also recheck external current filter

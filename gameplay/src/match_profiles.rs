@@ -535,6 +535,17 @@ impl Registry {
             items.retail_combat()?;
         }
         for loaded in self.profiles.values() {
+            if loaded
+                .domination
+                .as_ref()
+                .is_some_and(|world| world.state.frag_character_blast)
+            {
+                crate::domination_gameplay_config::validate_frag_character_inputs(
+                    items,
+                    loaded.collision.as_ref(),
+                    loaded.spawns.map_name(),
+                )?;
+            }
             objective_catalog::validate_configuration(
                 loaded.objectives.as_ref(),
                 loaded.spawns.map_name(),
@@ -608,6 +619,15 @@ impl Registry {
         self.profiles
             .values()
             .any(|profile| profile.hospital_rockets.is_some())
+    }
+
+    pub fn has_frag_character_blast(&self) -> bool {
+        self.profiles.values().any(|profile| {
+            profile
+                .domination
+                .as_ref()
+                .is_some_and(|world| world.state.frag_character_blast)
+        })
     }
 
     pub fn has_hospital_rocket_ground(&self) -> bool {
@@ -738,6 +758,7 @@ impl<W: Write> Engine<W> {
             self.active_abilities = None;
             self.hospital_rockets = None;
             self.hospital_rocket_ground = None;
+            self.frag_character_blast = false;
             self.projectile_contacts = None;
             if let Some(leadership) = &mut self.leadership {
                 leadership.clear_held_roles();
@@ -861,6 +882,10 @@ impl<W: Write> Engine<W> {
             .domination
             .as_ref()
             .and_then(|world| world.state.hospital_rocket_ground.clone());
+        self.frag_character_blast = loaded
+            .domination
+            .as_ref()
+            .is_some_and(|world| world.state.frag_character_blast);
         self.domination_gameplay = loaded.domination;
         self.character_damage_rules = loaded.damage;
         self.development_dummy_position = self
