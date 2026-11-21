@@ -1,0 +1,247 @@
+//! Source bindings for the current Domination projectile mesh overlays.
+use serde::Deserialize;
+use std::collections::BTreeSet;
+
+use crate::{
+    domination_structural_world::{
+        HeloCollisionAssets, HospitalHulkAssets, SequenceCollisionAssets,
+    },
+    projectile_contact::Coverage,
+};
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ContactBindings {
+    schema: String,
+    map_name: String,
+    retail_elf_sha256: String,
+    proof_sha256: String,
+    static_world_sha256: String,
+    dynamic_catalog_sha256: String,
+    ground_phantom_roots: BTreeSet<String>,
+    static_coverage_policy: StaticCoveragePolicy,
+    sequence: Vec<SequenceRow>,
+    hospital: Vec<BodyRow>,
+    helo: Vec<BodyRow>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StaticCoveragePolicy {
+    RepresentedReferencePose,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SequenceBinding {
+    pub(crate) source_sha256: String,
+    pub(crate) neutral_sha256: String,
+    pub(crate) collision_tag: u8,
+    pub(crate) part_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BodyBinding {
+    pub(crate) asset_sha256: String,
+    pub(crate) faction: u8,
+    pub(crate) packfile_sha256: String,
+    pub(crate) part_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SequenceRow {
+    binding: SequenceBinding,
+    contact: Properties,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BodyRow {
+    binding: BodyBinding,
+    contact: Properties,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Properties {
+    pub(crate) root_filter_info: u8,
+    pub(crate) child_filter_info: u8,
+    pub(crate) convex_radius: f64,
+}
+
+fn digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|v| v.is_ascii_digit() || (b'a'..=b'f').contains(&v))
+}
+
+fn part_ids_valid(ids: &[String]) -> bool {
+    !ids.is_empty()
+        && ids.iter().all(|id| !id.trim().is_empty())
+        && ids.windows(2).all(|pair| pair[0] < pair[1])
+}
+
+impl Properties {
+    fn valid(self, root: u8) -> bool {
+        self.root_filter_info == root && self.child_filter_info == 0 && self.convex_radius == 0.
+    }
+}
+
+impl ContactBindings {
+    pub(crate) fn from_json(raw: &[u8]) -> Result<Self, &'static str> {
+        if raw.len() > 512 * 1024 {
+            return Err("projectile_contact_bindings_limit");
+        }
+        let mut parsed: Self =
+            serde_json::from_slice(raw).map_err(|_| "invalid_projectile_contact_bindings")?;
+        parsed
+            .sequence
+            .sort_by(|left, right| left.binding.cmp(&right.binding));
+        for rows in [&mut parsed.hospital, &mut parsed.helo] {
+            rows.sort_by(|left, right| left.binding.cmp(&right.binding));
+        }
+        if parsed.schema != "mag_domination_projectile_contacts_v1"
+            || parsed.map_name.is_empty()
+            || !digest(&parsed.retail_elf_sha256)
+            || !digest(&parsed.proof_sha256)
+            || !digest(&parsed.static_world_sha256)
+            || !digest(&parsed.dynamic_catalog_sha256)
+            || !parsed
+                .ground_phantom_roots
+                .iter()
+                .map(String::as_str)
+                .eq(["wheel"])
+            || parsed.sequence.is_empty()
+            || parsed
+                .sequence
+                .windows(2)
+                .any(|pair| pair[0].binding == pair[1].binding)
+            || parsed.sequence.iter().any(|row| {
+                let binding = &row.binding;
+                !digest(&binding.source_sha256)
+                    || !digest(&binding.neutral_sha256)
+                    || !matches!(binding.collision_tag, 9 | 11 | 29)
+                    || !part_ids_valid(&binding.part_ids)
+                    || !row.contact.valid(binding.collision_tag)
+            })
+            || [&parsed.hospital, &parsed.helo].into_iter().any(|rows| {
+                !rows.is_empty()
+                    && (rows.len() != 3
+                        || rows
+                            .iter()
+                            .map(|row| row.binding.faction)
+                            .collect::<BTreeSet<_>>()
+                            .len()
+                            != 3
+                        || rows.iter().any(|row| {
+                            row.binding.faction > 2
+                                || !digest(&row.binding.asset_sha256)
+                                || !digest(&row.binding.packfile_sha256)
+                                || !part_ids_valid(&row.binding.part_ids)
+                                || !row.contact.valid(22)
+                        }))
+            })
+            || parsed.hospital.is_empty()
+        {
+            return Err("invalid_projectile_contact_bindings");
+        }
+        Ok(parsed)
+    }
+
+    pub(crate) fn validate(
+        &self,
+        map: &str,
+        retail_elf_sha256: &str,
+        sequence: &SequenceCollisionAssets,
+        hospital: &HospitalHulkAssets,
+        helo: Option<&HeloCollisionAssets>,
+    ) -> Result<(), &'static str> {
+        if self.map_name != map
+            || self.retail_elf_sha256 != retail_elf_sha256
+            || !sequence
+                .projectile_bindings()?
+                .iter()
+                .eq(self.sequence.iter().map(|row| &row.binding))
+            || !hospital
+                .projectile_bindings()
+                .iter()
+                .eq(self.hospital.iter().map(|row| &row.binding))
+            || !helo
+                .into_iter()
+                .flat_map(HeloCollisionAssets::projectile_bindings)
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .eq(self.helo.iter().map(|row| &row.binding))
+        {
+            return Err("projectile_contact_binding_mismatch");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_static(
+        &self,
+        world: &crate::collision::CollisionWorld,
+    ) -> Result<(), &'static str> {
+        if self.static_world_sha256 != world.source_sha256() {
+            return Err("projectile_static_reference_source_mismatch");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_dynamic(
+        &self,
+        catalog: &crate::dynamic_collision::Catalog,
+    ) -> Result<(), &'static str> {
+        if self.dynamic_catalog_sha256 != catalog.fingerprint() {
+            return Err("projectile_dynamic_catalog_source_mismatch");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn ground_phantom(&self, root: &str) -> bool {
+        self.ground_phantom_roots.contains(root)
+    }
+
+    pub(crate) fn coverage(&self) -> Coverage {
+        match self.static_coverage_policy {
+            StaticCoveragePolicy::RepresentedReferencePose => Coverage::ReferencePose,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) enum SurfaceBinding {
+    Sequence(SequenceBinding),
+    Hospital(BodyBinding),
+    Helo(BodyBinding),
+    HospitalHulk { layer: u8 },
+}
+
+impl SurfaceBinding {
+    pub(crate) fn layers(
+        &self,
+        bindings: &ContactBindings,
+    ) -> Result<(u8, Option<Properties>), &'static str> {
+        let properties = match self {
+            Self::Sequence(key) => bindings
+                .sequence
+                .binary_search_by(|row| row.binding.cmp(key))
+                .ok()
+                .map(|index| bindings.sequence[index].contact),
+            Self::Hospital(key) => find_body(&bindings.hospital, key),
+            Self::Helo(key) => find_body(&bindings.helo, key),
+            Self::HospitalHulk { layer } => return Ok((*layer, None)),
+        }
+        .ok_or("projectile_overlay_binding_unavailable")?;
+        Ok((properties.root_filter_info, Some(properties)))
+    }
+}
+
+fn find_body(rows: &[BodyRow], key: &BodyBinding) -> Option<Properties> {
+    rows.binary_search_by(|row| row.binding.cmp(key))
+        .ok()
+        .map(|index| rows[index].contact)
+}

@@ -472,7 +472,7 @@ fn ammo_crc32(name: &str) -> Option<u32> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{blast_rules::CharacterBlastRules, retail_combat::RetailCombatCatalog};
     use serde_json::{Value, json};
@@ -614,6 +614,10 @@ mod tests {
             self.rules["source"]["hospital_turrets_sha256"] =
                 json!(format!("{:x}", Sha256::digest(encode(&self.hospital))));
         }
+    }
+
+    pub(crate) fn synthetic_catalog() -> Catalog {
+        Fixture::new().load().unwrap()
     }
 
     fn encode(value: &Value) -> Vec<u8> {

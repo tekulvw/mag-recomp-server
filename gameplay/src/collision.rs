@@ -397,6 +397,29 @@ impl CollisionWorld {
             .collect())
     }
 
+    pub(crate) fn instance_ids(&self) -> &[String] {
+        &self.instance_ids
+    }
+
+    pub(crate) fn local_projectile_triangles_in_box(
+        &self,
+        min: Vec3,
+        max: Vec3,
+        budget: &mut usize,
+    ) -> Result<impl Iterator<Item = (&str, usize, [Vec3; 3])>, &'static str> {
+        Ok(self
+            .triangle_indices_in_box(min, max, budget)?
+            .into_iter()
+            .map(|index| {
+                let triangle = &self.triangles[index];
+                (
+                    self.instance_ids[triangle.instance].as_str(),
+                    triangle.triangle_index,
+                    triangle.vertices,
+                )
+            }))
+    }
+
     fn triangle_indices_in_box(
         &self,
         min: Vec3,

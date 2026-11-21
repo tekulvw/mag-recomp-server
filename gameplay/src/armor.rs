@@ -244,22 +244,11 @@ impl GrenadeProfile {
     }
 
     pub(crate) fn radius_scale(self, distance: f32) -> Result<f32, &'static str> {
-        if !distance.is_finite() || distance < 0.0 {
-            return Err("invalid_explosion_distance");
-        }
-        let scale = if distance <= self.parameters.half_radius {
-            // Native lerp(1,.5,d/5) uses vmaddfp after fdivs.
-            (-0.5_f32).mul_add(distance / self.parameters.half_radius, 1.0)
-        } else if distance < self.parameters.full_radius {
-            (-0.5_f32).mul_add(
-                (distance - self.parameters.half_radius)
-                    / (self.parameters.full_radius - self.parameters.half_radius),
-                0.5,
-            )
-        } else {
-            0.0
-        };
-        Ok(scale)
+        native_radial_scale(
+            distance,
+            self.parameters.half_radius,
+            self.parameters.full_radius,
+        )
     }
 
     pub fn native_damage_type(self) -> u8 {
@@ -270,12 +259,10 @@ impl GrenadeProfile {
         self,
         distance: f32,
     ) -> Result<RawCharacterDamage, &'static str> {
-        Ok(RawCharacterDamage {
-            amount_hp: self.raw_amount(distance)?,
-            armor_rating_redux: self.character_blast_rules.armor_rating_reduction,
-            armor_prevention_redux: self.character_blast_rules.armor_prevention_reduction,
-            hit_location: self.character_blast_rules.hit_location,
-        })
+        Ok(native_character_blast_damage(
+            self.raw_amount(distance)?,
+            self.character_blast_rules,
+        ))
     }
     /// Low-level authored profile for comparisons; the live blast resolver uses
     /// native_character_damage, never these authored penetration parameters.
@@ -306,6 +293,40 @@ impl GrenadeProfile {
             },
             crate::damage::DamageKind::Explosive,
         )
+    }
+}
+
+/// Falloff shared by original grenade and rocket debris callbacks.
+pub(crate) fn native_radial_scale(
+    distance: f32,
+    half_radius: f32,
+    outer_radius: f32,
+) -> Result<f32, &'static str> {
+    if !distance.is_finite() || distance < 0.0 {
+        return Err("invalid_explosion_distance");
+    }
+    let scale = if distance <= half_radius {
+        // Native lerp(1,.5,d/5) uses vmaddfp after fdivs.
+        (-0.5_f32).mul_add(distance / half_radius, 1.0)
+    } else if distance < outer_radius {
+        (-0.5_f32).mul_add((distance - half_radius) / (outer_radius - half_radius), 0.5)
+    } else {
+        0.0
+    };
+    Ok(scale)
+}
+
+/// Apply the native Character callback's armor and location fields to a
+/// qualified dose from its own ammo-specific Character channel.
+pub(crate) fn native_character_blast_damage(
+    amount_hp: f32,
+    rules: crate::blast_rules::CharacterBlastRules,
+) -> RawCharacterDamage {
+    RawCharacterDamage {
+        amount_hp,
+        armor_rating_redux: rules.armor_rating_reduction,
+        armor_prevention_redux: rules.armor_prevention_reduction,
+        hit_location: rules.hit_location,
     }
 }
 

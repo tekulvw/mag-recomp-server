@@ -42,6 +42,13 @@ pub enum Request {
         attacker: u32,
         objective_id: u32,
     },
+    /// A qualified on-foot Character dose from an authoritative rocket.
+    HospitalRocketExplosion {
+        raw_hp: f32,
+        from_direction: [f32; 3],
+        attacker: u32,
+        projectile_id: u32,
+    },
     /// A leadership strike target after radial falloff and occlusion.
     AirStrikeExplosion {
         raw_hp: f32,
@@ -214,6 +221,7 @@ impl<W: Write> Engine<W> {
         let initial_invulnerability = native
             .invulnerability
             .ok_or("acquisition_character_invulnerability_missing")?;
+        let rocket = matches!(request, Request::HospitalRocketExplosion { .. });
         let source_object = match request {
             Request::StructuralExplosion { objective_id, .. }
                 if objective_id & 0xffff_0000 == 0x0c80_0000 =>
@@ -222,6 +230,26 @@ impl<W: Write> Engine<W> {
             }
             Request::StructuralExplosion { .. } => {
                 return Err("invalid_structural_blast_source_object");
+            }
+            Request::HospitalRocketExplosion {
+                attacker,
+                projectile_id,
+                ..
+            } => {
+                let expected_index = 0x0080_0000 | (attacker & 0xffff);
+                if attacker & 0xffff_0000 != 0x0380_0000
+                    || !(16..=19).contains(&(projectile_id >> 24))
+                    || projectile_id & 0x00ff_ffff != expected_index
+                {
+                    return Err("invalid_hospital_rocket_character_source");
+                }
+                if expected.mounted
+                    || native.associated_vehicle
+                        != Some(protocol::VictimWasMounted::NoAssociatedVehicle)
+                {
+                    return Err("hospital_rocket_character_mounted");
+                }
+                projectile_id
             }
             _ => u32::MAX,
         };
@@ -355,6 +383,28 @@ impl<W: Write> Engine<W> {
                     false,
                 )
             }
+            Request::HospitalRocketExplosion {
+                raw_hp,
+                from_direction,
+                attacker,
+                ..
+            } => {
+                if !raw_hp.is_finite() || raw_hp <= 0. {
+                    return Err("invalid_hospital_rocket_character_damage");
+                }
+                let rules = self.item_catalog.character_blast_rules();
+                (
+                    armor::native_character_blast_damage(raw_hp, rules),
+                    damage::DamageKind::Explosive,
+                    rules.damage_type,
+                    attacker,
+                    2, // Native Weapon category. The mounted global index is unqualified.
+                    -1,
+                    from_direction,
+                    explosion_direction_user_data(from_direction)?,
+                    false,
+                )
+            }
             Request::StructuralArea {
                 raw_hp,
                 from_direction,
@@ -413,7 +463,7 @@ impl<W: Write> Engine<W> {
         let mut audit = json!({"on_character_hit":true,"character_id":target.character_id,
             "generation":target.generation,"world":target.world,"raw_amount_hp":raw.amount_hp,
             "damage_type":wire_damage_type,
-            "damage_source_type":source_type,"damage_source_index":source_index,
+            "damage_source_type":source_type,"damage_source_index":(!rocket).then_some(source_index),
             "attacker":attacker,"source_object":source_object,"location":raw.hit_location,"user_data":user_data,
             "from_direction":from_direction,"invulnerability_before":initial_invulnerability,
             "invulnerability_during":native_during.invulnerability,"invulnerability_after":native_after.invulnerability});
@@ -524,7 +574,7 @@ impl<W: Write> Engine<W> {
                 );
                 audit["damage_publication_hex"] =
                     json!(protocol::encode_hex(plan.packet.as_ref().unwrap()));
-                if plan.expected.health > 0 && damage.health_quarter_points == 0 {
+                if !rocket && plan.expected.health > 0 && damage.health_quarter_points == 0 {
                     plan.notice = Some(
                         self.plan_character_effect_notice(
                             death_notifications::CharacterEffectNoticeRequest {
@@ -802,6 +852,39 @@ impl Candidate {
     pub fn native_states(&self) -> &NativeMap {
         &self.native
     }
+
+    /// Check a terminal packet against the post-damage reliable queue. The
+    /// Character callback only appends to this queue, so it shares the live
+    /// recipient's separately reserved bootstrap range.
+    pub(crate) fn check_extra_shared<W: Write>(
+        &self,
+        engine: &Engine<W>,
+        world: u32,
+        count: usize,
+    ) -> Result<(), &'static str> {
+        for actor in engine
+            .active
+            .iter()
+            .chain(engine.peers.values())
+            .filter(|actor| actor.reservation.world == world && actor.initial_objects.is_some())
+        {
+            let staged = self
+                .state
+                .actors
+                .get(&actor.reservation.id)
+                .ok_or("stale_acquisition_character_candidate")?;
+            let fits = staged
+                .pending_shared
+                .len()
+                .checked_sub(actor.hospital_bootstrap.len())
+                .and_then(|ordinary| ordinary.checked_add(count))
+                .is_some_and(|total| total <= multiplayer::MAX_SHARED_QUEUE);
+            if staged.replication_backlogged || !fits {
+                return Err("hospital_rocket_publication_budget_exceeded");
+            }
+        }
+        Ok(())
+    }
 }
 impl<W: Write> Engine<W> {
     /// Run a bounded callback against cloned character-effect authority and
@@ -1030,3 +1113,146 @@ impl<W: Write> Engine<W> {
 #[cfg(test)]
 #[path = "acquisition_character_effects_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod rocket_character_damage_tests {
+    use super::*;
+
+    #[test]
+    fn rocket_character_dose_uses_native_explosive_metadata_and_existing_kill_credit() {
+        let mut engine = crate::human_kill_reward_tests::enable_incoming_base(
+            crate::human_kill_reward_tests::fixture(),
+            0.25,
+        );
+        let id = "synthetic-reservation-0000";
+        let victim = &engine.peers[id];
+        let target = Target {
+            character_id: 0x0380_0000,
+            generation: 4,
+            world: victim.reservation.world,
+        };
+        let rules = engine.item_catalog.character_blast_rules();
+        let native = engine.owned_acquisition_characters();
+        let request = Request::HospitalRocketExplosion {
+            raw_hp: 120.,
+            from_direction: [1., 0., 0.],
+            attacker: 0x0380_0001,
+            projectile_id: 0x1380_0001,
+        };
+        let candidate = engine
+            .prepare_acquisition_character_effects(
+                &[(target, request)],
+                &native,
+                Duration::from_secs(1),
+            )
+            .unwrap();
+        assert!(engine.peers[id].life.is_alive());
+        assert!(engine.pending_reward_batch().is_empty());
+        let audit = &candidate.audit()[0];
+        assert_eq!(audit["damage_source_type"], 2);
+        assert!(audit["damage_source_index"].is_null());
+        assert_eq!(audit["damage_type"], 10);
+        assert_eq!(audit["location"], rules.hit_location);
+        assert_eq!(audit["source_object"], 0x1380_0001);
+        assert!(audit["death_notice"].is_null());
+
+        let mut native = native;
+        engine
+            .install_acquisition_character_effects(candidate, &mut native)
+            .unwrap();
+        let victim = &engine.peers[id];
+        assert!(!victim.life.is_alive());
+        assert_eq!(
+            victim.last_damage.last_location_and_type,
+            0xa0 | rules.hit_location
+        );
+        assert_eq!(victim.last_damage.last_source_object, 0x1380_0001);
+        assert_eq!(victim.last_damage.last_attacker, 0x0380_0001);
+        assert_eq!(victim.reward_statistics.get(&12), Some(&1));
+        assert_eq!(
+            engine.active.as_ref().unwrap().reward_statistics.get(&10),
+            Some(&1)
+        );
+        assert_eq!(
+            engine
+                .pending_reward_batch()
+                .iter()
+                .filter(|event| event.kind == progression::RewardKind::EnemyKilled)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn rocket_character_dose_refuses_mounted_and_stale_victims() {
+        let mut engine = crate::human_kill_reward_tests::fixture();
+        let victim = engine.peers.get_mut("synthetic-reservation-0000").unwrap();
+        victim.mounted_seat = Some(1);
+        let mut target = Target {
+            character_id: 0x0380_0000,
+            generation: 4,
+            world: victim.reservation.world,
+        };
+        let native = engine.owned_acquisition_characters();
+        let request = Request::HospitalRocketExplosion {
+            raw_hp: 120.,
+            from_direction: [0., 0., 0.],
+            attacker: 0x0380_0001,
+            projectile_id: 0x1380_0001,
+        };
+        assert_eq!(
+            engine
+                .prepare_acquisition_character_effects(
+                    &[(target, request)],
+                    &native,
+                    Duration::from_secs(1),
+                )
+                .err(),
+            Some("hospital_rocket_character_mounted")
+        );
+        target.generation += 1;
+        assert_eq!(
+            engine
+                .prepare_acquisition_character_effects(
+                    &[(target, request)],
+                    &native,
+                    Duration::from_secs(1),
+                )
+                .err(),
+            Some("stale_acquisition_character_generation")
+        );
+    }
+
+    #[test]
+    fn rocket_character_dose_terminal_preflights_staged_health_and_reserved_bootstrap() {
+        let mut engine = crate::human_kill_reward_tests::fixture();
+        let actor = engine.active.as_mut().unwrap();
+        actor.initial_objects = Some(vec![]);
+        actor
+            .pending_shared
+            .resize(multiplayer::MAX_SHARED_QUEUE - 1, vec![0]);
+        actor.queue_hospital_bootstrap(vec![vec![1]]);
+        let id = actor.reservation.id.clone();
+        let world = actor.reservation.world;
+        let native = engine.owned_acquisition_characters();
+        let mut candidate = engine
+            .prepare_acquisition_character_effects(&[], &native, Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(candidate.check_extra_shared(&engine, world, 1), Ok(()));
+        candidate
+            .state
+            .actors
+            .get_mut(&id)
+            .unwrap()
+            .pending_shared
+            .push_back(vec![2]);
+        assert_eq!(
+            candidate.check_extra_shared(&engine, world, 1),
+            Err("hospital_rocket_publication_budget_exceeded")
+        );
+        assert_eq!(
+            engine.active.as_ref().unwrap().ordinary_shared_len(),
+            multiplayer::MAX_SHARED_QUEUE - 1
+        );
+    }
+}

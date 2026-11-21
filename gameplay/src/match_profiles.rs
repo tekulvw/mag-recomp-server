@@ -67,6 +67,8 @@ struct Loaded {
     domination: Option<domination_gameplay_provider::World>,
     bunkers: Option<structures::BunkerWorld>,
     hospital_turret_source: Option<Arc<[u8]>>,
+    hospital_rocket_source: Option<Arc<[u8]>>,
+    hospital_rockets: Option<Arc<crate::hospital_rockets::Catalog>>,
     ground_turret_source: Option<Arc<[u8]>>,
 }
 pub struct Registry {
@@ -80,6 +82,13 @@ impl Registry {
     ) -> Result<(), &'static str> {
         for profile in self.profiles.values() {
             bindings.validate_for(catalog, profile.vehicles.as_ref())?;
+            if let Some(contacts) = profile
+                .domination
+                .as_ref()
+                .and_then(|world| world.state.projectile_contacts.as_ref())
+            {
+                contacts.validate_dynamic(catalog)?;
+            }
             if let Some(setup) = &profile.acquisition {
                 setup.validate_ground_hulk_templates(catalog)?;
             }
@@ -315,7 +324,7 @@ impl Registry {
                     .validate_match(20231, &spawns)
                     .map_err(io::Error::other)?;
             }
-            let (domination, hospital_turret_source, ground_turret_source) =
+            let (domination, hospital_turret_source, ground_turret_source, hospital_rocket_source) =
                 if let Some(path) = &source.domination_gameplay {
                     if policy.game_type != 2
                         || domination_round.is_none()
@@ -337,6 +346,7 @@ impl Registry {
                     })?;
                     let config = domination_gameplay_config::Configuration::load(path)?;
                     let source = config.hospital_turret_source()?.map(Arc::from);
+                    let rocket_source = config.hospital_rocket_source()?.map(Arc::from);
                     let ground_turret_source = config.ground_turret_source()?.map(Arc::from);
                     let world = config.build_for(
                         objectives,
@@ -344,9 +354,16 @@ impl Registry {
                         bunkers,
                         vehicles.as_ref().unwrap(),
                     )?;
-                    (Some(world), source, ground_turret_source)
+                    if let Some(contacts) = &world.state.projectile_contacts {
+                        contacts
+                            .validate_static(collision.as_ref().ok_or_else(|| {
+                                io::Error::other("hospital_rockets_require_static_world")
+                            })?)
+                            .map_err(io::Error::other)?;
+                    }
+                    (Some(world), source, ground_turret_source, rocket_source)
                 } else {
-                    (None, None, acquisition_ground_turrets)
+                    (None, None, acquisition_ground_turrets, None)
                 };
             let ability_manifest = active_ability_config::manifest_path(
                 source.active_abilities,
@@ -407,13 +424,16 @@ impl Registry {
                     domination,
                     bunkers,
                     hospital_turret_source,
+                    hospital_rocket_source,
+                    hospital_rockets: None,
                     ground_turret_source,
                 },
             );
         }
         Ok(Self { profiles })
     }
-    fn bind_hospital_turrets(
+    /// Bind source-qualified hospital weapons before advertising profile readiness.
+    pub fn bind_hospital_turrets(
         &mut self,
         items: &item_catalog::ItemCatalog,
     ) -> Result<(), &'static str> {
@@ -429,6 +449,23 @@ impl Registry {
                 .objectives
                 .as_ref()
                 .ok_or("hospital_turret_objectives_required")?;
+            if let Some(rocket_source) = profile.hospital_rocket_source.take() {
+                if profile
+                    .domination
+                    .as_ref()
+                    .and_then(|world| world.state.projectile_contacts.as_ref())
+                    .is_none()
+                {
+                    return Err("hospital_rockets_require_contacts");
+                }
+                profile.hospital_rockets =
+                    Some(Arc::new(crate::hospital_rockets::Catalog::from_bytes(
+                        &rocket_source,
+                        items,
+                        &source,
+                        &objectives.source().source_image_sha256,
+                    )?));
+            }
             bunkers.hospital_turrets = crate::hospital_turrets::qualify(
                 &source,
                 bunkers,
@@ -553,6 +590,21 @@ impl Registry {
             .any(|profile| profile.domination.is_some())
     }
 
+    pub fn has_hospital_rockets(&self) -> bool {
+        self.profiles
+            .values()
+            .any(|profile| profile.hospital_rockets.is_some())
+    }
+
+    pub fn has_projectile_contacts(&self) -> bool {
+        self.profiles.values().any(|profile| {
+            profile
+                .domination
+                .as_ref()
+                .is_some_and(|world| world.state.projectile_contacts.is_some())
+        })
+    }
+
     /// Validate current immutable static partitions before advertising mode2.
     pub fn validate_domination_static_partitions<'a>(
         &self,
@@ -661,6 +713,8 @@ impl<W: Write> Engine<W> {
         if let Some(selected) = self.selected_match.take() {
             self.retired_formations.insert(selected.formation_id);
             self.active_abilities = None;
+            self.hospital_rockets = None;
+            self.projectile_contacts = None;
             if let Some(leadership) = &mut self.leadership {
                 leadership.clear_held_roles();
             }
@@ -774,6 +828,11 @@ impl<W: Write> Engine<W> {
         self.active_abilities = active_abilities;
         self.acquisition_round = acquisition_round;
         self.domination_round = loaded.domination_round;
+        self.projectile_contacts = loaded
+            .domination
+            .as_ref()
+            .and_then(|world| world.state.projectile_contacts.clone());
+        self.hospital_rockets = loaded.hospital_rockets;
         self.domination_gameplay = loaded.domination;
         self.character_damage_rules = loaded.damage;
         self.development_dummy_position = self
@@ -1511,6 +1570,8 @@ mod tests {
                 domination: None,
                 bunkers: None,
                 hospital_turret_source: None,
+                hospital_rocket_source: None,
+                hospital_rockets: None,
                 ground_turret_source: None,
                 acquisition: Some(sample.acquisition_gameplay.unwrap().setup),
             },

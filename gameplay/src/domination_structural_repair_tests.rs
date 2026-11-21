@@ -72,6 +72,7 @@ pub(crate) fn repair_fixture() -> Engine<Vec<u8>> {
             assets,
             hospital_hulks: None,
             hospital_turret_yaws: Default::default(),
+            projectile_contacts: None,
             helo: None,
             helo_collision: None,
             helo_damage: None,

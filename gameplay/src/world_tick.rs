@@ -32,6 +32,7 @@ impl<W: Write> Engine<W> {
             self.tick_leadership_auto_heal(now, wall)?;
             self.queue_squad_orders(now, wall)?;
             self.queue_active_ability_state(now, wall)?;
+            messages.extend(self.tick_hospital_rockets(now, wall)?);
             messages.extend(self.tick_match_clock(now, wall)?);
             self.queue_projectile_publications(now)?;
             let messages = self.drain_shared(messages, wall)?;
