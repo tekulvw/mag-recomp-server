@@ -236,17 +236,29 @@ fn ground_vehicle_catalog_validates_complete_source_seat_visibility() {
 }
 
 fn domination_apc_setup() -> (Engine<Vec<u8>>, Value) {
+    domination_apc_setup_at(0)
+}
+
+fn domination_apc_setup_at(first_apc: u16) -> (Engine<Vec<u8>>, Value) {
+    let apcs = first_apc..first_apc + 8;
     let mut engine = acquisition_entry::acquisition()
         .with_match_limits(1, 64)
         .unwrap();
     let mut spawn = apc_spawn_json(1);
     spawn["match_profile"]["game_type"] = json!(2);
+    let available = json!([first_apc, first_apc + 1]);
+    spawn["active"]["default_spawn"] = json!(first_apc);
+    spawn["active"]["available"] = available.clone();
+    for squad in spawn["maps"][0]["squads"].as_array_mut().unwrap() {
+        squad["default_spawn"] = json!(first_apc);
+        squad["available"] = available.clone();
+    }
     spawn["maps"][0]["spawn_count"] = json!(16);
     spawn["maps"][0]["locations"] = json!(
         (0..16)
             .map(|index| json!({
                 "index":index,"token":1000+index,
-                "kind":if index < 8 {"vehicle_passenger"} else {"unsupported"},
+                "kind":if apcs.contains(&index) {"vehicle_passenger"} else {"unsupported"},
                 "position":{"x":100.,"y":3.,"z":100.}
             }))
             .collect::<Vec<_>>()
@@ -262,7 +274,7 @@ fn domination_apc_setup() -> (Engine<Vec<u8>>, Value) {
                 vehicle["index"] = json!(index);
                 vehicle["spawn_point_index"] = json!(index);
                 vehicle["spawn_point_token"] = json!(1000 + index);
-                if index < 8 {
+                if apcs.contains(&index) {
                     vehicle["passenger_seats"] = json!([2, 3, 4, 5, 6, 7, 8, 9]);
                     vehicle["maximum_occupancy"] = json!(8);
                     vehicle["passenger_exit_candidates"] =
@@ -279,14 +291,14 @@ fn domination_apc_setup() -> (Engine<Vec<u8>>, Value) {
         (0..16)
             .map(|index| json!({
                 "vehicle_index":index,"spawn_point_index":index,"spawn_point_token":1000+index,
-                "vehicle_type_token":12345,"spawn_type":if index < 8 {3} else {7},
-                "user_class":u8::from(index >= 8),"source_family":35,"authored_active":true,
-                "team":u8::from(index >= 8)
+                "vehicle_type_token":12345,"spawn_type":if apcs.contains(&index) {3} else {7},
+                "user_class":u8::from(!apcs.contains(&index)),"source_family":35,"authored_active":true,
+                "team":u8::from(!apcs.contains(&index))
             }))
             .collect::<Vec<_>>()
     );
     value["passenger_spawns"] = json!(
-        (0..8)
+        apcs.clone()
             .map(|index| json!({
                 "spawn_point_index":index,"spawn_point_token":1000+index,"vehicle_index":index
             }))
@@ -294,7 +306,7 @@ fn domination_apc_setup() -> (Engine<Vec<u8>>, Value) {
     );
     value["seat_visibility"] = json!({
         "archive_sha256":"1".repeat(64),"registry_member_sha256":"2".repeat(64),
-        "vehicles":(0..8).map(|index| json!({
+        "vehicles":apcs.clone().map(|index| json!({
             "vehicle_index":index,"properties_member_sha256":"3".repeat(64),
             "seats":(2..10).map(|seat| json!({"seat":seat,"occupant_visible":false}))
                 .collect::<Vec<_>>()
@@ -1286,21 +1298,7 @@ fn escort_driver_engine() -> Engine<Vec<u8>> {
         rotation: source.rotation,
     };
     engine = engine.with_ground_vehicles(catalog).unwrap();
-    static NEXT_EXIT_FIXTURE: std::sync::atomic::AtomicUsize =
-        std::sync::atomic::AtomicUsize::new(0);
-    let n = NEXT_EXIT_FIXTURE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let world_path =
-        std::env::temp_dir().join(format!("escort-exit-{}-{n}.json", std::process::id()));
-    let world = json!({
-        "format":"mag_collision_world","schema_version":1,"coordinate_space":"world",
-        "metadata":{"map_name":engine.spawn_catalog.as_ref().unwrap().map_name(),"build":"synthetic",
-                    "provenance":["synthetic"],"coverage":"provisional","unknowns":[]},
-        "instances":[{"id":"invented-floor","vertices_xyz":[[80.,2.,80.],[80.,2.,120.],[120.,2.,80.],[120.,2.,120.]],
-                      "triangles":[[0,1,2],[1,2,3]]}]
-    });
-    std::fs::write(&world_path, world.to_string()).unwrap();
-    let world = collision::CollisionWorld::load(&world_path, Default::default()).unwrap();
-    std::fs::remove_file(world_path).unwrap();
+    let world = ground_driver_test_floor(&engine);
     engine = engine.with_collision_world(world);
     let runtime = engine.ground_runtime.as_mut().unwrap();
     let key = runtime.get(4).unwrap().key;
@@ -1329,8 +1327,38 @@ fn escort_driver_engine() -> Engine<Vec<u8>> {
     engine
 }
 
+fn ground_driver_test_floor(engine: &Engine<Vec<u8>>) -> collision::CollisionWorld {
+    static NEXT_EXIT_FIXTURE: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT_EXIT_FIXTURE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let world_path = std::env::temp_dir().join(format!(
+        "ground-driver-exit-{}-{n}.json",
+        std::process::id()
+    ));
+    let world = json!({
+        "format":"mag_collision_world","schema_version":1,"coordinate_space":"world",
+        "metadata":{"map_name":engine.spawn_catalog.as_ref().unwrap().map_name(),"build":"synthetic",
+                    "provenance":["synthetic"],"coverage":"provisional","unknowns":[]},
+        "instances":[{"id":"invented-floor","vertices_xyz":[[80.,2.,80.],[80.,2.,120.],[120.,2.,80.],[120.,2.,120.]],
+                      "triangles":[[0,1,2],[1,2,3]]}]
+    });
+    std::fs::write(&world_path, world.to_string()).unwrap();
+    let world = collision::CollisionWorld::load(&world_path, Default::default()).unwrap();
+    std::fs::remove_file(world_path).unwrap();
+    world
+}
+
 fn escort_driver_relay(
     profile: wire_profile::WireProfile,
+    sequence: u32,
+    position_x: u32,
+) -> Vec<u8> {
+    ground_driver_relay(profile, 4, sequence, position_x)
+}
+
+fn ground_driver_relay(
+    profile: wire_profile::WireProfile,
+    index: u16,
     sequence: u32,
     position_x: u32,
 ) -> Vec<u8> {
@@ -1346,7 +1374,7 @@ fn escort_driver_relay(
     .unwrap();
     for (value, width) in [
         (1, 1),
-        (4, 16),
+        (u32::from(index), 16),
         (0, 25),
         (1, 1),
         (position_x, 16),
@@ -1506,3 +1534,6 @@ fn escort_dismount_without_supported_current_floor_keeps_driver_and_vehicle_owne
     assert_eq!(engine.ground_driver_owner(4), Some(3));
     assert!(engine.active.as_ref().unwrap().ground_seat.is_some());
 }
+
+#[path = "domination_ground_driver_tests.rs"]
+mod domination_ground_driver;

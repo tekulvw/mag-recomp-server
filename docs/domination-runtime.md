@@ -226,10 +226,14 @@ after that review.
 
 ## APC passenger area-effect qualification
 
-Domination's qualified ground scope supports original physical-seat visibility through the shared [ground-vehicle projector](ground-vehicles.md#admitted-seat-visibility). Complete admitted-seat coverage is required when a bound Structural objective has enabled periodic area damage. Regenerate both ground and paired lifecycle bindings when adding visibility. Ordinary APC reinforcement and a due Structural scan share this qualified inventory; hidden passengers retain their health and mounting while the scan advances. This does not enable general driver or gunner authority.
+Domination's qualified ground scope supports original physical-seat visibility through the shared [ground-vehicle projector](ground-vehicles.md#admitted-seat-visibility). Complete admitted-seat coverage is required when a bound Structural objective has enabled periodic area damage. Regenerate both ground and paired lifecycle bindings when adding visibility. Ordinary APC reinforcement and a due Structural scan share this qualified inventory; hidden passengers retain their health and mounting while the scan advances. Driver authority requires the separate explicit APC opt-in; gunner authority remains unsupported.
 
 ## Playback changes with unchanged objective controls
 
 An authored same-state request can still enter the native state body, run callbacks and select a new playback sequence. An unchanged control value therefore does not imply an empty update. The committed candidate keeps control-linked sequences in the same bounded control packet and emits other qualified playback changes through the existing sequence-only field9/field10 packets. Sequence rows retain strict index order, unique identities, valid ordinals and the normal packet-size limit. Native entry effects retain their source order.
 
 The outer world transaction prepares every packet before recording and installing runtime, callback, sequence and world changes. A full recipient queue or recording failure defers the whole transaction. Retrying must preserve the original effect and playback semantics; dropping same-state entries to make publication succeed would lose authored behavior. Full-start source replays and native live-match acceptance remain distinct.
+
+## Optional APC control
+
+The [Domination APC driver projection](ground-vehicles.md#domination-apc-driver-opt-in) binds manual operator/passenger entry to the eight original type3 APC allocations. It reuses the shared authenticated family1 motion, peer and late-join snapshots, current-pose exits and lifecycle revocation. It does not grant control to type7 motor-pool sources or turret operators. Driver-capable data must include original seat0 visibility and a freshly bound lifecycle digest. Native driving acceptance remains a separate live-match review.

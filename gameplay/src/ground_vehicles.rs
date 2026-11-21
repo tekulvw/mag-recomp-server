@@ -270,7 +270,7 @@ pub struct VehicleSource {
     pub authored_active: bool,
     pub team: u8,
 }
-/// Operator seat and movement budget for a source-qualified Escort.
+/// Operator seat and movement budget for a source-qualified Ground vehicle.
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DriverSeat {
@@ -382,11 +382,12 @@ impl Catalog {
         if domination != domination_scope || (!domination && policy.game_type != 1) {
             return Err("ground_vehicles_require_matching_profile_scope");
         }
+        let domination_drivers = domination && !self.driver_seats.is_empty();
         if domination
             && (self.vehicles.len() != 16
                 || self.vehicle_sources.len() != 16
                 || self.passenger_spawns.len() != 8
-                || !self.driver_seats.is_empty())
+                || (domination_drivers && self.driver_seats.len() != 8))
         {
             return Err("incomplete_domination_ground_vehicle_population");
         }
@@ -484,12 +485,14 @@ impl Catalog {
             return Err("invalid_domination_ground_vehicle_load_order");
         }
         let mut drivers = BTreeSet::new();
+        let driver_spawn_type = if domination { 3 } else { 9 };
         for driver in &self.driver_seats {
             let vehicle = self
                 .vehicle(driver.vehicle_index)
                 .ok_or("unknown_ground_driver_vehicle")?;
             if !drivers.insert(driver.vehicle_index)
                 || driver.seat >= 16
+                || (domination && driver.seat != 0)
                 || !driver.maximum_speed_mps.is_finite()
                 || driver.maximum_speed_mps <= 0.
                 || vehicle.passenger_seats.contains(&driver.seat)
@@ -498,7 +501,7 @@ impl Catalog {
                 || vehicle.exit_policy().is_none()
                 || source_points
                     .get(&driver.vehicle_index)
-                    .is_none_or(|s| s.spawn_type != 9)
+                    .is_none_or(|s| s.spawn_type != driver_spawn_type)
             {
                 return Err("invalid_ground_driver_policy");
             }
@@ -516,6 +519,16 @@ impl Catalog {
                 policy.defending_faction
             };
             let source = source_points.get(&v.index);
+            if domination_drivers {
+                let invalid_seats = if drivers.contains(&v.index) {
+                    v.passenger_seats.iter().copied().ne(2..=9) || v.maximum_occupancy != Some(8)
+                } else {
+                    !v.passenger_seats.is_empty()
+                };
+                if invalid_seats {
+                    return Err("invalid_domination_ground_driver_passenger_policy");
+                }
+            }
             if self.source.creation_scope.as_deref() == Some("native_vehicle_source_points")
                 && v.index >= 4
                 && source.is_none()
