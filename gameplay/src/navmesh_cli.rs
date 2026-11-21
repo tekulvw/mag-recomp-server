@@ -38,7 +38,7 @@ fn write(
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
-    let command = args.next().ok_or("expected bake|query|inspect")?;
+    let command = args.next().ok_or("expected bake|query|inspect|goals")?;
     let mut flags = BTreeMap::new();
     while let Some(key) = args.next() {
         if !key.starts_with("--") || flags.contains_key(&key) {
@@ -141,6 +141,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = NavMesh::load(artifact.clone(), &hash, &world.metadata().map_name)?;
             write(Some(&get("--output")?.to_string()), &artifact)?;
         }
+        "goals" => {
+            if flags.keys().any(|key| {
+                ![
+                    "--mesh",
+                    "--collision-world",
+                    "--goal",
+                    "--goal-radius",
+                    "--output",
+                ]
+                .contains(&key.as_str())
+            }) {
+                return Err("unknown goals flag".into());
+            }
+            let artifact: Artifact =
+                serde_json::from_slice(&read(get("--mesh")?, navmesh::MAX_ARTIFACT_JSON_BYTES)?)?;
+            let world = mag_gameplay::collision::CollisionWorld::load(
+                get("--collision-world")?,
+                Default::default(),
+            )?;
+            let mesh = NavMesh::load(artifact, world.source_sha256(), &world.metadata().map_name)?;
+            mesh.validate_coverage(&world)?;
+            let mut goals =
+                mesh.goal_candidates(point(get("--goal")?)?, get("--goal-radius")?.parse()?)?;
+            goals.sort_by_key(|(component, _)| *component);
+            let candidates: Vec<_> = goals
+                .into_iter()
+                .map(|(component, point)| {
+                    json!({
+                        "component": component, "point": point
+                    })
+                })
+                .collect();
+            write(
+                flags.get("--output"),
+                &json!({
+                    "map": world.metadata().map_name,
+                    "world_sha256": world.source_sha256(),
+                    "detour_sha256": mesh.artifact().detour_sha256,
+                    "candidates": candidates,
+                }),
+            )?;
+        }
         "query" | "inspect" | "component" => {
             if flags.keys().any(|k| {
                 ![
@@ -210,7 +252,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 write(flags.get("--output"), &route)?;
             }
         }
-        _ => return Err("expected bake|query|inspect".into()),
+        _ => return Err("expected bake|query|inspect|goals".into()),
     }
     Ok(())
 }

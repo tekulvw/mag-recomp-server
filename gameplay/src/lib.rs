@@ -51,6 +51,7 @@ mod bot_objectives;
 pub mod bot_physics;
 pub mod bot_registry;
 pub mod bot_resupply;
+pub mod bot_resupply_approach_policy;
 pub mod bot_resupply_catalog;
 mod bot_stat_publication;
 mod bot_traffic_costs;

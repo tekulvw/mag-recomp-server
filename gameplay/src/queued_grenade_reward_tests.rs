@@ -308,6 +308,338 @@ fn enable_synthetic_resupply(engine: &mut Engine<Vec<u8>>, shooter: u16) {
     engine.install_synthetic_bot_resupply(bot_resupply_catalog::Catalog::synthetic(origin, 0.375));
 }
 
+fn dry_approach_fixture() -> (Engine<Vec<u8>>, u16, [f64; 3]) {
+    let (mut engine, shooter) = dry_resupply_fixture();
+    let runtime = engine.bot_registry.bots[&shooter].target.runtime.unwrap();
+    let [x, y, z] = runtime.physical_position();
+    let body = bot_physics::Body::default();
+    let terrain =
+        bot_physics::WorldTerrain::new(engine.collision_world.as_ref(), engine.map_name()).unwrap();
+    let supported = terrain
+        .advance(
+            terrain.start_motion([x, y + 0.5, z], body).unwrap(),
+            [0.; 3],
+            1.,
+            body,
+        )
+        .unwrap();
+    assert!(supported.grounded && !supported.blocked && supported.position[1] > y);
+    let runtime = engine
+        .bot_registry
+        .bots
+        .get_mut(&shooter)
+        .unwrap()
+        .target
+        .runtime
+        .as_mut()
+        .unwrap();
+    runtime.physics_motion = Some(supported);
+    runtime.position.y = supported.position[1] as f32;
+    let center = [x, supported.position[1], z + 4.0];
+    engine.install_synthetic_bot_resupply(bot_resupply_catalog::Catalog::synthetic(center, 0.375));
+    let world = engine.collision_world.as_ref().unwrap();
+    let artifact = navmesh::bake(navmesh::BakeInput {
+        format: "mag_navmesh_bake_input_v1".into(),
+        map_name: engine.map_name().into(),
+        world_sha256: world.source_sha256().into(),
+        geometry_sha256: "6dee7dab0b9d6c88801aa4fde5a451281bc4a24984410359966797228ddd939c".into(),
+        bounds: navmesh::Bounds {
+            min: [-9., -1., -9.],
+            max: [9., 4., 9.],
+        },
+        physics_regions: world.metadata().physics_regions.clone(),
+        vertices: vec![[-9., 0., -9.], [9., 0., -9.], [9., 0., 9.], [-9., 0., 9.]],
+        triangles: vec![[0, 2, 1], [0, 3, 2]],
+    })
+    .unwrap();
+    let mesh = navmesh::NavMesh::load(artifact, world.source_sha256(), engine.map_name()).unwrap();
+    (engine.with_navmesh_world(mesh), shooter, center)
+}
+
+#[test]
+fn bot_resupply_approach_walks_from_outside_before_starting_service() {
+    let (mut engine, shooter, center) = dry_approach_fixture();
+    let origin = engine.bot_registry.bots[&shooter]
+        .target
+        .runtime
+        .unwrap()
+        .physical_position();
+    let providers = bot_resupply_catalog::Catalog::synthetic(center, 0.375);
+    let key = providers.select(center).unwrap();
+    let provider = providers.provider(key).unwrap();
+    engine.install_synthetic_resupply_approach(bot_resupply_approach_policy::Policy::synthetic(
+        key, center,
+    ));
+    assert!(!provider.contains(origin));
+    engine.tick_bot_firearms(Duration::from_secs(1), 1).unwrap();
+    let bot = &engine.bot_registry.bots[&shooter];
+    assert!(matches!(
+        bot.target.runtime.unwrap().phase,
+        development_target::BotPhase::Relocating
+    ));
+    assert_eq!(bot.target.runtime.unwrap().physical_position(), origin);
+    assert!(bot.resupply.is_none());
+    assert_eq!(bot.firearm.reserve, 0);
+    let at = (1050..5000).step_by(50).find(|&ms| {
+        let now = Duration::from_millis(ms);
+        engine.tick_bots(now, 1).unwrap();
+        engine.tick_bot_firearms(now, 1).unwrap();
+        engine.bot_registry.bots[&shooter].resupply.is_some()
+    }).unwrap_or_else(|| {
+        let trace: Vec<_> = String::from_utf8_lossy(&engine.writer).lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|row| row["op"].as_str().is_some_and(|op| op.starts_with("bot_resupply"))
+                || row["movement_purpose"].as_str().is_some())
+            .map(|row| json!({"op":row["op"],"phase":row["phase"],"reason":row["reason"],
+                "origin":row["origin"],"physics":row["physics"],"navigation_error":row["navigation_error"],
+                "timestamp":row["timestamp_ms"]})).collect();
+        panic!("ordinary walking follower must reach physical service: {trace:?}");
+    });
+    let bot = &engine.bot_registry.bots[&shooter];
+    let arrival = bot.target.runtime.unwrap().physics_motion.unwrap();
+    assert!(arrival.grounded && provider.contains(arrival.position));
+    assert_ne!(arrival.position, origin);
+    assert_eq!((bot.firearm.magazine, bot.firearm.reserve), (0, 0));
+    engine
+        .tick_bot_firearms(Duration::from_millis(at + 374), 1)
+        .unwrap();
+    assert_eq!(engine.bot_registry.bots[&shooter].firearm.reserve, 0);
+    engine
+        .tick_bot_firearms(Duration::from_millis(at + 375), 1)
+        .unwrap();
+    assert_eq!(engine.bot_registry.bots[&shooter].firearm.reserve, 9);
+}
+
+fn configured_approach_fixture() -> (Engine<Vec<u8>>, u16, [f64; 3]) {
+    let (mut engine, shooter, center) = dry_approach_fixture();
+    let key = bot_resupply_catalog::Catalog::synthetic(center, 0.375)
+        .select(center)
+        .unwrap();
+    engine.install_synthetic_resupply_approach(bot_resupply_approach_policy::Policy::synthetic(
+        key, center,
+    ));
+    (engine, shooter, center)
+}
+
+#[test]
+fn bot_resupply_approach_requires_enabled_policy_and_fresh_perception() {
+    let (mut service_only, shooter, _) = dry_approach_fixture();
+    service_only
+        .tick_bot_firearms(Duration::from_secs(1), 1)
+        .unwrap();
+    assert!(!service_only.bot_registry.bots[&shooter].has_supply_action());
+
+    let (mut engine, shooter, _) = configured_approach_fixture();
+    let policy = &mut engine.bot_registry.config.as_mut().unwrap().firearms;
+    let rays = policy.max_rays_per_tick;
+    policy.max_rays_per_tick = 0;
+    engine.tick_bot_firearms(Duration::from_secs(1), 1).unwrap();
+    assert!(!engine.bot_registry.bots[&shooter].has_supply_action());
+    engine
+        .bot_registry
+        .config
+        .as_mut()
+        .unwrap()
+        .firearms
+        .max_rays_per_tick = rays;
+    engine
+        .tick_bot_firearms(Duration::from_millis(1050), 1)
+        .unwrap();
+    assert!(engine.bot_registry.bots[&shooter].resupply_seek.is_some());
+}
+
+#[test]
+fn bot_resupply_approach_does_not_treat_projected_goal_as_actual_arrival() {
+    let (mut engine, shooter, _) = configured_approach_fixture();
+    engine.tick_bot_firearms(Duration::from_secs(1), 1).unwrap();
+    let bot = engine.bot_registry.bots.get_mut(&shooter).unwrap();
+    assert!(bot.resupply_seek.is_some());
+    // A complete phase without physical progress leaves the actual body outside.
+    bot.target.runtime.as_mut().unwrap().phase = development_target::BotPhase::Complete;
+    engine
+        .tick_bot_firearms(Duration::from_millis(1050), 1)
+        .unwrap();
+    let bot = &engine.bot_registry.bots[&shooter];
+    assert!(!bot.has_supply_action());
+    assert_eq!((bot.firearm.magazine, bot.firearm.reserve), (0, 0));
+    assert!(String::from_utf8_lossy(&engine.writer).contains("seek_stopped_outside_provider"));
+}
+
+#[test]
+fn bot_resupply_approach_recorder_refusal_leaves_the_prior_movement_and_ammo() {
+    let (mut engine, shooter, _) = configured_approach_fixture();
+    let prior = engine.bot_registry.bots[&shooter]
+        .target
+        .runtime
+        .unwrap()
+        .physical_position();
+    engine.max_log = engine.written;
+    assert_eq!(
+        engine
+            .tick_bot_firearms(Duration::from_secs(1), 1)
+            .unwrap_err(),
+        "log_limit_reached"
+    );
+    let bot = &engine.bot_registry.bots[&shooter];
+    assert!(!bot.has_supply_action());
+    assert_eq!(bot.target.runtime.unwrap().physical_position(), prior);
+    assert!(matches!(
+        bot.target.runtime.unwrap().phase,
+        development_target::BotPhase::Complete
+    ));
+    assert!(bot.target.registry_move_destination().is_none());
+    assert_eq!((bot.firearm.magazine, bot.firearm.reserve), (0, 0));
+}
+
+#[test]
+fn bot_resupply_approach_refused_service_start_keeps_settled_seek_and_zero_reserve() {
+    let (mut engine, shooter, center) = configured_approach_fixture();
+    engine.tick_bot_firearms(Duration::from_secs(1), 1).unwrap();
+    let now = (1050..5000)
+        .step_by(50)
+        .map(Duration::from_millis)
+        .find(|&now| {
+            engine.tick_bots(now, 1).unwrap();
+            matches!(
+                engine.bot_registry.bots[&shooter]
+                    .target
+                    .runtime
+                    .unwrap()
+                    .phase,
+                development_target::BotPhase::Complete
+            )
+        })
+        .expect("ordinary follower settles without service planning");
+    let bot = &engine.bot_registry.bots[&shooter];
+    let motion = bot.target.runtime.unwrap().physics_motion.unwrap();
+    let catalog = bot_resupply_catalog::Catalog::synthetic(center, 0.375);
+    assert!(motion.grounded && catalog.select(motion.position).is_some());
+    let goal = bot.target.registry_move_destination();
+    assert!(bot.resupply_seek.is_some() && bot.resupply.is_none() && goal.is_some());
+    engine.max_log = engine.written;
+    assert_eq!(
+        engine.tick_bot_firearms(now, 1).unwrap_err(),
+        "log_limit_reached"
+    );
+    let bot = &engine.bot_registry.bots[&shooter];
+    assert!(bot.resupply_seek.is_some() && bot.resupply.is_none());
+    assert_eq!(bot.target.registry_move_destination(), goal);
+    assert_eq!((bot.firearm.magazine, bot.firearm.reserve), (0, 0));
+    assert!(!String::from_utf8_lossy(&engine.writer).contains("\"op\":\"bot_resupply_started\""));
+}
+
+#[test]
+fn bot_resupply_approach_refused_cancel_keeps_its_owned_walk() {
+    let (mut engine, shooter, _) = configured_approach_fixture();
+    engine.tick_bot_firearms(Duration::from_secs(1), 1).unwrap();
+    let bot = &engine.bot_registry.bots[&shooter];
+    let damage = replication::CharacterDamage {
+        health_quarter_points: bot.health - 1,
+        ..bot.damage
+    };
+    let life = bot.target.runtime.unwrap().generation;
+    let goal = bot.target.registry_move_destination();
+    engine
+        .record(json!({"op":"synthetic_accepted_damage"}), 1)
+        .unwrap();
+    engine
+        .commit_bot_damage(shooter, life, damage, Duration::from_millis(1050))
+        .unwrap();
+    engine.max_log = engine.written;
+    assert_eq!(
+        engine
+            .tick_bot_firearms(Duration::from_millis(1100), 1)
+            .unwrap_err(),
+        "log_limit_reached"
+    );
+    let bot = &engine.bot_registry.bots[&shooter];
+    assert!(
+        bot.resupply_seek
+            .as_ref()
+            .is_some_and(|seek| seek.owns(bot))
+    );
+    assert_eq!(bot.target.registry_move_destination(), goal);
+    assert_eq!((bot.firearm.magazine, bot.firearm.reserve), (0, 0));
+}
+
+#[test]
+fn bot_resupply_approach_lost_token_preserves_a_newer_movement() {
+    use development_bot_movement::{BotMove, BotMoveMode};
+    let (mut engine, shooter, _) = configured_approach_fixture();
+    engine.tick_bot_firearms(Duration::from_secs(1), 1).unwrap();
+    let mesh = engine.navmesh_world.as_ref().unwrap().clone();
+    let map = engine.map_name().to_owned();
+    let bot = engine.bot_registry.bots.get_mut(&shooter).unwrap();
+    assert!(bot.resupply_seek.is_some());
+    let old = bot.target.registry_move_destination().unwrap();
+    let from = bot.target.runtime.unwrap().position;
+    bot.target
+        .begin_registry_move(
+            mesh,
+            &map,
+            BotMove {
+                mode: BotMoveMode::Navmesh,
+                destination: replication::CharacterPosition {
+                    x: from.x - 2.,
+                    ..from
+                },
+                duration_ms: 3000,
+                update_ms: 250,
+                yaw: None,
+                sprint: false,
+            },
+            Duration::from_millis(1020),
+            bot.health,
+            None,
+        )
+        .unwrap();
+    let selected = bot.target.registry_move_destination().unwrap();
+    assert_ne!(selected, old);
+    engine
+        .tick_bot_firearms(Duration::from_millis(1050), 1)
+        .unwrap();
+    let bot = &engine.bot_registry.bots[&shooter];
+    assert!(!bot.has_supply_action());
+    assert_eq!(bot.target.registry_move_destination(), Some(selected));
+    assert!(matches!(
+        bot.target.runtime.unwrap().phase,
+        development_target::BotPhase::Relocating
+    ));
+}
+
+#[test]
+fn bot_resupply_approach_route_preparation_refuses_partial_truncated_and_drop_corridors() {
+    let (engine, shooter, goal) = configured_approach_fixture();
+    let mesh = engine.navmesh_world.as_ref().unwrap();
+    let target = &engine.bot_registry.bots[&shooter].target;
+    let route = mesh
+        .route(target.runtime.unwrap().physical_position(), goal, 0.75)
+        .unwrap();
+    assert_eq!(route.status, navmesh::Status::Complete);
+    let mut partial = route.clone();
+    partial.status = navmesh::Status::Partial;
+    let prefix = route.bounded_prefix(1.).unwrap();
+    let mut drop = route.clone();
+    drop.waypoint_kinds[1] = navmesh::WaypointKind::DropStart;
+    drop.waypoint_drop_ids[1] = Some(1);
+    for invalid in [partial, prefix, drop] {
+        assert_eq!(
+            target
+                .prepare_registry_supply_walk(
+                    mesh.clone(),
+                    invalid,
+                    goal,
+                    "synthetic-supply-walk".into(),
+                    8000,
+                    Duration::ZERO,
+                )
+                .err(),
+            Some("bot_resupply_seek_requires_complete_walk"),
+        );
+    }
+    assert!(target.registry_move_destination().is_none());
+}
+
 #[test]
 fn bot_resupply_dry_idle_waits_then_refills_reserve_and_normally_fires() {
     let (mut engine, shooter) = dry_resupply_fixture();

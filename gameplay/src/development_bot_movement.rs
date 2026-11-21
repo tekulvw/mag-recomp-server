@@ -117,6 +117,18 @@ pub(super) struct PendingMove {
     movement: BotMove,
     navigation: Option<NavigationMove>,
 }
+
+pub(super) struct PreparedRegistryMove {
+    pending: PendingMove,
+    runtime: BotRuntime,
+}
+
+impl PreparedRegistryMove {
+    pub(super) fn install(self, target: &mut Target) {
+        target.pending_move = Some(self.pending);
+        target.runtime = Some(self.runtime);
+    }
+}
 impl<W: Write> Engine<W> {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn queue_development_bot_move(
@@ -789,7 +801,7 @@ impl Target {
         &mut self,
         mesh: Arc<navmesh::NavMesh>,
         map: &str,
-        mut movement: BotMove,
+        movement: BotMove,
         now: Duration,
         health: u16,
         rules: Option<&fall_damage::Rules>,
@@ -813,27 +825,103 @@ impl Target {
             goal_tolerance,
             exit_goal_weight,
         )?;
+        self.prepare_registry_move(
+            movement,
+            navigation,
+            now,
+            format!("population-{}-{}", self.object_index, runtime.generation),
+        )?
+        .install(self);
+        Ok(())
+    }
+
+    pub(super) fn prepare_registry_supply_walk(
+        &self,
+        mesh: Arc<navmesh::NavMesh>,
+        route: navmesh::Route,
+        requested_goal: navmesh::Point,
+        movement_id: String,
+        duration_ms: u32,
+        now: Duration,
+    ) -> Result<PreparedRegistryMove, &'static str> {
+        let runtime = self.runtime.ok_or("bot_not_spawned")?;
+        if !matches!(runtime.phase, BotPhase::Complete)
+            || route.start != runtime.physical_position()
+            || route.requested_goal != requested_goal
+            || route.status != navmesh::Status::Complete
+            || route.world_sha256 != mesh.artifact().world_sha256
+            || route.profile != mesh.artifact().profile
+            || route.waypoints.last() != Some(&route.projected_goal)
+            || route.waypoint_kinds.len() != route.waypoints.len()
+            || route.waypoint_drop_ids.len() != route.waypoints.len()
+            || route
+                .waypoint_kinds
+                .iter()
+                .any(|kind| *kind != navmesh::WaypointKind::Walk)
+            || route.waypoint_drop_ids.iter().any(Option::is_some)
+        {
+            return Err("bot_resupply_seek_requires_complete_walk");
+        }
+        let movement = BotMove {
+            mode: BotMoveMode::Navmesh,
+            destination: character_position(route.projected_goal),
+            duration_ms,
+            update_ms: 250,
+            yaw: None,
+            sprint: false,
+        };
+        let navigation = NavigationMove::from_complete_navmesh_route(mesh, route)?;
+        self.prepare_registry_move(movement, navigation, now, movement_id)
+    }
+
+    pub(super) fn owns_registry_move(&self, movement_id: &str) -> bool {
+        self.pending_move
+            .as_ref()
+            .is_some_and(|pending| pending.movement_id == movement_id)
+    }
+
+    pub(super) fn stop_owned_supply_walk(&mut self, movement_id: &str) -> bool {
+        if !self.owns_registry_move(movement_id) {
+            return false;
+        }
+        self.pending_move = None;
+        if let Some(runtime) = &mut self.runtime
+            && matches!(runtime.phase, BotPhase::Relocating)
+        {
+            runtime.phase = BotPhase::Complete;
+        }
+        true
+    }
+
+    fn prepare_registry_move(
+        &self,
+        mut movement: BotMove,
+        navigation: NavigationMove,
+        now: Duration,
+        movement_id: String,
+    ) -> Result<PreparedRegistryMove, &'static str> {
+        let runtime = self.runtime.ok_or("bot_not_spawned")?;
         movement.destination =
             character_position(navigation.navmesh.as_ref().unwrap().1.projected_goal);
         movement.validate_from(runtime.position)?;
-        self.pending_move = Some(PendingMove {
-            movement_id: format!("population-{}-{}", self.object_index, runtime.generation),
+        let pending = PendingMove {
+            movement_id,
             from: runtime.position,
             movement,
             navigation: Some(navigation),
-        });
+        };
         let mut navmesh_state = runtime.navmesh_state;
         navmesh_state.drop_wait = Duration::ZERO;
         navmesh_state.navigation_aborted = false;
-        self.runtime = Some(BotRuntime {
+        let runtime = BotRuntime {
             navmesh_state,
             phase: BotPhase::Relocating,
             since: now,
             last_update: now,
             navigation_waypoint: 0,
             ..runtime
-        });
-        Ok(())
+        };
+        Ok(PreparedRegistryMove { pending, runtime })
     }
     #[allow(clippy::too_many_arguments)]
     pub(super) fn begin_registry_ground_recovery(
@@ -2091,6 +2179,13 @@ impl NavigationMove {
         } else {
             route
         };
+        Self::from_complete_navmesh_route(mesh, route)
+    }
+
+    fn from_complete_navmesh_route(
+        mesh: Arc<navmesh::NavMesh>,
+        route: navmesh::Route,
+    ) -> Result<Self, &'static str> {
         if route.length_m > 256.0 || route.waypoints.len() < 2 {
             return Err("bot_navigation_route_distance_limit");
         }
