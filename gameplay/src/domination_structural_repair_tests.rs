@@ -14,7 +14,7 @@ use crate::{
     },
 };
 
-fn repair_fixture() -> Engine<Vec<u8>> {
+pub(crate) fn repair_fixture() -> Engine<Vec<u8>> {
     let (mut runtime, _, spawns, round) = fixture();
     runtime.started = true;
     let mut objectives = (*runtime.setup.catalog).clone();

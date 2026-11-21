@@ -177,6 +177,9 @@ pub(crate) struct DriverControls {
 }
 
 impl Vehicle {
+    pub(crate) fn health_hp(&self) -> f32 {
+        self.health_hp
+    }
     pub fn is_dead(&self) -> bool {
         self.health_quarter_points == 0
     }

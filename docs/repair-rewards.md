@@ -1,6 +1,6 @@
 # Repair work, XP and contextual FRAGO
 
-The qualified manual Hospital and Structural objective paths report accepted
+The qualified manual Ground, Hospital and Structural objective paths report accepted
 repair work. Each credited callback adds f32(1 + the repairer's effective
 RepairAmount modifier) to a separate actor work carry. At the inclusive whole
 unit threshold, stat35 increases by the truncated units and retains the work
@@ -71,7 +71,7 @@ verified, while the replacement's retained rejoin behavior is an explicit local
 policy. Server restart does not persist the in-memory match work counter.
 
 Leadership AutoRepair passes no credited callback and remains rewardless.
-Manual movable-Ground repair still needs its own qualified ingress. Full-repair,
+Manual movable-Ground repair now has the [qualified live input path](manual-ground-repair.md). Full-repair,
 subtype completion and leader tagged-objective counters are distinct zero-XP
 retail paths and are not manufactured by this work producer. Other objective
 FRAGO contexts and live-match/native presentation acceptance remain separate.

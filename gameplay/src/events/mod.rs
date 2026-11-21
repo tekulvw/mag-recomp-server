@@ -312,6 +312,11 @@ impl<W: Write> Engine<W> {
         {
             return Err("identity_mismatch");
         }
+        if let Ok(protocol::GameMessage::Repair(request)) = &decoded.message
+            && request.target_object_id & 0xffff_0000 == 0x0100_0000
+        {
+            return self.event_ground_repair(&event, *request, now, wall_secs);
+        }
         if self.domination_gameplay.is_some()
             && event.rt_type == 0x3d
             && event.plugin_id == Some(1)

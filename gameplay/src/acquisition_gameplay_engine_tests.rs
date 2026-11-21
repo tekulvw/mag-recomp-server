@@ -672,7 +672,7 @@ fn engine_release_requeue_restarts_native_capture_and_escort_cycle() {
     assert_eq!(primary_assignment(&e), FIRST_CAPTURE + 1);
 }
 
-fn ground_firearm_fixture(amount_hp: f32, friendly: bool) -> Engine<Vec<u8>> {
+pub(crate) fn ground_firearm_fixture(amount_hp: f32, friendly: bool) -> Engine<Vec<u8>> {
     let policy = serde_json::from_value(json!({
         "friendly_fire_multiplier": 0.5,
         "profiles":[{
