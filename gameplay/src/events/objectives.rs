@@ -390,7 +390,8 @@ impl<W: Write> Engine<W> {
                     continue;
                 }
                 for (&id, bot) in &self.bot_registry.bots {
-                    if !bot.task.operator
+                    if bot.has_supply_action()
+                        || !bot.task.operator
                         || bot.task.objective != Some(index)
                         || bot.task.recovering
                         || bot.drop_waiting.is_some()

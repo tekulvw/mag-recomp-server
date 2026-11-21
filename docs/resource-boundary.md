@@ -28,3 +28,10 @@ An eventual integration cutover should use one canonical public source checkout
 at a pinned revision, supply resources by explicit paths, and run private
 acceptance checks separately. Avoid maintaining two editable implementation
 copies or copying private inputs into the public tests to make them pass.
+
+Bot supply catalogs and approach policies are also external runtime resources.
+Their maintained projectors consume operator-owned original data and exact
+world/navigation inputs; generated provider placements and approach anchors
+remain private. Public tests use authored synthetic geometry. A projected
+navigation candidate or offline replay does not establish native live-match
+acceptance.

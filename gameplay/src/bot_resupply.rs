@@ -7,10 +7,16 @@ use crate::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+#[path = "bot_resupply_approach.rs"]
+mod approach;
+pub(crate) use approach::Seek;
+
 #[derive(Default)]
 pub(super) struct State {
     provider: Option<(Catalog, Binding)>,
     revision: u64,
+    approach: Option<Box<approach::Approach>>,
+    approach_revision: u64,
 }
 
 struct Binding {
@@ -99,6 +105,7 @@ enum Plan {
     Pulse(Session),
 }
 
+#[derive(Clone, Copy)]
 struct Frame<'a> {
     bot: &'a WorldBot,
     catalog: &'a Catalog,
@@ -112,6 +119,7 @@ impl Plan {
         bot: &WorldBot,
         frame: Option<Frame<'_>>,
         now: Duration,
+        selected_provider: Option<ProviderKey>,
     ) -> Result<Option<Self>, &'static str> {
         let before = bot.resupply;
         let Some(frame) = frame else {
@@ -157,17 +165,11 @@ impl Plan {
             }
             return Ok(Some(Self::Pulse(session)));
         }
-        let Some(ammo) = frame
-            .observed
-            .filter(|seen| {
-                matches!(seen.threat, Threat::Quiet) && bot.damage_revision == seen.damage_revision
-            })
-            .and_then(|seen| seen.ammo)
-            .filter(|ammo| frame.has_ammo_binding(*ammo))
-        else {
+        let Some(ammo) = frame.start_ammo() else {
             return Ok(None);
         };
-        let Some(provider) = frame.catalog.select(frame.origin) else {
+        let Some(provider) = selected_provider.or_else(|| frame.catalog.select(frame.origin))
+        else {
             return Ok(None);
         };
         let source = frame
@@ -192,6 +194,16 @@ impl Plan {
 }
 
 impl Frame<'_> {
+    fn start_ammo(&self) -> Option<AmmoBinding> {
+        self.observed
+            .filter(|seen| {
+                matches!(seen.threat, Threat::Quiet)
+                    && self.bot.damage_revision == seen.damage_revision
+            })
+            .and_then(|seen| seen.ammo)
+            .filter(|ammo| self.has_ammo_binding(*ammo))
+    }
+
     fn has_ammo_binding(&self, binding: AmmoBinding) -> bool {
         binding.reserve_cap > 0
             && self.bot.firearm.is_resupply_dry()
@@ -244,6 +256,7 @@ impl<W: Write> Engine<W> {
             .ok_or("bot_resupply_catalog_revision_exhausted")?;
         self.bot_resupply.provider = Some((catalog, binding));
         self.bot_resupply.revision = revision;
+        self.bot_resupply.approach = None;
         Ok(())
     }
 
@@ -252,6 +265,13 @@ impl<W: Write> Engine<W> {
         let binding = Binding::capture(self).unwrap();
         self.bot_resupply.provider = Some((catalog, binding));
         self.bot_resupply.revision += 1;
+    }
+    #[cfg(test)]
+    pub(super) fn install_synthetic_resupply_approach(
+        &mut self,
+        policy: crate::bot_resupply_approach_policy::Policy,
+    ) {
+        self.install_resupply_approach(policy).unwrap();
     }
 
     pub(super) fn bot_resupply_enabled(&self) -> bool {
@@ -307,9 +327,11 @@ impl<W: Write> Engine<W> {
             .bot_registry
             .bots
             .iter()
-            .filter(|(id, bot)| bot.resupply.is_some() || observed.contains_key(id))
+            .filter(|(id, bot)| bot.has_supply_action() || observed.contains_key(id))
             .map(|(&id, _)| id)
             .collect();
+        let approach_revision = self.resupply_approach_revision();
+        let mut outside = Vec::new();
         for id in ids {
             let bot = &self.bot_registry.bots[&id];
             let frame = scope.and_then(|scope| {
@@ -317,8 +339,12 @@ impl<W: Write> Engine<W> {
                 let runtime = bot.target.runtime?;
                 let motion = runtime.physics_motion?;
                 if !binding.matches(self)
-                    || !matches!(runtime.phase, BotPhase::Complete)
-                    || !bot_firearms::safe(bot)
+                    || !(matches!(runtime.phase, BotPhase::Complete)
+                        || bot
+                            .resupply_seek
+                            .as_ref()
+                            .is_some_and(|seek| seek.owns(bot)))
+                    || !bot_firearms::safe_for_supply_observation(bot)
                     || motion.vertical_velocity != 0.
                     || bot.holding_access.is_some()
                     || !motion.position.iter().all(|p| p.is_finite())
@@ -334,7 +360,37 @@ impl<W: Write> Engine<W> {
                     observed: observed.get(&id).copied(),
                 })
             });
-            let Some(plan) = Plan::prepare(bot, frame, now)? else {
+            let mut arrived = None;
+            if let Some(seek) = &bot.resupply_seek {
+                match seek.step(frame.as_ref(), approach_revision, now) {
+                    approach::Disposition::Wait => continue,
+                    approach::Disposition::Cancel(reason) => {
+                        self.record(json!({
+                            "op":"bot_resupply_seek_cancelled","object_index":id,
+                            "movement_id":seek.movement_id,"source_offset":seek.provider.source_offset,
+                            "name_token":seek.provider.name_token,"reason":reason,
+                            "timestamp_ms":now.as_millis(),
+                        }), wall)?;
+                        self.finish_resupply_seek(id, now);
+                        continue;
+                    }
+                    approach::Disposition::Arrive => arrived = Some(seek),
+                }
+            }
+            let Some(plan) = Plan::prepare(bot, frame, now, arrived.map(|seek| seek.provider))?
+            else {
+                if approach_revision.is_some()
+                    && !bot.has_supply_action()
+                    && let Some(frame) = frame
+                    && let Some(ammo) = frame.start_ammo()
+                {
+                    outside.push(approach::Request {
+                        id,
+                        scope: frame.scope,
+                        ammo,
+                        origin: frame.origin,
+                    });
+                }
                 continue;
             };
             let (session, event, reason) = match plan {
@@ -342,7 +398,7 @@ impl<W: Write> Engine<W> {
                 Plan::Cancel(session, reason) => (session, "bot_resupply_cancelled", Some(reason)),
                 Plan::Pulse(session) => (session, "bot_resupply_pulse", None),
             };
-            self.record(json!({
+            let service_record = json!({
                 "op":event,"reason":reason,"object_index":id,"world_id":session.scope.world,
                 "round":session.scope.round,"allocation_generation":session.allocation,
                 "life_generation":session.ammo.equipment.0,"weapon_item":session.ammo.equipment.4,
@@ -351,7 +407,13 @@ impl<W: Write> Engine<W> {
                 "reserve_before":bot.firearm.reserve,
                 "reserve_after":if matches!(plan, Plan::Pulse(_)) { session.ammo.reserve_cap } else { bot.firearm.reserve },
                 "magazine":bot.firearm.magazine,"ammo_pool":session.ammo.ammo_pool,"origin":session.origin,
-            }), wall)?;
+                "seek_movement_id":arrived.map(|seek| &seek.movement_id),
+            });
+            let completed_seek = arrived.is_some();
+            self.record(service_record, wall)?;
+            if completed_seek {
+                self.finish_resupply_seek(id, now);
+            }
             let bot = self
                 .bot_registry
                 .bots
@@ -366,6 +428,6 @@ impl<W: Write> Engine<W> {
                 }
             }
         }
-        Ok(())
+        self.plan_resupply_seeks(now, wall, outside)
     }
 }

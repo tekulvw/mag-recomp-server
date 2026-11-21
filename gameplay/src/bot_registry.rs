@@ -150,6 +150,7 @@ pub(super) struct WorldBot {
     pub(super) yaw: u16,
     pub(super) firearm: crate::bot_firearms::State,
     pub(super) resupply: Option<crate::bot_resupply::Session>,
+    pub(super) resupply_seek: Option<crate::bot_resupply::Seek>,
     pub(super) healing: crate::bot_healing::State,
     pub(super) move_attempted: bool,
     due_respawn_wave: Option<(u32, Duration)>,
@@ -402,6 +403,9 @@ impl BotRegistry {
     }
 }
 impl WorldBot {
+    pub(super) fn has_supply_action(&self) -> bool {
+        self.resupply.is_some() || self.resupply_seek.is_some()
+    }
     fn apply_damage_health(&mut self, health: u16) {
         if health < self.health {
             self.damage_revision = self.damage_revision.wrapping_add(1);
@@ -825,6 +829,7 @@ impl<W: Write> Engine<W> {
             if bot.health == 0 {
                 bot.firearm = Default::default();
                 bot.resupply = None;
+                bot.resupply_seek = None;
                 bot.healing = Default::default();
                 runtime.phase = BotPhase::Dead;
                 runtime.since = now;
@@ -1081,6 +1086,7 @@ impl<W: Write> Engine<W> {
                 bot.damage_revision = 0;
                 bot.firearm = Default::default();
                 bot.resupply = None;
+                bot.resupply_seek = None;
                 bot.healing = Default::default();
                 bot.damage = initial_damage();
                 bot.move_attempted = false;
@@ -1108,7 +1114,7 @@ impl<W: Write> Engine<W> {
                     json!({"op":"bot_respawn","object_index":id,"generation":runtime.generation}),
                 );
             }
-            if bot.resupply.is_none()
+            if !bot.has_supply_action()
                 && !self.bot_registry.config.as_ref().unwrap().autonomous
                 && !bot.move_attempted
             {
@@ -1178,6 +1184,7 @@ impl<W: Write> Engine<W> {
                             Some("physics_validated_precommit_passage_retreat") =>
                                 "precommit_passage_retreat",
                             _ if bot.target.registry_ground_recovery() => "mesh_recovery",
+                            _ if bot.resupply_seek.is_some() => "resupply",
                             _ if bot.traffic_yield.is_some() => "traffic_yield",
                             _ if bot.drop_holding_goal.is_some() => "drop_holding",
                             _ => "objective_or_fixed_goal",
@@ -1393,6 +1400,9 @@ impl<W: Write> Engine<W> {
                 b.drop_queue_approach.clear();
                 b.holding_retry_at = Duration::ZERO;
                 b.drop_approach_ready = false;
+                continue;
+            }
+            if b.has_supply_action() {
                 continue;
             }
             let r = b.target.runtime.unwrap();
@@ -2479,6 +2489,7 @@ impl<W: Write> Engine<W> {
                     yaw: 0,
                     firearm: Default::default(),
                     resupply: None,
+                    resupply_seek: None,
                     healing: Default::default(),
                     move_attempted: false,
                     due_respawn_wave: None,

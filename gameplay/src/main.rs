@@ -129,6 +129,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     let mut navmesh_path: Option<PathBuf> = None;
     let mut bot_population_path: Option<PathBuf> = None;
     let mut bot_resupply_catalog_path: Option<PathBuf> = None;
+    let mut bot_resupply_approach_policy_path: Option<PathBuf> = None;
     let mut bot_names_path: Option<PathBuf> = None;
     let mut bot_fill_total: usize = 0;
     let mut initial_spawn_delay_ms: Option<[u32; 2]> = None;
@@ -218,6 +219,17 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                     args.next()
                         .ok_or_else(|| {
                             io::Error::other("--bot-resupply-catalog requires an absolute path")
+                        })?
+                        .into(),
+                );
+            }
+            "--bot-resupply-approach-policy" => {
+                bot_resupply_approach_policy_path = Some(
+                    args.next()
+                        .ok_or_else(|| {
+                            io::Error::other(
+                                "--bot-resupply-approach-policy requires an absolute path",
+                            )
                         })?
                         .into(),
                 );
@@ -524,7 +536,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             }
             _ => {
                 return Err(io::Error::other(
-                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--match-profiles /absolute/MATCH_PROFILES.json] [--active-abilities /absolute/ACTIVE_ABILITIES.json] [--squad-orders /absolute/ORDERS.json] [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--dynamic-bodies /absolute/BODIES.json] [--static-partition /absolute/PARTITION.json] [--acquisition-gameplay /absolute/GAMEPLAY.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--firearm-assist-rules /absolute/ASSISTS.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--worker-id ID] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json] [--navmesh-world MESH.mag-nav] [--bot-fill-total N --bot-population POPULATION.json] [--bot-names /absolute/NAMES.json] [--bot-resupply-catalog /absolute/SUPPLY.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS] [--log-segment-bytes BYTES [--log-retention-s SECONDS]]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
+                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--match-profiles /absolute/MATCH_PROFILES.json] [--active-abilities /absolute/ACTIVE_ABILITIES.json] [--squad-orders /absolute/ORDERS.json] [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--dynamic-bodies /absolute/BODIES.json] [--static-partition /absolute/PARTITION.json] [--acquisition-gameplay /absolute/GAMEPLAY.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--firearm-assist-rules /absolute/ASSISTS.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--worker-id ID] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json] [--navmesh-world MESH.mag-nav] [--bot-fill-total N --bot-population POPULATION.json] [--bot-names /absolute/NAMES.json] [--bot-resupply-catalog /absolute/SUPPLY.json] [--bot-resupply-approach-policy /absolute/APPROACH.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS] [--log-segment-bytes BYTES [--log-retention-s SECONDS]]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
                 ));
             }
         }
@@ -537,6 +549,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         }
         if bot_population_path.is_some()
             || bot_resupply_catalog_path.is_some()
+            || bot_resupply_approach_policy_path.is_some()
             || bot_fill_total != 0
             || development_dummy
             || structure_path.is_some()
@@ -1166,6 +1179,30 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             Ok(supply)
         })
         .transpose()?;
+    let bot_resupply_approach_policy = bot_resupply_approach_policy_path
+        .as_ref()
+        .map(|path| {
+            if !path.is_absolute() {
+                return Err(io::Error::other(
+                    "--bot-resupply-approach-policy requires an absolute path",
+                ));
+            }
+            let supply = bot_resupply_catalog.as_ref().ok_or_else(|| {
+                io::Error::other("--bot-resupply-approach-policy requires --bot-resupply-catalog")
+            })?;
+            let mesh = navmesh_world.as_ref().ok_or_else(|| {
+                io::Error::other("--bot-resupply-approach-policy requires --navmesh-world")
+            })?;
+            let world = collision_world.as_ref().ok_or_else(|| {
+                io::Error::other("--bot-resupply-approach-policy requires --collision-world")
+            })?;
+            let policy = mag_gameplay::bot_resupply_approach_policy::Policy::load(path)?;
+            policy
+                .validate_binding(supply, mesh, world)
+                .map_err(io::Error::other)?;
+            Ok(policy)
+        })
+        .transpose()?;
     let firearm_assist_rules = firearm_assist_rules_path
         .as_ref()
         .map(|path| {
@@ -1422,7 +1459,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         }
         println!(
             "{}",
-            serde_json::json!({"event":"catalogs_validated","application_id":application_id,"skill_application_id":skill_catalog.application_id(),"bunkers":bunker_info,"fall_damage_enabled":fall_rules.is_some(),"incapacitation_enabled":incapacitation_rules.is_some(),"character_damage_rules_enabled":character_damage_rules.is_some(),"firearm_assists_enabled":firearm_assist_rules.is_some(),"bot_resupply_validated":bot_resupply_catalog.is_some(),"dynamic_body_catalog_validated":dynamic_bodies.is_some(),"static_partitions_validated":static_partitions.len(),"acquisition_gameplay_validated":acquisition_setup.is_some(),"squad_orders_validated":squad_orders.is_some(),"active_abilities_validated":active_abilities.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_active_abilities()),"domination_gameplay_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_domination_gameplay()),"hospital_rockets_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rockets()),"hospital_rocket_ground_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rocket_ground()),"hospital_rocket_helo_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rocket_helo()),"frag_character_blast_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.frag_character_blast) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_frag_character_blast()),"frag_ground_areas_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.has_frag_ground_areas()) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_frag_ground_areas()),"frag_helo_areas_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_frag_helo_areas()),"hospital_blast_areas_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_blast_areas()),"projectile_contacts_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_projectile_contacts()),"scope":"schema_and_profile_validation_not_client_acceptance"})
+            serde_json::json!({"event":"catalogs_validated","application_id":application_id,"skill_application_id":skill_catalog.application_id(),"bunkers":bunker_info,"fall_damage_enabled":fall_rules.is_some(),"incapacitation_enabled":incapacitation_rules.is_some(),"character_damage_rules_enabled":character_damage_rules.is_some(),"firearm_assists_enabled":firearm_assist_rules.is_some(),"bot_resupply_validated":bot_resupply_catalog.is_some(),"bot_resupply_approach_validated":bot_resupply_approach_policy.is_some(),"dynamic_body_catalog_validated":dynamic_bodies.is_some(),"static_partitions_validated":static_partitions.len(),"acquisition_gameplay_validated":acquisition_setup.is_some(),"squad_orders_validated":squad_orders.is_some(),"active_abilities_validated":active_abilities.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_active_abilities()),"domination_gameplay_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_domination_gameplay()),"hospital_rockets_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rockets()),"hospital_rocket_ground_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rocket_ground()),"hospital_rocket_helo_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rocket_helo()),"frag_character_blast_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.frag_character_blast) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_frag_character_blast()),"frag_ground_areas_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.has_frag_ground_areas()) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_frag_ground_areas()),"frag_helo_areas_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_frag_helo_areas()),"hospital_blast_areas_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_blast_areas()),"projectile_contacts_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_projectile_contacts()),"scope":"schema_and_profile_validation_not_client_acceptance"})
         );
         return Ok(());
     }
@@ -1533,6 +1570,11 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             .configure_bot_resupply_catalog(supply)
             .map_err(io::Error::other)?;
     }
+    if let Some(policy) = bot_resupply_approach_policy {
+        engine
+            .configure_bot_resupply_approach_policy(policy)
+            .map_err(io::Error::other)?;
+    }
     if let Some(registry) = match_profiles {
         engine = engine
             .with_match_profiles(registry)
@@ -1593,7 +1635,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     );
     println!(
         "{}",
-        serde_json::json!({"event":"listening","application_id":application_id.unwrap_or(20230),"match_profiles":match_profiles_path,"active_abilities":active_abilities_path,"squad_orders":squad_orders_path,"profile_selection":if application_id.is_some(){"explicit"}else{"legacy"},"protocol":mag_gameplay::BRIDGE_VERSION,"address":listener.local_addr()?.to_string(),"collision":collision_info,"spawn_catalog":spawn_path,"objective_catalog":objective_info,"item_catalog":item_path,"character_blast_rules":blast_rules_path,"retail_combat_metadata":retail_metadata,"bootstrap_loadouts":bootstrap_loadouts_path,"fall_damage_rules":fall_rules_path,"incapacitation_rules":incapacitation_rules_path,"character_damage_rules":character_damage_rules_path,"firearm_assist_rules":firearm_assist_rules_path,"skill_catalog":skill_path,"retail_armory_catalog":retail_armory_path,"leadership_passives":leadership_passives_path,"leadership_role_policy":leadership_role_policy_path,"bunkers":bunker_info,"tick_telemetry":telemetry_path,"tick_budget_us":tick_budget_us,"scheduler":"independent_50ms_when_subscribed","bot_fill_total":bot_fill_total,"initial_spawn_delay_ms":effective_initial_spawn_delay_ms,"initial_spawn_delay_source":if initial_spawn_delay_ms.is_some(){"override"}else{"catalog"},"bot_population":bot_population_path,"bot_resupply_catalog":bot_resupply_catalog_path,"bot_names":bot_names_path,"bot_names_count":bot_names_count,"development_dummy_position":actual_dummy_position})
+        serde_json::json!({"event":"listening","application_id":application_id.unwrap_or(20230),"match_profiles":match_profiles_path,"active_abilities":active_abilities_path,"squad_orders":squad_orders_path,"profile_selection":if application_id.is_some(){"explicit"}else{"legacy"},"protocol":mag_gameplay::BRIDGE_VERSION,"address":listener.local_addr()?.to_string(),"collision":collision_info,"spawn_catalog":spawn_path,"objective_catalog":objective_info,"item_catalog":item_path,"character_blast_rules":blast_rules_path,"retail_combat_metadata":retail_metadata,"bootstrap_loadouts":bootstrap_loadouts_path,"fall_damage_rules":fall_rules_path,"incapacitation_rules":incapacitation_rules_path,"character_damage_rules":character_damage_rules_path,"firearm_assist_rules":firearm_assist_rules_path,"skill_catalog":skill_path,"retail_armory_catalog":retail_armory_path,"leadership_passives":leadership_passives_path,"leadership_role_policy":leadership_role_policy_path,"bunkers":bunker_info,"tick_telemetry":telemetry_path,"tick_budget_us":tick_budget_us,"scheduler":"independent_50ms_when_subscribed","bot_fill_total":bot_fill_total,"initial_spawn_delay_ms":effective_initial_spawn_delay_ms,"initial_spawn_delay_source":if initial_spawn_delay_ms.is_some(){"override"}else{"catalog"},"bot_population":bot_population_path,"bot_resupply_catalog":bot_resupply_catalog_path,"bot_resupply_approach_policy":bot_resupply_approach_policy_path,"bot_names":bot_names_path,"bot_names_count":bot_names_count,"development_dummy_position":actual_dummy_position})
     );
     let context = Arc::new(ConnectionContext {
         engine,
@@ -2594,6 +2636,7 @@ mod runtime_profile_tests {
     fn registry_rejects_unswitchable_world_extras_before_loading() {
         for flags in [
             vec!["--bot-population", "/synthetic/missing.json"],
+            vec!["--bot-resupply-approach-policy", "/synthetic/missing.json"],
             vec!["--bot-fill-total", "1"],
             vec!["--development-dummy"],
             vec!["--leadership-passives", "/synthetic/missing.json"],
@@ -2636,6 +2679,46 @@ mod runtime_profile_tests {
                 .unwrap_err()
                 .to_string()
                 .contains("requires configured bot population")
+        );
+    }
+
+    #[test]
+    fn bot_resupply_approach_is_explicit_and_requires_bound_service_before_logs() {
+        let files = SyntheticCatalogs::new();
+        files.write(
+            "approach.json",
+            &serde_json::json!({"invalid":"not implicitly enabled"}),
+        );
+        assert!(run(files.args()).is_ok());
+        for (path, reason) in [
+            ("approach.json".to_owned(), "requires an absolute path"),
+            (
+                files.0.join("approach.json").display().to_string(),
+                "requires --bot-resupply-catalog",
+            ),
+        ] {
+            let mut args = files.runtime_args();
+            let log = files.0.join("should-not-exist.jsonl");
+            args.extend([
+                "--log".into(),
+                log.display().to_string(),
+                "--bot-resupply-approach-policy".into(),
+                path,
+            ]);
+            let error = run(args).unwrap_err().to_string();
+            assert!(error.contains(reason), "unexpected error: {error}");
+            assert!(
+                !log.exists(),
+                "invalid approach must fail before opening the log"
+            );
+        }
+        let mut missing_value = files.args();
+        missing_value.push("--bot-resupply-approach-policy".into());
+        assert!(
+            run(missing_value)
+                .unwrap_err()
+                .to_string()
+                .contains("requires an absolute path")
         );
     }
 

@@ -236,9 +236,23 @@ impl Actor {
 }
 
 pub(super) fn safe(bot: &WorldBot) -> bool {
+    safe_for_phase(bot, false)
+}
+
+pub(super) fn safe_for_supply_observation(bot: &WorldBot) -> bool {
+    safe_for_phase(
+        bot,
+        bot.resupply_seek
+            .as_ref()
+            .is_some_and(|seek| seek.owns(bot)),
+    )
+}
+
+fn safe_for_phase(bot: &WorldBot, allow_owned_walk: bool) -> bool {
     let r = bot.target.runtime.unwrap();
     bot.health > 0
-        && !matches!(r.phase, BotPhase::Dead | BotPhase::Relocating)
+        && !matches!(r.phase, BotPhase::Dead)
+        && (allow_owned_walk || !matches!(r.phase, BotPhase::Relocating))
         && r.physics_motion
             .is_some_and(|m| m.grounded && m.slide_velocity == [0.; 2])
         && !r.navmesh_state.movement.sprinting()
@@ -408,7 +422,7 @@ impl<W: Write> Engine<W> {
         // must never publish the previous weapon's ammunition in a join snapshot.
         for bot in self.bot_registry.bots.values_mut() {
             // Service cancellation records before a same-life equipment rebind.
-            if bot.resupply.is_none()
+            if !bot.has_supply_action()
                 && (bot.health == 0
                     || bot
                         .firearm
@@ -533,7 +547,7 @@ impl<W: Write> Engine<W> {
                 continue;
             };
             let bot = &self.bot_registry.bots[&id];
-            if !safe(bot) {
+            if !safe_for_supply_observation(bot) {
                 let state = &mut self.bot_registry.bots.get_mut(&id).unwrap().firearm;
                 if let Some(profile) = state.recoil_profile {
                     let dt = state
@@ -547,8 +561,10 @@ impl<W: Write> Engine<W> {
             }
             let kit = &bot.target.loadout;
             let equipped = kit.primary;
-            let servicing = bot.resupply.is_some();
-            let service_due = bot.resupply.is_some_and(|session| session.due(now));
+            let servicing = bot.has_supply_action();
+            let service_due = bot.resupply.is_some_and(|session| session.due(now))
+                || (bot.resupply_seek.is_some()
+                    && matches!(bot.target.runtime.unwrap().phase, BotPhase::Complete));
             let damage_revision = bot.damage_revision;
             if servicing && current_equipment_key(bot) != bot.firearm.equipment {
                 continue;

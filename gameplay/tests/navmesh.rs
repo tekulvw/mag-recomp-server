@@ -402,3 +402,23 @@ fn corridor_prefix_never_cuts_an_airborne_drop() {
     assert_eq!(after.waypoint_kinds.last(), Some(&WaypointKind::Walk));
     assert!(after.length_m <= 9.000001);
 }
+
+#[test]
+fn goal_candidates_filter_by_radius_and_validate_input() {
+    let mesh = load(fixture(false, true, false));
+    let candidates = mesh.goal_candidates([10., 0., 10.], 4.).unwrap();
+    assert_eq!(candidates.len(), 2);
+    assert_ne!(candidates[0].0, candidates[1].0);
+    assert!(
+        candidates
+            .iter()
+            .all(|(_, point)| point[0] <= 8. || point[0] >= 12.)
+    );
+    assert!(
+        mesh.goal_candidates([10., 0., 10.], 0.5)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(mesh.goal_candidates([f64::NAN, 0., 10.], 1.).is_err());
+    assert!(mesh.goal_candidates([10., 0., 10.], 5.1).is_err());
+}

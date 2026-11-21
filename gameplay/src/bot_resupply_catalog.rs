@@ -109,6 +109,8 @@ fn is_digest(value: &str) -> bool {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Catalog {
+    #[serde(skip)]
+    source_sha256: String,
     schema_version: u32,
     application_id: u32,
     map: String,
@@ -131,6 +133,7 @@ impl Catalog {
     #[cfg(test)]
     pub(crate) fn synthetic(anchor: [f64; 3], tick_rate_seconds: f32) -> Self {
         Self {
+            source_sha256: "e".repeat(64),
             schema_version: 1,
             application_id: 20231,
             map: MAP.into(),
@@ -163,7 +166,8 @@ impl Catalog {
         if bytes.len() as u64 > MAX_CATALOG_BYTES {
             return Err(io::Error::other("bot_resupply_catalog_too_large"));
         }
-        let catalog: Self = serde_json::from_slice(bytes)?;
+        let mut catalog: Self = serde_json::from_slice(bytes)?;
+        catalog.source_sha256 = crate::navmesh::sha256(bytes);
         if !catalog.valid() {
             return Err(io::Error::other("bot_resupply_catalog_invalid"));
         }
@@ -209,6 +213,14 @@ impl Catalog {
             return Err("bot_resupply_catalog_binding_mismatch");
         }
         Ok(())
+    }
+
+    pub fn source_sha256(&self) -> &str {
+        &self.source_sha256
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = ProviderKey> + '_ {
+        self.providers.iter().map(Provider::key)
     }
 
     pub fn select(&self, anchor: [f64; 3]) -> Option<ProviderKey> {

@@ -338,6 +338,15 @@ pub(super) struct Task {
     candidate_attempts: usize,
 }
 impl Task {
+    /// Keep the tactical destination, but never reuse the pre-supply corridor.
+    pub(super) fn resume_after_supply(&mut self, now: Duration) {
+        self.finish_segment(now);
+        self.continuing = self.role_goal.is_some();
+        self.recovering = false;
+        self.progress_distance = None;
+        self.progress_at = now;
+    }
+
     fn finish_segment(&mut self, now: Duration) {
         self.goal = None;
         self.retry_at = now;
@@ -409,7 +418,7 @@ pub(super) fn operator_action(
 fn operator_safe(bot: &crate::bot_registry::WorldBot) -> bool {
     let r = bot.target.runtime.unwrap();
     bot.health > 0
-        && bot.resupply.is_none()
+        && !bot.has_supply_action()
         && r.physics_motion.is_some_and(|m| m.grounded)
         && !r.navmesh_state.on_player
         && !bot.drop_committed
@@ -972,6 +981,9 @@ impl<W: Write> Engine<W> {
                 b.holding_access = None;
                 continue;
             }
+            if b.has_supply_action() {
+                continue;
+            }
             if b.traffic_progress.as_ref().is_none_or(|p| {
                 p.generation != r.generation
                     || p.objective != b.task.objective
@@ -1074,6 +1086,7 @@ impl<W: Write> Engine<W> {
             .filter_map(|(&id, b)| {
                 let r = b.target.runtime.unwrap();
                 (b.health > 0
+                    && !b.has_supply_action()
                     && b.traffic_yield.is_none()
                     && (b.drop_waiting.is_none() || b.drop_holding_goal.is_some())
                     && matches!(r.phase, BotPhase::Relocating)
@@ -1126,7 +1139,7 @@ impl<W: Write> Engine<W> {
             let Some(b) = self.bot_registry.bots.get_mut(&blocker) else {
                 continue;
             };
-            if b.resupply.is_some() {
+            if b.has_supply_action() {
                 continue;
             }
             let r = b.target.runtime.unwrap();
@@ -2213,6 +2226,9 @@ impl<W: Write> Engine<W> {
                 bot.task = Default::default();
                 continue;
             }
+            if bot.has_supply_action() {
+                continue;
+            }
             let t = &mut bot.task;
             if t.generation != r.generation {
                 *t = Task {
@@ -2324,6 +2340,7 @@ impl<W: Write> Engine<W> {
             .values()
             .filter(|b| {
                 b.health > 0
+                    && !b.has_supply_action()
                     && b.target.runtime.is_some_and(|r| {
                         r.physics_motion.is_some_and(|m| m.grounded) && !r.navmesh_state.on_player
                     })
@@ -2357,7 +2374,7 @@ impl<W: Write> Engine<W> {
             let mut fresh = Vec::new();
             let mut retry = Vec::new();
             for (&id, b) in &self.bot_registry.bots {
-                if b.resupply.is_some() {
+                if b.has_supply_action() {
                     continue;
                 }
                 let r = b.target.runtime.unwrap();
@@ -2845,6 +2862,29 @@ mod public_synthetic_policy_tests {
         assert!(task.continuing);
         assert_eq!(task.retry_at, std::time::Duration::from_secs(12));
     }
+    #[test]
+    fn supply_completion_replans_the_preserved_tactical_destination() {
+        let final_goal = super::position([12., 0., 15.]);
+        let mut task = super::Task {
+            objective: Some(4),
+            goal: Some(super::position([3., 0., 6.])),
+            role_goal: Some(final_goal),
+            recovering: true,
+            routed: true,
+            progress_distance: Some((5, 2.)),
+            retry_at: std::time::Duration::from_secs(50),
+            ..Default::default()
+        };
+        let now = std::time::Duration::from_secs(12);
+        task.resume_after_supply(now);
+        assert_eq!(task.objective, Some(4));
+        assert_eq!(task.role_goal, Some(final_goal));
+        assert!(task.goal.is_none() && task.continuing && task.routed);
+        assert!(!task.recovering && task.progress_distance.is_none());
+        assert_eq!(task.retry_at, now);
+        assert_eq!(task.progress_at, now);
+    }
+
     #[test]
     fn bundled_synthetic_policy_satisfies_bounds() {
         let policy = super::ObjectivePolicy::bundled();

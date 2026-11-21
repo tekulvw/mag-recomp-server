@@ -558,7 +558,15 @@ impl NavMesh {
         }
         Ok(id)
     }
+    /// Project a bounded sample onto at most one polygon per walking component.
+    pub fn goal_candidates(&self, goal: Point, radius: f64) -> Result<Vec<(i32, Point)>, Error> {
+        self.goals(goal, radius)
+    }
+
     fn goals(&self, goal: Point, radius: f64) -> Result<Vec<(i32, Point)>, Error> {
+        if !valid_point(goal) || !radius.is_finite() || !(0.05..=5.).contains(&radius) {
+            return err("navmesh_invalid_request");
+        }
         let h = self
             .native
             .lock()
@@ -577,10 +585,10 @@ impl NavMesh {
                 &mut count,
             )
         };
-        if ok == 0 {
+        if ok == 0 || !(0..=128).contains(&count) {
             return err("navmesh_goal_candidate_limit");
         }
-        Ok((0..count as usize)
+        let results: Vec<_> = (0..count as usize)
             .map(|i| {
                 (
                     ids[i],
@@ -591,7 +599,14 @@ impl NavMesh {
                     ],
                 )
             })
-            .collect())
+            .collect();
+        if results
+            .iter()
+            .any(|(id, point)| *id < 0 || !valid_point(*point))
+        {
+            return err("navmesh_invalid_goal_candidate");
+        }
+        Ok(results)
     }
     pub fn contains(&self, position: Point, route: &Route) -> bool {
         if !valid_point(position)
