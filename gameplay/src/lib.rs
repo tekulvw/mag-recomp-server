@@ -160,6 +160,7 @@ pub mod objective_range;
 pub mod owner_update;
 pub mod player_tracking;
 pub mod progression;
+mod progression_refresh;
 pub mod projectile;
 pub mod projectile_replication;
 pub mod protocol;
@@ -179,6 +180,7 @@ pub mod telemetry;
 pub mod turret;
 pub mod vehicle_exit;
 pub mod wire_profile;
+pub mod worker_identity;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::io::{self, Read, Write};
@@ -396,6 +398,18 @@ pub enum Request {
         revision: u64,
         status: loadout_selection::SelectionStatus,
     },
+    RefreshProgression {
+        v: u8,
+        request_id: String,
+        reservation_id: String,
+        world_id: u32,
+        player_id: u16,
+        account_id: String,
+        character_id: u32,
+        progression: progression::ProgressionSnapshot,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        leadership: Option<leadership_runtime::LeadershipRecord>,
+    },
     ProgressionCommitted {
         v: u8,
         request_id: String,
@@ -498,6 +512,7 @@ impl Request {
             | Self::SelectMatchProfile { v, request_id, .. }
             | Self::Reserve { v, request_id, .. }
             | Self::Event { v, request_id, .. }
+            | Self::RefreshProgression { v, request_id, .. }
             | Self::ProgressionCommitted { v, request_id, .. }
             | Self::LoadoutSelectionSettled { v, request_id, .. }
             | Self::RefreshLoadouts { v, request_id, .. }
@@ -543,14 +558,16 @@ pub struct Response {
     pub match_profiles: Vec<match_profiles::Summary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_match: Option<match_profiles::SelectedMatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_identity: Option<worker_identity::WorkerIdentity>,
 }
 impl Response {
-    pub fn error(request_id: String, error: &str) -> Self {
+    pub fn success(request_id: String) -> Self {
         Self {
             v: BRIDGE_VERSION,
             request_id,
-            ok: false,
-            error: Some(error.to_owned()),
+            ok: true,
+            error: None,
             messages: Vec::new(),
             rewards: Vec::new(),
             loadout_selections: Vec::new(),
@@ -558,6 +575,15 @@ impl Response {
             match_terminal: None,
             match_profiles: Vec::new(),
             selected_match: None,
+            worker_identity: None,
+        }
+    }
+
+    pub fn error(request_id: String, error: &str) -> Self {
+        Self {
+            ok: false,
+            error: Some(error.to_owned()),
+            ..Self::success(request_id)
         }
     }
 }
@@ -580,23 +606,26 @@ pub struct ParseError {
 }
 
 pub fn parse_request(line: &[u8]) -> Result<Request, ParseError> {
-    validate_request(line).map_err(|code| {
-        // Only recover a bounded valid correlation ID, never echo credentials or arbitrary JSON.
-        let request_id = if line.len() <= MAX_LINE {
-            serde_json::from_slice::<Value>(line)
-                .ok()
-                .and_then(|v| {
-                    v.get("request_id")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                })
-                .filter(|id| identifier(id, 1))
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
-        ParseError { request_id, code }
+    validate_request(line).map_err(|code| ParseError {
+        request_id: recover_request_id(line),
+        code,
     })
+}
+
+fn recover_request_id(line: &[u8]) -> String {
+    // Only recover a bounded valid correlation ID, never echo credentials or arbitrary JSON.
+    if line.len() > MAX_LINE {
+        return String::new();
+    }
+    serde_json::from_slice::<Value>(line)
+        .ok()
+        .and_then(|v| {
+            v.get("request_id")
+                .and_then(Value::as_str)
+                .filter(|id| identifier(id, 1))
+                .map(str::to_owned)
+        })
+        .unwrap_or_default()
 }
 
 fn validate_request(line: &[u8]) -> Result<Request, &'static str> {
@@ -745,6 +774,24 @@ impl Request {
                 {
                     return Err("invalid_loadout_selection_identity");
                 }
+            }
+            Request::RefreshProgression {
+                reservation_id,
+                account_id,
+                character_id,
+                progression,
+                leadership,
+                ..
+            } => {
+                if !identifier(reservation_id, 16)
+                    || !identifier(account_id, 1)
+                    || account_id.len() > 32
+                    || *character_id == 0
+                {
+                    return Err("invalid_refresh_progression_identity");
+                }
+                progression.validate()?;
+                leadership_progression::validate_snapshot(*leadership, None)?;
             }
             Request::ProgressionCommitted {
                 reservation_id,
@@ -1433,7 +1480,10 @@ impl<W: Write> Engine<W> {
         Ok(())
     }
     pub fn handle(&mut self, request: Request, now: Duration, wall_secs: u64) -> Response {
-        self.last_wall_secs = wall_secs;
+        let refresh = matches!(&request, Request::RefreshProgression { .. });
+        if !refresh {
+            self.last_wall_secs = wall_secs;
+        }
         let request_id = request.header().1.to_owned();
         // Public callers can construct Request without going through parse_request.
         if let Err(code) = request.validate() {
@@ -1499,39 +1549,11 @@ impl<W: Write> Engine<W> {
         };
         let result = self.apply_shared(request, decoded.as_ref(), now, wall_secs);
         match result {
+            Ok(_) if refresh => Response::success(request_id),
             Ok(messages) => Response {
-                v: BRIDGE_VERSION,
-                request_id,
-                ok: true,
-                error: None,
                 messages,
                 rewards: self.pending_reward_batch(),
                 loadout_selections: self.pending_loadout_selections(),
-                capabilities: if hello {
-                    let mut capabilities = vec![
-                        match_cohorts::CAPABILITY.into(),
-                        loadout_selection::CAPABILITY.into(),
-                        loadout_refresh::CAPABILITY.into(),
-                        frago::CAPABILITY.into(),
-                        frago::ACTION_CAPABILITY.into(),
-                        frago::OBJECTIVE_CAPABILITY.into(),
-                        objective_rewards::EXTENDED_CAPABILITY.into(),
-                        repair_rewards::CAPABILITY.into(),
-                    ];
-                    if self.match_profiles.is_some() {
-                        capabilities.push(match_profiles::CAPABILITY.into());
-                    }
-                    capabilities
-                } else {
-                    Vec::new()
-                },
-                match_profiles: if hello {
-                    self.match_profiles
-                        .as_ref()
-                        .map_or_else(Vec::new, |r| r.summaries())
-                } else {
-                    Vec::new()
-                },
                 selected_match: if selection {
                     self.selected_match.clone()
                 } else {
@@ -1542,10 +1564,54 @@ impl<W: Write> Engine<W> {
                 } else {
                     None
                 },
+                ..if hello {
+                    self.discovery_response(request_id)
+                } else {
+                    Response::success(request_id)
+                }
             },
             Err(code) => Response::error(request_id, code),
         }
     }
+    fn discovery_response(&self, request_id: String) -> Response {
+        let mut capabilities = vec![
+            match_cohorts::CAPABILITY.into(),
+            loadout_selection::CAPABILITY.into(),
+            loadout_refresh::CAPABILITY.into(),
+            frago::CAPABILITY.into(),
+            frago::ACTION_CAPABILITY.into(),
+            frago::OBJECTIVE_CAPABILITY.into(),
+            objective_rewards::EXTENDED_CAPABILITY.into(),
+            repair_rewards::CAPABILITY.into(),
+        ];
+        let match_profiles = self
+            .match_profiles
+            .as_ref()
+            .map_or_else(Vec::new, |registry| {
+                capabilities.push(match_profiles::CAPABILITY.into());
+                registry.summaries()
+            });
+        Response {
+            capabilities,
+            match_profiles,
+            ..Response::success(request_id)
+        }
+    }
+
+    /// Configured hello never advances gameplay or settles an outbox receipt.
+    /// Only the exact validated fence permits reading the pending batches.
+    pub fn describe_worker(&self, request_id: String, fenced: bool) -> Response {
+        let mut response = self.discovery_response(request_id);
+        response
+            .capabilities
+            .push(worker_identity::CAPABILITY.into());
+        if fenced {
+            response.rewards = self.pending_reward_batch();
+            response.loadout_selections = self.pending_loadout_selections();
+        }
+        response
+    }
+
     fn apply(
         &mut self,
         request: Request,
@@ -1627,6 +1693,7 @@ impl<W: Write> Engine<W> {
                 )
                 .map(|_| Vec::new()),
             Request::ProgressionCommitted { .. }
+            | Request::RefreshProgression { .. }
             | Request::LoadoutSelectionSettled { .. }
             | Request::RefreshLoadouts { .. } => {
                 unreachable!("handled before actor selection")

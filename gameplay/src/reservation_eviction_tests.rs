@@ -90,3 +90,47 @@ fn idle_expired_reservation_release_is_acknowledged_while_peers_remain() {
     let ack = release(&mut engine, "synthetic-reservation-0001", now);
     assert!(ack.ok, "{:?}", ack.error);
 }
+
+#[test]
+fn acknowledged_release_before_reserve_fences_a_delayed_admission() {
+    for with_peer in [false, true] {
+        let mut engine = engine();
+        if with_peer {
+            reserve(&mut engine, 0);
+        }
+        let id = "synthetic-delayed-reserve-0001";
+        let ack = release(&mut engine, id, Duration::from_secs(1));
+        assert!(
+            ack.ok,
+            "release must fence future admission: {:?}",
+            ack.error
+        );
+        let delayed = reserve_identity(&mut engine, 1, 1, id);
+        assert_eq!(delayed.error.as_deref(), Some("reservation_id_retired"));
+        assert_eq!(
+            present(&mut engine, 0),
+            with_peer,
+            "release changed an unrelated current owner"
+        );
+        assert!(!present(&mut engine, 1));
+        assert!(release(&mut engine, id, Duration::from_secs(2)).ok);
+    }
+}
+
+#[test]
+fn unknown_release_record_failure_does_not_acknowledge_or_tombstone() {
+    let mut engine = engine();
+    let max = engine.max_log;
+    engine.max_log = engine.written;
+    let id = "synthetic-delayed-reserve-0001";
+    let reply = release(&mut engine, id, Duration::from_secs(1));
+    assert_eq!(reply.error.as_deref(), Some("log_limit_reached"));
+    assert!(!engine.released_reservations.contains(id));
+    engine.failed = false;
+    engine.max_log = max;
+    assert!(release(&mut engine, id, Duration::from_secs(2)).ok);
+    assert_eq!(
+        reserve_identity(&mut engine, 1, 1, id).error.as_deref(),
+        Some("reservation_id_retired")
+    );
+}

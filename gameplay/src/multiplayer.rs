@@ -361,6 +361,22 @@ impl<W: Write> Engine<W> {
             )?;
             return Ok(Vec::new());
         }
+        if let Request::Release { reservation_id, .. } = &request
+            && !self
+                .active
+                .as_ref()
+                .is_some_and(|a| a.reservation.id == *reservation_id)
+            && !self.peers.contains_key(reservation_id)
+        {
+            // A cancel may overtake its in-flight reserve on another control
+            // connection. A successful release is definitive for that identity.
+            self.record(
+                json!({"op":"released_before_admission","reservation_id":reservation_id}),
+                wall,
+            )?;
+            self.retire_reservation_id(reservation_id);
+            return Ok(Vec::new());
+        }
         if let Request::Reserve { world_id, .. } = &request
             && self
                 .results_cohorts
@@ -382,6 +398,9 @@ impl<W: Write> Engine<W> {
                 }
                 return self.reserve_fixed_cohort(request, now, wall);
             }
+        }
+        if matches!(&request, Request::RefreshProgression { .. }) {
+            return self.refresh_progression(request, now, wall);
         }
         if matches!(&request, Request::RefreshLoadouts { .. }) {
             return self.refresh_loadouts(request, now, wall);
@@ -436,6 +455,7 @@ impl<W: Write> Engine<W> {
             | Request::SelectMatchProfile { .. }
             | Request::ConfigureMatch { .. }
             | Request::ProgressionCommitted { .. }
+            | Request::RefreshProgression { .. }
             | Request::LoadoutSelectionSettled { .. }
             | Request::RefreshLoadouts { .. } => None,
             Request::Reserve { reservation_id, .. }

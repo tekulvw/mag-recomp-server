@@ -47,6 +47,8 @@ namespace Server.Medius
         public static MediusManager Manager = new MediusManager();
         public static MagLoginRegistry MagLoginTickets = new MagLoginRegistry();
         public static LocalDmeHost LocalDme;
+        public static MagWorldRegistry WorldRegistry;
+        public static IMagGameplayLobby GameplayLobby => (IMagGameplayLobby)WorldRegistry ?? LocalDme;
         public static MagLoadoutCatalog LoadoutCatalog { get; private set; }
         public static MagSkillCatalog SkillCatalog { get; private set; }
         public static MagProgressionCatalog ProgressionCatalog { get; private set; }
@@ -209,7 +211,8 @@ namespace Server.Medius
 
                 // Tick manager
                 await Manager.Tick();
-                    if (LocalDme != null) await LocalDme.TickAsync();
+                    if (WorldRegistry != null) await WorldRegistry.TickAsync();
+                    else if (LocalDme != null) await LocalDme.TickAsync();
 
                 // Tick plugins
                 await Plugins.Tick();
@@ -234,7 +237,8 @@ namespace Server.Medius
             {
                 Logger.Error(ex);
 
-                if (LocalDme != null) await LocalDme.DisposeAsync();
+                if (WorldRegistry != null) await WorldRegistry.DisposeAsync();
+                else if (LocalDme != null) await LocalDme.DisposeAsync();
                 await AuthenticationServer.Stop();
                 await LobbyServer.Stop();
                 await ProxyServer.Stop();
@@ -257,11 +261,21 @@ namespace Server.Medius
             LoadCharacterCatalog();
             PublishActiveAccounts();
 
+            string registryPath=Environment.GetEnvironmentVariable("MAG_WORLD_REGISTRY");
+            if (registryPath!=null && Environment.GetEnvironmentVariable("MAG_LOCAL_DME")!="1")
+                throw new InvalidDataException("MAG_WORLD_REGISTRY requires MAG_LOCAL_DME=1.");
             if (Environment.GetEnvironmentVariable("MAG_LOCAL_DME") == "1")
             {
-                LocalDme = new LocalDmeHost(new GameplayBridge(Environment.GetEnvironmentVariable("MAG_GAMEPLAY_HOST") ?? "mag-gameplay",
-                    int.Parse(Environment.GetEnvironmentVariable("MAG_GAMEPLAY_PORT") ?? "31000")), CreateCharacterStore());
-                await LocalDme.StartAsync();
+                if(registryPath!=null) {
+                    var registryConfig=MagWorldRegistryConfig.Load(registryPath);
+                    if(Settings.MagApplicationId!=registryConfig.ApplicationId) throw new InvalidDataException("Registry application must match the configured MAG lobby application.");
+                    WorldRegistry=new MagWorldRegistry(registryConfig,CreateCharacterStore(),registryPath);
+                    await WorldRegistry.StartAsync();
+                } else {
+                    LocalDme = new LocalDmeHost(new GameplayBridge(Environment.GetEnvironmentVariable("MAG_GAMEPLAY_HOST") ?? "mag-gameplay",
+                        int.Parse(Environment.GetEnvironmentVariable("MAG_GAMEPLAY_PORT") ?? "31000")), CreateCharacterStore());
+                    await LocalDme.StartAsync();
+                }
             }
             Logger.Info("Starting medius components...");
 

@@ -47,14 +47,27 @@ namespace Server.Medius
                 for(byte a=0;a<3;a++)for(byte d=0;d<3;d++)if(a!=d &&
                     !hello.MatchProfiles.Any(p=>p.GameType==mode&&p.AttackingFaction==a&&p.DefendingFaction==d))
                     throw new IOException("Faction matchmaking requires every ordered faction pair for each advertised mode.");
-            var configured=Program.Settings.MagMinimumPlayersPerTeam??new[]{1,1};
+            var configured=_options.MinimumPlayersPerTeam?.ToArray()??new[]{1,1};
             if(configured.Length!=2||configured.Any(n=>n<0))throw new IOException("Matchmaking requires two nonnegative human team minima.");
             _formationTeamMinima=configured.Select(n=>Math.Max(1,n)).ToArray();
             _formationStartup=new MagMatchStartupPolicy(Math.Max(2,_minimumPlayers),_maximumPlayers,_formationTeamMinima);
-            _matchProfiles=hello.MatchProfiles;
+            var profiles = hello.MatchProfiles;
+            if (InRegistry)
+            {
+                profiles = Array.AsReadOnly(profiles.Where(profile =>
+                    _allowedFactions.Contains(profile.AttackingFaction) && _allowedFactions.Contains(profile.DefendingFaction) &&
+                    profile.MaximumPlayers >= _formationStartup.MinimumPlayers &&
+                    _formationTeamMinima.All(minimum => minimum <= profile.TeamCapacity) &&
+                    (long)profile.TeamCapacity * 2 >= _formationStartup.MinimumPlayers).ToArray());
+            }
+            _matchProfiles = profiles;
         }
-        bool RequestedModeIsCurrent(uint mode)=>UsesFactionMatchmaking ?
-            _formedProfile!=null && _formationConfigured && mode==(uint)_formedProfile.GameType : mode==(uint)_gameType;
+        bool RequestedModeIsCurrent(uint mode)
+        {
+            lock (_gate) return UsesFactionMatchmaking
+                ? _formedProfile != null && _formationConfigured && mode == (uint)_formedProfile.GameType
+                : mode == (uint)_gameType;
+        }
 
         public static bool MatchesFormationAcknowledgement(GameplayBridgeResponse reply,string formation,MagMatchProfile profile)
         {
@@ -68,40 +81,63 @@ namespace Server.Medius
             Action<MagPluginClientMessage> send,Func<bool> connected,Action<MagCharacterRecord> notify=null)
         {
             var rejection=!UsesFactionMatchmaking?"faction_matchmaking_disabled":
-                JoinRequestRejection(request,true,mode=>_matchProfiles.Any(p=>(uint)p.GameType==mode))??JoinSessionRejection(session)??
+                JoinRequestRejection(request,true,mode=>_matchProfiles.Any(p=>(uint)p.GameType==mode))??HostJoinSessionRejection(session)??
                 (!connected()?"lobby_disconnected":null);
-            if(rejection!=null){LogJoinRejection(rejection,request);send(JoinResponse(request.TransactionId,2));return;}
+            if(rejection!=null)
+            {
+                LogJoinRejection(rejection,request);
+                send(JoinResponse(request.TransactionId, InRegistry && rejection == "host_not_ready" ? (byte)6 : (byte)2));
+                return;
+            }
             try
             {
                 var character=_store.ReadForAccount(session.AuthenticatedAccount).SingleOrDefault(c=>c.Id==session.CharacterId);
                 if(character==null||character.Faction>2){send(JoinResponse(request.TransactionId,2));return;}
                 var queued=new QueuedJoin {Session=session,Request=request,Account=session.AuthenticatedAccount,
                     Character=session.CharacterId,Connected=connected,Send=send,Notify=notify};
+                byte result = 0;
                 lock(_gate)
                 {
-                    if(_disposed||_reservations.Values.Any(r=>IsLiveCohort(r)&&r.Account==queued.Account&&r.TerminalMatchId==null))
-                    {send(JoinResponse(request.TransactionId,6));return;}
-                    _humanQueue.Put(queued.Account,(int)request.Value,character.Faction,queued);
+                    if(!ReadyForAdmission || _reservations.Values.Any(r=>IsLiveCohort(r)&&r.Account==queued.Account&&r.TerminalMatchId==null))
+                        result = 6;
+                    else if (InRegistry && (_formedProfile == null ||
+                        request.Value != (uint)_formedProfile.GameType ||
+                        (character.Faction != _formedProfile.AttackingFaction && character.Faction != _formedProfile.DefendingFaction)))
+                        result = 6;
+                    else _humanQueue.Put(queued.Account,(int)request.Value,character.Faction,queued);
                 }
+                if (result != 0) { send(JoinResponse(request.TransactionId, result)); return; }
+                // The registry stages and forwards a batch synchronously, then
+                // starts the worker on its next world tick.
+                if (InRegistry) return;
                 SendQueueNotices(true);
                 StartMatchmakingPump();
             }
             catch(Exception e) when(e is IOException||e is InvalidDataException||e is UnauthorizedAccessException||e is ArgumentException||e is InvalidOperationException)
             {send(JoinResponse(request.TransactionId,2));}
         }
-        public void CancelQueuedJoin(MagMlsSession session)
+        public void CancelQueuedJoin(MagMlsSession session) => CancelQueuedJoinCore(session, null);
+
+        public void CancelQueuedJoin(MagMlsSession session, MagJoinGameRequest expectedRequest)
+        {
+            ArgumentNullException.ThrowIfNull(expectedRequest);
+            CancelQueuedJoinCore(session, expectedRequest);
+        }
+
+        void CancelQueuedJoinCore(MagMlsSession session, MagJoinGameRequest expectedRequest)
         {
             if(session==null)return;
             lock(_gate)
             {
-                var ticket=_humanQueue.Snapshot().FirstOrDefault(e=>ReferenceEquals(e.Value.Session,session));
+                var ticket = _humanQueue.Snapshot().FirstOrDefault(e => ReferenceEquals(e.Value.Session, session) &&
+                    (expectedRequest == null || ReferenceEquals(e.Value.Request, expectedRequest)));
                 if(ticket!=null)_humanQueue.Remove(ticket);
             }
             // A cancel can race the successful join reply. Release only this
             // session's still-unclaimed reservation, never an active human.
-            _=ReleaseCancelledQueueAdmissionAsync(session);
+            _ = ReleaseCancelledQueueAdmissionAsync(session, expectedRequest);
         }
-        async Task ReleaseCancelledQueueAdmissionAsync(MagMlsSession session)
+        async Task ReleaseCancelledQueueAdmissionAsync(MagMlsSession session, MagJoinGameRequest expectedRequest)
         {
             try
             {
@@ -109,13 +145,16 @@ namespace Server.Medius
                 lock(_gate)
                 {
                     var pending=_reservations.Values.FirstOrDefault(r=>IsLiveCohort(r)&&r.Account==session.AuthenticatedAccount&&
-                        r.CharacterId==session.CharacterId&&r.Client.SessionKey==session.SessionKey&&!r.Claimed);
+                        r.CharacterId == session.CharacterId && r.Client.SessionKey == session.SessionKey && !r.Claimed &&
+                        (expectedRequest == null || OwnsQueueRequest(r, session, expectedRequest)));
                     if(pending!=null){pending.ReleaseReason="queued_join_cancelled";release=ReleaseAsync(pending);}
                 }
                 if(release!=null)await release;
             }
             catch(Exception e){Logger.Error($"Queued cancellation cleanup: {e.GetType().Name}");}
         }
+        static bool OwnsQueueRequest(Reservation reservation, MagMlsSession session, MagJoinGameRequest request) =>
+            ReferenceEquals(reservation.QueueSession, session) && ReferenceEquals(reservation.QueueRequest, request);
         void PurgeHumanQueue()
         {
             foreach(var ticket in _humanQueue.Snapshot())if(!ticket.Value.Alive)_humanQueue.Remove(ticket);
@@ -128,7 +167,7 @@ namespace Server.Medius
             foreach(var ticket in _humanQueue.Snapshot())if(!_reservations.Values.Any(r=>IsLiveCohort(r)&&r.Accepted&&
                 r.Account==ticket.Value.Account&&r.CharacterId==ticket.Value.Character))
                 status.QueueSizes[ticket.Human.GameType*3+ticket.Human.Faction]++;
-            if(_ready&&_worldStreamHealthy&&!_disposed)
+            if(ReadyForAdmission)
                 foreach(var profile in _matchProfiles)
                 {status.QueueEnabled[profile.GameType*3+profile.AttackingFaction]=true;status.QueueEnabled[profile.GameType*3+profile.DefendingFaction]=true;}
         }
@@ -152,13 +191,37 @@ namespace Server.Medius
         {
             lock(_gate)
             {
-                if(!UsesFactionMatchmaking||_disposed||!_ready||!_worldStreamHealthy||!_matchmakingWorker.IsCompleted||
-                    DateTime.UtcNow<_nextFormationAttempt||_humanQueue.Count==0)return;
+                if (!UsesFactionMatchmaking || !_matchmakingWorker.IsCompleted) return;
+                if (InRegistry)
+                {
+                    if (_registryBatchDepth > 0) return;
+                    PurgeHumanQueue();
+                    if (_registryFormationStaged && _humanQueue.Count == 0) ResetFormation();
+                }
+                if (!ReadyForAdmission || DateTime.UtcNow < _nextFormationAttempt || _humanQueue.Count == 0) return;
                 _matchmakingWorker=Task.Run(PumpFactionMatchmakingAsync);
             }
         }
         void ResetFormation()
-        {_formedProfile=null;_formationId=null;_formationConfigured=false;_formationEverAdmitted=false;}
+        {
+            _formedProfile = null;
+            _formationId = null;
+            _formationConfigured = false;
+            _formationEverAdmitted = false;
+            _registryFormationStaged = false;
+        }
+        void AbandonRegistryFormation()
+        {
+            MagPendingHumanQueue<QueuedJoin>.Entry[] abandoned;
+            lock (_gate)
+            {
+                abandoned = _humanQueue.Snapshot().ToArray();
+                foreach (var ticket in abandoned) _humanQueue.Remove(ticket);
+                ResetFormation();
+            }
+            foreach (var ticket in abandoned.Where(ticket => ticket.Value.Alive))
+                ticket.Value.Send(JoinResponse(ticket.Value.Request.TransactionId, 6));
+        }
         async Task PumpFactionMatchmakingAsync()
         {
             try
@@ -170,7 +233,7 @@ namespace Server.Medius
                     Task release;
                     lock(_gate)
                     {
-                        if(!_humanQueue.IsCurrent(ticket)||!ticket.Value.Alive)continue;
+                        if(!ReadyForAdmission||!_humanQueue.IsCurrent(ticket)||!ticket.Value.Alive)continue;
                         release=ReleasePriorResultsAsync(ticket.Value.Account,ticket.Value.Character);
                     }
                     await release;
@@ -179,11 +242,12 @@ namespace Server.Medius
                 lock(_gate)
                 {
                     PurgeHumanQueue();
-                    if(_disposed||!_worldStreamHealthy||_pendingReleases.Values.Any(p=>!IsResultsCohort(p.Reservation))||
+                    if(!ReadyForAdmission||_pendingReleases.Values.Any(p=>!IsResultsCohort(p.Reservation))||
                         (!_independentMatchCohorts&&_reservations.Values.Any(r=>r.TerminalMatchId!=null)))return;
-                    if(_admissionTerminal||(_formationEverAdmitted&&!_reservations.Values.Any(IsLiveCohort)))ResetFormation();
+                    if(!InRegistry && (_admissionTerminal||(_formationEverAdmitted&&!_reservations.Values.Any(IsLiveCohort))))ResetFormation();
                     if(_formedProfile==null)
                     {
+                        if (InRegistry) return;
                         var selection=MagFactionMatchmaking.Select(_humanQueue.Snapshot().Select(e=>e.Human).ToArray(),
                             _matchProfiles,_formationStartup.MinimumPlayers,_maximumPlayers,_formationTeamMinima,RandomNumberGenerator.GetInt32);
                         if(selection==null)return;
@@ -194,30 +258,46 @@ namespace Server.Medius
                 }
                 if(!_formationConfigured)
                 {
+                    lock (_gate) if (!ReadyForAdmission || _matchmakingCancellation.IsCancellationRequested) return;
                     var reply=await _bridge.RequestControlAsync(new {v=2,request_id=Id(),op="select_match_profile",formation_id=formation,profile_id=profile.ProfileId});
                     if(!MatchesFormationAcknowledgement(reply,formation,profile))
                     {
-                        lock(_gate){_nextFormationAttempt=DateTime.UtcNow.AddSeconds(1);if(reply!=null&&!reply.Ok&&reply.Failure==GameplayBridgeFailure.None)ResetFormation();}
+                        bool refused = reply != null && !reply.Ok && reply.Failure == GameplayBridgeFailure.None;
+                        lock (_gate)
+                        {
+                            _nextFormationAttempt=DateTime.UtcNow.AddSeconds(1);
+                            if (refused && !InRegistry) ResetFormation();
+                        }
+                        if (refused && InRegistry) AbandonRegistryFormation();
                         return; // An uncertain selection is retried with the SAME formation identity.
                     }
-                    lock(_gate)if(_disposed||_matchmakingCancellation.IsCancellationRequested)return;
+                    lock(_gate)if(!ReadyForAdmission||_matchmakingCancellation.IsCancellationRequested)return;
                     var startup=_formationStartup.WithProfileMaximum(profile.MaximumPlayers);
                     if(!await _bridge.RequestAsync(startup.ConfigureRequest(Id(),_applicationId)))
                     {lock(_gate)_nextFormationAttempt=DateTime.UtcNow.AddSeconds(1);return;}
-                    lock(_gate){if(_disposed||_matchmakingCancellation.IsCancellationRequested)return;_formationConfigured=true;}
+                    lock(_gate){if(!ReadyForAdmission||_matchmakingCancellation.IsCancellationRequested)return;_formationConfigured=true;}
                 }
                 MagPendingHumanQueue<QueuedJoin>.Entry[] cohort;
                 lock(_gate)
                 {
                     PurgeHumanQueue();
-                    if(_disposed||_matchmakingCancellation.IsCancellationRequested)return;
-                    if(!_reservations.Values.Any(IsLiveCohort))
+                    if(!ReadyForAdmission||_matchmakingCancellation.IsCancellationRequested)return;
+                    if (InRegistry && _admissionTerminal)
+                        cohort = null;
+                    else if(!_reservations.Values.Any(IsLiveCohort))
                     {
                         var selection=MagFactionMatchmaking.ForProfile(_humanQueue.Snapshot().Select(e=>e.Human).ToArray(),profile,
                             _formationStartup.MinimumPlayers,_maximumPlayers,_formationTeamMinima);
-                        if(selection==null){ResetFormation();return;}
-                        var ids=selection.Players.Select(p=>p.TicketId).ToHashSet(StringComparer.Ordinal);
-                        cohort=_humanQueue.Snapshot().Where(e=>ids.Contains(e.Human.TicketId)).ToArray();
+                        if (selection == null)
+                        {
+                            if (!InRegistry) { ResetFormation(); return; }
+                            cohort = null;
+                        }
+                        else
+                        {
+                            var ids=selection.Players.Select(p=>p.TicketId).ToHashSet(StringComparer.Ordinal);
+                            cohort=_humanQueue.Snapshot().Where(e=>ids.Contains(e.Human.TicketId)).ToArray();
+                        }
                     }
                     else
                     {
@@ -229,18 +309,26 @@ namespace Server.Medius
                             .Take(_reservations.Values.Count(IsLiveCohort)<Math.Min(_maximumPlayers,profile.MaximumPlayers)?1:0).ToArray();
                     }
                 }
+                if (cohort == null) { AbandonRegistryFormation(); return; }
                 foreach(var ticket in cohort)
                 {
-                    lock(_gate)if(_disposed||_matchmakingCancellation.IsCancellationRequested||!_humanQueue.IsCurrent(ticket)||!ticket.Value.Alive)continue;
-                    var reply=await JoinAsync(ticket.Value.Session,ticket.Value.Request,ticket.Value.Notify);
+                    bool TicketCurrent() => _humanQueue.IsCurrent(ticket) && ticket.Value.Alive;
+                    lock(_gate)if(!ReadyForAdmission||_matchmakingCancellation.IsCancellationRequested||!TicketCurrent())continue;
+                    var reply=await JoinAsync(ticket.Value.Session,ticket.Value.Request,ticket.Value.Notify,TicketCurrent);
                     bool current;lock(_gate){current=_humanQueue.IsCurrent(ticket)&&ticket.Value.Alive;
-                        if(reply.Result!=6||!current)_humanQueue.Remove(ticket);
-                        if(reply.Result==0)_formationEverAdmitted=true;}
+                        if(InRegistry||reply.Result!=6||!current)_humanQueue.Remove(ticket);
+                        if(reply.Result==0){_formationEverAdmitted=true;_registryFormationStaged=false;}}
                     if(!current&&reply.Result==0)
                     {
-                        Reservation owned;lock(_gate)owned=_reservations.Values.FirstOrDefault(r=>IsLiveCohort(r)&&r.Account==ticket.Value.Account&&
-                            r.CharacterId==ticket.Value.Character&&r.Client.SessionKey==ticket.Value.Session.SessionKey&&!r.Claimed);
-                        if(owned!=null){owned.ReleaseReason="queued_join_cancelled";await ReleaseAsync(owned);}
+                        await ReleaseCancelledQueueAdmissionAsync(ticket.Value.Session, ticket.Value.Request);
+                    }
+                    else if (current && InRegistry)
+                    {
+                        bool send;
+                        lock (_gate) send = !_disposed && ticket.Value.Alive && (reply.Result != 0 ||
+                            _reservations.Values.Any(r => IsLiveCohort(r) && !r.Invalidated &&
+                                OwnsQueueRequest(r, ticket.Value.Session, ticket.Value.Request)));
+                        if (send) ticket.Value.Send(reply);
                     }
                     else if(current&&reply.Result!=6)lock(_gate)
                     {

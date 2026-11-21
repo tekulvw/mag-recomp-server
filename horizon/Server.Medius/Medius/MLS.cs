@@ -226,19 +226,19 @@ namespace Server.Medius
                     {
                         if (!Program.Settings.EnableMagAccountLogin || !MagPluginRouting.IsSelectedApplication(data.ApplicationId) || !data.MagMlsSession.IsBound)
                         { Logger.Warn("UNHANDLED MAG MLS plugin on unbound session."); break; }
-                        if (Program.LocalDme != null && data.MagMlsSession.State == MagMlsSession.SessionState.Ready &&
+                        if (Program.GameplayLobby != null && data.MagMlsSession.State == MagMlsSession.SessionState.Ready &&
                             plugin.IsValid && plugin.PluginId == 0 && RT.Models.MAG.MagMessageCodec.TryParseClientForApplication(plugin.Payload, data.ApplicationId, out var gameplay))
                         {
                             if (gameplay is RT.Models.MAG.MagServerStatusRequest status)
-                            { Queue(RT.Models.MAG.MagMessageCodec.ToPluginMessageForApplication(Program.LocalDme.Status(status.TransactionId), data.ApplicationId), clientChannel); break; }
+                            { Queue(RT.Models.MAG.MagMessageCodec.ToPluginMessageForApplication(Program.GameplayLobby.Status(status.TransactionId), data.ApplicationId), clientChannel); break; }
                             if (gameplay is RT.Models.MAG.MagRetailCancelJoinRequest)
-                            { Program.LocalDme.CancelQueuedJoin(data.MagMlsSession); break; }
-                            if (gameplay is RT.Models.MAG.MagJoinGameRequest queuedJoin && Program.LocalDme.UsesFactionMatchmaking)
+                            { Program.GameplayLobby.CancelQueuedJoin(data.MagMlsSession); break; }
+                            if (gameplay is RT.Models.MAG.MagJoinGameRequest queuedJoin && Program.GameplayLobby.UsesFactionMatchmaking)
                             {
                                 var queuedSession=data.MagMlsSession;var queuedCharacter=queuedSession.CharacterId;var queuedApplication=data.ApplicationId;
                                 bool CurrentQueueSession()=>clientChannel.Active && ReferenceEquals(data.MagMlsSession,queuedSession) &&
                                     queuedSession.CharacterId==queuedCharacter && queuedSession.State==MagMlsSession.SessionState.Ready && !queuedSession.IsExpired(DateTime.UtcNow);
-                                Program.LocalDme.QueueJoin(queuedSession,queuedJoin,
+                                Program.GameplayLobby.QueueJoin(queuedSession,queuedJoin,
                                     message=>{if(CurrentQueueSession())Queue(RT.Models.MAG.MagMessageCodec.ToPluginMessageForApplication(message,queuedApplication),clientChannel);},
                                     CurrentQueueSession,
                                     record=>{if(CurrentQueueSession()&&record.AccountId==queuedCharacter)Queue(RT.Models.MAG.MagMessageCodec.ToPluginMessageForApplication(
@@ -248,14 +248,14 @@ namespace Server.Medius
                             if (gameplay is RT.Models.MAG.MagJoinGameRequest join)
                             { if (join is RT.Models.MAG.MagRetailJoinGameRequest retailJoin)
                                 Logger.Info($"MAG retail join preference={retailJoin.Preference} value0={retailJoin.Value} value1={retailJoin.Value1} clientType={retailJoin.ClientType} partyId={retailJoin.PartyId}");
-                              Queue(RT.Models.MAG.MagMessageCodec.ToPluginMessageForApplication(await Program.LocalDme.JoinAsync(data.MagMlsSession, join, record => {
+                              Queue(RT.Models.MAG.MagMessageCodec.ToPluginMessageForApplication(await Program.GameplayLobby.JoinAsync(data.MagMlsSession, join, record => {
                                 var session = data.MagMlsSession;
                                 if (clientChannel.Active && session.State == MagMlsSession.SessionState.Ready && !session.IsExpired(DateTime.UtcNow) && session.CharacterId == record.AccountId)
                                     Queue(RT.Models.MAG.MagMessageCodec.ToPluginMessageForApplication(new RT.Models.MAG.MagCharacterRecordNotification { Record = record }, session.ApplicationId), clientChannel);
                             }), data.ApplicationId), clientChannel); break; }
                         }
                         data.MagMlsSession.CharacterStore = Program.CreateCharacterStore();
-                        data.MagMlsSession.LoadoutCommitted = (account, character) => Program.LocalDme?.ArmoryLoadoutCommitted(account, character);
+                        data.MagMlsSession.LoadoutCommitted = (account, character) => Program.GameplayLobby?.ArmoryLoadoutCommitted(account, character);
                         var replies = data.MagMlsSession.HandleMany(plugin, magNow);
                         Logger.Info($"MAG MLS plugin type={plugin.ApplicationMessageType:X4} bytes={plugin.Payload?.Length ?? 0} state={data.MagMlsSession.State}/{data.MagMlsSession.StorageStatus} refresh={data.MagMlsSession.LoadoutRefreshStatus} replies={replies.Count}");
                         Queue(replies, clientChannel);

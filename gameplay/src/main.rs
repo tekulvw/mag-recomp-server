@@ -1,7 +1,8 @@
 use mag_gameplay::collision::{CollisionLimits, CollisionWorld};
 use mag_gameplay::telemetry::{TickRecorder, TickSample};
+use mag_gameplay::worker_identity::{WORKER_ID_ERROR, WorkerIdentity};
 use mag_gameplay::{
-    Engine, EngineResources, IO_DEADLINE, MAX_LOG, Response, parse_request, read_line,
+    Engine, EngineResources, IO_DEADLINE, MAX_LOG, Request, Response, parse_request, read_line,
 };
 use sha2::{Digest, Sha256};
 use std::fs::OpenOptions;
@@ -117,6 +118,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     let mut application_id: Option<u32> = None;
     let mut validate_catalogs = false;
     let mut headless_sim_seconds: Option<u64> = None;
+    let mut worker_identity = None;
     let mut bind = SocketAddr::from(([127, 0, 0, 1], 31000));
     let mut log: Option<PathBuf> = None;
     let mut log_segment_bytes: Option<u64> = None;
@@ -462,6 +464,12 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             "--development-dummy" => development_dummy = true,
             "--development-control" => development_control = true,
             "--development-grenade-radius" => development_grenade_radius = true,
+            "--worker-id" => {
+                let id = args
+                    .next()
+                    .ok_or_else(|| io::Error::other(WORKER_ID_ERROR))?;
+                worker_identity = Some(WorkerIdentity::start(id)?);
+            }
             "--bind" => {
                 bind = args
                     .next()
@@ -496,7 +504,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             }
             _ => {
                 return Err(io::Error::other(
-                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--match-profiles /absolute/MATCH_PROFILES.json] [--active-abilities /absolute/ACTIVE_ABILITIES.json] [--squad-orders /absolute/ORDERS.json] [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--dynamic-bodies /absolute/BODIES.json] [--static-partition /absolute/PARTITION.json] [--acquisition-gameplay /absolute/GAMEPLAY.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json] [--navmesh-world MESH.mag-nav] [--bot-fill-total N --bot-population POPULATION.json] [--bot-names /absolute/NAMES.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS] [--log-segment-bytes BYTES [--log-retention-s SECONDS]]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
+                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--match-profiles /absolute/MATCH_PROFILES.json] [--active-abilities /absolute/ACTIVE_ABILITIES.json] [--squad-orders /absolute/ORDERS.json] [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--dynamic-bodies /absolute/BODIES.json] [--static-partition /absolute/PARTITION.json] [--acquisition-gameplay /absolute/GAMEPLAY.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--worker-id ID] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json] [--navmesh-world MESH.mag-nav] [--bot-fill-total N --bot-population POPULATION.json] [--bot-names /absolute/NAMES.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS] [--log-segment-bytes BYTES [--log-retention-s SECONDS]]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
                 ));
             }
         }
@@ -1452,6 +1460,14 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         "{}",
         serde_json::json!({"event":"listening","application_id":application_id.unwrap_or(20230),"match_profiles":match_profiles_path,"active_abilities":active_abilities_path,"squad_orders":squad_orders_path,"profile_selection":if application_id.is_some(){"explicit"}else{"legacy"},"protocol":mag_gameplay::BRIDGE_VERSION,"address":listener.local_addr()?.to_string(),"collision":collision_info,"spawn_catalog":spawn_path,"objective_catalog":objective_info,"item_catalog":item_path,"character_blast_rules":blast_rules_path,"retail_combat_metadata":retail_metadata,"bootstrap_loadouts":bootstrap_loadouts_path,"fall_damage_rules":fall_rules_path,"incapacitation_rules":incapacitation_rules_path,"character_damage_rules":character_damage_rules_path,"skill_catalog":skill_path,"retail_armory_catalog":retail_armory_path,"leadership_passives":leadership_passives_path,"leadership_role_policy":leadership_role_policy_path,"bunkers":bunker_info,"tick_telemetry":telemetry_path,"tick_budget_us":tick_budget_us,"scheduler":"independent_50ms_when_subscribed","bot_fill_total":bot_fill_total,"initial_spawn_delay_ms":effective_initial_spawn_delay_ms,"initial_spawn_delay_source":if initial_spawn_delay_ms.is_some(){"override"}else{"catalog"},"bot_population":bot_population_path,"bot_names":bot_names_path,"bot_names_count":bot_names_count,"development_dummy_position":actual_dummy_position})
     );
+    let context = Arc::new(ConnectionContext {
+        engine,
+        started,
+        telemetry,
+        tick_budget_us,
+        subscriber,
+        worker_identity,
+    });
     for connection in listener.incoming() {
         let stream = connection?;
         if active
@@ -1463,21 +1479,11 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             drop(stream);
             continue;
         }
-        let engine = Arc::clone(&engine);
+        let context = Arc::clone(&context);
         let active = Arc::clone(&active);
-        let telemetry = telemetry.clone();
-        let subscriber = Arc::clone(&subscriber);
         std::thread::spawn(move || {
             let slot = ConnectionSlot(Some(active));
-            if let Err(failure) = serve(
-                stream,
-                engine,
-                started,
-                telemetry,
-                tick_budget_us,
-                subscriber,
-                slot,
-            ) {
+            if let Err(failure) = serve(stream, &context, slot) {
                 // Fixed categories only: no payload, request ID, credentials or
                 // operating-system error text can reach this diagnostic.
                 let _ = writeln!(io::stderr().lock(), "{}", failure.diagnostic());
@@ -1524,24 +1530,62 @@ impl ConnectionFailure {
     }
 }
 
-fn serve(
-    mut stream: TcpStream,
+struct ConnectionContext {
     engine: Arc<Mutex<Engine<LogWriter>>>,
     started: Instant,
     telemetry: Option<TickRecorder>,
     tick_budget_us: Option<u64>,
     subscriber: SharedSubscriber,
+    worker_identity: Option<WorkerIdentity>,
+}
+
+fn serve(
+    mut stream: TcpStream,
+    context: &ConnectionContext,
     slot: ConnectionSlot,
 ) -> Result<(), ConnectionFailure> {
+    let ConnectionContext {
+        engine,
+        started,
+        telemetry,
+        tick_budget_us,
+        subscriber,
+        worker_identity,
+    } = context;
+    let worker_identity = worker_identity.as_ref();
     let line = read_line(&mut stream, IO_DEADLINE)
         .map_err(|error| ConnectionFailure::io(ConnectionStage::ReadRequest, error))?;
+    let (line, fenced) = match worker_identity {
+        Some(identity) => match identity.strip_request_envelope(&line) {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                return write_response(
+                    &mut stream,
+                    Response::error(error.request_id, error.code),
+                    worker_identity,
+                );
+            }
+        },
+        None => (line, false),
+    };
     if serde_json::from_slice::<serde_json::Value>(&line)
         .ok()
         .is_some_and(|v| v["op"] == "subscribe_world")
     {
-        return serve_subscription(stream, &line, engine, subscriber, slot);
+        return serve_subscription(
+            stream,
+            &line,
+            engine,
+            Arc::clone(subscriber),
+            slot,
+            worker_identity,
+        );
     }
     let response = match parse_request(&line) {
+        Ok(Request::Hello { request_id, .. }) if worker_identity.is_some() => match engine.lock() {
+            Ok(engine) => engine.describe_worker(request_id, fenced),
+            Err(_) => Response::error(request_id, "engine_unavailable"),
+        },
         Ok(request) => {
             let wall = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -1573,22 +1617,14 @@ fn serve(
                     wait_us,
                     engine_us,
                     response.ok,
-                    tick_budget_us,
+                    *tick_budget_us,
                 ));
             }
             response
         }
         Err(error) => Response::error(error.request_id, error.code),
     };
-    let mut reply = serde_json::to_vec(&response).map_err(|_| ConnectionFailure {
-        stage: ConnectionStage::EncodeResponse,
-        kind: io::ErrorKind::InvalidData,
-    })?;
-    reply.push(b'\n');
-    stream
-        .set_write_timeout(Some(IO_DEADLINE))
-        .and_then(|_| stream.write_all(&reply))
-        .map_err(|error| ConnectionFailure::io(ConnectionStage::WriteResponse, error))
+    write_response(&mut stream, response, worker_identity)
 }
 
 fn parse_point(value: &str) -> io::Result<[f64; 3]> {
@@ -1632,8 +1668,13 @@ struct SubscribeWorld {
     request_id: String,
     world_id: u32,
 }
-fn write_response(stream: &mut TcpStream, response: &Response) -> Result<(), ConnectionFailure> {
-    let mut bytes = serde_json::to_vec(response).map_err(|_| ConnectionFailure {
+fn write_response(
+    stream: &mut TcpStream,
+    mut response: Response,
+    worker_identity: Option<&WorkerIdentity>,
+) -> Result<(), ConnectionFailure> {
+    response.worker_identity = worker_identity.cloned();
+    let mut bytes = serde_json::to_vec(&response).map_err(|_| ConnectionFailure {
         stage: ConnectionStage::EncodeResponse,
         kind: io::ErrorKind::InvalidData,
     })?;
@@ -1646,9 +1687,10 @@ fn write_response(stream: &mut TcpStream, response: &Response) -> Result<(), Con
 fn serve_subscription(
     mut stream: TcpStream,
     line: &[u8],
-    engine: Arc<Mutex<Engine<LogWriter>>>,
+    engine: &Mutex<Engine<LogWriter>>,
     shared: SharedSubscriber,
     slot: ConnectionSlot,
+    worker_identity: Option<&WorkerIdentity>,
 ) -> Result<(), ConnectionFailure> {
     let request = serde_json::from_slice::<SubscribeWorld>(line)
         .ok()
@@ -1663,7 +1705,8 @@ fn serve_subscription(
     let Some(request) = request else {
         return write_response(
             &mut stream,
-            &Response::error(String::new(), "invalid_subscription"),
+            Response::error(String::new(), "invalid_subscription"),
+            worker_identity,
         );
     };
     let (sender, receiver) = mpsc::sync_channel(32);
@@ -1673,7 +1716,8 @@ fn serve_subscription(
         let Some(mut guard) = vacant_subscriber_slot(&shared)? else {
             return write_response(
                 &mut stream,
-                &Response::error(request.request_id, "world_subscription_exists"),
+                Response::error(request.request_id, "world_subscription_exists"),
+                worker_identity,
             );
         };
         let mut engine = engine.lock().map_err(|_| ConnectionFailure {
@@ -1685,25 +1729,14 @@ fn serve_subscription(
             drop(guard);
             return write_response(
                 &mut stream,
-                &Response::error(request.request_id, "subscription_world_mismatch"),
+                Response::error(request.request_id, "subscription_world_mismatch"),
+                worker_identity,
             );
         }
         engine.enable_world_ticks();
         // Queue the acknowledgement before exposing the sender to the scheduler.
         sender
-            .send(Response {
-                v: mag_gameplay::BRIDGE_VERSION,
-                request_id: request.request_id.clone(),
-                ok: true,
-                error: None,
-                messages: Vec::new(),
-                rewards: Vec::new(),
-                loadout_selections: Vec::new(),
-                capabilities: Vec::new(),
-                match_profiles: Vec::new(),
-                selected_match: None,
-                match_terminal: None,
-            })
+            .send(Response::success(request.request_id.clone()))
             .unwrap();
         *guard = Some(WorldSubscriber {
             generation,
@@ -1714,7 +1747,7 @@ fn serve_subscription(
     }
     // Persistent subscriptions have their own single slot, separate from request workers.
     drop(slot);
-    forward_subscription(stream, shared, generation, receiver)
+    forward_subscription(stream, shared, generation, receiver, worker_identity)
 }
 
 // Keep the occupancy check and registration under the same lock: a new
@@ -1734,6 +1767,7 @@ fn forward_subscription(
     shared: SharedSubscriber,
     generation: u64,
     receiver: mpsc::Receiver<Response>,
+    worker_identity: Option<&WorkerIdentity>,
 ) -> Result<(), ConnectionFailure> {
     let _owner = SubscriptionOwner {
         shared: Arc::clone(&shared),
@@ -1790,7 +1824,7 @@ fn forward_subscription(
         }
         match receiver.recv_timeout(remaining.min(Duration::from_millis(100))) {
             Ok(response) => {
-                write_response(&mut stream, &response)?;
+                write_response(&mut stream, response, worker_identity)?;
                 frame_deadline = Instant::now() + Duration::from_secs(2);
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -1912,19 +1946,7 @@ mod subscription_tests {
     use std::sync::atomic::AtomicBool;
 
     fn response() -> Response {
-        Response {
-            v: mag_gameplay::BRIDGE_VERSION,
-            request_id: "synthetic-world-stream".into(),
-            ok: true,
-            error: None,
-            messages: Vec::new(),
-            rewards: Vec::new(),
-            loadout_selections: Vec::new(),
-            capabilities: Vec::new(),
-            match_profiles: Vec::new(),
-            selected_match: None,
-            match_terminal: None,
-        }
+        Response::success("synthetic-world-stream".into())
     }
 
     fn sockets() -> (TcpStream, TcpStream) {
@@ -1974,8 +1996,9 @@ mod subscription_tests {
             }
         });
         let worker_shared = Arc::clone(&shared);
-        let worker =
-            std::thread::spawn(move || forward_subscription(server, worker_shared, 1, receiver));
+        let worker = std::thread::spawn(move || {
+            forward_subscription(server, worker_shared, 1, receiver, None)
+        });
         // FIN leaves the peer's read side open: all tiny heartbeats can still
         // write successfully. Only checking writes/queue timeouts misses it.
         client.shutdown(Shutdown::Write).unwrap();
@@ -1999,8 +2022,9 @@ mod subscription_tests {
         let (sender, receiver) = register(&shared, 2);
         sender.send(response()).unwrap();
         let worker_shared = Arc::clone(&shared);
-        let worker =
-            std::thread::spawn(move || forward_subscription(server, worker_shared, 2, receiver));
+        let worker = std::thread::spawn(move || {
+            forward_subscription(server, worker_shared, 2, receiver, None)
+        });
         let line = mag_gameplay::read_line(&mut replacement, Duration::from_secs(1)).unwrap();
         let reply: Response = serde_json::from_slice(&line).unwrap();
         assert!(reply.ok);
@@ -2016,8 +2040,9 @@ mod subscription_tests {
         let shared = Arc::new(Mutex::new(None));
         let (_sender, receiver) = register(&shared, 1);
         let worker_shared = Arc::clone(&shared);
-        let worker =
-            std::thread::spawn(move || forward_subscription(server, worker_shared, 1, receiver));
+        let worker = std::thread::spawn(move || {
+            forward_subscription(server, worker_shared, 1, receiver, None)
+        });
         std::thread::sleep(Duration::from_millis(250));
         assert!(vacant_subscriber_slot(&shared).ok().flatten().is_none());
         client.shutdown(Shutdown::Write).unwrap();
@@ -2031,7 +2056,7 @@ mod subscription_tests {
         let shared = Arc::new(Mutex::new(None));
         let (_sender, receiver) = register(&shared, 1);
         let began = Instant::now();
-        let failure = forward_subscription(server, Arc::clone(&shared), 1, receiver)
+        let failure = forward_subscription(server, Arc::clone(&shared), 1, receiver, None)
             .err()
             .unwrap();
         assert!(began.elapsed() >= Duration::from_secs(2));
@@ -2046,7 +2071,7 @@ mod subscription_tests {
         let shared = Arc::new(Mutex::new(None));
         let (_sender, receiver) = register(&shared, 1);
         client.write_all(b"x").unwrap();
-        let failure = forward_subscription(server, Arc::clone(&shared), 1, receiver)
+        let failure = forward_subscription(server, Arc::clone(&shared), 1, receiver, None)
             .err()
             .unwrap();
         assert_eq!(failure.kind, io::ErrorKind::InvalidData);
@@ -2087,6 +2112,10 @@ mod subscription_tests {
 }
 
 #[cfg(test)]
+#[path = "../tests/support/synthetic_runtime_catalogs.rs"]
+mod synthetic_runtime_catalogs;
+
+#[cfg(test)]
 mod runtime_profile_tests {
     use super::*;
 
@@ -2106,137 +2135,7 @@ mod runtime_profile_tests {
         );
     }
 
-    struct SyntheticCatalogs(PathBuf);
-
-    impl SyntheticCatalogs {
-        fn new() -> Self {
-            static NEXT_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
-            let path = std::env::temp_dir().join(format!(
-                "mag-synthetic-runtime-{}-{}-{}",
-                std::process::id(),
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos(),
-                NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
-            ));
-            std::fs::create_dir(&path).unwrap();
-            let files = Self(path);
-            let items = serde_json::json!({"schema_version":2,"application_id":20231,
-                "items":{"FactionItemList0:2":{"authored_ref":"FactionItemList0:2",
-                    "faction_list":"FactionItemList0","local_ordinal":2,"wire_item_id":null,
-                    "name":"synthetic_weapon","item_type":"kWeapon",
-                    "definition":{"group":"weapons","name":"synthetic_weapon"}}},
-                "definitions":{"weapons":{"synthetic_weapon":{"parameters":{}}}},
-                "resources":{}});
-            files.write("items.json", &items);
-            let digest = format!(
-                "{:x}",
-                Sha256::digest(std::fs::read(files.0.join("items.json")).unwrap())
-            );
-            files.write("spawns.json", &serde_json::json!({
-                "format":"mag_spawn_catalog","schema_version":1,"source":"SYNTHETIC CLI schema test",
-                "active":{"map_name":"synthetic_arena","squad_index":0,"default_spawn":0,"available":[0]},
-                "match_profile":{"has_bunkers":false,"has_objectives":false},
-                "maps":[{"name":"synthetic_arena","spawn_count":1,"locations":[
-                    {"index":0,"token":1,"kind":"on_foot","position":{"x":10.,"y":2.,"z":12.}}
-                ]}]
-            }));
-            let mut wire: serde_json::Value =
-                serde_json::from_str(include_str!("../data/synthetic-wire-profiles.json")).unwrap();
-            wire["profiles"] = serde_json::json!([wire["profiles"][1].clone()]);
-            files.write("wire.json", &wire);
-            files.write("blast.json", &serde_json::json!({"schema_version":1,"applications":[20230,20231],
-                "character_damage":{"armor_rating_reduction":0.25,"armor_prevention_reduction":0.75,"hit_location":3,"damage_type":10}}));
-            let mut provenance = serde_json::json!({"verified_binding":{"validated":true,
-                "positions_compared":667,"blank_positions_compared":25,"blank_zero_empirically_verified":true}});
-            for name in [
-                "original_retail_elf_sha256",
-                "snapshot_sha256",
-                "catalog_sha256",
-                "rules_sha256",
-                "owner_attestation_sha256",
-                "gear_slots_sha256",
-                "comparator_sha256",
-            ] {
-                provenance[name] = serde_json::json!(if name == "catalog_sha256" {
-                    digest.clone()
-                } else {
-                    "a".repeat(64)
-                });
-            }
-            let mut kit = vec![None; 22];
-            kit[..3].fill(Some(2_u16));
-            let loadouts: Vec<_> = (0..5)
-                .map(|index| {
-                    serde_json::json!({
-                        "update_id":1,"items":if index < 3 {kit.clone()} else {vec![None;22]},
-                        "primary_ammo":if index < 3 {7} else {0}
-                    })
-                })
-                .collect();
-            files.write("bootstrap.json", &serde_json::json!({"schema_version":1,"application_id":20231,
-                "provenance":provenance,
-                "factions":(0..3).map(|faction|serde_json::json!({"faction":faction,"class_ref":"CharacterClassInfo0","loadouts":loadouts})).collect::<Vec<_>>()
-            }));
-            files.write("combat.json", &serde_json::json!({"schema_version":2,"application_id":20231,
-                "status":"SYNTHETIC schema test","authority":{"bullet_damage":true,"grenade_damage":false,
-                    "grenade_physics":false,"armor_reduction":true,"body_damage":true,"healing_schedule":false,"ammo_tokens":false},
-                "provenance":{"catalog_sha256":digest},"bullets":{},"grenades":{},"armor":{},"healing":{},"unsupported":{},
-                "body":(0..16).map(|location|serde_json::json!({"location":location,"armor_area":0,"multiplier":1.0,"source":"SYNTHETIC"})).collect::<Vec<_>>(),
-                "limitations":["Synthetic schema data proves no native compatibility"]}));
-            files.write("armory.json", &serde_json::json!({"schema_version":1,"application_id":20231,
-                "source_sha256":{"gameplay/data/retail-items.json":digest},
-                "items":[{"wire_id":2,"name":"synthetic_weapon","authored_ref":"FactionItemList0:2","available_bit":2,"factions":[0,1,2],"primary_ammo":7}],
-                "factions":(0..3).map(|faction|serde_json::json!({"faction":faction,"available_item_bits":[2],"skill_ids":[],
-                    "loadouts":loadouts.iter().map(|row|serde_json::json!({"update_id":row["update_id"],"items":row["items"]})).collect::<Vec<_>>()
-                })).collect::<Vec<_>>()
-            }));
-            files.write("skills.json", &serde_json::json!({"schema_version":2,"application_id":20231,
-                "source_sha256":{"gameplay/data/retail-items.json":digest},
-                "table":{"Skills":{"MagCharacterSkill1":{"MagCharacterSkill":{"Green":{"Available":true}}}}}}));
-            files.write("fall.json", &serde_json::json!({"schema_version":1,"source_build":"retail","application_id":20231,
-                "min_height":3.0,"damage_factor":4.0,"minimum_damage_exclusive":2.0,"jump_fall_state":1,"damage_type":5,"damage_source_type":1}));
-            files
-        }
-
-        fn write(&self, name: &str, value: &serde_json::Value) {
-            std::fs::write(self.0.join(name), serde_json::to_vec(value).unwrap()).unwrap();
-        }
-
-        fn read(&self, name: &str) -> serde_json::Value {
-            serde_json::from_slice(&std::fs::read(self.0.join(name)).unwrap()).unwrap()
-        }
-
-        fn args(&self) -> Vec<String> {
-            let mut args = vec![
-                "--application-id".into(),
-                "20231".into(),
-                "--validate-catalogs".into(),
-            ];
-            for (flag, name) in [
-                ("--item-catalog", "items.json"),
-                ("--spawn-catalog", "spawns.json"),
-                ("--wire-profiles", "wire.json"),
-                ("--character-blast-rules", "blast.json"),
-                ("--bootstrap-loadouts", "bootstrap.json"),
-                ("--retail-combat-metadata", "combat.json"),
-                ("--retail-armory-catalog", "armory.json"),
-                ("--skill-catalog", "skills.json"),
-                ("--fall-damage-rules", "fall.json"),
-            ] {
-                args.push(flag.into());
-                args.push(self.0.join(name).to_str().unwrap().into());
-            }
-            args
-        }
-    }
-
-    impl Drop for SyntheticCatalogs {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
+    use super::synthetic_runtime_catalogs::SyntheticCatalogs;
 
     #[test]
     fn offline_cli_validates_explicit_bot_names_without_opening_logs() {
@@ -2393,8 +2292,7 @@ mod runtime_profile_tests {
         spawns["match_profile"]["game_type"] = serde_json::json!(1);
         files.write("spawns.json", &spawns);
         let log = files.0.join("should-not-exist.jsonl");
-        let mut args = files.args();
-        args.retain(|arg| arg != "--validate-catalogs");
+        let mut args = files.runtime_args();
         args.extend([
             "--acquisition-gameplay".into(),
             files.0.join("gameplay.json").display().to_string(),
@@ -2546,8 +2444,7 @@ mod runtime_profile_tests {
         let mut broken = files.read("profiles.json");
         broken["profiles"][0]["spawn_catalog"] = serde_json::json!(files.0.join("missing.json"));
         files.write("profiles.json", &broken);
-        let mut args = files.args();
-        args.retain(|s| s != "--validate-catalogs");
+        let mut args = files.runtime_args();
         args.extend([
             "--match-profiles".into(),
             manifest.display().to_string(),

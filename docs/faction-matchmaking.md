@@ -59,3 +59,5 @@ extras rather than carrying stale map-specific state into another profile.
 Native queued join/cancel, map loading and gameplay acceptance remain live checks.
 Passing source tests does not change services, release pins or the maintainer's
 manual release decision after live-match review.
+
+For a shared human queue across explicitly configured independent live worlds, see [Configured independent live worlds](configured-world-registry.md). The single-host path remains the default.

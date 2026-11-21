@@ -104,17 +104,11 @@ impl<W: Write> Engine<W> {
     }
     fn world_response(&self, request_id: String, messages: Vec<OutboundMessage>) -> Response {
         Response {
-            v: BRIDGE_VERSION,
-            request_id,
-            ok: true,
-            error: None,
             messages,
             rewards: self.pending_reward_batch(),
             loadout_selections: self.pending_loadout_selections(),
-            capabilities: Vec::new(),
-            match_profiles: Vec::new(),
-            selected_match: None,
             match_terminal: self.match_terminal.clone(),
+            ..Response::success(request_id)
         }
     }
     pub fn accepts_subscription_world(&self, world_id: u32) -> bool {

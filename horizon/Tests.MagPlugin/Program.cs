@@ -28,11 +28,17 @@ void Test(string name, Action action)
     passed++;
 }
 
+Test("configured world registry validation and placement", ConfiguredRegistryChecks.Run);
+Test("configured registry simultaneous worlds and transfer", RegistryCoordinationChecks.Run);
+if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(RealRegistryWorkerChecks.BinaryVariable)))
+    Test("configured registry real workers", RealRegistryWorkerChecks.Run);
+Test("registry DME host world and lease isolation", RegistryDmeHostChecks.Run);
 Test("bundled server NEWS formatting and bounds", ServerNewsChecks.Formatting);
 Test("bundled server NEWS and EULA wire responses", ServerNewsChecks.Run);
 
 Test("active Armory loadout refresh", ActiveLoadoutRefreshChecks.Run);
 Test("typed worker match profile bridge", MatchProfileBridgeChecks.Run);
+Test("gameplay worker identity fencing", GameplayWorkerIdentityChecks.Run);
 Test("retail waiting and cancellation wire", QueueWireChecks.Run);
 Test("faction matchmaking fairness and role selection", FactionMatchmakingChecks.Run);
 Test("pending human queue ownership and cancellation", PendingHumanQueueChecks.Run);
@@ -336,4 +342,4 @@ Test("advertised endpoints validate independently from listener ports", () =>
     { values["MAG_AUTH_DNS"] = bad; Throws<ArgumentException>(() => MagNetworkSettings.Load(Read)); }
 });
 
-Console.WriteLine($"{passed} synthetic checks passed; no service or game started.");
+Console.WriteLine($"{passed} synthetic checks passed.");

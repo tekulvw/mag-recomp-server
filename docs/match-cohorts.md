@@ -74,3 +74,5 @@ native client presentation or multi-human live acceptance. No catalog or game
 data changes are required by this increment. Live review remains necessary before
 the maintainer manually cuts a release; no source check changes release pins,
 services, deployments or the manual release decision.
+
+Configured independent live workers are described in [Configured independent live worlds](configured-world-registry.md). Results cohorts retain their original settlement owner when a character transfers to another worker.

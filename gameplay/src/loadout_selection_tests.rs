@@ -2,7 +2,7 @@
 use super::*;
 use crate::spawn_progression::{engine, ready, reserve};
 
-fn fixture() -> Engine<Vec<u8>> {
+pub(super) fn fixture() -> Engine<Vec<u8>> {
     let mut engine = engine();
     reserve(&mut engine, 0);
     let actor = engine.active.as_mut().unwrap();
@@ -42,7 +42,7 @@ fn fixture() -> Engine<Vec<u8>> {
     });
     engine
 }
-fn select(engine: &mut Engine<Vec<u8>>, index: u8, now: u64) -> Response {
+pub(super) fn select(engine: &mut Engine<Vec<u8>>, index: u8, now: u64) -> Response {
     engine.handle(
         Request::Event {
             v: 2,

@@ -20,7 +20,12 @@ namespace Server.Medius
     /// <summary>One shared local Horizon world; each member has a Rust-acknowledged reservation.</summary>
     public sealed partial class LocalDmeHost : Server.Dme.ILocalGameplaySink, IAsyncDisposable
     {
-        sealed class Reservation { public string Id; public uint AccountId; public string Account; public uint CharacterId; public Action<MagCharacterRecord> Notify; public DmeClient Client; public DateTime Deadline; public byte Faction; public bool Accepted; public bool Claimed; public bool Invalidated; public string ReleaseReason; public string TerminalMatchId; public bool FragoActionBonusEnabled; public bool FragoObjectiveBonusEnabled; public bool ExtendedObjectiveRewardsEnabled; public bool RepairRewardsEnabled; }
+        sealed class Reservation
+        {
+            public string Id; public uint AccountId; public string Account; public uint CharacterId; public Action<MagCharacterRecord> Notify; public DmeClient Client; public DateTime Deadline; public byte Faction; public bool Accepted; public bool Claimed; public bool Invalidated; public string ReleaseReason; public string TerminalMatchId; public bool FragoActionBonusEnabled; public bool FragoObjectiveBonusEnabled; public bool ExtendedObjectiveRewardsEnabled; public bool RepairRewardsEnabled;
+            public MagMlsSession QueueSession;
+            public MagJoinGameRequest QueueRequest;
+        }
         sealed class PendingRelease { public Reservation Reservation; public string RequestId; public DateTime NextAttempt; public DateTime? FirstRejected; public bool InFlight; }
         static readonly IInternalLogger Logger = InternalLoggerFactory.GetInstance<LocalDmeHost>();
         readonly int _applicationId;
@@ -29,6 +34,7 @@ namespace Server.Medius
         readonly int _gameType;
         readonly int _maximumPlayers;
         readonly HashSet<byte> _allowedFactions;
+        readonly LocalDmeHostOptions _options;
         readonly GameplayBridge _bridge;
         readonly LocalCharacterStore _store;
         readonly object _gate = new object();
@@ -39,7 +45,7 @@ namespace Server.Medius
         // Bound them rather than recycling a reservation identity into a new actor.
         readonly Dictionary<string, Reservation> _rewardOwners = new Dictionary<string, Reservation>(StringComparer.Ordinal);
         readonly HashSet<string> _notifiedRewards = new HashSet<string>(StringComparer.Ordinal);
-        readonly SemaphoreSlim _rewardSettlement = new SemaphoreSlim(1, 1);
+        readonly SemaphoreSlim _rewardSettlement;
         readonly SemaphoreSlim _rewardAcknowledgements = new SemaphoreSlim(1, 1);
         readonly SemaphoreSlim _loadoutSelectionSettlement = new SemaphoreSlim(1, 1);
         readonly GameplayLoadoutSelectionSettlement _loadoutSelections;
@@ -66,8 +72,9 @@ namespace Server.Medius
         bool _supportsExtendedObjectiveRewards;
         bool _supportsRepairRewards;
         bool _ready; bool _started; bool _disposed;
+        bool _ownsIntegratedDme;
         public DmeWorld World { get; private set; }
-        public bool IsReady { get { lock (_gate) return _ready && _worldStreamHealthy && !_disposed; } }
+        public bool IsReady { get { lock (_gate) return ReadyForAdmission; } }
         // Rust evicts a reservation that has sent no event for its 120 s idle timeout.
         // Horizon stops forwarding events once it releases, so after this grace a
         // definitively rejected release cannot still name a live Rust reservation.
@@ -93,16 +100,18 @@ namespace Server.Medius
             if (request.ClientType != 0) return "client_type_unsupported";
             return null;
         }
-        string JoinSessionRejection(MagMlsSession session)
+        public static string JoinSessionRejection(MagMlsSession session)
         {
-            if (session == null || session.ApplicationId != _applicationId) return "session_application_mismatch";
+            if (session == null) return "session_application_mismatch";
             if (session.State != MagMlsSession.SessionState.Ready) return "session_not_ready";
             if (session.IsExpired(DateTime.UtcNow)) return "session_expired";
             if (session.AccountId == 0 || session.CharacterId == 0) return "session_without_character";
             if (!MagDevelopmentAccountPolicy.ValidAccount(session.AuthenticatedAccount)) return "account_not_allowed";
-            if (!IsReady) return "host_not_ready";
             return null;
         }
+        string HostJoinSessionRejection(MagMlsSession session) =>
+            session?.ApplicationId != _applicationId ? "session_application_mismatch" :
+            JoinSessionRejection(session) ?? (IsReady ? null : "host_not_ready");
         static void LogJoinRejection(string reason, MagJoinGameRequest request) =>
             Logger.Warn($"Gameplay join rejected: reason={reason} preference={request.Preference} value={request.Value} client_type={request.ClientType} party={(request as MagRetailJoinGameRequest)?.PartyId.ToString() ?? "none"}");
         public static int SupportedMaximumPlayers(int applicationId, int gameType, bool hasDominationProfiles = false)
@@ -112,43 +121,66 @@ namespace Server.Medius
                 throw new ArgumentException("Local gameplay serves types2/3, plus retail Sabotage0 and bounded Acquisition1.");
             return retail && (gameType == 0 || gameType == 1 || gameType == 3 || (gameType == 2 && hasDominationProfiles)) ? 64 : 8;
         }
-        public LocalDmeHost(GameplayBridge bridge, LocalCharacterStore store)
+        public LocalDmeHost(GameplayBridge bridge, LocalCharacterStore store) :
+            this(bridge, store, LocalDmeHostOptions.FromLegacySettings()) { }
+
+        public LocalDmeHost(GameplayBridge bridge, LocalCharacterStore store, LocalDmeHostOptions options,
+            TimeProvider timeProvider = null, SemaphoreSlim progressionGate = null)
         {
-            _applicationId = Program.Settings.MagApplicationId;
-            _startupPolicy = new MagMatchStartupPolicy(Program.Settings.MagMinimumPlayers, Program.Settings.MagMaximumPlayers, Program.Settings.MagMinimumPlayersPerTeam);
+            _options = options ?? throw new ArgumentNullException(nameof(options));
+            _timeProvider = timeProvider ?? TimeProvider.System;
+            _applicationId = options.ApplicationId;
+            _startupPolicy = options.StartupPolicy;
             _minimumPlayers = _startupPolicy.MinimumPlayers;
-            _gameType = Program.Settings.MagGameType;
-            _maximumPlayers = Program.Settings.MagMaximumPlayers;
-            // Hello verifies profile-backed Domination before the host opens reservations.
-            int supportedMaximum = SupportedMaximumPlayers(_applicationId, _gameType, hasDominationProfiles: true);
-            if (_minimumPlayers < 1 || _maximumPlayers > supportedMaximum || _minimumPlayers > _maximumPlayers) throw new ArgumentException($"Local match limits must be 1..{supportedMaximum}.");
-            var configuredFactions = Program.Settings.MagAllowedFactions ?? new[] { 0, 1, 2 };
-            if (configuredFactions.Length == 0 || configuredFactions.Any(faction => faction < 0 || faction > 2) || configuredFactions.Distinct().Count() != configuredFactions.Length)
-                throw new ArgumentException("MagAllowedFactions requires distinct faction values0..2, or null for legacy availability.");
-            _allowedFactions = new HashSet<byte>(configuredFactions.Select(faction => (byte)faction));
-            _bridge = bridge; _store = store; _loadoutSelections = new GameplayLoadoutSelectionSettlement(_gate);
+            _gameType = options.GameType;
+            _maximumPlayers = _startupPolicy.MaximumPlayers;
+            _allowedFactions = options.AllowedFactions.Select(faction => (byte)faction).ToHashSet();
+            _bridge = bridge ?? throw new ArgumentNullException(nameof(bridge));
+            _store = store ?? throw new ArgumentNullException(nameof(store));
+            _rewardSettlement = progressionGate ?? new SemaphoreSlim(1, 1);
+            _loadoutSelections = new GameplayLoadoutSelectionSettlement(_gate);
             _loadoutRefreshes = new GameplayLoadoutRefreshQueue(_gate, (target, revision, reason) =>
                 Logger.Warn($"Active Armory refresh dropped: player={target.PlayerId} revision={revision} reason={reason}"));
             _worker = RunEvents(_events.Reader, false);
             _resultsEventWorker = RunEvents(_resultsEvents.Reader, true);
         }
         static string Id() => Guid.NewGuid().ToString("N");
+        void BeginStart()
+        {
+            lock (_gate)
+            {
+                if (_started || _disposed) throw new InvalidOperationException("DME host is started or disposed.");
+                _started = true;
+            }
+        }
+        async Task StartWorldStreamAsync()
+        {
+            _worldStreamWorker = RunWorldStreamAsync();
+            await _firstWorldStream.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        }
         public async Task StartAsync()
         {
-            if (_started) throw new InvalidOperationException("DME already started."); _started = true;
-            var hello = await _bridge.RequestHelloAsync(new { v = 2, request_id = Id(), op = "hello" });
-            InitializeGameplayHello(hello);
-            bool hasDominationProfiles = UsesFactionMatchmaking && _matchProfiles.Any(profile => profile.GameType == 2);
-            if (_maximumPlayers > SupportedMaximumPlayers(_applicationId, _gameType, hasDominationProfiles))
-                throw new IOException("Expanded retail Domination admission requires all ordered faction profiles.");
-            if (!UsesFactionMatchmaking && !await _bridge.RequestAsync(_startupPolicy.ConfigureRequest(Id(), _applicationId))) throw new IOException("Gameplay match configuration was not acknowledged.");
-            DmeProgram.SERVER_IP = MagNetworkSettings.FromEnvironment().Address; DmeProgram.Settings.TCPPort = 10073; DmeProgram.Settings.UDPPort = 10474;
-            DmeProgram.Plugins = Program.Plugins ?? new Server.Plugins.PluginsManager("plugins/");
-            var manager = new Server.Dme.MediusManager(_applicationId) { LocalOnly = true }; DmeProgram.Managers.Add(_applicationId, manager);
-            World = new DmeWorld(manager, _applicationId, _maximumPlayers); DmeProgram.LocalGameplay = this;
-            try {
-                _worldStreamWorker = RunWorldStreamAsync();
-                await _firstWorldStream.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            if (InRegistry) throw new InvalidOperationException("Use registry startup for a configured gameplay worker.");
+            BeginStart();
+            try
+            {
+                var hello = await _bridge.RequestHelloAsync(new { v = 2, request_id = Id(), op = "hello" });
+                InitializeGameplayHello(hello);
+                bool hasDominationProfiles = UsesFactionMatchmaking && _matchProfiles.Any(profile => profile.GameType == 2);
+                if (_maximumPlayers > SupportedMaximumPlayers(_applicationId, _gameType, hasDominationProfiles))
+                    throw new IOException("Expanded retail Domination admission requires all ordered faction profiles.");
+                if (!UsesFactionMatchmaking && !await _bridge.RequestAsync(_startupPolicy.ConfigureRequest(Id(), _applicationId)))
+                    throw new IOException("Gameplay match configuration was not acknowledged.");
+                DmeProgram.SERVER_IP = _options.AdvertisedAddress;
+                DmeProgram.Settings.TCPPort = 10073;
+                DmeProgram.Settings.UDPPort = 10474;
+                DmeProgram.Plugins = Program.Plugins ?? new Server.Plugins.PluginsManager("plugins/");
+                var manager = new Server.Dme.MediusManager(_applicationId) { LocalOnly = true };
+                DmeProgram.Managers.Add(_applicationId, manager);
+                _ownsIntegratedDme = true;
+                CreateWorld(manager);
+                DmeProgram.LocalGameplay = this;
+                await StartWorldStreamAsync();
                 await DmeProgram.TcpServer.StartAsync(); lock (_gate) _ready = true;
             }
             catch { await DisposeAsync(); throw; }
@@ -178,7 +210,7 @@ namespace Server.Medius
                     TransactionId = transactionId, ContractOwners = Enumerable.Repeat((byte)255, 9).ToArray(),
                     MinimumPlayers = Enumerable.Repeat((uint)_minimumPlayers, 4).ToArray(), QueueEnabled = new bool[12]
                 };
-                if (!UsesFactionMatchmaking && _ready && _worldStreamHealthy && !_disposed)
+                if (!UsesFactionMatchmaking && ReadyForAdmission)
                     foreach (var faction in _allowedFactions) status.QueueEnabled[_gameType * 3 + faction] = true;
                 var now = DateTime.UtcNow;
                 foreach (var reservation in _reservations.Values)
@@ -198,23 +230,35 @@ namespace Server.Medius
                 return status;
             }
         }
-        public async Task<MagJoinGameResponse> JoinAsync(MagMlsSession session, MagJoinGameRequest request, Action<MagCharacterRecord> notify = null)
+        public Task<MagJoinGameResponse> JoinAsync(MagMlsSession session, MagJoinGameRequest request, Action<MagCharacterRecord> notify = null) =>
+            JoinAsync(session, request, notify, null);
+
+        // ownerCurrent is checked under _gate. An old callback cannot allocate
+        // or reserve after its exact forwarded queue entry was replaced.
+        async Task<MagJoinGameResponse> JoinAsync(MagMlsSession session, MagJoinGameRequest request,
+            Action<MagCharacterRecord> notify, Func<bool> ownerCurrent)
         {
             var failure = JoinResponse(request.TransactionId, 2);
             // Party membership/admission is not implemented. Do not silently turn a party request into a solo join.
-            var rejection = JoinRequestRejection(request, _applicationId == 20231, RequestedModeIsCurrent) ?? JoinSessionRejection(session);
-            if (rejection != null) { LogJoinRejection(rejection, request); return failure; }
+            var rejection = JoinRequestRejection(request, _applicationId == 20231, RequestedModeIsCurrent) ?? HostJoinSessionRejection(session);
+            if (rejection != null)
+            {
+                LogJoinRejection(rejection, request);
+                return InRegistry && rejection == "host_not_ready" ? JoinResponse(request.TransactionId, 6) : failure;
+            }
             await _admission.WaitAsync();
             try
             {
+                lock (_gate) if (ownerCurrent != null && !ownerCurrent()) return failure;
                 await ReleasePriorResultsAsync(session.AuthenticatedAccount, session.CharacterId);
                 PendingRelease pending;
                 lock (_gate) pending = _pendingReleases.Values.FirstOrDefault(r => !IsResultsCohort(r.Reservation) && r.Reservation.Account == session.AuthenticatedAccount);
                 if (pending != null) await RetryReleaseAsync(pending);
                 Reservation reservation;
                 DmeClient client;
-                GameplayBridgeResponse admittedReply;
-                bool admittedRouted;
+                GameplayBridgeResponse admittedReply = null;
+                bool admittedRouted = false;
+                Task<GameplayBridgeResponse> acknowledgement = null;
                 // A reward must either precede the snapshot read or reach the reserved actor by ACK.
                 // Release and reply settlement below can themselves settle rewards and require this gate.
                 await _rewardSettlement.WaitAsync();
@@ -223,6 +267,8 @@ namespace Server.Medius
                     DmeWorld admissionWorld;
                     lock (_gate)
                     {
+                        if (ownerCurrent != null && !ownerCurrent()) return failure;
+                        if (InRegistry && !ReadyForAdmission) return JoinResponse(request.TransactionId, 6);
                         if (_independentMatchCohorts)
                         {
                             if (_admissionTerminal && (UsesFactionMatchmaking || !AdvanceTerminalCohort())) return JoinResponse(request.TransactionId, 6);
@@ -250,13 +296,14 @@ namespace Server.Medius
                     reservation = new Reservation {
                         Id = Id(), AccountId = character.Id, Account = session.AuthenticatedAccount, CharacterId = character.Id,
                         Faction = character.Faction, Notify = notify, Client = client, Deadline = DateTime.UtcNow.AddSeconds(30),
+                        QueueSession = ownerCurrent == null ? null : session,
+                        QueueRequest = ownerCurrent == null ? null : request,
                         FragoActionBonusEnabled = _supportsFragoActionBonus && _applicationId == 20231 && progressionCatalog?.FragoActionBonusEnabled == true,
                         FragoObjectiveBonusEnabled = _supportsFragoObjectiveBonus && _applicationId == 20231 && progressionCatalog?.FragoBonusEnabled == true,
                         ExtendedObjectiveRewardsEnabled = _supportsExtendedObjectiveRewards && _applicationId == 20231 &&
                             progressionCatalog?.ExtendedObjectiveRewardsEnabled == true,
                         RepairRewardsEnabled = _supportsRepairRewards && _applicationId == 20231 && progressionCatalog?.RepairRewardsEnabled == true
                     };
-                    lock (_gate) { _reservations.Add(reservation.Id, reservation); _rewardOwners.Add(reservation.Id, reservation); }
                     var admissionCharacter = new Dictionary<string, object> {
                         ["loadout_account_id"] = reservation.Account,
                         ["leadership"] = character.Leadership == null ? null : new GameplayLeadershipRecord(character.Leadership),
@@ -278,15 +325,49 @@ namespace Server.Medius
                         admissionCharacter["extended_objective_rewards_enabled"] = reservation.ExtendedObjectiveRewardsEnabled;
                     if (_supportsRepairRewards)
                         admissionCharacter["repair_rewards_enabled"] = reservation.RepairRewardsEnabled;
-                    admittedReply = await _bridge.RequestControlAsync(new { v = 2, request_id = Id(), op = "reserve", reservation_id = reservation.Id,
+                    var reserve = new { v = 2, request_id = Id(), op = "reserve", reservation_id = reservation.Id,
                         world_id = (uint)World.WorldId, player_id = (ushort)client.DmeId, account_id = character.Id, session_key = client.SessionKey, access_key = client.Token,
-                        character = admissionCharacter });
-                    lock (_gate) admittedRouted = Route(admittedReply);
+                        character = admissionCharacter };
+                    lock (_gate)
+                    {
+                        bool owned = ownerCurrent == null || ownerCurrent();
+                        bool registered = !InRegistry || (ReadyForAdmission &&
+                            admissionWorld.Manager.GetClientByAccessToken(client.Token) == client &&
+                            admissionWorld.Manager.GetClientBySessionKey(client.SessionKey) == client);
+                        if (owned && registered)
+                        {
+                            _reservations.Add(reservation.Id, reservation);
+                            _rewardOwners.Add(reservation.Id, reservation);
+                            acknowledgement = _bridge.RequestControlAsync(reserve);
+                        }
+                        else
+                        {
+                            admissionWorld.Manager.RemoveClient(client);
+                            admissionWorld.RemoveLocalClient(client);
+                        }
+                    }
+                    if (acknowledgement == null)
+                    {
+                        await client.Stop();
+                        return InRegistry ? JoinResponse(request.TransactionId, 6) : failure;
+                    }
+                    if (!InRegistry)
+                    {
+                        admittedReply = await acknowledgement;
+                        lock (_gate) admittedRouted = Route(admittedReply);
+                    }
                 }
                 finally { _rewardSettlement.Release(); }
+                if (InRegistry)
+                {
+                    // The pending owner can now capture concurrent durable
+                    // writes. Other workers need not wait for this network ACK.
+                    admittedReply = await acknowledgement;
+                    lock (_gate) admittedRouted = Route(admittedReply);
+                }
                 await ObserveReceiptsAsync(admittedReply, admittedRouted);
-                bool admitted = admittedReply?.Ok == true;
-                bool ready; bool readyFlag; bool streamHealthy; lock (_gate) { readyFlag = _ready; streamHealthy = _worldStreamHealthy; ready = readyFlag && streamHealthy && !_disposed; }
+                bool admitted = admittedReply?.Ok == true && (!InRegistry || admittedRouted);
+                bool ready; bool readyFlag; bool streamHealthy; lock (_gate) { readyFlag = _ready; streamHealthy = HasWorldStreamLease; ready = ReadyForAdmission; }
                 if (!admitted || !ready)
                 {
                     // Gameplay may record the reservation before a later step of its reserve
@@ -298,12 +379,17 @@ namespace Server.Medius
                     // These rejections precede any Rust reservation. A release
                     // retry would hold the next live admission against an unused ID.
                     await ReleaseReservationAsync(reservation, !terminalRefusal);
-                    return terminalRefusal ? JoinResponse(request.TransactionId, 6) : failure;
+                    return terminalRefusal || (InRegistry && !ready) ? JoinResponse(request.TransactionId, 6) : failure;
                 }
                 lock (_gate)
                 {
-                    if (!Current(reservation) || reservation.Invalidated || !_worldStreamHealthy)
-                    { reservation.Invalidated = true; reservation.ReleaseReason = "world_stream_gap"; return failure; }
+                    if (!Current(reservation) || reservation.Invalidated || !ReadyForAdmission ||
+                        (ownerCurrent != null && !ownerCurrent()))
+                    {
+                        reservation.Invalidated = true;
+                        reservation.ReleaseReason = HasWorldStreamLease ? "admission_closed" : "world_stream_gap";
+                        return InRegistry ? JoinResponse(request.TransactionId, 6) : failure;
+                    }
                     if (!IsResultsCohort(reservation)) reservation.Accepted = true;
                 }
                 if (!reservation.Accepted)
@@ -317,8 +403,7 @@ namespace Server.Medius
                 ArmoryLoadoutCommitted(reservation.Account, reservation.CharacterId);
                 var response = JoinResponse(request.TransactionId, 0);
                 response.MediusWorldUid = (uint)World.WorldId; response.ConnectionType = 3; response.AddressType = 1;
-                var network = MagNetworkSettings.FromEnvironment();
-                response.ServerAddress = FixedAscii(network.Address.ToString(), 16); response.ServerPort = network.GameTcpPort;
+                response.ServerAddress = FixedAscii(_options.AdvertisedAddress.ToString(), 16); response.ServerPort = _options.GameTcpPort;
                 response.WorldId = (uint)World.WorldId; response.AccessKey = FixedAscii(client.Token, 17);
                 return response;
             }
@@ -337,12 +422,12 @@ namespace Server.Medius
             lock (_gate)
             {
                 var r = Find(client);
-                if (!_ready || !_worldStreamHealthy || r == null || IsResultsCohort(r) || r.Invalidated || r.Claimed || r.Deadline <= DateTime.UtcNow || client == null || client.IsDestroyed ||
+                if (!ReadyForGameplay || r == null || (InRegistry && !r.Accepted) || IsResultsCohort(r) || r.Invalidated || r.Claimed || r.Deadline <= DateTime.UtcNow || client == null || client.IsDestroyed ||
                     connect.AppId != _applicationId || connect.ARG1 != (uint)World.WorldId || connect.SessionKey != client.SessionKey || connect.AccessToken != client.Token) return false;
                 r.Claimed = true; return true;
             }
         }
-        public bool CanUse(DmeClient client) { lock (_gate) { var r = Find(client); return _ready && _worldStreamHealthy && r != null && !r.Invalidated && r.Claimed && r.Deadline > DateTime.UtcNow; } }
+        public bool CanUse(DmeClient client) { lock (_gate) { var r = Find(client); return ReadyForGameplay && r != null && !r.Invalidated && r.Claimed && r.Deadline > DateTime.UtcNow; } }
         public void Connected(DmeClient client) { lock (_gate) if (CanUse(client)) Find(client).Deadline = DateTime.UtcNow.AddSeconds(120); }
         public void Event(DmeClient client, string transport, byte rtType, byte? pluginId, byte[] payload)
         {
@@ -361,11 +446,12 @@ namespace Server.Medius
         // Called with _gate held; validate the entire batch before queueing anything.
         bool Route(GameplayBridgeResponse reply)
         {
-            if (reply?.Ok != true) return false;
+            if (reply?.Ok != true || (InRegistry && _bridge.HasWorkerIdentityFault)) return false;
             if (!TryFindTerminalMembers(reply.MatchTerminal, out var completed)) return false;
             var deliveries = new List<(DmeClient client, GameplayBridgeMessage message)>();
             foreach (var message in reply.Messages)
             {
+                if (InRegistry && message.WorldId != (uint)World.WorldId) return false;
                 // A released recipient may disappear while Rust's reply is in flight.
                 // Reservation IDs prevent delivery to the next occupant of that slot.
                 if (!_reservations.TryGetValue(message.ReservationId, out var recipient)) continue;
@@ -392,7 +478,10 @@ namespace Server.Medius
                         lock (_gate)
                         {
                             if (_disposed || cancellation.IsCancellationRequested) return;
+                            if (InRegistry && _worldStreamHealthy && !HasWorldStreamLease)
+                                throw new IOException("Gameplay world stream lease expired.");
                             if (!Route(reply)) throw new InvalidDataException("World stream recipient mismatch.");
+                            _lastWorldFrameTimestamp = _timeProvider.GetTimestamp();
                             _worldStreamHealthy = true;
                             _firstWorldStream.TrySetResult(true);
                         }
@@ -409,11 +498,14 @@ namespace Server.Medius
                         affected = _reservations.Values.ToArray();
                         foreach (var reservation in affected) { reservation.Invalidated = true; reservation.ReleaseReason = "world_stream_gap"; }
                     }
+                    if (InRegistry && error is GameplayWorkerIdentityException)
+                        _firstWorldStream.TrySetException(error);
                     Logger.Warn($"Gameplay world stream interrupted: failure={error.GetType().Name}; releasing {affected.Length} affected reservations");
                     // A successful socket write does not prove client receipt. We
                     // deliberately end affected sessions instead of resuming after
                     // an unknown replication gap. Fresh joins use fresh identities.
                     await ReleaseReservationsAsync(affected);
+                    if (InRegistry && _bridge.HasWorkerIdentityFault) break;
                 }
                 try { await Task.Delay(TimeSpan.FromSeconds(1), cancellation); }
                 catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { break; }
@@ -462,7 +554,7 @@ namespace Server.Medius
         }
         bool IsCurrentRefreshOwner(GameplayLoadoutRefreshTarget target)
         {
-            return !_disposed && _ready && _worldStreamHealthy && World != null &&
+            return ReadyForGameplay && World != null &&
                 _reservations.TryGetValue(target.ReservationId, out var owner) && IsLiveCohort(owner) && owner.Accepted && !owner.Invalidated &&
                 owner.Deadline > DateTime.UtcNow && owner.Client != null && !owner.Client.IsDestroyed && !owner.Client.Disconnected &&
                 target.MatchesOwner(owner.Id, (uint)World.WorldId, (ushort)owner.Client.DmeId, owner.Account, owner.CharacterId);
@@ -617,6 +709,8 @@ namespace Server.Medius
                         {
                             result = _store.ApplyRewardForAccount(owner.Account, owner.CharacterId, reward.RewardId,
                                 $"world-{reward.WorldId}-{reward.MatchId}", reward.Kind, checked((int)reward.Units), reward.Leadership, reward.Frago);
+                            if (result.Result == MagNetResult.Success)
+                                DurableProgressionCommitted?.Invoke(owner.Account, owner.CharacterId);
                         }
                         finally { _rewardSettlement.Release(); }
                         if (result.Result != MagNetResult.Success)
@@ -666,19 +760,55 @@ namespace Server.Medius
         }
         public async Task TickAsync()
         {
-            if (_disposed || !_ready) return;
-            StartLoadoutRefreshPump();
-            await ScheduleBridgeMaintenanceAsync();
-            Reservation[] release;
-            lock (_gate) release = _reservations.Values.Where(r => r.Invalidated || r.Deadline <= DateTime.UtcNow || r.Client.IsDestroyed || r.Client.Disconnected ||
-                (r.Claimed && r.Client.Tcp != null && !r.Client.Tcp.Active)).ToArray();
-            await ReleaseReservationsAsync(release);
-            SendQueueNotices();StartMatchmakingPump();
+            if (InRegistry) throw new InvalidOperationException("The registry owns the shared DME server tick.");
+            if (!await MaintainWorldAsync()) return;
             await DmeProgram.TcpServer.HandleIncomingMessages();
-            DmeClient[] clients; lock (_gate) clients = _reservations.Values.Select(r => r.Client).ToArray();
+            var clients = ClientsForTick();
             await Task.WhenAll(clients.Select(client => client.HandleIncomingMessages()));
             await DmeProgram.TcpServer.HandleOutgoingMessages();
             foreach (var client in clients) client.HandleOutgoingMessages();
+        }
+        public async Task TickWorldAsync(bool flushOutput = true)
+        {
+            if (!InRegistry) throw new InvalidOperationException("Only a configured worker has a registry-owned tick.");
+            if (!await MaintainWorldAsync()) return;
+            var clients = ClientsForTick();
+            await Task.WhenAll(clients.Select(client => client.HandleIncomingMessages()));
+            if (flushOutput)
+                foreach (var client in clients) client.HandleOutgoingMessages();
+        }
+        /// <summary>Flush worker application output after the shared TCP server sends its SCERT control output.</summary>
+        public void FlushWorldOutput()
+        {
+            if (!InRegistry) throw new InvalidOperationException("Only a configured worker has a registry-owned tick.");
+            foreach (var client in ClientsForTick()) client.HandleOutgoingMessages();
+        }
+        DmeClient[] ClientsForTick()
+        {
+            lock (_gate) return _disposed ? Array.Empty<DmeClient>() : _reservations.Values.Select(r => r.Client).ToArray();
+        }
+        async Task<bool> MaintainWorldAsync()
+        {
+            lock (_gate) if (_disposed || !_ready) return false;
+            StartLoadoutRefreshPump();
+            StartProgressionRefreshPump();
+            await ScheduleBridgeMaintenanceAsync();
+            Reservation[] release;
+            lock (_gate)
+            {
+                if (_disposed) return false;
+                release = _reservations.Values.Where(r => r.Invalidated || r.Deadline <= DateTime.UtcNow || r.Client.IsDestroyed || r.Client.Disconnected ||
+                    (r.Claimed && r.Client.Tcp != null && !r.Client.Tcp.Active)).ToArray();
+                if (InRegistry && release.Length > 0 && _worldCleanupWorker.IsCompleted)
+                    _worldCleanupWorker = Task.Run(() => ReleaseReservationsAsync(release));
+            }
+            if (!InRegistry)
+            {
+                await ReleaseReservationsAsync(release);
+                SendQueueNotices();
+            }
+            StartMatchmakingPump();
+            return true;
         }
         Task ReleaseAsync(Reservation r) => ReleaseReservationAsync(r, true);
 
@@ -692,11 +822,14 @@ namespace Server.Medius
                 // could never own a reward, even if local teardown won the race.
                 if (!notifyGameplay) _rewardOwners.Remove(r.Id);
                 if (!Current(r)) return;
-                defer = IsResultsCohort(r);
+                defer = InRegistry || IsResultsCohort(r);
                 r.Invalidated = true;
                 _reservations.Remove(r.Id);
+                r.QueueSession = null;
+                r.QueueRequest = null;
                 _loadoutSelections.Forget(r.Id);
                 _loadoutRefreshes.Forget(r.Id);
+                _progressionRefreshes.Remove(r.Id);
                 if (notifyGameplay)
                 {
                     pending = new PendingRelease { Reservation = r, RequestId = Id() };
@@ -763,19 +896,24 @@ namespace Server.Medius
             lock (_gate) { if (_disposed) return; _disposed = true; _ready = false; foreach (var r in _reservations.Values) r.Invalidated = true; }
             await StopFactionMatchmakingAsync();
             _loadoutRefreshCancellation.Cancel();
-            Task refresh; lock (_gate) refresh = _loadoutRefreshWorker;
+            Task refresh; lock (_gate) refresh = Task.WhenAll(_loadoutRefreshWorker, _progressionRefreshWorker);
             try { await refresh.WaitAsync(TimeSpan.FromSeconds(3)); }
-            catch (TimeoutException) { Logger.Error("Active Armory refresh disposal exceeded its bounded RPC deadline."); }
+            catch (TimeoutException) { Logger.Error("Gameplay character refresh disposal exceeded its bounded RPC deadline."); }
             _worldStreamCancellation.Cancel(); await _worldStreamWorker;
-            try { await Task.WhenAll(_receiptWorker, _releaseWorker).WaitAsync(TimeSpan.FromSeconds(5)); }
+            try { await Task.WhenAll(_receiptWorker, _releaseWorker, _worldCleanupWorker).WaitAsync(TimeSpan.FromSeconds(5)); }
             catch (TimeoutException) { Logger.Error("Gameplay outbox disposal exceeded its bounded bridge deadline."); }
             _events.Writer.TryComplete(); _resultsEvents.Writer.TryComplete();
             await Task.WhenAll(_worker, _resultsEventWorker);
             Reservation[] release; lock (_gate) release = _reservations.Values.ToArray();
             await ReleaseReservationsAsync(release);
             if (_started && _independentMatchCohorts) await FlushRetiredReleasesAsync();
-            if (World != null) { await World.Stop(); DmeProgram.Managers.Remove(_applicationId); }
-            if (_started) await DmeProgram.TcpServer.Stop(); if (DmeProgram.LocalGameplay == this) DmeProgram.LocalGameplay = null;
+            if (World != null) await World.Stop();
+            if (_ownsIntegratedDme)
+            {
+                DmeProgram.Managers.Remove(_applicationId);
+                await DmeProgram.TcpServer.Stop();
+                if (DmeProgram.LocalGameplay == this) DmeProgram.LocalGameplay = null;
+            }
         }
     }
 }
