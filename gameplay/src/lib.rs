@@ -139,6 +139,7 @@ pub mod domination_helo;
 mod domination_helo_damage;
 mod domination_helo_engine;
 mod ground_seats;
+mod ground_turrets;
 pub mod ground_vehicles;
 mod headless_sim;
 pub mod healing;
@@ -986,6 +987,7 @@ enum CharacterHitProfile {
     OnFoot(ballistics::BallisticProfile),
     Retail(retail_combat::RetailBulletProfile),
     HospitalPrimary(retail_combat::RetailBulletProfile),
+    GroundApcPrimary(retail_combat::RetailBulletProfile),
     Melee(retail_melee::RetailMeleeProfile),
     Alpha(turret::AlphaMinigunProfile),
 }
@@ -999,7 +1001,7 @@ impl CharacterHitProfile {
     fn item_id(&self) -> u16 {
         match self {
             Self::OnFoot(p) => p.item_id(),
-            Self::Retail(p) | Self::HospitalPrimary(p) => p.item_id(),
+            Self::Retail(p) | Self::HospitalPrimary(p) | Self::GroundApcPrimary(p) => p.item_id(),
             Self::Melee(p) => p.item_id(),
             Self::Alpha(p) => p.item_id(),
         }
@@ -1012,7 +1014,7 @@ impl CharacterHitProfile {
     ) -> Result<armor::RawCharacterDamage, &'static str> {
         match self {
             Self::OnFoot(p) => p.raw_character_damage(distance, scale, location),
-            Self::Retail(p) | Self::HospitalPrimary(p) => {
+            Self::Retail(p) | Self::HospitalPrimary(p) | Self::GroundApcPrimary(p) => {
                 p.raw_character_damage(distance, scale, location)
             }
             Self::Melee(p) => p.raw_character_damage(distance, scale, location),
@@ -1242,6 +1244,19 @@ impl<W: Write> Engine<W> {
         active: &Active,
         request: &bullet_hit::NetMessageHit,
     ) -> Result<CharacterHitProfile, &'static str> {
+        if self.is_ground_gunner(active) {
+            if request.defender >> 16 != 0x0380 {
+                return Err("ground_apc_primary_requires_character_target");
+            }
+            let qualified = self.ground_primary_for_actor(active, request)?;
+            return Ok(CharacterHitProfile::GroundApcPrimary(
+                retail_combat::RetailBulletProfile::from_ground_apc_primary(
+                    self.item_catalog.retail_combat()?,
+                    qualified,
+                    request,
+                )?,
+            ));
+        }
         if active.is_indexed_hospital_gunner() {
             if request.defender >> 16 != 0x0380 {
                 return Err("hospital_primary_requires_character_target");
@@ -1536,12 +1551,13 @@ impl<W: Write> Engine<W> {
                 ..
             } => {
                 let retained = self.results_owner(reservation_id);
-                Some(DecodedEvent::with_hospital_ownership(
+                Some(DecodedEvent::with_vehicle_ownership(
                     &bytes,
                     *player_id,
                     retained.map_or(self.wire_profile, |c| c.profile),
                     retained.is_none() && self.ground_driver_enabled(),
                     retained.is_none() && self.has_hospital_turrets(),
+                    retained.is_none() && self.has_ground_turrets(),
                 ))
             }
             _ => None,

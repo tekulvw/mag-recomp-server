@@ -134,6 +134,7 @@ fn retail_ground_vehicle_creation_rejects_invalid_identity_transform_and_packet_
 #[test]
 fn retail_ground_vehicle_batches_preserve_separate_network_indices_and_budget() {
     let world = Catalog {
+        turret_policies: Default::default(),
         raw_sha256: String::new(),
         format: "mag_ground_vehicles".into(),
         schema_version: 1,

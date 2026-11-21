@@ -766,7 +766,7 @@ impl ItemCatalog {
                 if self
                     .retail_combat
                     .as_ref()
-                    .is_some_and(|combat| combat.hospital_primary_for_damage(item).is_ok())
+                    .is_some_and(|combat| combat.is_mounted_bullet(item))
                 {
                     return Err("saved_mounted_bullet_weapon");
                 }

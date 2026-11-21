@@ -1,5 +1,5 @@
-//! Retail family 13 turret 0 fields. Seat, grant and equipment authority belong
-//! to the caller. The prototype Alpha codec uses different angle widths.
+//! Common retail Vehicle turret 0 fields and the family 13 row wrapper.
+//! Seat, grant and equipment authority belong to the caller.
 use crate::player_tracking;
 use crate::replication::{BitReader, BitWriter, InventoryItem, UpdateHeader};
 use crate::wire_profile::WireProfile;
@@ -79,13 +79,64 @@ impl InventoryDefinition {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Fields {
     pub yaw: Option<Yaw>,
     pub pitch: Option<Pitch>,
     pub primary: Option<InventoryItem>,
     pub secondary: Option<InventoryItem>,
     pub overheat_info: Option<u8>,
+}
+
+impl Fields {
+    pub(crate) fn has_changes(self) -> bool {
+        self.yaw.is_some()
+            || self.pitch.is_some()
+            || self.primary.is_some()
+            || self.secondary.is_some()
+            || self.overheat_info.is_some()
+    }
+
+    pub(crate) fn read_present(
+        &mut self,
+        field: usize,
+        bits: &mut BitReader<'_>,
+    ) -> Result<bool, &'static str> {
+        match field {
+            8 => self.yaw = Some(Yaw::new(bits.read(Yaw::BITS)? as u16)?),
+            9 => self.pitch = Some(Pitch::new(bits.read(Pitch::BITS)? as u16)?),
+            11 => self.primary = Some(player_tracking::inventory(bits)?),
+            12 => self.secondary = Some(player_tracking::inventory(bits)?),
+            21 => self.overheat_info = Some(bits.read(8)? as u8),
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    /// Write presence and value for a common turret field owned by the caller.
+    pub(crate) fn write_field(
+        self,
+        field: usize,
+        definition: Option<InventoryDefinition>,
+        bits: &mut BitWriter,
+    ) -> Result<bool, &'static str> {
+        match field {
+            8 => write_optional(bits, self.yaw, |bits, yaw| {
+                bits.write(yaw.packed().into(), Yaw::BITS)
+            })?,
+            9 => write_optional(bits, self.pitch, |bits, pitch| {
+                bits.write(pitch.packed().into(), Pitch::BITS)
+            })?,
+            10 => write_optional(bits, definition, |bits, definition| definition.encode(bits))?,
+            11 => write_optional(bits, self.primary, |bits, item| item.encode(bits))?,
+            12 => write_optional(bits, self.secondary, |bits, item| item.encode(bits))?,
+            21 => write_optional(bits, self.overheat_info, |bits, info| {
+                bits.write(info.into(), 8)
+            })?,
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -112,16 +163,8 @@ pub(crate) fn decode_objects(bits: &mut BitReader<'_>) -> Result<Vec<ClientUpdat
         claim_index(index, &mut seen)?;
         let mut fields = Fields::default();
         for field in 0..FIELD_COUNT {
-            if bits.read(1)? == 0 {
-                continue;
-            }
-            match field {
-                8 => fields.yaw = Some(Yaw::new(bits.read(Yaw::BITS)? as u16)?),
-                9 => fields.pitch = Some(Pitch::new(bits.read(Pitch::BITS)? as u16)?),
-                11 => fields.primary = Some(player_tracking::inventory(bits)?),
-                12 => fields.secondary = Some(player_tracking::inventory(bits)?),
-                21 => fields.overheat_info = Some(bits.read(8)? as u8),
-                _ => return Err("unsupported_client_turret_field"),
+            if bits.read(1)? != 0 && !fields.read_present(field, bits)? {
+                return Err("unsupported_client_turret_field");
             }
         }
         rows.push(ClientUpdate { index, fields });
@@ -159,26 +202,8 @@ pub(crate) fn encode_updates(
         bits.write(1, 1)?;
         bits.write(row.index.into(), 16)?;
         for field in 0..FIELD_COUNT {
-            match field {
-                8 => write_optional(&mut bits, row.fields.yaw, |bits, yaw| {
-                    bits.write(yaw.packed().into(), Yaw::BITS)
-                })?,
-                9 => write_optional(&mut bits, row.fields.pitch, |bits, pitch| {
-                    bits.write(pitch.packed().into(), Pitch::BITS)
-                })?,
-                10 => write_optional(&mut bits, row.definition, |bits, definition| {
-                    definition.encode(bits)
-                })?,
-                11 => write_optional(&mut bits, row.fields.primary, |bits, item| {
-                    item.encode(bits)
-                })?,
-                12 => write_optional(&mut bits, row.fields.secondary, |bits, item| {
-                    item.encode(bits)
-                })?,
-                21 => write_optional(&mut bits, row.fields.overheat_info, |bits, info| {
-                    bits.write(info.into(), 8)
-                })?,
-                _ => bits.write(0, 1)?,
+            if !row.fields.write_field(field, row.definition, &mut bits)? {
+                bits.write(0, 1)?;
             }
         }
     }

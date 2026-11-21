@@ -21,12 +21,31 @@ impl<'a> DecodedEvent<'a> {
         Self::with_hospital_ownership(bytes, player, profile, allow_ground_owner, false)
     }
 
+    #[cfg(test)]
     pub(crate) fn with_hospital_ownership(
         bytes: &'a [u8],
         player: u16,
         profile: crate::wire_profile::WireProfile,
         allow_ground_owner: bool,
         allow_hospital_owner: bool,
+    ) -> Self {
+        Self::with_vehicle_ownership(
+            bytes,
+            player,
+            profile,
+            allow_ground_owner,
+            allow_hospital_owner,
+            false,
+        )
+    }
+
+    pub(crate) fn with_vehicle_ownership(
+        bytes: &'a [u8],
+        player: u16,
+        profile: crate::wire_profile::WireProfile,
+        allow_ground_owner: bool,
+        allow_hospital_owner: bool,
+        allow_ground_turret_owner: bool,
     ) -> Self {
         let message = protocol::GameMessage::decode_with_profile(bytes, profile);
         let owner_fields = match &message {
@@ -37,6 +56,7 @@ impl<'a> DecodedEvent<'a> {
                     profile,
                     allow_ground_owner,
                     allow_hospital_owner,
+                    allow_ground_turret_owner,
                 ))
             }
             _ => None,

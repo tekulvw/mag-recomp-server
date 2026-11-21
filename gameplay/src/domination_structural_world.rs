@@ -957,11 +957,12 @@ impl<W: Write> Engine<W> {
         let vehicle = catalog
             .vehicle(seat.vehicle_index)
             .ok_or("structural_area_ground_vehicle_missing")?;
-        if !vehicle.passenger_seats.contains(&seat.seat)
-            && !catalog
+        let supported = vehicle.passenger_seats.contains(&seat.seat)
+            || catalog
                 .driver_seat(seat.vehicle_index)
                 .is_some_and(|driver| driver.seat == seat.seat)
-        {
+            || (seat.seat == 1 && catalog.turret_policy(seat.vehicle_index).is_some());
+        if !supported {
             return Err("structural_area_ground_seat_unbound");
         }
         if self

@@ -135,6 +135,7 @@ pub enum RetailBulletUsage {
     #[default]
     Character,
     HospitalPrimary,
+    GroundApcPrimary,
 }
 
 /// Original disk weapon schedule, separate from configurable AI policy.
@@ -369,10 +370,23 @@ impl RetailCombatCatalog {
     }
 
     pub fn bullet_metadata(&self, item_id: u16) -> Option<&RetailBulletMetadata> {
+        self.bullet_by_usage(item_id, RetailBulletUsage::Character)
+    }
+    fn bullet_by_usage(
+        &self,
+        item_id: u16,
+        usage: RetailBulletUsage,
+    ) -> Option<&RetailBulletMetadata> {
         self.0
             .bullets
             .get(&item_id)
-            .filter(|bullet| bullet.usage == RetailBulletUsage::Character)
+            .filter(|bullet| bullet.usage == usage)
+    }
+    pub(crate) fn is_mounted_bullet(&self, item_id: u16) -> bool {
+        self.0
+            .bullets
+            .get(&item_id)
+            .is_some_and(|row| row.usage != RetailBulletUsage::Character)
     }
     pub fn melee(&self) -> &BTreeMap<u16, RetailMeleeMetadata> {
         &self.0.melee
@@ -424,10 +438,14 @@ impl RetailCombatCatalog {
         &self,
         item_id: u16,
     ) -> Result<&RetailBulletMetadata, RetailCombatError> {
-        self.0
-            .bullets
-            .get(&item_id)
-            .filter(|bullet| bullet.usage == RetailBulletUsage::HospitalPrimary)
+        self.bullet_by_usage(item_id, RetailBulletUsage::HospitalPrimary)
+            .ok_or(RetailCombatError::UnsupportedItem(item_id))
+    }
+    pub(crate) fn ground_apc_primary_for_damage(
+        &self,
+        item_id: u16,
+    ) -> Result<&RetailBulletMetadata, RetailCombatError> {
+        self.bullet_by_usage(item_id, RetailBulletUsage::GroundApcPrimary)
             .ok_or(RetailCombatError::UnsupportedItem(item_id))
     }
     pub fn grenade_for_damage(
@@ -845,6 +863,33 @@ impl RetailBulletProfile {
             .map_err(|_| "unsupported_hospital_primary_bullet")?;
         Ok(Self::from_metadata(qualified.item_id, metadata))
     }
+    pub(crate) fn from_ground_apc_primary(
+        catalog: &RetailCombatCatalog,
+        qualified: crate::ground_turrets::GroundQualifiedPrimary,
+        request: &crate::bullet_hit::NetMessageHit,
+    ) -> Result<Self, &'static str> {
+        let crate::ground_turrets::GroundQualifiedPrimary {
+            item_id,
+            equipped,
+            definition_version,
+        } = qualified;
+        if equipped.inventory_update_id != definition_version {
+            return Err("stale_ground_turret_inventory");
+        }
+        if request.gear_index != 0 || equipped.gear_slot != 0 {
+            return Err("unsupported_ground_turret_gear");
+        }
+        if equipped.ammo_pool != 0 {
+            return Err("unsupported_ground_turret_ammo_pool");
+        }
+        if request.fire_mode != 0 {
+            return Err("unsupported_ground_turret_fire_mode");
+        }
+        let metadata = catalog
+            .ground_apc_primary_for_damage(item_id)
+            .map_err(|_| "unsupported_ground_apc_primary_bullet")?;
+        Ok(Self::from_metadata(item_id, metadata))
+    }
     fn from_metadata(item_id: u16, p: &RetailBulletMetadata) -> Self {
         Self {
             item_id,
@@ -947,11 +992,18 @@ mod hospital_primary_tests {
         mounted_bullet["authored_ref"] = json!("Synthetic:4");
         mounted_bullet["name"] = json!("synthetic_mounted_primary");
         mounted_bullet["usage"] = json!("hospital_primary");
+        let mut apc_bullet = bullet.clone();
+        apc_bullet["authored_ref"] = json!("Synthetic:5");
+        apc_bullet["name"] = json!("synthetic_apc_primary");
+        apc_bullet["usage"] = json!("ground_apc_primary");
+        apc_bullet["damage"]["character"] = json!(48.);
+        apc_bullet["damage"]["characterAPierce"] = json!(2.);
+        apc_bullet["damage"]["characterARedux"] = json!(0.125);
         RetailCombatCatalog::from_json(&json!({
             "schema_version":2,"application_id":20231,"status":"synthetic",
             "authority":{"bullet_damage":true,"armor_reduction":true,"body_damage":true,
                 "grenade_damage":false,"grenade_physics":false,"healing_schedule":false,"ammo_tokens":false},
-            "provenance":{},"bullets":{"2":bullet,"4":mounted_bullet},"armor":{
+            "provenance":{},"bullets":{"2":bullet,"4":mounted_bullet,"5":apc_bullet},"armor":{
                 "3":{"authored_ref":"Synthetic:3","name":"synthetic_target_armor",
                     "definition":{},"source":{},"item_source":{},"armor_type":1,"rating":2.0,
                     "prevention":0.25,"coverage":[1.0,1.0,1.0,1.0],"armor_type_source":{}}
@@ -960,6 +1012,100 @@ mod hospital_primary_tests {
             "body":(0..16).map(|location| json!({"location":location,"armor_area":0,"multiplier":1.0,
                 "incapacitated_multiplier":1.0,"source":{}})).collect::<Vec<_>>()
         }).to_string()).unwrap()
+    }
+
+    #[test]
+    fn ground_apc_primary_isolated_from_ordinary_and_hospital_rows() {
+        let catalog = combat_catalog();
+        assert!(catalog.bullet_for_damage(2).is_ok());
+        assert!(catalog.hospital_primary_for_damage(4).is_ok());
+        assert!(catalog.bullet_metadata(5).is_none());
+        assert!(catalog.bullet_for_damage(5).is_err());
+        assert!(catalog.hospital_primary_for_damage(5).is_err());
+        for item in [2, 4, 6] {
+            assert!(catalog.ground_apc_primary_for_damage(item).is_err());
+        }
+        assert!(catalog.ground_apc_primary_for_damage(5).is_ok());
+    }
+
+    #[test]
+    fn ground_apc_primary_requires_matching_equipment_version_and_primary_slot() {
+        let catalog = combat_catalog();
+        let hit = crate::bullet_hit::NetMessageHit::decode(
+            &crate::human_kill_reward_tests::native_hit(0x0380_0000, 10),
+        )
+        .unwrap();
+        let equipped = crate::replication::InventoryItem {
+            inventory_update_id: 2,
+            gear_slot: 0,
+            ammo_pool: 0,
+            ammo_count: 9,
+            reloading: false,
+        };
+        let from_grant = |item_id, equipped, definition_version, hit: &_| {
+            let qualified = crate::ground_turrets::GroundQualifiedPrimary {
+                item_id,
+                equipped,
+                definition_version,
+            };
+            RetailBulletProfile::from_ground_apc_primary(&catalog, qualified, hit)
+        };
+        let raw = from_grant(5, equipped, 2, &hit)
+            .unwrap()
+            .raw_character_damage(1., 1., 3)
+            .unwrap();
+        assert_eq!(
+            (
+                raw.amount_hp,
+                raw.armor_rating_redux,
+                raw.armor_prevention_redux
+            ),
+            (48., 2., 0.125)
+        );
+        assert!(matches!(
+            from_grant(4, equipped, 2, &hit),
+            Err("unsupported_ground_apc_primary_bullet")
+        ));
+        assert!(matches!(
+            from_grant(5, equipped, 3, &hit),
+            Err("stale_ground_turret_inventory")
+        ));
+        assert!(matches!(
+            from_grant(
+                5,
+                crate::replication::InventoryItem {
+                    gear_slot: 1,
+                    ..equipped
+                },
+                2,
+                &hit
+            ),
+            Err("unsupported_ground_turret_gear")
+        ));
+        assert!(matches!(
+            from_grant(
+                5,
+                crate::replication::InventoryItem {
+                    ammo_pool: 1,
+                    ..equipped
+                },
+                2,
+                &hit
+            ),
+            Err("unsupported_ground_turret_ammo_pool")
+        ));
+        for secondary in [
+            crate::bullet_hit::NetMessageHit {
+                gear_index: 1,
+                ..hit
+            },
+            crate::bullet_hit::NetMessageHit {
+                fire_mode: 1,
+                ..hit
+            },
+        ] {
+            assert!(from_grant(5, equipped, 2, &secondary).is_err());
+        }
     }
 
     #[test]
@@ -984,7 +1130,7 @@ mod hospital_primary_tests {
         };
         let mut slots = [None; 22];
         slots[0] = Some(4);
-        let loadout = CharacterLoadout {
+        let mut loadout = CharacterLoadout {
             inventories: std::array::from_fn(|_| CharacterInventory {
                 update_id: 1,
                 slots,
@@ -996,22 +1142,29 @@ mod hospital_primary_tests {
             primary: equipped,
             primary_equipped: true,
         };
-        assert!(matches!(
-            RetailBulletProfile::from_equipped(&catalog, &loadout, equipped, 0, 0),
-            Err("unsupported_retail_bullet_weapon")
-        ));
+        for item in [4, 5] {
+            loadout.inventories[0].slots[0] = Some(item);
+            assert!(matches!(
+                RetailBulletProfile::from_equipped(&catalog, &loadout, equipped, 0, 0),
+                Err("unsupported_retail_bullet_weapon")
+            ));
+        }
     }
 
     #[test]
     fn mounted_primary_cannot_be_saved_in_an_unselected_kit() {
+        let mounted_items = [4, 5].into_iter().map(|id| {
+                    let reference = format!("FactionItemList0:{id}");
+                    (reference.clone(), json!({
+                        "authored_ref":reference,"faction_list":"FactionItemList0",
+                        "local_ordinal":id,"wire_item_id":null,"name":"synthetic_mounted_primary",
+                        "item_type":"kWeapon","definition":{"group":"weapons","name":"synthetic_mounted_primary"}
+                    }))
+                }).collect::<serde_json::Map<_,_>>();
         let items = crate::item_catalog::ItemCatalog::from_value_for_application(
             json!({
                 "schema_version":2,"application_id":20231,
-                "items":{"FactionItemList0:4":{
-                    "authored_ref":"FactionItemList0:4","faction_list":"FactionItemList0",
-                    "local_ordinal":4,"wire_item_id":null,"name":"synthetic_mounted_primary",
-                    "item_type":"kWeapon","definition":{"group":"weapons","name":"synthetic_mounted_primary"}
-                }},
+                "items": mounted_items,
                 "definitions":{"weapons":{"synthetic_mounted_primary":{"parameters":{"magazine_capacity":9}}}},
                 "resources":{}
             }),
@@ -1028,11 +1181,13 @@ mod hospital_primary_tests {
             update_ids: [1; 5],
             inventories: [[None; 22]; 5],
         };
-        saved.inventories[4][1] = Some(4);
-        assert_eq!(
-            items.validate_saved_item_bindings(&saved),
-            Err("saved_mounted_bullet_weapon")
-        );
+        for item in [4, 5] {
+            saved.inventories[4][1] = Some(item);
+            assert_eq!(
+                items.validate_saved_item_bindings(&saved),
+                Err("saved_mounted_bullet_weapon")
+            );
+        }
     }
 
     #[test]
@@ -1124,6 +1279,92 @@ mod hospital_primary_tests {
         enable_synthetic_hospital_turrets(&mut engine);
         equip_synthetic_hospital_turret(&mut engine, 5);
         engine
+    }
+
+    #[test]
+    fn ground_apc_primary_uses_armored_hostile_hit_transaction() {
+        use crate::{
+            CharacterLife,
+            ground_turrets::tests::{equip_synthetic_ground_turret, opt_in},
+            human_kill_reward_tests::{fixture, hit},
+            progression::RewardKind,
+            spawn_progression::tests::ground_vehicle_runtime::domination_ground_driver::driver_engine,
+        };
+
+        let victim_id = "synthetic-reservation-0000";
+        let setup = || {
+            let mut engine = fixture();
+            let grounds = driver_engine(8);
+            engine.ground_vehicles = grounds.ground_vehicles;
+            engine.ground_runtime = grounds.ground_runtime;
+            let vehicle = engine.current_ground_vehicle(8).unwrap();
+            let batch_count = engine.ground_vehicles.as_ref().unwrap().batch_count();
+            let catalog = engine.spawn_catalog.as_ref().unwrap();
+            let for_team = |team| {
+                let squad = catalog
+                    .map_pool()
+                    .squads
+                    .iter()
+                    .find(|s| s.team == team)
+                    .unwrap();
+                std::sync::Arc::new(catalog.for_squad(squad.index).unwrap())
+            };
+            let shooter = engine.active.as_mut().unwrap();
+            shooter.squad_catalog = for_team(vehicle.team);
+            shooter.reservation.character.faction = vehicle.faction;
+            shooter.ground_vehicle_batch = batch_count;
+            engine.peers.get_mut(victim_id).unwrap().squad_catalog = for_team(1 - vehicle.team);
+            let items = std::mem::replace(&mut engine.item_catalog, grounds.item_catalog);
+            engine.item_catalog = std::sync::Arc::new(
+                std::sync::Arc::try_unwrap(items)
+                    .ok()
+                    .unwrap()
+                    .with_retail_combat(combat_catalog()),
+            );
+            engine.match_started = true;
+            opt_in(&mut engine, 8);
+            equip_synthetic_ground_turret(&mut engine, 8);
+            engine.peers.get_mut(victim_id).unwrap().life = CharacterLife::Alive {
+                generation: 4,
+                health_quarter_points: 200,
+            };
+
+            engine
+        };
+        let mut failed = setup();
+        failed.max_log = failed.written;
+        assert!(matches!(
+            hit(&mut failed, 70, 1000),
+            Err("log_limit_reached")
+        ));
+        assert_eq!(failed.peers[victim_id].life.damage_health(), Some((4, 200)));
+        assert!(failed.pending_reward_batch().is_empty());
+
+        let mut engine = setup();
+        hit(&mut engine, 71, 1001).unwrap();
+        let victim = &engine.peers[victim_id];
+        assert_eq!(victim.life.damage_health(), Some((4, 32)));
+        assert_eq!(victim.last_damage.last_attacker, 0x0380_0001);
+        assert_eq!(victim.last_damage.last_source_object, u32::MAX);
+
+        hit(&mut engine, 72, 1002).unwrap();
+        assert!(matches!(
+            engine.peers[victim_id].life,
+            CharacterLife::Incapacitated { generation: 4, .. }
+        ));
+        assert_eq!(engine.peers[victim_id].reward_statistics.get(&12), Some(&1));
+        assert_eq!(
+            engine.active.as_ref().unwrap().reward_statistics.get(&10),
+            Some(&1)
+        );
+        assert_eq!(
+            engine
+                .pending_reward_batch()
+                .iter()
+                .filter(|event| event.kind == RewardKind::EnemyKilled && event.player_id == 1)
+                .count(),
+            1
+        );
     }
 
     #[test]

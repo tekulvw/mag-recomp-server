@@ -7,6 +7,22 @@ pub(super) fn hit<W: Write>(
     request: bullet_hit::NetMessageHit,
 ) -> Result<Value, &'static str> {
     let indexed_hospital = ctx.active.is_indexed_hospital_gunner();
+    let ground_gunner = ctx.engine.is_ground_gunner(ctx.active);
+    if ground_gunner {
+        let denial = if !ctx.accepted_client_route {
+            Some("ground_apc_primary_requires_native_client_route")
+        } else if !ctx.engine.match_started || !ctx.engine.round_combat_allowed(ctx.now) {
+            Some("ground_apc_primary_requires_active_round")
+        } else if request.defender >> 16 != 0x0380 {
+            Some("ground_apc_primary_requires_character_target")
+        } else {
+            None
+        };
+        if let Some(code) = denial {
+            plan.gameplay_denial = Some(code);
+            return Ok(json!({"type":"bullet_hit","target_id":request.defender}));
+        }
+    }
     if indexed_hospital
         && (!ctx.accepted_client_route
             || !ctx.engine.match_started
@@ -123,7 +139,8 @@ pub(super) fn hit<W: Write>(
     } else if !active.entered_game
         || !active.ready_for_updates
         || !active.life.is_alive()
-        || (active.ground_seat.is_some() || active.mounted_seat.is_some_and(|seat| seat != 0))
+        || ((active.ground_seat.is_some() && !ground_gunner)
+            || active.mounted_seat.is_some_and(|seat| seat != 0))
     {
         plan.gameplay_denial = Some("bullet_requires_living_armed_shooter");
     } else if target_health.is_none() {
@@ -369,7 +386,7 @@ pub(super) fn hit<W: Write>(
         "hit_authority":"client_reported",
         "collision_audit":collision_audit(ctx.engine.collision_world.as_ref(), ctx.engine.map_name(), request.hit_origin, request.hit_dest),
         "ammo_authority":"observed_only_no_fire_event"});
-    if indexed_hospital {
+    if indexed_hospital || ground_gunner {
         let audit = audit.as_object_mut().unwrap();
         audit.remove("magazine");
         audit.insert("fire_mode".into(), json!(request.fire_mode));

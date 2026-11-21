@@ -212,14 +212,14 @@ impl Rules {
                 }
                 Ok((
                     row.object_index,
-                    Runtime::new(variant.primary_item_id, variant.secondary_item_id),
+                    Runtime::new(variant.primary_item_id, Some(variant.secondary_item_id)),
                 ))
             })
             .collect()
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Runtime {
     items: [Option<u16>; 3],
     version: u8,
@@ -227,7 +227,7 @@ pub(crate) struct Runtime {
     grant: Option<Grant>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct Grant {
     reservation: String,
     player: u16,
@@ -237,9 +237,9 @@ struct Grant {
 }
 
 impl Runtime {
-    fn new(primary: u16, secondary: u16) -> Self {
+    pub(crate) fn new(primary: u16, secondary: Option<u16>) -> Self {
         Self {
-            items: [Some(primary), Some(secondary), None],
+            items: [Some(primary), secondary, None],
             version: 2,
             aim: Fields::default(),
             grant: None,
@@ -283,7 +283,7 @@ impl Runtime {
         Ok((next, definition))
     }
 
-    fn definition(&self, granted: bool) -> InventoryDefinition {
+    pub(crate) fn definition(&self, granted: bool) -> InventoryDefinition {
         InventoryDefinition {
             version: if granted { self.version } else { 2 },
             items: self.items,
@@ -308,13 +308,42 @@ impl Runtime {
                 && self.grant_for(actor).is_some())
     }
 
+    pub(crate) fn has_grant(&self) -> bool {
+        self.grant.is_some()
+    }
+
+    pub(crate) fn grant_matches(&self, actor: &Active) -> bool {
+        self.grant_for(actor).is_some()
+    }
+
+    pub(crate) fn primary_for(&self, actor: &Active) -> Option<(u16, InventoryItem, u8)> {
+        let equipped = self
+            .grant_for(actor)?
+            .primary
+            .filter(|item| self.can_fire(*item))?;
+        Some((self.items[0]?, equipped, self.version))
+    }
+
+    pub(crate) fn snapshot(&self, actor: Option<&Active>, operational: bool) -> Fields {
+        let mut fields = if operational {
+            self.aim
+        } else {
+            Fields::default()
+        };
+        if let Some(grant) = actor.and_then(|actor| self.grant_for(actor)) {
+            fields.primary = grant.primary;
+            fields.secondary = grant.secondary;
+        }
+        fields
+    }
+
     fn can_fire(&self, equipped: InventoryItem) -> bool {
         equipped.inventory_update_id == self.version
             && equipped.gear_slot == 0
             && equipped.ammo_pool == 0
     }
 
-    fn report(&self, fields: Fields) -> Result<(Self, Fields), &'static str> {
+    pub(crate) fn report(&self, fields: Fields) -> Result<(Self, Fields), &'static str> {
         if [fields.primary, fields.secondary]
             .into_iter()
             .flatten()

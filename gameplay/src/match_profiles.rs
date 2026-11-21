@@ -67,6 +67,7 @@ struct Loaded {
     domination: Option<domination_gameplay_provider::World>,
     bunkers: Option<structures::BunkerWorld>,
     hospital_turret_source: Option<Arc<[u8]>>,
+    ground_turret_source: Option<Arc<[u8]>>,
 }
 pub struct Registry {
     profiles: BTreeMap<String, Loaded>,
@@ -310,7 +311,7 @@ impl Registry {
                     .validate_match(20231, &spawns)
                     .map_err(io::Error::other)?;
             }
-            let (domination, hospital_turret_source) =
+            let (domination, hospital_turret_source, ground_turret_source) =
                 if let Some(path) = &source.domination_gameplay {
                     if policy.game_type != 2
                         || domination_round.is_none()
@@ -332,15 +333,16 @@ impl Registry {
                     })?;
                     let config = domination_gameplay_config::Configuration::load(path)?;
                     let source = config.hospital_turret_source()?.map(Arc::from);
+                    let ground_turret_source = config.ground_turret_source()?.map(Arc::from);
                     let world = config.build_for(
                         objectives,
                         &mut spawns,
                         bunkers,
                         vehicles.as_ref().unwrap(),
                     )?;
-                    (Some(world), source)
+                    (Some(world), source, ground_turret_source)
                 } else {
-                    (None, None)
+                    (None, None, None)
                 };
             let ability_manifest = active_ability_config::manifest_path(
                 source.active_abilities,
@@ -401,6 +403,7 @@ impl Registry {
                     domination,
                     bunkers,
                     hospital_turret_source,
+                    ground_turret_source,
                 },
             );
         }
@@ -430,6 +433,36 @@ impl Registry {
                 &objectives.source().source_image_sha256,
             )
             .map_err(|_| "invalid_match_profile_hospital_turrets")?;
+        }
+        Ok(())
+    }
+
+    fn bind_ground_turrets(
+        &mut self,
+        items: &item_catalog::ItemCatalog,
+    ) -> Result<(), &'static str> {
+        for profile in self.profiles.values_mut() {
+            let Some(source) = profile.ground_turret_source.take() else {
+                continue;
+            };
+            let grounds = profile
+                .vehicles
+                .as_mut()
+                .ok_or("ground_turret_catalog_required")?;
+            let objectives = profile
+                .objectives
+                .as_ref()
+                .ok_or("ground_turret_objectives_required")?;
+            grounds.set_turret_policies(
+                crate::ground_turrets::qualify(
+                    &source,
+                    grounds,
+                    &profile.spawns,
+                    items,
+                    &objectives.source().source_image_sha256,
+                )
+                .map_err(|_| "invalid_match_profile_ground_turrets")?,
+            );
         }
         Ok(())
     }
@@ -604,6 +637,7 @@ impl<W: Write> Engine<W> {
         }
         registry.validate_runtime(&self.item_catalog, self.wire_profile)?;
         registry.bind_hospital_turrets(&self.item_catalog)?;
+        registry.bind_ground_turrets(&self.item_catalog)?;
         if registry.has_domination_gameplay() && self.dynamic_body_resources.is_none() {
             return Err("domination_profiles_require_dynamic_bodies");
         }
@@ -1472,6 +1506,7 @@ mod tests {
                 domination: None,
                 bunkers: None,
                 hospital_turret_source: None,
+                ground_turret_source: None,
                 acquisition: Some(sample.acquisition_gameplay.unwrap().setup),
             },
         );

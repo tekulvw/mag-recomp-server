@@ -571,6 +571,17 @@ impl<W: Write> Engine<W> {
             .as_ref()
             .filter(|_| is_release)
             .and_then(|actor| self.ground_driver_seat_index(actor));
+        let released_gunner = self
+            .active
+            .as_ref()
+            .filter(|actor| is_release && self.is_ground_gunner(actor))
+            .and_then(|actor| actor.ground_seat)
+            .map(|seat| {
+                let index = seat.vehicle_index;
+                self.ground_turret_revocation_packet(index, now)
+                    .map(|packets| (index, packets))
+            })
+            .transpose()?;
         let removed = if is_release {
             self.active
                 .as_ref()
@@ -601,6 +612,18 @@ impl<W: Write> Engine<W> {
         let mut messages = self.apply(request, decoded, now, wall)?;
         if is_release {
             self.revoke_inactive_hospital_turrets();
+        }
+        if let Some((index, packets)) = released_gunner {
+            self.revoke_ground_gunner(index);
+            for actor in self
+                .peers
+                .values_mut()
+                .filter(|actor| actor.initial_objects.is_some())
+            {
+                for packet in &packets {
+                    actor.queue_shared(packet.clone());
+                }
+            }
         }
         if let Some(index) = released_driver {
             self.queue_ground_driver_revocation(index, now)?;

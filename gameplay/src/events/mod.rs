@@ -59,6 +59,9 @@ struct EventPlan {
     hospital_aim_packets: Vec<Vec<u8>>,
     hospital_late_join: Vec<Vec<u8>>,
     ground_dynamics_relay: Option<(u16, Vec<u8>)>,
+    ground_turret: Option<(u16, crate::hospital_turrets::Runtime)>,
+    ground_turret_packets: Vec<Vec<u8>>,
+    ground_gunner_revocations: Vec<(u16, u16, Vec<Vec<u8>>)>,
     ground_damage_relay: Option<Vec<u8>>,
     combat: CombatChanges,
     leadership: leadership_runtime::LeadershipPlan,
@@ -508,7 +511,8 @@ impl<W: Write> Engine<W> {
         if self.has_hospital_turrets() && plan.replication.emplacement_creation.is_some() {
             plan.hospital_late_join = self.hospital_turret_late_join(now)?;
         }
-        self.stage_hospital_aim_budget(&mut plan);
+        self.stage_ground_gunner_revocations(&mut plan, now)?;
+        self.stage_turret_aim_budget(&mut plan);
         statistics::stage(self, &mut plan)?;
         if let Some(points) = plan.session.clock_points {
             let score = protocol::ScoreChange {
@@ -557,6 +561,11 @@ impl<W: Write> Engine<W> {
                 "ordered_health": plan.replication.ordered_health.as_ref().map(|p| protocol::encode_hex(p)),
                 "domination_sequence_batches": plan.replication.domination_sequence_batches.iter()
                     .map(|packet| protocol::encode_hex(packet)).collect::<Vec<_>>(),
+                "ground_turret_packets": plan.ground_turret_packets.iter().map(|packet| protocol::encode_hex(packet)).collect::<Vec<_>>(),
+                "ground_gunner_revocations": plan.ground_gunner_revocations.iter().map(|(index, owner, packets)| json!({
+                    "vehicle_index": index, "owner": owner,
+                    "packets": packets.iter().map(|packet| protocol::encode_hex(packet)).collect::<Vec<_>>()
+                })).collect::<Vec<_>>(),
                 "hospital_aim_packets": plan.hospital_aim_packets.iter().map(|packet| protocol::encode_hex(packet)).collect::<Vec<_>>(),
                 "hospital_late_join": plan.hospital_late_join.iter().map(|packet| protocol::encode_hex(packet)).collect::<Vec<_>>(),
                 "messages": plan.messages,
@@ -578,8 +587,48 @@ impl<W: Write> Engine<W> {
         self.commit_event(&event, decoded, plan, now)
     }
 
-    fn stage_hospital_aim_budget(&self, plan: &mut EventPlan) {
-        if plan.hospital_aim_packets.is_empty() {
+    fn stage_ground_gunner_revocations(
+        &self,
+        plan: &mut EventPlan,
+        now: Duration,
+    ) -> Result<(), &'static str> {
+        for (index, owner) in self.active_ground_gunners() {
+            let loses_life = self.active.as_ref().is_some_and(|actor| {
+                actor.reservation.player == owner
+                    && plan.combat.new_life.is_some_and(|life| !life.is_alive())
+            }) || plan.combat.peer_lives.iter().any(|(id, life)| {
+                !life.is_alive()
+                    && self
+                        .peers
+                        .get(id)
+                        .is_some_and(|actor| actor.reservation.player == owner)
+            }) || plan.combat.peer_damage.iter().any(|(id, _, damage)| {
+                damage.health_quarter_points == 0
+                    && self
+                        .peers
+                        .get(id)
+                        .is_some_and(|actor| actor.reservation.player == owner)
+            });
+            let loses_vehicle = plan.ground_runtime.as_ref().is_some_and(|runtime| {
+                runtime.get(index).is_none_or(|vehicle| {
+                    vehicle.state != 2
+                        || vehicle.is_dead()
+                        || vehicle.body != acquisition_ground_runtime::Body::Operational
+                })
+            });
+            if loses_life || loses_vehicle {
+                plan.ground_gunner_revocations.push((
+                    index,
+                    owner,
+                    self.ground_turret_revocation_packet(index, now)?,
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn stage_turret_aim_budget(&self, plan: &mut EventPlan) {
+        if plan.hospital_aim_packets.is_empty() && plan.ground_turret_packets.is_empty() {
             return;
         }
         // A single owner update can also finish a grenade launched before
@@ -614,6 +663,7 @@ impl<W: Write> Engine<W> {
             };
             grenade_relays
                 + driver_revocations
+                + plan.ground_gunner_revocations.len()
                 + usize::from(plan.replication.ordered_health.is_some())
                 + usize::from(plan.session.correction_publication.is_some())
                 + usize::from(plan.ground_dynamics_relay.is_some())
@@ -624,12 +674,19 @@ impl<W: Write> Engine<W> {
             self.peers
                 .values()
                 .filter(|peer| peer.initial_objects.is_some()),
-            plan.hospital_aim_packets.len(),
+            plan.hospital_aim_packets.len() + plan.ground_turret_packets.len(),
             baseline,
         ) {
-            plan.hospital_turret = None;
-            plan.hospital_aim_packets.clear();
-            plan.gameplay_denial = Some(reason);
+            if !plan.hospital_aim_packets.is_empty() {
+                plan.hospital_turret = None;
+                plan.hospital_aim_packets.clear();
+                plan.gameplay_denial = Some(reason);
+            }
+            if !plan.ground_turret_packets.is_empty() {
+                plan.ground_turret = None;
+                plan.ground_turret_packets.clear();
+                plan.gameplay_denial = Some("ground_turret_publication_budget_exceeded");
+            }
         }
     }
 
@@ -1135,6 +1192,49 @@ impl<W: Write> Engine<W> {
                 .filter(|a| a.initial_objects.is_some())
             {
                 recipient.queue_shared(packet.clone());
+            }
+        }
+        if let Some((index, turret)) = plan.ground_turret {
+            let accepts = !turret.has_grant()
+                || (self.ground_vehicle_is_operational(index)
+                    && self.active.as_ref().is_some_and(|actor| {
+                        self.is_ground_gunner(actor)
+                            && actor
+                                .ground_seat
+                                .is_some_and(|seat| seat.vehicle_index == index)
+                            && turret.grant_matches(actor)
+                    }));
+            if accepts {
+                self.ground_runtime
+                    .as_mut()
+                    .expect("qualified ground world")
+                    .install_turret(index, turret);
+            } else {
+                plan.ground_turret_packets.clear();
+            }
+        }
+        for (index, owner, packets) in plan.ground_gunner_revocations {
+            if !self.active_ground_gunners().contains(&(index, owner)) {
+                self.revoke_ground_gunner(index);
+                for recipient in self
+                    .active
+                    .iter_mut()
+                    .chain(self.peers.values_mut())
+                    .filter(|actor| actor.initial_objects.is_some())
+                {
+                    for packet in &packets {
+                        recipient.queue_shared(packet.clone());
+                    }
+                }
+            }
+        }
+        for peer in self
+            .peers
+            .values_mut()
+            .filter(|peer| peer.initial_objects.is_some())
+        {
+            for packet in &plan.ground_turret_packets {
+                peer.queue_shared(packet.clone());
             }
         }
         if let Some((index, turret)) = plan.hospital_turret {

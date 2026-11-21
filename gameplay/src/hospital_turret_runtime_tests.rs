@@ -3,7 +3,7 @@ use crate::{spawn_progression::dispatch, structures::domination_bunker_seat_test
 
 pub(crate) fn enable_synthetic_hospital_turrets<W: Write>(engine: &mut Engine<W>) {
     engine.bunker_world.as_mut().unwrap().hospital_turrets =
-        BTreeMap::from([(5, Runtime::new(4, 5)), (6, Runtime::new(4, 5))]);
+        BTreeMap::from([(5, Runtime::new(4, Some(5))), (6, Runtime::new(4, Some(5)))]);
 }
 
 pub(crate) fn equip_synthetic_hospital_turret<W: Write>(engine: &mut Engine<W>, index: u16) {

@@ -51,6 +51,7 @@ impl From<&'static str> for OwnerUpdateError {
 pub struct TypedOwnerUpdateFields {
     pub character: Option<ClientCharacterFields>,
     pub ground_vehicles: Vec<OwnerDynamics>,
+    pub(crate) ground_turrets: Vec<crate::ground_vehicles::OwnerUpdate>,
     pub turret: Option<ClientTurretFields>,
     pub(crate) hospital_turrets: Vec<crate::hospital_turret_wire::ClientUpdate>,
     pub projectiles: Vec<ProjectileOwnerUpdate>,
@@ -62,6 +63,7 @@ impl TypedOwnerUpdateFields {
         profile: crate::wire_profile::WireProfile,
         allow_ground_owner: bool,
         allow_hospital_owner: bool,
+        allow_ground_turret_owner: bool,
     ) -> Result<Self, OwnerUpdateError> {
         Self::decode_with_ownership(
             update,
@@ -69,6 +71,7 @@ impl TypedOwnerUpdateFields {
             profile,
             allow_ground_owner,
             allow_hospital_owner,
+            allow_ground_turret_owner,
         )
         .map_err(OwnerUpdateError::from)
     }
@@ -88,7 +91,14 @@ impl TypedOwnerUpdateFields {
         expected_character_index: u16,
         profile: crate::wire_profile::WireProfile,
     ) -> Result<Self, &'static str> {
-        Self::decode_with_ownership(update, expected_character_index, profile, false, false)
+        Self::decode_with_ownership(
+            update,
+            expected_character_index,
+            profile,
+            false,
+            false,
+            false,
+        )
     }
 
     fn decode_with_ownership(
@@ -97,6 +107,7 @@ impl TypedOwnerUpdateFields {
         profile: crate::wire_profile::WireProfile,
         allow_ground_owner: bool,
         allow_hospital_owner: bool,
+        allow_ground_turret_owner: bool,
     ) -> Result<Self, &'static str> {
         update.validate_profile(profile)?;
         let mut bits = BitReader::with_profile(update.wire, profile);
@@ -109,7 +120,16 @@ impl TypedOwnerUpdateFields {
                 continue;
             }
             if object_type == 1 && allow_ground_owner && profile.application_id() == 20231 {
-                fields.ground_vehicles = OwnerDynamics::decode_list(&mut bits)?;
+                if allow_ground_turret_owner {
+                    let rows = crate::ground_vehicles::decode_owner_updates(&mut bits)?;
+                    fields.ground_vehicles = rows.iter().map(|row| row.dynamics).collect();
+                    fields.ground_turrets = rows
+                        .into_iter()
+                        .filter(|row| row.turret.has_changes())
+                        .collect();
+                } else {
+                    fields.ground_vehicles = OwnerDynamics::decode_list(&mut bits)?;
+                }
                 continue;
             }
             if object_type == 13 {
