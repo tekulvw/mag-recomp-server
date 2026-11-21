@@ -5,6 +5,8 @@ using Server.Medius;
 
 internal static partial class LeadershipProgressionChecks
 {
+    private const string FragoCapability = "frago_kill_bonus_v1";
+
     public static void FragoBridgeSchema()
     {
         const string qualified = ",\"frago\":true";
@@ -76,7 +78,22 @@ internal static partial class LeadershipProgressionChecks
             var ack = bridge.Latest("progression_committed");
             Check(ack["match_frago_points"]!.GetValue<int>() == 0 && ack["match_experience"]!.GetValue<int>() == 22,
                 "An authored zero changed ordinary XP or omitted the qualified receipt snapshot");
-        }).GetAwaiter().GetResult();
+        }, FragoCapability).GetAwaiter().GetResult();
+    });
+
+    public static void FragoOlderWorkerAdmission() => WithDirectory(directory =>
+    {
+        var store = new LocalCharacterStore(Path.Combine(directory, "characters.json")) { ProgressionCatalog = Load(directory, FragoCatalog("0.25")) };
+        Create(store, "alpha", "Alpha");
+        foreach (string capability in new[] { null, "FRAGO_KILL_BONUS_V1" })
+        {
+            WithAdmission(store, async (host, bridge, session) =>
+            {
+                Check((await BeginJoin(host, session).WaitAsync(AdmissionTimeout)).Result == 0, "Older-worker synthetic admission failed");
+                var character = bridge.Latest("reserve")["character"]!.AsObject();
+                Check(!character.ContainsKey("frago_bonus_enabled"), "New Horizon sent an unknown FRAGO admission field to an older worker");
+            }, capability).GetAwaiter().GetResult();
+        }
     });
 
     public static void FragoDurableSettlement() => WithDirectory(directory =>
@@ -129,7 +146,7 @@ internal static partial class LeadershipProgressionChecks
             replay["request_id"] = first["request_id"]!.DeepClone();
             Check(JsonNode.DeepEquals(replay, first) && before.SequenceEqual(File.ReadAllBytes(path)), "Late replay did not return the original complete ACK");
             Check(JsonNode.DeepEquals(other, JsonNode.Parse(before)!["characters"]![1]), "Qualified reward changed another account's row");
-        }).GetAwaiter().GetResult();
+        }, FragoCapability).GetAwaiter().GetResult();
     });
 
     public static void FragoFailedCommitAndOverflow() => WithDirectory(directory =>

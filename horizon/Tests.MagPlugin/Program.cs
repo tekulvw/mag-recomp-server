@@ -48,6 +48,7 @@ Test("committed loadout selection persistence", LoadoutSelectionChecks.Run);
 Test("optional finishing and revive reward catalog fields", ReviveRewardChecks.Run);
 Test("FRAGO kill reward bridge schema", LeadershipProgressionChecks.FragoBridgeSchema);
 Test("FRAGO authored coefficient validation", LeadershipProgressionChecks.FragoCatalogValidation);
+Test("FRAGO admission omits the field for older gameplay workers", LeadershipProgressionChecks.FragoOlderWorkerAdmission);
 Test("FRAGO admission capability and zero award", LeadershipProgressionChecks.FragoAdmissionCapability);
 Test("FRAGO durable XP and match points settlement", LeadershipProgressionChecks.FragoDurableSettlement);
 Test("FRAGO failed commit, overflow and malformed receipt", LeadershipProgressionChecks.FragoFailedCommitAndOverflow);
