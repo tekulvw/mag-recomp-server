@@ -71,7 +71,7 @@ fn fixture() -> Engine<Vec<u8>> {
     assignment.assignment.tagged_object = u32::MAX;
     e
 }
-fn interact(
+pub(crate) fn interact(
     e: &mut Engine<Vec<u8>>,
     index: u16,
     kind: protocol::ObjectiveInteractionKind,
@@ -317,7 +317,7 @@ fn legacy_capabilities_keep_native_objective_base_rewards_only() {
     assert_eq!(e.pending_reward_batch()[0].frago, None);
 }
 
-fn acquisition_fixture() -> Engine<Vec<u8>> {
+pub(crate) fn acquisition_fixture() -> Engine<Vec<u8>> {
     let mut e = acquisition_structural::connected_tests::fixture();
     let mut catalog = e.objective_catalog.clone().unwrap();
     for object in &mut catalog.objects {

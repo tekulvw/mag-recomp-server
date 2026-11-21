@@ -82,6 +82,7 @@ pub struct Gameplay {
     callback_tokens: BTreeSet<u32>,
     objectives: BTreeMap<u32, Objective>,
     squads: BTreeMap<u16, Squad>,
+    target_versions: BTreeMap<u32, u64>,
 }
 
 /// Operations requiring Engine collision and character authority. The
@@ -166,6 +167,7 @@ impl Gameplay {
         Ok(Self {
             controller: catalog.fingerprint().into(),
             callback_tokens: expected,
+            target_versions: objectives.keys().map(|&token| (token, 0)).collect(),
             objectives,
             squads,
         })
@@ -215,12 +217,25 @@ impl Gameplay {
         token: u32,
         target: ObjectiveState,
     ) -> Result<(), &'static str> {
+        let version = self
+            .target_versions
+            .get_mut(&token)
+            .ok_or("unknown_acquisition_gameplay_objective")?;
+        let next = version
+            .checked_add(1)
+            .ok_or("acquisition_target_version_exhausted")?;
         self.objectives
             .get_mut(&token)
             .ok_or("unknown_acquisition_gameplay_objective")?
             .state
             .target = target as i32;
+        *version = next;
         Ok(())
+    }
+
+    /// Replacement-only request identity; scripts cannot reuse an old delivery witness.
+    pub(crate) fn target_version(&self, token: u32) -> Option<u64> {
+        self.target_versions.get(&token).copied()
     }
 
     /// Handle the forced type-9 ground death notification. The caller resolves
@@ -235,10 +250,10 @@ impl Gameplay {
         if actor_team > 1 {
             return Err("invalid_acquisition_fsp_actor_team");
         }
-        let objective = self
+        let (&token, objective) = self
             .objectives
-            .values_mut()
-            .find(|objective| objective.fsp.is_some() && objective.object_id() == object_id)
+            .iter_mut()
+            .find(|(_, objective)| objective.fsp.is_some() && objective.object_id() == object_id)
             .ok_or("unknown_acquisition_fsp_objective")?;
         if actor_team != objective.owner_team {
             objective.current_attacker = actor_id;
@@ -247,6 +262,13 @@ impl Gameplay {
         }
         // GetIsCompleted includes Repairing in addition to Completed, unlike
         // the Lua graph, whose predicates read the literal current state.
+        let version = self
+            .target_versions
+            .get_mut(&token)
+            .ok_or("unknown_acquisition_gameplay_objective")?;
+        *version = version
+            .checked_add(1)
+            .ok_or("acquisition_target_version_exhausted")?;
         objective.state.target = if matches!(objective.state.current, 5 | 7) {
             ObjectiveState::Deactivated as i32
         } else {
@@ -389,8 +411,15 @@ impl Gameplay {
                         .objectives
                         .get_mut(target)
                         .ok_or("unknown_acquisition_gameplay_objective")?;
-                    if let Some(target) = objective.state.request(*operation) {
-                        objective.state.target = target;
+                    if let Some(requested) = objective.state.request(*operation) {
+                        let version = self
+                            .target_versions
+                            .get_mut(target)
+                            .ok_or("unknown_acquisition_gameplay_objective")?;
+                        *version = version
+                            .checked_add(1)
+                            .ok_or("acquisition_target_version_exhausted")?;
+                        objective.state.target = requested;
                     }
                 }
                 Command::DamageVolume {

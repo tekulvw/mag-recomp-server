@@ -225,6 +225,8 @@ pub struct Character {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frago_objective_bonus_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extended_objective_rewards_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repair_rewards_enabled: Option<bool>,
 }
 fn deserialize_skills<'de, D: serde::Deserializer<'de>>(
@@ -1479,6 +1481,7 @@ impl<W: Write> Engine<W> {
                         frago::CAPABILITY.into(),
                         frago::ACTION_CAPABILITY.into(),
                         frago::OBJECTIVE_CAPABILITY.into(),
+                        objective_rewards::EXTENDED_CAPABILITY.into(),
                         repair_rewards::CAPABILITY.into(),
                     ];
                     if self.match_profiles.is_some() {
@@ -2134,3 +2137,12 @@ mod manual_ground_repair_domination_tests;
 
 #[cfg(test)]
 mod objective_reward_tests;
+
+#[cfg(test)]
+mod extended_objective_reward_tests;
+
+#[cfg(test)]
+mod extended_objective_ack_tests;
+
+#[cfg(test)]
+mod extended_delivery_reward_tests;

@@ -1,7 +1,7 @@
 //! Qualified objective targeting for the Precision Strike command.
 use crate::{
     Deserialize, Engine, Write,
-    objective_control::{NativeClass, ObjectiveWorld},
+    objective_control::{NativeClass, ObjectiveWorld, PrecisionRewardActor},
     structure_damage::Source,
 };
 
@@ -36,6 +36,21 @@ fn target_allowed(
 }
 
 impl<W: Write> Engine<W> {
+    pub(crate) fn current_objective_source_team(&self, player: u16, world: u32) -> Option<u8> {
+        if let Some(actor) =
+            self.active.iter().chain(self.peers.values()).find(|actor| {
+                actor.reservation.player == player && actor.reservation.world == world
+            })
+        {
+            return (actor.entered_game && actor.claimed.is_some()).then(|| actor.team());
+        }
+        self.bot_registry
+            .bots
+            .get(&player)
+            .filter(|_| self.accepts_subscription_world(world))
+            .map(|bot| bot.target.squad.team())
+    }
+
     pub(crate) fn precision_target_allowed(
         &self,
         target_id: u32,
@@ -62,13 +77,27 @@ impl<W: Write> Engine<W> {
     pub(crate) fn stage_precision_strike(
         &self,
         world: &mut ObjectiveWorld,
+        targets: &[PrecisionTarget],
         target_id: u32,
         source: Option<Source>,
+        source_player: u16,
+        source_world: u32,
     ) -> Result<bool, &'static str> {
         let Some(index) = objective_index(target_id) else {
             return Ok(false);
         };
-        world.stage_precision_strike(index, source)
+        let reward_actor = targets
+            .iter()
+            .find(|target| target.object_index == index)
+            .zip(self.current_objective_source_team(source_player, source_world))
+            .map(|(target, team)| {
+                if target.team == team {
+                    PrecisionRewardActor::Defender(source_player)
+                } else {
+                    PrecisionRewardActor::Attacker(source_player)
+                }
+            });
+        world.stage_precision_strike_with_actor(index, source, reward_actor)
     }
 }
 

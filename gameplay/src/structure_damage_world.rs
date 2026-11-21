@@ -206,8 +206,18 @@ impl<W: std::io::Write> crate::Engine<W> {
                     player: actor.reservation.player,
                     generation,
                 };
+                let source_allocated = self
+                    .current_objective_source_team(source.player, actor.reservation.world)
+                    .is_some();
                 progressed = objectives
-                    .activate_destroyed_trigger(key.0, key.1, source, now, modifier)?
+                    .activate_destroyed_trigger_with_source(
+                        key.0,
+                        key.1,
+                        source,
+                        source_allocated,
+                        now,
+                        modifier,
+                    )?
                     .is_some();
                 if progressed {
                     triggers.remove_phantom(key)?;

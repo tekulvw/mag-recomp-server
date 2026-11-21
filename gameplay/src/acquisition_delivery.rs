@@ -23,6 +23,14 @@ struct Delivery {
     exits: Vec<OccupantExit>,
 }
 
+/// Frozen mounted pose with the exact pending request that may consume it.
+pub(crate) struct RewardWitness {
+    pub recipient: progression::RewardRecipient,
+    pub position: Option<[f32; 3]>,
+    pub target_version: u64,
+    pub timestamp_ms: u32,
+}
+
 impl<W: Write> Engine<W> {
     /// Called inside the isolated character callback. All occupants must have
     /// qualified exits before any occupant, vehicle, or objective is changed.
@@ -33,6 +41,7 @@ impl<W: Write> Engine<W> {
         now: Duration,
         changes: &mut BTreeMap<u16, u32>,
         entry_actors: &mut BTreeMap<u32, u16>,
+        rewards: &mut BTreeMap<u32, RewardWitness>,
     ) -> Result<(Vec<Value>, Vec<OutboundMessage>), &'static str> {
         let setup = runtime.setup.clone();
         let mut audit = Vec::new();
@@ -86,11 +95,21 @@ impl<W: Write> Engine<W> {
                 continue;
             };
 
-            self.install_acquisition_occupant_exits(delivery.exits, now)?;
-            ground.deliver(key)?;
             runtime
                 .state
                 .request_state(chain.arrival_token, ObjectiveState::Completed)?;
+            let witness = self.plan_acquisition_delivery_reward(
+                runtime,
+                ground,
+                chain.arrival_token,
+                delivery.driver,
+                now,
+            )?;
+            self.install_acquisition_occupant_exits(delivery.exits, now)?;
+            ground.deliver(key)?;
+            if let Some(witness) = witness {
+                rewards.insert(chain.arrival_token, witness);
+            }
             entry_actors.insert(chain.arrival_token, delivery.driver);
             // Replicate the delivered state and the explicit server-owner revoke.
             *changes.entry(key.index).or_default() |= (1 << 1) | (1 << 5);

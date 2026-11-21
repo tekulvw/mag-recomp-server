@@ -559,13 +559,14 @@ impl<W: Write> Engine<W> {
         let characters = self.prepare_acquisition_character_callback(&native, now, |engine, native| {
             let mut audit = Vec::new();
             let mut messages = Vec::new();
+            let mut delivery_rewards = BTreeMap::new();
             let (rows, output) = engine.stage_acquisition_vehicle_waves(&mut runtime, &mut ground, now, native, &mut ground_changes)?;
             audit.extend(rows);
             messages.extend(output);
             let (rows, output) = engine.stage_acquisition_ground_updates(&mut runtime, &mut ground, now, native, &mut ground_changes, &mut entry_actors)?;
             audit.extend(rows);
             messages.extend(output);
-            let (rows, output) = engine.stage_acquisition_deliveries(&mut runtime, &mut ground, now, &mut ground_changes, &mut entry_actors)?;
+            let (rows, output) = engine.stage_acquisition_deliveries(&mut runtime, &mut ground, now, &mut ground_changes, &mut entry_actors, &mut delivery_rewards)?;
             audit.extend(rows);
             messages.extend(output);
             if engine.active_abilities.is_some() {
@@ -606,7 +607,14 @@ impl<W: Write> Engine<W> {
                 };
                 changed.extend(structural.stage_world(&mut world, &mut frame, starting)?);
             } else {
-                for delta in world.advance_acquisition_precision_entries(now, |_, _| Ok(()))? {
+                for delta in world.advance_acquisition_precision_entries(now, |entry, _| {
+                    let assignment = engine.active.iter().chain(engine.peers.values())
+                        .find(|a| Some(a.reservation.player) == entry.reward_actor)
+                        .and_then(|a| runtime.state.squad(a.squad_catalog.squad_index()).map(|s|s.assignment));
+                    audit.extend(engine.stage_native_objective_rewards(entry, assignment,
+                        crate::frago::Frame{ground:Some(&ground),..Default::default()})?);
+                    Ok(())
+                })? {
                     changed.insert(delta.object_index, delta);
                 }
             }
@@ -632,6 +640,10 @@ impl<W: Write> Engine<W> {
                 let actor_index = entry_actors.remove(&token).unwrap_or({
                     if attributed & 0xffff_0000 == 0x0380_0000 { attributed as u16 } else { u16::MAX }
                 });
+                if let Some(witness) = delivery_rewards.remove(&token)
+                    && state == ObjectiveState::Completed && actor_index == witness.recipient.player_id {
+                    audit.extend(engine.stage_acquisition_delivery_reward(&runtime, &ground, token, witness)?);
+                }
                 let callback = setup.controller.objective_tokens().any(|t| t == token);
                 let delta = if callback && matches!(state, ObjectiveState::Completed | ObjectiveState::Deactivated) {
                     let entry = Entry { objective_token: token, state: if state == ObjectiveState::Completed { EnteredState::Completed } else { EnteredState::Deactivated }, actor_index, timestamp_ms: now.as_millis() as u32 };
@@ -965,6 +977,11 @@ pub(crate) mod test_support {
         runtime: &mut Runtime,
     ) -> &mut crate::acquisition_structural::Runtime {
         runtime.structural.as_mut().unwrap()
+    }
+
+    pub(crate) fn disable_structural_fixture(runtime: &mut Runtime) {
+        Arc::get_mut(&mut runtime.setup).unwrap().structural = None;
+        runtime.structural = None;
     }
 
     pub(crate) fn install_structural_fixture(

@@ -786,7 +786,7 @@ fn engine_firearm_uses_native_sub_one_hp_death_floor() {
 }
 
 #[path = "acquisition_delivery_tests.rs"]
-mod delivery;
+pub(crate) mod delivery;
 
 #[test]
 fn engine_dying_escort_blocks_further_hits_and_decays_with_original_attacker() {

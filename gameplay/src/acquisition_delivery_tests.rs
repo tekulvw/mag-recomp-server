@@ -3,7 +3,7 @@ use super::*;
 use crate::ground_vehicles::arrival_static::Binding;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-pub(super) fn delivery_fixture() -> Engine<Vec<u8>> {
+pub(crate) fn delivery_fixture() -> Engine<Vec<u8>> {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let path = std::env::temp_dir().join(format!(
         "mag-delivery-fixture-{}-{}.json",
@@ -48,7 +48,7 @@ pub(super) fn delivery_fixture() -> Engine<Vec<u8>> {
     engine
 }
 
-pub(super) fn position(engine: &mut Engine<Vec<u8>>, x: f32, z: f32) {
+pub(crate) fn position(engine: &mut Engine<Vec<u8>>, x: f32, z: f32) {
     position_vehicle(engine, 4, x, z);
 }
 

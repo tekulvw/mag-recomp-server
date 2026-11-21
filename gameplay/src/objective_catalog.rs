@@ -94,8 +94,6 @@ impl From<ObjectiveRepairRule> for crate::domination_repair_runtime::Rules {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ObjectiveRewardRule {
     pub(crate) category: u8,
-    // Retained for future subtype-specific destruction stats; current generic actions use category/class.
-    #[allow(dead_code)]
     pub(crate) subtype: u8,
     /// Verified ObjectiveDemolitionStructuralProperties native virtual type 1.
     pub(crate) demolition: bool,

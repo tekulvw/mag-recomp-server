@@ -19,7 +19,7 @@ namespace Server.Medius
     /// <summary>One shared local Horizon world; each member has a Rust-acknowledged reservation.</summary>
     public sealed partial class LocalDmeHost : Server.Dme.ILocalGameplaySink, IAsyncDisposable
     {
-        sealed class Reservation { public string Id; public uint AccountId; public string Account; public uint CharacterId; public Action<MagCharacterRecord> Notify; public DmeClient Client; public DateTime Deadline; public byte Faction; public bool Accepted; public bool Claimed; public bool Invalidated; public string ReleaseReason; public string TerminalMatchId; public bool FragoActionBonusEnabled; public bool FragoObjectiveBonusEnabled; public bool RepairRewardsEnabled; }
+        sealed class Reservation { public string Id; public uint AccountId; public string Account; public uint CharacterId; public Action<MagCharacterRecord> Notify; public DmeClient Client; public DateTime Deadline; public byte Faction; public bool Accepted; public bool Claimed; public bool Invalidated; public string ReleaseReason; public string TerminalMatchId; public bool FragoActionBonusEnabled; public bool FragoObjectiveBonusEnabled; public bool ExtendedObjectiveRewardsEnabled; public bool RepairRewardsEnabled; }
         sealed class PendingRelease { public Reservation Reservation; public string RequestId; public DateTime NextAttempt; public DateTime? FirstRejected; }
         static readonly IInternalLogger Logger = InternalLoggerFactory.GetInstance<LocalDmeHost>();
         readonly int _applicationId;
@@ -58,6 +58,7 @@ namespace Server.Medius
         bool _supportsFragoKillBonus;
         bool _supportsFragoActionBonus;
         bool _supportsFragoObjectiveBonus;
+        bool _supportsExtendedObjectiveRewards;
         bool _supportsRepairRewards;
         bool _ready; bool _started; bool _disposed;
         public Server.Dme.Models.World World { get; private set; }
@@ -153,6 +154,7 @@ namespace Server.Medius
             _supportsFragoKillBonus = hello.Capabilities.Contains("frago_kill_bonus_v1", StringComparer.Ordinal);
             _supportsFragoActionBonus = hello.Capabilities.Contains("frago_action_bonus_v1", StringComparer.Ordinal);
             _supportsFragoObjectiveBonus = hello.Capabilities.Contains("frago_objective_bonus_v1", StringComparer.Ordinal);
+            _supportsExtendedObjectiveRewards = hello.Capabilities.Contains("extended_objective_rewards_v1", StringComparer.Ordinal);
             _supportsRepairRewards = hello.Capabilities.Contains("repair_rewards_v1", StringComparer.Ordinal);
         }
         public static void RequireLoadoutSelectionCapability(GameplayBridgeResponse hello)
@@ -234,6 +236,8 @@ namespace Server.Medius
                         Faction = character.Faction, Notify = notify, Client = client, Deadline = DateTime.UtcNow.AddSeconds(30),
                         FragoActionBonusEnabled = _supportsFragoActionBonus && _applicationId == 20231 && progressionCatalog?.FragoActionBonusEnabled == true,
                         FragoObjectiveBonusEnabled = _supportsFragoObjectiveBonus && _applicationId == 20231 && progressionCatalog?.FragoBonusEnabled == true,
+                        ExtendedObjectiveRewardsEnabled = _supportsExtendedObjectiveRewards && _applicationId == 20231 &&
+                            progressionCatalog?.ExtendedObjectiveRewardsEnabled == true,
                         RepairRewardsEnabled = _supportsRepairRewards && _applicationId == 20231 && progressionCatalog?.RepairRewardsEnabled == true
                     };
                     lock (_gate) { _reservations.Add(reservation.Id, reservation); _rewardOwners.Add(reservation.Id, reservation); }
@@ -254,6 +258,8 @@ namespace Server.Medius
                         admissionCharacter["frago_action_bonus_enabled"] = reservation.FragoActionBonusEnabled;
                     if (_supportsFragoObjectiveBonus)
                         admissionCharacter["frago_objective_bonus_enabled"] = reservation.FragoObjectiveBonusEnabled;
+                    if (_supportsExtendedObjectiveRewards)
+                        admissionCharacter["extended_objective_rewards_enabled"] = reservation.ExtendedObjectiveRewardsEnabled;
                     if (_supportsRepairRewards)
                         admissionCharacter["repair_rewards_enabled"] = reservation.RepairRewardsEnabled;
                     admittedReply = await _bridge.RequestControlAsync(new { v = 2, request_id = Id(), op = "reserve", reservation_id = reservation.Id,
@@ -547,6 +553,8 @@ namespace Server.Medius
                         { _rewardRetry = true; Logger.Warn("Gameplay reward rejected: admission identity mismatch"); return; }
                         if (reward.Kind == MagProgressionCatalog.RepairRewardKind && !owner.RepairRewardsEnabled)
                         { _rewardRetry = true; Logger.Warn("Gameplay reward rejected: repair rewards were disabled at admission"); return; }
+                        if (MagProgressionCatalog.IsExtendedObjectiveRewardKind(reward.Kind) && !owner.ExtendedObjectiveRewardsEnabled)
+                        { _rewardRetry = true; Logger.Warn("Gameplay reward rejected: extended objectives were disabled at admission"); return; }
                         if (reward.Frago == true && MagProgressionCatalog.IsFragoSupportKind(reward.Kind) && !owner.FragoActionBonusEnabled)
                         { _rewardRetry = true; Logger.Warn("Gameplay reward rejected: FRAGO support was disabled at admission"); return; }
                         if (reward.Frago == true && MagProgressionCatalog.IsFragoObjectiveKind(reward.Kind) && !owner.FragoObjectiveBonusEnabled)

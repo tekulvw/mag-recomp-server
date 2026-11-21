@@ -5,9 +5,11 @@ use crate::{
     progression::RewardKind as Kind, replication::ObjectiveState as State,
 };
 
+pub(crate) const EXTENDED_CAPABILITY: &str = "extended_objective_rewards_v1";
+
 /// A callback is an entry effect, not a comparison of final world snapshots.
 /// Rollbacks deliberately bypass the retail positive-stat notification.
-fn action_kinds(entry: NativeEntry, category: u8) -> Vec<Kind> {
+fn action_kinds(entry: NativeEntry, category: u8, subtype: u8) -> Vec<Kind> {
     let (old, new) = (entry.previous, entry.delta.state_actor.state);
     let structural = entry.class == NativeClass::Structural;
     let mut kinds = Vec::new();
@@ -16,6 +18,23 @@ fn action_kinds(entry: NativeEntry, category: u8) -> Vec<Kind> {
     }
     if structural && old == State::Deactivating && new == State::Deactivated {
         kinds.push(Kind::ChargeDefused);
+    }
+    if structural
+        && new == State::Completed
+        && matches!(old, State::Activated | State::Deactivating)
+        && let Some(kind) = match subtype {
+            3 => Some(Kind::DefensiveEmplacementsDestroyed),
+            4 => Some(Kind::BridgesDestroyed),
+            5 => Some(Kind::FortificationsDestroyed),
+            7 => Some(Kind::GatesDestroyed),
+            8 => Some(Kind::MortarsDestroyed),
+            11 => Some(Kind::SensorNetworksDestroyed),
+            13 => Some(Kind::AntiAircraftDestroyed),
+            14 => Some(Kind::MotorPoolsDestroyed),
+            _ => None,
+        }
+    {
+        kinds.push(kind);
     }
     if category <= 1 {
         match (old, new) {
@@ -54,7 +73,12 @@ impl<W: Write> Engine<W> {
                     .iter()
                     .find(|o| o.object_index == entry.delta.object_index)
             })
-            .filter(|o| o.native_class == Some(entry.class))
+            .filter(|o| {
+                o.native_class == Some(entry.class)
+                    || o.native_class.is_none()
+                        && entry.class == NativeClass::Structural
+                        && o.reward.as_ref().is_some_and(|r| r.demolition)
+            })
             .and_then(|o| o.reward.as_ref())
         else {
             return Ok(vec![]);
@@ -76,8 +100,17 @@ impl<W: Write> Engine<W> {
             return Ok(vec![]);
         };
         let context = self.frago_object_position(0x0c80_0000 | u32::from(entry.delta.object_index));
-        let rewards: Vec<_> = action_kinds(entry, rule.category)
+        let rewards: Vec<_> = action_kinds(entry, rule.category, rule.subtype)
             .into_iter()
+            .filter(|kind| {
+                !kind.is_extended_objective()
+                    || actor.wire_profile.application_id() == 20231
+                        && actor
+                            .reservation
+                            .character
+                            .extended_objective_rewards_enabled
+                            .unwrap_or(false)
+            })
             .map(|kind| {
                 self.frago_objective_reward(
                     recipient.event(
@@ -165,6 +198,103 @@ impl<W: Write> Engine<W> {
             .map(|reward| json!({"op":"objective_reward","reward":reward}))
             .collect();
         self.commit_rewards(rewards);
+        Ok(audit)
+    }
+
+    /// Freeze native mounted context without awarding an unentered target.
+    pub(crate) fn plan_acquisition_delivery_reward(
+        &self,
+        runtime: &acquisition_gameplay_engine::Runtime,
+        ground: &acquisition_ground_runtime::Runtime,
+        token: u32,
+        driver: u16,
+        now: Duration,
+    ) -> Result<Option<acquisition_delivery::RewardWitness>, &'static str> {
+        let Some(actor) = self.active.iter().chain(self.peers.values()).find(|a| {
+            a.reservation.player == driver
+                && a.entered_game
+                && a.claimed.is_some()
+                && a.wire_profile.application_id() == 20231
+                && a.reservation
+                    .character
+                    .extended_objective_rewards_enabled
+                    .unwrap_or(false)
+        }) else {
+            return Ok(None);
+        };
+        let Some(recipient) = progression::RewardRecipient::from_active(actor) else {
+            return Ok(None);
+        };
+        Ok(Some(acquisition_delivery::RewardWitness {
+            recipient,
+            position: self.frago_character_position(
+                actor,
+                frago::Frame {
+                    ground: Some(ground),
+                    ..Default::default()
+                },
+            ),
+            target_version: runtime
+                .state
+                .target_version(token)
+                .ok_or("acquisition_delivery_arrival_missing")?,
+            timestamp_ms: now.as_millis() as u32,
+        }))
+    }
+
+    /// The pending request must still own this actual Completed callback.
+    /// Assignment/targets are current; the operator pose predates its staged exit.
+    pub(crate) fn stage_acquisition_delivery_reward(
+        &mut self,
+        runtime: &acquisition_gameplay_engine::Runtime,
+        ground: &acquisition_ground_runtime::Runtime,
+        token: u32,
+        witness: acquisition_delivery::RewardWitness,
+    ) -> Result<Vec<Value>, &'static str> {
+        let object = runtime
+            .state
+            .objective(token)
+            .ok_or("acquisition_delivery_arrival_missing")?;
+        if object.state.target != State::Completed as i32
+            || runtime.state.target_version(token) != Some(witness.target_version)
+        {
+            return Ok(vec![]);
+        }
+        let Some(actor) = self
+            .active
+            .iter()
+            .chain(self.peers.values())
+            .find(|a| witness.recipient.matches_active(a))
+        else {
+            return Ok(vec![]);
+        };
+        let index = object.replication.object_index;
+        let assignment = runtime
+            .state
+            .squad(actor.squad_catalog.squad_index())
+            .map(|s| s.assignment);
+        let reward = self.frago_objective_reward(
+            witness.recipient.event(
+                format!(
+                    "delivery-{:016x}-{index}-{}-{}",
+                    self.round_number, witness.timestamp_ms, witness.recipient.reservation_id
+                ),
+                Kind::EscortVehicleDelivered,
+                1,
+            ),
+            actor,
+            self.frago_object_position(0x0c80_0000 | u32::from(index)),
+            assignment,
+            frago::Frame {
+                ground: Some(ground),
+                position: witness.position,
+                active_reservation: Some(&witness.recipient.reservation_id),
+                ..Default::default()
+            },
+        );
+        self.check_reward_capacity(std::slice::from_ref(&reward))?;
+        let audit = vec![json!({"op":"objective_reward","reward":reward})];
+        self.commit_rewards(vec![reward]);
         Ok(audit)
     }
 

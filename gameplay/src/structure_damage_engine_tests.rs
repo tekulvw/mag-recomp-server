@@ -56,7 +56,22 @@ fn armed_world() -> Engine<Vec<u8>> {
     ];
     engine.active_abilities = Some(Arc::new(setup).runtime().unwrap());
     add_ready(&mut engine, 0);
-    actor_mut(&mut engine, 0).tracking.server_position(
+    let actor = actor_mut(&mut engine, 0);
+    actor.claimed = Some(Claimed {
+        wire: Vec::new(),
+        np_identity: [0; 36],
+        game_info: protocol::GameInfo {
+            client_index: 0,
+            level_name: "synthetic_arena".into(),
+            start_time_ms: 0,
+            attacking_faction: 1,
+            defending_faction: 0,
+            maximum_points: [100, 100],
+            current_points: [100, 100],
+            game_type: 2,
+        },
+    });
+    actor.tracking.server_position(
         CharacterPosition {
             x: 160.,
             y: 3.,
@@ -105,6 +120,7 @@ fn state(engine: &Engine<Vec<u8>>) -> ObjectiveState {
 #[test]
 fn timed_cluster_crosses_the_threshold_then_ordinary_objective_ticks_arm_and_complete() {
     let mut engine = armed_world();
+    assert_eq!(actor_mut(&mut engine, 0).team(), 1);
     let first = strike(&mut engine, 47, "Accumulated", false);
     engine
         .record_acquisition_character_effects(first, &mut BTreeMap::new(), 1)
@@ -140,6 +156,11 @@ fn timed_cluster_crosses_the_threshold_then_ordinary_objective_ticks_arm_and_com
         world.tick_native_object(STRUCTURAL, now, &BTreeMap::new());
         assert_eq!(world.state(STRUCTURAL), Some(expected), "at {millis}ms");
     }
+    let entries = world.take_native_entries();
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[0].reward_actor, None);
+    assert_eq!(entries[1].reward_actor, Some(0));
+    assert_eq!(entries[2].reward_actor, Some(0));
     assert!(world.take_reward_actions().is_empty());
 }
 
@@ -159,6 +180,7 @@ fn failed_threshold_query_and_record_keep_accumulated_health_and_pending_strike_
     engine.collision_world = Some(strike_floor(engine.map_name(), true));
     let second = strike(&mut engine, 55, "Destroyed", true);
     let written = engine.writer.len();
+    let max_log = engine.max_log;
     engine.max_log = engine.written;
     assert_eq!(
         engine
@@ -168,12 +190,84 @@ fn failed_threshold_query_and_record_keep_accumulated_health_and_pending_strike_
     );
     assert_eq!(engine.writer.len(), written);
     assert_eq!(state(&engine), ObjectiveState::Deactivated);
+    assert!(
+        !engine
+            .objective_world
+            .as_ref()
+            .unwrap()
+            .has_native_entries()
+    );
     // A read-only preparation after recorder failure can still inspect the
     // restored phase and damage ledger. Re-enable the synthetic recorder only
     // because world snapshot construction requires an available Engine.
     engine.failed = false;
-    let _retry = strike(&mut engine, 55, "Destroyed", true);
+    let retry = strike(&mut engine, 55, "Destroyed", true);
     assert_eq!(state(&engine), ObjectiveState::Deactivated);
+    engine.max_log = max_log;
+    engine
+        .record_acquisition_character_effects(retry, &mut BTreeMap::new(), 1)
+        .unwrap();
+    let world = engine.objective_world.as_mut().unwrap();
+    let now = Duration::from_millis(65);
+    world.begin_native_tick(now);
+    world.tick_native_object(STRUCTURAL, now, &BTreeMap::new());
+    let entries = world.take_native_entries();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].reward_actor, None);
+    assert_eq!(entries[1].reward_actor, Some(0));
+}
+
+#[test]
+fn precision_source_uses_the_allocated_slot_at_request_time() {
+    let mut engine = armed_world();
+    let mut catalog = native_catalog();
+    catalog["objects"][1]["initial_state"] = json!(1);
+    catalog["objects"][1]["demolition"]["owner_team"] = json!(0);
+    catalog["objects"][1]["repair"]["owner_team"] = json!(0);
+    let live = ObjectiveWorld::new(
+        &objective_catalog::ObjectiveCatalog::from_json(&catalog.to_string()).unwrap(),
+    );
+    let targets = [crate::active_ability_precision::PrecisionTarget {
+        object_index: STRUCTURAL,
+        team: 0,
+    }];
+    for (life, world, credited) in [
+        (CharacterLife::AwaitingRespawn { generation: 4 }, 1, Some(0)),
+        (
+            CharacterLife::Alive {
+                generation: 5,
+                health_quarter_points: 400,
+            },
+            1,
+            Some(0),
+        ),
+        (CharacterLife::AwaitingRespawn { generation: 4 }, 2, None),
+    ] {
+        actor_mut(&mut engine, 0).life = life;
+        let mut candidate = live.clone();
+        assert!(
+            engine
+                .stage_precision_strike(
+                    &mut candidate,
+                    &targets,
+                    0x0c80_0000 | u32::from(STRUCTURAL),
+                    None,
+                    0,
+                    world,
+                )
+                .unwrap()
+        );
+        for millis in 100..103 {
+            let now = Duration::from_millis(millis);
+            candidate.begin_native_tick(now);
+            candidate.tick_native_object(STRUCTURAL, now, &BTreeMap::new());
+        }
+        let entries = candidate.take_native_entries();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[1].reward_actor, None);
+        assert_eq!(entries[2].reward_actor, credited);
+        assert_eq!(entries[2].delta.state_actor.actor_index, u16::MAX);
+    }
 }
 
 #[test]
