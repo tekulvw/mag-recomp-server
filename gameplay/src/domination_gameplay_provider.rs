@@ -41,6 +41,10 @@ impl World {
         self.state.frag_ground_areas.is_some()
     }
 
+    pub(crate) fn has_helo_frag_damage_areas(&self) -> bool {
+        self.state.helo_frag_damage_areas.is_some()
+    }
+
     pub(crate) fn validate_frag_ground(
         &self,
         items: &crate::item_catalog::ItemCatalog,
@@ -50,9 +54,50 @@ impl World {
         if !self.has_frag_ground_areas() {
             return Ok(());
         }
+        self.validate_vehicle_frag_scene(
+            items,
+            collision,
+            map,
+            "domination_frag_ground_requires_static_world",
+            "domination_frag_ground_collision_filter_required",
+        )
+    }
+
+    pub(crate) fn validate_frag_helo(
+        &self,
+        items: &crate::item_catalog::ItemCatalog,
+        collision: Option<&crate::collision::CollisionWorld>,
+        map: &str,
+    ) -> Result<(), &'static str> {
+        if !self.has_helo_frag_damage_areas() {
+            return Ok(());
+        }
+        if self.state.helo.is_none()
+            || self.state.helo_collision.is_none()
+            || self.state.helo_damage.is_none()
+        {
+            return Err("domination_frag_helo_requires_fleet_sources");
+        }
+        self.validate_vehicle_frag_scene(
+            items,
+            collision,
+            map,
+            "domination_frag_helo_requires_static_world",
+            "domination_frag_helo_collision_filter_required",
+        )
+    }
+
+    fn validate_vehicle_frag_scene(
+        &self,
+        items: &crate::item_catalog::ItemCatalog,
+        collision: Option<&crate::collision::CollisionWorld>,
+        map: &str,
+        missing_world: &'static str,
+        missing_filter: &'static str,
+    ) -> Result<(), &'static str> {
         let collision = collision
             .filter(|world| world.stats().triangles != 0 && world.metadata().map_name == map)
-            .ok_or("domination_frag_ground_requires_static_world")?;
+            .ok_or(missing_world)?;
         crate::domination_gameplay_config::validate_frag_character_inputs(
             items,
             Some(collision),
@@ -62,7 +107,7 @@ impl World {
             .into_iter()
             .any(|row| self.state.filter_rows[row] & (1 << 22) == 0)
         {
-            return Err("domination_frag_ground_collision_filter_required");
+            return Err(missing_filter);
         }
         collision.validate_material_ray_bindings(
             self.state.filter_rows[24],
@@ -175,6 +220,7 @@ pub(crate) struct State {
     pub(crate) hospital_turret_yaws: Arc<BTreeMap<u16, f32>>,
     pub(crate) hospital_rocket_ground: Option<Arc<crate::hospital_rocket_ground::Catalog>>,
     pub(crate) hospital_rocket_helo_areas: Option<Arc<crate::hospital_rocket_helo::Catalog>>,
+    pub(crate) helo_frag_damage_areas: Option<Arc<crate::hospital_rocket_helo::Catalog>>,
     pub(crate) frag_character_blast: bool,
     pub(crate) frag_ground_areas: Option<Arc<crate::acquisition_frag_ground::Catalog>>,
     pub(crate) projectile_contacts:
