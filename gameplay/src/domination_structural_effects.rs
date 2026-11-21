@@ -588,6 +588,10 @@ impl TerrainMaterialGrid {
         })
     }
 
+    pub(crate) fn material_slots(&self) -> BTreeSet<u8> {
+        self.pixels.iter().copied().collect()
+    }
+
     pub fn sample(&self, x: f32, z: f32) -> Result<u8, &'static str> {
         if ![x, z].into_iter().all(|v| (0.0..=1024.0).contains(&v)) {
             return Err("domination_terrain_material_position_out_of_bounds");

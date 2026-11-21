@@ -19,6 +19,7 @@ from zrb_records import parse as parse_resources
 
 RETAIL_ELF_SHA256 = '0089f0d6d17e48533ce7ff8d943dddd03487b925e7b04a1a055bfb907568694c'
 PROVENANCE = 'Retail compiled root tag with qualified stored triangle child filter'
+MATERIAL_PROVENANCE = 'Retail resource subpart material slots and original terrain roots'
 
 
 def require(condition, message):
@@ -53,10 +54,21 @@ def authored_vertical_bounds(clv):
             for value in (center - extent, center + extent)]
 
 
-def enrich_instances(instances, source, removed):
+def compiled_material(indices, subpart):
+    require(type(subpart) is int and 0 <= subpart < len(indices),
+            'Unbound original compiled material subpart')
+    value = indices[subpart]
+    require(type(value) is int and (0 <= value <= 26 or value == 255),
+            'Unsupported original compiled material slot')
+    return value
+
+
+def enrich_instances(instances, source, removed, *, materials=None):
     emitted = unique(instances, lambda value: value['id'])
     require(set(emitted) <= set(source) and set(removed) <= set(source),
             'Unknown source mesh in assembled world')
+    require(materials is None or materials.keys() == emitted.keys(),
+            'Original material inventory differs from emitted mesh inventory')
     for name, (root, child, count) in source.items():
         omitted = removed.get(name, [])
         require(all(type(index) is int and 0 <= index < count for index in omitted)
@@ -76,6 +88,12 @@ def enrich_instances(instances, source, removed):
             'child_filter_policy': 'uniform',
             'provenance': PROVENANCE,
         }
+        if materials is not None:
+            expected = materials[name]
+            supplied = {field: instance[field] for field in ('material_index', 'terrain_material')
+                        if field in instance}
+            require(not supplied or supplied == expected, f'Existing material binding differs {name}')
+            instance.update(expected)
 
 
 def archive_member(archive, name):
@@ -118,7 +136,7 @@ def source_packs(archive, proof, roots):
                         require(type(ray['default_filter_info']) is int
                                 and 0 <= ray['default_filter_info'] < 32,
                                 'Unsupported child ray filter group')
-                        features.append((ray['default_filter_info'], len(mesh['triangles'])))
+                        features.append((ray['default_filter_info'], len(mesh['triangles']), mesh.get('subpart_index')))
                     require(features, 'Empty root ray geometry')
                     cache[digest] = features
                 resources[token].append((resource['physics_resource_type'], pack, features))
@@ -126,10 +144,11 @@ def source_packs(archive, proof, roots):
     return resources
 
 
-def bound_source_meshes(archive, clv, root_proof):
+def bound_source_meshes(archive, clv, root_proof, *, material_ids=None):
     roots = unique(root_proof['root_inventory'], lambda row: row['root_id'])
     resources = source_packs(archive, root_proof, roots)
     source = {}
+    materials = {} if material_ids is not None else None
     for name, row in roots.items():
         token, ordinal = row['resource_token'], row['pack_index']
         kind, pack, children = resources[token][ordinal]
@@ -150,12 +169,18 @@ def bound_source_meshes(archive, clv, root_proof):
             require(row['kind'] == 'terrain' and kind == 1
                     and name == f'terrain:{token}:pack-{ordinal}',
                     f'Invalid terrain root identity {name}')
-        for index, (child, count) in enumerate(children):
-            source[f'{name}:mesh-{index}'] = (row['filter_info'], child, count)
-    return source
+        for index, (child, count, subpart) in enumerate(children):
+            identity = f'{name}:mesh-{index}'
+            source[identity] = (row['filter_info'], child, count)
+            if materials is not None and identity in material_ids:
+                material = ({'terrain_material': True} if kind == 1 else
+                            {'material_index': compiled_material(pack['material_indices'], subpart)})
+                materials[identity] = material
+    return source, materials
 
 
-def project(archive_path, elf_path, world_path, assembly_path, root_inventory_path):
+def project(archive_path, elf_path, world_path, assembly_path, root_inventory_path,
+            *, include_materials=False):
     world_raw = world_path.read_bytes()
     world = json.loads(world_raw)
     assembly_raw = assembly_path.read_bytes()
@@ -180,14 +205,17 @@ def project(archive_path, elf_path, world_path, assembly_path, root_inventory_pa
     clv_sha256 = sha(clv)
     require(clv_sha256 == proof['original_clv_sha256'], 'Changed original level CLV')
     vertical_bounds = authored_vertical_bounds(clv)
-    source = bound_source_meshes(archive, clv, proof)
+    instances = world['instances']
+    material_ids = {row['id'] for row in instances} if include_materials else None
+    source, materials = bound_source_meshes(archive, clv, proof, material_ids=material_ids)
     removed = {key: value['source_triangle_indices'] for key, value in
                unique(assembly['exact_zero_area_removals'], lambda row: row['instance_id']).items()}
     require(len(source) == proof['source_membership']['mesh_instances']
             + len(proof['source_membership']['source_meshes_omitted']), 'Source mesh inventory differs')
-    instances = world['instances']
-    enrich_instances(instances, source, removed)
+    enrich_instances(instances, source, removed, materials=materials)
     world['metadata']['provenance'].append(PROVENANCE)
+    if materials is not None:
+        world['metadata']['provenance'].append(MATERIAL_PROVENANCE)
     output = (json.dumps(world, separators=(',', ':'), allow_nan=False) + '\n').encode()
     filter_counts = Counter((root, child) for root, child, _ in source.values())
     receipt = {
@@ -210,6 +238,13 @@ def project(archive_path, elf_path, world_path, assembly_path, root_inventory_pa
             for (root, child), count in sorted(filter_counts.items())
         ],
     }
+    if materials is not None:
+        counts = Counter(row['material_index'] for row in materials.values() if 'material_index' in row)
+        receipt['material_projection'] = {
+            'provenance': MATERIAL_PROVENANCE,
+            'compiled_slot_mesh_counts': dict(sorted(counts.items())),
+            'terrain_mesh_count': sum('terrain_material' in row for row in materials.values()),
+        }
     return output, (json.dumps(receipt, indent=2) + '\n').encode()
 
 
@@ -217,6 +252,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('archive', 'elf', 'world', 'assembly', 'root-inventory', 'output-dir'):
         parser.add_argument('--' + name, type=Path, required=True)
+    parser.add_argument('--materials', action='store_true',
+                        help='Also project original compiled material slots and terrain identities')
     parser.add_argument('--check', action='store_true')
     args = parser.parse_args()
     try:
@@ -225,7 +262,8 @@ def main():
                 'Outputs must be outside the source checkout')
         if not args.check:
             require(not output.exists(), 'Refusing an existing output directory')
-        world, receipt = project(args.archive, args.elf, args.world, args.assembly, args.root_inventory)
+        world, receipt = project(args.archive, args.elf, args.world, args.assembly,
+                                 args.root_inventory, include_materials=args.materials)
         if args.check:
             require((output / 'world.json').read_bytes() == world
                     and (output / 'static-ray-receipt.json').read_bytes() == receipt,

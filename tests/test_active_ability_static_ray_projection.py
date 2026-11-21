@@ -43,3 +43,38 @@ class StaticRayProjectionTests(unittest.TestCase):
             projector['enrich_instances'](
                 [{'id': 'unknown', 'triangles': [[0, 1, 2]]}], source, {},
             )
+
+    def test_optional_materials_preserve_native_null_and_use_explicit_terrain_tags(self):
+        instances = [
+            {'id': 'compiled:root', 'vertices_xyz': [[0, 1, 2]], 'triangles': [[0, 1, 2]]},
+            {'id': 'terrain:root', 'vertices_xyz': [[2, 1, 0]], 'triangles': [[0, 1, 2]]},
+        ]
+        filters = {row['id']: (9, 0, 1) for row in instances}
+        original = [row.copy() for row in instances]
+        material = projector['compiled_material']
+        self.assertEqual(material([6, 255, 4], 1), 255)
+        annotations = {
+            'compiled:root': {'material_index': material([6, 255, 4], 1)},
+            'terrain:root': {'terrain_material': True},
+        }
+        projector['enrich_instances'](instances, filters, {}, materials=annotations)
+        self.assertEqual(instances[0].pop('material_index'), 255)
+        self.assertIs(instances[1].pop('terrain_material'), True)
+        for new, previous in zip(instances, original, strict=True):
+            self.assertEqual(new.pop('collision')['filter_info'], 9)
+            self.assertEqual(new, previous)
+
+    def test_material_projection_rejects_unknown_slots_subparts_and_missing_coverage(self):
+        material = projector['compiled_material']
+        for indices, subpart in [([9], None), ([9], 1), ([9], -1), ([9], True), ([27], 0), ([256], 0)]:
+            with self.subTest(indices=indices, subpart=subpart), self.assertRaises(ValueError):
+                material(indices, subpart)
+        with self.assertRaisesRegex(ValueError, 'material inventory'):
+            projector['enrich_instances'](
+                [{'id': 'root', 'triangles': [[0, 1, 2]]}], {'root': (9, 0, 1)}, {}, materials={},
+            )
+        with self.assertRaisesRegex(ValueError, 'Existing material binding differs'):
+            projector['enrich_instances'](
+                [{'id': 'root', 'triangles': [[0, 1, 2]], 'terrain_material': True}],
+                {'root': (9, 0, 1)}, {}, materials={'root': {'material_index': 4}},
+            )

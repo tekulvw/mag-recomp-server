@@ -6,7 +6,13 @@
 //! establish material/filter behavior or agreement with the running client.
 
 use serde::{Deserialize, Serialize};
-use std::{collections::HashSet, fmt, fs::File, io::Read, path::Path};
+use std::{
+    collections::{BTreeSet, HashSet},
+    fmt,
+    fs::File,
+    io::Read,
+    path::Path,
+};
 
 type Vec3 = [f64; 3];
 
@@ -239,6 +245,47 @@ pub struct CollisionWorld {
     max_abs_coordinate: f64,
 }
 impl CollisionWorld {
+    /// Check the same root/child eligibility used by filtered material rays.
+    /// Null is the native collision-null slot; its ray semantics remain in the
+    /// penetration consumer, independently of the ordinary cost table.
+    pub(crate) fn validate_material_ray_bindings(
+        &self,
+        filter_row: u32,
+        known_slots: &BTreeSet<u8>,
+        terrain_slots: Option<&BTreeSet<u8>>,
+    ) -> Result<(), &'static str> {
+        let known = |slot: u8| slot == u8::MAX || known_slots.contains(&slot);
+        for (properties, &(material, terrain)) in self
+            .static_properties
+            .iter()
+            .zip(self.material_indices.iter())
+        {
+            let properties = properties
+                .as_ref()
+                .ok_or("static_material_filter_binding_required")?;
+            let root = properties.filter_info & 31;
+            let child = properties
+                .ray_child_filter_info
+                .unwrap_or(properties.filter_info)
+                & 31;
+            if filter_row & (1 << root) == 0 || filter_row & (1 << child) == 0 {
+                continue;
+            }
+            if terrain {
+                let slots = terrain_slots.ok_or("static_terrain_material_grid_required")?;
+                if slots.is_empty() || !slots.iter().copied().all(known) {
+                    return Err("static_terrain_material_cost_required");
+                }
+            } else {
+                let slot = material.ok_or("static_material_binding_required")?;
+                if !known(slot) {
+                    return Err("static_material_cost_required");
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Enumerate immutable represented-world leaves for the separate combined
     /// projectile collector. Callers must also supply every eligible live body
     /// and overlay before using a clear result as a world-flight decision.
@@ -1120,4 +1167,90 @@ fn intersect_triangle(start: Vec3, delta: Vec3, vertices: [Vec3; 3]) -> Option<f
     }
     let fraction = dot(edge2, q) / determinant;
     (0.0..=1.0).contains(&fraction).then_some(fraction)
+}
+
+#[cfg(test)]
+mod material_ray_binding_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn world(material: Option<u8>, terrain: bool, root: u32, child: u32) -> CollisionWorld {
+        let mut instance = json!({
+            "id":"synthetic-face", "terrain_material":terrain,
+            "collision":{"filter_info":root,"ray_child_filter_info":child,
+                "convex_radius":0.,"child_filter_policy":"uniform","provenance":"synthetic"},
+            "vertices_xyz":[[0.,0.,0.],[1.,0.,0.],[0.,0.,1.]],"triangles":[[0,1,2]]
+        });
+        if let Some(material) = material {
+            instance["material_index"] = Value::from(material);
+        }
+        CollisionWorld::from_bytes(
+            &serde_json::to_vec(&json!({
+                "format":"mag_collision_world","schema_version":1,"coordinate_space":"world",
+                "metadata":{"map_name":"synthetic","build":"synthetic","coverage":"provisional",
+                    "provenance":["synthetic"],"unknowns":[]},
+                "instances":[instance]
+            }))
+            .unwrap(),
+            Default::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn eligible_material_rays_reject_unannotated_or_unknown_source_slots() {
+        let known = BTreeSet::from([2]);
+        assert_eq!(
+            world(None, false, 9, 9).validate_material_ray_bindings(1 << 9, &known, None),
+            Err("static_material_binding_required")
+        );
+        assert_eq!(
+            world(Some(3), false, 9, 9).validate_material_ray_bindings(1 << 9, &known, None),
+            Err("static_material_cost_required")
+        );
+        assert!(
+            world(Some(2), false, 9, 9)
+                .validate_material_ray_bindings(1 << 9, &known, None)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn material_binding_admission_uses_root_and_child_and_preserves_native_null() {
+        let known = BTreeSet::new();
+        assert!(
+            world(None, false, 9, 22)
+                .validate_material_ray_bindings(1 << 9, &known, None)
+                .is_ok()
+        );
+        assert!(
+            world(None, false, 22, 9)
+                .validate_material_ray_bindings(1 << 9, &known, None)
+                .is_ok()
+        );
+        assert!(
+            world(Some(u8::MAX), false, 9, 9)
+                .validate_material_ray_bindings(1 << 9, &known, None)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn terrain_material_rays_require_the_bound_grid_and_each_used_cost() {
+        let known = BTreeSet::from([2]);
+        let terrain = world(None, true, 9, 9);
+        assert_eq!(
+            terrain.validate_material_ray_bindings(1 << 9, &known, None),
+            Err("static_terrain_material_grid_required")
+        );
+        assert_eq!(
+            terrain.validate_material_ray_bindings(1 << 9, &known, Some(&BTreeSet::from([2, 3]))),
+            Err("static_terrain_material_cost_required")
+        );
+        assert!(
+            terrain
+                .validate_material_ray_bindings(1 << 9, &known, Some(&BTreeSet::from([2, u8::MAX])))
+                .is_ok()
+        );
+    }
 }

@@ -535,6 +535,9 @@ impl Registry {
             items.retail_combat()?;
         }
         for loaded in self.profiles.values() {
+            if let Some(setup) = &loaded.acquisition {
+                setup.validate_frag_character_blast(items, loaded.collision.as_ref())?;
+            }
             if loaded
                 .domination
                 .as_ref()
@@ -624,9 +627,13 @@ impl Registry {
     pub fn has_frag_character_blast(&self) -> bool {
         self.profiles.values().any(|profile| {
             profile
-                .domination
+                .acquisition
                 .as_ref()
-                .is_some_and(|world| world.state.frag_character_blast)
+                .is_some_and(|setup| setup.frag_character_blast)
+                || profile
+                    .domination
+                    .as_ref()
+                    .is_some_and(|world| world.state.frag_character_blast)
         })
     }
 
@@ -882,10 +889,14 @@ impl<W: Write> Engine<W> {
             .domination
             .as_ref()
             .and_then(|world| world.state.hospital_rocket_ground.clone());
-        self.frag_character_blast = loaded
-            .domination
+        self.frag_character_blast = self
+            .acquisition_gameplay
             .as_ref()
-            .is_some_and(|world| world.state.frag_character_blast);
+            .is_some_and(|runtime| runtime.setup.frag_character_blast)
+            || loaded
+                .domination
+                .as_ref()
+                .is_some_and(|world| world.state.frag_character_blast);
         self.domination_gameplay = loaded.domination;
         self.character_damage_rules = loaded.damage;
         self.development_dummy_position = self

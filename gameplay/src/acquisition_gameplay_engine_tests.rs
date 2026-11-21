@@ -393,6 +393,7 @@ fn acquisition_setup_fixture(
             vehicle_reinforcement_intervals_ms,
             structural: None,
             ground_damage,
+            frag_character_blast: false,
         },
     )
 }

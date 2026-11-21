@@ -1,17 +1,34 @@
 # Ordinary retail frag Character damage
 
-A concrete Domination profile can opt into ordinary on-foot frag damage with
-`core.frag_character_blast: true`. The setting is absent/off for existing profiles.
-It does not require hospital rocket equipment or the development grenade-radius
-switch. Both Engine configuration and match-profile startup require current map
-collision, dynamic bodies, the core's material/terrain/Sequence inputs, retail
-Character blast rules and grenade authority before enabling it.
+Concrete Acquisition and Domination profiles can opt into ordinary on-foot frag
+damage. Domination uses `core.frag_character_blast: true`; Acquisition uses
+`frag_character_blast: true` in its gameplay configuration and requires its
+Structural provider. The setting is absent/off for existing profiles. It does not
+require hospital rocket equipment or the development grenade-radius switch.
+Both direct Engine configuration and match-profile startup require current map
+collision, dynamic bodies, source material/terrain/Sequence inputs, retail
+Character blast rules and grenade authority before enabling it. Acquisition uses
+its current Structural runtime's collision frame rather than a separate copy.
 
 The maintained `tools/extraction/project-retail-combat.py` projects authored
 `material_penetration` alongside each frag's existing ammo identity, dose, radii
 and fuse. Legacy metadata without the field remains usable by existing paths;
 the new opt-in rejects missing, negative or nonfinite penetration. Original game
 files and extracted catalogs remain external inputs.
+
+The maintained `tools/extraction/project-retail-active-ability-static-ray.py`
+accepts `--materials` with its existing original archive, executable, assembled
+world and source-root inventory inputs. It adds the original compiled subpart's
+material slot or the terrain marker without changing geometry, filters, coverage
+or qualified source omissions. Its no-flag output remains unchanged. Updated
+world hashes require matching static-ray receipts and active-ability sidecars.
+The optional typed receipt checks the material inventory against the output count.
+
+An enabled Acquisition profile validates every row-24-eligible root/child pair's
+static material binding and known cost, plus every slot used by its loaded terrain
+grid. Legacy unannotated worlds are rejected before readiness. The native
+collision-null slot keeps its existing penetration behavior independently of the
+ordinary cost table. No fallback material is assigned.
 
 A launch must already pass normal equipment, ammo and slot admission. The current
 owner's authenticated UDP report supplies its terminal position, and the authored

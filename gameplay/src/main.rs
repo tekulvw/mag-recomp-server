@@ -952,6 +952,11 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         )?;
     }
     let item_catalog = Arc::new(item_catalog);
+    if let Some(setup) = &acquisition_setup {
+        setup
+            .validate_frag_character_blast(&item_catalog, collision_world.as_ref())
+            .map_err(io::Error::other)?;
+    }
     let wire_profiles_path =
         wire_profiles_path.unwrap_or_else(|| item_path.with_file_name("wire-profiles.json"));
     let wire_profiles = mag_gameplay::wire_profile::WireProfileCatalog::load(&wire_profiles_path)?;
@@ -1312,7 +1317,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         }
         println!(
             "{}",
-            serde_json::json!({"event":"catalogs_validated","application_id":application_id,"skill_application_id":skill_catalog.application_id(),"bunkers":bunker_info,"fall_damage_enabled":fall_rules.is_some(),"incapacitation_enabled":incapacitation_rules.is_some(),"character_damage_rules_enabled":character_damage_rules.is_some(),"dynamic_body_catalog_validated":dynamic_bodies.is_some(),"static_partitions_validated":static_partitions.len(),"acquisition_gameplay_validated":acquisition_setup.is_some(),"squad_orders_validated":squad_orders.is_some(),"active_abilities_validated":active_abilities.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_active_abilities()),"domination_gameplay_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_domination_gameplay()),"hospital_rockets_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rockets()),"hospital_rocket_ground_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rocket_ground()),"frag_character_blast_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_frag_character_blast()),"projectile_contacts_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_projectile_contacts()),"scope":"schema_and_profile_validation_not_client_acceptance"})
+            serde_json::json!({"event":"catalogs_validated","application_id":application_id,"skill_application_id":skill_catalog.application_id(),"bunkers":bunker_info,"fall_damage_enabled":fall_rules.is_some(),"incapacitation_enabled":incapacitation_rules.is_some(),"character_damage_rules_enabled":character_damage_rules.is_some(),"dynamic_body_catalog_validated":dynamic_bodies.is_some(),"static_partitions_validated":static_partitions.len(),"acquisition_gameplay_validated":acquisition_setup.is_some(),"squad_orders_validated":squad_orders.is_some(),"active_abilities_validated":active_abilities.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_active_abilities()),"domination_gameplay_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_domination_gameplay()),"hospital_rockets_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rockets()),"hospital_rocket_ground_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rocket_ground()),"frag_character_blast_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.frag_character_blast) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_frag_character_blast()),"projectile_contacts_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_projectile_contacts()),"scope":"schema_and_profile_validation_not_client_acceptance"})
         );
         return Ok(());
     }
@@ -1352,14 +1357,17 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             .with_objective_catalog(objectives)
             .map_err(io::Error::other)?;
     }
-    if let Some(setup) = acquisition_setup {
-        engine = engine
-            .with_acquisition_gameplay(setup)
-            .map_err(io::Error::other)?;
-    }
     if let Some(rules) = character_damage_rules {
         engine = engine
             .with_character_damage_rules(rules)
+            .map_err(io::Error::other)?;
+    }
+    if let Some(world) = collision_world {
+        engine = engine.with_collision_world(world);
+    }
+    if let Some(setup) = acquisition_setup {
+        engine = engine
+            .with_acquisition_gameplay(setup)
             .map_err(io::Error::other)?;
     }
     if let Some(rules) = incapacitation_rules {
@@ -1369,9 +1377,6 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     }
     if let Some(rules) = fall_rules {
         engine = engine.with_fall_damage_rules(rules);
-    }
-    if let Some(world) = collision_world {
-        engine = engine.with_collision_world(world);
     }
     if let Some(mesh) = navmesh_world {
         engine = engine.with_navmesh_world(mesh);

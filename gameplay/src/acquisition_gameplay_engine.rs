@@ -29,6 +29,7 @@ pub struct Setup {
     pub arrival_static: Option<ground_vehicles::arrival_static::ArrivalStatic>,
     pub ground_capabilities: Vec<(u16, acquisition_ground_runtime::Capabilities)>,
     pub ground_damage: Option<acquisition_ground_damage::Policy>,
+    pub frag_character_blast: bool,
     pub vehicle_reinforcement_intervals_ms: [u32; 2],
     pub structural: Option<crate::acquisition_structural::Setup>,
 }
@@ -61,6 +62,21 @@ struct CaptureWitness {
 }
 
 impl Setup {
+    pub fn validate_frag_character_blast(
+        &self,
+        items: &item_catalog::ItemCatalog,
+        world: Option<&collision::CollisionWorld>,
+    ) -> Result<(), &'static str> {
+        if !self.frag_character_blast {
+            return Ok(());
+        }
+        let structural = self
+            .structural
+            .as_ref()
+            .ok_or("acquisition_frag_character_blast_requires_structural")?;
+        structural.validate_frag_character_inputs(items, world, self.filter_rows[24])
+    }
+
     pub(crate) fn validate_structural(
         &self,
         catalog: &objective_catalog::ObjectiveCatalog,
@@ -170,6 +186,14 @@ impl Runtime {
             .map_or_else(Vec::new, crate::acquisition_structural::Runtime::sequences)
     }
 
+    pub(crate) fn blast_collision(
+        &self,
+    ) -> Option<domination_structural_world::BlastCollision<'_>> {
+        self.structural.as_ref().map(|structural| {
+            structural.blast_collision(&self.setup.filter_rows, self.setup.physics)
+        })
+    }
+
     pub(crate) fn reset(&mut self) {
         self.state = self.setup.state.clone();
         self.started = false;
@@ -209,6 +233,13 @@ impl<W: Write> Engine<W> {
             .as_ref()
             .ok_or("objective_catalog_unavailable")?;
         setup.validate_structural(catalog)?;
+        setup.validate_frag_character_blast(&self.item_catalog, self.collision_world.as_ref())?;
+        if setup.frag_character_blast && self.dynamic_body_resources.is_none() {
+            return Err("frag_character_blast_requires_dynamic_bodies");
+        }
+        if setup.frag_character_blast && self.character_damage_rules.is_none() {
+            return Err("acquisition_gameplay_requires_character_damage_rules");
+        }
         if catalog.source().capture_qualification != "native_source_gameplay"
             || setup.rules.starting_points != self.match_profile().maximum_points
             || setup.rules.starting_points.iter().any(|v| *v <= 0)
@@ -272,6 +303,7 @@ impl<W: Write> Engine<W> {
             &setup.ground_capabilities,
         )?;
         self.acquisition_round = Some(Round::new(setup.rules));
+        self.frag_character_blast = setup.frag_character_blast;
         self.acquisition_gameplay = Some(Runtime::from_setup(Arc::new(setup)));
         Ok(self)
     }
@@ -591,11 +623,11 @@ impl<W: Write> Engine<W> {
                 let previous = engine.ground_runtime.replace(ground.clone());
                 let sequences = crate::domination_structural_world::SequenceCollisionState::default();
                 let costs = BTreeMap::new();
-                let collision = runtime.structural.as_ref().map_or(
+                let collision = runtime.blast_collision().unwrap_or(
                     crate::domination_structural_world::BlastCollision {
                         filter_rows: &setup.filter_rows, limits: setup.physics.query_limits,
                         sequences: &sequences, material_costs: &costs, terrain_materials: None,
-                    }, |structural| structural.blast_collision(&setup.filter_rows, setup.physics));
+                    });
                 let result = engine.stage_active_ability_update_in_world(now, native,
                     collision, setup.ground_damage.as_ref(), Some(&mut world));
                 ground = std::mem::replace(&mut engine.ground_runtime, previous).ok_or("ground_vehicle_runtime_required")?;
