@@ -1000,3 +1000,162 @@ mod combined_helo_terminal {
         );
     }
 }
+
+mod hospital_blast_terminal {
+    use super::*;
+    use crate::domination_structural_world::domination_hospital_blast::tests::{
+        TARGET as HOSPITAL, damage, install_hospital_fixture,
+    };
+
+    const PEER: &str = "synthetic-rocket-target";
+
+    fn fixture(observer_created: bool) -> (Engine<Vec<u8>>, Flight) {
+        let mut engine = tick_fixture();
+        launch_for_tick(&mut engine);
+        install_hospital_fixture(&mut engine, true);
+        // The general flight fixture opts capsule layer 21 into its synthetic
+        // material mask. The retail layer-24 blast ray excludes Character bodies.
+        engine
+            .domination_gameplay
+            .as_mut()
+            .unwrap()
+            .state
+            .filter_rows[24] &= !(1 << 21);
+        let actor = engine.active.as_mut().unwrap();
+        let Some(Slot::Flying(flight)) = &actor.hospital_rocket_flights.slots[3] else {
+            panic!("expected the admitted flight");
+        };
+        let flight = flight.clone();
+        actor.emplacement_creation.get_or_insert_with(Vec::new);
+        let profile = engine.wire_profile;
+        let peer = engine.peers.get_mut(PEER).unwrap();
+        peer.emplacement_creation = observer_created.then(Vec::new);
+        peer.tracking.server_position(
+            CharacterPosition {
+                x: 40.,
+                y: 0.5,
+                z: 40.,
+            },
+            player_tracking::PositionOrigin::ServerSpawn,
+            1,
+        );
+        let packet = replication::TeamSpawnDeadline {
+            sequence: 1,
+            timestamp_ms: 1020,
+            object_index: 0,
+            team: 0,
+            deadline_ms: 3000,
+        }
+        .encode_with_profile(profile)
+        .unwrap();
+        while peer.ordinary_shared_len() < multiplayer::MAX_SHARED_QUEUE - 1 {
+            peer.queue_shared(packet.clone());
+        }
+        (engine, flight)
+    }
+
+    fn finish(
+        engine: &mut Engine<Vec<u8>>,
+        flight: Flight,
+    ) -> Result<Vec<OutboundMessage>, &'static str> {
+        engine.finish_rocket(
+            flight,
+            End::Detonation(Terminal {
+                position: [3., 2.5, 1.],
+                elapsed_ms: 50.,
+                reason: TerminalReason::AgeExpired,
+            }),
+            Duration::from_millis(1050),
+            1,
+        )
+    }
+
+    #[test]
+    fn rocket_hospital_blast_counts_only_creation_ready_recipients_and_keeps_firing_turret() {
+        let (mut engine, flight) = fixture(false);
+        assert_eq!(flight.hospital, HOSPITAL);
+        let turret = engine.bunker_world.as_ref().unwrap().hospital_turrets[&HOSPITAL].clone();
+        assert!(turret.rocket_magazine.is_some());
+        finish(&mut engine, flight).unwrap();
+        let terminal = engine
+            .writer
+            .split(|&byte| byte == b'\n')
+            .rev()
+            .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+            .find(|row| row["op"] == "hospital_rocket_terminal")
+            .expect("recorded rocket terminal");
+        assert!(terminal["damage_denial"].is_null(), "{terminal}");
+        assert!(damage(&engine).health_quarter_points < 800, "{terminal}");
+        assert_eq!(damage(&engine).last_location_and_type, 0xa2);
+        assert_eq!(damage(&engine).last_source_object, u32::MAX);
+        assert_eq!(
+            engine.bunker_world.as_ref().unwrap().hospital_turrets[&HOSPITAL],
+            turret
+        );
+        let peer = &engine.peers[PEER];
+        assert_eq!(peer.ordinary_shared_len(), multiplayer::MAX_SHARED_QUEUE);
+        assert!(!peer.replication_backlogged);
+        let last_mask = |actor: &Active| {
+            replication::ObjectUpdate::decode_with_profile(
+                actor.pending_shared.back().unwrap(),
+                engine.wire_profile,
+            )
+            .unwrap()
+            .header
+            .object_type_mask
+        };
+        assert_eq!(last_mask(peer), 1 << 19);
+        assert!(
+            engine
+                .active
+                .as_ref()
+                .unwrap()
+                .pending_shared
+                .iter()
+                .any(|packet| {
+                    replication::ObjectUpdate::decode_with_profile(packet, engine.wire_profile)
+                        .is_ok_and(|row| row.header.object_type_mask == 1 << 13)
+                })
+        );
+
+        let (mut engine, flight) = fixture(true);
+        assert!(finish(&mut engine, flight.clone()).unwrap().is_empty());
+        assert_eq!(damage(&engine).health_quarter_points, 800);
+        assert!(matches!(
+            engine
+                .active
+                .as_ref()
+                .unwrap()
+                .hospital_rocket_flights
+                .slots[3],
+            Some(Slot::Flying(_))
+        ));
+        engine.peers.get_mut(PEER).unwrap().pop_shared();
+        finish(&mut engine, flight).unwrap();
+        assert!(damage(&engine).health_quarter_points < 800);
+        assert_eq!(
+            engine.peers[PEER].ordinary_shared_len(),
+            multiplayer::MAX_SHARED_QUEUE
+        );
+    }
+
+    #[test]
+    fn rocket_hospital_blast_recorder_refusal_preserves_flight_health_and_queues() {
+        let (mut engine, flight) = fixture(false);
+        let before = engine.active.as_ref().unwrap().pending_shared.clone();
+        let peer_before = engine.peers[PEER].pending_shared.clone();
+        engine.max_log = engine.written;
+        assert_eq!(
+            finish(&mut engine, flight).unwrap_err(),
+            "log_limit_reached"
+        );
+        assert_eq!(damage(&engine).health_quarter_points, 800);
+        let actor = engine.active.as_ref().unwrap();
+        assert!(matches!(
+            actor.hospital_rocket_flights.slots[3],
+            Some(Slot::Flying(_))
+        ));
+        assert_eq!(actor.pending_shared, before);
+        assert_eq!(engine.peers[PEER].pending_shared, peer_before);
+    }
+}

@@ -47,6 +47,7 @@ struct Core {
     scope: String,
     aircraft_links: PathBuf,
     hospital_hulks: PathBuf,
+    hospital_blast_areas: Option<PathBuf>,
     hospital_turrets: Option<PathBuf>,
     hospital_rockets: Option<PathBuf>,
     hospital_rocket_ground: Option<PathBuf>,
@@ -282,6 +283,10 @@ impl Configuration {
                 *path = directory.join(&*path);
             }
             for (input, error) in [
+                (
+                    &mut core.hospital_blast_areas,
+                    "empty_domination_hospital_blast_areas_path",
+                ),
                 (
                     &mut core.frag_ground_areas,
                     "empty_domination_frag_ground_areas_path",
@@ -707,6 +712,24 @@ impl Configuration {
         .map_err(io::Error::other)?;
         let hospital_doc: serde_json::Value =
             serde_json::from_slice(&hospital_raw).map_err(io::Error::other)?;
+        let hospital_blast_areas = core
+            .hospital_blast_areas
+            .as_ref()
+            .map(|path| {
+                let areas =
+                    crate::hospital_blast_areas::Catalog::from_bytes(&read(path, 16 * 1024)?)
+                        .map_err(io::Error::other)?;
+                let main = hospital_doc["main_archive_sha256"]
+                    .as_str()
+                    .ok_or_else(|| {
+                        io::Error::other("domination_hospital_blast_main_source_missing")
+                    })?;
+                areas
+                    .validate(native_elf, main, &hospital_assets)
+                    .map_err(io::Error::other)?;
+                Ok::<_, io::Error>(Arc::new(areas))
+            })
+            .transpose()?;
         let mut yaws = BTreeMap::new();
         let mut initial_collisions = SequenceCollisionState::default();
         for index in 0..16 {
@@ -922,6 +945,7 @@ impl Configuration {
                 structural: sources.structural,
                 assets: Arc::new(sources.sequence_assets),
                 hospital_hulks: Some(Arc::new(hospital_assets)),
+                hospital_blast_areas,
                 hospital_turret_yaws: Arc::new(yaws),
                 hospital_rocket_ground,
                 hospital_rocket_helo_areas,
@@ -1004,6 +1028,13 @@ impl<W: Write> Engine<W> {
             .map_err(io::Error::other)?;
         world
             .validate_frag_helo(
+                &self.item_catalog,
+                self.collision_world.as_ref(),
+                spawns.map_name(),
+            )
+            .map_err(io::Error::other)?;
+        world
+            .validate_hospital_blast(
                 &self.item_catalog,
                 self.collision_world.as_ref(),
                 spawns.map_name(),

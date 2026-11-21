@@ -25,11 +25,19 @@ mod update_actions;
 #[path = "../helo_frag_publication_tests.rs"]
 mod helo_frag_publication_tests;
 
+#[cfg(test)]
+#[path = "../hospital_blast_publication_tests.rs"]
+mod hospital_blast_publication_tests;
+
 fn source_helo_damage_recipient(actor: &Active, world: u32) -> bool {
     actor.reservation.world == world
         && actor.initial_objects.is_some()
         && actor.ready_for_updates
         && actor.helo_creation_sent
+}
+
+pub(crate) fn hospital_blast_damage_recipient(actor: &Active, world: u32) -> bool {
+    actor.reservation.world == world && actor.emplacement_creation.is_some()
 }
 
 pub(super) struct EventInput {
@@ -62,6 +70,7 @@ struct EventPlan {
     objective_world: Option<objective_control::ObjectiveWorld>,
     ground_runtime: Option<acquisition_ground_runtime::Runtime>,
     helo_runtime: Option<domination_helo::FleetRuntime>,
+    hospital_blast: Option<domination_structural_world::HospitalBlastCandidate>,
     active_ability_runtime: Option<crate::active_ability_engine::Runtime>,
     strategic_waves: Option<[Option<TeamWaveClock>; 2]>,
     squad_order_candidate: Option<crate::squad_order_engine::Candidate>,
@@ -238,6 +247,7 @@ struct EventAudit {
     ground_grenade_checks: Vec<Value>,
     native_grenade_character_checks: Vec<Value>,
     helo_grenade_checks: Vec<Value>,
+    hospital_grenade_checks: Vec<Value>,
     applied_damage: Option<Value>,
     falling_damage: Option<fall_damage::FallDamage>,
     spawned_point: Option<u16>,
@@ -669,11 +679,12 @@ impl<W: Write> Engine<W> {
                 loses_life || loses_vehicle
             })
             .count();
-        let helo_world = self.active.as_ref().map(|actor| actor.reservation.world);
+        let publication_world = self.active.as_ref().map(|actor| actor.reservation.world);
         let baseline = |actor: &Active| {
             let grenade_relays = if actor.ready_for_updates {
                 let receives_helo = !plan.helo_damage_requires_creation
-                    || helo_world.is_some_and(|world| source_helo_damage_recipient(actor, world));
+                    || publication_world
+                        .is_some_and(|world| source_helo_damage_recipient(actor, world));
                 usize::from(plan.ground_damage_relay.is_some())
                     + if receives_helo {
                         plan.helo_damage_relay.len()
@@ -683,7 +694,15 @@ impl<W: Write> Engine<W> {
             } else {
                 0
             };
+            let hospital_relays = usize::from(
+                plan.hospital_blast
+                    .as_ref()
+                    .is_some_and(|effect| effect.packet.is_some())
+                    && publication_world
+                        .is_some_and(|world| hospital_blast_damage_recipient(actor, world)),
+            );
             grenade_relays
+                + hospital_relays
                 + driver_revocations
                 + plan.ground_gunner_revocations.len()
                 + usize::from(plan.replication.ordered_health.is_some())
@@ -1183,6 +1202,23 @@ impl<W: Write> Engine<W> {
                     {
                         peer.queue_shared(relay.clone());
                     }
+                }
+            }
+        }
+        if let Some(effect) = plan.hospital_blast {
+            effect.patch.install(
+                self.bunker_world
+                    .as_mut()
+                    .expect("prepared Hospital blast world"),
+            );
+            if let Some(packet) = effect.packet {
+                for actor in self
+                    .peers
+                    .values_mut()
+                    .chain(self.active.iter_mut())
+                    .filter(|actor| hospital_blast_damage_recipient(actor, event.world_id))
+                {
+                    actor.queue_shared(packet.clone());
                 }
             }
         }

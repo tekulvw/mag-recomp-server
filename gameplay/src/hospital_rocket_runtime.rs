@@ -4,7 +4,7 @@ use crate::{
     acquisition_volume_damage::{TargetKey, TargetKind},
     domination_structural_world::{
         BlastCollision, GroundRocketCandidate, GroundRocketDose, HeloRocketCandidate,
-        HeloRocketDose,
+        HeloRocketDose, HospitalBlastCandidate,
     },
     dynamic_collision::QueryLimits,
     hospital_rockets::{Blast, Muzzle, MuzzleNode, Weapon},
@@ -361,6 +361,7 @@ struct RocketEffects {
     native: std::collections::BTreeMap<u32, acquisition_character_effects::NativeState>,
     ground: Option<GroundRocketCandidate>,
     helo: Option<HeloRocketCandidate>,
+    hospital: Option<HospitalBlastCandidate>,
 }
 
 impl<W: Write> Engine<W> {
@@ -593,11 +594,28 @@ impl<W: Write> Engine<W> {
                     .helo
                     .as_ref()
                     .map_or(0, |candidate| candidate.packets.len());
-                if effects
-                    .character
-                    .check_extra_shared(self, world, 1 + ground_packets + helo_packets)
-                    .is_err()
-                {
+                let common_packets = 1 + ground_packets + helo_packets;
+                let has_hospital_packet = effects
+                    .hospital
+                    .as_ref()
+                    .is_some_and(|effect| effect.packet.is_some());
+                let capacity = if has_hospital_packet {
+                    effects
+                        .character
+                        .check_extra_shared_for(self, world, |actor| {
+                            let hospital =
+                                crate::events::hospital_blast_damage_recipient(actor, world);
+                            let base = actor.initial_objects.is_some();
+                            (base || hospital).then_some(
+                                usize::from(base) * common_packets + usize::from(hospital),
+                            )
+                        })
+                } else {
+                    effects
+                        .character
+                        .check_extra_shared(self, world, common_packets)
+                };
+                if capacity.is_err() {
                     return Ok(Vec::new());
                 }
                 (Some(effects), None)
@@ -618,23 +636,28 @@ impl<W: Write> Engine<W> {
             }
             TerminalReason::AgeExpired => json!({"kind":"aged"}),
         };
-        self.record(
-            json!({"op":"hospital_rocket_terminal","source":flight.source,
+        let mut audit = json!({"op":"hospital_rocket_terminal","source":flight.source,
                 "coverage":"represented_world_reference_pose","terminal":terminal_reason,
                 "elapsed_ms":terminal.elapsed_ms,"position":terminal.position,
                 "effects":effects.as_ref().map(|effects|effects.character.audit()),
                 "ground_effects":effects.as_ref().and_then(|effects|effects.ground.as_ref()).map(|candidate|&candidate.audit),
                 "helo_effects":effects.as_ref().and_then(|effects|effects.helo.as_ref()).map(|candidate|&candidate.audit),
                 "messages":effects.as_ref().map(|effects|effects.character.messages()),
-                "damage_denial":damage_denial,"packet":protocol::encode_hex(&packet)}),
-            wall,
-        )?;
+                "damage_denial":damage_denial,"packet":protocol::encode_hex(&packet)});
+        if let Some(hospital) = effects
+            .as_ref()
+            .and_then(|effects| effects.hospital.as_ref())
+        {
+            audit["hospital_effects"] = json!(hospital.audit);
+        }
+        self.record(audit, wall)?;
         let messages = effects.map_or_else(Vec::new, |effects| {
             let RocketEffects {
                 character,
                 mut native,
                 ground,
                 helo,
+                hospital,
             } = effects;
             let messages = self.install_character_effects_after_record(character, &mut native);
             if let Some(candidate) = ground {
@@ -657,6 +680,23 @@ impl<W: Write> Engine<W> {
                     self.queue_rocket_helo_packet(world, &packet);
                 }
             }
+            if let Some(candidate) = hospital
+                && let Some(packet) = candidate.packet
+            {
+                candidate.patch.install(
+                    self.bunker_world
+                        .as_mut()
+                        .expect("prepared rocket Hospital world"),
+                );
+                for actor in self
+                    .active
+                    .iter_mut()
+                    .chain(self.peers.values_mut())
+                    .filter(|actor| crate::events::hospital_blast_damage_recipient(actor, world))
+                {
+                    actor.queue_shared(packet.clone());
+                }
+            }
             messages
         });
         self.queue_rocket_packet(world, &packet);
@@ -677,6 +717,7 @@ impl<W: Write> Engine<W> {
             .ok_or("hospital_rocket_domination_world_required")?
             .state;
         let helo_rules = state.hospital_rocket_helo_areas.clone();
+        let hospital_blast = state.hospital_blast_areas.is_some();
         let filter_rows = state.filter_rows;
         let sequences = state.collisions.clone();
         let costs = state.structural.material_penetration_costs().clone();
@@ -725,11 +766,23 @@ impl<W: Write> Engine<W> {
                 )
             })
             .transpose()?;
+        let hospital = hospital_blast
+            .then(|| {
+                self.prepare_hospital_rocket_hospital_blast(
+                    &flight.source,
+                    position,
+                    flight.blast,
+                    collision,
+                    now,
+                )
+            })
+            .transpose()?;
         Ok(RocketEffects {
             character,
             native,
             ground,
             helo,
+            hospital,
         })
     }
 

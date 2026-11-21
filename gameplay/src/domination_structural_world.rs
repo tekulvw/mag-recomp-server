@@ -20,6 +20,10 @@ use std::collections::{BTreeMap, BTreeSet};
 #[path = "acquisition_frag_ground_damage.rs"]
 mod acquisition_frag_ground_damage;
 
+#[path = "domination_hospital_blast.rs"]
+pub(crate) mod domination_hospital_blast;
+pub(crate) use domination_hospital_blast::HospitalBlastCandidate;
+
 #[path = "hospital_rocket_damage.rs"]
 mod hospital_rocket_damage;
 
@@ -1387,6 +1391,24 @@ pub(crate) struct SequenceSurface {
     mesh: collision::CollisionWorld,
 }
 
+fn operational_hospital_pose(
+    hospital: &structures::DominationBunker<'_>,
+) -> Result<Pose, &'static str> {
+    let transform = hospital.exit_policy.transform;
+    let columns = [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]].map(|axis| transform.rotate(axis));
+    let pose = Pose {
+        translation: [
+            transform.position.x,
+            transform.position.y,
+            transform.position.z,
+        ]
+        .map(f64::from),
+        rotation: std::array::from_fn(|i| std::array::from_fn(|j| columns[j][i].into())),
+    };
+    pose.validate()?;
+    Ok(pose)
+}
+
 pub struct HospitalHulkAssets {
     by_faction: BTreeMap<u8, HospitalHulk>,
 }
@@ -2095,18 +2117,7 @@ impl SequenceCollisionState {
             .and_then(|row| row.operational.as_ref())
             .ok_or("domination_hospital_operational_collision_required")?
             .clone();
-        let transform = hospital.exit_policy.transform;
-        let columns = [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]].map(|axis| transform.rotate(axis));
-        let pose = Pose {
-            translation: [
-                transform.position.x,
-                transform.position.y,
-                transform.position.z,
-            ]
-            .map(f64::from),
-            rotation: std::array::from_fn(|i| std::array::from_fn(|j| columns[j][i].into())),
-        };
-        pose.validate()?;
+        let pose = operational_hospital_pose(&hospital)?;
         self.hulks.remove(&hospital.index);
         self.hospitals.insert(
             hospital.index,

@@ -568,6 +568,11 @@ impl Registry {
                     loaded.collision.as_ref(),
                     loaded.spawns.map_name(),
                 )?;
+                world.validate_hospital_blast(
+                    items,
+                    loaded.collision.as_ref(),
+                    loaded.spawns.map_name(),
+                )?;
             }
             if let Some(setup) = &loaded.acquisition {
                 setup.validate_frag_character_blast(items, loaded.collision.as_ref())?;
@@ -691,6 +696,15 @@ impl Registry {
                 .domination
                 .as_ref()
                 .is_some_and(|world| world.has_helo_frag_damage_areas())
+        })
+    }
+
+    pub fn has_hospital_blast_areas(&self) -> bool {
+        self.profiles.values().any(|profile| {
+            profile
+                .domination
+                .as_ref()
+                .is_some_and(|world| world.has_hospital_blast_areas())
         })
     }
 

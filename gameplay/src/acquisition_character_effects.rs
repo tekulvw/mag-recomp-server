@@ -862,12 +862,26 @@ impl Candidate {
         world: u32,
         count: usize,
     ) -> Result<(), &'static str> {
+        self.check_extra_shared_for(engine, world, |actor| {
+            actor.initial_objects.is_some().then_some(count)
+        })
+    }
+
+    pub(crate) fn check_extra_shared_for<W: Write>(
+        &self,
+        engine: &Engine<W>,
+        world: u32,
+        packets_for: impl Fn(&Active) -> Option<usize>,
+    ) -> Result<(), &'static str> {
         for actor in engine
             .active
             .iter()
             .chain(engine.peers.values())
-            .filter(|actor| actor.reservation.world == world && actor.initial_objects.is_some())
+            .filter(|actor| actor.reservation.world == world)
         {
+            let Some(count) = packets_for(actor) else {
+                continue;
+            };
             let staged = self
                 .state
                 .actors

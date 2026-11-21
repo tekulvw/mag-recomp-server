@@ -146,6 +146,7 @@ mod ground_turrets;
 pub mod ground_vehicles;
 mod headless_sim;
 pub mod healing;
+mod hospital_blast_areas;
 mod hospital_rocket_ground;
 mod hospital_rocket_helo;
 mod hospital_rocket_runtime;

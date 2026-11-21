@@ -45,6 +45,31 @@ impl World {
         self.state.helo_frag_damage_areas.is_some()
     }
 
+    pub(crate) fn has_hospital_blast_areas(&self) -> bool {
+        self.state.hospital_blast_areas.is_some()
+    }
+
+    pub(crate) fn validate_hospital_blast(
+        &self,
+        items: &crate::item_catalog::ItemCatalog,
+        collision: Option<&crate::collision::CollisionWorld>,
+        map: &str,
+    ) -> Result<(), &'static str> {
+        if !self.has_hospital_blast_areas() {
+            return Ok(());
+        }
+        if self.state.hospital_hulks.is_none() {
+            return Err("domination_hospital_blast_requires_body_sources");
+        }
+        self.validate_vehicle_frag_scene(
+            items,
+            collision,
+            map,
+            "domination_hospital_blast_requires_static_world",
+            "domination_hospital_blast_collision_filter_required",
+        )
+    }
+
     pub(crate) fn validate_frag_ground(
         &self,
         items: &crate::item_catalog::ItemCatalog,
@@ -217,6 +242,7 @@ pub(crate) struct State {
     pub(crate) structural: Structural,
     pub(crate) assets: Arc<SequenceCollisionAssets>,
     pub(crate) hospital_hulks: Option<Arc<HospitalHulkAssets>>,
+    pub(crate) hospital_blast_areas: Option<Arc<crate::hospital_blast_areas::Catalog>>,
     pub(crate) hospital_turret_yaws: Arc<BTreeMap<u16, f32>>,
     pub(crate) hospital_rocket_ground: Option<Arc<crate::hospital_rocket_ground::Catalog>>,
     pub(crate) hospital_rocket_helo_areas: Option<Arc<crate::hospital_rocket_helo::Catalog>>,

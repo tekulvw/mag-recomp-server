@@ -79,6 +79,9 @@ pub(super) fn object_update<W: Write>(
     if !plan.audit.helo_grenade_checks.is_empty() {
         audit["helo_grenade_checks"] = json!(plan.audit.helo_grenade_checks);
     }
+    if !plan.audit.hospital_grenade_checks.is_empty() {
+        audit["hospital_grenade_checks"] = json!(plan.audit.hospital_grenade_checks);
+    }
     if !plan.audit.native_grenade_character_checks.is_empty() {
         audit["native_grenade_character_checks"] =
             json!(plan.audit.native_grenade_character_checks);
@@ -470,24 +473,44 @@ fn plan_grenade_blasts<W: Write>(
     }
     let ground_damage_configured = ctx.engine.ground_damage_policy().is_some();
     let source_ground_frag = ctx.engine.ground_frag_areas().is_some();
-    let source_helo_frag = ctx
-        .engine
-        .domination_gameplay
-        .as_ref()
-        .is_some_and(|world| world.has_helo_frag_damage_areas());
+    let domination = ctx.engine.domination_gameplay.as_ref();
+    let source_helo_frag = domination.is_some_and(|world| world.has_helo_frag_damage_areas());
+    let source_hospital_blast = domination.is_some_and(|world| world.has_hospital_blast_areas());
+    let isolate_legacy_ground = source_helo_frag || source_hospital_blast;
+    // All typed vehicle queries see the same accepted pre-damage motion.
+    let owner_view = crate::dynamic_collision_runtime::OwnerCollisionView {
+        active_position: plan.session.client_position.map(|(position, _)| position),
+        ground: plan.ground_runtime.as_ref(),
+    };
     let typed_helo = (admitted_owner_blast && detonated && source_helo_frag).then(|| {
-        // Helo rays must see the same accepted pre-damage Ground motion
-        // used by the Character and Ground blast candidates.
         ctx.engine.prepare_domination_source_helo_frags(
             active,
             &plan.audit.projectile_terminals,
-            crate::dynamic_collision_runtime::OwnerCollisionView {
-                active_position: plan.session.client_position.map(|(position, _)| position),
-                ground: plan.ground_runtime.as_ref(),
-            },
+            owner_view,
             ctx.now,
         )
     });
+    if admitted_owner_blast && detonated && source_hospital_blast {
+        match ctx.engine.prepare_domination_hospital_frags(
+            active,
+            &plan.audit.projectile_terminals,
+            owner_view,
+            ctx.now,
+        ) {
+            Ok(mut effect) => {
+                plan.audit.hospital_grenade_checks = std::mem::take(&mut effect.audit);
+                if effect.packet.is_some() {
+                    plan.hospital_blast = Some(effect);
+                }
+            }
+            Err(error) => {
+                plan.gameplay_denial.get_or_insert(error);
+                plan.audit
+                    .hospital_grenade_checks
+                    .push(json!({"error":error}));
+            }
+        }
+    }
     if admitted_owner_blast && detonated && source_ground_frag {
         let result = plan
             .ground_runtime
@@ -520,7 +543,7 @@ fn plan_grenade_blasts<W: Write>(
         }
     } else if admitted_owner_blast && detonated && ground_damage_configured {
         let motion_staged = plan.ground_runtime.is_some();
-        let baseline = if source_helo_frag {
+        let baseline = if isolate_legacy_ground {
             plan.ground_runtime.clone()
         } else {
             plan.ground_runtime.take()
@@ -545,7 +568,7 @@ fn plan_grenade_blasts<W: Write>(
                 plan.ground_damage_relay = packet;
                 plan.audit.ground_grenade_checks = audit;
             }
-            Err(error) if source_helo_frag => {
+            Err(error) if isolate_legacy_ground => {
                 plan.gameplay_denial.get_or_insert(error);
                 plan.audit
                     .ground_grenade_checks
@@ -570,7 +593,7 @@ fn plan_grenade_blasts<W: Write>(
                 plan.audit.helo_grenade_checks = helo.audit;
             }
             Ok(None) => (),
-            Err(error) if source_ground_frag || source_helo_frag => {
+            Err(error) if source_ground_frag || isolate_legacy_ground => {
                 plan.gameplay_denial.get_or_insert(error);
                 plan.audit.helo_grenade_checks.push(json!({"error":error}));
             }
