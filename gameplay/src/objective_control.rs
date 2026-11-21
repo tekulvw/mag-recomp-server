@@ -101,6 +101,7 @@ struct Objective {
     state: ObjectiveControlDelta,
     operation: Option<Operation>,
     native: Option<NativeObjective>,
+    current_actor: Option<u16>,
     reward_attacker: Option<u16>,
     reward_defender: Option<u16>,
 }
@@ -108,12 +109,14 @@ struct Objective {
 #[derive(Clone)]
 struct NativeObjective {
     class: NativeClass,
+    owner_team: Option<u8>,
     secure: Option<secure::SecureHold>,
     repair_rule: Option<ObjectiveRepairRule>,
     repair: Option<repair::StructuralRepair>,
     damage_health: f32,
     was_repaired: bool,
     autonomous_arming: bool,
+    active_trigger_index: Option<u8>,
     pending: Option<NativePending>,
 }
 
@@ -127,7 +130,7 @@ enum NativePending {
         modifier: f32,
         recipient: Option<RewardRecipient>,
     },
-    Script(ObjectiveState, Option<secure::Actor>),
+    Script(ObjectiveState),
     Precision(Option<crate::structure_damage::Source>),
 }
 
@@ -193,6 +196,13 @@ impl ObjectiveWorld {
                         };
                         NativeObjective {
                             class,
+                            owner_team: object
+                                .interaction
+                                .as_ref()
+                                .map(|rule| rule.owner_team)
+                                .or_else(|| object.demolition.as_ref().map(|rule| rule.owner_team))
+                                .or_else(|| object.repair.map(|rule| rule.owner_team))
+                                .or_else(|| object.scoring.as_ref().map(|rule| rule.owner_team)),
                             secure: object
                                 .interaction
                                 .as_ref()
@@ -202,6 +212,7 @@ impl ObjectiveWorld {
                             damage_health,
                             was_repaired: initial == ObjectiveState::Repaired,
                             autonomous_arming: false,
+                            active_trigger_index: None,
                             pending: None,
                         }
                     });
@@ -227,6 +238,7 @@ impl ObjectiveWorld {
                             },
                             operation: None,
                             native,
+                            current_actor: None,
                             reward_attacker: None,
                             reward_defender: None,
                         },
@@ -315,7 +327,28 @@ impl ObjectiveWorld {
         let object = self.objects.get_mut(&index)?;
         let mut mode = object.native.take()?;
         let previous = object.state;
-        let scripted = matches!(mode.pending, Some(NativePending::Script(..)));
+        let class = mode.class;
+        if let Some(NativePending::Script(target)) = mode.pending {
+            let old = previous.state_actor.state;
+            let entry = script_next_state(class, old, target).map(|next| {
+                let active_trigger_index = mode.active_trigger_index;
+                advance_script(object, &mut mode, old, next, target, now);
+                NativeEntry {
+                    class,
+                    previous: old,
+                    delta: object.state,
+                    actor_generation: None,
+                    reward_actor: script_reward_actor(object, class, old, next, target),
+                    active_trigger_index,
+                }
+            });
+            object.native = Some(mode);
+            return entry.and_then(|entry| {
+                self.native_entries.push(entry);
+                self.pristine = false;
+                (entry.delta != previous).then_some(entry.delta)
+            });
+        }
         let precision = matches!(mode.pending, Some(NativePending::Precision(_)));
         let active_trigger_index = if precision {
             None
@@ -330,13 +363,12 @@ impl ObjectiveWorld {
             actors,
             &mut self.reward_actions,
         );
-        let class = mode.class;
-        let reward_actor = match (class, scripted, precision) {
-            (NativeClass::SecureHold, false, _) => Some(object.state.state_actor.actor_index),
-            (NativeClass::Structural, false, true) => {
+        let reward_actor = match (class, precision) {
+            (NativeClass::SecureHold, _) => Some(object.state.state_actor.actor_index),
+            (NativeClass::Structural, true) => {
                 precision_completion_actor(object, previous.state_actor.state)
             }
-            (NativeClass::Structural, false, false) => {
+            (NativeClass::Structural, false) => {
                 use ObjectiveState::{
                     Activated, Activating, Completed, Deactivated, Deactivating, Repaired,
                     Repairing,
@@ -351,7 +383,6 @@ impl ObjectiveWorld {
                     _ => None,
                 }
             }
-            _ => None,
         };
         object.native = Some(mode);
         if previous == object.state {
@@ -377,6 +408,52 @@ impl ObjectiveWorld {
         target: ObjectiveState,
         actor: Option<secure::Actor>,
     ) -> Result<(), &'static str> {
+        self.stage_native_state_with_caller(index, target, actor.map(|actor| actor.player), actor)
+    }
+
+    pub(crate) fn stage_native_state_with_caller(
+        &mut self,
+        index: u16,
+        target: ObjectiveState,
+        raw_slot: Option<u16>,
+        actor: Option<secure::Actor>,
+    ) -> Result<(), &'static str> {
+        let Some(object) = self.objects.get(&index) else {
+            return Err("unknown_native_objective");
+        };
+        if object.native.is_none() {
+            return Err("native_objective_not_configured");
+        }
+        if object.state.state_actor.state == target {
+            return Ok(());
+        }
+        self.stage_native_target(index, target)?;
+        let raw_slot = raw_slot.filter(|&slot| slot != u16::MAX);
+        let object = self
+            .objects
+            .get_mut(&index)
+            .expect("qualified native objective");
+        let mode = object.native.as_mut().expect("qualified native objective");
+        object.current_actor = raw_slot;
+        mode.active_trigger_index = None;
+        if let (Some(actor), Some(owner_team)) = (
+            actor.filter(|a| Some(a.player) == raw_slot),
+            mode.owner_team,
+        ) {
+            if actor.team == owner_team {
+                object.reward_defender = Some(actor.player);
+            } else {
+                object.reward_attacker = Some(actor.player);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn stage_native_target(
+        &mut self,
+        index: u16,
+        target: ObjectiveState,
+    ) -> Result<(), &'static str> {
         let object = self
             .objects
             .get_mut(&index)
@@ -400,13 +477,27 @@ impl ObjectiveWorld {
         ) {
             return Err("native_objective_transition_pending");
         }
-        if object.state.state_actor.state != target {
-            mode.pending = Some(NativePending::Script(target, actor));
-            self.pristine = false;
-        } else {
-            mode.pending = None;
+        if target != ObjectiveState::Completed
+            || !matches!(mode.pending, Some(NativePending::Precision(_)))
+        {
+            mode.pending = Some(NativePending::Script(target));
         }
+        self.pristine = false;
         Ok(())
+    }
+
+    pub(crate) fn script_actor(&self, index: u16) -> Option<u16> {
+        self.objects.get(&index)?.current_actor
+    }
+
+    pub(crate) fn has_script_transition(&self, index: u16) -> bool {
+        matches!(
+            self.objects
+                .get(&index)
+                .and_then(|object| object.native.as_ref())
+                .and_then(|mode| mode.pending.as_ref()),
+            Some(NativePending::Script(_))
+        )
     }
 
     /// Precision executes the Structural desired-state setter. Acquisition
@@ -420,11 +511,27 @@ impl ObjectiveWorld {
         self.stage_precision_strike_with_actor(index, source, None)
     }
 
+    #[cfg(test)]
     pub(crate) fn stage_precision_strike_with_actor(
         &mut self,
         index: u16,
         source: Option<crate::structure_damage::Source>,
         reward_actor: Option<PrecisionRewardActor>,
+    ) -> Result<bool, &'static str> {
+        self.stage_precision_strike_with_caller(
+            index,
+            source,
+            reward_actor,
+            source.map(|actor| actor.player),
+        )
+    }
+
+    pub(crate) fn stage_precision_strike_with_caller(
+        &mut self,
+        index: u16,
+        source: Option<crate::structure_damage::Source>,
+        reward_actor: Option<PrecisionRewardActor>,
+        raw_slot: Option<u16>,
     ) -> Result<bool, &'static str> {
         let Some(object) = self.objects.get_mut(&index) else {
             return Ok(false);
@@ -435,6 +542,7 @@ impl ObjectiveWorld {
         match object.native.as_mut() {
             Some(mode) if mode.class == NativeClass::Structural => {
                 mode.pending = Some(NativePending::Precision(source));
+                mode.active_trigger_index = None;
             }
             Some(_) => return Ok(false),
             None => {
@@ -446,6 +554,7 @@ impl ObjectiveWorld {
             Some(PrecisionRewardActor::Defender(player)) => object.reward_defender = Some(player),
             None => {}
         }
+        object.current_actor = raw_slot.filter(|&slot| slot != u16::MAX);
         self.pristine = false;
         Ok(true)
     }
@@ -496,9 +605,7 @@ impl ObjectiveWorld {
             if advance_precision(object, source, now).is_none() {
                 break;
             }
-            if object.state.state_actor.state == ObjectiveState::Deactivated {
-                object.reward_attacker = None;
-            }
+            enter_structural_actor(object, object.state.state_actor.state);
             let entry = NativeEntry {
                 class: NativeClass::Structural,
                 previous,
@@ -544,13 +651,14 @@ impl ObjectiveWorld {
         object.state.expiration_time_ms = 0;
         object.state.deactivation_time_ms = 0;
         if class == NativeClass::Structural {
-            object.reward_attacker = None;
-            object.reward_defender = None;
+            enter_structural_actor(object, target);
             object.state.health_percent = if target == ObjectiveState::Completed {
                 0
             } else {
                 100
             };
+        } else {
+            object.current_actor = Some(actor).filter(|&slot| slot != u16::MAX);
         }
 
         self.pristine = false;
@@ -618,6 +726,7 @@ impl ObjectiveWorld {
         // Retail synchronous SetTargetStateId replaces an unstarted async script request.
         mode.pending = None;
         mode.autonomous_arming = true;
+        mode.active_trigger_index = Some(trigger);
         // Trigger admission installs the source in the attacker slot for either team.
         object.reward_attacker = source_allocated.then_some(actor.player);
         object.fuse = None;
@@ -1340,6 +1449,156 @@ fn set_native_state(object: &mut Objective, target: ObjectiveState, player: u16,
     };
 }
 
+fn script_next_state(
+    class: NativeClass,
+    previous: ObjectiveState,
+    desired: ObjectiveState,
+) -> Option<ObjectiveState> {
+    use ObjectiveState::*;
+    // The stable desired state selects a column; the physical state selects a
+    // row. Each update dispatches the selected entry before evaluating again.
+    let column = match desired {
+        Inactive => 0,
+        Deactivated => 1,
+        Completed => 2,
+        Locked => 3,
+        _ => return None,
+    };
+    let next = match class {
+        NativeClass::Structural => {
+            let states = match previous {
+                Inactive => [Inactive, Deactivated, Deactivated],
+                Deactivated | Repaired => [Inactive, Deactivated, Activating],
+                Activating => [Inactive, Deactivated, Activated],
+                Activated => [Inactive, Deactivating, Completed],
+                Deactivating | Repairing | Completed => [Inactive, Deactivated, Completed],
+                _ => return None,
+            };
+            *states.get(column)?
+        }
+        NativeClass::SecureHold => {
+            let states = match previous {
+                Inactive => [Inactive, Deactivated, Deactivated, Deactivated],
+                Deactivated => [Inactive, Deactivated, Activating, Activating],
+                Activating => [Deactivated, Deactivated, Activated, Activated],
+                Activated => [Deactivating, Deactivating, Completed, Completed],
+                Deactivating => [Deactivated, Deactivated, Activated, Activated],
+                Completed => [Retaking, Retaking, Completed, Locked],
+                Locked => [Completed, Completed, Completed, Locked],
+                Retaking | CancelRetaken => [Retaken, Retaken, Completed, Completed],
+                Retaken => [Deactivated, Deactivated, CancelRetaken, CancelRetaken],
+                _ => return None,
+            };
+            states[column]
+        }
+    };
+    Some(next)
+}
+
+fn advance_script(
+    object: &mut Objective,
+    mode: &mut NativeObjective,
+    previous: ObjectiveState,
+    next: ObjectiveState,
+    desired: ObjectiveState,
+    now: Duration,
+) {
+    use ObjectiveState::*;
+    object.operation = None;
+    object.fuse = None;
+    let actor = match mode.class {
+        NativeClass::Structural => enter_structural_actor(object, next),
+        NativeClass::SecureHold => enter_secure_fields(object, next),
+    };
+    let change_time_ms = if next == previous {
+        object.state.state_actor.change_time_ms
+    } else {
+        wire_time(now)
+    };
+    object.state.state_actor = ObjectiveStateActor {
+        state: next,
+        actor_index: actor.unwrap_or(u16::MAX),
+        change_time_ms,
+    };
+    match mode.class {
+        NativeClass::Structural => enter_structural_health(object, mode, previous),
+        NativeClass::SecureHold => {
+            if next == desired {
+                mode.secure = object.rule.as_ref().map(|rule| secure_hold(next, rule));
+            }
+        }
+    }
+    match next {
+        Inactive | Locked => {
+            object.state.expiration_time_ms = 0;
+            object.state.deactivation_time_ms = 0;
+        }
+        Deactivated => {
+            object.state.expiration_time_ms = 0;
+            if previous != Deactivating {
+                object.state.deactivation_time_ms = 0;
+            }
+        }
+        Activating | Activated | Retaking | Retaken => {
+            object.state.expiration_time_ms = wire_time(now);
+            object.state.deactivation_time_ms = 0;
+        }
+        Deactivating | CancelRetaken => object.state.deactivation_time_ms = wire_time(now),
+        Completed => object.state.deactivation_time_ms = 0,
+        _ => unreachable!("unsupported script entry"),
+    }
+    mode.pending = (next != desired).then_some(NativePending::Script(desired));
+}
+
+fn script_reward_actor(
+    object: &Objective,
+    class: NativeClass,
+    previous: ObjectiveState,
+    next: ObjectiveState,
+    desired: ObjectiveState,
+) -> Option<u16> {
+    use ObjectiveState::*;
+    match (class, previous, next) {
+        (NativeClass::Structural, Activated | Deactivating, Completed)
+        | (NativeClass::SecureHold, Activated | CancelRetaken, Completed) => object.reward_attacker,
+        (_, Deactivating, Deactivated) | (NativeClass::SecureHold, Retaken, Deactivated) => {
+            object.reward_defender
+        }
+        (_, Activating, Activated) if next == desired => object.reward_attacker,
+        (NativeClass::SecureHold, Retaking, Retaken) if next == desired => object.reward_defender,
+        _ => None,
+    }
+}
+
+fn enter_secure_fields(object: &mut Objective, target: ObjectiveState) -> Option<u16> {
+    use ObjectiveState::*;
+    let actor = match target {
+        Inactive | Locked => {
+            object.reward_attacker = None;
+            object.reward_defender = None;
+            None
+        }
+        Deactivated | Retaken => {
+            object.reward_attacker = None;
+            object.reward_defender
+        }
+        Activated | Completed => {
+            object.reward_defender = None;
+            object.reward_attacker
+        }
+        Activating | CancelRetaken => object.reward_attacker,
+        Deactivating | Retaking => object.reward_defender,
+        _ => unreachable!("unsupported Secure entry"),
+    };
+    object.current_actor = actor;
+    match target {
+        Deactivated => object.state.health_percent = 100,
+        Completed => object.state.health_percent = 0,
+        _ => {}
+    }
+    actor
+}
+
 fn enter_secure(
     object: &mut Objective,
     hold: &mut secure::SecureHold,
@@ -1351,6 +1610,7 @@ fn enter_secure(
         .commit(request, wire_time(now), duration)
         .expect("staged secure hold transition");
     set_native_state(object, entry.current, entry.actor.player, now);
+    enter_secure_fields(object, entry.current);
     object.state.expiration_time_ms = entry.expiration_ms.unwrap_or_default();
     object.state.deactivation_time_ms = entry.deactivation_ms.unwrap_or_default();
     let generation = u32::try_from(entry.actor.generation).ok();
@@ -1377,6 +1637,39 @@ fn enter_secure(
 }
 
 fn enter_structural(object: &mut Objective, mode: &mut NativeObjective, previous: ObjectiveState) {
+    enter_structural_actor(object, object.state.state_actor.state);
+    enter_structural_health(object, mode, previous);
+}
+
+fn enter_structural_actor(object: &mut Objective, target: ObjectiveState) -> Option<u16> {
+    use ObjectiveState::*;
+    let actor = match target {
+        Inactive => {
+            object.reward_attacker = None;
+            object.reward_defender = None;
+            None
+        }
+        Deactivated => {
+            object.reward_attacker = None;
+            object.reward_defender
+        }
+        Activating => object.reward_attacker,
+        Activated | Completed => {
+            object.reward_defender = None;
+            object.reward_attacker
+        }
+        Deactivating | Repairing | Repaired => object.reward_defender,
+        _ => None,
+    };
+    object.current_actor = if target == Deactivated { None } else { actor };
+    actor
+}
+
+fn enter_structural_health(
+    object: &mut Objective,
+    mode: &mut NativeObjective,
+    previous: ObjectiveState,
+) {
     use ObjectiveState::{Activated, Completed, Deactivated, Deactivating, Repaired, Repairing};
     let target = object.state.state_actor.state;
     if target != ObjectiveState::Activating {
@@ -1396,11 +1689,9 @@ fn enter_structural(object: &mut Objective, mode: &mut NativeObjective, previous
             }
         }
         Deactivated => {
-            object.reward_attacker = None;
             mode.damage_health = 100.0;
         }
         Activated => {
-            object.reward_defender = None;
             mode.damage_health = 100.0;
         }
         _ => {}
@@ -1470,26 +1761,7 @@ fn tick_native(
 ) -> Option<u32> {
     let previous = object.state.state_actor.state;
     match mode.pending.take() {
-        Some(NativePending::Script(target, actor)) => {
-            object.reward_attacker = None;
-            object.reward_defender = None;
-            set_native_state(
-                object,
-                target,
-                actor.map_or(u16::MAX, |actor| actor.player),
-                now,
-            );
-            object.state.expiration_time_ms = 0;
-            object.state.deactivation_time_ms = 0;
-            object.operation = None;
-            object.fuse = None;
-            if mode.class == NativeClass::Structural {
-                enter_structural(object, mode, previous);
-            } else {
-                mode.secure = object.rule.as_ref().map(|rule| secure_hold(target, rule));
-            }
-            return actor.and_then(|actor| u32::try_from(actor.generation).ok());
-        }
+        Some(NativePending::Script(_)) => unreachable!("script handled before ordinary tick"),
         Some(NativePending::Precision(source)) => {
             if let Some(next) = advance_precision(object, source, now) {
                 enter_structural(object, mode, previous);
@@ -1500,6 +1772,15 @@ fn tick_native(
             }
         }
         Some(NativePending::Secure(request, duration)) => {
+            match request.target() {
+                ObjectiveState::Activating | ObjectiveState::CancelRetaken => {
+                    object.reward_attacker = Some(request.actor().player);
+                }
+                ObjectiveState::Deactivating | ObjectiveState::Retaking => {
+                    object.reward_defender = Some(request.actor().player);
+                }
+                _ => {}
+            }
             return enter_secure(
                 object,
                 mode.secure.as_mut().expect("native secure hold"),
@@ -1537,10 +1818,12 @@ fn tick_native(
                 }
                 match (kind, object.state.state_actor.state) {
                     (ObjectiveInteractionKind::Activate, ObjectiveState::Activating) => {
-                        object.reward_attacker = Some(actor.player)
+                        object.reward_attacker = Some(actor.player);
+                        mode.active_trigger_index = Some(trigger);
                     }
                     (ObjectiveInteractionKind::Deactivate, ObjectiveState::Deactivating) => {
-                        object.reward_defender = Some(actor.player)
+                        object.reward_defender = Some(actor.player);
+                        mode.active_trigger_index = Some(trigger);
                     }
                     _ => {}
                 }
@@ -1961,6 +2244,212 @@ pub(crate) mod trigger_box_tests {
     }
 
     #[test]
+    fn structural_script_same_current_keeps_pending_desired_and_completes_through_entries() {
+        let mut catalog = native_catalog();
+        catalog["objects"][1]["initial_state"] = json!(1);
+        let mut world =
+            ObjectiveWorld::new(&ObjectiveCatalog::from_json(&catalog.to_string()).unwrap());
+        let enemy = secure::Actor {
+            player: 7,
+            generation: 3,
+            team: 0,
+        };
+        let owner = secure::Actor {
+            player: 8,
+            generation: 4,
+            team: 1,
+        };
+        world
+            .stage_native_state(11, ObjectiveState::Completed, Some(enemy))
+            .unwrap();
+        world
+            .stage_native_state(11, ObjectiveState::Completed, Some(owner))
+            .unwrap();
+        world
+            .stage_native_state(11, ObjectiveState::Deactivated, None)
+            .unwrap();
+        assert_eq!(world.script_actor(11), Some(owner.player));
+
+        for (state, actor, credit) in [
+            (ObjectiveState::Activating, 7, None),
+            (ObjectiveState::Activated, 7, None),
+            (ObjectiveState::Completed, 7, Some(7)),
+        ] {
+            let delta = frame(&mut world, 11, 40, &BTreeMap::new()).unwrap();
+            assert_eq!(delta.state_actor.state, state);
+            assert_eq!(delta.state_actor.actor_index, actor);
+            assert_eq!(world.script_actor(11), Some(actor));
+            assert_eq!(
+                world.take_native_entries().pop().unwrap().reward_actor,
+                credit
+            );
+        }
+        assert!(frame(&mut world, 11, 41, &BTreeMap::new()).is_none());
+    }
+
+    #[test]
+    fn structural_direct_target_reenters_current_and_preserves_the_request_actor() {
+        use ObjectiveState::{Completed, Deactivated};
+        let mut catalog = native_catalog();
+        catalog["objects"][1]["initial_state"] = json!(1);
+        let mut world =
+            ObjectiveWorld::new(&ObjectiveCatalog::from_json(&catalog.to_string()).unwrap());
+        world
+            .stage_native_state_with_caller(11, Completed, Some(7), None)
+            .unwrap();
+        world.stage_native_target(11, Deactivated).unwrap();
+        assert_eq!(world.script_actor(11), Some(7));
+
+        assert!(frame(&mut world, 11, 100, &BTreeMap::new()).is_none());
+        let entry = world.take_native_entries().pop().unwrap();
+        assert_eq!(entry.previous, Deactivated);
+        assert_eq!(entry.delta.state_actor.state, Deactivated);
+        assert_eq!(entry.delta.state_actor.change_time_ms, 0);
+        assert_eq!(entry.reward_actor, None);
+        assert_eq!(world.script_actor(11), None);
+        assert!(!world.has_script_transition(11));
+    }
+
+    #[test]
+    fn structural_unresolved_script_caller_preserves_the_planter_and_defender() {
+        use ObjectiveState::{Activated, Completed, Deactivated, Deactivating};
+        let mut catalog = native_catalog();
+        catalog["objects"][1]["initial_state"] = json!(1);
+        let mut world =
+            ObjectiveWorld::new(&ObjectiveCatalog::from_json(&catalog.to_string()).unwrap());
+        let enemy = secure::Actor {
+            player: 7,
+            team: 0,
+            generation: 3,
+        };
+        let owner = secure::Actor {
+            player: 8,
+            team: 1,
+            generation: 4,
+        };
+        world
+            .stage_native_state(11, Completed, Some(enemy))
+            .unwrap();
+        frame(&mut world, 11, 100, &BTreeMap::new()).unwrap();
+        assert_eq!(
+            frame(&mut world, 11, 100, &BTreeMap::new())
+                .unwrap()
+                .state_actor
+                .state,
+            Activated
+        );
+        world.take_native_entries();
+
+        let mut completing = world.clone();
+        completing
+            .stage_native_state_with_caller(11, Completed, Some(9), None)
+            .unwrap();
+        assert_eq!(completing.script_actor(11), Some(9));
+        frame(&mut completing, 11, 101, &BTreeMap::new()).unwrap();
+        let complete = completing.take_native_entries().pop().unwrap();
+        assert_eq!(complete.delta.state_actor.actor_index, enemy.player);
+        assert_eq!(complete.reward_actor, Some(enemy.player));
+        assert_eq!(complete.delta.expiration_time_ms, 100);
+
+        world
+            .stage_native_state(11, Deactivated, Some(owner))
+            .unwrap();
+        world
+            .stage_native_state_with_caller(11, Deactivated, Some(9), None)
+            .unwrap();
+        assert_eq!(world.script_actor(11), Some(9));
+        let deactivating = frame(&mut world, 11, 102, &BTreeMap::new()).unwrap();
+        assert_eq!(deactivating.state_actor.state, Deactivating);
+        assert_eq!(deactivating.expiration_time_ms, 100);
+        assert_eq!(deactivating.deactivation_time_ms, 102);
+        assert_eq!(
+            world.take_native_entries().pop().unwrap().reward_actor,
+            None
+        );
+        let disarmed = frame(&mut world, 11, 102, &BTreeMap::new()).unwrap();
+        let entry = world.take_native_entries().pop().unwrap();
+        assert_eq!(entry.previous, Deactivating);
+        assert_eq!(entry.delta.state_actor.actor_index, owner.player);
+        assert_eq!(entry.reward_actor, Some(owner.player));
+        assert_eq!(world.script_actor(11), None);
+        assert_eq!(disarmed.expiration_time_ms, 0);
+        assert_eq!(disarmed.deactivation_time_ms, 102);
+    }
+
+    #[test]
+    fn ordinary_secure_retake_and_completion_publish_the_entry_health() {
+        use ObjectiveInteractionKind::{Activate, Deactivate};
+        use ObjectiveState::{Completed, Deactivated, Retaken, Retaking};
+        let mut world = native_world();
+        world.stage_native_state(10, Completed, None).unwrap();
+        for _ in 0..3 {
+            frame(&mut world, 10, 100, &BTreeMap::new()).unwrap();
+        }
+        assert_eq!(
+            world
+                .take_native_entries()
+                .last()
+                .unwrap()
+                .delta
+                .health_percent,
+            0
+        );
+
+        let interact = |world: &mut ObjectiveWorld, player, team, kind, ms| {
+            let actor = ObjectiveActor {
+                player,
+                team,
+                generation: 1,
+                position: CharacterPosition {
+                    x: 100.,
+                    y: 2.5,
+                    z: 100.,
+                },
+            };
+            assert!(
+                world
+                    .interact(
+                        ObjectiveInteraction {
+                            target_object_id: 0x0c80_000a,
+                            kind,
+                            actor_index: player,
+                            trigger_index: 0,
+                        },
+                        actor,
+                        Duration::from_millis(ms),
+                    )
+                    .accepted
+            );
+            BTreeMap::from([(player, actor)])
+        };
+        let owner = interact(&mut world, 8, 1, Deactivate, 101);
+        assert_eq!(
+            frame(&mut world, 10, 101, &owner)
+                .unwrap()
+                .state_actor
+                .state,
+            Retaking
+        );
+        assert_eq!(
+            frame(&mut world, 10, 111, &owner)
+                .unwrap()
+                .state_actor
+                .state,
+            Retaken
+        );
+        let deactivated = frame(&mut world, 10, 131, &owner).unwrap();
+        assert_eq!(deactivated.state_actor.state, Deactivated);
+        assert_eq!(deactivated.health_percent, 100);
+
+        let enemy = interact(&mut world, 7, 0, Activate, 132);
+        frame(&mut world, 10, 132, &enemy).unwrap();
+        frame(&mut world, 10, 142, &enemy).unwrap();
+        let completed = frame(&mut world, 10, 162, &enemy).unwrap();
+        assert_eq!(completed.state_actor.state, Completed);
+        assert_eq!(completed.health_percent, 0);
+    }
+
+    #[test]
     fn precision_strike_queues_one_ordinary_structural_completion() {
         let mut catalog = native_catalog();
         catalog["objects"][1]["initial_state"] = json!(1);
@@ -2054,6 +2543,18 @@ pub(crate) mod trigger_box_tests {
             assert_eq!(entry.reward_actor, Some(credited));
             assert_eq!(world.state(11), Some(ObjectiveState::Activated));
         }
+
+        assert!(
+            world
+                .stage_precision_strike_with_caller(11, None, None, Some(strike.player))
+                .unwrap()
+        );
+        assert_eq!(world.script_actor(11), Some(strike.player));
+        frame(&mut world, 11, 100, &BTreeMap::new()).unwrap();
+        let entry = world.take_native_entries().pop().unwrap();
+        assert_eq!(entry.delta.state_actor.actor_index, u16::MAX);
+        assert_eq!(entry.reward_actor, Some(planter.player));
+        assert_eq!(world.script_actor(11), Some(planter.player));
     }
 
     #[test]
@@ -2429,3 +2930,7 @@ pub(crate) mod trigger_box_tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "objective_control_secure_script_tests.rs"]
+mod secure_script_tests;

@@ -265,3 +265,33 @@ fn native_area_damage_requires_ground_seat_visibility_at_admission() {
         assert_eq!(setup.validate_ground_drivers(vehicles), expected);
     }
 }
+
+#[test]
+fn startup_is_staged_before_later_native_script_requests() {
+    let mut engine = connected_tests::fixture();
+    engine.acquisition_gameplay.as_mut().unwrap().reset();
+    {
+        let structural = crate::acquisition_gameplay_engine::test_support::structural_fixture(
+            engine.acquisition_gameplay.as_mut().unwrap(),
+        );
+        let world = engine.objective_world.as_mut().unwrap();
+        structural.stage_mission_start(world).unwrap();
+        assert!(
+            world.has_script_transition(INDEX),
+            "MissionStart must stage the direct target before callbacks"
+        );
+        // This request occurs after MissionStart and before the first Sim pass.
+        world
+            .stage_native_state(INDEX, ObjectiveState::Completed, None)
+            .unwrap();
+        structural.stage_mission_start(world).unwrap();
+        for _ in 0..8 {
+            world.tick_native_object(INDEX, clock(100), &BTreeMap::new());
+            world.take_native_entries();
+            if !world.has_script_transition(INDEX) {
+                break;
+            }
+        }
+    }
+    assert_eq!(state(&engine), ObjectiveState::Completed);
+}

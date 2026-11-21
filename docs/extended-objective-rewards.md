@@ -8,7 +8,7 @@ Structural Completed entered from Activated or Deactivating selects the destruct
 
 Qualified callback attribution is independent of the replicated wire actor. A Precision request resolves the cached source slot in its original world against the current allocated character and team. An attacker-side source updates the attacker latch; an owner-side source updates the defender and preserves the planter; an unresolved source preserves both. Dead or respawned current characters are not rejected by an old life-generation test. An Inactive cascade passes through Deactivated and clears its attacker. Intermediate Activated under desired Completed emits no planting callback. Final Completed from the armed states uses the resulting attacker latch. These rules also cover the source-classified passive Acquisition Precision path.
 
-A destroyed trigger directly installs its resolved source as attacker, including owner-side damage, following the separately qualified native trigger admission. Its timer and completion retain that actor independently of wire publication. The existing gameplay admission, damage and blast source behavior are preserved. Generic scripted actor attribution remains unqualified unless represented by a proved callback path.
+A destroyed trigger directly installs its resolved source as attacker, including owner-side damage, following the separately qualified native trigger admission. Its timer and completion retain that actor independently of wire publication. The existing gameplay admission, damage and blast source behavior are preserved. The [scripted objective implementation](script-objective-attribution.md) now represents the qualified ChangeState paths separately from direct setters.
 
 ## Acquisition delivery timing
 

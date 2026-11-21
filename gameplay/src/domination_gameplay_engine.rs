@@ -320,9 +320,6 @@ pub trait ExternalEffects {
         enabled: bool,
     ) -> Result<(), &'static str>;
 
-    /// Resolve the original packed actor from the committed source and generation.
-    fn original_actor_id(&self, player: u16, generation: u32) -> Result<u32, &'static str>;
-
     fn callback_actor(&self, original_object_id: u32) -> Result<Option<Actor>, &'static str>;
 
     /// Refresh assignments through the native ordered squad vectors and
@@ -452,7 +449,7 @@ impl Runtime {
         let mut next = self.candidate(&frame, effects)?;
         if !self.started {
             for &(index, state) in &self.setup.startup {
-                next.world.stage_native_state(index, state, None)?;
+                next.world.stage_native_target(index, state)?;
             }
             next.runtime.started = true;
         }
@@ -475,8 +472,11 @@ impl Runtime {
         for &index in &self.setup.update_order {
             let state_before_update = next.world.state(index);
             let mut published = None;
+            let mut transitions = 0;
             loop {
-                if let Some(delta) = next.world.tick_native_object(index, frame.now, actors) {
+                let delta = next.world.tick_native_object(index, frame.now, actors);
+                let progressed = delta.is_some() || next.world.has_native_entries();
+                if let Some(delta) = delta {
                     published = Some(delta);
                 }
                 // The structural state machine queues each entry before
@@ -484,8 +484,15 @@ impl Runtime {
                 for entry in next.world.take_native_entries() {
                     next.prepare_entry(entry, frame.now.as_millis() as u32)?;
                 }
-                if !next.world.has_precision_transition(index) {
+                if !progressed
+                    || !(next.world.has_precision_transition(index)
+                        || next.world.has_script_transition(index))
+                {
                     break;
+                }
+                transitions += 1;
+                if transitions >= 256 {
+                    return Err("native_objective_transition_limit");
                 }
             }
             next.deltas.extend(published);
@@ -770,24 +777,16 @@ impl<E: ExternalEffects> Candidate<E> {
             if entry.requires_authored_explosion() {
                 self.effects.prepare_explosion(entry, &self.world)?;
             }
-            let actor = entry.delta.state_actor.actor_index;
-            let actor_id = if actor == u16::MAX {
-                u32::MAX
-            } else {
-                self.effects.original_actor_id(
-                    actor,
-                    entry
-                        .actor_generation
-                        .ok_or("domination_gameplay_missing_actor_generation")?,
-                )?
-            };
+            // Lua Caller is the source objective identity. Its current actor is
+            // resolved by each setter invocation, including delayed callbacks.
+            let caller_id = 0x0c80_0000 | u32::from(entry.delta.object_index);
             let current = self.current();
             self.runtime.callbacks.execute_event(
                 Transition {
                     objective_token: token,
                     event,
                 },
-                actor_id,
+                caller_id,
                 now,
                 &current,
                 |batch| {
@@ -851,12 +850,18 @@ fn apply_effects<E: ExternalEffects>(
                     State::Locked => ObjectiveState::Locked,
                     State::Other => return Err("domination_gameplay_unknown_script_target"),
                 };
-                let actor_id = batch.context.actor_object_id;
-                let actor = match caller {
-                    Caller::Original if actor_id != u32::MAX => owner.callback_actor(actor_id)?,
+                let caller_id = batch.context.caller_object_id;
+                let raw_slot = match caller {
+                    Caller::Original if caller_id & 0xffff_0000 == 0x0c80_0000 => {
+                        world.script_actor(caller_id as u16)
+                    }
                     _ => None,
                 };
-                world.stage_native_state(index, desired, actor)?;
+                let actor = raw_slot
+                    .map(|slot| owner.callback_actor(0x0380_0000 | u32::from(slot)))
+                    .transpose()?
+                    .flatten();
+                world.stage_native_state_with_caller(index, desired, raw_slot, actor)?;
             }
             Effect::ScoreRate(rate) => round.rates_mut().configure(rate, now)?,
             Effect::Ability {

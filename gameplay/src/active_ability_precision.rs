@@ -97,7 +97,7 @@ impl<W: Write> Engine<W> {
                     PrecisionRewardActor::Attacker(source_player)
                 }
             });
-        world.stage_precision_strike_with_actor(index, source, reward_actor)
+        world.stage_precision_strike_with_caller(index, source, reward_actor, Some(source_player))
     }
 }
 

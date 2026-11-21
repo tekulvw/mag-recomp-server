@@ -404,7 +404,7 @@ impl<W: Write> Engine<W> {
                     now,
                 };
                 for entry in world.take_native_entries() {
-                    structural.stage_entry(entry, &mut frame)?;
+                    structural.stage_entry(entry, &mut world, &mut frame)?;
                 }
                 if let Some(reply) = reply {
                     messages.push(OutboundMessage {
@@ -540,6 +540,9 @@ impl<W: Write> Engine<W> {
         }
         let starting = !runtime.started;
         if starting {
+            if let Some(structural) = &mut runtime.structural {
+                structural.stage_mission_start(&mut world)?;
+            }
             for &token in &setup.initial_active {
                 runtime
                     .state
