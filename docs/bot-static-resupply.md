@@ -83,8 +83,8 @@ alternative endpoints on the same walking component; each accepted anchor must
 lie inside its referenced provider box. These are route candidates, not proof
 of physical arrival. The runtime requires a complete bounded walking corridor,
 valid endpoint support and occupancy. Partial, truncated and drop-bearing
-routes cannot authorize this approach. Longer spawn-to-provider routes that
-need drops remain separate.
+routes cannot authorize the walking approach. The separate one-certificate
+opt-in below is required for routes that need a drop.
 
 Seeking retains the accepted corridor through the existing physical movement
 follower, preserves tactical role and goal, and owns an exact movement token.
@@ -95,6 +95,40 @@ body after the interruption. A complete query or projected endpoint never
 starts service: the actual body must settle grounded inside the same trigger
 with current equipment, life, allocation and fresh quiet. Service time begins
 at that separate Start, after walking ends.
+
+An optional `allowed_drop_id` in the approach parameters enables one certified
+passage on the same pinned mesh. Its value is an external positive certificate
+ID, paired with explicit `planning_window_ms` of 1,000–10,000 ms and no longer
+than the seek deadline. The retry interval must be shorter than this planning
+window to allow a separate drop query after a failed walk. Omit both fields to retain walking-only behavior. The worker rejects an
+unknown certificate and requires an autonomous population, configured drop
+policy and explicit fall-damage rules before opening logs. Generated policies
+and receipts retain the same source bindings.
+
+An idle, grounded, fully dry bot can first acquire a recorded planning window
+before the tactical planner chooses a new route. This is pending planning,
+with no passage or refill authority. Normal perception must still supply fresh
+quiet and the bounded walking/drop queries must produce a complete qualified
+route before movement starts. Deferred perception grants no quiet. Threat,
+damage, equipment/scope change or expiry ends the window; its retry cooldown
+leaves tactical planning a real turn. Existing active routes remain owned by
+their current action.
+
+Drop-capable seeking reuses the normal queue, permit and certified physical
+controller. A stable supply parent owns trusted holding, launch and egress
+moves without changing the bot's tactical objective. A frozen waiting pose is
+not arrival. On interruption before commitment, the bot suppresses launch. If
+already committed or still occupying the passage, it retains the motion needed
+to clear or recover from that passage; it cannot begin service while cancellation
+is pending. A second required drop is outside this opt-in.
+
+After actual clearance, a separate bounded query plans a complete walking
+continuation from the current physical body to the saved provider endpoint.
+Only subsequent settled, grounded trigger membership with fresh quiet permits
+service. Walking, drop survey and continuation queries all consume supply query
+credits; a one-credit policy can alternate failed walking and enabled drop
+surveys across retries. The option does not authorize taking over an unrelated
+active movement.
 
 Human020b interoperability, native packed target identities, other maps and
 native animation/presentation remain separate. Internal provider

@@ -41,6 +41,10 @@ pub struct Policy {
     provider_catalog_sha256: String,
     collision_sha256: String,
     detour_sha256: String,
+    #[serde(default)]
+    allowed_drop_id: Option<u32>,
+    #[serde(default)]
+    planning_window_ms: Option<u32>,
     query_budget_per_tick: u8,
     retry_ms: u32,
     goal_radius_m: f64,
@@ -86,6 +90,16 @@ impl Policy {
                         .bytes()
                         .all(|x| x.is_ascii_digit() || (b'a'..=b'f').contains(&x))
             })
+            && match (self.allowed_drop_id, self.planning_window_ms) {
+                (None, None) => true,
+                (Some(id), Some(window)) => {
+                    id > 0
+                        && (1_000..=10_000).contains(&window)
+                        && window <= self.seek_max_duration_ms
+                        && self.retry_ms < window
+                }
+                _ => false,
+            }
             && (1..=16).contains(&self.query_budget_per_tick)
             && self.retry_ms > 0
             && (0.05..=5.0).contains(&self.goal_radius_m)
@@ -130,7 +144,43 @@ impl Policy {
         {
             return Err("bot_resupply_approach_world_binding_mismatch");
         }
+        if self
+            .allowed_drop_id
+            .is_some_and(|id| !artifact.drop_links.iter().any(|link| link.id == id))
+        {
+            return Err("bot_resupply_approach_unknown_drop");
+        }
         self.validate_providers(catalog)
+    }
+
+    pub fn allowed_drop_id(&self) -> Option<u32> {
+        self.allowed_drop_id
+    }
+
+    pub fn planning_window(&self) -> Option<Duration> {
+        self.planning_window_ms
+            .map(|ms| Duration::from_millis(u64::from(ms)))
+    }
+
+    pub fn validate_drop_context(
+        &self,
+        autonomous: bool,
+        has_drop_policy: bool,
+        has_fall_rules: bool,
+    ) -> Result<(), &'static str> {
+        if self.allowed_drop_id.is_none() {
+            return Ok(());
+        }
+        if !autonomous {
+            return Err("bot_resupply_drop_requires_autonomous_population");
+        }
+        if !has_drop_policy {
+            return Err("bot_resupply_drop_requires_drop_policy");
+        }
+        if !has_fall_rules {
+            return Err("bot_resupply_drop_requires_fall_rules");
+        }
+        Ok(())
     }
 
     fn validate_providers(&self, catalog: &Catalog) -> Result<(), &'static str> {
@@ -182,6 +232,13 @@ impl Policy {
     }
 
     #[cfg(test)]
+    pub(crate) fn with_synthetic_drop(mut self, id: u32) -> Self {
+        self.allowed_drop_id = Some(id);
+        self.planning_window_ms = Some(2_000);
+        self
+    }
+
+    #[cfg(test)]
     pub(crate) fn synthetic(key: ProviderKey, anchor: Point) -> Self {
         Self {
             schema_version: 1,
@@ -191,6 +248,8 @@ impl Policy {
             provider_catalog_sha256: "e".repeat(64),
             collision_sha256: "d".repeat(64),
             detour_sha256: "a".repeat(64),
+            allowed_drop_id: None,
+            planning_window_ms: None,
             query_budget_per_tick: 1,
             retry_ms: 500,
             goal_radius_m: 0.75,
@@ -229,6 +288,57 @@ mod tests {
         input["query_budget_per_tick"] = json!(1);
         input["providers"][0]["anchors"][1] = json!([1, 2, 3]);
         assert!(load(&input).is_err());
+    }
+
+    #[test]
+    fn bot_resupply_approach_policy_accepts_only_one_positive_optional_drop() {
+        let mut input = json!({
+            "schema_version":1,"application_id":20231,"map":"synthetic_map","mode":0,
+            "provider_catalog_sha256":"e".repeat(64),"collision_sha256":"d".repeat(64),
+            "detour_sha256":"a".repeat(64),"query_budget_per_tick":1,"retry_ms":1000,
+            "goal_radius_m":0.5,"max_route_length_m":160,"seek_max_duration_ms":90000,
+            "providers":[{"source_offset":42,"name_token":5,"anchors":[[1,2,3]]}],
+        });
+        let load =
+            |input: &serde_json::Value| Policy::from_bytes(&serde_json::to_vec(input).unwrap());
+        let walking = load(&input).unwrap();
+        assert_eq!(walking.allowed_drop_id(), None);
+        assert_eq!(walking.validate_drop_context(false, false, false), Ok(()));
+        input["allowed_drop_id"] = json!(57);
+        assert!(
+            load(&input).is_err(),
+            "drop opt-in requires a bounded planning window"
+        );
+        input["planning_window_ms"] = json!(2000);
+        let enabled = load(&input).expect("an explicitly selected single drop is supported");
+        assert_eq!(enabled.planning_window(), Some(Duration::from_millis(2000)));
+        assert_eq!(enabled.allowed_drop_id(), Some(57));
+        assert!(enabled.validate_drop_context(false, true, true).is_err());
+        assert!(enabled.validate_drop_context(true, false, true).is_err());
+        assert!(enabled.validate_drop_context(true, true, false).is_err());
+        assert_eq!(enabled.validate_drop_context(true, true, true), Ok(()));
+        for window in [json!(999), json!(10001), json!(true), json!("2000")] {
+            input["planning_window_ms"] = window;
+            assert!(load(&input).is_err());
+        }
+        input["planning_window_ms"] = json!(2000);
+        input["retry_ms"] = json!(2000);
+        assert!(load(&input).is_err());
+        input["retry_ms"] = json!(1000);
+        input["seek_max_duration_ms"] = json!(1000);
+        assert!(load(&input).is_err());
+        input["seek_max_duration_ms"] = json!(90000);
+        for value in [
+            json!(0),
+            json!(-1),
+            json!(true),
+            json!("57"),
+            json!(4294967296_u64),
+            json!([57, 58]),
+        ] {
+            input["allowed_drop_id"] = value;
+            assert!(load(&input).is_err());
+        }
     }
 
     #[test]

@@ -1667,6 +1667,7 @@ impl<W: Write> Engine<W> {
         &mut self,
         id: u16,
         now: Duration,
+        wall: u64,
         policy: &ObjectivePolicy,
         actors: &crate::actor_collision::ActorGrid,
         started: &Instant,
@@ -1677,11 +1678,22 @@ impl<W: Write> Engine<W> {
         let Some(passage) = b.drop_queue_passage else {
             return Ok(());
         };
+        let supply = b
+            .supply_passage_seek()
+            .filter(|seek| seek.allowed_drop_id() == Some(passage.id));
+        let supply_parent = supply.map(|seek| seek.parent_id().to_owned());
+        let supply_goal = supply.map(|seek| position(seek.passage_resume_goal()));
         let egress = b.drop_egress;
         let retreat = b.drop_retreat;
         let preentry_retreat = b.drop_retreat_preentry;
         let reroute = b.drop_reroute;
         let physical_exit = egress || retreat;
+        if supply.is_some_and(|seek| seek.cancellation_pending()) && !physical_exit {
+            return Ok(());
+        }
+        if supply.is_some() && reroute {
+            return Ok(());
+        }
         let prepare = b.drop_waiting.is_some()
             && !b.drop_approach_ready
             && b.drop_holding_goal.is_some_and(|goal| {
@@ -1700,6 +1712,7 @@ impl<W: Write> Engine<W> {
         if resume
             && !physical_exit
             && !prepare
+            && supply_goal.is_none()
             && b.task.goal.is_none()
             && b.task.role_goal.is_none()
         {
@@ -1721,8 +1734,8 @@ impl<W: Write> Engine<W> {
         let goal = if prepare {
             Ok(position(passage.launch))
         } else if resume && !physical_exit {
-            b.task
-                .role_goal
+            supply_goal
+                .or(b.task.role_goal)
                 .or(b.task.goal)
                 .ok_or("bot_drop_resume_goal_missing")
         } else if !physical_exit && !local_rejoin {
@@ -1777,6 +1790,7 @@ impl<W: Write> Engine<W> {
                 g
             }
         };
+        let mut record_failure = None;
         let result = (|| {
             let goal = goal?;
             let body = bot_physics::Body::default();
@@ -1844,7 +1858,15 @@ impl<W: Write> Engine<W> {
             } else {
                 BTreeMap::new()
             };
+            let supply_resume = if supply_parent.is_some() && resume && !prepare && !physical_exit {
+                Some(self.prepare_resupply_drop_resume(id, actors, now))
+            } else {
+                None
+            };
             let bot = self.bot_registry.bots.get_mut(&id).unwrap();
+            let original_supply = supply_parent
+                .as_ref()
+                .map(|_| (bot.target.pending_move.clone(), bot.target.runtime));
             // The egress proof reads the failed pending route to identify the
             // committed certificate. It mutates the target only after success.
             let old_pending = if physical_exit {
@@ -1853,7 +1875,9 @@ impl<W: Write> Engine<W> {
                 bot.target.pending_move.take()
             };
             let old_runtime = bot.target.runtime;
-            let result = if retreat {
+            let result = if let Some(candidate) = supply_resume {
+                candidate.map(|prepared| prepared.install(&mut bot.target))
+            } else if retreat {
                 let world = self
                     .collision_world
                     .as_ref()
@@ -2009,7 +2033,9 @@ impl<W: Write> Engine<W> {
                                 }))
                     }));
             if !safe {
-                if !physical_exit {
+                if let Some((pending, _)) = original_supply {
+                    bot.target.pending_move = pending;
+                } else if !physical_exit {
                     bot.target.pending_move = old_pending;
                 }
                 bot.target.runtime = old_runtime;
@@ -2036,8 +2062,27 @@ impl<W: Write> Engine<W> {
                 bot.drop_resume_failure_at = None;
                 return Ok(goal);
             }
+            if let Some(parent) = supply_parent.as_deref() {
+                bot.target.set_registry_supply_parent(parent);
+                let candidate = (bot.target.pending_move.take(), bot.target.runtime);
+                let (pending, runtime) = original_supply.unwrap();
+                bot.target.pending_move = pending;
+                bot.target.runtime = runtime;
+                if let Err(reason) = self.record(json!({
+                    "op": "bot_supply_passage_child",
+                    "object_index": id, "parent": parent, "drop_id": passage.id,
+                    "stage": if physical_exit { "safe_exit" } else if resume { "resume" } else { "holding" },
+                }), wall) {
+                    record_failure = Some(reason);
+                    return Err(reason);
+                }
+                let bot = self.bot_registry.bots.get_mut(&id).unwrap();
+                bot.target.pending_move = candidate.0;
+                bot.target.runtime = candidate.1;
+            }
+            let bot = self.bot_registry.bots.get_mut(&id).unwrap();
             if resume {
-                if !physical_exit {
+                if !physical_exit && supply_parent.is_none() {
                     bot.task.goal = Some(bot.target.registry_move_destination().unwrap_or(goal));
                     bot.task.recovering = false;
                 }
@@ -2052,8 +2097,10 @@ impl<W: Write> Engine<W> {
                     bot.drop_queue_since = None;
                     bot.bind_delay_episode(now, policy.drop_entry_buffer_m);
                 }
-                bot.task.progress_at = now;
-                bot.task.progress_distance = bot.target.registry_route_progress();
+                if supply_parent.is_none() {
+                    bot.task.progress_at = now;
+                    bot.task.progress_distance = bot.target.registry_route_progress();
+                }
             } else {
                 bot.drop_holding_goal = Some(goal);
                 bot.holding_retry_at = now;
@@ -2061,6 +2108,9 @@ impl<W: Write> Engine<W> {
             }
             Ok(goal)
         })();
+        if let Some(reason) = record_failure {
+            return Err(reason);
+        }
         if !resume && result.is_err() && !matches!(result, Err("bot_planning_slice_yield")) {
             self.bot_registry
                 .bots
@@ -2374,7 +2424,8 @@ impl<W: Write> Engine<W> {
             let mut fresh = Vec::new();
             let mut retry = Vec::new();
             for (&id, b) in &self.bot_registry.bots {
-                if b.has_supply_action() {
+                let supply_passage = b.supply_passage_seek();
+                if b.has_supply_action() && supply_passage.is_none() {
                     continue;
                 }
                 let r = b.target.runtime.unwrap();
@@ -2403,6 +2454,7 @@ impl<W: Write> Engine<W> {
                                     > Duration::from_millis(policy.drop_holding_stall_ms)))
                 });
                 if traffic_job
+                    && supply_passage.is_none()
                     && !selected_ids.contains(&id)
                     && b.health > 0
                     && r.physics_motion.is_some_and(|m| m.grounded)
@@ -2414,7 +2466,7 @@ impl<W: Write> Engine<W> {
                 if b.traffic_yield.is_some() {
                     continue;
                 }
-                let holding_job = b.drop_waiting.is_some()
+                let holding_job = (b.drop_waiting.is_some()
                     && (b.drop_holding_goal.is_none()
                         || (!b.drop_approach_ready
                             && matches!(r.phase, BotPhase::Complete)
@@ -2436,7 +2488,14 @@ impl<W: Write> Engine<W> {
                     || b.drop_resume
                     || b.drop_egress
                     || b.drop_retreat
-                    || b.drop_reroute;
+                    || b.drop_reroute)
+                    && supply_passage.is_none_or(|seek| {
+                        if seek.cancellation_pending() {
+                            b.drop_egress || b.drop_retreat
+                        } else {
+                            !b.drop_reroute
+                        }
+                    });
                 if holding_job
                     && (now >= b.holding_retry_at
                         || b.drop_resume
@@ -2449,6 +2508,9 @@ impl<W: Write> Engine<W> {
                     && !r.navmesh_state.on_player
                 {
                     retry.push(id);
+                    continue;
+                }
+                if supply_passage.is_some() {
                     continue;
                 }
                 if !selected_ids.contains(&id)
@@ -2530,6 +2592,7 @@ impl<W: Write> Engine<W> {
                 self.plan_drop_holding(
                     id,
                     now,
+                    wall,
                     &policy,
                     actors,
                     &started,

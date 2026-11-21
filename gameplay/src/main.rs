@@ -1263,6 +1263,22 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             mag_gameplay::fall_damage::Rules::load(path)
         })
         .transpose()?;
+    if let Some(policy) = bot_resupply_approach_policy.as_ref()
+        && policy.allowed_drop_id().is_some()
+    {
+        let population_path = bot_population_path
+            .as_ref()
+            .ok_or_else(|| io::Error::other("bot resupply drop requires configured population"))?;
+        let population = mag_gameplay::bot_registry::BotPopulation::load(population_path)
+            .map_err(io::Error::other)?;
+        policy
+            .validate_drop_context(
+                population.autonomous,
+                population.objective_policy.is_some(),
+                fall_rules.is_some(),
+            )
+            .map_err(io::Error::other)?;
+    }
     let bot_names = bot_names_path
         .as_ref()
         .map(|path| {
@@ -1459,7 +1475,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         }
         println!(
             "{}",
-            serde_json::json!({"event":"catalogs_validated","application_id":application_id,"skill_application_id":skill_catalog.application_id(),"bunkers":bunker_info,"fall_damage_enabled":fall_rules.is_some(),"incapacitation_enabled":incapacitation_rules.is_some(),"character_damage_rules_enabled":character_damage_rules.is_some(),"firearm_assists_enabled":firearm_assist_rules.is_some(),"bot_resupply_validated":bot_resupply_catalog.is_some(),"bot_resupply_approach_validated":bot_resupply_approach_policy.is_some(),"dynamic_body_catalog_validated":dynamic_bodies.is_some(),"static_partitions_validated":static_partitions.len(),"acquisition_gameplay_validated":acquisition_setup.is_some(),"squad_orders_validated":squad_orders.is_some(),"active_abilities_validated":active_abilities.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_active_abilities()),"domination_gameplay_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_domination_gameplay()),"hospital_rockets_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rockets()),"hospital_rocket_ground_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rocket_ground()),"hospital_rocket_helo_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rocket_helo()),"frag_character_blast_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.frag_character_blast) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_frag_character_blast()),"frag_ground_areas_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.has_frag_ground_areas()) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_frag_ground_areas()),"frag_helo_areas_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_frag_helo_areas()),"hospital_blast_areas_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_blast_areas()),"projectile_contacts_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_projectile_contacts()),"scope":"schema_and_profile_validation_not_client_acceptance"})
+            serde_json::json!({"event":"catalogs_validated","application_id":application_id,"skill_application_id":skill_catalog.application_id(),"bunkers":bunker_info,"fall_damage_enabled":fall_rules.is_some(),"incapacitation_enabled":incapacitation_rules.is_some(),"character_damage_rules_enabled":character_damage_rules.is_some(),"firearm_assists_enabled":firearm_assist_rules.is_some(),"bot_resupply_validated":bot_resupply_catalog.is_some(),"bot_resupply_approach_validated":bot_resupply_approach_policy.is_some(),"bot_resupply_drop_validated":bot_resupply_approach_policy.as_ref().is_some_and(|policy|policy.allowed_drop_id().is_some()),"dynamic_body_catalog_validated":dynamic_bodies.is_some(),"static_partitions_validated":static_partitions.len(),"acquisition_gameplay_validated":acquisition_setup.is_some(),"squad_orders_validated":squad_orders.is_some(),"active_abilities_validated":active_abilities.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_active_abilities()),"domination_gameplay_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_domination_gameplay()),"hospital_rockets_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rockets()),"hospital_rocket_ground_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rocket_ground()),"hospital_rocket_helo_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rocket_helo()),"frag_character_blast_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.frag_character_blast) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_frag_character_blast()),"frag_ground_areas_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.has_frag_ground_areas()) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_frag_ground_areas()),"frag_helo_areas_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_frag_helo_areas()),"hospital_blast_areas_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_blast_areas()),"projectile_contacts_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_projectile_contacts()),"scope":"schema_and_profile_validation_not_client_acceptance"})
         );
         return Ok(());
     }
