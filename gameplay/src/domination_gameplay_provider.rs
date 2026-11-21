@@ -1233,39 +1233,19 @@ impl<W: Write> ExternalEffects for Provider<'_, W> {
         Ok(())
     }
 
-    fn original_actor_id(&self, player: u16, _generation: u32) -> Result<u32, &'static str> {
-        // The accepted operation already owns the actor's original generation.
-        // Native queues retain its raw family3 ID even if the actor has died or left.
-        if player >= 256 {
-            return Err("domination_entry_actor_index_out_of_range");
-        }
-        Ok(0x0380_0000 | u32::from(player))
-    }
-
     fn callback_actor(&self, original_object_id: u32) -> Result<Option<Actor>, &'static str> {
         if original_object_id & 0xffff_0000 != 0x0380_0000 {
             return Err("domination_callback_invalid_actor_id");
         }
         let player = original_object_id as u16;
-        Ok(self
+        let world = self
             .engine
             .active
             .iter()
             .chain(self.engine.peers.values())
-            .find(|a| a.reservation.player == player)
-            .and_then(|a| {
-                let generation = match a.life {
-                    CharacterLife::Alive { generation, .. }
-                    | CharacterLife::Incapacitated { generation, .. }
-                    | CharacterLife::AwaitingRespawn { generation } => generation,
-                    CharacterLife::AwaitingFirstSpawn => return None,
-                };
-                Some(Actor {
-                    player,
-                    generation: u64::from(generation),
-                    team: a.team(),
-                })
-            }))
+            .next()
+            .map(|a| a.reservation.world);
+        Ok(world.and_then(|world| self.engine.objective_script_character(player, world)))
     }
 
     fn refresh_assignments(

@@ -558,6 +558,7 @@ pub(crate) struct Runtime {
     collisions: SequenceCollisionState,
     area: AreaDamageState,
     queued: BTreeMap<u16, (ObjectiveState, u16)>,
+    mission_start_staged: bool,
 }
 
 impl Runtime {
@@ -567,6 +568,7 @@ impl Runtime {
             collisions: SequenceCollisionState::default(),
             area: AreaDamageState::default(),
             queued: BTreeMap::new(),
+            mission_start_staged: false,
         }
     }
 
@@ -613,6 +615,7 @@ impl Runtime {
     pub(crate) fn stage_entry<W: Write>(
         &mut self,
         entry: NativeEntry,
+        world: &mut ObjectiveWorld,
         frame: &mut Frame<'_, W>,
     ) -> Result<(), &'static str> {
         let index = entry.delta.object_index;
@@ -687,13 +690,7 @@ impl Runtime {
             }
         }
         if let Some(hook) = hook {
-            self.stage_hook(
-                index,
-                state,
-                entry.delta.state_actor.actor_index,
-                hook,
-                frame,
-            )?;
+            self.stage_hook(index, state, world.script_actor(index), hook, world, frame)?;
         }
         if entry.class == NativeClass::Structural {
             let root = self.setup.playback.catalog().objective_pose(token)?;
@@ -721,6 +718,21 @@ impl Runtime {
         Ok(())
     }
 
+    pub(crate) fn stage_mission_start(
+        &mut self,
+        world: &mut ObjectiveWorld,
+    ) -> Result<(), &'static str> {
+        if !self.mission_start_staged {
+            for (&index, row) in &self.setup.bindings.rows {
+                if row.start_deactivated && world.native_class(index).is_some() {
+                    world.stage_native_target(index, ObjectiveState::Deactivated)?;
+                }
+            }
+            self.mission_start_staged = true;
+        }
+        Ok(())
+    }
+
     pub(crate) fn stage_world<W: Write>(
         &mut self,
         world: &mut ObjectiveWorld,
@@ -728,6 +740,7 @@ impl Runtime {
         starting: bool,
     ) -> Result<BTreeMap<u16, crate::replication::ObjectiveControlDelta>, &'static str> {
         if starting {
+            self.stage_mission_start(world)?;
             self.setup.configure_spawns(frame.spawns)?;
         }
         if self.advances_native_objectives() {
@@ -748,25 +761,25 @@ impl Runtime {
             let state_before_update = world.state(index);
             let row = &self.setup.bindings.rows[&index];
             let class = row.class;
-            let request = self.queued.remove(&index).or_else(|| {
-                (starting && row.start_deactivated)
+            let script_request = self.queued.remove(&index);
+            let request = script_request.or_else(|| {
+                (starting && row.start_deactivated && world.native_class(index).is_none())
                     .then_some((ObjectiveState::Deactivated, u16::MAX))
             });
             if world.native_class(index) == Some(NativeClass::Structural) {
-                if let Some((state, actor)) = request
-                    && world.state(index) != Some(state)
-                {
-                    // MotorPool hooks can request an already-current state.
-                    // Preserve that no-op instead of clearing a pending strike.
-                    let source = (actor != u16::MAX)
-                        .then(|| crate::acquisition_gameplay_engine::objective_actors(frame.engine))
-                        .and_then(|actors| actors.get(&actor).copied())
-                        .map(|actor| crate::domination_objective_runtime::Actor {
-                            player: actor.player,
-                            generation: actor.generation.into(),
-                            team: actor.team,
-                        });
-                    world.stage_native_state(index, state, source)?;
+                if let Some((state, slot)) = script_request {
+                    let raw_slot = (slot != u16::MAX).then_some(slot);
+                    let source_world = frame
+                        .engine
+                        .active
+                        .iter()
+                        .chain(frame.engine.peers.values())
+                        .next()
+                        .map(|a| a.reservation.world);
+                    let resolved = raw_slot.zip(source_world).and_then(|(player, world)| {
+                        frame.engine.objective_script_character(player, world)
+                    });
+                    world.stage_native_state_with_caller(index, state, raw_slot, resolved)?;
                 }
                 // Earlier entries and area tails can kill or unseat a holder.
                 // Resolve the actor against the staged world at this slot.
@@ -775,15 +788,25 @@ impl Runtime {
                 } else {
                     BTreeMap::new()
                 };
+                let mut transitions = 0;
                 loop {
-                    if let Some(delta) = world.tick_native_object(index, frame.now, &actors) {
+                    let delta = world.tick_native_object(index, frame.now, &actors);
+                    let progressed = delta.is_some() || world.has_native_entries();
+                    if let Some(delta) = delta {
                         deltas.insert(index, delta);
                     }
                     for entry in world.take_native_entries() {
-                        self.stage_entry(entry, frame)?;
+                        self.stage_entry(entry, world, frame)?;
                     }
-                    if !world.has_precision_transition(index) {
+                    if !progressed
+                        || !(world.has_precision_transition(index)
+                            || world.has_script_transition(index))
+                    {
                         break;
+                    }
+                    transitions += 1;
+                    if transitions >= 256 {
+                        return Err("native_objective_transition_limit");
                     }
                 }
             } else {
@@ -791,14 +814,14 @@ impl Runtime {
                     && let Some(entry) = world
                         .enter_acquisition_spawn_state(index, class, state, actor, frame.now)?
                 {
-                    self.stage_entry(entry, frame)?;
+                    self.stage_entry(entry, world, frame)?;
                     deltas.insert(index, entry.delta);
                 }
-                if let Some(delta) =
-                    world.advance_acquisition_precision_entry(index, frame.now, |entry, _| {
-                        self.stage_entry(entry, frame)
-                    })?
-                {
+                if let Some(delta) = world.advance_acquisition_precision_entry(
+                    index,
+                    frame.now,
+                    |entry, world| self.stage_entry(entry, world, frame),
+                )? {
                     deltas.insert(index, delta);
                 }
             }
@@ -872,8 +895,9 @@ impl Runtime {
         &mut self,
         objective: u16,
         state: ObjectiveState,
-        actor: u16,
+        actor: Option<u16>,
         hook: Hook,
+        world: &mut ObjectiveWorld,
         frame: &mut Frame<'_, W>,
     ) -> Result<(), &'static str> {
         let completed = state == ObjectiveState::Completed;
@@ -895,13 +919,28 @@ impl Runtime {
         } else {
             ObjectiveState::Deactivated
         };
-        let actor = if matches!(hook, Hook::MotorPool { .. }) {
-            u16::MAX
+        let raw_slot = if matches!(hook, Hook::MotorPool { .. }) {
+            None
         } else {
             actor
         };
+        let source_world = frame
+            .engine
+            .active
+            .iter()
+            .chain(frame.engine.peers.values())
+            .next()
+            .map(|a| a.reservation.world);
         for &target in hook.spawn_targets() {
-            self.queued.insert(target, (state, actor));
+            if world.native_class(target).is_some() {
+                let resolved = raw_slot.zip(source_world).and_then(|(player, world)| {
+                    frame.engine.objective_script_character(player, world)
+                });
+                world.stage_native_state_with_caller(target, state, raw_slot, resolved)?;
+            } else {
+                self.queued
+                    .insert(target, (state, raw_slot.unwrap_or(u16::MAX)));
+            }
         }
         Ok(())
     }

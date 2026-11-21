@@ -153,6 +153,8 @@ struct Spy {
     fail_sequence: bool,
     allow_strike_lifecycle: bool,
     precision_trigger: bool,
+    allow_callback_actor: bool,
+    callback_actors: std::cell::RefCell<Vec<u32>>,
 }
 
 impl ExternalEffects for Spy {
@@ -217,7 +219,7 @@ impl ExternalEffects for Spy {
         enabled: bool,
     ) -> Result<(), &'static str> {
         assert_eq!(context.transition.objective_token, FIRST);
-        assert_eq!(context.actor_object_id, u32::MAX);
+        assert_eq!(context.caller_object_id, 0x0c80_0000);
         assert_eq!(platoon, 31);
         assert_eq!(ability, Ability::Sensor);
         self.calls
@@ -229,15 +231,19 @@ impl ExternalEffects for Spy {
         }
     }
 
-    fn original_actor_id(&self, player: u16, generation: u32) -> Result<u32, &'static str> {
-        if (player, generation) != (3, 5) {
-            return Err("unexpected_actor");
+    fn callback_actor(&self, id: u32) -> Result<Option<Actor>, &'static str> {
+        if !self.allow_callback_actor {
+            return Err("unexpected_callback_actor");
         }
-        Ok(0x0380_0000 | u32::from(player))
-    }
-
-    fn callback_actor(&self, _: u32) -> Result<Option<Actor>, &'static str> {
-        Err("unexpected_callback_actor")
+        if id & 0xffff_0000 != 0x0380_0000 {
+            return Err("unexpected_callback_actor_family");
+        }
+        self.callback_actors.borrow_mut().push(id);
+        Ok(Some(Actor {
+            player: id as u16,
+            generation: 42,
+            team: 0,
+        }))
     }
 
     fn refresh_assignments(
@@ -312,6 +318,19 @@ fn staged_mission_uses_committed_entries_and_preserves_qualified_order() {
             ("immediate", 0),
             ("assignment", 0),
             ("sequence", 0),
+            // Secure desired Completed from Inactive traverses 1,2,3,7.
+            ("class_prefix", 1),
+            ("class_suffix", 1),
+            ("assignment", 1),
+            ("sequence", 1),
+            ("class_prefix", 1),
+            ("class_suffix", 1),
+            ("assignment", 1),
+            ("sequence", 1),
+            ("class_prefix", 1),
+            ("class_suffix", 1),
+            ("assignment", 1),
+            ("sequence", 1),
             ("class_prefix", 1),
             ("class_suffix", 1),
             ("assignment", 1),
@@ -754,3 +773,6 @@ fn manual_tag_uses_the_normal_domination_assignment_refresh() {
     assert_eq!(skipped.assignment, manual.assignment);
     assert_eq!(skipped.manual_tag, u32::MAX);
 }
+
+#[path = "script_objective_actor_tests.rs"]
+mod script_actor;

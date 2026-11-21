@@ -60,6 +60,39 @@ fn tagged_callback(entry: NativeEntry) -> bool {
 }
 
 impl<W: Write> Engine<W> {
+    pub(crate) fn objective_script_character(
+        &self,
+        player: u16,
+        world: u32,
+    ) -> Option<domination_objective_runtime::Actor> {
+        let team = self.current_objective_source_team(player, world)?;
+        let generation = if let Some(actor) = self
+            .active
+            .iter()
+            .chain(self.peers.values())
+            .find(|a| a.reservation.player == player && a.reservation.world == world)
+        {
+            match actor.life {
+                CharacterLife::AwaitingFirstSpawn => 0,
+                CharacterLife::Alive { generation, .. }
+                | CharacterLife::Incapacitated { generation, .. }
+                | CharacterLife::AwaitingRespawn { generation } => generation,
+            }
+        } else {
+            self.bot_registry
+                .bots
+                .get(&player)?
+                .target
+                .runtime
+                .map_or(0, |r| r.generation)
+        };
+        Some(domination_objective_runtime::Actor {
+            player,
+            generation: u64::from(generation),
+            team,
+        })
+    }
+
     pub(crate) fn stage_native_objective_callbacks(
         &mut self,
         entry: NativeEntry,

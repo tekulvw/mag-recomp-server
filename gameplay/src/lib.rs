@@ -2150,3 +2150,6 @@ mod extended_delivery_reward_tests;
 
 #[cfg(test)]
 mod objective_counter_tests;
+
+#[cfg(test)]
+mod script_objective_reward_tests;

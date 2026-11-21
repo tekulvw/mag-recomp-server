@@ -3,7 +3,7 @@ use super::*;
 use crate::objective_catalog::{NativeClass, ObjectiveRewardRule};
 use crate::progression::RewardKind as Kind;
 
-fn fixture() -> Engine<Vec<u8>> {
+pub(crate) fn fixture() -> Engine<Vec<u8>> {
     let mut e = domination_gameplay_engine::tests::structural_repair::repair_fixture();
     e.ground_runtime = Some(Default::default());
     std::sync::Arc::make_mut(

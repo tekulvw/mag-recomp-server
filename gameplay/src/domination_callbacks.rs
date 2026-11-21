@@ -6,8 +6,9 @@ use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
 pub struct Context {
     /// The committed objective entry and its original calling objective token.
     pub transition: Transition,
-    /// Original packed object ID, including the native invalid-actor sentinel.
-    pub actor_object_id: u32,
+    /// Original Lua Caller object identity, normally the source objective.
+    /// The called binding reads that object's current actor at invocation.
+    pub caller_object_id: u32,
     pub invocation: Invocation,
 }
 
@@ -55,7 +56,7 @@ impl Queue {
     pub fn execute_event<T>(
         &mut self,
         transition: Transition,
-        actor_object_id: u32,
+        caller_object_id: u32,
         game_time_ms: u32,
         current: &BTreeMap<u32, State>,
         prepare_immediate: impl FnOnce(InvocationEffects) -> Result<T, &'static str>,
@@ -68,7 +69,7 @@ impl Queue {
         {
             let context = Context {
                 transition,
-                actor_object_id,
+                caller_object_id,
                 invocation,
             };
             if invocation.delay_ms == 0 {
@@ -191,7 +192,7 @@ mod tests {
             start.context,
             Context {
                 transition: TRANSITION,
-                actor_object_id: ACTOR,
+                caller_object_id: ACTOR,
                 invocation: Invocation {
                     binding_token: 77,
                     entry_index: 0,
@@ -213,7 +214,7 @@ mod tests {
             .unwrap();
         assert_eq!(delayed.context.invocation.entry_index, 2);
         assert_eq!(delayed.context.transition, TRANSITION);
-        assert_eq!(delayed.context.actor_object_id, ACTOR);
+        assert_eq!(delayed.context.caller_object_id, ACTOR);
         assert_eq!(delayed.effects, [target(5)]);
         assert_eq!(queue.pending_count(), 2);
 
@@ -288,7 +289,7 @@ mod tests {
         );
         assert_eq!(queue.pending_count(), 3);
         let retried = queue.consume_next_due(120, &current, Ok).unwrap().unwrap();
-        assert_eq!(retried.context.actor_object_id, ACTOR);
+        assert_eq!(retried.context.caller_object_id, ACTOR);
         assert_eq!(retried.context.invocation.entry_index, 1);
         queue.clear();
         assert_eq!(queue.consume_next_due(120, &current, Ok).unwrap(), None);
@@ -305,7 +306,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(output.context.invocation.entry_index, 1);
-        assert_eq!(output.context.actor_object_id, u32::MAX);
+        assert_eq!(output.context.caller_object_id, u32::MAX);
         assert_eq!(queue.pending_count(), 2);
     }
 }
