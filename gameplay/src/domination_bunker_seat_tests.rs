@@ -2,7 +2,7 @@
 use super::*;
 use crate::spawn_progression::dispatch;
 
-fn fixture() -> Engine<Vec<u8>> {
+pub(crate) fn fixture() -> Engine<Vec<u8>> {
     let mut engine = bunker_team_tests::fixture(1, 1, true);
     engine.wire_profile = engine.wire_profiles.profile(20231).unwrap();
     let squads: Vec<_> = (0..32)

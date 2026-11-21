@@ -269,6 +269,27 @@ class NativeProjectorTests(unittest.TestCase):
         self.assertEqual(len(result['body']), 16)
         self.assertEqual(result['body'][7]['incapacitated_multiplier'], .479375)
         self.assertEqual(result['body'][7]['multiplier'], 1.21875)
+        # A mounted-only selection must not silently enter the ordinary bullet set.
+        mounted = 'invented_hospital_primary'
+        catalog['items']['4'] = {'name': mounted,
+            'definition': {'group': 'weapons', 'name': mounted}, 'source': {'invented': True}}
+        catalog['definitions']['weapons'][mounted] = definition(dict(bullet))
+        catalog_raw = encode(catalog)
+        report['catalog_sha256'] = sha(catalog_raw)
+        bootstrap['provenance']['catalog_sha256'] = sha(catalog_raw)
+        binding_raw, bootstrap_raw = encode(report), encode(bootstrap)
+        tool.BINDING_REPORT_SHA256, tool.BOOTSTRAP_SHA256 = map(sha, (binding_raw, bootstrap_raw))
+        selection['hospital_bullets'] = [mounted]
+        result = tool.project(catalog_raw, binding_raw, bootstrap_raw, bullet_raw, melee_raw, selection, policy)
+        self.assertEqual(result['bullets']['4']['usage'], 'hospital_primary')
+        self.assertNotIn('usage', result['bullets']['0'])
+        selection['hospital_bullets'] = [names[0]]
+        with self.assertRaisesRegex(ValueError, 'overlapping_combat_selection'):
+            tool.project(catalog_raw, binding_raw, bootstrap_raw, bullet_raw, melee_raw, selection, policy)
+        selection['hospital_bullets'] = [mounted, mounted]
+        with self.assertRaisesRegex(ValueError, 'invalid_selection:hospital_bullets'):
+            tool.project(catalog_raw, binding_raw, bootstrap_raw, bullet_raw, melee_raw, selection, policy)
+        selection['hospital_bullets'] = [mounted]
         catalog['definitions']['weapons'][names[0]]['parameters']['effective_range'] = 32.
         changed = encode(catalog)
         with self.assertRaisesRegex(ValueError, 'catalog_hash_mismatch'):

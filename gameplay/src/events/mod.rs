@@ -55,6 +55,9 @@ struct EventPlan {
     strategic_waves: Option<[Option<TeamWaveClock>; 2]>,
     squad_order_candidate: Option<crate::squad_order_engine::Candidate>,
     helo_damage_relay: Vec<Vec<u8>>,
+    hospital_turret: Option<(u16, crate::hospital_turrets::Runtime)>,
+    hospital_aim_packets: Vec<Vec<u8>>,
+    hospital_late_join: Vec<Vec<u8>>,
     ground_dynamics_relay: Option<(u16, Vec<u8>)>,
     ground_damage_relay: Option<Vec<u8>>,
     combat: CombatChanges,
@@ -184,6 +187,29 @@ struct ReplicationChanges {
     helo_creation: Option<Vec<u8>>,
     seat_transition: Option<Vec<u8>>,
     squad_spawn_delta: Option<Vec<u8>>,
+}
+
+impl ReplicationChanges {
+    fn history_packet(&self) -> Option<&Vec<u8>> {
+        if self.ordered_health.is_some() {
+            return None;
+        }
+        self.initial_objects
+            .as_ref()
+            .or(self.spawn_delta.as_ref())
+            .or(self.wave_delta.as_ref())
+            .or(self.squad_spawn_delta.as_ref())
+            .or(self.objective_delta.as_ref())
+            .or(self.objective_assignment.as_ref())
+            .or(self.objective_clear.as_ref())
+            .or(self.emplacement_creation.as_ref())
+            .or(self.ground_vehicle_creation.as_ref())
+            .or(self.helo_creation.as_ref())
+            .or(self.seat_transition.as_ref())
+            .or(self.damage_delta.as_ref())
+            .or(self.projectile_delta.as_ref())
+            .or(self.dummy_delta.as_ref())
+    }
 }
 
 #[derive(Default)]
@@ -479,6 +505,10 @@ impl<W: Write> Engine<W> {
         } else {
             json!({"type":"opaque_transport_payload"})
         };
+        if self.has_hospital_turrets() && plan.replication.emplacement_creation.is_some() {
+            plan.hospital_late_join = self.hospital_turret_late_join(now)?;
+        }
+        self.stage_hospital_aim_budget(&mut plan);
         statistics::stage(self, &mut plan)?;
         if let Some(points) = plan.session.clock_points {
             let score = protocol::ScoreChange {
@@ -527,6 +557,8 @@ impl<W: Write> Engine<W> {
                 "ordered_health": plan.replication.ordered_health.as_ref().map(|p| protocol::encode_hex(p)),
                 "domination_sequence_batches": plan.replication.domination_sequence_batches.iter()
                     .map(|packet| protocol::encode_hex(packet)).collect::<Vec<_>>(),
+                "hospital_aim_packets": plan.hospital_aim_packets.iter().map(|packet| protocol::encode_hex(packet)).collect::<Vec<_>>(),
+                "hospital_late_join": plan.hospital_late_join.iter().map(|packet| protocol::encode_hex(packet)).collect::<Vec<_>>(),
                 "messages": plan.messages,
                 "rewards": plan.combat.new_rewards,
                 "rejection": plan.rejection,
@@ -546,6 +578,61 @@ impl<W: Write> Engine<W> {
         self.commit_event(&event, decoded, plan, now)
     }
 
+    fn stage_hospital_aim_budget(&self, plan: &mut EventPlan) {
+        if plan.hospital_aim_packets.is_empty() {
+            return;
+        }
+        // A single owner update can also finish a grenade launched before
+        // mounting. Account for its shared damage and revocation frames
+        // before recording the turret state and its relay together.
+        let driver_revocations = self
+            .active_ground_drivers()
+            .into_iter()
+            .filter(|&(index, player)| {
+                let loses_life = plan.combat.peer_lives.iter().any(|(id, life)| {
+                    !life.is_alive()
+                        && self
+                            .peers
+                            .get(id)
+                            .is_some_and(|peer| peer.reservation.player == player)
+                });
+                let loses_vehicle = plan.ground_runtime.as_ref().is_some_and(|runtime| {
+                    runtime.get(index).is_none_or(|vehicle| {
+                        vehicle.state != 2
+                            || vehicle.is_dead()
+                            || vehicle.body != acquisition_ground_runtime::Body::Operational
+                    })
+                });
+                loses_life || loses_vehicle
+            })
+            .count();
+        let baseline = |actor: &Active| {
+            let grenade_relays = if actor.ready_for_updates {
+                usize::from(plan.ground_damage_relay.is_some()) + plan.helo_damage_relay.len()
+            } else {
+                0
+            };
+            grenade_relays
+                + driver_revocations
+                + usize::from(plan.replication.ordered_health.is_some())
+                + usize::from(plan.session.correction_publication.is_some())
+                + usize::from(plan.ground_dynamics_relay.is_some())
+                // Multiplayer can relay one direct history packet too.
+                + usize::from(self.maximum_players > 1 && plan.replication.history_packet().is_some())
+        };
+        if let Err(reason) = self.check_hospital_turret_queue(
+            self.peers
+                .values()
+                .filter(|peer| peer.initial_objects.is_some()),
+            plan.hospital_aim_packets.len(),
+            baseline,
+        ) {
+            plan.hospital_turret = None;
+            plan.hospital_aim_packets.clear();
+            plan.gameplay_denial = Some(reason);
+        }
+    }
+
     /// Called only after recording and validating the planned event. Keep this
     /// commit order stable: peer effects, owner fields, history, then actor state.
     fn commit_event(
@@ -557,6 +644,10 @@ impl<W: Write> Engine<W> {
     ) -> Result<Vec<OutboundMessage>, &'static str> {
         let previously_driving = self.active_ground_drivers();
         let seating_transition = plan.replication.seat_transition.is_some();
+        let reconcile_hospital_grants = plan.hospital_turret.is_some()
+            || plan.combat.new_life.is_some()
+            || !plan.combat.peer_lives.is_empty()
+            || !plan.combat.death_notifications.is_empty();
         if let Some(clock) = plan.session.new_team_wave {
             let team = self.active.as_ref().ok_or("no_reservation")?.team();
             self.team_waves[usize::from(team)] = Some(clock);
@@ -667,25 +758,7 @@ impl<W: Write> Engine<W> {
         }
         // Only newly encoded object updates enter history. Replays and time/score
         // replies consume no replication sequence; commit follows record+flush.
-        if let Some(packet) = plan
-            .replication
-            .initial_objects
-            .as_ref()
-            .or(plan.replication.spawn_delta.as_ref())
-            .or(plan.replication.wave_delta.as_ref())
-            .or(plan.replication.squad_spawn_delta.as_ref())
-            .or(plan.replication.objective_delta.as_ref())
-            .or(plan.replication.objective_assignment.as_ref())
-            .or(plan.replication.objective_clear.as_ref())
-            .or(plan.replication.emplacement_creation.as_ref())
-            .or(plan.replication.ground_vehicle_creation.as_ref())
-            .or(plan.replication.helo_creation.as_ref())
-            .or(plan.replication.seat_transition.as_ref())
-            .or(plan.replication.damage_delta.as_ref())
-            .or(plan.replication.projectile_delta.as_ref())
-            .or(plan.replication.dummy_delta.as_ref())
-            .filter(|_| plan.replication.ordered_health.is_none())
-        {
+        if let Some(packet) = plan.replication.history_packet() {
             active.remember(packet.clone())?;
         }
         if let Some(tracker) = plan.session.fall_tracker {
@@ -1063,6 +1136,36 @@ impl<W: Write> Engine<W> {
             {
                 recipient.queue_shared(packet.clone());
             }
+        }
+        if let Some((index, turret)) = plan.hospital_turret {
+            if self
+                .active
+                .as_ref()
+                .is_some_and(|actor| turret.accepted_actor(actor, index))
+            {
+                self.bunker_world
+                    .as_mut()
+                    .expect("qualified hospital world")
+                    .hospital_turrets
+                    .insert(index, turret);
+            } else {
+                plan.hospital_aim_packets.clear();
+            }
+        }
+        if reconcile_hospital_grants {
+            self.revoke_inactive_hospital_turrets();
+        }
+        for peer in self
+            .peers
+            .values_mut()
+            .filter(|peer| peer.initial_objects.is_some())
+        {
+            for packet in &plan.hospital_aim_packets {
+                peer.queue_shared(packet.clone());
+            }
+        }
+        if let Some(active) = self.active.as_mut() {
+            active.queue_hospital_bootstrap(plan.hospital_late_join);
         }
         Ok(plan.messages)
     }

@@ -1038,6 +1038,14 @@ fn engine_dying_escort_blocks_further_hits_and_decays_with_original_attacker() {
 mod ground_effects;
 
 fn ground_grenade_fixture(blocked: bool, vehicle_damage: f32) -> Engine<Vec<u8>> {
+    ground_grenade_fixture_for_map(blocked, vehicle_damage, "synthetic_arena")
+}
+
+pub(crate) fn ground_grenade_fixture_for_map(
+    blocked: bool,
+    vehicle_damage: f32,
+    map_name: &str,
+) -> Engine<Vec<u8>> {
     let mut e = ground_firearm_fixture(0.0, false);
     e.item_catalog = crate::human_kill_reward_tests::grenade_items_for_ground_test(vehicle_damage);
     let p = e
@@ -1050,7 +1058,7 @@ fn ground_grenade_fixture(blocked: bool, vehicle_damage: f32) -> Engine<Vec<u8>>
         .position;
     let x = p.x - if blocked { 1.0 } else { 20.0 };
     let raw = json!({"format":"mag_collision_world","schema_version":1,"coordinate_space":"world",
-        "metadata":{"map_name":"synthetic_arena","build":"synthetic","coverage":"complete",
+        "metadata":{"map_name":map_name,"build":"synthetic","coverage":"complete",
             "provenance":["synthetic grenade wall"],"unknowns":[]},
         "instances":[{"id":"wall","vertices_xyz":[[x,p.y-2.,p.z-3.],[x,p.y+4.,p.z-3.],
             [x,p.y+4.,p.z+3.],[x,p.y-2.,p.z+3.]],"triangles":[[0,1,2],[0,2,3]]}]});

@@ -111,6 +111,7 @@ pub(super) fn fixture(actor_team: u8, bunker_team: u8, same_faction: bool) -> En
         vehicle_token: 1,
         domination_spawn_sha256: None,
         domination_structure_sha256: None,
+        hospital_turrets: Default::default(),
         pending_placements: 0,
         commands: BTreeMap::new(),
     });

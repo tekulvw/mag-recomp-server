@@ -32,7 +32,7 @@ pub(super) fn mount<W: Write>(
         || bunker.as_ref().unwrap().faction != active.reservation.character.faction
     {
         Some("bunker_mount_side_mismatch")
-    } else if seat == 0 {
+    } else if seat == 0 && !bunker.as_ref().unwrap().turret_qualified {
         Some("bunker_turret_authority_unavailable")
     } else if seat > bunker.as_ref().unwrap().passenger_seats {
         Some("invalid_bunker_seat")
@@ -79,6 +79,31 @@ pub(super) fn mount<W: Write>(
     if let Some(denial) = denial {
         plan.gameplay_denial = Some(denial);
     } else if !duplicate {
+        let mut definition = None;
+        if seat == 0 {
+            let staged = ctx
+                .engine
+                .check_hospital_turret_queue(
+                    ctx.engine
+                        .peers
+                        .values()
+                        .filter(|peer| peer.initial_objects.is_some()),
+                    1,
+                    |_| 0,
+                )
+                .and_then(|_| world.unwrap().hospital_turrets[&index].mount(active));
+            match staged {
+                Ok((next, items)) => {
+                    definition = Some(items);
+                    plan.hospital_turret = Some((index, next));
+                }
+                Err(error) => {
+                    plan.gameplay_denial = Some(error);
+                    return Ok(json!({"type":"mount_seat","vehicle_id":request.vehicle_id,
+                        "seat_id":request.seat_id,"indexed_hospital":true,"transition_sent":false}));
+                }
+            }
+        }
         let packet = replication::AlphaSeatTransition {
             sequence: ctx.next_sequence,
             timestamp_ms: ctx.now.as_millis() as u32,
@@ -87,13 +112,14 @@ pub(super) fn mount<W: Write>(
                 client_index: active.reservation.player,
             },
         }
-        .encode_for_bunker_with_profile(
+        .encode_bunker_with_definition(
             index,
             active.reservation.player,
             Some(
                 ctx.engine
                     .bunker_ownership_after(index, active.reservation.player, Some(seat)),
             ),
+            definition,
             ctx.engine.wire_profile,
         )?;
         plan.outgoing = Some(packet.clone());
@@ -145,6 +171,17 @@ pub(super) fn dismount<W: Write>(
         {
             Err(reason) => plan.gameplay_denial = Some(reason),
             Ok(exit) => {
+                if request.seat_id == 0
+                    && let Some(mut turret) = ctx
+                        .engine
+                        .bunker_world
+                        .as_ref()
+                        .and_then(|world| world.hospital_turrets.get(&index))
+                        .cloned()
+                {
+                    turret.revoke();
+                    plan.hospital_turret = Some((index, turret));
+                }
                 let packet = replication::AlphaSeatTransition {
                     sequence: ctx.next_sequence,
                     timestamp_ms: ctx.now.as_millis() as u32,

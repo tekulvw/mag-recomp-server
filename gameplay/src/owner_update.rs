@@ -52,6 +52,7 @@ pub struct TypedOwnerUpdateFields {
     pub character: Option<ClientCharacterFields>,
     pub ground_vehicles: Vec<OwnerDynamics>,
     pub turret: Option<ClientTurretFields>,
+    pub(crate) hospital_turrets: Vec<crate::hospital_turret_wire::ClientUpdate>,
     pub projectiles: Vec<ProjectileOwnerUpdate>,
 }
 impl TypedOwnerUpdateFields {
@@ -60,12 +61,14 @@ impl TypedOwnerUpdateFields {
         expected_character_index: u16,
         profile: crate::wire_profile::WireProfile,
         allow_ground_owner: bool,
+        allow_hospital_owner: bool,
     ) -> Result<Self, OwnerUpdateError> {
-        Self::decode_with_ground_ownership(
+        Self::decode_with_ownership(
             update,
             expected_character_index,
             profile,
             allow_ground_owner,
+            allow_hospital_owner,
         )
         .map_err(OwnerUpdateError::from)
     }
@@ -85,14 +88,15 @@ impl TypedOwnerUpdateFields {
         expected_character_index: u16,
         profile: crate::wire_profile::WireProfile,
     ) -> Result<Self, &'static str> {
-        Self::decode_with_ground_ownership(update, expected_character_index, profile, false)
+        Self::decode_with_ownership(update, expected_character_index, profile, false, false)
     }
 
-    fn decode_with_ground_ownership(
+    fn decode_with_ownership(
         update: &ObjectUpdate<'_>,
         expected_character_index: u16,
         profile: crate::wire_profile::WireProfile,
         allow_ground_owner: bool,
+        allow_hospital_owner: bool,
     ) -> Result<Self, &'static str> {
         update.validate_profile(profile)?;
         let mut bits = BitReader::with_profile(update.wire, profile);
@@ -109,7 +113,12 @@ impl TypedOwnerUpdateFields {
                 continue;
             }
             if object_type == 13 {
-                fields.turret = ClientTurretFields::decode_object(&mut bits)?;
+                if allow_hospital_owner {
+                    fields.hospital_turrets =
+                        crate::hospital_turret_wire::decode_objects(&mut bits)?;
+                } else {
+                    fields.turret = ClientTurretFields::decode_object(&mut bits)?;
+                }
                 continue;
             }
             if bits.read(1)? == 0 {

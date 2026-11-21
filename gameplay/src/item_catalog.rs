@@ -702,6 +702,9 @@ impl ItemCatalog {
     pub fn valor_loadout(&self, index: u8) -> Option<crate::replication::CharacterLoadout> {
         self.valor_defaults.as_ref()?.loadout(self, index)
     }
+    pub(crate) fn retail_authored_ref(&self, item_id: u16) -> Option<&str> {
+        self.retail_item_refs.get(&item_id).map(String::as_str)
+    }
     fn item(&self, id: u16) -> Result<&Value, &'static str> {
         let retail = self.application_id() == 20231;
         if id >= if retail { 4096 } else { 1024 } {
@@ -760,6 +763,13 @@ impl ItemCatalog {
         for row in &saved.inventories {
             for &item in row.iter().flatten() {
                 self.validate_item(item)?;
+                if self
+                    .retail_combat
+                    .as_ref()
+                    .is_some_and(|combat| combat.hospital_primary_for_damage(item).is_ok())
+                {
+                    return Err("saved_mounted_bullet_weapon");
+                }
             }
         }
         Ok(())

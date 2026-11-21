@@ -244,6 +244,8 @@ pub struct DominationBunker<'a> {
     pub spawn_index: u16,
     pub team: u8,
     pub faction: u8,
+    pub(crate) properties_source: &'a str,
+    pub(crate) turret_qualified: bool,
     pub operational: bool,
     pub position: replication::CharacterPosition,
     pub max_occupancy: u8,
@@ -257,8 +259,7 @@ impl DominationBunker<'_> {
     /// Original hospital passenger seats use the vehicle transform directly
     /// because the shared empty node name never resolves in these models.
     pub fn seat_position(&self, seat: u8) -> Option<replication::CharacterPosition> {
-        (1..=self.passenger_seats)
-            .contains(&seat)
+        ((seat == 0 && self.turret_qualified) || (1..=self.passenger_seats).contains(&seat))
             .then_some(self.position)
     }
 
@@ -378,6 +379,7 @@ pub struct BunkerWorld {
     vehicle_token: u32,
     domination_spawn_sha256: Option<String>,
     domination_structure_sha256: Option<String>,
+    pub(crate) hospital_turrets: BTreeMap<u16, crate::hospital_turrets::Runtime>,
     pending_placements: usize,
     commands: BTreeMap<String, (u16, f32)>,
 }
@@ -492,6 +494,7 @@ impl BunkerWorld {
             vehicle_token,
             domination_spawn_sha256: None,
             domination_structure_sha256: None,
+            hospital_turrets: Default::default(),
             pending_placements,
             commands: Default::default(),
         })
@@ -579,6 +582,7 @@ impl BunkerWorld {
             vehicle_token: raw.vehicle_type_token,
             domination_spawn_sha256: Some(raw.spawn_catalog_sha256),
             domination_structure_sha256: Some(raw.structure_catalog_sha256),
+            hospital_turrets: Default::default(),
             pending_placements: 0,
             commands: BTreeMap::new(),
         })
@@ -598,6 +602,10 @@ impl BunkerWorld {
     /// The per-emplacement exit is addressed by the family-13 pool index.
     pub fn exit_policy(&self, index: u16) -> Option<&vehicle_exit::BunkerExitPolicy> {
         self.bunkers.get(&index)?.exit.as_ref()
+    }
+
+    pub(crate) fn vehicle_type_token(&self) -> u32 {
+        self.vehicle_token
     }
 
     pub(crate) fn domination_structure_sha256(&self) -> Option<&str> {
@@ -716,6 +724,8 @@ impl BunkerWorld {
             spawn_index: bunker.spawn,
             team: bunker.team,
             faction: bunker.faction,
+            properties_source: &bunker.profile.properties_source,
+            turret_qualified: self.hospital_turrets.contains_key(&index),
             operational: bunker.vehicle_state == VehicleState::Operational
                 && !bunker.health.destroyed,
             position: exit.transform.position,
@@ -772,6 +782,11 @@ impl BunkerWorld {
             bunker.turret_destruction_started = true;
         }
         bunker.vehicle_state = state;
+        if (state_changed || !enabled)
+            && let Some(turret) = self.hospital_turrets.get_mut(&object_index)
+        {
+            turret.revoke();
+        }
         bunker.damage.health_quarter_points = bunker.health.wire_health();
         bunker.damage.conditions = bunker.health.conditions();
         Ok(DominationBunkerUpdate {
@@ -793,6 +808,7 @@ impl BunkerWorld {
             vehicle_token: 0,
             domination_spawn_sha256: None,
             domination_structure_sha256: None,
+            hospital_turrets: Default::default(),
             pending_placements: 0,
             commands: Default::default(),
         })
@@ -812,6 +828,9 @@ impl BunkerWorld {
         self.pending_placements
     }
     pub fn reset(&mut self) {
+        self.hospital_turrets
+            .values_mut()
+            .for_each(crate::hospital_turrets::Runtime::reset);
         for b in self.bunkers.values_mut() {
             b.vehicle_state = VehicleState::Operational;
             b.turret_destruction_started = false;
@@ -1725,4 +1744,4 @@ mod domination_placement_tests {
 
 #[cfg(test)]
 #[path = "domination_bunker_seat_tests.rs"]
-mod domination_bunker_seat_tests;
+pub(crate) mod domination_bunker_seat_tests;

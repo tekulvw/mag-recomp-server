@@ -390,10 +390,16 @@ impl<W: Write> Provider<'_, W> {
                 .as_ref()
                 .cloned()
                 .ok_or("domination_hospital_hulk_assets_required")?;
-            let yaw = *self
-                .state
-                .hospital_turret_yaws
+            let yaw = bunkers
+                .hospital_turrets
                 .get(&update.object_index())
+                .and_then(crate::hospital_turrets::Runtime::yaw)
+                .or_else(|| {
+                    self.state
+                        .hospital_turret_yaws
+                        .get(&update.object_index())
+                        .copied()
+                })
                 .ok_or("domination_hospital_turret_yaw_required")?;
             let bunker = bunkers
                 .domination_bunker(update.object_index())

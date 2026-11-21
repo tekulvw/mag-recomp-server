@@ -9,11 +9,31 @@ impl Active {
     /// Bound memory now; retire this recipient through recorded lifecycle cleanup
     /// on the next request rather than failing the healthy publisher's operation.
     pub(super) fn queue_shared(&mut self, packet: Vec<u8>) {
-        if self.pending_shared.len() >= MAX_SHARED_QUEUE {
+        if self.ordinary_shared_len() >= MAX_SHARED_QUEUE {
             self.replication_backlogged = true;
         } else if !self.replication_backlogged {
             self.pending_shared.push_back(packet);
         }
+    }
+
+    pub(super) fn ordinary_shared_len(&self) -> usize {
+        self.pending_shared.len() - self.hospital_bootstrap.len()
+    }
+
+    pub(super) fn queue_hospital_bootstrap(&mut self, packets: Vec<Vec<u8>>) {
+        if !packets.is_empty() {
+            debug_assert!(self.hospital_bootstrap.is_empty());
+            debug_assert!(packets.len() <= crate::hospital_turrets::MAX_LATE_JOIN_PACKETS);
+            let start = self.pending_shared.len();
+            self.hospital_bootstrap = start..start + packets.len();
+            self.pending_shared.extend(packets);
+        }
+    }
+
+    pub(super) fn pop_shared(&mut self) {
+        self.pending_shared.pop_front();
+        self.hospital_bootstrap.start = self.hospital_bootstrap.start.saturating_sub(1);
+        self.hospital_bootstrap.end = self.hospital_bootstrap.end.saturating_sub(1);
     }
 
     pub(super) fn apply_peer_damage(
@@ -579,6 +599,9 @@ impl<W: Write> Engine<W> {
             _ => None,
         };
         let mut messages = self.apply(request, decoded, now, wall)?;
+        if is_release {
+            self.revoke_inactive_hospital_turrets();
+        }
         if let Some(index) = released_driver {
             self.queue_ground_driver_revocation(index, now)?;
         }
@@ -1078,6 +1101,9 @@ impl<W: Write> Engine<W> {
         if messages.len() > limit || total > 24_000 {
             return Err("shared_reply_budget_exceeded");
         }
+        // Shared character frames can already refer to an indexed hospital.
+        // Its direct creation reply precedes the existing FIFO and bootstrap.
+        let requires_hospital_creation = self.has_hospital_turrets();
         let mut ready: Vec<_> = self
             .peers
             .values()
@@ -1086,6 +1112,7 @@ impl<W: Write> Engine<W> {
                 a.ready_for_updates
                     && !a.pending_shared.is_empty()
                     && self.ground_vehicle_creation_complete(a.ground_vehicle_batch)
+                    && (!requires_hospital_creation || a.emplacement_creation.is_some())
             })
             .collect();
         ready.sort_unstable_by_key(|a| a.reservation.player);
@@ -1167,7 +1194,7 @@ impl<W: Write> Engine<W> {
             if let Some((sequence, position)) = correction {
                 actor.tracking.bind_correction(sequence, position);
             }
-            actor.pending_shared.pop_front();
+            actor.pop_shared();
             if actor.pending_shared.is_empty() {
                 actor.ordered_health_pending = false;
             }

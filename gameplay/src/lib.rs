@@ -142,6 +142,8 @@ mod ground_seats;
 pub mod ground_vehicles;
 mod headless_sim;
 pub mod healing;
+mod hospital_turret_wire;
+mod hospital_turrets;
 pub mod item_catalog;
 mod loadout_refresh;
 #[cfg(test)]
@@ -983,6 +985,7 @@ struct PendingDamage {
 enum CharacterHitProfile {
     OnFoot(ballistics::BallisticProfile),
     Retail(retail_combat::RetailBulletProfile),
+    HospitalPrimary(retail_combat::RetailBulletProfile),
     Melee(retail_melee::RetailMeleeProfile),
     Alpha(turret::AlphaMinigunProfile),
 }
@@ -996,7 +999,7 @@ impl CharacterHitProfile {
     fn item_id(&self) -> u16 {
         match self {
             Self::OnFoot(p) => p.item_id(),
-            Self::Retail(p) => p.item_id(),
+            Self::Retail(p) | Self::HospitalPrimary(p) => p.item_id(),
             Self::Melee(p) => p.item_id(),
             Self::Alpha(p) => p.item_id(),
         }
@@ -1009,7 +1012,9 @@ impl CharacterHitProfile {
     ) -> Result<armor::RawCharacterDamage, &'static str> {
         match self {
             Self::OnFoot(p) => p.raw_character_damage(distance, scale, location),
-            Self::Retail(p) => p.raw_character_damage(distance, scale, location),
+            Self::Retail(p) | Self::HospitalPrimary(p) => {
+                p.raw_character_damage(distance, scale, location)
+            }
             Self::Melee(p) => p.raw_character_damage(distance, scale, location),
             Self::Alpha(p) => p.raw_character_damage(distance, scale, location),
         }
@@ -1073,6 +1078,8 @@ struct Active {
     replication_history: Vec<Vec<u8>>,
     outbound_sequence: u32,
     pending_shared: std::collections::VecDeque<Vec<u8>>,
+    /// Contiguous one-time hospital bootstrap inside the reliable FIFO.
+    hospital_bootstrap: std::ops::Range<usize>,
     /// Health replies must join the FIFO until scheduled health drains.
     ordered_health_pending: bool,
     replication_backlogged: bool,
@@ -1109,6 +1116,13 @@ struct Active {
     published_wave_deadline: Option<Duration>,
     entered_game: bool,
     owner_fields: player_tracking::ClientCharacterFields,
+}
+impl Active {
+    fn is_indexed_hospital_gunner(&self) -> bool {
+        self.wire_profile.application_id() == 20231
+            && self.mounted_bunker.is_some()
+            && self.mounted_seat == Some(0)
+    }
 }
 
 /// The writer is flushed before a request is acknowledged or state changes.
@@ -1228,6 +1242,19 @@ impl<W: Write> Engine<W> {
         active: &Active,
         request: &bullet_hit::NetMessageHit,
     ) -> Result<CharacterHitProfile, &'static str> {
+        if active.is_indexed_hospital_gunner() {
+            if request.defender >> 16 != 0x0380 {
+                return Err("hospital_primary_requires_character_target");
+            }
+            let qualified = self.hospital_primary_for_actor(active, request)?;
+            return Ok(CharacterHitProfile::HospitalPrimary(
+                retail_combat::RetailBulletProfile::from_hospital_primary(
+                    self.item_catalog.retail_combat()?,
+                    qualified,
+                    request,
+                )?,
+            ));
+        }
         if active.mounted_seat == Some(0) {
             let authority = self.alpha_turret_authority(active)?;
             let generation = match active.life {
@@ -1509,11 +1536,12 @@ impl<W: Write> Engine<W> {
                 ..
             } => {
                 let retained = self.results_owner(reservation_id);
-                Some(DecodedEvent::with_profile(
+                Some(DecodedEvent::with_hospital_ownership(
                     &bytes,
                     *player_id,
                     retained.map_or(self.wire_profile, |c| c.profile),
                     retained.is_none() && self.ground_driver_enabled(),
+                    retained.is_none() && self.has_hospital_turrets(),
                 ))
             }
             _ => None,
