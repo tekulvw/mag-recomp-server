@@ -16,7 +16,7 @@ mod resuscitate;
 mod seats;
 mod statistics;
 pub(crate) use statistics::{
-    CharacterEffectConsequences, CharacterEffectInput, bot_killed_human,
+    CharacterEffectConsequences, CharacterEffectInput, plan_bot_killed_human,
     plan_character_effect_consequences,
 };
 mod update_actions;
@@ -165,6 +165,7 @@ struct CombatChanges {
     peer_lives: Vec<(String, CharacterLife)>,
     peer_damage: Vec<(String, u32, replication::CharacterDamage)>,
     bot_damage: Vec<(u16, u32, replication::CharacterDamage)>,
+    bot_firearm_kd: Option<bot_firearm_kd::Plan>,
     death_notifications: Vec<death_notifications::Plan>,
     new_damage_model: Option<replication::CharacterDamage>,
     revived_peer: Option<(String, u32, replication::CharacterDamage)>,
@@ -581,6 +582,7 @@ impl<W: Write> Engine<W> {
                 "peer_lives":plan.combat.peer_lives.iter().map(|(id,life)|json!({"reservation_id":id,"life":format!("{life:?}")})).collect::<Vec<_>>(),
                 "new_life":plan.combat.new_life.map(|life|format!("{life:?}")),
                 "death_notifications": plan.combat.death_notifications.iter().map(|p| p.audit()).collect::<Vec<_>>(),
+                "bot_firearm_kd": plan.combat.bot_firearm_kd.as_ref().map(bot_firearm_kd::Plan::audit),
                 "ordered_health": plan.replication.ordered_health.as_ref().map(|p| protocol::encode_hex(p)),
                 "domination_sequence_batches": plan.replication.domination_sequence_batches.iter()
                     .map(|packet| protocol::encode_hex(packet)).collect::<Vec<_>>(),
@@ -794,6 +796,9 @@ impl<W: Write> Engine<W> {
             } else {
                 self.commit_bot_damage(id, generation, damage, now)?;
             }
+        }
+        if let Some(kd) = plan.combat.bot_firearm_kd {
+            kd.install(self)?;
         }
         if let Some((id, generation, damage)) = plan.combat.revived_peer {
             let peer = self.peers.get_mut(&id).ok_or("stale_revive_patient")?;

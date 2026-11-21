@@ -7,23 +7,27 @@ fn combat_items() -> Arc<item_catalog::ItemCatalog> {
     combat_items_with_grenade(false)
 }
 fn combat_items_with_grenade(grenade: bool) -> Arc<item_catalog::ItemCatalog> {
-    combat_fixture_items(grenade, 0.0, 0.0, None)
+    combat_fixture_items(grenade, 0.0, 0.0, None, false)
 }
 
 pub(crate) fn combat_items_for_ground_test(vehicle_hp: f32) -> Arc<item_catalog::ItemCatalog> {
-    combat_fixture_items(false, vehicle_hp, 0.0, None)
+    combat_fixture_items(false, vehicle_hp, 0.0, None, false)
 }
 
 pub(crate) fn grenade_items_for_ground_test(vehicle_hp: f32) -> Arc<item_catalog::ItemCatalog> {
-    combat_fixture_items(true, 0.0, vehicle_hp, None)
+    combat_fixture_items(true, 0.0, vehicle_hp, None, false)
 }
 
 pub(crate) fn grenade_items_with_cover() -> Arc<item_catalog::ItemCatalog> {
-    combat_fixture_items(true, 0.0, 0.0, Some(1.25))
+    combat_fixture_items(true, 0.0, 0.0, Some(1.25), false)
 }
 
 pub(crate) fn vehicle_grenade_items_with_cover(vehicle_hp: f32) -> Arc<item_catalog::ItemCatalog> {
-    combat_fixture_items(true, 0.0, vehicle_hp, Some(1.25))
+    combat_fixture_items(true, 0.0, vehicle_hp, Some(1.25), false)
+}
+
+pub(crate) fn bot_firearm_items() -> Arc<item_catalog::ItemCatalog> {
+    combat_fixture_items(false, 0.0, 0.0, None, true)
 }
 
 fn combat_fixture_items(
@@ -31,7 +35,17 @@ fn combat_fixture_items(
     vehicle_hp: f32,
     grenade_vehicle_hp: f32,
     material_penetration: Option<f64>,
+    bot_firearm: bool,
 ) -> Arc<item_catalog::ItemCatalog> {
+    let mut weapon = json!({"magazine_capacity":9});
+    if bot_firearm {
+        weapon["reticule_params_stand"] = json!({
+            "KnockAdd":0,"KnockFire":0.,"KnockReturn":1.,"SideKnockFire":0.,"SideKnockReturn":1.,
+            "SpreadFire":0.,"SpreadReturn":1.,"SpreadMove":0.,"SpreadRotate":0.,"MoveSpreadReturn":1.,
+            "cone_width_range":[0.,0.],"pitch_offset_range":[0.,0.],"yaw_offset_range":[0.,0.],
+            "SpreadNormalization":0,"WidthCombineOp":"kWCO_Add",
+        });
+    }
     let items = item_catalog::ItemCatalog::from_value_for_application(json!({
         "schema_version":2,"application_id":20231,
         "items":{
@@ -40,7 +54,7 @@ fn combat_fixture_items(
             "FactionItemList0:3":{"authored_ref":"FactionItemList0:3","faction_list":"FactionItemList0","local_ordinal":3,"wire_item_id":null,
                 "name":"synthetic_armor","item_type":"kArmor","definition":{"group":"armor","name":"synthetic_armor"}}
         },
-        "definitions":{"weapons":{"synthetic_rifle":{"parameters":{"magazine_capacity":9}}},"armor":{"synthetic_armor":{"parameters":{}}}},"resources":{}
+        "definitions":{"weapons":{"synthetic_rifle":{"parameters":weapon}},"armor":{"synthetic_armor":{"parameters":{}}}},"resources":{}
     }), blast_rules::CharacterBlastRules {armor_rating_reduction:0.0,armor_prevention_reduction:0.0,hit_location:3,damage_type:10},20231).unwrap();
     let armory = retail_armory::RetailArmory::from_json(&json!({
         "schema_version":1,"application_id":20231,"source_sha256":{"synthetic":"a".repeat(64)},
@@ -64,6 +78,12 @@ fn combat_fixture_items(
         "body":(0..16).map(|location|json!({"location":location,"armor_area":1,"multiplier":1.0,"incapacitated_multiplier":1.0,"source":{}})).collect::<Vec<_>>(),
         "grenades":{},"healing":{},"unsupported":{},"limitations":["Synthetic fixtures only"]
     });
+    if bot_firearm {
+        metadata["bullets"]["2"]["firearm"] = json!({
+            "initial_fire_mode":"kSemiAuto","refire_seconds":0.1,
+            "reload_seconds":1.,"infinite_ammo":false,
+        });
+    }
     if grenade {
         metadata["schema_version"] = json!(3);
         metadata["authority"]["grenade_damage"] = json!(true);

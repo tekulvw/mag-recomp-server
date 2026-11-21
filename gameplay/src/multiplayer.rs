@@ -31,7 +31,9 @@ impl Active {
     }
 
     pub(super) fn pop_shared(&mut self) {
-        self.pending_shared.pop_front();
+        if self.pending_shared.pop_front().is_some() {
+            self.shared_frames_drained = self.shared_frames_drained.saturating_add(1);
+        }
         self.hospital_bootstrap.start = self.hospital_bootstrap.start.saturating_sub(1);
         self.hospital_bootstrap.end = self.hospital_bootstrap.end.saturating_sub(1);
     }
@@ -1145,7 +1147,11 @@ impl<W: Write> Engine<W> {
             .chain(self.active.iter())
             .filter(|a| {
                 a.ready_for_updates
-                    && !a.pending_shared.is_empty()
+                    && (!a.pending_shared.is_empty()
+                        || self
+                            .bot_registry
+                            .stats_publication
+                            .pending(a, &self.bot_registry.bots))
                     && self.ground_vehicle_creation_complete(a.ground_vehicle_batch)
                     && (!requires_hospital_creation || a.emplacement_creation.is_some())
             })
@@ -1159,8 +1165,17 @@ impl<W: Write> Engine<W> {
         let mut offsets = vec![0; ready.len()];
         let mut sequences = ready
             .iter()
-            .map(|a| a.next_sequence())
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|a| a.outbound_sequence)
+            .collect::<Vec<_>>();
+        let mut scheduling = ready
+            .iter()
+            .map(|a| {
+                self.bot_registry
+                    .stats_publication
+                    .scheduling(&a.reservation.id)
+            })
+            .collect::<Vec<_>>();
+        let mut selected_stats = vec![std::collections::BTreeSet::new(); ready.len()];
         let mut next_cursor = self.shared_drain_cursor;
         'drain: loop {
             let mut progressed = false;
@@ -1168,21 +1183,55 @@ impl<W: Write> Engine<W> {
                 if messages.len() + planned.len() >= limit {
                     break 'drain;
                 }
-                let Some(wire) = actor.pending_shared.get(offsets[index]) else {
+                let candidate = self.bot_registry.stats_publication.next(
+                    actor,
+                    &self.bot_registry.bots,
+                    actor
+                        .shared_frames_drained
+                        .saturating_add(offsets[index] as u64),
+                    scheduling[index].0,
+                    &selected_stats[index],
+                );
+                let stat_packet = candidate
+                    .map(|candidate| candidate.totals.encode(candidate.slot, actor.wire_profile))
+                    .transpose()?;
+                let shared = actor.pending_shared.get(offsets[index]);
+                // Alternate eligible application rows with reliable FIFO frames.
+                // A busy scoreboard and a busy replication stream both advance.
+                let prefer_stat = scheduling[index].1 || shared.is_none();
+                let mut chosen = None;
+                for statistics in [prefer_stat, !prefer_stat] {
+                    if statistics {
+                        if let Some(packet) = &stat_packet
+                            && total + packet.len() <= 24_000
+                        {
+                            chosen = Some((packet.clone(), candidate));
+                            break;
+                        }
+                    } else if let Some(wire) = shared {
+                        let sequence = sequences[index]
+                            .checked_add(1)
+                            .ok_or("replication_sequence_exhausted")?;
+                        let packet = for_recipient_with_profile(wire, sequence, self.wire_profile)?;
+                        if total + packet.len() <= 24_000 {
+                            chosen = Some((packet, None));
+                            break;
+                        }
+                    }
+                }
+                let Some((packet, stat)) = chosen else {
                     continue;
                 };
-                let packet = for_recipient_with_profile(wire, sequences[index], self.wire_profile)?;
-                if total + packet.len() > 24_000 {
-                    // Keep this recipient's head packet intact. Smaller heads
-                    // may still fit; resume after the last served slot next time.
-                    continue;
-                }
                 total += packet.len();
-                planned.push((actor.reservation.id.clone(), packet));
-                offsets[index] += 1;
-                sequences[index] = sequences[index]
-                    .checked_add(1)
-                    .ok_or("replication_sequence_exhausted")?;
+                planned.push((actor.reservation.id.clone(), packet, stat));
+                if let Some(stat) = stat {
+                    selected_stats[index].insert(stat.slot);
+                    scheduling[index] = (stat.slot.wrapping_add(1), false);
+                } else {
+                    offsets[index] += 1;
+                    sequences[index] += 1;
+                    scheduling[index].1 = true;
+                }
                 next_cursor = actor.reservation.player.wrapping_add(1);
                 progressed = true;
             }
@@ -1192,7 +1241,7 @@ impl<W: Write> Engine<W> {
         }
         let recipients: Vec<_> = planned
             .iter()
-            .map(|(id, wire)| {
+            .map(|(id, wire, _)| {
                 let actor = self
                     .active
                     .as_ref()
@@ -1214,7 +1263,12 @@ impl<W: Write> Engine<W> {
                 wall,
             )?;
         }
-        for (id, packet) in planned {
+        for (id, packet, stat) in planned {
+            if let Some(stat) = stat {
+                self.bot_registry.stats_publication.sent(&id, stat);
+                continue;
+            }
+            self.bot_registry.stats_publication.replication_sent(&id);
             let actor = if self.active.as_ref().is_some_and(|a| a.reservation.id == id) {
                 self.active.as_mut().unwrap()
             } else {
