@@ -224,6 +224,7 @@ impl<W: Write> Engine<W> {
             reward_match_id: None,
             round_participants: Default::default(),
             match_terminal: None,
+            results_cohorts: Default::default(),
             released_reservations: Default::default(),
             release_order: Default::default(),
             bunker_world: resources.bunker_world,

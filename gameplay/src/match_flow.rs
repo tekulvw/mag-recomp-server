@@ -54,7 +54,7 @@ impl Active {
         Ok(())
     }
 
-    fn queue_round(&mut self, publication: Publication) {
+    pub(crate) fn queue_round(&mut self, publication: Publication) {
         if self.pending_notifications.len() >= 128 {
             self.replication_backlogged = true;
         } else {
@@ -307,143 +307,21 @@ impl<W: Write> Engine<W> {
         now: Duration,
         publication: ScorePublication,
     ) -> Result<Vec<OutboundMessage>, &'static str> {
-        let scores = self.round.scores.ok_or("round_scores_unavailable")?;
-        let rewards_settled = self.pending_rewards.is_empty();
-        let needs_stats = self.round.outcome.is_some()
-            && rewards_settled
-            && self
-                .peers
-                .values()
-                .chain(self.active.iter())
-                .any(|a| a.ready_for_updates && !a.results_announced);
-        let final_stats: Vec<_> = self
-            .peers
+        let settled = !self
+            .pending_rewards
             .values()
-            .chain(self.active.iter())
-            .filter(|a| needs_stats && a.claimed.is_some())
-            .map(|a| {
-                protocol::StatUpdate {
-                    character_index: a.reservation.player,
-                    // Reward ACKs already include all earned XP in the durable
-                    // account snapshot. Publish that total as stat1 without
-                    // adding match XP again; stat2 remains the round total.
-                    stats: a
-                        .reservation
-                        .character
-                        .progression
-                        .into_iter()
-                        .map(|state| protocol::StatValue {
-                            stat: 1,
-                            value: state.experience.min(i32::MAX as u32) as i32,
-                        })
-                        .chain(std::iter::once(protocol::StatValue {
-                            stat: 2,
-                            value: a.match_experience.min(i32::MAX as u32) as i32,
-                        }))
-                        .chain(
-                            a.reward_statistics
-                                .iter()
-                                .map(|(&stat, &value)| protocol::StatValue { stat, value }),
-                        )
-                        .collect(),
-                }
-                .encode_with_profile(self.wire_profile)
-            })
-            .collect::<Result<_, _>>()?;
-        let outcome = self.round.outcome.clone();
-        for recipient in self
-            .peers
-            .values_mut()
-            .chain(self.active.iter_mut())
-            .filter(|a| a.initial_objects.is_some() && a.ready_for_updates)
-        {
-            use protocol::ScoreChangeReason::{Initial, PrimaryObjective, TimedBleed};
-            match (publication, recipient.round_scores) {
-                (ScorePublication::NativeScoreRate { before_bleed }, Some(previous)) => {
-                    // Objective entries commit before this score-bleed update.
-                    // Preserve both notices if the same team changed twice.
-                    for (team, points) in before_bleed.into_iter().enumerate() {
-                        if previous[team] != points {
-                            recipient.queue_round_score(
-                                team,
-                                points,
-                                PrimaryObjective,
-                                self.wire_profile,
-                            )?;
-                        }
-                    }
-                    for (team, points) in scores.into_iter().enumerate() {
-                        if before_bleed[team] != points {
-                            recipient.queue_round_score(
-                                team,
-                                points,
-                                TimedBleed,
-                                self.wire_profile,
-                            )?;
-                        }
-                    }
-                }
-                _ if recipient.round_scores != Some(scores) => {
-                    let reason = match (publication, recipient.round_scores) {
-                        (
-                            ScorePublication::Sabotage {
-                                objective_effect: true,
-                            },
-                            _,
-                        ) => PrimaryObjective,
-                        (_, None) => Initial,
-                        _ => TimedBleed,
-                    };
-                    for (team, points) in scores.into_iter().enumerate() {
-                        recipient.queue_round_score(team, points, reason, self.wire_profile)?;
-                    }
-                }
-                _ => {}
-            }
-            recipient.round_scores = Some(scores);
-            recipient.last_clock_points = scores[0];
-            if let Some(end) = &outcome {
-                if !recipient.end_announced {
-                    recipient.queue_round(Publication::Replication(
-                        replication::multiplayer::MatchPhaseUpdate {
-                            sequence: 1,
-                            timestamp_ms: now.as_millis() as u32,
-                            phase: replication::MatchPhase::EndCountdown,
-                        }
-                        .encode_with_profile(self.wire_profile)?,
-                    ));
-                    recipient.queue_round(Publication::Application(
-                        protocol::EndOfGame {
-                            winning_team: end.winner,
-                            major_victory: end.major,
-                            end_time_ms: end.deadline.as_millis() as u32,
-                        }
-                        .encode_with_profile(self.wire_profile)?,
-                    ));
-                    recipient.end_announced = true;
-                }
-                if rewards_settled && !recipient.results_announced {
-                    for stats in &final_stats {
-                        recipient.queue_round(Publication::Application(stats.clone()));
-                    }
-                    recipient.queue_round(Publication::Application(
-                        protocol::CharacterStatsComplete.encode(),
-                    ));
-                    recipient.results_announced = true;
-                }
-                if end.finalized && recipient.results_announced && !recipient.postgame_announced {
-                    recipient.queue_round(Publication::Replication(
-                        replication::multiplayer::MatchPhaseUpdate {
-                            sequence: 1,
-                            timestamp_ms: now.as_millis() as u32,
-                            phase: replication::MatchPhase::PostGame,
-                        }
-                        .encode_with_profile(self.wire_profile)?,
-                    ));
-                    recipient.postgame_announced = true;
-                }
-            }
-        }
+            .any(|r| Some(r.match_id.as_str()) == self.reward_match_id.as_deref());
+        queue_round_publications(
+            &self.round,
+            self.wire_profile,
+            self.peers
+                .values_mut()
+                .chain(self.active.iter_mut())
+                .collect(),
+            settled,
+            now,
+            publication,
+        )?;
         Ok(Vec::new())
     }
     /// Application notices and phase deltas share one bounded FIFO, so stats cannot
@@ -553,4 +431,150 @@ impl<W: Write> Engine<W> {
         messages.extend(publications);
         Ok(messages)
     }
+}
+
+/// Queue result publications identically for the live round and retained results.
+pub(crate) fn queue_round_publications(
+    round: &Round,
+    profile: wire_profile::WireProfile,
+    mut actors: Vec<&mut Active>,
+    rewards_settled: bool,
+    now: Duration,
+    publication: ScorePublication,
+) -> Result<(), &'static str> {
+    let scores = round.scores.ok_or("round_scores_unavailable")?;
+    let needs_stats = round.outcome.is_some()
+        && rewards_settled
+        && actors
+            .iter()
+            .any(|a| a.ready_for_updates && !a.results_announced);
+    let final_stats: Vec<_> = actors
+        .iter()
+        .filter(|a| needs_stats && a.claimed.is_some())
+        .map(|a| {
+            protocol::StatUpdate {
+                character_index: a.reservation.player,
+                // Reward ACKs already include all earned XP in the durable
+                // account snapshot. Publish that total as stat1 without
+                // adding match XP again; stat2 remains the round total.
+                stats: a
+                    .reservation
+                    .character
+                    .progression
+                    .into_iter()
+                    .map(|state| protocol::StatValue {
+                        stat: 1,
+                        value: state.experience.min(i32::MAX as u32) as i32,
+                    })
+                    .chain(std::iter::once(protocol::StatValue {
+                        stat: 2,
+                        value: a.match_experience.min(i32::MAX as u32) as i32,
+                    }))
+                    .chain(
+                        a.reward_statistics
+                            .iter()
+                            .map(|(&stat, &value)| protocol::StatValue { stat, value }),
+                    )
+                    .collect(),
+            }
+            .encode_with_profile(profile)
+        })
+        .collect::<Result<_, _>>()?;
+    let outcome = round.outcome.clone();
+    for recipient in actors
+        .iter_mut()
+        .filter(|a| a.initial_objects.is_some() && a.ready_for_updates)
+    {
+        use protocol::ScoreChangeReason::{Initial, PrimaryObjective, TimedBleed};
+        let score_changed = recipient.round_scores != Some(scores)
+            || matches!(publication,ScorePublication::NativeScoreRate {before_bleed} if recipient.round_scores!=Some(before_bleed));
+        if score_changed && recipient.pending_notifications.len() + 4 > 128 {
+            continue;
+        }
+        match (publication, recipient.round_scores) {
+            (ScorePublication::NativeScoreRate { before_bleed }, Some(previous)) => {
+                // Objective entries commit before this score-bleed update.
+                // Preserve both notices if the same team changed twice.
+                for (team, points) in before_bleed.into_iter().enumerate() {
+                    if previous[team] != points {
+                        recipient.queue_round_score(team, points, PrimaryObjective, profile)?;
+                    }
+                }
+                for (team, points) in scores.into_iter().enumerate() {
+                    if before_bleed[team] != points {
+                        recipient.queue_round_score(team, points, TimedBleed, profile)?;
+                    }
+                }
+            }
+            _ if recipient.round_scores != Some(scores) => {
+                let reason = match (publication, recipient.round_scores) {
+                    (
+                        ScorePublication::Sabotage {
+                            objective_effect: true,
+                        },
+                        _,
+                    ) => PrimaryObjective,
+                    (_, None) => Initial,
+                    _ => TimedBleed,
+                };
+                for (team, points) in scores.into_iter().enumerate() {
+                    recipient.queue_round_score(team, points, reason, profile)?;
+                }
+            }
+            _ => {}
+        }
+        recipient.round_scores = Some(scores);
+        recipient.last_clock_points = scores[0];
+        if let Some(end) = &outcome {
+            if !recipient.end_announced {
+                if recipient.pending_notifications.len() + 2 > 128 {
+                    continue;
+                }
+                recipient.queue_round(Publication::Replication(
+                    replication::multiplayer::MatchPhaseUpdate {
+                        sequence: 1,
+                        timestamp_ms: now.as_millis() as u32,
+                        phase: replication::MatchPhase::EndCountdown,
+                    }
+                    .encode_with_profile(profile)?,
+                ));
+                recipient.queue_round(Publication::Application(
+                    protocol::EndOfGame {
+                        winning_team: end.winner,
+                        major_victory: end.major,
+                        end_time_ms: end.deadline.as_millis() as u32,
+                    }
+                    .encode_with_profile(profile)?,
+                ));
+                recipient.end_announced = true;
+            }
+            if rewards_settled && !recipient.results_announced {
+                if recipient.pending_notifications.len() + final_stats.len() + 1 > 128 {
+                    continue;
+                }
+                for stats in &final_stats {
+                    recipient.queue_round(Publication::Application(stats.clone()));
+                }
+                recipient.queue_round(Publication::Application(
+                    protocol::CharacterStatsComplete.encode(),
+                ));
+                recipient.results_announced = true;
+            }
+            if end.finalized && recipient.results_announced && !recipient.postgame_announced {
+                if recipient.pending_notifications.len() >= 128 {
+                    continue;
+                }
+                recipient.queue_round(Publication::Replication(
+                    replication::multiplayer::MatchPhaseUpdate {
+                        sequence: 1,
+                        timestamp_ms: now.as_millis() as u32,
+                        phase: replication::MatchPhase::PostGame,
+                    }
+                    .encode_with_profile(profile)?,
+                ));
+                recipient.postgame_announced = true;
+            }
+        }
+    }
+    Ok(())
 }

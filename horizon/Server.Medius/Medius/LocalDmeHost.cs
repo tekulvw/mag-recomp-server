@@ -14,13 +14,14 @@ using RT.Models;
 using RT.Models.MAG;
 using DmeClient = Server.Dme.Models.ClientObject;
 using DmeProgram = Server.Dme.Program;
+using DmeWorld = Server.Dme.Models.World;
 namespace Server.Medius
 {
     /// <summary>One shared local Horizon world; each member has a Rust-acknowledged reservation.</summary>
     public sealed partial class LocalDmeHost : Server.Dme.ILocalGameplaySink, IAsyncDisposable
     {
         sealed class Reservation { public string Id; public uint AccountId; public string Account; public uint CharacterId; public Action<MagCharacterRecord> Notify; public DmeClient Client; public DateTime Deadline; public byte Faction; public bool Accepted; public bool Claimed; public bool Invalidated; public string ReleaseReason; public string TerminalMatchId; public bool FragoActionBonusEnabled; public bool FragoObjectiveBonusEnabled; public bool ExtendedObjectiveRewardsEnabled; public bool RepairRewardsEnabled; }
-        sealed class PendingRelease { public Reservation Reservation; public string RequestId; public DateTime NextAttempt; public DateTime? FirstRejected; }
+        sealed class PendingRelease { public Reservation Reservation; public string RequestId; public DateTime NextAttempt; public DateTime? FirstRejected; public bool InFlight; }
         static readonly IInternalLogger Logger = InternalLoggerFactory.GetInstance<LocalDmeHost>();
         readonly int _applicationId;
         readonly int _minimumPlayers;
@@ -34,12 +35,12 @@ namespace Server.Medius
         readonly SemaphoreSlim _admission = new SemaphoreSlim(1, 1);
         readonly Dictionary<string, Reservation> _reservations = new Dictionary<string, Reservation>(StringComparer.Ordinal);
         readonly Dictionary<string, PendingRelease> _pendingReleases = new Dictionary<string, PendingRelease>(StringComparer.Ordinal);
-        readonly SemaphoreSlim _releaseSettlement = new SemaphoreSlim(1, 1);
         // Keep admission identities after transport release until pending rewards settle.
         // Bound them rather than recycling a reservation identity into a new actor.
         readonly Dictionary<string, Reservation> _rewardOwners = new Dictionary<string, Reservation>(StringComparer.Ordinal);
         readonly HashSet<string> _notifiedRewards = new HashSet<string>(StringComparer.Ordinal);
         readonly SemaphoreSlim _rewardSettlement = new SemaphoreSlim(1, 1);
+        readonly SemaphoreSlim _rewardAcknowledgements = new SemaphoreSlim(1, 1);
         readonly SemaphoreSlim _loadoutSelectionSettlement = new SemaphoreSlim(1, 1);
         readonly GameplayLoadoutSelectionSettlement _loadoutSelections;
         readonly GameplayLoadoutRefreshQueue _loadoutRefreshes;
@@ -49,8 +50,12 @@ namespace Server.Medius
         DateTime _nextSelectionPoll;
         bool _rewardRetry;
         DateTime _nextRewardPoll;
-        readonly Channel<(Reservation reservation, object message)> _events = Channel.CreateBounded<(Reservation, object)>(new BoundedChannelOptions(128) { SingleReader = true, FullMode = BoundedChannelFullMode.Wait });
+        static Channel<(Reservation reservation, object message)> CreateEventQueue() =>
+            Channel.CreateBounded<(Reservation, object)>(new BoundedChannelOptions(128) { SingleReader = true, FullMode = BoundedChannelFullMode.Wait });
+        readonly Channel<(Reservation reservation, object message)> _events = CreateEventQueue();
+        readonly Channel<(Reservation reservation, object message)> _resultsEvents = CreateEventQueue();
         readonly Task _worker;
+        readonly Task _resultsEventWorker;
         readonly CancellationTokenSource _worldStreamCancellation = new CancellationTokenSource();
         readonly TaskCompletionSource<bool> _firstWorldStream = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         Task _worldStreamWorker = Task.CompletedTask;
@@ -61,7 +66,7 @@ namespace Server.Medius
         bool _supportsExtendedObjectiveRewards;
         bool _supportsRepairRewards;
         bool _ready; bool _started; bool _disposed;
-        public Server.Dme.Models.World World { get; private set; }
+        public DmeWorld World { get; private set; }
         public bool IsReady { get { lock (_gate) return _ready && _worldStreamHealthy && !_disposed; } }
         // Rust evicts a reservation that has sent no event for its 120 s idle timeout.
         // Horizon stops forwarding events once it releases, so after this grace a
@@ -124,7 +129,8 @@ namespace Server.Medius
             _bridge = bridge; _store = store; _loadoutSelections = new GameplayLoadoutSelectionSettlement(_gate);
             _loadoutRefreshes = new GameplayLoadoutRefreshQueue(_gate, (target, revision, reason) =>
                 Logger.Warn($"Active Armory refresh dropped: player={target.PlayerId} revision={revision} reason={reason}"));
-            _worker = RunEvents();
+            _worker = RunEvents(_events.Reader, false);
+            _resultsEventWorker = RunEvents(_resultsEvents.Reader, true);
         }
         static string Id() => Guid.NewGuid().ToString("N");
         public async Task StartAsync()
@@ -139,7 +145,7 @@ namespace Server.Medius
             DmeProgram.SERVER_IP = MagNetworkSettings.FromEnvironment().Address; DmeProgram.Settings.TCPPort = 10073; DmeProgram.Settings.UDPPort = 10474;
             DmeProgram.Plugins = Program.Plugins ?? new Server.Plugins.PluginsManager("plugins/");
             var manager = new Server.Dme.MediusManager(_applicationId) { LocalOnly = true }; DmeProgram.Managers.Add(_applicationId, manager);
-            World = new Server.Dme.Models.World(manager, _applicationId, _maximumPlayers); DmeProgram.LocalGameplay = this;
+            World = new DmeWorld(manager, _applicationId, _maximumPlayers); DmeProgram.LocalGameplay = this;
             try {
                 _worldStreamWorker = RunWorldStreamAsync();
                 await _firstWorldStream.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -151,6 +157,7 @@ namespace Server.Medius
         {
             RequireLoadoutSelectionCapability(hello);
             InitializeFactionMatchmaking(hello);
+            _independentMatchCohorts = hello.Capabilities.Contains("independent_match_cohorts_v1", StringComparer.Ordinal);
             _supportsFragoKillBonus = hello.Capabilities.Contains("frago_kill_bonus_v1", StringComparer.Ordinal);
             _supportsFragoActionBonus = hello.Capabilities.Contains("frago_action_bonus_v1", StringComparer.Ordinal);
             _supportsFragoObjectiveBonus = hello.Capabilities.Contains("frago_objective_bonus_v1", StringComparer.Ordinal);
@@ -177,9 +184,9 @@ namespace Server.Medius
                 foreach (var reservation in _reservations.Values)
                 {
                     var client = reservation.Client;
-                    if (!reservation.Accepted || reservation.Invalidated || reservation.TerminalMatchId != null || reservation.Deadline <= now || reservation.Faction > 2 ||
+                    if (!IsLiveCohort(reservation) || !reservation.Accepted || reservation.Invalidated || reservation.TerminalMatchId != null || reservation.Deadline <= now || reservation.Faction > 2 ||
                         client == null || client.IsDestroyed || client.Disconnected || World == null ||
-                        !World.Clients.TryGetValue(client.DmeId, out var member) || member != client ||
+                        !client.DmeWorld.Clients.TryGetValue(client.DmeId, out var member) || member != client ||
                         (client.Tcp != null && !client.Tcp.Active)) continue;
                     // Native status matrices are game type first, then faction.
                     // These are authenticated world members, not physical spawns.
@@ -200,11 +207,9 @@ namespace Server.Medius
             await _admission.WaitAsync();
             try
             {
-                Reservation completed;
-                lock (_gate) completed = _reservations.Values.FirstOrDefault(r => r.Account == session.AuthenticatedAccount && r.CharacterId == session.CharacterId && r.TerminalMatchId != null);
-                if (completed != null) { completed.ReleaseReason = "results_requeue"; await ReleaseAsync(completed); }
+                await ReleasePriorResultsAsync(session.AuthenticatedAccount, session.CharacterId);
                 PendingRelease pending;
-                lock (_gate) pending = _pendingReleases.Values.FirstOrDefault(r => r.Reservation.Account == session.AuthenticatedAccount);
+                lock (_gate) pending = _pendingReleases.Values.FirstOrDefault(r => !IsResultsCohort(r.Reservation) && r.Reservation.Account == session.AuthenticatedAccount);
                 if (pending != null) await RetryReleaseAsync(pending);
                 Reservation reservation;
                 DmeClient client;
@@ -215,9 +220,20 @@ namespace Server.Medius
                 await _rewardSettlement.WaitAsync();
                 try
                 {
-                    // The shared round stays available to its current results cohort until release.
-                    lock (_gate) if (_reservations.Values.Any(r => r.TerminalMatchId != null) || _pendingReleases.Values.Any(r => r.Reservation.TerminalMatchId != null || r.Reservation.Account == session.AuthenticatedAccount)) return JoinResponse(request.TransactionId, 6);
-                    lock (_gate) if (_rewardOwners.Count >= 4096 || _reservations.Count >= _maximumPlayers || _reservations.Values.Any(r => r.AccountId == session.AccountId)) return JoinResponse(request.TransactionId, 6);
+                    DmeWorld admissionWorld;
+                    lock (_gate)
+                    {
+                        if (_independentMatchCohorts)
+                        {
+                            if (_admissionTerminal && (UsesFactionMatchmaking || !AdvanceTerminalCohort())) return JoinResponse(request.TransactionId, 6);
+                        }
+                        else if (_reservations.Values.Any(r => r.TerminalMatchId != null)) return JoinResponse(request.TransactionId, 6);
+                        if (_pendingReleases.Values.Any(p => !IsResultsCohort(p.Reservation) &&
+                            (p.Reservation.TerminalMatchId != null || p.Reservation.Account == session.AuthenticatedAccount))) return JoinResponse(request.TransactionId, 6);
+                        if (_rewardOwners.Count >= 4096 || _reservations.Values.Count(IsLiveCohort) >= _maximumPlayers ||
+                            _reservations.Values.Any(r => IsLiveCohort(r) && r.AccountId == session.AccountId)) return JoinResponse(request.TransactionId, 6);
+                        admissionWorld = AdmissionWorld;
+                    }
                     StoredCharacter character;
                     try { character = _store.ReadForAccount(session.AuthenticatedAccount).SingleOrDefault(c => c.Id == session.CharacterId); }
                     catch (Exception e) when (e is IOException || e is InvalidDataException || e is UnauthorizedAccessException) { return failure; }
@@ -227,8 +243,8 @@ namespace Server.Medius
                     GameplayAdmissionLoadouts admissionLoadouts;
                     try { admissionLoadouts = GameplayLoadoutAdmission.Project(character, record, _store.LoadoutCatalog); }
                     catch (InvalidDataException) { return failure; }
-                    var allocation = await World.OnJoinGameRequest(new MediusServerJoinGameRequest { ConnectInfo = new NetConnectionInfo { SessionKey = session.SessionKey } });
-                    if (allocation.Confirmation != MGCL_ERROR_CODE.MGCL_SUCCESS || !World.Clients.TryGetValue(allocation.DmeClientIndex, out client)) return failure;
+                    var allocation = await admissionWorld.OnJoinGameRequest(new MediusServerJoinGameRequest { ConnectInfo = new NetConnectionInfo { SessionKey = session.SessionKey } });
+                    if (allocation.Confirmation != MGCL_ERROR_CODE.MGCL_SUCCESS || !admissionWorld.Clients.TryGetValue(allocation.DmeClientIndex, out client)) return failure;
                     client.ApplicationId = _applicationId;
                     var progressionCatalog = _store.ProgressionCatalog;
                     reservation = new Reservation {
@@ -268,8 +284,7 @@ namespace Server.Medius
                     lock (_gate) admittedRouted = Route(admittedReply);
                 }
                 finally { _rewardSettlement.Release(); }
-                if (admittedRouted) await SettleLoadoutSelectionsAsync(admittedReply);
-                await SettleRewardsAsync(admittedReply);
+                await ObserveReceiptsAsync(admittedReply, admittedRouted);
                 bool admitted = admittedReply?.Ok == true;
                 bool ready; bool readyFlag; bool streamHealthy; lock (_gate) { readyFlag = _ready; streamHealthy = _worldStreamHealthy; ready = readyFlag && streamHealthy && !_disposed; }
                 if (!admitted || !ready)
@@ -278,9 +293,25 @@ namespace Server.Medius
                     // fails, so name the cause here instead of the default transport_closed.
                     reservation.ReleaseReason = AdmissionFailureReason(admittedReply, ready);
                     Logger.Warn($"Gameplay admission refused: player={client.DmeId} reason={reservation.ReleaseReason} error={admittedReply?.Error ?? "none"} failure={admittedReply?.Failure.ToString() ?? "Unavailable"} elapsed_ms={admittedReply?.ElapsedMilliseconds ?? -1} ready={readyFlag} world_stream={streamHealthy}");
-                    await ReleaseAsync(reservation); return failure;
+                    bool terminalRefusal = _independentMatchCohorts && admittedReply?.Failure == GameplayBridgeFailure.None &&
+                        admittedReply.Error is "results_cohort_limit" or "match_finished";
+                    // These rejections precede any Rust reservation. A release
+                    // retry would hold the next live admission against an unused ID.
+                    await ReleaseReservationAsync(reservation, !terminalRefusal);
+                    return terminalRefusal ? JoinResponse(request.TransactionId, 6) : failure;
                 }
-                lock (_gate) { if (!Current(reservation) || reservation.Invalidated || !_worldStreamHealthy) { reservation.Invalidated = true; reservation.ReleaseReason = "world_stream_gap"; return failure; } reservation.Accepted = true; }
+                lock (_gate)
+                {
+                    if (!Current(reservation) || reservation.Invalidated || !_worldStreamHealthy)
+                    { reservation.Invalidated = true; reservation.ReleaseReason = "world_stream_gap"; return failure; }
+                    if (!IsResultsCohort(reservation)) reservation.Accepted = true;
+                }
+                if (!reservation.Accepted)
+                {
+                    reservation.ReleaseReason = "admission_after_terminal";
+                    await ReleaseAsync(reservation);
+                    return JoinResponse(request.TransactionId, 6);
+                }
                 // Reconcile once after admission, closing saves committed between
                 // the initial store read and registration/reserve acknowledgement.
                 ArmoryLoadoutCommitted(reservation.Account, reservation.CharacterId);
@@ -306,7 +337,7 @@ namespace Server.Medius
             lock (_gate)
             {
                 var r = Find(client);
-                if (!_ready || !_worldStreamHealthy || r == null || r.Invalidated || r.Claimed || r.Deadline <= DateTime.UtcNow || client == null || client.IsDestroyed ||
+                if (!_ready || !_worldStreamHealthy || r == null || IsResultsCohort(r) || r.Invalidated || r.Claimed || r.Deadline <= DateTime.UtcNow || client == null || client.IsDestroyed ||
                     connect.AppId != _applicationId || connect.ARG1 != (uint)World.WorldId || connect.SessionKey != client.SessionKey || connect.AccessToken != client.Token) return false;
                 r.Claimed = true; return true;
             }
@@ -322,14 +353,16 @@ namespace Server.Medius
                 if (payload == null || payload.Length > 16384 || (transport != "tcp" && transport != "udp")) { r.Invalidated = true; r.ReleaseReason = "invalid_event"; return; }
                 var message = new { v = 2, request_id = Id(), op = "event", reservation_id = r.Id, world_id = (uint)World.WorldId, player_id = (ushort)client.DmeId,
                     transport, direction = "client_to_server", rt_type = rtType, plugin_id = pluginId, payload_hex = Convert.ToHexString(payload).ToLowerInvariant() };
-                if (!_events.Writer.TryWrite((r, message))) { r.Invalidated = true; r.ReleaseReason = "event_queue_full"; }
+                bool archived = IsArchivedTransport(r);
+                var queue = archived ? _resultsEvents : _events;
+                if (!queue.Writer.TryWrite((r, message)) && !archived) { r.Invalidated = true; r.ReleaseReason = "event_queue_full"; }
             }
         }
         // Called with _gate held; validate the entire batch before queueing anything.
         bool Route(GameplayBridgeResponse reply)
         {
             if (reply?.Ok != true) return false;
-            if (reply.MatchTerminal != null && reply.MatchTerminal.WorldId != (uint)World.WorldId) return false;
+            if (!TryFindTerminalMembers(reply.MatchTerminal, out var completed)) return false;
             var deliveries = new List<(DmeClient client, GameplayBridgeMessage message)>();
             foreach (var message in reply.Messages)
             {
@@ -339,13 +372,12 @@ namespace Server.Medius
                 var client = recipient.Client;
                 if (message.WorldId != (uint)World.WorldId || message.PlayerId != (ushort)client.DmeId) return false;
                 if (!CanUse(client) || !client.IsAuthenticated || client.IsDestroyed || client.Disconnected || client.Tcp?.Active != true ||
-                    !World.Clients.TryGetValue(client.DmeId, out var member) || member != client) continue;
+                    !client.DmeWorld.Clients.TryGetValue(client.DmeId, out var member) || member != client) continue;
                 deliveries.Add((client, message));
             }
             foreach (var delivery in deliveries) delivery.client.EnqueueTcp(delivery.message.ToScertMessage());
-            if (reply.MatchTerminal != null)
-                foreach (var id in reply.MatchTerminal.ReservationIds)
-                    if (_reservations.TryGetValue(id, out var completed)) completed.TerminalMatchId = reply.MatchTerminal.MatchId;
+            foreach (var r in completed) r.TerminalMatchId = reply.MatchTerminal.MatchId;
+            if (_independentMatchCohorts && completed.Any(r => r.Client.DmeWorld == AdmissionWorld)) _admissionTerminal = true;
             return true;
         }
         async Task RunWorldStreamAsync()
@@ -364,8 +396,7 @@ namespace Server.Medius
                             _worldStreamHealthy = true;
                             _firstWorldStream.TrySetResult(true);
                         }
-                        await SettleLoadoutSelectionsAsync(reply);
-                        await SettleRewardsAsync(reply);
+                        await ObserveReceiptsAsync(reply, true);
                     }, cancellation);
                 }
                 catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { break; }
@@ -382,24 +413,32 @@ namespace Server.Medius
                     // A successful socket write does not prove client receipt. We
                     // deliberately end affected sessions instead of resuming after
                     // an unknown replication gap. Fresh joins use fresh identities.
-                    foreach (var reservation in affected) await ReleaseAsync(reservation);
+                    await ReleaseReservationsAsync(affected);
                 }
                 try { await Task.Delay(TimeSpan.FromSeconds(1), cancellation); }
                 catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { break; }
             }
         }
-        async Task RunEvents()
+        async Task RunEvents(ChannelReader<(Reservation reservation, object message)> reader, bool resultsOnly)
         {
-            await foreach (var item in _events.Reader.ReadAllAsync())
+            await foreach (var item in reader.ReadAllAsync())
             {
-                lock (_gate) if (!Current(item.reservation) || item.reservation.Invalidated) continue;
+                lock (_gate)
+                {
+                    if (!Current(item.reservation) || item.reservation.Invalidated) continue;
+                    if (!resultsOnly && IsArchivedTransport(item.reservation))
+                    {
+                        _resultsEvents.Writer.TryWrite(item);
+                        continue;
+                    }
+                }
                 var elapsed = Stopwatch.StartNew();
                 var reply = await _bridge.RequestEventAsync(item.message);
                 lock (_gate)
                 {
                     var reservation = item.reservation; var client = reservation.Client;
                     bool current = Current(reservation) && CanUse(client) && client.IsAuthenticated && !client.IsDestroyed && !client.Disconnected &&
-                        client.Tcp?.Active == true && World.Clients.TryGetValue(client.DmeId, out var member) && member == client;
+                        client.Tcp?.Active == true && client.DmeWorld.Clients.TryGetValue(client.DmeId, out var member) && member == client;
                     // A missing response cannot tell us whether Rust committed the event.
                     // Keep the authenticated transport; never retry an uncertain shot.
                     if (reply == null || reply.IsTransientFailure)
@@ -418,14 +457,13 @@ namespace Server.Medius
                     }
                     if (current) reservation.Deadline = DateTime.UtcNow.AddSeconds(120);
                 }
-                await SettleLoadoutSelectionsAsync(reply);
-                await SettleRewardsAsync(reply);
+                await ObserveReceiptsAsync(reply, true);
             }
         }
         bool IsCurrentRefreshOwner(GameplayLoadoutRefreshTarget target)
         {
             return !_disposed && _ready && _worldStreamHealthy && World != null &&
-                _reservations.TryGetValue(target.ReservationId, out var owner) && Current(owner) && owner.Accepted && !owner.Invalidated &&
+                _reservations.TryGetValue(target.ReservationId, out var owner) && IsLiveCohort(owner) && owner.Accepted && !owner.Invalidated &&
                 owner.Deadline > DateTime.UtcNow && owner.Client != null && !owner.Client.IsDestroyed && !owner.Client.Disconnected &&
                 target.MatchesOwner(owner.Id, (uint)World.WorldId, (ushort)owner.Client.DmeId, owner.Account, owner.CharacterId);
         }
@@ -440,7 +478,7 @@ namespace Server.Medius
             lock (_gate)
             {
                 if (_disposed || World == null) return;
-                var owner = _reservations.Values.FirstOrDefault(row => Current(row) &&
+                var owner = _reservations.Values.FirstOrDefault(row => IsLiveCohort(row) &&
                     string.Equals(row.Account, account, StringComparison.Ordinal) && row.CharacterId == characterId);
                 if (owner == null) return; // The next admission reads the latest durable record.
                 var target = new GameplayLoadoutRefreshTarget(owner.Id, (uint)World.WorldId, (ushort)owner.Client.DmeId, owner.Account, owner.CharacterId);
@@ -496,7 +534,7 @@ namespace Server.Medius
         }
         bool IsCurrentLoadoutOwner(GameplayLoadoutSelection action)
         {
-            return !_disposed && World != null && _reservations.TryGetValue(action.ReservationId, out var owner) && Current(owner) &&
+            return !_disposed && World != null && _reservations.TryGetValue(action.ReservationId, out var owner) && IsLiveCohort(owner) &&
                 !owner.Invalidated && owner.Accepted && owner.Client != null &&
                 action.MatchesOwner(owner.Id, (uint)World.WorldId, (ushort)owner.Client.DmeId, owner.Account, owner.CharacterId);
         }
@@ -512,6 +550,7 @@ namespace Server.Medius
                 int remaining = 64; // Bounded acknowledgements even if the peer repeats an uncleared receipt.
                 while (actions.Count > 0 && remaining-- > 0)
                 {
+                    lock (_gate) if (_disposed && _independentMatchCohorts) return;
                     var action = actions.Dequeue();
                     if (!seen.Add((action.SelectionId, action.Revision))) { retry = true; continue; }
                     string status = _loadoutSelections.Settle(action, DateTime.UtcNow, IsCurrentLoadoutOwner,
@@ -530,14 +569,14 @@ namespace Server.Medius
                         }
                     }
                 }
-                lock (_gate) _selectionRetry = retry || actions.Count > 0;
+                lock (_gate) _selectionRetry = (_independentMatchCohorts && _selectionRetry) || retry || actions.Count > 0;
             }
             finally { _loadoutSelectionSettlement.Release(); }
         }
         async Task SettleRewardsAsync(GameplayBridgeResponse reply)
         {
             if (reply?.Ok != true || reply.Rewards.Count == 0) return;
-            await _rewardSettlement.WaitAsync();
+            await _rewardAcknowledgements.WaitAsync();
             try
             {
                 var owners = new List<(GameplayReward reward, Reservation owner)>();
@@ -565,12 +604,21 @@ namespace Server.Medius
                 bool retry = false; bool pending = false;
                 foreach (var pair in owners)
                 {
+                    lock (_gate) if (_disposed && _independentMatchCohorts) return;
                     var reward = pair.reward; var owner = pair.owner;
                     try
                     {
                         // Replacement reservations share the surviving round's native XP carry and result basis.
-                        var result = _store.ApplyRewardForAccount(owner.Account, owner.CharacterId, reward.RewardId,
-                            $"world-{reward.WorldId}-{reward.MatchId}", reward.Kind, checked((int)reward.Units), reward.Leadership, reward.Frago);
+                        // Serialize the durable apply against admission, then release the
+                        // gate before acknowledging it to Rust over the network.
+                        ProgressionRewardOutcome result;
+                        await _rewardSettlement.WaitAsync();
+                        try
+                        {
+                            result = _store.ApplyRewardForAccount(owner.Account, owner.CharacterId, reward.RewardId,
+                                $"world-{reward.WorldId}-{reward.MatchId}", reward.Kind, checked((int)reward.Units), reward.Leadership, reward.Frago);
+                        }
+                        finally { _rewardSettlement.Release(); }
                         if (result.Result != MagNetResult.Success)
                         { retry = true; Logger.Warn($"Gameplay reward not committed: player={owner.Client.DmeId} reason={result.Reason}"); break; }
                         // Publish the latest account record, not an older receipt snapshot.
@@ -580,7 +628,7 @@ namespace Server.Medius
                         {
                             lock (_gate)
                             {
-                                var currentOwner = _reservations.Values.FirstOrDefault(r => !r.Invalidated &&
+                                var currentOwner = _reservations.Values.FirstOrDefault(r => IsLiveCohort(r) && !r.Invalidated &&
                                     r.Account == owner.Account && r.CharacterId == owner.CharacterId);
                                 var callback = currentOwner?.Notify ?? owner.Notify;
                                 if (callback != null && _notifiedRewards.Add(reward.RewardId)) notify = callback;
@@ -606,55 +654,71 @@ namespace Server.Medius
                         var ack = await _bridge.RequestProgressionAsync(request);
                         bool ackRouted;
                         lock (_gate) { ackRouted = Route(ack); if (!ackRouted) retry = true; else pending = ack.Rewards.Count > 0; }
-                        if (ackRouted) await SettleLoadoutSelectionsAsync(ack);
+                        if (ackRouted) await ObserveLoadoutSelectionsAsync(ack);
                         Logger.Info($"Gameplay reward committed: player={owner.Client.DmeId} kind={reward.Kind} units={reward.Units} xp={result.Experience} level={result.Level} skill_points={result.SkillPoints} match_xp={result.MatchExperience} duplicate={result.Duplicate}");
                     }
                     catch (Exception e) when (e is IOException || e is InvalidDataException || e is UnauthorizedAccessException)
                     { retry = true; Logger.Warn($"Gameplay reward persistence deferred: player={owner.Client.DmeId} error={e.GetType().Name}"); break; }
                 }
-                lock (_gate) _rewardRetry = retry || pending;
+                lock (_gate) _rewardRetry = (_independentMatchCohorts && _rewardRetry) || retry || pending;
             }
-            finally { _rewardSettlement.Release(); }
+            finally { _rewardAcknowledgements.Release(); }
         }
         public async Task TickAsync()
         {
             if (_disposed || !_ready) return;
             StartLoadoutRefreshPump();
-            bool poll; lock (_gate) {
-                poll = (_rewardRetry && DateTime.UtcNow >= _nextRewardPoll) || (_selectionRetry && DateTime.UtcNow >= _nextSelectionPoll);
-                if (poll) { _nextRewardPoll = DateTime.UtcNow.AddSeconds(1); _nextSelectionPoll = DateTime.UtcNow.AddSeconds(1); }
-            }
-            if (poll)
-            {
-                var reply = await _bridge.RequestProgressionAsync(new { v = 2, request_id = Id(), op = "hello" });
-                bool routed; lock (_gate) routed = Route(reply);
-                if (routed) await SettleLoadoutSelectionsAsync(reply);
-                await SettleRewardsAsync(reply);
-            }
-            PendingRelease[] pending; lock (_gate) pending = _pendingReleases.Values.Where(r => r.NextAttempt <= DateTime.UtcNow).ToArray();
-            foreach (var item in pending) await RetryReleaseAsync(item);
+            await ScheduleBridgeMaintenanceAsync();
             Reservation[] release;
             lock (_gate) release = _reservations.Values.Where(r => r.Invalidated || r.Deadline <= DateTime.UtcNow || r.Client.IsDestroyed || r.Client.Disconnected ||
                 (r.Claimed && r.Client.Tcp != null && !r.Client.Tcp.Active)).ToArray();
-            foreach (var r in release) await ReleaseAsync(r);
+            await ReleaseReservationsAsync(release);
             SendQueueNotices();StartMatchmakingPump();
-            await DmeProgram.TcpServer.HandleIncomingMessages(); await World.HandleIncomingMessages(); await DmeProgram.TcpServer.HandleOutgoingMessages();
-            foreach (var client in World.Clients.Values) client.HandleOutgoingMessages();
+            await DmeProgram.TcpServer.HandleIncomingMessages();
+            DmeClient[] clients; lock (_gate) clients = _reservations.Values.Select(r => r.Client).ToArray();
+            await Task.WhenAll(clients.Select(client => client.HandleIncomingMessages()));
+            await DmeProgram.TcpServer.HandleOutgoingMessages();
+            foreach (var client in clients) client.HandleOutgoingMessages();
         }
-        async Task ReleaseAsync(Reservation r)
+        Task ReleaseAsync(Reservation r) => ReleaseReservationAsync(r, true);
+
+        async Task ReleaseReservationAsync(Reservation r, bool notifyGameplay)
         {
-            PendingRelease pending;
-            lock (_gate) { if (!Current(r)) return; r.Invalidated = true; _reservations.Remove(r.Id); _loadoutSelections.Forget(r.Id); _loadoutRefreshes.Forget(r.Id); pending = new PendingRelease { Reservation = r, RequestId = Id() }; _pendingReleases.Add(r.Id, pending); }
+            PendingRelease pending = null;
+            bool defer;
+            lock (_gate)
+            {
+                // Only a definitive pre-admission refusal proves this identity
+                // could never own a reward, even if local teardown won the race.
+                if (!notifyGameplay) _rewardOwners.Remove(r.Id);
+                if (!Current(r)) return;
+                defer = IsResultsCohort(r);
+                r.Invalidated = true;
+                _reservations.Remove(r.Id);
+                _loadoutSelections.Forget(r.Id);
+                _loadoutRefreshes.Forget(r.Id);
+                if (notifyGameplay)
+                {
+                    pending = new PendingRelease { Reservation = r, RequestId = Id() };
+                    _pendingReleases.Add(r.Id, pending);
+                }
+                r.Client.DmeWorld.Manager.RemoveClient(r.Client);
+                r.Client.DmeWorld.RemoveLocalClient(r.Client);
+            }
             Logger.Warn($"Gameplay reservation released: player={r.Client.DmeId} reason={r.ReleaseReason ?? (r.Deadline <= DateTime.UtcNow ? "application_inactivity" : "transport_closed")}");
-            await r.Client.Stop(); World.Manager.RemoveClient(r.Client); World.Clients.TryRemove(r.Client.DmeId, out _); World.UnregisterClientIndex(r.Client.DmeId);
-            await RetryReleaseAsync(pending);
+            await r.Client.Stop();
+            if (!defer && pending != null) await RetryReleaseAsync(pending);
         }
         async Task RetryReleaseAsync(PendingRelease pending)
         {
-            await _releaseSettlement.WaitAsync();
+            lock (_gate)
+            {
+                if (!_pendingReleases.TryGetValue(pending.Reservation.Id, out var current) || current != pending ||
+                    pending.InFlight || pending.NextAttempt > DateTime.UtcNow) return;
+                pending.InFlight = true;
+            }
             try
             {
-                lock (_gate) if (!_pendingReleases.TryGetValue(pending.Reservation.Id, out var current) || current != pending || pending.NextAttempt > DateTime.UtcNow) return;
                 var reply = await _bridge.RequestReleaseAsync(new { v = 2, request_id = pending.RequestId, op = "release", reservation_id = pending.Reservation.Id });
                 bool routed;
                 lock (_gate)
@@ -690,10 +754,9 @@ namespace Server.Medius
                         }
                     }
                 }
-                if (routed) await SettleLoadoutSelectionsAsync(reply);
-                await SettleRewardsAsync(reply);
+                await ObserveReceiptsAsync(reply, routed);
             }
-            finally { _releaseSettlement.Release(); }
+            finally { lock (_gate) pending.InFlight = false; }
         }
         public async ValueTask DisposeAsync()
         {
@@ -704,8 +767,13 @@ namespace Server.Medius
             try { await refresh.WaitAsync(TimeSpan.FromSeconds(3)); }
             catch (TimeoutException) { Logger.Error("Active Armory refresh disposal exceeded its bounded RPC deadline."); }
             _worldStreamCancellation.Cancel(); await _worldStreamWorker;
-            _events.Writer.TryComplete(); await _worker;
-            Reservation[] release; lock (_gate) release = _reservations.Values.ToArray(); foreach (var r in release) await ReleaseAsync(r);
+            try { await Task.WhenAll(_receiptWorker, _releaseWorker).WaitAsync(TimeSpan.FromSeconds(5)); }
+            catch (TimeoutException) { Logger.Error("Gameplay outbox disposal exceeded its bounded bridge deadline."); }
+            _events.Writer.TryComplete(); _resultsEvents.Writer.TryComplete();
+            await Task.WhenAll(_worker, _resultsEventWorker);
+            Reservation[] release; lock (_gate) release = _reservations.Values.ToArray();
+            await ReleaseReservationsAsync(release);
+            if (_started && _independentMatchCohorts) await FlushRetiredReleasesAsync();
             if (World != null) { await World.Stop(); DmeProgram.Managers.Remove(_applicationId); }
             if (_started) await DmeProgram.TcpServer.Stop(); if (DmeProgram.LocalGameplay == this) DmeProgram.LocalGameplay = null;
         }

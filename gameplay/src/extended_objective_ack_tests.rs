@@ -262,6 +262,7 @@ fn gameplay_objective_counters_follow_same_character_rejoin_and_new_round() {
     peer.reservation_id = PEER.into();
     release(&mut engine, &peer);
     assert!(engine.round_participants.is_empty());
-    reserve(&mut engine, RECONNECTED, 2, account, character);
-    assert!(actor_for(&engine, RECONNECTED).reward_statistics.is_empty());
+    let fresh = "synthetic-counter-fresh-round";
+    reserve(&mut engine, fresh, 2, account, character);
+    assert!(actor_for(&engine, fresh).reward_statistics.is_empty());
 }

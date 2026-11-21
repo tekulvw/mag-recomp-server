@@ -853,6 +853,7 @@ fn engine_release_requeue_restarts_native_capture_and_escort_cycle() {
         4,
     );
     assert!(released.ok, "{:?}", released.error);
+    reserve(&mut e, 1); // Rollover commits with successor admission.
     assert!(e.match_terminal.is_none());
     assert_eq!(e.acquisition_round.as_ref().unwrap().points(), [1200, 1000]);
     assert_eq!(

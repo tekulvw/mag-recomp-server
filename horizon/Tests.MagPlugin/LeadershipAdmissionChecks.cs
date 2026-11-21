@@ -24,6 +24,9 @@ internal static partial class LeadershipProgressionChecks
         public ConcurrentQueue<JsonObject> Requests { get; } = new();
         public GameplayBridge Client { get; }
 
+        public Func<JsonObject, JsonObject, JsonObject> CustomizeReply { get; init; }
+        public Func<JsonObject, Task> BeforeReply { get; init; }
+
         public FixtureBridge(string[] capabilities)
         {
             _capabilities = new[] { "committed_loadout_selection_v1", "active_loadout_refresh_v1" }.Concat(capabilities).ToArray();
@@ -36,9 +39,23 @@ internal static partial class LeadershipProgressionChecks
 
         private async Task AnswerAsync()
         {
-            while (!_stop.IsCancellationRequested)
+            var connections = new List<Task>();
+            try
             {
-                using var socket = await _listener.AcceptTcpClientAsync(_stop.Token);
+                while (!_stop.IsCancellationRequested)
+                {
+                    var socket = await _listener.AcceptTcpClientAsync(_stop.Token);
+                    connections.RemoveAll(task => task.IsCompletedSuccessfully);
+                    connections.Add(AnswerConnectionAsync(socket));
+                }
+            }
+            finally { await Task.WhenAll(connections); }
+        }
+
+        private async Task AnswerConnectionAsync(TcpClient socket)
+        {
+            using (socket)
+            {
                 using var stream = socket.GetStream();
                 using var reader = new StreamReader(stream);
                 using var writer = new StreamWriter(stream) { AutoFlush = true };
@@ -49,6 +66,8 @@ internal static partial class LeadershipProgressionChecks
                 };
                 if (request["op"]!.GetValue<string>() == "hello")
                     response["capabilities"] = new JsonArray(_capabilities.Select(capability => (JsonNode)JsonValue.Create(capability)).ToArray());
+                if (CustomizeReply != null) response = CustomizeReply(request, response);
+                if (BeforeReply != null) await BeforeReply(request).WaitAsync(_stop.Token);
                 await writer.WriteLineAsync(response.ToJsonString().AsMemory(), _stop.Token);
             }
         }
@@ -94,38 +113,47 @@ internal static partial class LeadershipProgressionChecks
         {
             await using var bridge = new FixtureBridge(capabilities);
             await using var host = new LocalDmeHost(bridge.Client, store);
-            // Supply only an in-memory world and readiness. StartAsync would open production listeners.
-            var hello = await bridge.Client.RequestHelloAsync(new { v = 2, request_id = "synthetic-hello", op = "hello" });
-            typeof(LocalDmeHost).GetMethod("InitializeGameplayHello", HostInternals)!.Invoke(host, new object[] { hello });
-            var manager = new Server.Dme.MediusManager(applicationId) { LocalOnly = true };
-            typeof(LocalDmeHost).GetProperty(nameof(LocalDmeHost.World))!.SetValue(host, new Server.Dme.Models.World(manager, applicationId, 8));
-            typeof(LocalDmeHost).GetField("_ready", HostInternals)!.SetValue(host, true);
-            typeof(LocalDmeHost).GetField("_worldStreamHealthy", HostInternals)!.SetValue(host, true);
-
-            var now = DateTime.UtcNow;
-            var registry = new MagLoginRegistry();
-            var ticket = registry.IssueForAccount("alpha", 1, 1, now);
-            var session = new MagMlsSession { CharacterStore = store };
-            var connect = new RT_MSG_CLIENT_CONNECT_TCP {
-                AppId = applicationId, TargetWorldId = 1, AccessToken = ticket.AccessToken, SessionKey = ticket.SessionKey
-            };
-            Check(session.TryBind(connect, registry, "synthetic-channel", now) && session.Accept(now) && session.CompleteTransport(now),
-                "Synthetic MLS transport setup failed");
-            foreach (var message in new MagMessage[] { new MagHello(), new MagProtocolInfo { ProtocolVersion = settings.MagProtocolVersion } })
-            {
-                byte[] payload = MagMessageCodec.SerializeForApplication(message, applicationId);
-                using var buffer = new MemoryStream();
-                using (var writer = new BinaryWriter(buffer, Encoding.UTF8, leaveOpen: true))
-                { writer.Write((ushort)payload.Length); writer.Write((byte)0); writer.Write(payload); }
-                buffer.Position = 0;
-                using var reader = new MessageReader(buffer);
-                var envelope = new RT_MSG_CLIENT_APP_TO_PLUGIN(); envelope.Deserialize(reader);
-                session.HandleMany(envelope, now);
-            }
-            Check(session.State == MagMlsSession.SessionState.Ready, "Synthetic authenticated MLS handshake failed");
-            await test(host, bridge, session);
+            await MakeReady(host, bridge, applicationId);
+            await test(host, bridge, MakeSession(store, applicationId, "alpha", 1));
         }
         finally { settings.MagApplicationId = previousApp; }
+    }
+
+    private static async Task MakeReady(LocalDmeHost host, FixtureBridge bridge, int applicationId)
+    {
+        // Supply only an in-memory world and readiness. StartAsync would open production listeners.
+        var hello = await bridge.Client.RequestHelloAsync(new { v = 2, request_id = "synthetic-hello", op = "hello" });
+        typeof(LocalDmeHost).GetMethod("InitializeGameplayHello", HostInternals)!.Invoke(host, new object[] { hello });
+        var manager = new Server.Dme.MediusManager(applicationId) { LocalOnly = true };
+        typeof(LocalDmeHost).GetProperty(nameof(LocalDmeHost.World))!.SetValue(host, new Server.Dme.Models.World(manager, applicationId, Server.Medius.Program.Settings.MagMaximumPlayers));
+        typeof(LocalDmeHost).GetField("_ready", HostInternals)!.SetValue(host, true);
+        typeof(LocalDmeHost).GetField("_worldStreamHealthy", HostInternals)!.SetValue(host, true);
+    }
+
+    private static MagMlsSession MakeSession(LocalCharacterStore store, int applicationId, string account, uint characterId)
+    {
+        var now = DateTime.UtcNow;
+        var registry = new MagLoginRegistry();
+        var ticket = registry.IssueForAccount(account, characterId, 1, now);
+        var session = new MagMlsSession { CharacterStore = store };
+        var connect = new RT_MSG_CLIENT_CONNECT_TCP {
+            AppId = applicationId, TargetWorldId = 1, AccessToken = ticket.AccessToken, SessionKey = ticket.SessionKey
+        };
+        Check(session.TryBind(connect, registry, "synthetic-channel", now) && session.Accept(now) && session.CompleteTransport(now),
+            "Synthetic MLS transport setup failed");
+        foreach (var message in new MagMessage[] { new MagHello(), new MagProtocolInfo { ProtocolVersion = Server.Medius.Program.Settings.MagProtocolVersion } })
+        {
+            byte[] payload = MagMessageCodec.SerializeForApplication(message, applicationId);
+            using var buffer = new MemoryStream();
+            using (var writer = new BinaryWriter(buffer, Encoding.UTF8, leaveOpen: true))
+            { writer.Write((ushort)payload.Length); writer.Write((byte)0); writer.Write(payload); }
+            buffer.Position = 0;
+            using var reader = new MessageReader(buffer);
+            var envelope = new RT_MSG_CLIENT_APP_TO_PLUGIN(); envelope.Deserialize(reader);
+            session.HandleMany(envelope, now);
+        }
+        Check(session.State == MagMlsSession.SessionState.Ready, "Synthetic authenticated MLS handshake failed");
+        return session;
     }
 
     private static Task<MagJoinGameResponse> BeginJoin(LocalDmeHost host, MagMlsSession session)

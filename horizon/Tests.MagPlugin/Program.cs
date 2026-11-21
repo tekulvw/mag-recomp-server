@@ -36,6 +36,8 @@ Test("typed worker match profile bridge", MatchProfileBridgeChecks.Run);
 Test("retail waiting and cancellation wire", QueueWireChecks.Run);
 Test("faction matchmaking fairness and role selection", FactionMatchmakingChecks.Run);
 Test("pending human queue ownership and cancellation", PendingHumanQueueChecks.Run);
+Test("independent terminal cohort transport and requeue", LeadershipProgressionChecks.IndependentMatchCohortAdmission);
+Test("faction cohort formation while previous results are connected", LeadershipProgressionChecks.IndependentFactionCohortFormation);
 Test("mag-admin raises levels safely and honours live logins", AdminCliChecks.Run);
 Test("medius starts through Program.Main, not the admin CLI", MediusEntryPointChecks.Run);
 Test("operator starting level creates earned-equivalent characters", StartingLevelChecks.Run);

@@ -1114,3 +1114,6 @@ fn native_acquisition_squad_spawn_uses_generic_creation_and_supported_points() {
     );
     assert_eq!(engine.squad_spawn_for(0), Some(1));
 }
+
+#[path = "match_cohort_tests.rs"]
+mod match_cohorts;

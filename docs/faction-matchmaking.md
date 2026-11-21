@@ -18,8 +18,11 @@ For Sabotage and Acquisition:
 4. Acknowledge the exact profile and formation identity on an idle Rust worker,
    then configure its human quorum. Only then admit the selected cohort.
 5. Lock the pairing for that cohort. Late joins fill only its two factions within
-   team/world capacity. After old members, releases and durable results clear,
-   the next cohort can select a different pairing and map.
+   team/world capacity. Once the round is terminal, workers advertising
+   `independent_match_cohorts_v1` can retain its results separately and admit a
+   next cohort with a different pairing and map. Old releases and reward ACKs
+   do not block unrelated next-cohort admission. Legacy workers keep their
+   existing all-members/all-receipts barrier.
 
 Waiting does not block MLS keepalive, status or cancellation processing. Refreshes
 preserve queue age and replace callback ownership; duplicate accounts count once.
@@ -36,7 +39,9 @@ bound MLS session. No cancellation acknowledgement/result code is invented.
 
 An uncertain profile acknowledgement is retried with the same formation identity.
 A failed/mismatched acknowledgement never admits players to the old map. The
-worker refuses switching occupied worlds or dropping unsettled reward/kit work.
+worker refuses switching unfinished gameplay worlds or dropping unsettled
+reward/kit work. Finished result transports have separate membership and player
+slot allocators under the same wire world ID; see [cohort lifecycle](match-cohorts.md).
 Queue callbacks and cleanup retain their owner/session checks.
 
 The source supports one active DME/Rust world, with queued waiting cohorts.

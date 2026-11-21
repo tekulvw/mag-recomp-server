@@ -79,7 +79,7 @@ namespace Server.Medius
                     Character=session.CharacterId,Connected=connected,Send=send,Notify=notify};
                 lock(_gate)
                 {
-                    if(_disposed||_reservations.Values.Any(r=>r.Account==queued.Account&&r.TerminalMatchId==null))
+                    if(_disposed||_reservations.Values.Any(r=>IsLiveCohort(r)&&r.Account==queued.Account&&r.TerminalMatchId==null))
                     {send(JoinResponse(request.TransactionId,6));return;}
                     _humanQueue.Put(queued.Account,(int)request.Value,character.Faction,queued);
                 }
@@ -108,8 +108,8 @@ namespace Server.Medius
                 Task release=null;
                 lock(_gate)
                 {
-                    var pending=_reservations.Values.FirstOrDefault(r=>r.Account==session.AuthenticatedAccount&&
-                        r.CharacterId==session.CharacterId&&!r.Claimed);
+                    var pending=_reservations.Values.FirstOrDefault(r=>IsLiveCohort(r)&&r.Account==session.AuthenticatedAccount&&
+                        r.CharacterId==session.CharacterId&&r.Client.SessionKey==session.SessionKey&&!r.Claimed);
                     if(pending!=null){pending.ReleaseReason="queued_join_cancelled";release=ReleaseAsync(pending);}
                 }
                 if(release!=null)await release;
@@ -125,7 +125,7 @@ namespace Server.Medius
             if(!UsesFactionMatchmaking)return;
             PurgeHumanQueue();
             status.MinimumPlayers=Enumerable.Repeat((uint)_formationStartup.MinimumPlayers,4).ToArray();
-            foreach(var ticket in _humanQueue.Snapshot())if(!_reservations.Values.Any(r=>r.Accepted&&
+            foreach(var ticket in _humanQueue.Snapshot())if(!_reservations.Values.Any(r=>IsLiveCohort(r)&&r.Accepted&&
                 r.Account==ticket.Value.Account&&r.CharacterId==ticket.Value.Character))
                 status.QueueSizes[ticket.Human.GameType*3+ticket.Human.Faction]++;
             if(_ready&&_worldStreamHealthy&&!_disposed)
@@ -163,21 +163,31 @@ namespace Server.Medius
         {
             try
             {
-                Reservation[] results;
-                lock(_gate)results=_reservations.Values.Where(r=>r.TerminalMatchId!=null&&
-                    _humanQueue.Snapshot().Any(q=>q.Value.Account==r.Account&&q.Value.Character==r.CharacterId)).ToArray();
-                foreach(var r in results){r.ReleaseReason="results_requeue";await ReleaseAsync(r);}
+                MagPendingHumanQueue<QueuedJoin>.Entry[] waiting;
+                lock(_gate){PurgeHumanQueue();waiting=_humanQueue.Snapshot().ToArray();}
+                foreach(var ticket in waiting)
+                {
+                    Task release;
+                    lock(_gate)
+                    {
+                        if(!_humanQueue.IsCurrent(ticket)||!ticket.Value.Alive)continue;
+                        release=ReleasePriorResultsAsync(ticket.Value.Account,ticket.Value.Character);
+                    }
+                    await release;
+                }
                 MagMatchProfile profile;string formation;
                 lock(_gate)
                 {
                     PurgeHumanQueue();
-                    if(_disposed||!_worldStreamHealthy||_pendingReleases.Count!=0||_reservations.Values.Any(r=>r.TerminalMatchId!=null))return;
-                    if(_formationEverAdmitted&&_reservations.Count==0)ResetFormation();
+                    if(_disposed||!_worldStreamHealthy||_pendingReleases.Values.Any(p=>!IsResultsCohort(p.Reservation))||
+                        (!_independentMatchCohorts&&_reservations.Values.Any(r=>r.TerminalMatchId!=null)))return;
+                    if(_admissionTerminal||(_formationEverAdmitted&&!_reservations.Values.Any(IsLiveCohort)))ResetFormation();
                     if(_formedProfile==null)
                     {
                         var selection=MagFactionMatchmaking.Select(_humanQueue.Snapshot().Select(e=>e.Human).ToArray(),
                             _matchProfiles,_formationStartup.MinimumPlayers,_maximumPlayers,_formationTeamMinima,RandomNumberGenerator.GetInt32);
                         if(selection==null)return;
+                        if(!AdvanceTerminalCohort())return;
                         _formedProfile=selection.Profile;_formationId=Id();
                     }
                     profile=_formedProfile;formation=_formationId;
@@ -201,7 +211,7 @@ namespace Server.Medius
                 {
                     PurgeHumanQueue();
                     if(_disposed||_matchmakingCancellation.IsCancellationRequested)return;
-                    if(_reservations.Count==0)
+                    if(!_reservations.Values.Any(IsLiveCohort))
                     {
                         var selection=MagFactionMatchmaking.ForProfile(_humanQueue.Snapshot().Select(e=>e.Human).ToArray(),profile,
                             _formationStartup.MinimumPlayers,_maximumPlayers,_formationTeamMinima);
@@ -215,8 +225,8 @@ namespace Server.Medius
                         // existing per-side occupancy before considering a ticket.
                         cohort=_humanQueue.Snapshot().Where(e=>e.Human.GameType==profile.GameType&&
                             (e.Human.Faction==profile.AttackingFaction||e.Human.Faction==profile.DefendingFaction)&&
-                            _reservations.Values.Count(r=>r.Faction==e.Human.Faction)<profile.TeamCapacity)
-                            .Take(_reservations.Count<Math.Min(_maximumPlayers,profile.MaximumPlayers)?1:0).ToArray();
+                            _reservations.Values.Count(r=>IsLiveCohort(r)&&r.Faction==e.Human.Faction)<profile.TeamCapacity)
+                            .Take(_reservations.Values.Count(IsLiveCohort)<Math.Min(_maximumPlayers,profile.MaximumPlayers)?1:0).ToArray();
                     }
                 }
                 foreach(var ticket in cohort)
@@ -228,13 +238,15 @@ namespace Server.Medius
                         if(reply.Result==0)_formationEverAdmitted=true;}
                     if(!current&&reply.Result==0)
                     {
-                        Reservation owned;lock(_gate)owned=_reservations.Values.FirstOrDefault(r=>r.Account==ticket.Value.Account&&r.CharacterId==ticket.Value.Character);
+                        Reservation owned;lock(_gate)owned=_reservations.Values.FirstOrDefault(r=>IsLiveCohort(r)&&r.Account==ticket.Value.Account&&
+                            r.CharacterId==ticket.Value.Character&&r.Client.SessionKey==ticket.Value.Session.SessionKey&&!r.Claimed);
                         if(owned!=null){owned.ReleaseReason="queued_join_cancelled";await ReleaseAsync(owned);}
                     }
                     else if(current&&reply.Result!=6)lock(_gate)
                     {
                         if(!_disposed&&ticket.Value.Alive&&(reply.Result!=0||_reservations.Values.Any(r=>
-                            r.Account==ticket.Value.Account&&r.CharacterId==ticket.Value.Character&&!r.Invalidated)))ticket.Value.Send(reply);
+                            IsLiveCohort(r)&&r.Account==ticket.Value.Account&&r.CharacterId==ticket.Value.Character&&
+                            r.Client.SessionKey==ticket.Value.Session.SessionKey&&!r.Invalidated)))ticket.Value.Send(reply);
                     }
                 }
             }

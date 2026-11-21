@@ -22,6 +22,7 @@ namespace Server.Dme.Models
         public const int MAX_WORLDS = 256;
         public const int MAX_CLIENTS_PER_WORLD = 10;
         private readonly int _clientCapacity;
+        private readonly bool _registeredWorld;
 
          #region Id Management
 
@@ -92,16 +93,19 @@ namespace Server.Dme.Models
         public bool Destroy => ((WorldTimer.Elapsed.TotalSeconds > Program.GetAppSettingsOrDefault(ApplicationId).GameTimeoutSeconds) || SelfDestructFlag) && Clients.Count == 0;
         public bool Destroyed { get; protected set; } = false;
 
-        public Stopwatch WorldTimer { get; protected set; } = Stopwatch.StartNew();
+        public Stopwatch WorldTimer { get; protected set; }
 
         public ConcurrentDictionary<int, ClientObject> Clients = new ConcurrentDictionary<int, ClientObject>();
 
         public MediusManager Manager { get; } = null;
         
-        public World(MediusManager manager, int appId, int maxPlayers)
+        public World(MediusManager manager, int appId, int maxPlayers) : this(manager, appId, maxPlayers, null) { }
+
+        private World(MediusManager manager, int appId, int maxPlayers, World wireWorld)
         {
             Manager = manager;
             ApplicationId = appId;
+            WorldTimer = wireWorld?.WorldTimer ?? Stopwatch.StartNew();
 
             // Preserve the upstream ten-slot world. Only the explicitly local
             // MAG host opts into its configured, bounded capacity.
@@ -112,13 +116,33 @@ namespace Server.Dme.Models
             for (int i = 0; i < _clientCapacity; ++i)
                 _pIdIsUsed.TryAdd(i, false);
 
-            RegisterWorld();
+            _registeredWorld = wireWorld == null;
+            if (_registeredWorld) RegisterWorld();
+            else WorldId = wireWorld.WorldId;
             this.MaxPlayers = maxPlayers;
+        }
+
+        // MAG's bridge has one wire world and clock. A successor cohort gets a
+        // separate transport membership and native player-slot allocator.
+        public World CreateLocalCohort()
+        {
+            if (!Manager.LocalOnly) throw new InvalidOperationException("Local cohort requires a local DME manager.");
+            return new World(Manager, ApplicationId, MaxPlayers, this);
+        }
+
+        public void RemoveLocalClient(ClientObject client)
+        {
+            if (!Manager.LocalOnly || client.DmeWorld != this) throw new InvalidOperationException("Client does not belong to this local DME world.");
+            lock (_lock)
+            {
+                if (Clients.TryRemove(new KeyValuePair<int, ClientObject>(client.DmeId, client)))
+                    UnregisterClientIndex(client.DmeId);
+            }
         }
 
         public void Dispose()
         {
-            FreeWorld();
+            if (_registeredWorld) FreeWorld();
             Destroyed = true;
         }
 
@@ -303,18 +327,12 @@ namespace Server.Dme.Models
             });
 
             // Tell other clients
-            foreach (var client in Clients)
+            NotifyOtherPlayers(player, new RT_MSG_SERVER_CONNECT_NOTIFY()
             {
-                if (!client.Value.HasJoined || client.Value == player || !client.Value.HasRecvFlag(RT_RECV_FLAG.RECV_NOTIFICATION))
-                    continue;
-
-                client.Value.EnqueueTcp(new RT_MSG_SERVER_CONNECT_NOTIFY()
-                {
-                    PlayerIndex = (short)player.DmeId,
-                    ScertId = (short)player.ScertId,
-                    IP = player.RemoteUdpEndpoint?.Address
-                });
-            }
+                PlayerIndex = (short)player.DmeId,
+                ScertId = (short)player.ScertId,
+                IP = player.RemoteUdpEndpoint?.Address
+            });
 
             // Tell server
             Manager.Enqueue(new MediusServerConnectNotification()
@@ -337,18 +355,12 @@ namespace Server.Dme.Models
             });
 
             // Tell other clients
-            foreach (var client in Clients)
+            NotifyOtherPlayers(player, new RT_MSG_SERVER_DISCONNECT_NOTIFY()
             {
-                if (!client.Value.HasJoined || client.Value == player || !client.Value.HasRecvFlag(RT_RECV_FLAG.RECV_NOTIFICATION))
-                    continue;
-
-                client.Value.EnqueueTcp(new RT_MSG_SERVER_DISCONNECT_NOTIFY()
-                {
-                    PlayerIndex = (short)player.DmeId,
-                    ScertId = (short)player.ScertId,
-                    IP = player.RemoteUdpEndpoint?.Address
-                });
-            }
+                PlayerIndex = (short)player.DmeId,
+                ScertId = (short)player.ScertId,
+                IP = player.RemoteUdpEndpoint?.Address
+            });
 
             // Tell server
             Manager.Enqueue(new MediusServerConnectNotification()
@@ -357,6 +369,19 @@ namespace Server.Dme.Models
                 PlayerSessionKey = player.SessionKey,
                 ConnectEventType = MGCL_EVENT_TYPE.MGCL_EVENT_CLIENT_DISCONNECT
             });
+        }
+
+        private void NotifyOtherPlayers(ClientObject player, BaseScertMessage notification)
+        {
+            lock (_lock)
+            {
+                // The join/leave plugin callback may finish after the original
+                // local connection has been released and its index reused.
+                if (Manager.LocalOnly && (!Clients.TryGetValue(player.DmeId, out var member) || member != player)) return;
+                foreach (var client in Clients.Values)
+                    if (client != player && client.HasJoined && client.HasRecvFlag(RT_RECV_FLAG.RECV_NOTIFICATION))
+                        client.EnqueueTcp(notification);
+            }
         }
 
         public async Task<MediusServerJoinGameResponse> OnJoinGameRequest(MediusServerJoinGameRequest request)
@@ -404,7 +429,8 @@ namespace Server.Dme.Models
                 }
                 else
                 {
-                    newClient.OnDestroyed += (client) => { UnregisterClientIndex(client.DmeId); };
+                    if (Manager.LocalOnly) newClient.OnDestroyed += RemoveLocalClient;
+                    else newClient.OnDestroyed += client => UnregisterClientIndex(client.DmeId);
                 }
             }
             else

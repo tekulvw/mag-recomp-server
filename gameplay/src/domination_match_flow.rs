@@ -366,14 +366,14 @@ mod tests {
             3,
         );
         assert!(release.ok, "{:?}", release.error);
+        let next_epoch = deadline + Duration::from_millis(1);
+        started(&mut engine, 2, next_epoch);
         assert_eq!(
             engine.domination_round.as_ref().unwrap().phase(),
             Phase::Playing
         );
         assert!(engine.match_terminal.is_none());
         assert!(engine.round.scores.is_none());
-        let next_epoch = deadline + Duration::from_millis(1);
-        started(&mut engine, 2, next_epoch);
         let next_update = next_epoch + Duration::from_secs(1);
         engine.tick_match_clock(next_update, 4).unwrap();
         assert_eq!(engine.round.scores, Some(START));

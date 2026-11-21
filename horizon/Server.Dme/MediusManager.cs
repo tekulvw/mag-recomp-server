@@ -101,8 +101,8 @@ namespace Server.Dme
             if (client == null)
                 return;
 
-            _sessionKeyToClient.TryRemove(client.SessionKey, out _);
-            _accessTokenToClient.TryRemove(client.Token, out _);
+            _sessionKeyToClient.TryRemove(new KeyValuePair<string, ClientObject>(client.SessionKey, client));
+            _accessTokenToClient.TryRemove(new KeyValuePair<string, ClientObject>(client.Token, client));
         }
 
         #endregion

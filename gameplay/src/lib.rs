@@ -150,6 +150,7 @@ pub mod loadout_selection;
 #[cfg(test)]
 mod loadout_selection_tests;
 pub mod loadouts;
+mod match_cohorts;
 mod match_flow;
 pub mod match_profiles;
 mod multiplayer;
@@ -1130,6 +1131,7 @@ pub struct Engine<W: Write> {
     round_participants:
         std::collections::BTreeMap<progression::ParticipantKey, progression::RoundParticipation>,
     match_terminal: Option<match_flow::MatchTerminal>,
+    results_cohorts: std::collections::BTreeMap<String, match_cohorts::ResultsCohort>,
     released_reservations: std::collections::BTreeSet<String>,
     release_order: std::collections::VecDeque<String>,
     bunker_world: Option<structures::BunkerWorld>,
@@ -1451,12 +1453,19 @@ impl<W: Write> Engine<W> {
             _ => Vec::new(),
         };
         let decoded = match &request {
-            Request::Event { player_id, .. } => Some(DecodedEvent::with_profile(
-                &bytes,
-                *player_id,
-                self.wire_profile,
-                self.ground_driver_enabled(),
-            )),
+            Request::Event {
+                reservation_id,
+                player_id,
+                ..
+            } => {
+                let retained = self.results_owner(reservation_id);
+                Some(DecodedEvent::with_profile(
+                    &bytes,
+                    *player_id,
+                    retained.map_or(self.wire_profile, |c| c.profile),
+                    retained.is_none() && self.ground_driver_enabled(),
+                ))
+            }
             _ => None,
         };
         let hello = matches!(&request, Request::Hello { .. });
@@ -1465,6 +1474,29 @@ impl<W: Write> Engine<W> {
             &request,
             Request::Event { .. } | Request::Release { .. } | Request::ProgressionCommitted { .. }
         );
+        // A retained operation can arrive while a different cohort is itself
+        // terminal. Its metadata must name the same exact cohort as its payload.
+        let terminal_context = match &request {
+            Request::Event { reservation_id, .. } | Request::Release { reservation_id, .. } => self
+                .results_owner(reservation_id)
+                .map(|c| Some(c.terminal.clone()))
+                .or_else(|| {
+                    self.released_reservations
+                        .contains(reservation_id)
+                        .then_some(None)
+                }),
+            Request::ProgressionCommitted { reward_id, .. } => self
+                .pending_rewards
+                .get(reward_id)
+                .and_then(|r| self.results_cohorts.get(&r.match_id))
+                .map(|c| Some(c.terminal.clone()))
+                .or_else(|| {
+                    self.committed_rewards
+                        .contains_key(reward_id)
+                        .then_some(None)
+                }),
+            _ => None,
+        };
         let result = self.apply_shared(request, decoded.as_ref(), now, wall_secs);
         match result {
             Ok(messages) => Response {
@@ -1477,6 +1509,7 @@ impl<W: Write> Engine<W> {
                 loadout_selections: self.pending_loadout_selections(),
                 capabilities: if hello {
                     let mut capabilities = vec![
+                        match_cohorts::CAPABILITY.into(),
                         loadout_selection::CAPABILITY.into(),
                         loadout_refresh::CAPABILITY.into(),
                         frago::CAPABILITY.into(),
@@ -1505,7 +1538,7 @@ impl<W: Write> Engine<W> {
                     None
                 },
                 match_terminal: if terminal_allowed {
-                    self.match_terminal.clone()
+                    terminal_context.unwrap_or_else(|| self.match_terminal.clone())
                 } else {
                     None
                 },
@@ -1567,10 +1600,11 @@ impl<W: Write> Engine<W> {
         {
             let id = self.active.as_ref().unwrap().reservation.id.clone();
             self.record(json!({"op":"expired","reservation_id":id}), wall_secs)?;
+            self.retire_reservation_id(&id);
             let removed = self.active.take().unwrap();
             self.remember_round_participant(&removed);
             if self.peers.is_empty() {
-                self.reset_objective_world();
+                self.reset_empty_gameplay_world();
                 self.clear_bot_world();
                 self.team_waves = [None; 2];
                 self.shared_drain_cursor = 0;
@@ -1676,27 +1710,7 @@ impl<W: Write> Engine<W> {
                 if usize::from(player_id) >= self.maximum_players {
                     return Err("invalid_player_slot");
                 }
-                let modifiers = match candidate.character.skills {
-                    Some(owned) => self
-                        .skill_catalog
-                        .as_ref()
-                        .ok_or("skill_catalog_unavailable")?
-                        .resolve(candidate.character.faction, &owned)?,
-                    None => skill_catalog::OwnedModifiers::default(),
-                };
-                if let Some(saved) = &candidate.character.loadouts {
-                    if candidate.character.character_id.is_none_or(|id| id == 0) {
-                        return Err("invalid_saved_character_id");
-                    }
-                    if self.wire_profile.application_id() == 20231
-                        && let Some(armory) = self.item_catalog.retail_armory()
-                    {
-                        self.item_catalog.validate_saved_item_bindings(saved)?;
-                        armory.validate_saved(candidate.character.faction, saved)?;
-                    } else {
-                        saved.validate(&self.item_catalog)?;
-                    }
-                }
+                let modifiers = self.validate_admission_character(&candidate.character)?;
                 if let Some(active) = &self.active {
                     return if active.reservation == candidate {
                         Ok(Vec::new())
@@ -1710,120 +1724,29 @@ impl<W: Write> Engine<W> {
                     .squad_spawn_for(squad_catalog.squad_index())
                     .ok_or("missing_squad_spawn")?;
                 squad_catalog.set_runtime_default(shared_spawn)?;
+                let round_number = if self.peers.is_empty() {
+                    self.round_number
+                        .checked_add(1)
+                        .ok_or("round_number_exhausted")?
+                } else {
+                    self.round_number
+                };
                 self.record(
                     json!({"op":"reserved","reservation_id":candidate.id,"world_id":world_id,
                     "player_id":player_id,"account_id":account_id,"character":candidate.character,
                     "team":squad_catalog.squad_index()/16,"squad_index":squad_catalog.squad_index()}),
                     wall_secs,
                 )?;
-                if self.peers.is_empty() {
-                    self.round_number = self
-                        .round_number
-                        .checked_add(1)
-                        .ok_or("round_number_exhausted")?;
-                }
-                let reward_match_id = self
-                    .reward_match_id
-                    .get_or_insert_with(|| {
-                        progression::round_identity(&candidate, self.round_number)
-                    })
-                    .clone();
-                let participation = progression::participant_key(&candidate)
-                    .and_then(|key| self.round_participants.get(&key))
-                    .cloned()
-                    .unwrap_or_default();
-                let nominations = self.initial_nominations(&candidate.character);
-                let leadership_level = self
-                    .leadership_record(&candidate.character)
-                    .or(candidate.character.leadership)
-                    .map_or(1, |record| record.leadership_level);
-                self.active = Some(Active {
-                    wire_profile: self.wire_profile,
-                    reservation: candidate,
-                    modifiers,
-                    leadership: None,
-                    leadership_level,
-                    nominations,
-                    last_event: now,
-                    claimed: None,
-                    ready_for_updates: false,
-                    initial_objects: None,
-                    spawn_delta: None,
-                    life: CharacterLife::AwaitingFirstSpawn,
-                    revive_state_pending: false,
-                    tracking: player_tracking::PlayerTracking::default(),
-                    fall_tracker: fall_damage::Tracker::default(),
-                    pending_damage: None,
-                    last_damage: replication::CharacterDamage {
-                        last_location_and_type: 0,
-                        health_quarter_points: 400,
-                        conditions: 0,
-                        last_attacker: 0,
-                        last_source_object: 0,
-                        last_user_data: 0,
+                self.install_reserved(
+                    admission::PreparedAdmission {
+                        candidate,
+                        modifiers,
+                        squad_catalog,
+                        shared_spawn,
+                        round_number,
                     },
-                    healing: None,
-                    healing_sequence: 0,
-                    reward_match_id,
-                    match_experience: participation.match_experience,
-                    reward_statistics: participation.statistics,
-                    repair_credit: participation.repair_credit,
-                    next_heal_allowed: Duration::ZERO,
-                    projectiles: projectile::ProjectileFlights::default(),
-                    projectile_replicas: projectile_replication::ProjectileReplicas::with_profile(
-                        self.wire_profile,
-                    ),
-                    projectile_cleanup: [None, None, None],
-                    projectile_publications: Vec::new(),
-                    grenade_remaining: 0,
-                    observed_primary: None,
-                    observed_secondary: None,
-                    primary_equipped: true,
-                    dummy_created: false,
-                    development_target: None,
-                    target_commands: std::collections::BTreeMap::new(),
-                    dummy_health: None,
-                    latest_owner_sequence: 0,
-                    grenade_damage: std::collections::VecDeque::new(),
-                    damage_commands: std::collections::BTreeMap::new(),
-                    replication_history: Vec::new(),
-                    outbound_sequence: 0,
-                    pending_shared: std::collections::VecDeque::new(),
-                    ordered_health_pending: false,
-                    replication_backlogged: false,
-                    objective_delta: None,
-                    objective_assigned: false,
-                    objective_needs_clear: false,
-                    emplacement_creation: None,
-                    ground_vehicle_batch: 0,
-                    mounted_seat: None,
-                    mounted_bunker: None,
-                    ground_seat: None,
-                    helo_seat: None,
-                    helo_creation_sent: false,
-                    seat_transitions: Vec::new(),
-                    last_exit: None,
-                    match_clock_started: None,
-                    last_clock_points: self.match_profile().maximum_points[0],
-                    round_scores: None,
-                    pending_notifications: Default::default(),
-                    end_announced: false,
-                    results_announced: false,
-                    postgame_announced: false,
-                    current_inventory_handle: None,
-                    spawned_loadout: None,
-                    selected_loadout: None,
-                    loadout_selection_revision: 0,
-                    last_loadout_refresh: None,
-                    pending_loadout_selection: None,
-                    selected_spawn: None,
-                    squad_spawn: shared_spawn,
-                    squad_catalog: std::sync::Arc::new(squad_catalog),
-                    pending_spawn_deadline: None,
-                    published_wave_deadline: None,
-                    entered_game: false,
-                    owner_fields: player_tracking::ClientCharacterFields::default(),
-                });
+                    now,
+                );
                 Ok(Vec::new())
             }
             Request::DevelopmentArmDemolition {
@@ -2006,13 +1929,7 @@ impl<W: Write> Engine<W> {
                     let removed = self.active.take().unwrap();
                     self.remember_round_participant(&removed);
                     if self.peers.is_empty() {
-                        // Horizon settles pending release ACKs before a new cohort.
-                        // Retire identities only while this shared world exists.
-                        if self.match_profiles.is_none() {
-                            self.released_reservations.clear();
-                            self.release_order.clear();
-                        }
-                        self.reset_objective_world();
+                        self.reset_empty_gameplay_world();
                         self.clear_bot_world();
                         self.team_waves = [None; 2];
                         self.shared_drain_cursor = 0;
