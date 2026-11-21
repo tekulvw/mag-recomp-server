@@ -776,3 +776,303 @@ fn manual_tag_uses_the_normal_domination_assignment_refresh() {
 
 #[path = "script_objective_actor_tests.rs"]
 mod script_actor;
+
+fn objective_packet_rows(packet: &[u8], profile: WireProfile) -> Vec<(u16, u16)> {
+    use crate::replication::{BitReader, ObjectUpdate};
+
+    assert!(packet.len() <= 1397);
+    let header = ObjectUpdate::decode_with_profile(packet, profile)
+        .unwrap()
+        .header;
+    assert_eq!(header.object_type_mask, 1 << 12);
+    let mut bits = BitReader::with_profile(packet, profile);
+    bits.position = profile.header_bits();
+    let mut rows = Vec::new();
+    while bits.read(1).unwrap() != 0 {
+        let index = bits.read(16).unwrap() as u16;
+        let mut mask = 0;
+        for field in 0..11 {
+            if bits.read(1).unwrap() == 0 {
+                continue;
+            }
+            mask |= 1 << field;
+            match field {
+                2 => {
+                    bits.read(8).unwrap();
+                    bits.read(32).unwrap();
+                    bits.read(16).unwrap();
+                }
+                3 | 4 | 9 | 10 => {
+                    bits.read(32).unwrap();
+                }
+                6 => {
+                    bits.read(8).unwrap();
+                }
+                _ => panic!("unexpected objective field {field}"),
+            }
+        }
+        rows.push((index, mask));
+    }
+    rows
+}
+
+const CONTROL_FIELDS: u16 = (1 << 2) | (1 << 3) | (1 << 4) | (1 << 6);
+const SEQUENCE_FIELDS: u16 = (1 << 9) | (1 << 10);
+
+#[test]
+fn domination_sequence_only_mission_start_tick_records_before_install_and_retries() {
+    let (mut runtime, world, spawns, round) = fixture();
+    // Keep the authored Inactive request for the constructor-Inactive SecureHold.
+    // The other fixture objective's controller would complete it before its tick.
+    Arc::get_mut(&mut runtime.setup)
+        .unwrap()
+        .startup
+        .retain(|&(index, _)| index == 1);
+    let mut engine = crate::human_kill_reward_tests::fixture();
+    engine.objective_world = Some(world);
+    engine.spawn_catalog = Some(spawns);
+    engine.domination_round = Some(round);
+    engine
+        .commit_domination_mission_start(&mut runtime, test_time(100), 0)
+        .unwrap();
+
+    let installed = std::cell::Cell::new(0);
+    let tick = |engine: &mut crate::Engine<Vec<u8>>, runtime: &mut Runtime, ms| {
+        engine.commit_domination_gameplay(
+            runtime,
+            test_time(ms),
+            0,
+            BTreeMap::new(),
+            |_, _, runtime, frame| {
+                let (candidate, effects) = runtime
+                    .stage_objective_update(
+                        frame,
+                        &BTreeMap::new(),
+                        Spy {
+                            allow_strike_lifecycle: true,
+                            ..Spy::default()
+                        },
+                    )?
+                    .detach_effects();
+                assert!(candidate.deltas.is_empty());
+                if ms == 116 {
+                    assert_eq!(
+                        candidate.sequences,
+                        [ObjectiveSequenceDelta {
+                            object_index: 1,
+                            sequence_index: 0,
+                            start_time_ms: 116,
+                        }]
+                    );
+                    assert_eq!(
+                        effects.calls,
+                        [
+                            ("class_prefix", 1),
+                            ("class_suffix", 1),
+                            ("assignment", 1),
+                            ("sequence", 1),
+                        ]
+                    );
+                } else {
+                    assert!(candidate.sequences.is_empty());
+                    assert!(effects.calls.is_empty());
+                }
+                let installed = &installed;
+                Ok((
+                    candidate,
+                    EffectsCommit {
+                        audit: Vec::new(),
+                        messages: Vec::new(),
+                        packets: Vec::new(),
+                        install: move |_: &mut crate::Engine<Vec<u8>>| {
+                            installed.set(installed.get() + effects.calls.len());
+                        },
+                    },
+                ))
+            },
+        )
+    };
+
+    for actor in engine.active.iter_mut().chain(engine.peers.values_mut()) {
+        actor.pending_shared.clear();
+    }
+    let revision = engine.sequence;
+    let original_controls = engine
+        .objective_world
+        .as_ref()
+        .unwrap()
+        .snapshot(1, 100)
+        .objectives;
+    engine.failed = true;
+    assert_eq!(
+        tick(&mut engine, &mut runtime, 116).unwrap_err(),
+        "recorder_unavailable"
+    );
+    assert_eq!(installed.get(), 0);
+    assert_eq!(engine.sequence, revision);
+    assert_eq!(
+        engine
+            .objective_world
+            .as_ref()
+            .unwrap()
+            .snapshot(1, 100)
+            .objectives,
+        original_controls
+    );
+    assert!(
+        engine
+            .active
+            .iter()
+            .chain(engine.peers.values())
+            .all(|actor| actor.pending_shared.is_empty())
+    );
+
+    engine.failed = false;
+    tick(&mut engine, &mut runtime, 116).unwrap();
+    assert_eq!(installed.get(), 4);
+    let world = engine.objective_world.as_ref().unwrap();
+    assert_eq!(world.snapshot(1, 100).objectives, original_controls);
+    assert_eq!(world.state(1), Some(ObjectiveState::Inactive));
+    for actor in engine.active.iter().chain(engine.peers.values()) {
+        assert_eq!(actor.pending_shared.len(), 1);
+        let packet = &actor.pending_shared[0];
+        assert_eq!(
+            objective_packet_rows(packet, engine.wire_profile),
+            [(1, SEQUENCE_FIELDS)]
+        );
+        let mut bits = crate::replication::BitReader::with_profile(packet, engine.wire_profile);
+        bits.position = engine.wire_profile.header_bits() + 1 + 16 + 10;
+        assert_eq!(bits.read(32), Ok(0));
+        assert_eq!(bits.read(1), Ok(1));
+        assert_eq!(bits.read(32), Ok(116));
+    }
+    tick(&mut engine, &mut runtime, 132).unwrap();
+    assert_eq!(installed.get(), 4);
+    assert!(
+        engine
+            .active
+            .iter()
+            .chain(engine.peers.values())
+            .all(|actor| actor.pending_shared.len() == 1)
+    );
+}
+
+#[test]
+fn domination_sequence_publication_keeps_linked_rows_across_control_chunk_boundaries() {
+    let (runtime, world, spawns, round) = fixture();
+    let mut candidate = runtime
+        .candidate(&frame(116, &world, &spawns, &round), ())
+        .unwrap();
+    candidate.deltas = (1..=50)
+        .map(|slot| ObjectiveControlDelta {
+            object_index: slot * 2,
+            state_actor: crate::replication::ObjectiveStateActor {
+                state: ObjectiveState::Deactivated,
+                actor_index: u16::MAX,
+                change_time_ms: 116,
+            },
+            expiration_time_ms: 0,
+            deactivation_time_ms: 0,
+            health_percent: 100,
+        })
+        .collect();
+    candidate.sequences = (1..=101)
+        .map(|index| ObjectiveSequenceDelta {
+            object_index: index,
+            sequence_index: 0,
+            start_time_ms: 116,
+        })
+        .collect();
+
+    let profile = crate::wire_profile::WireProfileCatalog::embedded()
+        .profile(20231)
+        .unwrap();
+    let packets = candidate.objective_packets(116, profile).unwrap();
+    let rows: Vec<_> = packets
+        .iter()
+        .map(|packet| objective_packet_rows(packet, profile))
+        .collect();
+    assert_eq!(rows.iter().map(Vec::len).collect::<Vec<_>>(), [48, 2, 51]);
+    assert_eq!(
+        rows[0],
+        (1..=48)
+            .map(|slot| (slot * 2, CONTROL_FIELDS | SEQUENCE_FIELDS))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        rows[1],
+        [
+            (98, CONTROL_FIELDS | SEQUENCE_FIELDS),
+            (100, CONTROL_FIELDS | SEQUENCE_FIELDS)
+        ]
+    );
+    assert_eq!(
+        rows[2],
+        (1..=101)
+            .step_by(2)
+            .map(|index| (index, SEQUENCE_FIELDS))
+            .collect::<Vec<_>>()
+    );
+
+    // Cross-partition ordering and invalid values still reject the candidate.
+    candidate.sequences.swap(0, 1);
+    assert_eq!(
+        candidate.objective_packets(116, profile).unwrap_err(),
+        "invalid_objective_sequence_links"
+    );
+    candidate.sequences.swap(0, 1);
+    candidate.sequences[1].sequence_index = -2;
+    assert_eq!(
+        candidate.objective_packets(116, profile).unwrap_err(),
+        "invalid_objective_sequence_links"
+    );
+    candidate.sequences[1].sequence_index = 0;
+    candidate.sequences[1].object_index = 1;
+    assert_eq!(
+        candidate.objective_packets(116, profile).unwrap_err(),
+        "invalid_objective_sequence_links"
+    );
+    candidate.sequences[1].object_index = 2;
+    candidate.deltas[48].object_index = candidate.deltas[47].object_index;
+    assert_eq!(
+        candidate.objective_packets(116, profile).unwrap_err(),
+        "invalid_objective_control_delta"
+    );
+}
+
+#[test]
+fn domination_sequence_only_publication_respects_sequence_packet_bounds() {
+    let (runtime, world, spawns, round) = fixture();
+    let mut candidate = runtime
+        .candidate(&frame(116, &world, &spawns, &round), ())
+        .unwrap();
+    candidate.sequences = (0..128)
+        .map(|index| ObjectiveSequenceDelta {
+            object_index: index,
+            sequence_index: 0,
+            start_time_ms: 116,
+        })
+        .collect();
+    let profile = crate::wire_profile::WireProfileCatalog::embedded()
+        .profile(20231)
+        .unwrap();
+    let packets = candidate.objective_packets(116, profile).unwrap();
+    assert_eq!(packets.len(), 2);
+    assert_eq!(
+        objective_packet_rows(&packets[0], profile),
+        (0..96)
+            .map(|index| (index, SEQUENCE_FIELDS))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        objective_packet_rows(&packets[1], profile),
+        (96..128)
+            .map(|index| (index, SEQUENCE_FIELDS))
+            .collect::<Vec<_>>()
+    );
+    candidate.sequences[127].object_index = 128;
+    assert_eq!(
+        candidate.objective_packets(116, profile).unwrap_err(),
+        "invalid_objective_sequence_links"
+    );
+}
