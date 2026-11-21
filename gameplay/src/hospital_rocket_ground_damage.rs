@@ -196,7 +196,7 @@ impl<W: Write> Engine<W> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::Arc;
 
@@ -415,7 +415,7 @@ mod tests {
     const TARGET: &str = "synthetic-rocket-target";
     const CONTACT_AT: Duration = Duration::from_millis(1050);
 
-    fn combined_fixture(enable_ground: bool) -> Engine<Vec<u8>> {
+    pub(crate) fn combined_fixture(enable_ground: bool) -> Engine<Vec<u8>> {
         let (mut engine, _, rules) = ground_rocket_fixture();
         if enable_ground {
             engine.hospital_rocket_ground = Some(Arc::new(rules));

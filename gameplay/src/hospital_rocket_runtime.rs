@@ -2,7 +2,10 @@
 use super::*;
 use crate::{
     acquisition_volume_damage::{TargetKey, TargetKind},
-    domination_structural_world::{BlastCollision, GroundRocketCandidate, GroundRocketDose},
+    domination_structural_world::{
+        BlastCollision, GroundRocketCandidate, GroundRocketDose, HeloRocketCandidate,
+        HeloRocketDose,
+    },
     dynamic_collision::QueryLimits,
     hospital_rockets::{Blast, Muzzle, MuzzleNode, Weapon},
     projectile::{
@@ -357,6 +360,7 @@ struct RocketEffects {
     character: acquisition_character_effects::Candidate,
     native: std::collections::BTreeMap<u32, acquisition_character_effects::NativeState>,
     ground: Option<GroundRocketCandidate>,
+    helo: Option<HeloRocketCandidate>,
 }
 
 impl<W: Write> Engine<W> {
@@ -585,9 +589,13 @@ impl<W: Write> Engine<W> {
                         .as_ref()
                         .is_some_and(|candidate| candidate.packet.is_some()),
                 );
+                let helo_packets = effects
+                    .helo
+                    .as_ref()
+                    .map_or(0, |candidate| candidate.packets.len());
                 if effects
                     .character
-                    .check_extra_shared(self, world, 1 + ground_packets)
+                    .check_extra_shared(self, world, 1 + ground_packets + helo_packets)
                     .is_err()
                 {
                     return Ok(Vec::new());
@@ -616,6 +624,7 @@ impl<W: Write> Engine<W> {
                 "elapsed_ms":terminal.elapsed_ms,"position":terminal.position,
                 "effects":effects.as_ref().map(|effects|effects.character.audit()),
                 "ground_effects":effects.as_ref().and_then(|effects|effects.ground.as_ref()).map(|candidate|&candidate.audit),
+                "helo_effects":effects.as_ref().and_then(|effects|effects.helo.as_ref()).map(|candidate|&candidate.audit),
                 "messages":effects.as_ref().map(|effects|effects.character.messages()),
                 "damage_denial":damage_denial,"packet":protocol::encode_hex(&packet)}),
             wall,
@@ -625,6 +634,7 @@ impl<W: Write> Engine<W> {
                 character,
                 mut native,
                 ground,
+                helo,
             } = effects;
             let messages = self.install_character_effects_after_record(character, &mut native);
             if let Some(candidate) = ground {
@@ -633,6 +643,18 @@ impl<W: Write> Engine<W> {
                 }
                 if let Some(packet) = candidate.packet {
                     self.queue_rocket_packet(world, &packet);
+                }
+            }
+            if let Some(candidate) = helo {
+                if let Some(after) = candidate.after {
+                    self.domination_gameplay
+                        .as_mut()
+                        .expect("prepared rocket Helo world")
+                        .state
+                        .helo = Some(after);
+                }
+                for packet in candidate.packets {
+                    self.queue_rocket_helo_packet(world, &packet);
                 }
             }
             messages
@@ -654,6 +676,7 @@ impl<W: Write> Engine<W> {
             .as_ref()
             .ok_or("hospital_rocket_domination_world_required")?
             .state;
+        let helo_rules = state.hospital_rocket_helo_areas.clone();
         let filter_rows = state.filter_rows;
         let sequences = state.collisions.clone();
         let costs = state.structural.material_penetration_costs().clone();
@@ -689,10 +712,24 @@ impl<W: Write> Engine<W> {
                 )
             })
             .transpose()?;
+        let helo = helo_rules
+            .as_deref()
+            .map(|rules| {
+                self.prepare_hospital_rocket_helo_blast(
+                    &flight.source,
+                    position,
+                    HeloRocketDose::from(flight.blast),
+                    rules,
+                    collision,
+                    now,
+                )
+            })
+            .transpose()?;
         Ok(RocketEffects {
             character,
             native,
             ground,
+            helo,
         })
     }
 
@@ -762,6 +799,21 @@ impl<W: Write> Engine<W> {
                 !actor.replication_backlogged
                     && actor.ordinary_shared_len() + count <= multiplayer::MAX_SHARED_QUEUE
             })
+    }
+
+    fn queue_rocket_helo_packet(&mut self, world: u32, packet: &[u8]) {
+        for actor in self
+            .active
+            .iter_mut()
+            .chain(self.peers.values_mut())
+            .filter(|actor| {
+                actor.reservation.world == world
+                    && actor.initial_objects.is_some()
+                    && actor.helo_creation_sent
+            })
+        {
+            actor.queue_shared(packet.to_vec());
+        }
     }
 
     fn queue_rocket_packet(&mut self, world: u32, packet: &[u8]) {

@@ -22,7 +22,13 @@ mod hospital_rocket_damage;
 
 #[path = "hospital_rocket_ground_damage.rs"]
 mod hospital_rocket_ground_damage;
+#[cfg(test)]
+pub(crate) use hospital_rocket_ground_damage::tests::combined_fixture as combined_ground_rocket_fixture;
 pub(crate) use hospital_rocket_ground_damage::{GroundRocketCandidate, GroundRocketDose};
+
+#[path = "hospital_rocket_helo_damage.rs"]
+pub(crate) mod hospital_rocket_helo_damage;
+pub(crate) use hospital_rocket_helo_damage::{HeloRocketCandidate, HeloRocketDose};
 
 const CHARACTERS_PER_UPDATE: u16 = 16;
 const CHARACTER_FAMILY_CAPACITY: u16 = 256;

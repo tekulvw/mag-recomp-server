@@ -112,6 +112,7 @@ pub(crate) struct State {
     pub(crate) hospital_hulks: Option<Arc<HospitalHulkAssets>>,
     pub(crate) hospital_turret_yaws: Arc<BTreeMap<u16, f32>>,
     pub(crate) hospital_rocket_ground: Option<Arc<crate::hospital_rocket_ground::Catalog>>,
+    pub(crate) hospital_rocket_helo_areas: Option<Arc<crate::hospital_rocket_helo::Catalog>>,
     pub(crate) frag_character_blast: bool,
     pub(crate) projectile_contacts:
         Option<Arc<crate::domination_projectile_collision::ContactBindings>>,

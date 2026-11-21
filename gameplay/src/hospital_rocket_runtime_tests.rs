@@ -791,3 +791,212 @@ fn hospital_rocket_large_face_crossing_preserves_certified_contact() {
     assert!((endpoint.fraction - 1.).abs() < 1e-7);
     assert!(cast(2.875 - 2e-8).is_none());
 }
+
+mod combined_helo_terminal {
+    use super::*;
+    const TARGET: &str = "synthetic-rocket-target";
+    const NOW: Duration = Duration::from_millis(1050);
+
+    fn fixture(enabled: bool) -> Engine<Vec<u8>> {
+        let mut engine = crate::domination_structural_world::combined_ground_rocket_fixture(true);
+        crate::domination_structural_world::hospital_rocket_helo_damage::tests::install_helo_fixture(
+            &mut engine, CharacterPosition { x: 1.5, y: 2.5, z: 2.0 },
+        );
+        if enabled {
+            engine
+                .domination_gameplay
+                .as_mut()
+                .unwrap()
+                .state
+                .hospital_rocket_helo_areas = Some(std::sync::Arc::new(
+                crate::hospital_rocket_helo::Catalog::synthetic(),
+            ));
+        }
+        for actor in engine.active.iter_mut().chain(engine.peers.values_mut()) {
+            actor.helo_creation_sent = true;
+            actor.pending_shared.clear();
+        }
+        engine
+    }
+    fn health(engine: &Engine<Vec<u8>>) -> [u16; 3] {
+        [
+            engine.peers[TARGET].last_damage.health_quarter_points,
+            engine
+                .ground_runtime
+                .as_ref()
+                .unwrap()
+                .get(0)
+                .unwrap()
+                .health_quarter_points,
+            engine
+                .domination_gameplay
+                .as_ref()
+                .unwrap()
+                .state
+                .helo
+                .as_ref()
+                .unwrap()
+                .carriers[0]
+                .damage
+                .wire
+                .health_quarter_points,
+        ]
+    }
+    fn flight(engine: &Engine<Vec<u8>>) -> Flight {
+        match engine
+            .active
+            .as_ref()
+            .unwrap()
+            .hospital_rocket_flights
+            .slots[3]
+            .as_ref()
+            .unwrap()
+        {
+            Slot::Flying(flight) => flight.clone(),
+            _ => panic!("expected the admitted flight"),
+        }
+    }
+    fn finish(engine: &mut Engine<Vec<u8>>) -> Result<Vec<OutboundMessage>, &'static str> {
+        // Isolate the shared terminal transaction. Motion/contact and source
+        // bindings are covered by the separate full source replay.
+        let flight = flight(engine);
+        engine.finish_rocket(
+            flight,
+            End::Detonation(Terminal {
+                position: [1.5, 2.5, 3.0],
+                elapsed_ms: 50.0,
+                reason: TerminalReason::AgeExpired,
+            }),
+            NOW,
+            1,
+        )
+    }
+    fn terminals(engine: &Engine<Vec<u8>>) -> Vec<Value> {
+        engine
+            .writer
+            .split(|&byte| byte == b'\n')
+            .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+            .filter(|row| row["op"] == "hospital_rocket_terminal")
+            .collect()
+    }
+
+    #[test]
+    fn combined_helo_terminal_records_all_three_domains_and_respects_creation_order() {
+        let mut engine = fixture(true);
+        engine.active.as_mut().unwrap().helo_creation_sent = false;
+        let before = health(&engine);
+        finish(&mut engine).unwrap();
+        let after = health(&engine);
+        assert!(
+            after
+                .into_iter()
+                .zip(before)
+                .all(|(after, before)| after < before)
+        );
+        let audit = terminals(&engine);
+        assert_eq!(audit.len(), 1);
+        assert!(audit[0]["damage_denial"].is_null(), "{audit:?}");
+        assert_eq!(audit[0]["helo_effects"].as_array().unwrap().len(), 1);
+        let masks = |actor: &Active| {
+            actor
+                .pending_shared
+                .iter()
+                .map(|packet| {
+                    replication::ObjectUpdate::decode_with_profile(packet, engine.wire_profile)
+                        .unwrap()
+                        .header
+                        .object_type_mask
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(!masks(engine.active.as_ref().unwrap()).contains(&(1 << 2)));
+        let observer = masks(&engine.peers[TARGET]);
+        assert!(
+            observer
+                .windows(3)
+                .any(|masks| masks == [1 << 1, 1 << 2, 1 << 19]),
+            "{observer:?}"
+        );
+        let carrier = &engine
+            .domination_gameplay
+            .as_ref()
+            .unwrap()
+            .state
+            .helo
+            .as_ref()
+            .unwrap()
+            .carriers[0];
+        assert_eq!(
+            format!("{:?}", carrier.creation(1, 1050).base.damage),
+            format!("{:?}", carrier.damage.wire)
+        );
+        assert_eq!(carrier.damage.wire.last_source_object, u32::MAX);
+        assert!(matches!(
+            engine
+                .active
+                .as_ref()
+                .unwrap()
+                .hospital_rocket_flights
+                .slots[3],
+            Some(Slot::Cleanup { .. })
+        ));
+    }
+
+    #[test]
+    fn combined_helo_terminal_recorder_refusal_preserves_health_queues_and_flight() {
+        let mut engine = fixture(true);
+        let before = health(&engine);
+        let flying = format!("{:?}", flight(&engine));
+        let queues = [
+            engine.active.as_ref().unwrap().pending_shared.clone(),
+            engine.peers[TARGET].pending_shared.clone(),
+        ];
+        engine.max_log = engine.written;
+        assert_eq!(finish(&mut engine).err(), Some("log_limit_reached"));
+        assert_eq!(health(&engine), before);
+        assert_eq!(format!("{:?}", flight(&engine)), flying);
+        assert_eq!(engine.active.as_ref().unwrap().pending_shared, queues[0]);
+        assert_eq!(engine.peers[TARGET].pending_shared, queues[1]);
+        assert!(terminals(&engine).is_empty());
+    }
+
+    #[test]
+    fn combined_helo_terminal_reserves_the_extra_packet_then_retries_after_drain() {
+        let fill = |engine: &mut Engine<Vec<u8>>| {
+            let packet = replication::TeamSpawnDeadline {
+                sequence: 1,
+                timestamp_ms: 1020,
+                object_index: 0,
+                team: 0,
+                deadline_ms: 3000,
+            }
+            .encode_with_profile(engine.wire_profile)
+            .unwrap();
+            let actor = engine.active.as_mut().unwrap();
+            while actor.ordinary_shared_len() < multiplayer::MAX_SHARED_QUEUE - 3 {
+                actor.queue_shared(packet.clone());
+            }
+        };
+        let mut without = fixture(false);
+        fill(&mut without);
+        finish(&mut without).unwrap();
+        assert_eq!(terminals(&without).len(), 1);
+        let mut combined = fixture(true);
+        fill(&mut combined);
+        let before = health(&combined);
+        let flying = format!("{:?}", flight(&combined));
+        assert!(finish(&mut combined).unwrap().is_empty());
+        assert_eq!(health(&combined), before);
+        assert_eq!(format!("{:?}", flight(&combined)), flying);
+        assert!(terminals(&combined).is_empty());
+        assert!(!combined.drain_shared(Vec::new(), 1).unwrap().is_empty());
+        finish(&mut combined).unwrap();
+        assert_eq!(terminals(&combined).len(), 1);
+        assert!(
+            health(&combined)
+                .into_iter()
+                .zip(before)
+                .all(|(after, before)| after < before)
+        );
+    }
+}

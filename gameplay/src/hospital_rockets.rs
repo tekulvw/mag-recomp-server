@@ -14,6 +14,31 @@ const TOKEN_OVERRIDE_SHA256: &str =
 const MAX_RULE_BYTES: usize = 1 << 20;
 const FACTION_COUNT: usize = 3;
 
+/// Classify a blast origin with a validated vehicle pose and source thresholds.
+pub(crate) fn vehicle_blast_location(
+    pose: crate::dynamic_collision::Pose,
+    blast_origin: [f64; 3],
+    rear_threshold_z: f32,
+    front_threshold_z: f32,
+) -> u8 {
+    let displacement: [f32; 3] =
+        std::array::from_fn(|axis| blast_origin[axis] as f32 - pose.translation[axis] as f32);
+    let local = |axis: usize| {
+        (0..3).fold(0., |sum, world| {
+            (pose.rotation[world][axis] as f32).mul_add(displacement[world], sum)
+        })
+    };
+    let z = local(2);
+    let area = if z > front_threshold_z {
+        1
+    } else if z < rear_threshold_z {
+        3
+    } else {
+        2
+    };
+    area + if local(0) > 0. { 0 } else { 3 }
+}
+
 #[derive(Debug)]
 pub struct Catalog {
     variants: Vec<Variant>,

@@ -146,6 +146,7 @@ pub mod ground_vehicles;
 mod headless_sim;
 pub mod healing;
 mod hospital_rocket_ground;
+mod hospital_rocket_helo;
 mod hospital_rocket_runtime;
 pub mod hospital_rockets;
 mod hospital_turret_wire;
