@@ -905,6 +905,14 @@ impl RetailBulletProfile {
         {
             return Err("unsupported_retail_bullet_fire_mode");
         }
+        if gear == 0
+            && inventory.slots[17].is_none()
+            && items
+                .zip(weapon)
+                .is_some_and(|(items, weapon)| items.retail_sniper_requires_underbarrel(weapon))
+        {
+            return Err("unsupported_bullet_attachment");
+        }
         for &slot in attachments {
             let Some(attachment) = inventory.slots[slot] else {
                 continue;

@@ -815,6 +815,21 @@ impl ItemCatalog {
     /// Ordinary retail Hit encodes the active FireMode row index separately
     /// from the equipment report's ammo-pool index.
     pub(crate) fn retail_firearm_mode_count(&self, weapon_id: u16) -> Option<usize> {
+        let weapon = self.qualified_retail_firearm_weapon(weapon_id)?;
+        ordinary_fire_mode_count(&weapon["fire_mode"]["fire_modes"])
+    }
+
+    pub(crate) fn retail_sniper_requires_underbarrel(&self, weapon_id: u16) -> bool {
+        self.qualified_retail_firearm_weapon(weapon_id)
+            .is_some_and(|weapon| {
+                weapon["category"].as_str() == Some("kWepCategorySniperRifle")
+                    && weapon["required_underbarrel_attachment"]
+                        .as_str()
+                        .is_some_and(|name| !name.is_empty())
+            })
+    }
+
+    fn qualified_retail_firearm_weapon(&self, weapon_id: u16) -> Option<&Value> {
         let source_sha256 = self.retail_item_source_sha256.as_deref()?;
         let combat = self.retail_combat().ok()?;
         let bullet = combat.bullet_metadata(weapon_id)?;
@@ -826,7 +841,7 @@ impl ItemCatalog {
         {
             return None;
         }
-        ordinary_fire_mode_count(&weapon["fire_mode"]["fire_modes"])
+        Some(weapon)
     }
 
     pub(crate) fn retail_firearm_attachment(
@@ -883,6 +898,37 @@ impl ItemCatalog {
                 Some(BulletAttachmentKind::ForwardGrip)
             }
             (0, "kWepCategoryMachineGun", "kAttachTypeBipod") => Some(BulletAttachmentKind::Bipod),
+            (0, category, kind)
+                if parameters["character_attachment_type"].as_str()
+                    == Some("kCharAttachTypePrimary") =>
+            {
+                match (category, kind) {
+                    (
+                        "kWepCategorySniperRifle" | "kWepCategorySubMachineGun",
+                        "kAttachTypeSuppressor",
+                    ) => Some(BulletAttachmentKind::Suppressor),
+                    ("kWepCategoryAssaultRifle", "kAttachTypeBipod") => {
+                        Some(BulletAttachmentKind::Bipod)
+                    }
+                    ("kWepCategoryMachineGun", "kAttachTypeForwardGrip") => {
+                        Some(BulletAttachmentKind::ForwardGrip)
+                    }
+                    ("kWepCategorySniperRifle", "kAttachTypeBipod" | "kAttachTypeForwardGrip") => {
+                        let required = match weapon.get("required_underbarrel_attachment") {
+                            Some(value) => value.as_str()?,
+                            None => "",
+                        };
+                        if kind == "kAttachTypeBipod" && (required.is_empty() || required == name) {
+                            Some(BulletAttachmentKind::Bipod)
+                        } else if kind == "kAttachTypeForwardGrip" && required.is_empty() {
+                            Some(BulletAttachmentKind::ForwardGrip)
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }
