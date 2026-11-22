@@ -86,6 +86,139 @@ fn health(engine: &Engine<Vec<u8>>) -> u16 {
         _ => 0,
     }
 }
+
+fn notices(actor: &Active) -> Vec<String> {
+    actor
+        .pending_notifications
+        .iter()
+        .filter_map(|publication| match publication {
+            match_flow::Publication::Application(wire) if wire.starts_with(&[1, 0xff]) => {
+                Some(protocol::encode_hex(wire))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn falling_death_notifies_the_actual_self_squad_once() {
+    let mut engine = fixture(0., 0.);
+    engine.item_catalog = human_kill_reward_tests::bot_firearm_items();
+    for (slot, squad) in [(1, 0), (2, 1)] {
+        reserve(&mut engine, slot);
+        let observer = engine.active.as_mut().unwrap();
+        ready(observer);
+        observer.squad_catalog = std::sync::Arc::new(
+            engine
+                .spawn_catalog
+                .as_ref()
+                .unwrap()
+                .for_squad(squad)
+                .unwrap(),
+        );
+    }
+    let falling = engine.peers.remove("synthetic-reservation-0000").unwrap();
+    let observer = engine.active.replace(falling).unwrap();
+    engine
+        .peers
+        .insert(observer.reservation.id.clone(), observer);
+    report(&mut engine, 2, 11, 50.).unwrap();
+    report(&mut engine, 3, 1, 0.).unwrap();
+    assert!(matches!(
+        engine.active.as_ref().unwrap().life,
+        CharacterLife::AwaitingRespawn { generation: 1 }
+    ));
+    // ID01ff, self0/self0, Falling1, signed index-1, no head/vehicle flags.
+    assert_eq!(
+        notices(engine.active.as_ref().unwrap()),
+        ["01ff0000000001ffffffff00"]
+    );
+    assert_eq!(
+        notices(&engine.peers["synthetic-reservation-0001"]),
+        ["01ff0000000001ffffffff00"]
+    );
+    assert!(notices(&engine.peers["synthetic-reservation-0002"]).is_empty());
+    assert!(engine.pending_reward_batch().is_empty());
+    report(&mut engine, 4, 1, 0.).unwrap();
+    assert_eq!(notices(engine.active.as_ref().unwrap()).len(), 1);
+}
+
+#[test]
+fn falling_collapse_notifies_before_incapacitation_and_expiry_does_not_repeat_it() {
+    let mut engine = fixture(0., 0.)
+        .with_incapacitation_rules(incapacitation_tests::rules())
+        .unwrap();
+    engine.item_catalog = human_kill_reward_tests::bot_firearm_items();
+    engine.active.as_mut().unwrap().life = CharacterLife::Alive {
+        generation: 1,
+        health_quarter_points: 40,
+    };
+    fall(&mut engine); // 18HP against10HP, below the downed admission threshold.
+    assert!(matches!(
+        engine.active.as_ref().unwrap().life,
+        CharacterLife::Incapacitated { generation: 1, .. }
+    ));
+    assert_eq!(
+        notices(engine.active.as_ref().unwrap()),
+        ["01ff0000000001ffffffff00"]
+    );
+    engine
+        .tick_incapacitation(Duration::from_secs(9), 1)
+        .unwrap();
+    assert!(matches!(
+        engine.active.as_ref().unwrap().life,
+        CharacterLife::AwaitingRespawn { generation: 1 }
+    ));
+    assert_eq!(notices(engine.active.as_ref().unwrap()).len(), 1);
+    assert!(engine.pending_reward_batch().is_empty());
+}
+
+#[test]
+fn falling_notice_failed_record_keeps_life_and_does_not_publish() {
+    let mut engine = fixture(0., 0.);
+    engine.item_catalog = human_kill_reward_tests::bot_firearm_items();
+    report(&mut engine, 2, 11, 50.).unwrap();
+    engine.max_log = engine.written;
+    assert_eq!(
+        report(&mut engine, 3, 1, 0.).err(),
+        Some("log_limit_reached")
+    );
+    assert_eq!(health(&engine), 400);
+    assert!(notices(engine.active.as_ref().unwrap()).is_empty());
+    assert!(engine.active.as_ref().unwrap().grenade_damage.is_empty());
+    // A failed recorder is deliberately fail-stop; a second report cannot
+    // resume the transaction or publish a notice behind the missing record.
+    assert_eq!(
+        report(&mut engine, 3, 1, 0.).err(),
+        Some("recorder_unavailable")
+    );
+    assert_eq!(health(&engine), 400);
+    assert!(notices(engine.active.as_ref().unwrap()).is_empty());
+}
+
+#[test]
+fn falling_notice_keeps_damage_without_body_metadata_and_uses_qualified_head_mapping() {
+    let mut missing = fixture(0., 0.);
+    report(&mut missing, 2, 11, 50.).unwrap();
+    report(&mut missing, 3, 1, 0.).unwrap();
+    assert!(matches!(
+        missing.active.as_ref().unwrap().life,
+        CharacterLife::AwaitingRespawn { .. }
+    ));
+    assert!(notices(missing.active.as_ref().unwrap()).is_empty());
+
+    let mut mapped = fixture(0., 0.);
+    mapped.item_catalog = human_kill_reward_tests::melee_items(); // Invented body0 is head.
+    fall(&mut mapped);
+    assert_eq!(health(&mapped), 328);
+    assert!(notices(mapped.active.as_ref().unwrap()).is_empty());
+    report(&mut mapped, 4, 11, 50.).unwrap();
+    report(&mut mapped, 5, 1, 0.).unwrap();
+    assert_eq!(
+        notices(mapped.active.as_ref().unwrap()),
+        ["01ff0000000001ffffffff80"]
+    );
+}
 fn fall(engine: &mut Engine<Vec<u8>>) {
     report(engine, 2, 11, 14.).unwrap();
     report(engine, 3, 1, 10.).unwrap();

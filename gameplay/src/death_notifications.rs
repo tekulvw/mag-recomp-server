@@ -277,7 +277,58 @@ pub(crate) struct CharacterEffectNoticeRequest {
     pub mounted: protocol::VictimWasMounted,
 }
 impl<W: Write> Engine<W> {
+    /// A qualified self fall uses its own source metadata, not a weapon ID.
+    /// Falling damage remains available without the optional combat body map.
+    pub(super) fn plan_falling_death(
+        &self,
+        actor: &Active,
+        damage: replication::CharacterDamage,
+    ) -> Result<Option<CharacterEffectNotice>, &'static str> {
+        if actor.wire_profile.application_id() != 20231
+            || !actor.ready_for_updates
+            || !actor.entered_game
+            || actor.initial_objects.is_none()
+            || actor.is_mounted()
+            || !actor.life.is_alive()
+            || damage.health_quarter_points != 0
+            || self.item_catalog.retail_combat().is_err()
+        {
+            return Ok(None);
+        }
+        let id = 0x0380_0000 | u32::from(actor.reservation.player);
+        if damage.last_attacker != id
+            || damage.last_source_object != u32::MAX
+            || damage.last_location_and_type != 0x50
+            || damage.last_user_data != 0
+        {
+            return Err("invalid_falling_death_attribution");
+        }
+        self.character_effect_notice(CharacterEffectNoticeRequest {
+            world: actor.reservation.world,
+            victim: actor.reservation.player,
+            attacker: id,
+            source_type: 1,
+            source_index: -1,
+            location: 0,
+            mounted: protocol::VictimWasMounted::NoAssociatedVehicle,
+        })
+        .map(Some)
+    }
+
     pub(crate) fn plan_character_effect_notice(
+        &self,
+        request: CharacterEffectNoticeRequest,
+    ) -> Result<CharacterEffectNotice, &'static str> {
+        if self.wire_profile.application_id() != 20231
+            || ![4, 5, 6, 7, 9, 10].contains(&request.source_type)
+            || request.source_index != -1
+        {
+            return Err("unsupported_character_effect_death_source");
+        }
+        self.character_effect_notice(request)
+    }
+
+    fn character_effect_notice(
         &self,
         request: CharacterEffectNoticeRequest,
     ) -> Result<CharacterEffectNotice, &'static str> {
@@ -290,12 +341,6 @@ impl<W: Write> Engine<W> {
             location,
             mounted,
         } = request;
-        if self.wire_profile.application_id() != 20231
-            || ![4, 5, 6, 7, 9, 10].contains(&source_type)
-            || source_index != -1
-        {
-            return Err("unsupported_character_effect_death_source");
-        }
         let squad_for = |id: u32| {
             self.active
                 .iter()

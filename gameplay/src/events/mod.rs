@@ -168,6 +168,7 @@ struct CombatChanges {
     bot_firearm_kd: Option<bot_firearm_kd::Plan>,
     firearm_assists: Option<firearm_assists::Plan>,
     death_notifications: Vec<death_notifications::Plan>,
+    falling_death_notice: Option<death_notifications::CharacterEffectNotice>,
     new_damage_model: Option<replication::CharacterDamage>,
     revived_peer: Option<(String, u32, replication::CharacterDamage)>,
     new_healing: Option<Option<progression::HealingSession>>,
@@ -586,6 +587,7 @@ impl<W: Write> Engine<W> {
                 "peer_lives":plan.combat.peer_lives.iter().map(|(id,life)|json!({"reservation_id":id,"life":format!("{life:?}")})).collect::<Vec<_>>(),
                 "new_life":plan.combat.new_life.map(|life|format!("{life:?}")),
                 "death_notifications": plan.combat.death_notifications.iter().map(|p| p.audit()).collect::<Vec<_>>(),
+                "falling_death_notice": plan.combat.falling_death_notice.as_ref().map(|p| p.audit()),
                 "bot_firearm_kd": plan.combat.bot_firearm_kd.as_ref().map(bot_firearm_kd::Plan::audit),
                 "firearm_assists": plan.combat.firearm_assists.as_ref().map(firearm_assists::Plan::audit),
                 "ordered_health": plan.replication.ordered_health.as_ref().map(|p| protocol::encode_hex(p)),
@@ -1358,6 +1360,9 @@ impl<W: Write> Engine<W> {
             assists.install(self)?;
         }
         self.prune_firearm_assist_victims();
+        if let Some(notice) = plan.combat.falling_death_notice {
+            notice.commit(self);
+        }
         Ok(plan.messages)
     }
 }
