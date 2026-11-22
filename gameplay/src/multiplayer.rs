@@ -758,6 +758,7 @@ impl<W: Write> Engine<W> {
                 json!({"op":"shared_actor_created","reservation_id":new_id}),
                 wall,
             )?;
+            self.note_leadership_character_created();
             self.queue_roster(now)?;
         } else if let Some(actor) = self.active.as_ref()
             && actor.outbound_sequence > before_sequence
@@ -1231,6 +1232,7 @@ impl<W: Write> Engine<W> {
         // Larger match admission explicitly opts into the expanded message count;
         // the aggregate raw-byte budget is the same for every match size.
         let (limit, mut total) = self.reply_budget(&messages)?;
+        self.publish_inherited_leadership(wall)?;
         let mut planned = Vec::new();
         // Shared character frames can already refer to an indexed hospital.
         // Its direct creation reply precedes the existing FIFO and bootstrap.
