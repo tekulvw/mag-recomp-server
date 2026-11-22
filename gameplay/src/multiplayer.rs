@@ -580,6 +580,10 @@ impl<W: Write> Engine<W> {
             .as_ref()
             .is_some_and(|actor| actor.helo_creation_sent);
         let before_sequence = self.active.as_ref().map_or(0, |a| a.outbound_sequence);
+        let had_objectives = self
+            .active
+            .as_ref()
+            .is_some_and(|a| a.objective_delta.is_some());
         let before_owner = self.active.as_ref().map_or(0, |a| a.latest_owner_sequence);
         let before_alive_generation = self
             .active
@@ -765,8 +769,15 @@ impl<W: Write> Engine<W> {
             // life, vehicles, deadlines and objectives are published to peers.
             let own_helo_creation =
                 mask == 1 << 2 && !had_helo_creation && actor.helo_creation_sent;
+            // Multi-packet objective bootstrap belongs to the joining recipient.
+            // Relaying the last history packet would send only its private suffix.
+            let own_objective_bootstrap = mask == 1 << 12
+                && !had_objectives
+                && actor.objective_delta.is_some()
+                && actor.outbound_sequence - before_sequence > 1;
             if mask != ((1 << 3) | (1 << 7) | (1 << 8) | (1 << 13))
                 && !own_helo_creation
+                && !own_objective_bootstrap
                 && (mask != 8 || !is_spawn_assignment(&packet, self.wire_profile))
             {
                 for peer in self

@@ -49,6 +49,8 @@ impl<'a> BitReader<'a> {
         Ok(value)
     }
 }
+const MAX_UPDATE_BITS: usize = 1397 * 8;
+
 pub(crate) struct BitWriter {
     pub profile: crate::wire_profile::WireProfile,
     bytes: Vec<u8>,
@@ -66,7 +68,7 @@ impl BitWriter {
         if width > 32 || (width < 32 && value >= 1u32 << width) {
             return Err("replication_value_out_of_range");
         }
-        if self.position + width > 1397 * 8 {
+        if self.position + width > MAX_UPDATE_BITS {
             return Err("replication_packet_too_long");
         }
         for shift in (0..width).rev() {
@@ -1206,27 +1208,66 @@ impl ObjectiveControlSnapshot {
         {
             return Err("invalid_objective_sequence_links");
         }
+        self.validate_control_rows()?;
+        self.encode_control_rows(&self.objectives, sequences, self.sequence, profile)
+    }
+
+    /// Bootstrap omits sequence links, so each control row has a fixed wire width.
+    /// Validate the entire snapshot before serializing any page.
+    pub(crate) fn encode_bootstrap_batches(
+        &self,
+        profile: crate::wire_profile::WireProfile,
+    ) -> Result<Vec<Vec<u8>>, &'static str> {
+        self.validate_control_rows()?;
+        const CONTROL_ROW_BITS: usize = 1 + 16 + 11 + (8 + 32 + 16) + 32 + 32 + 8;
+        let rows_per_batch = (MAX_UPDATE_BITS - profile.header_bits() - 1) / CONTROL_ROW_BITS;
+        self.objectives
+            .chunks(rows_per_batch)
+            .enumerate()
+            .map(|(offset, rows)| {
+                let sequence = self
+                    .sequence
+                    .checked_add(offset as u32)
+                    .ok_or("replication_sequence_exhausted")?;
+                self.encode_control_rows(rows, &[], sequence, profile)
+            })
+            .collect()
+    }
+
+    fn validate_control_rows(&self) -> Result<(), &'static str> {
         if self.objectives.is_empty() {
             return Err("empty_objective_snapshot");
         }
+        let mut previous = None;
+        for row in &self.objectives {
+            if row.object_index >= 128
+                || previous.is_some_and(|index| row.object_index <= index)
+                || row.health_percent > 100
+            {
+                return Err("invalid_objective_control_delta");
+            }
+            previous = Some(row.object_index);
+        }
+        Ok(())
+    }
+
+    fn encode_control_rows(
+        &self,
+        rows: &[ObjectiveControlDelta],
+        sequences: &[ObjectiveSequenceDelta],
+        sequence: u32,
+        profile: crate::wire_profile::WireProfile,
+    ) -> Result<Vec<u8>, &'static str> {
         let mut bits = BitWriter::with_profile(profile);
         UpdateHeader {
-            sequence: self.sequence,
+            sequence,
             nak_sequence: 0,
             client_index: 0,
             object_type_mask: 1 << 12,
             timestamp_ms: self.timestamp_ms,
         }
         .encode(&mut bits)?;
-        let mut previous = None;
-        for objective in &self.objectives {
-            if objective.object_index >= 128
-                || previous.is_some_and(|index| objective.object_index <= index)
-                || objective.health_percent > 100
-            {
-                return Err("invalid_objective_control_delta");
-            }
-            previous = Some(objective.object_index);
+        for objective in rows {
             bits.write(1, 1)?;
             bits.write(objective.object_index.into(), 16)?;
             let sequence = sequences

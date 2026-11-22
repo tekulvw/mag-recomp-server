@@ -964,8 +964,8 @@ fn plan_grenade_blasts<W: Write>(
     Ok(grenade_queue)
 }
 
-/// Choose at most one reliable reply in the established priority order. Replay,
-/// damage, healing, initialization and respawn retain their original precedence.
+/// Choose the next reply in the established priority order. Objective bootstrap
+/// can carry multiple reliable packets in one reply.
 fn plan_update_reply<W: Write>(
     ctx: &PlanningContext<'_, W>,
     plan: &mut EventPlan,
@@ -1053,39 +1053,64 @@ fn plan_update_reply<W: Write>(
         && ctx.engine.match_profile().has_objectives
     {
         let timestamp = now.as_millis() as u32;
-        let delta = if let Some(catalog) = &ctx.engine.objective_catalog {
-            plan.replication.objective_count = catalog.object_count();
-            if let Some(world) = ctx
-                .engine
-                .objective_world
-                .as_ref()
-                .filter(|w| !w.is_pristine())
-            {
-                let snapshot = world.snapshot(next_sequence, timestamp);
-                let sequences = if let Some(gameplay) = &ctx.engine.domination_gameplay {
-                    gameplay.current_sequences()
-                } else if let Some(gameplay) = &ctx.engine.acquisition_gameplay {
-                    gameplay.current_structural_sequences()
-                } else {
-                    Vec::new()
-                };
-                plan.replication.domination_sequence_batches =
-                    replication::ObjectiveSequenceDelta::encode_batches(
-                        &sequences,
-                        timestamp,
-                        ctx.engine.wire_profile,
-                    )?;
-                snapshot.encode_with_profile(ctx.engine.wire_profile)?
+        let catalog = ctx
+            .engine
+            .objective_catalog
+            .as_ref()
+            .ok_or("retail_objective_catalog_required")?;
+        let (packets, sequence_batches) = if let Some(world) = ctx
+            .engine
+            .objective_world
+            .as_ref()
+            .filter(|w| !w.is_pristine())
+        {
+            let sequences = if let Some(gameplay) = &ctx.engine.domination_gameplay {
+                gameplay.current_sequences()
+            } else if let Some(gameplay) = &ctx.engine.acquisition_gameplay {
+                gameplay.current_structural_sequences()
             } else {
-                catalog
+                Vec::new()
+            };
+            (
+                world
                     .snapshot(next_sequence, timestamp)
-                    .encode_with_profile(ctx.engine.wire_profile)?
-            }
+                    .encode_bootstrap_batches(ctx.engine.wire_profile)?,
+                replication::ObjectiveSequenceDelta::encode_batches(
+                    &sequences,
+                    timestamp,
+                    ctx.engine.wire_profile,
+                )?,
+            )
         } else {
-            return Err("retail_objective_catalog_required");
+            (
+                vec![
+                    catalog
+                        .snapshot(next_sequence, timestamp)
+                        .encode_with_profile(ctx.engine.wire_profile)?,
+                ],
+                Vec::new(),
+            )
         };
-        plan.outgoing = Some(delta.clone());
-        plan.replication.objective_delta = Some(delta);
+        if (!ctx.engine.world_tick_enabled
+            && ctx.engine.maximum_players == 1
+            && active.replication_history.len() + packets.len() > MAX_REPLICATION_HISTORY)
+            || (!sequence_batches.is_empty()
+                && (active.replication_backlogged
+                    || active.ordinary_shared_len() + sequence_batches.len()
+                        > crate::multiplayer::MAX_SHARED_QUEUE))
+        {
+            // Leave bootstrap incomplete so a later pull retries the full snapshot.
+            return Ok(());
+        }
+        let mut packets = packets.into_iter();
+        let first = packets
+            .next()
+            .expect("validated nonempty objective bootstrap");
+        plan.outgoing = Some(first.clone());
+        plan.replication.objective_delta = Some(first);
+        plan.replication.objective_control_tail = packets.collect();
+        plan.replication.objective_count = catalog.object_count();
+        plan.replication.domination_sequence_batches = sequence_batches;
     } else if active.ready_for_updates
         && h.nak_sequence == 0
         && history_available
