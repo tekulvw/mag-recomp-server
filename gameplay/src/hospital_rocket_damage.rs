@@ -18,17 +18,18 @@ impl<W: Write> Engine<W> {
         let effects = self
             .collect_hospital_rocket_character_blast(source, attacker, origin, blast, collision)?;
         let native = self.owned_acquisition_characters();
-        let candidate = self.prepare_acquisition_character_effects(&effects, &native, now)?;
+        let candidate = self.prepare_rocket_character_effects(source, &effects, &native, now)?;
         Ok((candidate, native))
     }
 
-    pub(super) fn hospital_rocket_blast_attacker(
+    pub(crate) fn hospital_rocket_blast_attacker(
         &self,
         source: &LaunchSource,
     ) -> Result<u32, &'static str> {
         if self.round_number != source.round
             || !self.active.iter().chain(self.peers.values()).any(|actor| {
                 actor.reservation.id == source.reservation
+                    && actor.allocation_sequence == source.allocation_sequence
                     && actor.reservation.world == source.world
                     && actor.reservation.player == source.player
                     && actor.reward_match_id == source.match_id
@@ -185,6 +186,7 @@ mod tests {
         let mut engine = crate::human_kill_reward_tests::fixture();
         let actor = engine.active.as_mut().unwrap();
         let source = LaunchSource {
+            allocation_sequence: actor.allocation_sequence,
             reservation: actor.reservation.id.clone(),
             world: actor.reservation.world,
             round: engine.round_number,

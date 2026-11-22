@@ -2422,3 +2422,238 @@ fn mixed_frag_assists_refuse_stale_allocations_and_retain_pending_state_on_log_f
         assert!(engine.pending_reward_batch().is_empty());
     }
 }
+
+fn rocket_assist_source(engine: &Engine<Vec<u8>>) -> hospital_rocket_runtime::LaunchSource {
+    let shooter = engine.active.as_ref().unwrap();
+    hospital_rocket_runtime::LaunchSource {
+        allocation_sequence: shooter.allocation_sequence,
+        reservation: shooter.reservation.id.clone(),
+        world: shooter.reservation.world,
+        round: engine.round_number,
+        match_id: shooter.reward_match_id.clone(),
+        character_id: shooter.reservation.character.character_id,
+        player: shooter.reservation.player,
+        life_generation: 4,
+        team: shooter.team(),
+        item: 3,
+        projectile_id: 0x1380_0000 | u32::from(shooter.reservation.player),
+    }
+}
+
+fn rocket_assist_dose(
+    source: &hospital_rocket_runtime::LaunchSource,
+    victim: u16,
+    raw_hp: f32,
+) -> (
+    acquisition_character_effects::Target,
+    acquisition_character_effects::Request,
+) {
+    use acquisition_character_effects::{Request as Effect, Target};
+    (
+        Target {
+            world: source.world,
+            character_id: 0x0380_0000 | u32::from(victim),
+            generation: 4,
+        },
+        Effect::HospitalRocketExplosion {
+            attacker: 0x0380_0000 | u32::from(source.player),
+            projectile_id: source.projectile_id,
+            raw_hp,
+            from_direction: [1., 0., 0.],
+        },
+    )
+}
+
+#[test]
+fn rocket_assist_settles_both_mixed_orders_and_preserves_posthumous_attribution() {
+    for (rocket_first, other_is_frag) in
+        [(true, false), (true, true), (false, false), (false, true)]
+    {
+        let mut engine =
+            crate::human_kill_reward_tests::enable_incoming_base(mixed_frag_assist_fixture(), 0.25);
+        let now = Duration::from_millis(1000);
+        if rocket_first {
+            let source = rocket_assist_source(&engine);
+            engine.active.as_mut().unwrap().life = CharacterLife::AwaitingRespawn { generation: 4 };
+            let mut native = engine.owned_acquisition_characters();
+            let candidate = engine
+                .prepare_rocket_character_effects(
+                    &source,
+                    &[rocket_assist_dose(&source, 0, 5.)],
+                    &native,
+                    now,
+                )
+                .unwrap();
+            engine
+                .record_acquisition_character_effects(candidate, &mut native, 1)
+                .unwrap();
+            assert!(engine.peers["synthetic-reservation-0000"].life.is_alive());
+            focus_assist_actor(&mut engine, 1);
+            if other_is_frag {
+                queue_human_frag(&mut engine, 40.);
+                update(&mut engine, 6000).unwrap();
+            } else {
+                crate::human_kill_reward_tests::hit(&mut engine, 77, 6000).unwrap();
+            }
+        } else {
+            if other_is_frag {
+                queue_human_frag(&mut engine, 5.);
+                update(&mut engine, 1000).unwrap();
+            } else {
+                dispatch(&mut engine, &zero_damage_firearm_hit(0), 1000).unwrap();
+            }
+            focus_assist_actor(&mut engine, 1);
+            let source = rocket_assist_source(&engine);
+            let mut native = engine.owned_acquisition_characters();
+            let dose = rocket_assist_dose(&source, 0, 120.);
+            let candidate = engine
+                .prepare_rocket_character_effects(
+                    &source,
+                    &[dose, dose],
+                    &native,
+                    Duration::from_millis(6000),
+                )
+                .unwrap();
+            engine
+                .record_acquisition_character_effects(candidate, &mut native, 1)
+                .unwrap();
+        }
+        assert!(!engine.peers["synthetic-reservation-0000"].life.is_alive());
+        assert_eq!(
+            mixed_frag_assist_count(&engine),
+            1,
+            "rocket_first={rocket_first}, other_is_frag={other_is_frag}"
+        );
+        assert!(
+            engine
+                .pending_reward_batch()
+                .iter()
+                .all(|reward| reward.player_id != 2)
+        );
+    }
+}
+
+#[test]
+fn rocket_assist_failed_record_keeps_hp_ledger_and_publication_unchanged() {
+    let mut engine =
+        crate::human_kill_reward_tests::enable_incoming_base(mixed_frag_assist_fixture(), 0.25);
+    dispatch(&mut engine, &zero_damage_firearm_hit(0), 1000).unwrap();
+    focus_assist_actor(&mut engine, 1);
+    let source = rocket_assist_source(&engine);
+    let mut native = engine.owned_acquisition_characters();
+    let now = Duration::from_millis(1001);
+    let candidate = engine
+        .prepare_rocket_character_effects(
+            &source,
+            &[rocket_assist_dose(&source, 0, 120.)],
+            &native,
+            now,
+        )
+        .unwrap();
+    assert_eq!(candidate.audit()[0]["assists"][0]["player_id"], 2);
+    let revision = engine.firearm_assists.revision();
+    let pending = engine
+        .active
+        .as_ref()
+        .unwrap()
+        .pending_firearm_assist_rows
+        .clone();
+    engine.max_log = engine.written;
+    assert_eq!(
+        engine
+            .record_acquisition_character_effects(candidate, &mut native, 1)
+            .unwrap_err(),
+        "log_limit_reached"
+    );
+    assert_eq!(engine.firearm_assists.revision(), revision);
+    assert_eq!(
+        engine.active.as_ref().unwrap().pending_firearm_assist_rows,
+        pending
+    );
+    assert!(engine.peers["synthetic-reservation-0000"].life.is_alive());
+    assert_eq!(mixed_frag_assist_count(&engine), 0);
+}
+
+#[test]
+fn rocket_assist_batch_settles_each_victim_and_fences_stale_candidates() {
+    let mut engine =
+        crate::human_kill_reward_tests::enable_incoming_base(mixed_frag_assist_fixture(), 0.25);
+    crate::spawn_progression::reserve(&mut engine, 3);
+    let template = &engine.peers["synthetic-reservation-0000"];
+    let second = engine.active.as_mut().unwrap();
+    ready(second);
+    second.squad_catalog = template.squad_catalog.clone();
+    second.life = template.life;
+    second.owner_fields.state = template.owner_fields.state;
+    second.current_inventory_handle = template.current_inventory_handle;
+    second.spawned_loadout = template.spawned_loadout.clone();
+    focus_assist_actor(&mut engine, 2);
+    let now = Duration::from_millis(1000);
+    let contributor = rocket_assist_source(&engine);
+    let mut native = engine.owned_acquisition_characters();
+    let wounds = [
+        rocket_assist_dose(&contributor, 0, 5.),
+        rocket_assist_dose(&contributor, 3, 5.),
+    ];
+    let candidate = engine
+        .prepare_rocket_character_effects(&contributor, &wounds, &native, now)
+        .unwrap();
+    engine
+        .record_acquisition_character_effects(candidate, &mut native, 1)
+        .unwrap();
+    focus_assist_actor(&mut engine, 1);
+    let killer = rocket_assist_source(&engine);
+    let lethal = [
+        rocket_assist_dose(&killer, 0, 120.),
+        rocket_assist_dose(&killer, 3, 120.),
+    ];
+    let stale = engine
+        .prepare_rocket_character_effects(&killer, &lethal, &native, now)
+        .unwrap();
+    let refresh = firearm_assists::Plan::prepare(
+        &engine,
+        killer.world,
+        now,
+        firearm_assists::Fighter::human(&engine.peers[&contributor.reservation]),
+        firearm_assists::Fighter::human(&engine.peers["synthetic-reservation-0000"]),
+        false,
+    )
+    .unwrap();
+    refresh.install(&mut engine).unwrap();
+    assert_eq!(
+        engine.check_acquisition_character_effects(&stale, &native),
+        Err("stale_acquisition_character_candidate"),
+    );
+    let mut stale_source = killer.clone();
+    stale_source.allocation_sequence += 1;
+    assert_eq!(
+        engine
+            .prepare_rocket_character_effects(&stale_source, &lethal, &native, now)
+            .err(),
+        Some("stale_hospital_rocket_character_source"),
+    );
+    let candidate = engine
+        .prepare_rocket_character_effects(&killer, &lethal, &native, now)
+        .unwrap();
+    assert_eq!(candidate.audit()[0]["assists"][0]["after"], 1);
+    assert_eq!(candidate.audit()[1]["assists"][0]["after"], 2);
+    engine
+        .record_acquisition_character_effects(candidate, &mut native, 1)
+        .unwrap();
+    assert_eq!(mixed_frag_assist_count(&engine), 2);
+    for id in [0, 3] {
+        assert!(
+            !engine.peers[&format!("synthetic-reservation-{id:04}")]
+                .life
+                .is_alive()
+        );
+    }
+    assert!(
+        !engine
+            .active
+            .as_ref()
+            .unwrap()
+            .pending_firearm_assist_rows
+            .is_empty()
+    );
+}

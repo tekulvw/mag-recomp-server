@@ -133,7 +133,7 @@ impl Ledger {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct State {
     rules: Option<Rules>,
     scope: Option<(u32, u64)>,
@@ -142,6 +142,10 @@ pub(super) struct State {
 }
 
 impl State {
+    pub(super) fn revision(&self) -> u64 {
+        self.revision
+    }
+
     pub(super) fn enabled(&self) -> bool {
         self.rules.is_some()
     }
@@ -257,13 +261,35 @@ impl FragOwner {
 
 enum Source {
     Firearm(Victim),
-    QueuedFrag { index: u16, owner: FragOwner },
+    QueuedFrag {
+        index: u16,
+        owner: FragOwner,
+    },
+    Rocket {
+        index: u16,
+        allocation: u64,
+        team: u8,
+    },
 }
 
 impl Source {
     fn matches<W: Write>(&self, engine: &Engine<W>, world: u32) -> bool {
         match *self {
             Self::Firearm(source) => source.matches(engine, world, true),
+            Self::Rocket {
+                index,
+                allocation,
+                team,
+            } => engine
+                .active
+                .iter()
+                .chain(engine.peers.values())
+                .any(|actor| {
+                    actor.reservation.world == world
+                        && actor.reservation.player == index
+                        && actor.allocation_sequence == allocation
+                        && actor.team() == team
+                }),
             Self::QueuedFrag { index, owner } => engine
                 .active
                 .iter()
@@ -340,6 +366,38 @@ impl Plan {
                 },
             ),
             Fighter::human(target),
+            collapsed,
+        )
+    }
+
+    pub(super) fn prepare_rocket<W: Write>(
+        engine: &Engine<W>,
+        source: &crate::hospital_rocket_runtime::LaunchSource,
+        now: Duration,
+        target: Fighter<'_>,
+        collapsed: bool,
+    ) -> Option<Self> {
+        let identity = Source::Rocket {
+            index: source.player,
+            allocation: source.allocation_sequence,
+            team: source.team,
+        };
+        if source.round != engine.round_number || !identity.matches(engine, source.world) {
+            return None;
+        }
+        Self::prepare_hit(
+            engine,
+            source.world,
+            now,
+            (
+                Actor {
+                    index: source.player,
+                    allocation: Allocation::Human(source.allocation_sequence),
+                },
+                source.team,
+                identity,
+            ),
+            target,
             collapsed,
         )
     }

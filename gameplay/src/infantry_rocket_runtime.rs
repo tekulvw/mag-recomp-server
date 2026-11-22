@@ -36,7 +36,6 @@ struct Slot {
 #[derive(Clone, Debug)]
 struct Flight {
     source: LaunchSource,
-    allocation_sequence: u64,
     creation: ProjectileCreation,
     fingerprint: [u8; REQUEST_BYTES],
     variant: Variant,
@@ -193,7 +192,7 @@ impl<W: Write> Engine<W> {
         if let Some(entry) = &state.slots[usize::from(slot)] {
             let previous = &entry.flight;
             if previous.fingerprint == fingerprint
-                && previous.allocation_sequence == actor.allocation_sequence
+                && previous.source.allocation_sequence == actor.allocation_sequence
                 && previous.source.life_generation == generation
                 && previous.source.item == variant.item_id
                 && previous.source.round == self.round_number
@@ -247,6 +246,7 @@ impl<W: Write> Engine<W> {
         }
         .after_shot(now)?;
         let source = LaunchSource {
+            allocation_sequence: actor.allocation_sequence,
             reservation: actor.reservation.id.clone(),
             world: actor.reservation.world,
             round: self.round_number,
@@ -282,7 +282,6 @@ impl<W: Write> Engine<W> {
         state.slots[usize::from(slot)] = Some(Box::new(Slot {
             flight: Flight {
                 source,
-                allocation_sequence: actor.allocation_sequence,
                 creation,
                 fingerprint,
                 variant,
@@ -647,7 +646,7 @@ impl<W: Write> Engine<W> {
         if source.round != self.round_number
             || !self.active.iter().chain(self.peers.values()).any(|actor| {
                 actor.reservation.id == source.reservation
-                    && actor.allocation_sequence == flight.allocation_sequence
+                    && actor.allocation_sequence == flight.source.allocation_sequence
                     && actor.reservation.world == source.world
                     && actor.reservation.player == source.player
                     && actor.reward_match_id == source.match_id
@@ -709,7 +708,7 @@ impl<W: Write> Engine<W> {
                 .removal()
                 .encode_with_profile(1, now.as_millis() as u32, self.wire_profile)?;
         self.record(
-            json!({"op":"infantry_rocket_retired","source":flight.source,"allocation_sequence":flight.allocation_sequence,
+            json!({"op":"infantry_rocket_retired","source":flight.source,"allocation_sequence":flight.source.allocation_sequence,
             "reason":reason,"packet":protocol::encode_hex(&packet)}),
             wall,
         )?;
@@ -782,7 +781,7 @@ impl<W: Write> Engine<W> {
             }
         }
         self.record(
-            json!({"op":"infantry_rocket_terminal","source":flight.source,"allocation_sequence":flight.allocation_sequence,
+            json!({"op":"infantry_rocket_terminal","source":flight.source,"allocation_sequence":flight.source.allocation_sequence,
             "terminal":reason,"position":position,
             "contact":contact.as_ref().map(|hit| json!({"obstacle":format!("{:?}",hit.obstacle),
                 "fraction":hit.fraction,"center":hit.center,"normal":hit.normal})),

@@ -70,3 +70,11 @@ defer terminals when full, and cleanup waits behind undelivered terminal state.
 
 Source and offline checks remain separate from native packet-arrival, visual,
 HUD and live-match review. Releases remain the maintainer's manual action.
+
+With the optional retail firearm-assist rules enabled, positive effective
+Character damage from infantry rockets and hospital secondary rockets shares
+the firearm and ordinary-frag stat-11 ledger. The projectile's launching
+allocation retains attribution through its owner's death or respawn. Each
+victim's first collapse settles prior eligible contributors once. A blast's
+Character HP, assist ledger and statistic publication are installed together
+after the terminal record. Assist accounting adds no XP award.

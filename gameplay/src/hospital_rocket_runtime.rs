@@ -98,6 +98,7 @@ impl Magazine {
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub(crate) struct LaunchSource {
+    pub(crate) allocation_sequence: u64,
     pub(crate) reservation: String,
     pub(crate) world: u32,
     pub(crate) round: u64,
@@ -297,6 +298,7 @@ impl<W: Write> Engine<W> {
             },
         )?;
         let source = LaunchSource {
+            allocation_sequence: actor.allocation_sequence,
             reservation: actor.reservation.id.clone(),
             world: actor.reservation.world,
             round: self.round_number,
@@ -534,6 +536,7 @@ impl<W: Write> Engine<W> {
         let source = &flight.source;
         if !self.active.iter().chain(self.peers.values()).any(|actor| {
             source.round == self.round_number
+                && actor.allocation_sequence == source.allocation_sequence
                 && actor.reservation.id == source.reservation
                 && actor.reservation.world == source.world
                 && actor.reservation.player == source.player
