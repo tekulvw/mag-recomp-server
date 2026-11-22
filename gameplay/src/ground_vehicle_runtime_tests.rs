@@ -1537,3 +1537,6 @@ fn escort_dismount_without_supported_current_floor_keeps_driver_and_vehicle_owne
 
 #[path = "domination_ground_driver_tests.rs"]
 pub(crate) mod domination_ground_driver;
+
+#[path = "ground_redeploy_tests.rs"]
+mod ground_redeploy;
