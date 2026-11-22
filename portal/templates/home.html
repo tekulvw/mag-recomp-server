@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Your MAG test server account</h1>
+<p>Sign in to claim your player name. Only you can then play under it, and your characters follow you to any computer.</p>
+<p><a class="button" href="/auth/google">Sign in with Google</a></p>
+<p class="quiet">Google tells us your account ID and email address, nothing else. See <a href="/privacy">privacy</a>.</p>
+<h2>How it works</h2>
+<ol>
+  <li>Sign in and choose your player name.</li>
+  <li>In the MAG launcher, choose to link your account. It shows a short code.</li>
+  <li>Enter that code here. The launcher then signs you in to the server by itself.</li>
+</ol>
+{% endblock %}

@@ -16,6 +16,7 @@ credentials. Operators supply required runtime resources separately.
 | `gameplay/` | Rust gameplay state, protocol codecs, bots, collision and navigation |
 | `gameplay/vendor/recastnavigation/` | Pinned Recast/Detour sources and original license |
 | `horizon/` | Horizon SCERT/Medius transport, lobby integration and synthetic checks |
+| `portal/` | Player accounts website: Google sign-in, launcher linking and signed game tickets ([portal](portal/README.md)) |
 | `charts/mag-recomp-server/` | Independently versioned Helm deployment, including optional forwarding DNS |
 | `tools/extraction/`, `tools/collision/`, `tools/navmesh/` | Original-input extractors and evidence-dependent projectors; see [extraction guide](docs/extraction.md) |
 | `tests/`, `tools/` | Publication-boundary checks and synthetic input provenance |
@@ -44,18 +45,19 @@ See [BUILDING.md](BUILDING.md) for details.
 
 ## Releases and container images
 
-Release Please versions Medius, gameplay and the chart independently in one
+Release Please versions Medius, gameplay, the portal and the chart independently in one
 combined release PR. Merging it creates releases only for the changed components
 and checks their tags before publication. The `linux/amd64` image names are:
 
 - `ghcr.io/tekulvw/mag-recomp-server-medius`
 - `ghcr.io/tekulvw/mag-recomp-server-game`
+- `ghcr.io/tekulvw/mag-recomp-server-portal`
 
 Stable releases publish full version tags such as `0.1.0`, a moving minor tag
 such as `0.1`, and `latest`. Images contain replacement server code and synthetic
 defaults; operators still provide their own permitted runtime resources.
 Checked builds of `main` also publish a rolling `main` tag and full
-`sha-<commit>` tags for both server images, for manual prerelease testing.
+`sha-<commit>` tags for each image, for manual prerelease testing.
 The chart keeps its existing versioned releases. See the
 [main image testing guide](docs/releasing.md#main-image-testing-channel).
 See [the release guide](docs/releasing.md) for setup, versioning and recovery.

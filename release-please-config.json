@@ -20,6 +20,10 @@
     "charts/mag-recomp-server": {
       "release-type": "helm",
       "component": "chart"
+    },
+    "portal": {
+      "release-type": "rust",
+      "component": "portal"
     }
   }
 }

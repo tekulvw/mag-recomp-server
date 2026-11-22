@@ -10,18 +10,21 @@ const root = path.resolve(__dirname, '..');
 const config = JSON.parse(fs.readFileSync(path.join(root, 'release-please-config.json')));
 const current = JSON.parse(fs.readFileSync(path.join(root, '.release-please-manifest.json')));
 const chartPath = 'charts/mag-recomp-server';
-const paths = ['horizon', 'gameplay', chartPath];
-const seed = {horizon:'0.1.0',gameplay:'0.1.0',[chartPath]:'0.1.0'};
+const paths = ['horizon', 'gameplay', 'portal', chartPath];
+const seed = {horizon:'0.1.0',gameplay:'0.1.0',portal:'0.1.0',[chartPath]:'0.1.0'};
 const quiet = {info(){}, warn(){}, debug(){}, error(){}};
 require('release-please/build/src/util/logger').setLogger(quiet);
 const chart = 'apiVersion: v2\nname: mag-recomp-server\nversion: 0.1.0\nappVersion: "0.1.0"\n';
 const cargo = '[package]\nname = "mag-gameplay"\nversion = "0.1.0"\nedition = "2024"\n';
 const lock = 'version = 4\n\n[[package]]\nname = "mag-gameplay"\nversion = "0.1.0"\n\n[[package]]\nname = "example-dependency"\nversion = "1.2.3"\n';
+const portalCargo = '[package]\nname = "mag-portal"\nversion = "0.1.0"\nedition = "2024"\n';
+const portalLock = 'version = 4\n\n[[package]]\nname = "mag-portal"\nversion = "0.1.0"\n\n[[package]]\nname = "example-dependency"\nversion = "1.2.3"\n';
 
 async function candidates(changes, versions=seed, allReleased=false) {
-  const boundaries = {horizon:'b'.repeat(40), gameplay:'c'.repeat(40), [chartPath]:'d'.repeat(40)};
+  const boundaries = {horizon:'b'.repeat(40), gameplay:'c'.repeat(40), portal:'a'.repeat(40), [chartPath]:'d'.repeat(40)};
   const files = {'horizon/version.txt':'0.1.0\n', 'gameplay/Cargo.toml':cargo,
-    'gameplay/Cargo.lock':lock, [`${chartPath}/Chart.yaml`]:chart};
+    'gameplay/Cargo.lock':lock, 'portal/Cargo.toml':portalCargo, 'portal/Cargo.lock':portalLock,
+    [`${chartPath}/Chart.yaml`]:chart};
   const source = {
     repository:{owner:'example', repo:'synthetic'},
     async getFileJson(name) {
@@ -35,7 +38,7 @@ async function candidates(changes, versions=seed, allReleased=false) {
     },
     async getFileContentsOnBranch(name) { return this.getFileContents(name); },
     async *releaseIterator() {
-      for (const [component, directory] of [['chart',chartPath], ...(allReleased ? [['medius','horizon'],['gameplay','gameplay']] : [])]) {
+      for (const [component, directory] of [['chart',chartPath], ...(allReleased ? [['medius','horizon'],['gameplay','gameplay'],['portal','portal']] : [])]) {
         yield {tagName:`${component}-v${versions[directory]}`, sha:allReleased ? boundaries[directory] : config['bootstrap-sha'], notes:''};
       }
     },
@@ -69,13 +72,13 @@ async function check(name, changes, bumps, versions=seed, allReleased=false) {
     assert.equal(pr.headRefName,'release-please--branches--main');
     assert.equal(validateTitle(pr.title.toString()).valid,true,`${name}: generated release title accepted`);
   }
-  const components = {horizon:'medius',gameplay:'gameplay',[chartPath]:'chart'};
+  const components = {horizon:'medius',gameplay:'gameplay',portal:'portal',[chartPath]:'chart'};
   assert.deepEqual(releases.map(r=>r.tag.toString()).sort(),Object.entries(bumps).map(([p,v])=>`${components[p]}-v${v}`).sort(),`${name}: component release tags`);
   assert.deepEqual(releases.map(r=>r.path).sort(),Object.keys(bumps).sort(),`${name}: component output paths`);
   assert.ok(releases.every(r=>r.sha === 'f'.repeat(40)),`${name}: common release commit`);
   if (!prs.length) { console.log(`PASS ${name}`); return; }
   const updates = prs[0].updates;
-  const versionPaths = ['horizon/version.txt','gameplay/Cargo.toml',`${chartPath}/Chart.yaml`];
+  const versionPaths = ['horizon/version.txt','gameplay/Cargo.toml','portal/Cargo.toml',`${chartPath}/Chart.yaml`];
   const expectedPaths = Object.keys(bumps).map(p => versionPaths[paths.indexOf(p)]).sort();
   assert.deepEqual(updates.map(u=>u.path).filter(p=>versionPaths.includes(p)).sort(), expectedPaths, `${name}: affected packages`);
   let manifestText = JSON.stringify(versions);
@@ -95,6 +98,13 @@ async function check(name, changes, bumps, versions=seed, allReleased=false) {
     assert.match(updatedLock,new RegExp(`name = "mag-gameplay"\\nversion = "${bumps.gameplay.replaceAll('.','\\.')}"`));
     assert.match(updatedLock,/name = "example-dependency"\nversion = "1\.2\.3"/);
   }
+  if (bumps.portal) {
+    const text = updates.find(u=>u.path==='portal/Cargo.toml').updater.updateContent(portalCargo,quiet);
+    assert.match(text,new RegExp(`version = "${bumps.portal.replaceAll('.','\\.')}"`));
+    const updatedLock = updates.find(u=>u.path==='portal/Cargo.lock').updater.updateContent(portalLock,quiet);
+    assert.match(updatedLock,new RegExp(`name = "mag-portal"\\nversion = "${bumps.portal.replaceAll('.','\\.')}"`));
+    assert.match(updatedLock,/name = "example-dependency"\nversion = "1\.2\.3"/);
+  }
   if (bumps[chartPath]) {
     const text = updates.find(u=>u.path===`${chartPath}/Chart.yaml`).updater.updateContent(chart,quiet);
     assert.equal(YAML.parse(text).version,bumps[chartPath]);
@@ -106,7 +116,7 @@ async function check(name, changes, bumps, versions=seed, allReleased=false) {
 function publicationContract() {
   const workflow = YAML.parse(fs.readFileSync(path.join(root,'.github/workflows/release-please.yml'),'utf8'));
   const jobs = workflow.jobs;
-  for (const [component,directory,suffix] of [['medius','horizon','medius'],['gameplay','gameplay','game']]) {
+  for (const [component,directory,suffix] of [['medius','horizon','medius'],['gameplay','gameplay','game'],['portal','portal','portal']]) {
     for (const [output,source] of [['release_created','release_created'],['tag_name','tag_name'],['version','version']]) {
       assert.equal(jobs['release-please'].outputs[`${component}_${output}`], `\${{ steps.release.outputs['${directory}--${source}'] }}`);
     }
@@ -120,7 +130,7 @@ function publicationContract() {
     assert.equal(publisher.with.version,`\${{ needs.release-please.outputs.${component}_version }}`);
   }
   const appChecks = jobs['application-release-checks'];
-  assert.equal(appChecks.if,"needs.release-please.outputs.medius_release_created == 'true' || needs.release-please.outputs.gameplay_release_created == 'true'");
+  assert.equal(appChecks.if,"needs.release-please.outputs.medius_release_created == 'true' || needs.release-please.outputs.gameplay_release_created == 'true' || needs.release-please.outputs.portal_release_created == 'true'");
   assert.equal(jobs['publish-chart'].if,"needs.release-please.outputs.chart_release_created == 'true'");
   const publisher = YAML.parse(fs.readFileSync(path.join(root,'.github/workflows/publish-image.yml'),'utf8'));
   const metadata = publisher.jobs.publish.steps.find(s=>s.id==='meta');
@@ -137,26 +147,29 @@ function publicationContract() {
   assert.deepEqual(Object.keys(current).sort(),[...paths].sort());
   assert.equal(fs.readFileSync(path.join(root,'horizon/version.txt'),'utf8').trim(),current.horizon);
   assert.match(fs.readFileSync(path.join(root,'gameplay/Cargo.toml'),'utf8'),new RegExp(`^version = "${current.gameplay.replaceAll('.','\\.')}"$`,'m'));
+  assert.match(fs.readFileSync(path.join(root,'portal/Cargo.toml'),'utf8'),new RegExp(`^version = "${current.portal.replaceAll('.','\\.')}"$`,'m'));
   assert.equal(YAML.parse(fs.readFileSync(path.join(root,chartPath,'Chart.yaml'),'utf8')).version,current[chartPath]);
   await check('migration does not replay published history',[],{});
   await check('migration chore creates no releases',[{message:'chore: version server components independently',files:['release-please-config.json','.release-please-manifest.json','horizon/version.txt']}],{});
   await check('root documentation does not release packages',[{message:'fix: clarify deployment',files:['README.md']}],{});
-  await check('sibling directories do not release packages',[{message:'fix: synthetic sibling',files:['horizon-other/example.cs','gameplay-other/example.rs',`${chartPath}-other/values.yaml`]}],{});
+  await check('sibling directories do not release packages',[{message:'fix: synthetic sibling',files:['horizon-other/example.cs','gameplay-other/example.rs','portal-other/example.rs',`${chartPath}-other/values.yaml`]}],{});
   await check('Medius-only patch',[{message:'fix: synthetic Medius fix',files:['horizon/Server.Medius/Program.cs']}],{horizon:'0.1.1'});
   await check('gameplay-only patch',[{message:'fix: synthetic gameplay fix',files:['gameplay/src/main.rs']}],{gameplay:'0.1.1'});
+  await check('portal-only feature',[{message:'feat: synthetic portal feature',files:['portal/src/web.rs']}],{portal:'0.2.0'});
+  await check('new portal component first releases 0.1.0',[{message:'feat: synthetic portal feature',files:['portal/src/web.rs']}],{portal:'0.1.0'},{...seed,portal:'0.0.0'});
   await check('chart-only patch',[{message:'fix: synthetic chart fix',files:[`${chartPath}/values.yaml`]}],{[chartPath]:'0.1.1'});
   await check('mixed independent bumps in one PR',[
     {message:'fix: synthetic Medius fix',files:['horizon/Server.Medius/Program.cs']},
     {message:'feat: synthetic gameplay feature',files:['gameplay/src/main.rs']},
     {message:'fix: synthetic chart fix',files:[`${chartPath}/values.yaml`]}
   ],{horizon:'0.1.1',gameplay:'0.2.0',[chartPath]:'0.1.1'});
-  const divergent={horizon:'0.4.0',gameplay:'0.7.0',[chartPath]:'0.2.0'};
+  const divergent={horizon:'0.4.0',gameplay:'0.7.0',portal:'0.3.0',[chartPath]:'0.2.0'};
   await check('later releases keep independent versions',[
     {message:'fix: synthetic pair fix',files:['horizon/Server.Medius/Program.cs','gameplay/src/main.rs']}
   ],{horizon:'0.4.1',gameplay:'0.7.1'},divergent,true);
   await check('retail runtime and chart release together from published patches',[
     {message:'feat: select explicit retail catalogs',files:['gameplay/src/main.rs',`${chartPath}/values.yaml`]}
   ],{gameplay:'0.2.0',[chartPath]:'0.2.0'},
-  {horizon:'0.1.0',gameplay:'0.1.1',[chartPath]:'0.1.1'},true);
+  {horizon:'0.1.0',gameplay:'0.1.1',portal:'0.1.0',[chartPath]:'0.1.1'},true);
   publicationContract();
 })().catch(error=>{console.error(error);process.exitCode=1;});

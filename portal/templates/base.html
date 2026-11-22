@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}MAG test server{% endblock %} · magtest.online</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <a class="brand" href="/">magtest.online</a>
+  {% if let Some(csrf) = nav_csrf %}
+  <nav>
+    <a href="/account">Account</a>
+    <form method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="link">Sign out</button></form>
+  </nav>
+  {% endif %}
+</header>
+<main>
+{% block content %}{% endblock %}
+</main>
+<footer>
+  A community test server for MAG. Not affiliated with Sony Interactive Entertainment or Zipper Interactive.
+  <a href="/privacy">Privacy</a>
+</footer>
+</body>
+</html>

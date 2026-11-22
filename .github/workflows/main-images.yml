@@ -37,6 +37,8 @@ jobs:
             suffix: medius
           - context: gameplay
             suffix: game
+          - context: portal
+            suffix: portal
     steps:
       - name: Check out the tested main commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -99,7 +101,7 @@ jobs:
             exit 0
           fi
           owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
-          for suffix in medius game; do
+          for suffix in medius game portal; do
             image="ghcr.io/$owner/mag-recomp-server-$suffix"
             docker buildx imagetools create --prefer-index=false --tag "$image:main" "$image:sha-$GITHUB_SHA"
             printf '* Published `%s:main` from `%s`.\n' "$image" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
