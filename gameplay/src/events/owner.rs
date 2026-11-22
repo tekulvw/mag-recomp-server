@@ -57,6 +57,7 @@ pub(super) fn object_update<W: Write>(
         "fall_damage":plan.audit.falling_damage,
         "applied_damage":plan.audit.applied_damage,"applied_healing":plan.audit.applied_healing,
         "projectile_reports":plan.audit.projectile_reports,"projectile_terminals":plan.audit.projectile_terminals,
+        "smoke_terminals":plan.audit.smoke_terminals,
         "grenade_blast_checks":plan.audit.grenade_blast_checks,
         "grenade_visibility_policy":if ctx.engine.frag_character_blast {"current_body_stance_material_ray"} else if ctx.engine.development_grenade_radius {"disk_triangles_three_body_samples"} else {"unknown_no_damage"},
         "initial_objectives":plan.replication.objective_delta.is_some(),"objective_count":plan.replication.objective_count,
@@ -319,9 +320,49 @@ fn plan_owner_report<W: Write>(
                             .projectile_reports
                             .push(json!({"report":report,"accepted":accepted.is_ok_and(|v|v)}));
                     }
-                    plan.audit.projectile_terminals =
-                        flights.take_due(now.as_millis() as u64, generation);
-                    for terminal in &plan.audit.projectile_terminals {
+                    let terminals = flights.take_due(now.as_millis() as u64, generation);
+                    for terminal in terminals {
+                        if let Some(variant) =
+                            ctx.engine.smoke_grenades.as_deref().and_then(|catalog| {
+                                catalog
+                                    .variant(active.reservation.character.faction, terminal.item_id)
+                            })
+                        {
+                            let expired = flights.get(terminal.slot).is_some_and(|flight| {
+                                (now.as_millis() as u64).saturating_sub(flight.launched_at_ms)
+                                    >= flight.expiry_after_ms
+                            });
+                            if terminal.reason
+                                == projectile::ProjectileTerminalReason::ReportedDetonation
+                                && !expired
+                                && ctx.engine.round_combat_allowed(now)
+                            {
+                                match plan_smoke_terminal(ctx, plan, &terminal, variant) {
+                                    Ok(index) => plan.audit.smoke_terminals.push(json!({
+                                        "terminal":terminal,"volume_index":index,"created":true,
+                                        "volume_duration_ms":variant.volume_duration_ms
+                                    })),
+                                    Err(code) => {
+                                        flights.defer_terminal(terminal.slot, terminal.generation);
+                                        plan.gameplay_denial.get_or_insert(code);
+                                        plan.audit.smoke_terminals.push(json!({"terminal":terminal,"created":false,"deferred":code}));
+                                    }
+                                }
+                            } else if let Some(removal) = plan
+                                .combat
+                                .projectile_replicas
+                                .take_removal(terminal.slot, terminal.generation)?
+                            {
+                                plan.combat.projectile_cleanup[usize::from(terminal.slot)] =
+                                    Some(ProjectileCleanup { due: now, removal });
+                                plan.audit.smoke_terminals.push(
+                                    json!({"terminal":terminal,"created":false,"retired":true}),
+                                );
+                            }
+                            // A nondamaging Volume terminal never enters any frag consumer.
+                            continue;
+                        }
+                        plan.audit.projectile_terminals.push(terminal);
                         if let Some(removal) = plan
                             .combat
                             .projectile_replicas
@@ -411,6 +452,86 @@ fn plan_owner_report<W: Write>(
         body_supported,
         accepted_stance,
     })
+}
+
+fn plan_smoke_terminal<W: Write>(
+    ctx: &PlanningContext<'_, W>,
+    plan: &mut EventPlan,
+    terminal: &projectile::ProjectileTerminal,
+    variant: &smoke_grenades::Variant,
+) -> Result<u16, &'static str> {
+    let position = terminal
+        .position
+        .ok_or("smoke_terminal_position_required")?;
+    let object_index = ctx
+        .engine
+        .free_smoke_volume_index(&plan.combat.smoke_volumes)
+        .ok_or("smoke_volume_pool_full")?;
+    let expires = ctx
+        .now
+        .checked_add(Duration::from_millis(variant.volume_duration_ms))
+        .ok_or("smoke_volume_time_overflow")?;
+    let mut creation = plan
+        .combat
+        .projectile_replicas
+        .creation(terminal.slot, terminal.generation)
+        .ok_or("missing_smoke_parent")?;
+    creation.position = position;
+    let profile = ctx.engine.wire_profile;
+    let update = projectile::ProjectileOwnerUpdate {
+        slot: terminal.slot,
+        object_index: ctx.active.reservation.player,
+        fields: projectile::ProjectileOwnerFields {
+            state: Some(2),
+            position: Some(position),
+            rotation_xyzw: None,
+        },
+    };
+    let terminal_wire = projectile_replication::ProjectileOwnerDelta {
+        header: replication::UpdateHeader {
+            sequence: 1,
+            nak_sequence: 0,
+            client_index: 0,
+            object_type_mask: 1 << (16 + terminal.slot),
+            timestamp_ms: ctx.now.as_millis() as u32,
+        },
+        update: &update,
+    }
+    .encode_with_profile(profile)?;
+    let volume_wire = smoke_volume_replication::VolumeCreation {
+        object_index,
+        position,
+    }
+    .encode_with_profile(1, ctx.now.as_millis() as u32, profile)?;
+    // Validate every candidate before detaching the presentation cache. Event
+    // commit installs this clone only after the common record succeeds.
+    let removal = plan
+        .combat
+        .projectile_replicas
+        .take_removal(terminal.slot, terminal.generation)?
+        .ok_or("missing_smoke_parent")?;
+    plan.combat.projectile_cleanup[usize::from(terminal.slot)] = Some(ProjectileCleanup {
+        due: expires,
+        removal,
+    });
+    plan.combat.smoke_volumes.push(smoke_runtime::Volume {
+        object_index,
+        generation: terminal.generation,
+        creation,
+        expires,
+    });
+    // The admitted local Timer/Volume path already executed its effect while
+    // reporting state4. Replaying remote2 to that local object can explode it
+    // a second time; only peers need this presentation trigger.
+    for (wire, include_owner) in [(terminal_wire, false), (volume_wire, true)] {
+        plan.combat
+            .projectile_publications
+            .push(ProjectilePublication {
+                include_owner,
+                wire,
+            });
+    }
+    Ok(object_index)
 }
 
 fn plan_grenade_blasts<W: Write>(

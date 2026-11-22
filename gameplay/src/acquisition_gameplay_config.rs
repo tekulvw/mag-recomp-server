@@ -47,6 +47,7 @@ pub struct Configuration {
     human_static_resupply: Option<PathBuf>,
     projectile_contacts: Option<PathBuf>,
     infantry_rockets: Option<PathBuf>,
+    smoke_grenades: Option<PathBuf>,
     vehicle_reinforcement_intervals_ms: [u32; 2],
     structural: Option<crate::acquisition_structural::Files>,
 }
@@ -188,6 +189,14 @@ impl Configuration {
         if let Some(source) = &mut result.frag_ground_areas {
             *source = directory.join(&*source);
         }
+        if let Some(source) = &mut result.smoke_grenades {
+            if source.as_os_str().is_empty() {
+                return Err(io::Error::other(
+                    "empty_acquisition_smoke_grenade_source_path",
+                ));
+            }
+            *source = directory.join(&*source);
+        }
         if let Some(source) = &mut result.infantry_rockets {
             if source.as_os_str().is_empty() {
                 return Err(io::Error::other(
@@ -327,6 +336,22 @@ impl Configuration {
                     .read_to_end(&mut raw)?;
                 if raw.len() > 1 << 20 {
                     return Err(io::Error::other("invalid_infantry_rocket_rules"));
+                }
+                Ok(raw)
+            })
+            .transpose()
+    }
+
+    pub fn smoke_grenade_source(&self) -> io::Result<Option<Vec<u8>>> {
+        self.smoke_grenades
+            .as_ref()
+            .map(|path| {
+                let mut raw = Vec::new();
+                File::open(path)?
+                    .take((1 << 20) + 1)
+                    .read_to_end(&mut raw)?;
+                if raw.len() > 1 << 20 {
+                    return Err(io::Error::other("invalid_smoke_grenade_rules"));
                 }
                 Ok(raw)
             })

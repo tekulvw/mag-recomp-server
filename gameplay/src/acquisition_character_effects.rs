@@ -938,6 +938,7 @@ impl Candidate {
                 .pending_shared
                 .len()
                 .checked_sub(actor.hospital_bootstrap.len())
+                .and_then(|ordinary| ordinary.checked_sub(actor.smoke_bootstrap.len()))
                 .and_then(|ordinary| ordinary.checked_add(count))
                 .is_some_and(|total| total <= multiplayer::MAX_SHARED_QUEUE);
             if staged.replication_backlogged || !fits {
@@ -1294,6 +1295,7 @@ mod rocket_character_damage_tests {
             .pending_shared
             .resize(multiplayer::MAX_SHARED_QUEUE - 1, vec![0]);
         actor.queue_hospital_bootstrap(vec![vec![1]]);
+        actor.queue_smoke_bootstrap(vec![vec![3]]);
         let id = actor.reservation.id.clone();
         let world = actor.reservation.world;
         let native = engine.owned_acquisition_characters();

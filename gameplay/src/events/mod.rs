@@ -114,6 +114,7 @@ impl EventPlan {
             combat: CombatChanges {
                 projectile_replicas: active.projectile_replicas.clone(),
                 projectile_cleanup: active.projectile_cleanup.clone(),
+                smoke_volumes: active.smoke_volumes.clone(),
                 ..Default::default()
             },
             ..Default::default()
@@ -184,6 +185,7 @@ struct CombatChanges {
     projectile_replicas: projectile_replication::ProjectileReplicas,
     projectile_cleanup: [Option<ProjectileCleanup>; projectile::MAX_PROJECTILE_SLOTS],
     projectile_publications: Vec<ProjectilePublication>,
+    smoke_volumes: smoke_runtime::State,
     new_grenade_remaining: Option<u8>,
     static_resupply: Option<human_static_resupply::Change>,
     new_grenade_damage: Option<std::collections::VecDeque<PendingDamage>>,
@@ -250,6 +252,7 @@ struct EventAudit {
     applied_healing: Option<Value>,
     projectile_reports: Vec<Value>,
     projectile_terminals: Vec<projectile::ProjectileTerminal>,
+    smoke_terminals: Vec<Value>,
     grenade_blast_checks: Vec<blast_visibility::GrenadeBlastCheck>,
     ground_grenade_checks: Vec<Value>,
     native_grenade_character_checks: Vec<Value>,
@@ -970,6 +973,7 @@ impl<W: Write> Engine<W> {
         }
         active.projectile_replicas = plan.combat.projectile_replicas;
         active.projectile_cleanup = plan.combat.projectile_cleanup;
+        active.smoke_volumes = plan.combat.smoke_volumes;
         active
             .projectile_publications
             .extend(plan.combat.projectile_publications);
@@ -1051,7 +1055,15 @@ impl<W: Write> Engine<W> {
                                 .get(usize::from(kit.handle.inventory_index))
                                 .and_then(|i| i.slots[4])
                         })
-                        .and_then(|id| self.item_catalog.grenade(id).ok())
+                        .and_then(|id| {
+                            self.smoke_grenades
+                                .as_deref()
+                                .and_then(|catalog| {
+                                    catalog.variant(active.reservation.character.faction, id)
+                                })
+                                .map(|variant| variant.parameters())
+                                .or_else(|| self.item_catalog.grenade(id).ok())
+                        })
                         .map_or(0, |p| p.initial_count);
                 }
             }

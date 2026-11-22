@@ -17,7 +17,7 @@ impl Active {
     }
 
     pub(super) fn ordinary_shared_len(&self) -> usize {
-        self.pending_shared.len() - self.hospital_bootstrap.len()
+        self.pending_shared.len() - self.hospital_bootstrap.len() - self.smoke_bootstrap.len()
     }
 
     pub(super) fn queue_hospital_bootstrap(&mut self, packets: Vec<Vec<u8>>) {
@@ -30,12 +30,24 @@ impl Active {
         }
     }
 
+    pub(super) fn queue_smoke_bootstrap(&mut self, packets: Vec<Vec<u8>>) {
+        if !packets.is_empty() {
+            debug_assert!(self.smoke_bootstrap.is_empty());
+            debug_assert!(packets.len() <= usize::from(smoke_volume_replication::CAPACITY) * 3);
+            let start = self.pending_shared.len();
+            self.smoke_bootstrap = start..start + packets.len();
+            self.pending_shared.extend(packets);
+        }
+    }
+
     pub(super) fn pop_shared(&mut self) {
         if self.pending_shared.pop_front().is_some() {
             self.shared_frames_drained = self.shared_frames_drained.saturating_add(1);
         }
         self.hospital_bootstrap.start = self.hospital_bootstrap.start.saturating_sub(1);
         self.hospital_bootstrap.end = self.hospital_bootstrap.end.saturating_sub(1);
+        self.smoke_bootstrap.start = self.smoke_bootstrap.start.saturating_sub(1);
+        self.smoke_bootstrap.end = self.smoke_bootstrap.end.saturating_sub(1);
     }
 
     pub(super) fn apply_peer_damage(
@@ -88,7 +100,8 @@ impl Active {
         Ok(())
     }
     fn projectile_removal_packets(&self, now: Duration) -> Result<Vec<Vec<u8>>, &'static str> {
-        self.projectile_replicas
+        let mut packets = self
+            .projectile_replicas
             .clone()
             .take_all_removals()
             .into_iter()
@@ -103,7 +116,12 @@ impl Active {
             .map(|removal| {
                 removal.encode_with_profile(1, now.as_millis() as u32, self.wire_profile)
             })
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        packets.extend(
+            self.smoke_volumes
+                .removal_packets(now.as_millis() as u32, self.wire_profile)?,
+        );
+        Ok(packets)
     }
     pub(super) fn next_sequence(&self) -> Result<u32, &'static str> {
         self.outbound_sequence
@@ -655,6 +673,10 @@ impl<W: Write> Engine<W> {
             && !was_created;
         if created {
             let new_id = id.as_ref().unwrap();
+            // A scheduler can leave activations staged between requests. Old
+            // recipients need those originals, while this new recipient gets
+            // only the current snapshot below, once.
+            self.queue_projectile_publications_except(now, Some(new_id))?;
             let snapshot = self.active.as_ref().unwrap().snapshot(now)?;
             let existing: Vec<Vec<u8>> = self
                 .peers
@@ -677,6 +699,21 @@ impl<W: Write> Engine<W> {
                     Ok(packets)
                 })
                 .collect::<Result<Vec<Vec<Vec<u8>>>, &'static str>>()?
+                .into_iter()
+                .flatten()
+                .collect();
+            let smoke_snapshot = self
+                .peers
+                .values()
+                .filter(|actor| actor.initial_objects.is_some())
+                .map(|actor| {
+                    actor.smoke_volumes.snapshot_packets(
+                        now.as_millis() as u32,
+                        now,
+                        self.wire_profile,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?
                 .into_iter()
                 .flatten()
                 .collect();
@@ -708,6 +745,10 @@ impl<W: Write> Engine<W> {
             for packet in existing {
                 self.active.as_mut().unwrap().queue_shared(packet);
             }
+            self.active
+                .as_mut()
+                .unwrap()
+                .queue_smoke_bootstrap(smoke_snapshot);
             self.record(
                 json!({"op":"shared_actor_created","reservation_id":new_id}),
                 wall,
@@ -1077,6 +1118,14 @@ impl<W: Write> Engine<W> {
         &mut self,
         now: Duration,
     ) -> Result<(), &'static str> {
+        self.queue_projectile_publications_except(now, None)
+    }
+
+    fn queue_projectile_publications_except(
+        &mut self,
+        now: Duration,
+        excluded: Option<&str>,
+    ) -> Result<(), &'static str> {
         // Hold cleanup for the slowest recipient. This check runs before drain:
         // the last queued state2 grants500ms from its actual delivery request,
         // even when the32-message budget deferred it past the original deadline.
@@ -1108,6 +1157,19 @@ impl<W: Write> Engine<W> {
                     });
                 }
             }
+            for volume in actor.smoke_volumes.take_due(now) {
+                actor.projectile_publications.push(ProjectilePublication {
+                    include_owner: true,
+                    wire: smoke_volume_replication::VolumeRemoval {
+                        object_index: volume.object_index,
+                    }
+                    .encode_with_profile(
+                        1,
+                        now.as_millis() as u32,
+                        self.wire_profile,
+                    )?,
+                });
+            }
             for publication in actor.projectile_publications.drain(..) {
                 publications.push((actor.reservation.id.clone(), publication));
             }
@@ -1117,7 +1179,9 @@ impl<W: Write> Engine<W> {
                 .peers
                 .values_mut()
                 .chain(self.active.iter_mut())
-                .filter(|a| a.initial_objects.is_some())
+                .filter(|a| {
+                    a.initial_objects.is_some() && excluded != Some(a.reservation.id.as_str())
+                })
             {
                 if publication.include_owner || recipient.reservation.id != owner {
                     recipient.queue_shared(publication.wire.clone());

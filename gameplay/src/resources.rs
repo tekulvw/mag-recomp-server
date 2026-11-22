@@ -215,6 +215,7 @@ impl<W: Write> Engine<W> {
             domination_gameplay: None,
             hospital_rockets: None,
             infantry_rockets: None,
+            smoke_grenades: None,
             hospital_rocket_ground: None,
             frag_character_blast: false,
             projectile_contacts: None,
@@ -243,6 +244,58 @@ impl<W: Write> Engine<W> {
 }
 
 impl<W: Write> Engine<W> {
+    pub fn with_smoke_grenades(
+        mut self,
+        catalog: Arc<smoke_grenades::Catalog>,
+    ) -> Result<Self, &'static str> {
+        if self.wire_profile.application_id() != 20231
+            || !matches!(
+                (
+                    self.match_profile().game_type,
+                    &self.acquisition_gameplay,
+                    &self.domination_gameplay
+                ),
+                (1, Some(_), None) | (2, None, Some(_))
+            )
+        {
+            return Err("smoke_grenade_mode_required");
+        }
+        self.smoke_grenades = Some(catalog);
+        Ok(self)
+    }
+
+    pub(super) fn grenade_parameters(
+        &self,
+        faction: u8,
+        item: u16,
+    ) -> Option<item_catalog::GrenadeParameters> {
+        self.smoke_grenades
+            .as_deref()
+            .and_then(|catalog| catalog.variant(faction, item))
+            .map(|variant| variant.parameters())
+            .or_else(|| self.item_catalog.grenade(item).ok())
+    }
+
+    pub(super) fn free_smoke_volume_index(&self, planned: &smoke_runtime::State) -> Option<u16> {
+        let mut occupied = std::collections::BTreeSet::new();
+        for actor in self.active.iter().chain(self.peers.values()) {
+            occupied.extend(
+                actor
+                    .smoke_volumes
+                    .volumes()
+                    .iter()
+                    .map(|volume| volume.object_index),
+            );
+            occupied.extend(
+                actor.pending_shared.iter().filter_map(|wire| {
+                    smoke_volume_replication::is_removal(wire, self.wire_profile)
+                }),
+            );
+        }
+        occupied.extend(planned.volumes().iter().map(|volume| volume.object_index));
+        (0..smoke_volume_replication::CAPACITY).find(|index| !occupied.contains(index))
+    }
+
     pub fn with_infantry_rockets(
         mut self,
         catalog: infantry_rockets::Catalog,
