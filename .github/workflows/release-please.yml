@@ -27,6 +27,9 @@ jobs:
       gameplay_release_created: ${{ steps.release.outputs['gameplay--release_created'] }}
       gameplay_tag_name: ${{ steps.release.outputs['gameplay--tag_name'] }}
       gameplay_version: ${{ steps.release.outputs['gameplay--version'] }}
+      portal_release_created: ${{ steps.release.outputs['portal--release_created'] }}
+      portal_tag_name: ${{ steps.release.outputs['portal--tag_name'] }}
+      portal_version: ${{ steps.release.outputs['portal--version'] }}
       chart_release_created: ${{ steps.release.outputs['charts/mag-recomp-server--release_created'] }}
       chart_tag_name: ${{ steps.release.outputs['charts/mag-recomp-server--tag_name'] }}
       chart_version: ${{ steps.release.outputs['charts/mag-recomp-server--version'] }}
@@ -40,12 +43,12 @@ jobs:
 
   application-release-checks:
     needs: release-please
-    if: needs.release-please.outputs.medius_release_created == 'true' || needs.release-please.outputs.gameplay_release_created == 'true'
+    if: needs.release-please.outputs.medius_release_created == 'true' || needs.release-please.outputs.gameplay_release_created == 'true' || needs.release-please.outputs.portal_release_created == 'true'
     permissions:
       contents: read
     uses: ./.github/workflows/check.yml
     with:
-      ref: ${{ needs.release-please.outputs.medius_tag_name || needs.release-please.outputs.gameplay_tag_name }}
+      ref: ${{ needs.release-please.outputs.medius_tag_name || needs.release-please.outputs.gameplay_tag_name || needs.release-please.outputs.portal_tag_name }}
 
   chart-release-checks:
     needs: release-please
@@ -83,6 +86,19 @@ jobs:
       context: gameplay
       ref: ${{ needs.release-please.outputs.gameplay_tag_name }}
       version: ${{ needs.release-please.outputs.gameplay_version }}
+
+  publish-portal:
+    needs: [release-please, application-release-checks]
+    if: needs.release-please.outputs.portal_release_created == 'true'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/publish-image.yml
+    with:
+      image_suffix: portal
+      context: portal
+      ref: ${{ needs.release-please.outputs.portal_tag_name }}
+      version: ${{ needs.release-please.outputs.portal_version }}
 
   publish-chart:
     needs: [release-please, chart-release-checks]

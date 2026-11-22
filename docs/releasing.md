@@ -1,8 +1,8 @@
 # Releases, container images and Helm chart
 
-Release Please versions Medius, gameplay and the Helm chart independently. It
+Release Please versions Medius, gameplay, the portal and the Helm chart independently. It
 collects all pending component releases into **one release PR** and updates
-`.release-please-manifest.json` once. A PR may contain one, two or three version
+`.release-please-manifest.json` once. A PR may contain one or more version
 bumps; merging it publishes only those components. Independent versions do not
 require separate PRs.
 
@@ -10,6 +10,7 @@ require separate PRs.
 | --- | --- | --- | --- | --- |
 | Medius, including embedded DME | `horizon/` | `medius-vX.Y.Z` | `horizon/version.txt` | Medius image |
 | Gameplay | `gameplay/` | `gameplay-vX.Y.Z` | `gameplay/Cargo.toml` and `Cargo.lock` | Gameplay image |
+| Portal | `portal/` | `portal-vX.Y.Z` | `portal/Cargo.toml` and `Cargo.lock` | Portal image |
 | Helm chart | `charts/mag-recomp-server/` | `chart-vX.Y.Z` | `Chart.yaml` `version` | OCI Helm chart |
 
 One combined PR avoids sibling release PRs conflicting on their central manifest.
@@ -157,20 +158,21 @@ and the [Horizon runtime guide](../horizon/README.md).
 ## Main image testing channel
 
 The separate `Main container images` workflow runs after pushes to `main`.
-It runs the public source checks, then builds both `linux/amd64` server images
-from that exact commit. Each image is first published as `sha-<full-commit-sha>`.
-Only after both builds succeed does the workflow advance these moving aliases:
+It runs the public source checks, then builds the `linux/amd64` server and portal
+images from that exact commit. Each image is first published as `sha-<full-commit-sha>`.
+Only after every build succeeds does the workflow advance these moving aliases:
 
 ```text
 ghcr.io/tekulvw/mag-recomp-server-medius:main
 ghcr.io/tekulvw/mag-recomp-server-game:main
+ghcr.io/tekulvw/mag-recomp-server-portal:main
 ```
 
 Runs are queued without replacing pending runs, with separate concurrency groups
 for each branch, and promotion checks the repository's current main SHA.
 Rerunning an old workflow cannot move `main` back to an older commit. If checks
-or either build fail, the existing `main` aliases remain on the previous
-successful build. Promotion consists of two registry writes; a registry failure
+or any build fails, the existing `main` aliases remain on the previous
+successful build. Promotion consists of one registry write per image; a registry failure
 between them can temporarily leave different revisions. Rerun the failed
 promotion job for current main to finish it. The workflow summary and image
 `org.opencontainers.image.revision` labels identify the source commit. Forks

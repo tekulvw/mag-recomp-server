@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Your account{% endblock %}
+{% block content %}
+<h1>Your account</h1>
+{% if banned %}
+<p class="alert">This account is banned{% if let Some(reason) = ban_reason %}: {{ reason }}{% endif %}. It cannot sign in to the game server.</p>
+{% endif %}
+<dl>
+  <dt>Player name</dt>
+  <dd>{% if let Some(name) = player_name %}<strong>{{ name }}</strong>{% else %}none yet · <a href="/claim">choose one</a>{% endif %}</dd>
+  <dt>Signed in with</dt>
+  <dd>Google{% if let Some(email) = email %} ({{ email }}){% endif %}</dd>
+</dl>
+
+<h2>Linked launchers</h2>
+{% if devices.is_empty() %}
+<p>None yet. In the MAG launcher, choose to link your account, then enter its code at <a href="/link">magtest.online/link</a>.</p>
+{% else %}
+<table>
+  <thead><tr><th>Launcher</th><th>Linked</th><th>Last used</th><th></th></tr></thead>
+  <tbody>
+  {% for d in devices %}
+  <tr>
+    <td>{{ d.label }}</td><td>{{ d.created }}</td><td>{{ d.last_used }}</td>
+    <td><form method="post" action="/devices/{{ d.id }}/revoke"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="link">Unlink</button></form></td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<p><a href="/link">Link another launcher</a></p>
+{% endif %}
+
+<h2>Delete your account</h2>
+<p>This removes your sign-in and linked launchers. Your player name stays reserved so nobody else can take over its characters.</p>
+<form method="post" action="/account/delete" class="stack">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>Type {% if let Some(name) = player_name %}<strong>{{ name }}</strong>{% else %}<strong>delete</strong>{% endif %} to confirm
+    <input name="confirm" autocomplete="off" required></label>
+  <button class="danger">Delete account</button>
+</form>
+{% endblock %}

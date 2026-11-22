@@ -47,11 +47,12 @@ class MainImagesTests(unittest.TestCase):
         self.assertEqual(concurrency.get('queue', 'single'), 'max')
         self.assertIn('${{ github.ref }}', concurrency['group'])
 
-    def test_builds_both_components_from_the_same_commit_without_release_tags(self):
+    def test_builds_every_component_from_the_same_commit_without_release_tags(self):
         job = workflow()['jobs']['build-images']
         self.assertEqual(job['strategy']['matrix']['include'], [
             {'context': 'horizon', 'suffix': 'medius'},
             {'context': 'gameplay', 'suffix': 'game'},
+            {'context': 'portal', 'suffix': 'portal'},
         ])
         checkout = next(s for s in job['steps'] if s.get('uses', '').startswith('actions/checkout@'))
         self.assertEqual(checkout['with']['ref'], '${{ github.sha }}')
@@ -106,7 +107,7 @@ class MainImagesTests(unittest.TestCase):
             calls = [json.loads(line) for line in record.read_text().splitlines()] if record.exists() else []
             return result, calls, summary.read_text() if summary.exists() else ''
 
-    def test_current_commit_promotes_only_gameplay_and_medius_main_aliases(self):
+    def test_current_commit_promotes_each_component_main_alias(self):
         result, calls, summary = self.run_promotion()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(calls, [
@@ -116,6 +117,9 @@ class MainImagesTests(unittest.TestCase):
             ['buildx', 'imagetools', 'create', '--prefer-index=false', '--tag',
              'ghcr.io/example/mag-recomp-server-game:main',
              'ghcr.io/example/mag-recomp-server-game:sha-' + SHA],
+            ['buildx', 'imagetools', 'create', '--prefer-index=false', '--tag',
+             'ghcr.io/example/mag-recomp-server-portal:main',
+             'ghcr.io/example/mag-recomp-server-portal:sha-' + SHA],
         ])
         self.assertIn(SHA, summary)
 

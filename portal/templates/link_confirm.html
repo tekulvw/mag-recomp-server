@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Link this launcher?{% endblock %}
+{% block content %}
+<h1>Link this launcher?</h1>
+<dl>
+  <dt>Code</dt><dd><strong>{{ shown_code }}</strong></dd>
+  <dt>Launcher</dt><dd>{{ label }}</dd>
+  <dt>Requested</dt><dd>{{ requested }}</dd>
+</dl>
+<p>The launcher will sign in to the game server as <strong>{{ player_name }}</strong>. Only link a launcher you started yourself: anyone holding it can play as you until you unlink it.</p>
+<form method="post" action="/link/decide" class="row">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="code" value="{{ code }}">
+  <button name="decision" value="approve">Link launcher</button>
+  <button name="decision" value="deny" class="secondary">Cancel</button>
+</form>
+{% endblock %}

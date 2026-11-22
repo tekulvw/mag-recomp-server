@@ -1,0 +1,120 @@
+# mag-portal
+
+The player accounts website for a MAG replacement server (magtest.online). Players sign
+in with Google, claim a player name and link their launcher. The launcher trades its
+device token for short-lived **game tickets**, which the game server verifies with the
+portal's public key. See the [design](../docs/superpowers/specs/2026-11-22-portal-design.md)
+and the [ticket format](../docs/portal-ticket.md).
+
+The site is server-rendered HTML with no JavaScript. It stores accounts in PostgreSQL and
+never passes Google tokens on to the game or the game server.
+
+## Build and test
+
+Tests need a PostgreSQL server they can create throwaway databases on:
+
+```sh
+docker run -d --rm --name portal-pg -e POSTGRES_USER=portal -e POSTGRES_PASSWORD=portal \
+  -p 127.0.0.1:55432:5432 postgres:17-alpine
+export DATABASE_URL=postgres://portal:portal@127.0.0.1:55432/portal
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+```
+
+`docker build --target check portal` runs the same checks with its own PostgreSQL inside the
+build, as CI does. `docker build portal` builds the image (`mag-portal serve` by default,
+listening on port 8080 as UID 10001).
+Sign-in starts are limited to 30 a minute per client address.
+
+The tests run a fake OpenID provider and never contact Google. `tests/ticket-vectors.json`
+holds ticket test vectors for other verifiers; regenerate them with
+`PORTAL_WRITE_VECTORS=1 cargo test --test ticket_vectors` after a deliberate format change.
+
+## Setting up
+
+1. **Google OAuth client.** In Google Cloud console, create an OAuth client of type *Web
+   application*. Add the authorized redirect URI `https://<site>/auth/google/callback`.
+   The consent screen needs the site's home page and its privacy page
+   (`https://<site>/privacy`). The portal asks only for the `openid` and `email` scopes.
+2. **Ticket signing key.** `mag-portal keygen --out ticket-key.pem` writes a P-256 key
+   (mode 0600) and prints its public key. The game server is configured with that public
+   key; `mag-portal public-key --key-file ticket-key.pem` prints it again.
+3. **Database.** An empty PostgreSQL database. `mag-portal serve` applies migrations at
+   start; set `PORTAL_SKIP_MIGRATIONS=true` and run `mag-portal migrate` to do it separately.
+
+## Configuration
+
+| Variable | Required | Meaning |
+| --- | --- | --- |
+| `DATABASE_URL` | yes | PostgreSQL connection URL. Add `sslmode=verify-full&sslrootcert=…` for TLS. |
+| `PORTAL_PUBLIC_URL` | yes | The site's origin, such as `https://magtest.online` (https, or http://localhost for testing). |
+| `PORTAL_GOOGLE_CLIENT_ID` | yes | OAuth client ID. |
+| `PORTAL_GOOGLE_CLIENT_SECRET_FILE` | yes | File holding the OAuth client secret. |
+| `PORTAL_TICKET_KEY_FILE` | yes | PKCS#8 PEM P-256 private key from `mag-portal keygen`. |
+| `PORTAL_TICKET_AUDIENCE` | yes | The game server's host name, such as `play.magtest.online`. Tickets are valid only there. |
+| `PORTAL_TICKET_KEY_ID` | no | Key ID written into tickets (default 1). Change it when rotating keys. |
+| `PORTAL_TICKET_LIFETIME_SECONDS` | no | Ticket lifetime, 60 to 3600 (default 600). |
+| `PORTAL_CLIENT_IP_HEADER` | no | Header the trusted proxy appends the client address to (`x-forwarded-for`); the last entry is used. Without it, rate limits use the connecting address, which behind a proxy is the proxy. |
+| `PORTAL_OPERATOR_CONTACT` | no | Contact text shown on the privacy page. |
+| `PORTAL_LISTEN` | no | Listen address (default `0.0.0.0:8080`). Serve it behind a TLS-terminating proxy. |
+| `RUST_LOG` | no | Log filter (default `info`). |
+
+Session and flow cookies use the `__Host-` prefix, so the site must be served over HTTPS at
+the root of its own host name. `/healthz` returns 200 while the database answers.
+
+## Launcher API
+
+All bodies are JSON. Errors are `{"error": "<code>"}`; a body that is not the expected JSON gets `400 invalid_request`.
+
+**Start a link** — `POST /api/v1/device/start`, body `{"client": "MAG launcher (Windows)"}`
+(optional, at most 64 characters, shown to the player):
+
+```json
+{"device_code":"mgl_…","user_code":"BCDF-GHJK","verification_uri":"https://magtest.online/link",
+ "verification_uri_complete":"https://magtest.online/link?code=BCDF-GHJK","expires_in":600,"interval":5}
+```
+
+Show `user_code` and `verification_uri` (or open `verification_uri_complete` in the browser).
+`429 rate_limited` (more than 10 starts a minute from one address) and `503 busy` (too many links waiting) mean try again later.
+
+**Wait for the player** — `POST /api/v1/device/token`, body `{"device_code": "mgl_…"}`, every
+`interval` seconds:
+
+| Response | Meaning |
+| --- | --- |
+| `200 {"device_token":"mgd_…","player_name":"Alpha"}` | Linked. Store the device token privately; it is shown once. |
+| `400 authorization_pending` | Keep waiting. |
+| `400 slow_down` | Polled too soon; wait longer. |
+| `400 access_denied` | The player refused. |
+| `400 expired_token` | The code expired; start again. |
+| `400 invalid_grant` | Unknown or already used code. |
+
+**Get a ticket** — `POST /api/v1/ticket` with `Authorization: Bearer mgd_…`, before each sign-in:
+
+```json
+{"ticket":"<base64>","expires_at":1800000600,"account_id":42,"player_name":"Alpha","audience":"play.magtest.online"}
+```
+
+`401 invalid_token` means the launcher was unlinked: forget the token and link again.
+`403 banned` (with `reason`) and `409 no_player_name` are shown to the player.
+
+**Verifying keys** — `GET /api/v1/ticket-keys` returns `{"keys":[{"id":1,"alg":"ES256","spki":"<base64 DER>"}]}`.
+
+## Operator commands
+
+Run `mag-portal admin <command>` with `DATABASE_URL` set (in Kubernetes, `kubectl exec`):
+
+| Command | Effect |
+| --- | --- |
+| `show <name>` | The account holding a name. |
+| `find-email <email>` | Accounts signed in with an email address. |
+| `ban <name> --reason <text>` / `unban <name>` | Stop or restore ticket issuing. Tickets already issued last until they expire. |
+| `reserve <name>… [--reason <text>]` | Names nobody may claim, such as names that already have characters on the server. |
+| `assign <name> --account-id <id>` | Give a reserved name to an account without a name. |
+| `release <name>` | Let anyone claim a reserved name. |
+| `reserved` | List reserved names. |
+
+Banned accounts cannot delete themselves (that would shed the ban); delete them on request with SQL. Deleting an account (from its account page) keeps its name reserved, because the game server
+keeps characters under the name. To move existing players over, reserve every name that has
+characters, then assign each one when its owner signs in and asks (`find-email` finds them).
