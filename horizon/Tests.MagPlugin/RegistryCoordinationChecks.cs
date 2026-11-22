@@ -112,11 +112,29 @@ internal static partial class LeadershipProgressionChecks
             registry.QueueJoin(alpha,new MagRetailJoinGameRequest {TransactionId=1,Preference=1,Value=2},message=>{
                 if(message is MagJoinGameResponse {Result:0}) {entered.TrySetResult();if(!deliver.Wait(AdmissionTimeout))throw new TimeoutException("Blocked success callback expired");}
             },()=>true);
+            void Cancel(uint partyId)
+            {
+                var payload = MagMessageCodec.SerializeForApplication(new MagRetailCancelJoinRequest {
+                    TransactionId = 30, PartyId = partyId
+                }, 20231);
+                Check(MagMessageCodec.TryParseClientForApplication(payload, 20231, out var parsed),
+                    "Retail cancellation could not be decoded");
+                typeof(MLS).GetMethod("RouteRetailQueueCancellation", BindingFlags.NonPublic | BindingFlags.Static)!
+                    .Invoke(null, new object[] { registry, alpha, parsed });
+            }
+            Check(registry.Status(29).QueueSizes[6] == 1, "Expected a pending solo owner");
+            Cancel(7);
+            Check(registry.Status(29).QueueSizes[6] == 1, "Party cancel removed the pending solo owner");
             registry.QueueJoin(bravo,new MagRetailJoinGameRequest {TransactionId=2,Preference=1,Value=2},_=>{},()=>true);
             try {
                 using var deadline=new CancellationTokenSource(AdmissionTimeout);
                 while(!entered.Task.IsCompleted){await registry.TickAsync();await Task.Delay(10,deadline.Token);}
-                registry.CancelQueuedJoin(alpha);
+                Cancel(7);
+                Check((hosts[0].GetAccountOwnership("alpha") & LocalDmeAccountOwnership.Live) != 0,
+                    "Party cancel released the acknowledged solo owner");
+                Check(!a.Requests.Any(r => r["op"]!.GetValue<string>() == "release"),
+                    "Party cancel started a reservation release");
+                Cancel(0);
                 while((hosts[0].GetAccountOwnership("alpha")&(LocalDmeAccountOwnership.Live|LocalDmeAccountOwnership.PendingRelease))!=0){await registry.TickAsync();await Task.Delay(10,deadline.Token);}
                 Check(a.Requests.Any(r=>r["op"]!.GetValue<string>()=="release"),"Cancel lost the acknowledged-but-unclaimed owner before success delivery");
             } finally {deliver.Set();}
