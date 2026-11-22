@@ -68,8 +68,17 @@ fn load_catalog(raw: &Value) -> io::Result<RepairParameters> {
 pub(crate) fn synthetic_repair_bunker_world() -> crate::structures::BunkerWorld {
     // The empty bunker loader uses the prototype envelope. The test keeps
     // the same synthetic tool binding and rates in that envelope.
+    synthetic_repair_bunker_world_with_parameters(17., 1.25)
+}
+
+pub(crate) fn synthetic_repair_bunker_world_with_parameters(
+    amount: f32,
+    cooldown_seconds: f32,
+) -> crate::structures::BunkerWorld {
     let mut raw = catalog_value();
     raw["application_id"] = json!(20230);
+    raw["repair"]["globals"]["repairkit_repair_amount"] = json!(amount);
+    raw["repair"]["parameters"]["cooldown_time"] = json!(cooldown_seconds);
     with_catalog_file(&raw, |path| {
         crate::structures::BunkerWorld::without_bunkers(path)
     })

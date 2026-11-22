@@ -1,9 +1,10 @@
 # Manual live Ground vehicle repair
 
 The authenticated retail Repair message now repairs ordinary source-owned
-Acquisition Escorts and Domination APC/Motor Pool vehicles. It uses the current
+Acquisition APC/Escort and Domination APC/Motor Pool vehicles. It uses the current
 source-bound equipped kit and effective RepairAmount modifier, current allocated
-vehicle identity, actual owner team and live authoritative float HP. No new
+vehicle identity, actual owner team and live authoritative float HP. Acquisition APC repair also accepts existing schema-v1 source catalogs; it does
+not require APC crew, driver, or turret bindings. No new
 vehicle repair-time catalog is needed: the retail Ground virtual selects the
 instant authored kit amount. Existing extraction supplies amount, cooldown and
 item binding. Preserve the f32 fused amount calculation, percent conversion and
@@ -12,7 +13,7 @@ percent-to-HP round trip; do not substitute a direct integer-HP increment.
 The supported server route requires client TCP/plugin1, a started open match,
 a living ready on-foot actor, the current equipped kit and complete Ground
 creation. The full family1 ID must resolve to a supported source allocation
-(type9 Acquisition, type3/7 Domination), with a live operational non-hulk and
+(type3/9 Acquisition, type3/7 Domination), with a live operational non-hulk and
 noncritical model on the actor's actual team. These restrictions describe the
 replacement's supported ordinary authority. Native client target selection also
 uses actual team and damaged HP. The native server target virtual itself is
@@ -38,7 +39,9 @@ resequences the reliable queue through its own delivery record. A later delivery
 failure does not undo an already committed gameplay transaction.
 
 Synthetic checks cover real Acquisition tool sourcing and outer bridge output,
-all three Domination APC faction bindings, Motor Pool repair, current target-only
+Acquisition APC repair without crew bindings, its unsupported-source and authority
+fences, modifier work and atomic retry, all three Domination APC faction bindings,
+Motor Pool repair, current target-only
 FRAGO, sender/plugin/route/state/tool guards, actual team independent of faction,
 float/sub-quarter repair, effective modifier and work carry, full-outbox and
 recorder rollback, cooldown and once-only retry. Exact retail evidence remains
