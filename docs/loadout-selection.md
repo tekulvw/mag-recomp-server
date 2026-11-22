@@ -18,8 +18,8 @@ commit succeed. Each actor keeps its newest persistable choice with a checked,
 monotonically increasing revision. A newer choice replaces older pending work;
 revision exhaustion does not wrap or alter the equipped kit.
 
-Successful replies may carry at most32 entries in optional `loadout_selections`.
-Each entry has exactly these fields:
+Successful replies may carry up to 32 entries in `loadout_selections`. Each
+entry has these fields.
 
 | Field | Meaning |
 | --- | --- |
@@ -29,6 +29,7 @@ Each entry has exactly these fields:
 | `account_id`, `character_id` | Actual saved-record owner |
 | `revision` | Nonzero unsigned64-bit actor selection revision |
 | `inventory_index` | Valid owned saved slot |
+| `layout_revision` | Optional nonzero saved-layout revision after a deletion |
 
 Horizon validates all identities against its **current** reservation. Retained
 reward owners are not authority to change a preference after leaving. Its
@@ -81,7 +82,7 @@ The typed `refresh_loadouts` bridge operation carries the exact reservation,
 world, player, persistent account and character identities, a nonzero revision,
 and the projected saved rows. Gameplay validates those identities and the
 configured item/faction bindings before recording and committing the refresh.
-Only saved inventories and their update IDs change. The native desired index,
+For an edit within the same layout, only saved inventories and their update IDs change. The native desired index,
 pending preference, already equipped kit, current inventory handle and observed
 ammunition remain intact. A subsequent physical spawn equips from the updated
 saved rows; a late joiner still sees the current life's retained kit.
@@ -93,6 +94,28 @@ cannot rewind newer rows. A new successful save supersedes older pending work;
 release cancels that reservation's work and requeue uses a fresh owner identity.
 Failed storage writes never schedule refreshes. A refresh failure does not turn
 a completed durable save into a failed save response.
+
+## Deleting a retail saved kit
+
+Retail `0x0221` carries the zero-based saved row as a byte. The `0x0222`
+response carries one packed success bit. An authenticated MLS session can
+delete an occupied row from its own character. Later kits move one position
+earlier and the tail becomes empty. If deletion moves the saved preference's
+kit, the preference follows it. If the preferred kit is removed, the first
+playable kit becomes the preference. A deletion must leave a usable first kit.
+
+The store commits the complete row change, preference and incremented layout
+revision together. Gameplay receives the canonical future rows and remapped
+preference through the existing refresh path. A new layout retires the previous
+numeric desired slot and its pending selection. A delayed old-layout receipt
+also fails the durable revision check under the same lock used for deletion.
+The current life retains its equipment, inventory handle and ammunition.
+
+Deletion requires the running worker to advertise `loadout_layout_revision_v1`
+in Hello. A world registry requires support from every configured worker.
+Zero revisions retain the existing admission and receipt shapes. Admission to
+an older worker omits the optional revision. That worker's preferences cannot
+overwrite a record whose layout has already been compacted.
 
 ## Component compatibility and verification
 

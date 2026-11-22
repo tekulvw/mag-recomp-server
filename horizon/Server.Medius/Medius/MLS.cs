@@ -275,6 +275,7 @@ namespace Server.Medius
                         }
                         data.MagMlsSession.CharacterStore = Program.CreateCharacterStore();
                         data.MagMlsSession.LoadoutCommitted = (account, character) => Program.GameplayLobby?.ArmoryLoadoutCommitted(account, character);
+                        data.MagMlsSession.CanDeleteLoadout = () => Program.GameplayLobby?.SupportsLoadoutLayoutChanges == true;
                         var replies = data.MagMlsSession.HandleMany(plugin, magNow);
                         if (Program.GameplayLobby is MagWorldRegistry partyRegistry && partyRegistry.PartyMembershipEnabled &&
                             data.MagMlsSession.State == MagMlsSession.SessionState.Ready)

@@ -13,4 +13,14 @@ namespace RT.Models.MAG
         public override ushort MessageType => 0x0220;
         public bool Success { get; set; }
     }
+    public sealed class MagRetailLoadoutDeleteRequest : MagMessage
+    {
+        public override ushort MessageType => 0x0221;
+        public byte LoadoutIndex { get; set; }
+    }
+    public sealed class MagRetailLoadoutDeleteResponse : MagMessage
+    {
+        public override ushort MessageType => 0x0222;
+        public bool Success { get; set; }
+    }
 }

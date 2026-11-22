@@ -19,6 +19,7 @@ namespace Server.Medius
         public LocalCharacterStore CharacterStore { get; set; }
         public string StorageStatus { get; private set; } = "inactive";
         public Action<string, uint> LoadoutCommitted { get; set; }
+        public Func<bool> CanDeleteLoadout { get; set; }
         public string LoadoutRefreshStatus { get; private set; } = "inactive";
         public string SessionKey { get; private set; }
         private MagLoginRegistry _registry;
@@ -100,15 +101,23 @@ namespace Server.Medius
                 ObserveActivity(now);
                 return new[] { MagMessageCodec.ToPluginMessageForApplication(response, ApplicationId) };
             }
-            if (message is MagLoadoutUpdateRequest update && State == SessionState.Ready)
+            if (State == SessionState.Ready && message is (MagLoadoutUpdateRequest or MagRetailLoadoutDeleteRequest))
             {
                 LoadoutRefreshStatus = "not-scheduled";
                 bool success = false;
+                bool deleting = message is MagRetailLoadoutDeleteRequest;
                 try
                 {
-                    if (CharacterStore != null && CharacterId != 0 && MagDevelopmentAccountPolicy.ValidAccount(AuthenticatedAccount))
+                    if (deleting && CanDeleteLoadout?.Invoke() != true)
+                        StorageStatus = "loadout-layout-capability-unavailable";
+                    else if (CharacterStore != null && CharacterId != 0 && MagDevelopmentAccountPolicy.ValidAccount(AuthenticatedAccount))
                     {
-                        var outcome = CharacterStore.SaveLoadoutForAccount(AuthenticatedAccount, CharacterId, update.LoadoutIndex, update.Loadout);
+                        var outcome = message switch
+                        {
+                            MagLoadoutUpdateRequest update => CharacterStore.SaveLoadoutForAccount(AuthenticatedAccount, CharacterId, update.LoadoutIndex, update.Loadout),
+                            MagRetailLoadoutDeleteRequest delete => CharacterStore.DeleteLoadoutForAccount(AuthenticatedAccount, CharacterId, delete.LoadoutIndex),
+                            _ => throw new InvalidOperationException("Invalid Armory operation.")
+                        };
                         success = outcome.Result == MagNetResult.Success; StorageStatus = outcome.Reason;
                     }
                     else StorageStatus = "loadout-identity-or-store-unavailable";
@@ -117,13 +126,15 @@ namespace Server.Medius
                 { StorageStatus = "loadout-storage-error-no-success"; }
                 if (success && LoadoutCommitted != null)
                 {
-                    // This notification follows the durable save. A refresh failure
-                    // must never change its native success response or replay the save.
+                    // A refresh failure after a durable edit cannot reverse its native response.
                     try { LoadoutCommitted(AuthenticatedAccount, CharacterId); LoadoutRefreshStatus = "notified"; }
                     catch (Exception) { LoadoutRefreshStatus = "notification-failed-after-commit"; }
                 }
                 ObserveActivity(now);
-                return new[] { MagMessageCodec.ToPluginMessageForApplication(new MagLoadoutUpdateResponse { Success = success }, ApplicationId) };
+                MagMessage response = deleting
+                    ? new MagRetailLoadoutDeleteResponse { Success = success }
+                    : new MagLoadoutUpdateResponse { Success = success };
+                return new[] { MagMessageCodec.ToPluginMessageForApplication(response, ApplicationId) };
             }
             ObserveActivity(now); return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();
         }

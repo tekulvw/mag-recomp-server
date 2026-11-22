@@ -556,6 +556,7 @@ fn fixed_terminal_release_preserves_pending_desired_kit_during_successor_reserve
     let mut peer = character.clone();
     peer.account_id = Some("synthetic-kit-old-peer".into());
     let receipt = loadout_selection::CommittedLoadoutSelection {
+        layout_revision: 0,
         selection_id: "synthetic-released-desired-kit".into(),
         reservation_id: reservation.id.clone(),
         world_id: reservation.world,

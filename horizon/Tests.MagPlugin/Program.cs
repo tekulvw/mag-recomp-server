@@ -94,6 +94,7 @@ Test("leadership admission capability follows the catalog", LeadershipProgressio
 Test("leadership reconnect admission serializes reward settlement", LeadershipProgressionChecks.AdmissionRewardRace);
 Test("leadership commit failure, retry, and overflow", LeadershipProgressionChecks.FailedCommit);
 Test("selected kit ownership and complete store preservation", LoadoutPreferenceStoreChecks.Run);
+Test("retail saved loadout delete commits and compacts the owned layout", LoadoutPreferenceStoreChecks.DeleteThroughMls);
 Test("account-bound NP identity creation and persistence", NpIdentityChecks.Run);
 
 Test("bounded retail mode capacities", () =>
@@ -180,6 +181,30 @@ Test("response direction, unaligned boolean and zero padding", () =>
         Check(!MagMessageCodec.TryParseClient(bytes, out _), "Server response admitted as request");
         bytes[^1] |= 1;
         Check(!MagMessageCodec.TryParse(bytes, out _), "Nonzero padding accepted");
+    }
+});
+
+Test("retail saved loadout delete wire and profile bounds", () =>
+{
+    byte[] request = { 0x02, 0x21, 4 };
+    Check(MagMessageCodec.TryParseClientForApplication(request, 20231, out var parsed) &&
+        parsed is MagRetailLoadoutDeleteRequest { LoadoutIndex: 4 } &&
+        MagMessageCodec.SerializeForApplication(parsed, 20231).SequenceEqual(request), "Retail delete index wire differs");
+    Check(!MagMessageCodec.TryParseClientForApplication(request, 20230, out _) &&
+        !MagMessageCodec.TryParseClientForApplication(request[..^1], 20231, out _) &&
+        !MagMessageCodec.TryParseClientForApplication(new byte[] { 2, 0x21, 5 }, 20231, out _) &&
+        !MagMessageCodec.TryParseClientForApplication(new byte[] { 2, 0x21, 0, 0 }, 20231, out _), "Wrong profile or malformed delete index admitted");
+    Throws<ArgumentException>(() => MagMessageCodec.SerializeForApplication(parsed, 20230));
+    foreach (bool success in new[] { false, true })
+    {
+        byte[] response = { 0x02, 0x22, (byte)(success ? 0x80 : 0) };
+        Check(MagMessageCodec.TryParseForApplication(response, 20231, out parsed) &&
+            parsed is MagRetailLoadoutDeleteResponse result && result.Success == success &&
+            MagMessageCodec.SerializeForApplication(result, 20231).SequenceEqual(response), "Retail delete result bit differs");
+        Check(!MagMessageCodec.TryParseClientForApplication(response, 20231, out _) &&
+            !MagMessageCodec.TryParseForApplication(response, 20230, out _), "Wrong retail delete result direction or profile admitted");
+        response[2] |= 1;
+        Check(!MagMessageCodec.TryParseForApplication(response, 20231, out _), "Delete response accepted nonzero padding");
     }
 });
 

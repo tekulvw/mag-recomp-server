@@ -25,7 +25,7 @@ namespace RT.Models.MAG
             if (TryParseForApplication(payload, applicationId, out message) && (message is MagRetailPartyInvite || message is MagRetailPartyInviteResponse ||
                 message is MagRetailPartyLeave || message is MagRetailCancelJoinRequest || message is MagTrainingCompletedRequest || message is MagKeepAlive || message is MagJoinGameRequest || message is MagServerStatusRequest || message is MagHello || message is MagProtocolInfo || message is MagAccountLoginRequest || message is MagCharacterDataRequest ||
                 message is MagNpAuthenticateRequest || message is MagUniverseListRequest || message is MagRetailPatchRequest ||
-                message is MagNewsEulaRequest || message is MagCharacterListRequest || message is MagCreateCharacterRequest || message is MagLoadoutUpdateRequest || message is MagPurchaseSkillRequest)) return true;
+                message is MagNewsEulaRequest || message is MagCharacterListRequest || message is MagCreateCharacterRequest || message is MagLoadoutUpdateRequest || message is MagRetailLoadoutDeleteRequest || message is MagPurchaseSkillRequest)) return true;
             message = null;
             return false;
         }
@@ -90,6 +90,8 @@ namespace RT.Models.MAG
                     0x0251 => new MagPurchaseSkillResponse(),
                     0x021f => new MagLoadoutUpdateRequest(),
                     0x0220 => new MagLoadoutUpdateResponse(),
+                    0x0221 when applicationId == 20231 => new MagRetailLoadoutDeleteRequest(),
+                    0x0222 when applicationId == 20231 => new MagRetailLoadoutDeleteResponse(),
                     0x0236 => new MagCharacterListRequest(),
                     0x0237 => applicationId == 20231 ? new MagRetailCharacterListResponse() : new MagCharacterListResponse(),
                     0x0238 => new MagCharacterDataRequest(),
@@ -118,6 +120,13 @@ namespace RT.Models.MAG
                         break;
                     case MagLoadoutUpdateResponse update:
                         update.Success = reader.ReadBoolean();
+                        break;
+                    case MagRetailLoadoutDeleteRequest delete:
+                        delete.LoadoutIndex = reader.ReadByte();
+                        if (delete.LoadoutIndex >= 5) return false;
+                        break;
+                    case MagRetailLoadoutDeleteResponse delete:
+                        delete.Success = reader.ReadBoolean();
                         break;
                     case MagRetailPatchRequest patch:
                         patch.HighestVersion = unchecked((int)reader.ReadUInt32()); patch.InitialVersion = unchecked((int)reader.ReadUInt32());
@@ -261,7 +270,7 @@ namespace RT.Models.MAG
         // Legacy callers retain prototype behavior; the explicit retail summary type carries its profile.
         // Shared full-record/update types must use the application's explicit serializer at session boundaries.
         public static byte[] Serialize(MagMessage message) =>
-            SerializeForApplication(message, message is MagRetailPartyMessage || message is MagTrainingCompletedRequest || message is MagRetailCharacterListResponse || message is MagRetailAccountLoginRequest || message is MagRetailAccountLoginResponse || message is MagRetailJoinGameRequest || message is MagRetailJoinGameResponse ? 20231 : 20230);
+            SerializeForApplication(message, message is MagRetailPartyMessage || message is MagTrainingCompletedRequest || message is MagRetailCharacterListResponse || message is MagRetailAccountLoginRequest || message is MagRetailAccountLoginResponse || message is MagRetailJoinGameRequest || message is MagRetailJoinGameResponse || message is MagRetailLoadoutDeleteRequest or MagRetailLoadoutDeleteResponse ? 20231 : 20230);
 
         public static byte[] SerializeForApplication(MagMessage message, int applicationId)
         {
@@ -281,6 +290,8 @@ namespace RT.Models.MAG
                 throw new ArgumentException("Queue message is retail-only.",nameof(message));
             if (message is MagRetailPartyMessage && applicationId != 20231)
                 throw new ArgumentException("Party messages are retail-only.", nameof(message));
+            if (message is (MagRetailLoadoutDeleteRequest or MagRetailLoadoutDeleteResponse) && applicationId != 20231)
+                throw new ArgumentException("Loadout delete messages are retail-only.", nameof(message));
             var writer = new MagBitWriter();
             writer.WriteUInt16(message.MessageType);
             if (message is MagPluginClientMessage common) WriteHeader(writer, common);
@@ -304,6 +315,13 @@ namespace RT.Models.MAG
                     break;
                 case MagLoadoutUpdateResponse update:
                     writer.WriteBoolean(update.Success);
+                    break;
+                case MagRetailLoadoutDeleteRequest delete:
+                    if (delete.LoadoutIndex >= 5) throw new ArgumentException("Invalid loadout index.");
+                    writer.WriteByte(delete.LoadoutIndex);
+                    break;
+                case MagRetailLoadoutDeleteResponse delete:
+                    writer.WriteBoolean(delete.Success);
                     break;
                 case MagRetailPatchRequest patch:
                     writer.WriteUInt32(unchecked((uint)patch.HighestVersion)); writer.WriteUInt32(unchecked((uint)patch.InitialVersion));

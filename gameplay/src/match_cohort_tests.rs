@@ -208,6 +208,7 @@ fn archived_loadout_receipt_survives_selection_settlement_without_equipping_succ
     let old = e.active.as_mut().unwrap();
     assert_eq!(old.reservation.player, 1);
     let receipt = loadout_selection::CommittedLoadoutSelection {
+        layout_revision: 0,
         selection_id: "old-desired-kit".into(),
         reservation_id: old.reservation.id.clone(),
         world_id: 1,

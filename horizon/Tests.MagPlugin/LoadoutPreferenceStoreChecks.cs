@@ -1,6 +1,8 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using RT.Models;
 using RT.Models.MAG;
+using Server.Common.Stream;
 using Server.Medius;
 
 // Independently invented account/catalog data; no game files or real stores.
@@ -76,6 +78,136 @@ internal static class LoadoutPreferenceStoreChecks
             },
             extraDocument = new { marker = "retain", nested = new object[] { false, 7, "value" } }
         }))!.AsObject();
+    }
+
+    static RT_MSG_CLIENT_APP_TO_PLUGIN ArmoryEnvelope(byte[] payload, byte pluginId = 0)
+    {
+        using var buffer = new MemoryStream();
+        using (var writer = new BinaryWriter(buffer, System.Text.Encoding.UTF8, true))
+        {
+            writer.Write((ushort)payload.Length);
+            writer.Write(pluginId);
+            writer.Write(payload);
+        }
+        buffer.Position = 0;
+        using var reader = new MessageReader(buffer);
+        var envelope = new RT_MSG_CLIENT_APP_TO_PLUGIN();
+        envelope.Deserialize(reader);
+        return envelope;
+    }
+
+    public static void DeleteThroughMls()
+    {
+        const int app = 20231;
+        int previousApp = Server.Medius.Program.Settings.MagApplicationId;
+        Server.Medius.Program.Settings.MagApplicationId = app;
+        string directory = Path.Combine(Path.GetTempPath(), "mag-synthetic-delete-kit-" + Guid.NewGuid());
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var now = DateTime.UtcNow;
+            var path = Path.Combine(directory, "characters.json");
+            var original = Fixture();
+            File.WriteAllText(path, original.ToJsonString());
+            var store = new LocalCharacterStore(path) { LoadoutCatalog = Catalog(directory) };
+            var registry = new MagLoginRegistry();
+            var ticket = registry.IssueForAccount("alpha", 1, 1, now);
+            var session = new MagMlsSession { CharacterStore = store };
+            Check(session.TryBind(new RT_MSG_CLIENT_CONNECT_TCP
+            {
+                AppId = app, TargetWorldId = 1, AccessToken = ticket.AccessToken, SessionKey = ticket.SessionKey
+            }, registry, "synthetic-delete-kit", now), "Authenticated MLS session failed to bind");
+            Check(session.Accept(now) && session.CompleteTransport(now), "MLS transport failed to become ready");
+            session.HandleMany(ArmoryEnvelope(MagMessageCodec.SerializeForApplication(new MagHello(), app)), now);
+            session.HandleMany(ArmoryEnvelope(MagMessageCodec.SerializeForApplication(
+                new MagProtocolInfo { ProtocolVersion = Server.Medius.Program.Settings.MagProtocolVersion }, app)), now);
+            Check(session.State == MagMlsSession.SessionState.Ready, "MLS protocol handshake did not finish");
+            byte[] wire = { 0x02, 0x21, 0 };
+            byte[] before = File.ReadAllBytes(path);
+            int callbacks = 0;
+            session.LoadoutCommitted = (account, character) => {
+                Check(account == "alpha" && character == 1, "Delete notified the wrong owner");
+                Check(store.ReadForAccount(account).Single().LoadoutLayoutRevision == 1, "Delete notified before its durable write");
+                callbacks++;
+            };
+            var replies = session.HandleMany(ArmoryEnvelope(wire), now);
+            Check(replies.Count == 1 && replies[0].Payload.SequenceEqual(new byte[] { 0x02, 0x22, 0 }) &&
+                session.StorageStatus == "loadout-layout-capability-unavailable" && callbacks == 0 &&
+                File.ReadAllBytes(path).SequenceEqual(before), "Older worker did not prevent a delete before mutation");
+            Check(session.HandleMany(ArmoryEnvelope(wire, 1), now).Count == 0, "Wrong plugin entered the Armory delete route");
+            session.CanDeleteLoadout = () => true;
+            session.CharacterStore = new LocalCharacterStore(path, new FailedCommitter()) { LoadoutCatalog = store.LoadoutCatalog };
+            replies = session.HandleMany(ArmoryEnvelope(wire), now);
+            Check(replies.Count == 1 && replies[0].Payload.SequenceEqual(new byte[] { 0x02, 0x22, 0 }) &&
+                session.StorageStatus == "loadout-storage-error-no-success" && callbacks == 0 &&
+                File.ReadAllBytes(path).SequenceEqual(before), "Failed durable delete acknowledged success or changed the store");
+            session.CharacterStore = store;
+            replies = session.HandleMany(ArmoryEnvelope(wire), now);
+            Check(replies.Count == 1 && replies[0].PluginId == 0 && replies[0].Payload.SequenceEqual(new byte[] { 0x02, 0x22, 0x80 }),
+                "Authenticated retail delete did not return the native success response");
+            var current = new LocalCharacterStore(path) { LoadoutCatalog = store.LoadoutCatalog }.ReadForAccount("alpha").Single();
+            Check(current.LastUsedLoadout == 0 && current.Loadouts.Select(row => row.UpdateId).SequenceEqual(new byte[] { 2, 3, 4, 5, 0 }) &&
+                current.Loadouts[1].Items[0] == 2 && current.Loadouts[4].Items.All(id => id == -1) &&
+                current.LoadoutLayoutRevision == 1 && callbacks == 1, "Durable saved rows or preference were not compacted");
+            var expected = original.DeepClone();
+            var owner = expected["characters"]![0]!;
+            owner.AsObject().Remove("lastUsedLoadout");
+            owner["loadoutLayoutRevision"] = 1;
+            owner["loadouts"]!.AsArray().RemoveAt(0);
+            owner["loadouts"]!.AsArray().Add(JsonSerializer.SerializeToNode(new {
+                updateId = 0, items = Enumerable.Repeat(-1, 22)
+            }));
+            Check(JsonNode.DeepEquals(expected, JsonNode.Parse(File.ReadAllBytes(path))), "Delete changed unrelated saved rows, accounts, or progression");
+            var snapshot = GameplayLoadoutAdmission.Project(current, current.ToRecord(), store.LoadoutCatalog, supportsLayoutChanges: true);
+            Check(snapshot.LayoutRevision == 1 && snapshot.SelectedIndex == 0 && snapshot.Inventories[1][0] == 2 && snapshot.Inventories[4][0] == null &&
+                JsonSerializer.Serialize(snapshot).Contains("\"layout_revision\":1"), "Compaction was lost in the future-kit projection");
+            var legacy = GameplayLoadoutAdmission.Project(current, current.ToRecord(), store.LoadoutCatalog);
+            Check(legacy.LayoutRevision == 0 && !JsonSerializer.Serialize(legacy).Contains("layout_revision"), "Old peer projection contains the optional layout field");
+
+            byte[] committed = File.ReadAllBytes(path);
+            var settlement = new GameplayLoadoutSelectionSettlement(new object());
+            bool Owns(GameplayLoadoutSelection selection) => selection.MatchesOwner("synthetic-reservation", 7, 1, "alpha", 1);
+            CharacterCreationOutcome Save(GameplayLoadoutSelection selection) => store.SaveLastUsedLoadoutForAccount(
+                selection.AccountId, selection.CharacterId, selection.InventoryIndex, selection.LayoutRevision);
+            const string queuedOldSelection = """
+                {"v":2,"request_id":"test","ok":true,"error":null,"messages":[],"loadout_selections":[{"selection_id":"old-choice","reservation_id":"synthetic-reservation","world_id":7,"player_id":1,"account_id":"alpha","character_id":1,"revision":1,"inventory_index":1}]}
+                """;
+            Check(GameplayBridgeResponseCodec.TryParse(System.Text.Encoding.UTF8.GetBytes(queuedOldSelection), "test", true, out var reply) &&
+                settlement.Settle(reply.LoadoutSelections.Single(), now, Owns, Save) == "rejected" &&
+                settlement.Settle(reply.LoadoutSelections.Single(), now, Owns, Save) == "rejected" &&
+                store.DeleteLoadoutForAccount("alpha", 2, 0).Reason == "character-not-owned" &&
+                store.DeleteLoadoutForAccount("alpha", 1, 4).Reason == "loadout-delete-row-empty" &&
+                committed.SequenceEqual(File.ReadAllBytes(path)), "Queued old preference, empty tail, or foreign delete mutated the compacted store");
+            var fresh = JsonNode.Parse(queuedOldSelection);
+            var choice = fresh!["loadout_selections"]![0]!;
+            choice["selection_id"] = "new-choice";
+            choice["revision"] = 2;
+            choice["layout_revision"] = 1;
+            Check(GameplayBridgeResponseCodec.TryParse(JsonSerializer.SerializeToUtf8Bytes(fresh), "test", true, out var newReply) &&
+                settlement.Settle(newReply.LoadoutSelections.Single(), now, Owns, Save) == "persisted" &&
+                store.ReadForAccount("alpha").Single().LastUsedLoadout == 1, "A same-layout live preference could not select a surviving row");
+            Check(store.DeleteLoadoutForAccount("alpha", 1, 1).Result == MagNetResult.Success &&
+                store.ReadForAccount("alpha").Single().LastUsedLoadout == 0 &&
+                store.ReadForAccount("alpha").Single().LoadoutLayoutRevision == 2, "Deleting the preferred row did not choose the first playable kit");
+
+            var defaults = Fixture();
+            defaults["characters"]![0]!.AsObject().Remove("loadouts");
+            File.WriteAllText(path, defaults.ToJsonString());
+            Check(store.DeleteLoadoutForAccount("alpha", 1, 0).Result == MagNetResult.Success &&
+                store.ReadForAccount("alpha").Single().Loadouts[3].Items[0] == 1 &&
+                store.ReadForAccount("alpha").Single().Loadouts[4].Items[0] == -1, "Deleting before the first save lost the authored starter rows");
+            var finalKit = Fixture();
+            for (int index = 1; index < 5; index++) finalKit["characters"]![0]!["loadouts"]![index]!["items"]![0] = -1;
+            File.WriteAllText(path, finalKit.ToJsonString());
+            before = File.ReadAllBytes(path);
+            Check(store.DeleteLoadoutForAccount("alpha", 1, 0).Reason == "primary-loadout-required" &&
+                File.ReadAllBytes(path).SequenceEqual(before), "Last playable kit deletion left an invalid record");
+        }
+        finally
+        {
+            Server.Medius.Program.Settings.MagApplicationId = previousApp;
+            Directory.Delete(directory, true);
+        }
     }
 
     public static void Run()

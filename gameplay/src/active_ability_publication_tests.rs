@@ -24,6 +24,7 @@ fn configured_roster(players: u16) -> Engine<Vec<u8>> {
         .with_match_limits(1, 64)
         .unwrap();
     let mut loadouts = loadouts::SavedLoadouts {
+        layout_revision: 0,
         selected_index: 0,
         update_ids: [1; 5],
         inventories: [[None; 22]; 5],

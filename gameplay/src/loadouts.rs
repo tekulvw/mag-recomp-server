@@ -8,10 +8,16 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SavedLoadouts {
+    #[serde(default, skip_serializing_if = "layout_revision_is_zero")]
+    pub layout_revision: u64,
     pub selected_index: u8,
     pub update_ids: [u8; 5],
     pub inventories: [[Option<u16>; 22]; 5],
 }
+pub(crate) fn layout_revision_is_zero(revision: &u64) -> bool {
+    *revision == 0
+}
+
 impl SavedLoadouts {
     pub fn validate(&self, catalog: &ItemCatalog) -> Result<(), &'static str> {
         if self.selected_index >= 5 {

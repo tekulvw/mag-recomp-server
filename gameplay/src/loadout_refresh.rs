@@ -3,6 +3,7 @@ use crate::*;
 use sha2::{Digest, Sha256};
 
 pub const CAPABILITY: &str = "active_loadout_refresh_v1";
+pub const LAYOUT_CAPABILITY: &str = "loadout_layout_revision_v1";
 
 /// Only the latest accepted request is retained for exact idempotent retries.
 pub(super) struct AppliedRefresh {
@@ -82,11 +83,10 @@ impl<W: Write> Engine<W> {
         if now.saturating_sub(actor.last_event) >= IDLE_TIMEOUT {
             return Err("refresh_loadouts_reservation_expired");
         }
-        let selected_index = character
+        let current = character
             .loadouts
             .as_ref()
-            .ok_or("refresh_loadouts_saved_inventory_unavailable")?
-            .selected_index;
+            .ok_or("refresh_loadouts_saved_inventory_unavailable")?;
         let retry = if let Some(previous) = &actor.last_loadout_refresh {
             if revision < previous.revision {
                 return Err("refresh_loadouts_stale_revision");
@@ -102,13 +102,19 @@ impl<W: Write> Engine<W> {
         } else {
             false
         };
+        if loadouts.layout_revision < current.layout_revision {
+            return Err("refresh_loadouts_stale_layout");
+        }
+        let changed_layout = loadouts.layout_revision > current.layout_revision;
         // Validate the complete caller snapshot before normalizing the one field
-        // this operation does not own. The preserved preference must remain valid
-        // against the replacement rows as well.
+        // a same-layout edit does not own. A compacted layout supplies a new
+        // canonical selection because the old numeric preference names an old row.
         self.validate_refresh_loadouts(actor, &loadouts)?;
         let mut applied = loadouts.clone();
-        applied.selected_index = selected_index;
-        self.validate_refresh_loadouts(actor, &applied)?;
+        if !changed_layout {
+            applied.selected_index = current.selected_index;
+            self.validate_refresh_loadouts(actor, &applied)?;
+        }
         let digest = format!(
             "{:x}",
             Sha256::digest(serde_json::to_vec(&loadouts).map_err(|_| "record_encode_failed")?)
@@ -124,6 +130,10 @@ impl<W: Write> Engine<W> {
                 .find(|actor| actor.reservation.id == reservation_id)
                 .ok_or("refresh_loadouts_owner_unavailable")?;
             actor.reservation.character.loadouts = Some(applied);
+            if changed_layout {
+                actor.selected_loadout = None;
+                actor.pending_loadout_selection = None;
+            }
             actor.last_loadout_refresh = Some(AppliedRefresh {
                 revision,
                 requested: loadouts,

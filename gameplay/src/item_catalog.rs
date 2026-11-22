@@ -381,6 +381,7 @@ impl ItemCatalog {
             .and_then(|v| u8::try_from(v).ok())
             .ok_or_else(|| invalid("invalid authored inventory version"))?;
         let mut defaults = crate::loadouts::SavedLoadouts {
+            layout_revision: 0,
             selected_index: 0,
             update_ids: [initial_version; 5],
             inventories: [[None; 22]; 5],

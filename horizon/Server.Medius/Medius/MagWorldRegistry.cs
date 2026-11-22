@@ -62,6 +62,7 @@ namespace Server.Medius
         public Task<MagJoinGameResponse> JoinAsync(MagMlsSession session, MagJoinGameRequest request, Action<MagCharacterRecord> notify=null) =>
             Task.FromResult(JoinResponse(request.TransactionId,2));
         public bool UsesFactionMatchmaking => true;
+        public bool SupportsLoadoutLayoutChanges => _slots.All(slot => slot.Host.SupportsLoadoutLayoutChanges);
         public IReadOnlyList<MagRegisteredWorld> Worlds => Array.AsReadOnly(_slots.Select(slot => {
             var state = slot.Host.GetPlacement();
             return new MagRegisteredWorld(slot.Config.WorkerId, slot.Bridge.WorkerIdentity?.IncarnationId,

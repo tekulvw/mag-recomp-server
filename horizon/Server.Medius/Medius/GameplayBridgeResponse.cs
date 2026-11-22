@@ -41,13 +41,14 @@ namespace Server.Medius {
   public uint CharacterId {get;}
   public ulong Revision {get;}
   public byte InventoryIndex {get;}
-  internal GameplayLoadoutSelection(string id,string reservation,uint world,ushort player,string account,uint character,ulong revision,byte index) {
-   SelectionId=id;ReservationId=reservation;WorldId=world;PlayerId=player;AccountId=account;CharacterId=character;Revision=revision;InventoryIndex=index;
+  public ulong LayoutRevision {get;}
+  internal GameplayLoadoutSelection(string id,string reservation,uint world,ushort player,string account,uint character,ulong revision,byte index,ulong layoutRevision) {
+   SelectionId=id;ReservationId=reservation;WorldId=world;PlayerId=player;AccountId=account;CharacterId=character;Revision=revision;InventoryIndex=index;LayoutRevision=layoutRevision;
   }
   public bool MatchesOwner(string reservation,uint world,ushort player,string account,uint character)=>
    string.Equals(ReservationId,reservation,StringComparison.Ordinal)&&WorldId==world&&PlayerId==player&&
    string.Equals(AccountId,account,StringComparison.Ordinal)&&CharacterId==character;
-  internal bool Same(GameplayLoadoutSelection other)=>other!=null&&SelectionId==other.SelectionId&&ReservationId==other.ReservationId&&WorldId==other.WorldId&&PlayerId==other.PlayerId&&AccountId==other.AccountId&&CharacterId==other.CharacterId&&Revision==other.Revision&&InventoryIndex==other.InventoryIndex;
+  internal bool Same(GameplayLoadoutSelection other)=>other!=null&&SelectionId==other.SelectionId&&ReservationId==other.ReservationId&&WorldId==other.WorldId&&PlayerId==other.PlayerId&&AccountId==other.AccountId&&CharacterId==other.CharacterId&&Revision==other.Revision&&InventoryIndex==other.InventoryIndex&&LayoutRevision==other.LayoutRevision;
  }
  public enum GameplayBridgeFailure { None, Timeout, Unavailable, InvalidRequest, MalformedResponse, WorkerIdentityMismatch }
  public sealed class GameplayMatchTerminal {
@@ -77,6 +78,7 @@ namespace Server.Medius {
   public bool SupportsPartyReservations => Capabilities.Contains("party_reservation_v1",StringComparer.Ordinal);
   public bool SupportsActiveLoadoutRefresh => Capabilities.Contains("active_loadout_refresh_v1",StringComparer.Ordinal);
   public bool SupportsCommittedLoadoutSelections => Capabilities.Contains("committed_loadout_selection_v1",StringComparer.Ordinal);
+  public bool SupportsLoadoutLayoutChanges => Capabilities.Contains("loadout_layout_revision_v1",StringComparer.Ordinal);
   public bool SupportsWorkerRegistry => Capabilities.Contains("worker_registry_v1",StringComparer.Ordinal);
   internal GameplayBridgeResponse(bool ok,string error,IReadOnlyList<GameplayBridgeMessage> messages,GameplayBridgeFailure failure=GameplayBridgeFailure.None,IReadOnlyList<GameplayReward> rewards=null,GameplayMatchTerminal matchTerminal=null,IReadOnlyList<GameplayLoadoutSelection> loadoutSelections=null,IReadOnlyList<string> capabilities=null,IReadOnlyList<MagMatchProfile> matchProfiles=null,GameplaySelectedMatch selectedMatch=null,GameplayWorkerIdentity workerIdentity=null,GameplayPartyReservation partyReservation=null){PartyReservation=partyReservation;MatchProfiles=matchProfiles??Array.Empty<MagMatchProfile>();SelectedMatch=selectedMatch;WorkerIdentity=workerIdentity;LoadoutSelections=loadoutSelections??Array.Empty<GameplayLoadoutSelection>();Capabilities=capabilities??Array.Empty<string>();Ok=ok;Error=error;Messages=messages;Failure=failure;Rewards=rewards??Array.Empty<GameplayReward>();MatchTerminal=matchTerminal;}
   internal static GameplayBridgeResponse Failed(GameplayBridgeFailure failure,long elapsed)=>new GameplayBridgeResponse(false,null,Array.Empty<GameplayBridgeMessage>(),failure){ElapsedMilliseconds=elapsed};
@@ -175,12 +177,18 @@ namespace Server.Medius {
     if(hasSelections) {
      if(selections.ValueKind!=JsonValueKind.Array||selections.GetArrayLength()>32||(!success&&selections.GetArrayLength()!=0))return false;
      foreach(var selection in selections.EnumerateArray()) {
-      if(!ExactFields(selection,"selection_id","reservation_id","world_id","player_id","account_id","character_id","revision","inventory_index"))return false;
+      string[] selectionFields={"selection_id","reservation_id","world_id","player_id","account_id","character_id","revision","inventory_index"};
+      ulong layoutRevision=0;
+      if(selection.TryGetProperty("layout_revision",out var layout)) {
+       if(!layout.TryGetUInt64(out layoutRevision)||layoutRevision==0)return false;
+       selectionFields=selectionFields.Append("layout_revision").ToArray();
+      }
+      if(!ExactFields(selection,selectionFields))return false;
       string id=selection.GetProperty("selection_id").GetString(),reservation=selection.GetProperty("reservation_id").GetString(),account=selection.GetProperty("account_id").GetString();
       if(id==null||id.Length==0||id.Length>128||!id.All(c=>char.IsAsciiLetterOrDigit(c)||c=='-'||c=='_')||!selectionIds.Add(id)||!Identifier(reservation)||!selectionOwners.Add(reservation)||!MagDevelopmentAccountPolicy.ValidAccount(account)||
        !selection.GetProperty("world_id").TryGetUInt32(out var world)||!selection.GetProperty("player_id").TryGetUInt16(out var player)||!selection.GetProperty("character_id").TryGetUInt32(out var character)||character==0||
        !selection.GetProperty("revision").TryGetUInt64(out var revision)||revision==0||!selection.GetProperty("inventory_index").TryGetByte(out var index)||index>=5)return false;
-      parsedSelections.Add(new GameplayLoadoutSelection(id,reservation,world,player,account,character,revision,index));
+      parsedSelections.Add(new GameplayLoadoutSelection(id,reservation,world,player,account,character,revision,index,layoutRevision));
      }
     }
     GameplayMatchTerminal parsedTerminal=null;
