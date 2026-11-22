@@ -7,27 +7,31 @@ fn combat_items() -> Arc<item_catalog::ItemCatalog> {
     combat_items_with_grenade(false)
 }
 fn combat_items_with_grenade(grenade: bool) -> Arc<item_catalog::ItemCatalog> {
-    combat_fixture_items(grenade, 0.0, 0.0, None, false)
+    combat_fixture_items(grenade, 0.0, 0.0, None, false, false)
 }
 
 pub(crate) fn combat_items_for_ground_test(vehicle_hp: f32) -> Arc<item_catalog::ItemCatalog> {
-    combat_fixture_items(false, vehicle_hp, 0.0, None, false)
+    combat_fixture_items(false, vehicle_hp, 0.0, None, false, false)
 }
 
 pub(crate) fn grenade_items_for_ground_test(vehicle_hp: f32) -> Arc<item_catalog::ItemCatalog> {
-    combat_fixture_items(true, 0.0, vehicle_hp, None, false)
+    combat_fixture_items(true, 0.0, vehicle_hp, None, false, false)
 }
 
 pub(crate) fn grenade_items_with_cover() -> Arc<item_catalog::ItemCatalog> {
-    combat_fixture_items(true, 0.0, 0.0, Some(1.25), false)
+    combat_fixture_items(true, 0.0, 0.0, Some(1.25), false, false)
 }
 
 pub(crate) fn vehicle_grenade_items_with_cover(vehicle_hp: f32) -> Arc<item_catalog::ItemCatalog> {
-    combat_fixture_items(true, 0.0, vehicle_hp, Some(1.25), false)
+    combat_fixture_items(true, 0.0, vehicle_hp, Some(1.25), false, false)
 }
 
 pub(crate) fn bot_firearm_items() -> Arc<item_catalog::ItemCatalog> {
-    combat_fixture_items(false, 0.0, 0.0, None, true)
+    combat_fixture_items(false, 0.0, 0.0, None, true, false)
+}
+
+pub(crate) fn melee_items() -> Arc<item_catalog::ItemCatalog> {
+    combat_fixture_items(true, 0.0, 0.0, None, false, true)
 }
 
 fn combat_fixture_items(
@@ -36,6 +40,7 @@ fn combat_fixture_items(
     grenade_vehicle_hp: f32,
     material_penetration: Option<f64>,
     bot_firearm: bool,
+    melee: bool,
 ) -> Arc<item_catalog::ItemCatalog> {
     let mut weapon = json!({"magazine_capacity":9});
     if bot_firearm {
@@ -109,6 +114,30 @@ fn combat_fixture_items(
         if let Some(penetration) = material_penetration {
             metadata["grenades"]["4"]["material_penetration"] = json!(penetration);
         }
+    }
+    if melee {
+        metadata["schema_version"] = json!(4);
+        metadata["authority"]["melee_damage"] = json!(true);
+        metadata["melee_direction"] = json!({
+            "front_dot_threshold":-0.4,"back_dot_threshold":0.6,
+            "front_multiplier":1.,"side_multiplier":1.,"back_multiplier":1.
+        });
+        metadata["melee"]["2"] = json!({
+            "authored_ref":"FactionItemList0:2","name":"synthetic_knife",
+            "definition":{},"source":{},"item_source":{},
+            "ammo":{"group":"hitscan_ammo","name":"synthetic_swipe","source":{},
+                "ammo_token_candidate":78,"ammo_token_verified_for_retail":false},
+            "damage":{"character":40.,"characterAPierce":0.,"characterARedux":0.,
+                "vehicle":0.,"vehicleAPierce":0.,"vehicleARedux":0.,
+                "objective":0.,"objectiveAPierce":0.,"objectiveARedux":0.,"mine":0.},
+            "effective_range":3.,"max_range":4.,"gear_slot":2,"fire_mode":0,
+            "category":"kWepCategoryKnife","damage_type":3,
+            "max_angle":1.,"max_height":1.,"refire_seconds":0.2
+        });
+        // This synthetic item can be equipped in either slot; metadata, not its
+        // numeric ID, determines the admitted weapon kind for the event.
+        metadata["bullets"].as_object_mut().unwrap().clear();
+        metadata["body"][0]["armor_area"] = json!(0);
     }
     let combat = retail_combat::RetailCombatCatalog::from_json(&metadata.to_string()).unwrap();
     Arc::new(items.with_retail_armory(armory).with_retail_combat(combat))
