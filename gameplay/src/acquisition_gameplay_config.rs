@@ -45,6 +45,7 @@ pub struct Configuration {
     frag_character_blast: bool,
     frag_ground_areas: Option<PathBuf>,
     human_static_resupply: Option<PathBuf>,
+    projectile_contacts: Option<PathBuf>,
     vehicle_reinforcement_intervals_ms: [u32; 2],
     structural: Option<crate::acquisition_structural::Files>,
 }
@@ -186,6 +187,9 @@ impl Configuration {
         if let Some(source) = &mut result.frag_ground_areas {
             *source = directory.join(&*source);
         }
+        if let Some(source) = &mut result.projectile_contacts {
+            *source = directory.join(&*source);
+        }
         if let Some(source) = &mut result.human_static_resupply {
             *source = directory.join(&*source);
         }
@@ -319,6 +323,34 @@ impl Configuration {
             .as_ref()
             .map(|paths| paths.load(objective_catalog, spawns))
             .transpose()?;
+        if let Some(path) = &self.projectile_contacts {
+            if spawns.match_profile().game_type != 1 {
+                return Err(io::Error::other(
+                    "acquisition_projectile_contacts_require_mode1",
+                ));
+            }
+            let structural = setup.structural.as_ref().ok_or_else(|| {
+                io::Error::other("acquisition_projectile_contacts_require_structural")
+            })?;
+            let mut raw = Vec::new();
+            File::open(path)?
+                .take(512 * 1024 + 1)
+                .read_to_end(&mut raw)?;
+            let contacts =
+                crate::domination_projectile_collision::ContactBindings::from_acquisition_json(
+                    &raw,
+                )
+                .map_err(io::Error::other)?;
+            contacts
+                .validate_acquisition(
+                    spawns.map_name(),
+                    &objective_catalog.source().source_image_sha256,
+                    setup.filter_rows[23],
+                    structural.projectile_sequence_assets(),
+                )
+                .map_err(io::Error::other)?;
+            setup.projectile_contacts = Some(std::sync::Arc::new(contacts));
+        }
         if let Some(path) = &self.frag_ground_areas {
             let mut raw = Vec::new();
             File::open(path)?.take(16_385).read_to_end(&mut raw)?;
@@ -617,6 +649,7 @@ impl Configuration {
             frag_character_blast: self.frag_character_blast,
             frag_ground_areas: None,
             human_static_resupply: None,
+            projectile_contacts: None,
             vehicle_reinforcement_intervals_ms: self.vehicle_reinforcement_intervals_ms,
             structural: None,
         })

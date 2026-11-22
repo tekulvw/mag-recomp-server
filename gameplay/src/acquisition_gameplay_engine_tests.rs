@@ -400,6 +400,7 @@ fn acquisition_setup_fixture(
             frag_character_blast: false,
             frag_ground_areas: None,
             human_static_resupply: None,
+            projectile_contacts: None,
         },
     )
 }

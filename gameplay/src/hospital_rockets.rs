@@ -477,7 +477,7 @@ fn matches_numbers(numbers: &[(&Value, f32)]) -> bool {
 
 /// Reflected CRC32 of the canonical resource name. The extraction verifies
 /// that the pinned retail token-override table does not alias these names.
-fn ammo_crc32(name: &str) -> Option<u32> {
+pub(crate) fn ammo_crc32(name: &str) -> Option<u32> {
     if name.is_empty() || !name.bytes().all(|byte| byte.is_ascii_graphic()) {
         return None;
     }

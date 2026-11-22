@@ -167,6 +167,7 @@ mod hospital_rocket_runtime;
 pub mod hospital_rockets;
 mod hospital_turret_wire;
 mod hospital_turrets;
+pub mod infantry_rockets;
 pub mod item_catalog;
 mod loadout_refresh;
 #[cfg(test)]

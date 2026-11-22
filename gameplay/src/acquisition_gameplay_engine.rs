@@ -31,6 +31,8 @@ pub struct Setup {
     pub ground_damage: Option<acquisition_ground_damage::Policy>,
     pub frag_character_blast: bool,
     pub(crate) human_static_resupply: Option<Arc<human_static_resupply::Catalog>>,
+    pub(crate) projectile_contacts:
+        Option<Arc<crate::domination_projectile_collision::ContactBindings>>,
     pub(crate) frag_ground_areas: Option<Arc<acquisition_frag_ground::Catalog>>,
     pub vehicle_reinforcement_intervals_ms: [u32; 2],
     pub structural: Option<crate::acquisition_structural::Setup>,
@@ -129,6 +131,36 @@ impl Setup {
     ) -> Result<(), &'static str> {
         if let Some(areas) = &self.frag_ground_areas {
             areas.validate_dynamic_parts(bodies, bindings, ground)?;
+        }
+        Ok(())
+    }
+
+    pub fn has_projectile_contacts(&self) -> bool {
+        self.projectile_contacts.is_some()
+    }
+
+    pub fn validate_projectile_contacts(
+        &self,
+        world: Option<&collision::CollisionWorld>,
+        catalog: Option<&dynamic_collision::Catalog>,
+    ) -> Result<(), &'static str> {
+        self.validate_projectile_contact_static(world)?;
+        if let Some(contacts) = &self.projectile_contacts {
+            contacts.validate_dynamic(
+                catalog.ok_or("acquisition_projectile_contacts_require_dynamic_bodies")?,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_projectile_contact_static(
+        &self,
+        world: Option<&collision::CollisionWorld>,
+    ) -> Result<(), &'static str> {
+        if let Some(contacts) = &self.projectile_contacts {
+            contacts.validate_static(
+                world.ok_or("acquisition_projectile_contacts_require_static_world")?,
+            )?;
         }
         Ok(())
     }
@@ -331,6 +363,12 @@ impl<W: Write> Engine<W> {
             catalog,
             &self.item_catalog,
         )?;
+        setup.validate_projectile_contacts(
+            self.collision_world.as_ref(),
+            self.dynamic_body_resources
+                .as_ref()
+                .map(|resources| &resources.catalog),
+        )?;
         setup.validate_frag_character_blast(&self.item_catalog, self.collision_world.as_ref())?;
         setup.validate_frag_ground(
             &self.item_catalog,
@@ -415,6 +453,7 @@ impl<W: Write> Engine<W> {
         )?;
         self.acquisition_round = Some(Round::new(setup.rules));
         self.frag_character_blast = setup.frag_character_blast;
+        self.projectile_contacts = setup.projectile_contacts.clone();
         self.acquisition_gameplay = Some(Runtime::from_setup(Arc::new(setup)));
         Ok(self)
     }
