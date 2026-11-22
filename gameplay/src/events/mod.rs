@@ -78,6 +78,7 @@ struct EventPlan {
     helo_damage_requires_creation: bool,
     hospital_turret: Option<(u16, crate::hospital_turrets::Runtime)>,
     hospital_aim_packets: Vec<Vec<u8>>,
+    hospital_redeploy_ownership: Option<Vec<u8>>,
     hospital_late_join: Vec<Vec<u8>>,
     ground_dynamics_relay: Option<(u16, Vec<u8>)>,
     ground_turret: Option<(u16, crate::hospital_turrets::Runtime)>,
@@ -601,6 +602,7 @@ impl<W: Write> Engine<W> {
                     "packets": packets.iter().map(|packet| protocol::encode_hex(packet)).collect::<Vec<_>>()
                 })).collect::<Vec<_>>(),
                 "hospital_aim_packets": plan.hospital_aim_packets.iter().map(|packet| protocol::encode_hex(packet)).collect::<Vec<_>>(),
+                "hospital_redeploy_ownership": plan.hospital_redeploy_ownership.as_ref().map(|packet| protocol::encode_hex(packet)),
                 "hospital_late_join": plan.hospital_late_join.iter().map(|packet| protocol::encode_hex(packet)).collect::<Vec<_>>(),
                 "messages": plan.messages,
                 "rewards": plan.combat.new_rewards,
@@ -1362,6 +1364,20 @@ impl<W: Write> Engine<W> {
             assists.install(self)?;
         }
         self.prune_firearm_assist_victims();
+        if let Some(packet) = plan.hospital_redeploy_ownership {
+            for recipient in self
+                .active
+                .iter_mut()
+                .chain(self.peers.values_mut())
+                .filter(|actor| {
+                    actor.reservation.world == event.world_id
+                        && actor.initial_objects.is_some()
+                        && actor.emplacement_creation.is_some()
+                })
+            {
+                recipient.queue_shared(packet.clone());
+            }
+        }
         if let Some(notice) = plan.combat.falling_death_notice {
             notice.commit(self);
         }

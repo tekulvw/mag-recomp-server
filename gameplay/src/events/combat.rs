@@ -787,8 +787,24 @@ pub(super) fn kill_self<W: Write>(
         && owned
         && let Some((generation, _)) = active.life.damage_health()
     {
+        let mut staged_helo = None;
+        let mut staged_hospital_ownership = None;
         let association = if active.ground_seat.is_some() {
             ctx.engine.ground_redeploy_association(active)
+        } else if active.helo_seat.is_some() {
+            ctx.engine
+                .prepare_helo_redeploy(active)
+                .map(|(fleet, association)| {
+                    staged_helo = Some(fleet);
+                    association
+                })
+        } else if active.mounted_bunker.is_some() {
+            ctx.engine
+                .prepare_hospital_redeploy(active, now)
+                .map(|prepared| {
+                    staged_hospital_ownership = Some(prepared.ownership);
+                    prepared.association
+                })
         } else if active.is_mounted() {
             Err("mounted_death_not_supported")
         } else {
@@ -820,6 +836,8 @@ pub(super) fn kill_self<W: Write>(
             }
             .encode_with_profile(ctx.engine.wire_profile)?;
             plan.combat.clear_pending_damage = true;
+            plan.helo_runtime = staged_helo;
+            plan.hospital_redeploy_ownership = staged_hospital_ownership;
             plan.outgoing = Some(update.clone());
             plan.replication.damage_delta = Some(update);
             plan.combat.new_life = Some(CharacterLife::AwaitingRespawn { generation });
@@ -829,6 +847,7 @@ pub(super) fn kill_self<W: Write>(
         json!({"type":"kill_self","target_character_id":request.target_character_id,
         "eligible":eligible,"owned":owned,"health_before_quarter_points":health_before,
         "damage_sent":plan.replication.damage_delta.is_some(),
+        "released_helo_seat":if plan.combat.new_life.is_some() { active.helo_seat.map(|seat|json!({"index":seat.object_index,"seat":seat.seat})) } else { None },
         "health_after_quarter_points":if plan.replication.damage_delta.is_some() {Some(0)} else {health_before},
         "replication_sequence":if plan.replication.damage_delta.is_some() {Some(next_sequence)} else {None}}),
     )
