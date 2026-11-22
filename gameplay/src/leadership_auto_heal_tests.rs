@@ -2,6 +2,10 @@
 use super::*;
 
 fn fixture(modifier: f32, max_modifier: f32) -> Engine<Vec<u8>> {
+    fixture_for_vehicle(modifier, max_modifier, false)
+}
+
+fn fixture_for_vehicle(modifier: f32, max_modifier: f32, apc_passenger: bool) -> Engine<Vec<u8>> {
     let catalog=leadership_passives::LeadershipCatalog::from_json(&json!({
         "schema_version":1,"application_id":20231,
         "source":{"member":"scripts/character_leadership_abilities.zpr","member_sha256":"a".repeat(64),
@@ -20,14 +24,16 @@ fn fixture(modifier: f32, max_modifier: f32) -> Engine<Vec<u8>> {
         .to_string(),
     )
     .unwrap();
-    let mut e=crate::spawn_progression::tests::dynamic_bodies::acquisition_gameplay_tests::automatic_repair_fixture(catalog,policy);
+    let mut e=crate::spawn_progression::tests::dynamic_bodies::acquisition_gameplay_tests::automatic_repair_fixture_for_modeled_vehicle(catalog,policy,apc_passenger);
     let actor = e.active.as_mut().unwrap();
-    actor.ground_seat = None;
-    actor.owner_fields.state = Some(replication::CharacterState {
-        state: 1,
-        stance: 0,
-        user_data: [0; 3],
-    });
+    if !apc_passenger {
+        actor.ground_seat = None;
+        actor.owner_fields.state = Some(replication::CharacterState {
+            state: 1,
+            stance: 0,
+            user_data: [0; 3],
+        });
+    }
     let skills=skill_catalog::SkillCatalog::from_value(json!({
         "schema_version":2,"application_id":20231,"table":{"Skills":{"MagCharacterSkill0":{"MagCharacterSkill":{
         "Default":{"Modifier":"kCharModHealth","ModifierValue":max_modifier},"Green":{"Available":true}}}}}
@@ -248,6 +254,128 @@ fn unsupported_lives_and_mounts_never_heal() {
             .unwrap();
         assert_eq!(hp(&e), 250);
     }
+}
+
+fn mount_for_healing(engine: &mut Engine<Vec<u8>>, vehicle: u16, seat: u8, now: u64) {
+    if seat == 1 {
+        crate::ground_turrets::tests::opt_in(engine, vehicle);
+    }
+    let position = engine.current_ground_vehicle(vehicle).unwrap().position;
+    let actor = engine.active.as_mut().unwrap();
+    actor
+        .tracking
+        .server_position(position, player_tracking::PositionOrigin::ServerSpawn, now);
+    let character = 0x0380_0000 | u32::from(actor.reservation.player);
+    let mut wire = 0x0216u16.to_be_bytes().to_vec();
+    wire.extend((0x0100_0000 | u32::from(vehicle)).to_be_bytes());
+    wire.extend(u32::from(seat).to_be_bytes());
+    wire.extend(character.to_be_bytes());
+    crate::spawn_progression::dispatch(engine, &wire, now).unwrap();
+    assert_eq!(
+        engine.active.as_ref().unwrap().ground_seat,
+        Some(ground_seats::PassengerSeat {
+            vehicle_index: vehicle,
+            seat,
+        })
+    );
+}
+
+#[test]
+fn qualified_ground_occupants_receive_character_auto_heal_without_healing_credit() {
+    for (apc, seat) in [(false, 0), (false, 1), (false, 2), (true, 2)] {
+        let mut engine = fixture_for_vehicle(5., 0.2, apc);
+        let vehicle = if apc { 0 } else { 4 };
+        if !apc {
+            mount_for_healing(&mut engine, vehicle, seat, 3240);
+        }
+        let before = engine.active.as_ref().unwrap().last_damage;
+        let statistics = engine.active.as_ref().unwrap().reward_statistics.clone();
+        let association = engine.active.as_ref().unwrap().ground_seat;
+        engine
+            .tick_leadership_auto_heal(Duration::from_millis(3250), 3)
+            .unwrap();
+        engine
+            .tick_leadership_auto_heal(Duration::from_millis(4750), 3)
+            .unwrap();
+        assert_eq!(hp(&engine), 250);
+        engine
+            .tick_leadership_auto_heal(Duration::from_millis(4800), 3)
+            .unwrap();
+        let actor = engine.active.as_ref().unwrap();
+        assert_eq!(hp(&engine), 286, "APC {apc}, seat {seat}");
+        assert_eq!(actor.ground_seat, association);
+        assert_eq!(actor.owner_fields.state.unwrap().state, 14);
+        assert_eq!(actor.last_damage.last_location_and_type, 0x63);
+        assert_eq!(actor.last_damage.conditions, before.conditions);
+        assert_eq!(actor.last_damage.last_attacker, before.last_attacker);
+        assert_eq!(
+            actor.last_damage.last_source_object,
+            before.last_source_object
+        );
+        assert_eq!(actor.last_damage.last_user_data, before.last_user_data);
+        assert!(engine.pending_rewards.is_empty());
+        assert_eq!(actor.reward_statistics, statistics);
+        assert!(actor.healing.is_none());
+    }
+}
+
+#[test]
+fn mounting_does_not_restart_the_same_characters_auto_heal_interval() {
+    let mut engine = fixture(5., 0.);
+    tick(&mut engine, 3200);
+    tick(&mut engine, 4600);
+    mount_for_healing(&mut engine, 4, 0, 4610);
+    engine
+        .tick_leadership_auto_heal(Duration::from_millis(4750), 3)
+        .unwrap();
+    assert_eq!(hp(&engine), 280);
+    let actor = engine.active.as_mut().unwrap();
+    actor.ground_seat = None;
+    actor.owner_fields.state = Some(replication::CharacterState {
+        state: 1,
+        stance: 0,
+        user_data: [0; 3],
+    });
+    engine
+        .tick_leadership_auto_heal(Duration::from_millis(6250), 3)
+        .unwrap();
+    assert_eq!(hp(&engine), 310);
+}
+
+#[test]
+fn mounted_auto_heal_keeps_record_refusal_and_stale_gunner_fences() {
+    let mut engine = fixture(5., 0.);
+    mount_for_healing(&mut engine, 4, 1, 3240);
+    engine
+        .tick_leadership_auto_heal(Duration::from_millis(3250), 3)
+        .unwrap();
+    let before = engine.automatic_heal.clone();
+    let pending = engine.active.as_ref().unwrap().pending_shared.clone();
+    engine.max_log = engine.written;
+    assert_eq!(
+        engine.tick_leadership_auto_heal(Duration::from_millis(4800), 3),
+        Err("log_limit_reached")
+    );
+    assert_eq!(hp(&engine), 250);
+    assert_eq!(engine.automatic_heal, before);
+    assert_eq!(engine.active.as_ref().unwrap().pending_shared, pending);
+
+    let mut engine = fixture(5., 0.);
+    mount_for_healing(&mut engine, 4, 1, 3240);
+    engine
+        .tick_leadership_auto_heal(Duration::from_millis(3250), 3)
+        .unwrap();
+    engine.active.as_mut().unwrap().life = CharacterLife::Alive {
+        generation: 2,
+        health_quarter_points: 250,
+    };
+    engine
+        .tick_leadership_auto_heal(Duration::from_millis(4800), 3)
+        .unwrap();
+    engine
+        .tick_leadership_auto_heal(Duration::from_millis(6350), 3)
+        .unwrap();
+    assert_eq!(hp(&engine), 250);
 }
 #[test]
 fn failed_record_preserves_clock_model_cache_and_queue_before_retry() {
