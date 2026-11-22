@@ -163,6 +163,12 @@ pub(super) fn plan_pending_damage<W: Write>(
             }
         }
         let lethal = resolved.health_quarter_points == 0;
+        if pending.source == PendingDamageSource::Falling
+            && pending.target_character_id == (0x0380_0000 | u32::from(active.reservation.player))
+            && pending.target_reservation_id.as_deref() == Some(active.reservation.id.as_str())
+        {
+            plan.combat.falling_death_notice = ctx.engine.plan_falling_death(active, resolved)?;
+        }
         if lethal
             && health_quarter_points > 0
             && pending.target_character_id == dummy::OBJECT_ID
