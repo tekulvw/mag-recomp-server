@@ -32,6 +32,7 @@ namespace Server.Medius
         bool _operatorDraining;
         Func<bool> _readDrainPolicy;
         bool _registryFormationStaged;
+        int _registryExpectedParties;
         int _registryBatchDepth;
         Task _worldCleanupWorker = Task.CompletedTask;
 
@@ -170,18 +171,20 @@ namespace Server.Medius
             !_reservations.Values.Any(IsLiveCohort) && !_pendingReleases.Values.Any(r => !IsResultsCohort(r.Reservation)) &&
             (!_admissionTerminal || HasResultsCapacity());
 
-        public bool TryStageRegistryFormation(string profileId)
+        public bool TryStageRegistryFormation(string profileId, int expectedParties = 0)
         {
             lock (_gate)
             {
                 PurgeHumanQueue();
-                if (!CanStageRegistryFormation(ReadyForAdmission)) return false;
+                if (expectedParties < 0 || !CanStageRegistryFormation(ReadyForAdmission)) return false;
                 var profile = _matchProfiles.FirstOrDefault(p => p.ProfileId == profileId);
-                if (profile == null || !AdvanceTerminalCohort()) return false;
+                if (profile == null || (expectedParties > 0 && (!_supportsPartyReservations || profile.SquadCounts == null ||
+                    expectedParties > profile.SquadCounts.Sum())) || !AdvanceTerminalCohort()) return false;
                 ResetFormation();
                 _formedProfile = profile;
                 _formationId = Id();
                 _registryFormationStaged = true;
+                _registryExpectedParties = expectedParties;
                 return true;
             }
         }

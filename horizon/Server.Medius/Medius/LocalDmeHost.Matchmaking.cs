@@ -214,6 +214,7 @@ namespace Server.Medius
             _formationAdmissionEpoch = null;
             _formationEverAdmitted = false;
             _registryFormationStaged = false;
+            _registryExpectedParties = 0;
         }
         void AbandonRegistryFormation()
         {
@@ -303,6 +304,8 @@ namespace Server.Medius
                         {
                             var ids=selection.Players.Select(p=>p.TicketId).ToHashSet(StringComparer.Ordinal);
                             cohort=_humanQueue.Snapshot().Where(e=>ids.Contains(e.Human.TicketId)).OrderByDescending(e=>e.Human.Size).ToArray();
+                            if (InRegistry && cohort.Count(ticket => ticket.Value.Party != null) != _registryExpectedParties)
+                                cohort = null;
                         }
                     }
                     else

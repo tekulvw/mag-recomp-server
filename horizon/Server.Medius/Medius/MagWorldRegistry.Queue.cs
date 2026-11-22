@@ -165,7 +165,8 @@ namespace Server.Medius
                 if (plan == null) return;
                 var target = _slots.Single(s => s.Config.WorkerId == plan.WorkerId);
                 using var batch=target.Host.BeginRegistryBatch();
-                if (plan.NewFormation && !target.Host.TryStageRegistryFormation(plan.Profile.ProfileId)) continue;
+                if (plan.NewFormation && !target.Host.TryStageRegistryFormation(plan.Profile.ProfileId,
+                    plan.Players.Count(player => player.Size > 1))) continue;
                 var ids = plan.Players.Select(p => p.TicketId).ToHashSet(StringComparer.Ordinal);
                 foreach (var ticket in eligible.Where(e => ids.Contains(e.Human.TicketId)))
                 {

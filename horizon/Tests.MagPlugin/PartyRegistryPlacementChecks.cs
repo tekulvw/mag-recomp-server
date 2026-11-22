@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Collections.Concurrent;
 using System.Text.Json.Nodes;
 using RT.Models.MAG;
@@ -16,6 +17,7 @@ internal static partial class LeadershipProgressionChecks
             VerifyOpposingParties(directory, false).GetAwaiter().GetResult();
             VerifyOpposingParties(directory, true).GetAwaiter().GetResult();
             VerifyOpposingParties(directory, false, twoOnFirstSide: true).GetAwaiter().GetResult();
+            VerifyMissingForwardedParty(directory).GetAwaiter().GetResult();
         }
         finally { Server.Medius.Program.Settings.MagApplicationId = previous; }
     });
@@ -186,6 +188,50 @@ internal static partial class LeadershipProgressionChecks
             }
         }
         finally { finishSecond.TrySetResult(); }
+    }
+
+
+    static async Task VerifyMissingForwardedParty(string directory)
+    {
+        var store = new LocalCharacterStore(Path.Combine(directory, "missing-party.json"));
+        foreach (var (account, faction) in new[] { ("alpha", (byte)0), ("bravo", (byte)1) })
+            Check(store.CreateForAccount(new MagCreateCharacterRequest
+                { AccountName = account, Faction = faction, UniverseId = 26, NpId = new byte[36] }, account).Result
+                == MagNetResult.Success, "Missing party fixture character creation");
+        await using var worker = new RegistryWorker("first") { SupportsParties = true };
+        await using var spare = new RegistryWorker("second");
+        JsonObject Worker(string id, int port) => new() { ["worker_id"] = id, ["worker_host"] = "127.0.0.1",
+            ["worker_port"] = port, ["minimum_players"] = 2, ["maximum_players"] = 4,
+            ["minimum_players_per_team"] = new JsonArray(1, 1), ["draining"] = false };
+        var config = new JsonObject { ["format"] = "mag_world_registry_v1", ["application_id"] = 20231,
+            ["client_address"] = "192.0.2.9", ["client_tcp_port"] = 12073,
+            ["workers"] = new JsonArray(Worker("first", worker.Port), Worker("second", spare.Port)) };
+        await using var registry = new MagWorldRegistry(MagWorldRegistryConfig.Parse(config.ToJsonString()), store);
+        await registry.InitializeAsync();
+        var slot = ((IEnumerable)typeof(MagWorldRegistry).GetField("_slots", HostInternals)!.GetValue(registry)!).Cast<object>().First();
+        var host = (LocalDmeHost)slot.GetType().GetField("Host")!.GetValue(slot)!;
+        var replies = new ConcurrentQueue<MagJoinGameResponse>();
+        using (host.BeginRegistryBatch())
+        {
+            Check(host.TryStageRegistryFormation("profile-0-1", expectedParties: 1),
+                "Host did not stage an authored party formation");
+            // The selected party vanished before forwarding. Two surviving solos
+            // could satisfy startup, so a reduced batch would otherwise publish.
+            foreach (string account in new[] { "alpha", "bravo" })
+            {
+                var session = MakeSession(store, 20231, account, store.ReadForAccount(account).Single().Id);
+                host.QueueJoin(session, new MagRetailJoinGameRequest { Preference = 1, Value = 2 },
+                    message => { if (message is MagJoinGameResponse reply) replies.Enqueue(reply); }, () => true);
+            }
+        }
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+        while (replies.Count < 2)
+        {
+            await registry.TickAsync().WaitAsync(deadline.Token);
+            await Task.Delay(20, deadline.Token);
+        }
+        Check(replies.All(reply => reply.Result == 6) && worker.Reservations.IsEmpty,
+            "Host admitted an incomplete formation after a selected party went missing");
     }
 
 }
