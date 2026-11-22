@@ -43,6 +43,7 @@ struct Source {
     active_abilities: Option<PathBuf>,
     collision_world: Option<PathBuf>,
     navmesh_world: Option<PathBuf>,
+    movement_profile: Option<PathBuf>,
     ground_vehicles: Option<PathBuf>,
     character_damage_rules: Option<PathBuf>,
     acquisition_gameplay: Option<PathBuf>,
@@ -160,6 +161,7 @@ impl Registry {
                 source.active_abilities.as_ref(),
                 source.collision_world.as_ref(),
                 source.navmesh_world.as_ref(),
+                source.movement_profile.as_ref(),
                 source.ground_vehicles.as_ref(),
                 source.character_damage_rules.as_ref(),
                 source.acquisition_gameplay.as_ref(),
@@ -271,6 +273,11 @@ impl Registry {
             {
                 return Err(io::Error::other("match_profile_collision_map_mismatch"));
             }
+            if source.movement_profile.is_some() && source.navmesh_world.is_none() {
+                return Err(io::Error::other(
+                    "match_profile_movement_profile_requires_navmesh",
+                ));
+            }
             let navmesh = source
                 .navmesh_world
                 .as_ref()
@@ -286,9 +293,20 @@ impl Registry {
                         return Err(io::Error::other("navmesh artifact size limit"));
                     }
                     let artifact = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-                    let mesh =
-                        navmesh::NavMesh::load(artifact, world.source_sha256(), spawns.map_name())
-                            .map_err(io::Error::other)?;
+                    let mesh = match source.movement_profile.as_ref() {
+                        Some(path) => navmesh::NavMesh::load_with_movement_profile(
+                            artifact,
+                            world.source_sha256(),
+                            spawns.map_name(),
+                            &navmesh::MovementProfile::load(path)?,
+                        ),
+                        None => navmesh::NavMesh::load(
+                            artifact,
+                            world.source_sha256(),
+                            spawns.map_name(),
+                        ),
+                    }
+                    .map_err(io::Error::other)?;
                     mesh.validate_coverage(world).map_err(io::Error::other)?;
                     Ok::<_, io::Error>(Arc::new(mesh))
                 })

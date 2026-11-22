@@ -154,6 +154,7 @@ impl<W: Write> Engine<W> {
             return Err("bot_move_requires_singleton_retail");
         }
         movement.validate()?;
+        let body = self.bot_movement_body();
         let actor = self.active.as_ref().ok_or("no_reservation")?;
         if actor.reservation.id != reservation_id
             || actor.reservation.world != world_id
@@ -235,6 +236,7 @@ impl<W: Write> Engine<W> {
                 self.map_name(),
                 runtime.position,
                 &movement,
+                body,
             ) {
                 Ok(route) => Some(route),
                 Err(reason) => {
@@ -272,7 +274,7 @@ impl<W: Write> Engine<W> {
             Some(match runtime.physics_motion {
                 Some(motion) => motion,
                 None => terrain
-                    .start_motion(point(runtime.position), bot_physics::Body::default())
+                    .start_motion(point(runtime.position), body)
                     .map_err(|e| e.code())?,
             })
         };
@@ -682,6 +684,7 @@ impl Target {
         };
         let mut context = NavigationContext {
             state: runtime.navmesh_state,
+            body: mesh.body(),
             hp: health,
             rules: Some(rules),
             generation: runtime.generation,
@@ -1056,13 +1059,15 @@ impl Target {
         {
             return Err("bot_ground_recovery_goal_not_local_mesh");
         }
-        let navigation = match NavigationMove::plan(Some(world), map, runtime.position, &movement) {
-            Ok(route) => route,
-            Err("bot_navigation_unreachable") => NavigationMove::supported_recovery_prefix(
-                world, map, initial, &movement, maximum_m,
-            )?,
-            Err(e) => return Err(e),
-        };
+        let body = mesh.body();
+        let navigation =
+            match NavigationMove::plan(Some(world), map, runtime.position, &movement, body) {
+                Ok(route) => route,
+                Err("bot_navigation_unreachable") => NavigationMove::supported_recovery_prefix(
+                    world, map, initial, &movement, maximum_m, body,
+                )?,
+                Err(e) => return Err(e),
+            };
         if navigation.length > maximum_m {
             return Err("bot_ground_recovery_route_too_long");
         }
@@ -1139,6 +1144,7 @@ impl Target {
         profile: wire_profile::WireProfile,
         world: Option<&collision::CollisionWorld>,
         map: &str,
+        body: bot_physics::Body,
         health: u16,
         rules: Option<&fall_damage::Rules>,
         actors: crate::actor_collision::Query<'_>,
@@ -1161,6 +1167,7 @@ impl Target {
             .with_actors(actors);
         let mut context = NavigationContext {
             state: runtime.navmesh_state,
+            body,
             hp: health,
             rules,
             generation: runtime.generation,
@@ -1241,6 +1248,7 @@ impl Target {
         profile: wire_profile::WireProfile,
         collision_world: Option<&collision::CollisionWorld>,
         map_name: &str,
+        body: bot_physics::Body,
         health: u16,
         fall_rules: Option<&fall_damage::Rules>,
         actors: Option<crate::actor_collision::Query<'_>>,
@@ -1251,6 +1259,7 @@ impl Target {
             profile,
             collision_world,
             map_name,
+            body,
             health,
             fall_rules,
             actors,
@@ -1288,6 +1297,7 @@ impl Target {
         profile: wire_profile::WireProfile,
         collision_world: Option<&collision::CollisionWorld>,
         map_name: &str,
+        body: bot_physics::Body,
         health: u16,
         fall_rules: Option<&fall_damage::Rules>,
         actors: Option<crate::actor_collision::Query<'_>>,
@@ -1331,6 +1341,7 @@ impl Target {
         let mut landing_health = None;
         let mut context = NavigationContext {
             state: runtime.navmesh_state,
+            body,
             hp: health,
             rules: fall_rules,
             generation: runtime.generation,
@@ -1516,12 +1527,7 @@ impl Target {
                     } else {
                         terrain
                     };
-                    let result = terrain.advance(
-                        prior,
-                        [dx * factor, 0.0, dz * factor],
-                        dt,
-                        bot_physics::Body::default(),
-                    );
+                    let result = terrain.advance(prior, [dx * factor, 0.0, dz * factor], dt, body);
                     context.waiting_on = terrain.actor_contact();
                     result
                 });
@@ -1676,6 +1682,7 @@ pub(super) struct NavmeshRuntime {
 #[derive(Clone)]
 struct NavigationContext<'a> {
     state: NavmeshRuntime,
+    body: bot_physics::Body,
     hp: u16,
     rules: Option<&'a fall_damage::Rules>,
     generation: u32,
@@ -1735,7 +1742,7 @@ impl NavigationContext<'_> {
                 motion,
                 velocity,
                 dt,
-                bot_physics::Body::default(),
+                self.body,
                 |sample| {
                     if sample.grounded!=grounded {
                         self.ground_events.push(json!({"kind":if sample.grounded {"landing"} else {"departure"},"position":sample.position}));
@@ -2089,9 +2096,10 @@ impl NavigationMove {
         map_name: &str,
         start: replication::CharacterPosition,
         movement: &BotMove,
+        body: bot_physics::Body,
     ) -> Result<Self, &'static str> {
-        let extent = f64::from(NAVIGATION_LIMITS.radius_cells) * NAVIGATION_LIMITS.cell_size
-            + bot_physics::Body::default().radius;
+        let extent =
+            f64::from(NAVIGATION_LIMITS.radius_cells) * NAVIGATION_LIMITS.cell_size + body.radius;
         let bounds = bot_navigation::PlanningBounds {
             min_xz: [
                 (f64::from(start.x) - extent).max(0.0),
@@ -2102,15 +2110,8 @@ impl NavigationMove {
                 (f64::from(start.z) + extent).min(2047.96875),
             ],
         };
-        let query = bot_navigation::WorldNavigation::new(
-            world,
-            map_name,
-            bot_physics::Body::default(),
-            bounds,
-            16.0,
-            16.0,
-        )
-        .map_err(navigation_error)?;
+        let query = bot_navigation::WorldNavigation::new(world, map_name, body, bounds, 16.0, 16.0)
+            .map_err(navigation_error)?;
         let route = bot_navigation::plan_route(
             &query,
             point(start),
@@ -2154,9 +2155,9 @@ impl NavigationMove {
         initial: bot_physics::Motion,
         movement: &BotMove,
         maximum: f64,
+        body: bot_physics::Body,
     ) -> Result<Self, &'static str> {
         let terrain = bot_physics::WorldTerrain::new(Some(world), map).map_err(|e| e.code())?;
-        let body = bot_physics::Body::default();
         let target = point(movement.destination);
         let distance = (target[0] - initial.position[0]).hypot(target[2] - initial.position[2]);
         let speed = distance / (movement.duration_ms as f64 / 1000.);
@@ -2385,7 +2386,9 @@ impl NavigationMove {
         } else {
             terrain
         };
-        let body = bot_physics::Body::default();
+        let body = context
+            .as_ref()
+            .map_or_else(bot_physics::Body::default, |ctx| ctx.body);
         if let Some(egress) = &self.ground_egress {
             return self.advance_ground_egress(
                 &terrain,

@@ -6,9 +6,17 @@ use std::{ffi::c_int, sync::Mutex, time::Instant};
 #[path = "navmesh_drops.rs"]
 mod drops;
 pub use drops::{DropLink, WaypointKind};
+#[path = "navmesh_movement_profile.rs"]
+mod movement_profile;
 #[path = "navmesh_reference.rs"]
 mod reference;
-pub use reference::{ReferenceManifest, ReferenceNavMesh, bake_reference};
+pub use movement_profile::MovementProfile;
+#[cfg(test)]
+#[path = "navmesh_movement_profile_tests.rs"]
+mod movement_profile_tests;
+pub use reference::{
+    ReferenceManifest, ReferenceNavMesh, bake_reference, bake_reference_with_movement_profile,
+};
 pub type Point = [f64; 3];
 pub const UPSTREAM_COMMIT: &str = "6dc1667f580357e8a2154c28b7867bea7e8ad3a7";
 pub const LEGACY_BAKE_CONFIG: &str = "single-v1-cs0.1-ch0.05-height37-climb7-radius6-slope45-contour0.5-edge120-region64-merge400-detail0.6-error0.05-nvp6-nodes8192";
@@ -20,6 +28,10 @@ pub const MAX_REFERENCE_BYTES: u64 = 192 * 1024 * 1024;
 const REFERENCE_INPUT: &str = "mag_navmesh_reference_bake_input_v1";
 const REFERENCE_FORMAT: &str = "mag_navmesh_reference_v1";
 const REFERENCE_CONFIG: &str = "reference-v1-tile512-border9-tiles512-polys8192-cs0.1-ch0.05-height37-climb7-radius6-slope45-contour0.5-edge120-region64-merge400-detail0.6-error0.05-nvp6-nodes16384";
+const PROFILED_RUNTIME_FORMAT: &str = "mag_navmesh_world_v3";
+const PROFILED_REFERENCE_FORMAT: &str = "mag_navmesh_reference_v2";
+const PROFILED_RUNTIME_CONFIG: &str = "tiled-v3-tile512-border9-cs0.1-ch0.05-height37-climb7-radius6-slope-source-v1-contour0.5-edge120-region64-merge400-detail0.6-error0.05-nvp6-nodes16384";
+const PROFILED_REFERENCE_CONFIG: &str = "reference-v2-tile512-border9-tiles512-polys8192-cs0.1-ch0.05-height37-climb7-radius6-slope-source-v1-contour0.5-edge120-region64-merge400-detail0.6-error0.05-nvp6-nodes16384";
 const QUERY_NODE_LIMIT: c_int = 16_384;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -73,6 +85,8 @@ pub struct Artifact {
     pub world_sha256: String,
     pub geometry_sha256: String,
     pub profile: Profile,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub movement_profile_sha256: Option<String>,
     pub bounds: Bounds,
     pub upstream_commit: String,
     pub bake_config: String,
@@ -218,7 +232,8 @@ unsafe extern "C" {
         max: *const f32,
         out: *mut *mut u8,
         size: *mut c_int,
-        reference_mode: c_int,
+        mode: c_int,
+        slope_degrees: f32,
     ) -> c_int;
     fn mag_nav_free_bytes(data: *mut u8);
     fn mag_nav_load(
@@ -226,7 +241,7 @@ unsafe extern "C" {
         size: c_int,
         min: *const f32,
         max: *const f32,
-        reference_mode: c_int,
+        mode: c_int,
         node_limit: c_int,
     ) -> *mut std::ffi::c_void;
     fn mag_nav_destroy(handle: *mut std::ffi::c_void);
@@ -274,9 +289,41 @@ unsafe extern "C" {
     ) -> c_int;
 }
 pub fn bake(input: BakeInput) -> Result<Artifact, Error> {
-    bake_artifact(input, false)
+    bake_artifact(input, false, None)
 }
-fn bake_artifact(input: BakeInput, reference: bool) -> Result<Artifact, Error> {
+pub fn bake_with_movement_profile(
+    input: BakeInput,
+    rules: &MovementProfile,
+) -> Result<Artifact, Error> {
+    bake_artifact(input, false, Some(rules))
+}
+
+fn bake_mode(reference: bool, profiled: bool) -> c_int {
+    c_int::from(reference) + 2 * c_int::from(profiled)
+}
+
+fn format_and_config(reference: bool, profiled: bool) -> (&'static str, &'static str) {
+    match (reference, profiled) {
+        (false, false) => ("mag_navmesh_world_v2", BAKE_CONFIG),
+        (true, false) => (REFERENCE_FORMAT, REFERENCE_CONFIG),
+        (false, true) => (PROFILED_RUNTIME_FORMAT, PROFILED_RUNTIME_CONFIG),
+        (true, true) => (PROFILED_REFERENCE_FORMAT, PROFILED_REFERENCE_CONFIG),
+    }
+}
+
+fn selected_profile(rules: Option<&MovementProfile>) -> Profile {
+    let mut profile = Profile::default();
+    if let Some(rules) = rules {
+        profile.max_slope_degrees = rules.slope_degrees();
+    }
+    profile
+}
+
+fn bake_artifact(
+    input: BakeInput,
+    reference: bool,
+    rules: Option<&MovementProfile>,
+) -> Result<Artifact, Error> {
     let expected_format = if reference {
         REFERENCE_INPUT
     } else {
@@ -356,6 +403,7 @@ fn bake_artifact(input: BakeInput, reference: bool) -> Result<Artifact, Error> {
     let max = input.bounds.max.map(|v| v as f32);
     let mut data = std::ptr::null_mut();
     let mut size = 0;
+    let profile = selected_profile(rules);
     // The bridge borrows validated contiguous arrays and returns dtAlloc-owned bytes.
     let result = unsafe {
         mag_nav_bake(
@@ -367,7 +415,8 @@ fn bake_artifact(input: BakeInput, reference: bool) -> Result<Artifact, Error> {
             max.as_ptr(),
             &mut data,
             &mut size,
-            c_int::from(reference),
+            bake_mode(reference, rules.is_some()),
+            profile.max_slope_degrees as f32,
         )
     };
     if result != 0 {
@@ -394,25 +443,17 @@ fn bake_artifact(input: BakeInput, reference: bool) -> Result<Artifact, Error> {
     }
     let bytes = unsafe { std::slice::from_raw_parts(data, size as usize).to_vec() };
     unsafe { mag_nav_free_bytes(data) };
+    let (format, config) = format_and_config(reference, rules.is_some());
     Ok(Artifact {
-        format: if reference {
-            REFERENCE_FORMAT
-        } else {
-            "mag_navmesh_world_v2"
-        }
-        .into(),
+        format: format.into(),
         map_name: input.map_name,
         world_sha256: input.world_sha256,
         geometry_sha256: input.geometry_sha256,
-        profile: Profile::default(),
+        profile,
+        movement_profile_sha256: rules.map(|rules| rules.source_sha256().to_owned()),
         bounds: input.bounds,
         upstream_commit: UPSTREAM_COMMIT.into(),
-        bake_config: if reference {
-            REFERENCE_CONFIG
-        } else {
-            BAKE_CONFIG
-        }
-        .into(),
+        bake_config: config.into(),
         detour_sha256: sha256(&bytes),
         detour_data: bytes,
         drop_links: Vec::new(),
@@ -432,7 +473,29 @@ pub struct NavMesh {
 }
 impl NavMesh {
     pub fn load(artifact: Artifact, world_sha256: &str, map_name: &str) -> Result<Self, Error> {
-        Self::load_artifact(artifact, world_sha256, map_name, false, QUERY_NODE_LIMIT)
+        Self::load_artifact(
+            artifact,
+            world_sha256,
+            map_name,
+            false,
+            QUERY_NODE_LIMIT,
+            None,
+        )
+    }
+    pub fn load_with_movement_profile(
+        artifact: Artifact,
+        world_sha256: &str,
+        map_name: &str,
+        rules: &MovementProfile,
+    ) -> Result<Self, Error> {
+        Self::load_artifact(
+            artifact,
+            world_sha256,
+            map_name,
+            false,
+            QUERY_NODE_LIMIT,
+            Some(rules),
+        )
     }
     fn load_artifact(
         artifact: Artifact,
@@ -440,18 +503,20 @@ impl NavMesh {
         map_name: &str,
         reference: bool,
         node_limit: c_int,
+        rules: Option<&MovementProfile>,
     ) -> Result<Self, Error> {
-        let format_matches = if reference {
-            artifact.format == REFERENCE_FORMAT && artifact.bake_config == REFERENCE_CONFIG
-        } else {
-            (artifact.format == "mag_navmesh_world_v1"
-                && artifact.bake_config == LEGACY_BAKE_CONFIG)
-                || (artifact.format == "mag_navmesh_world_v2"
-                    && artifact.bake_config == BAKE_CONFIG)
-        };
+        let (format, config) = format_and_config(reference, rules.is_some());
+        let legacy_single = !reference
+            && rules.is_none()
+            && artifact.format == "mag_navmesh_world_v1"
+            && artifact.bake_config == LEGACY_BAKE_CONFIG;
+        let format_matches =
+            legacy_single || (artifact.format == format && artifact.bake_config == config);
         if !format_matches
             || artifact.upstream_commit != UPSTREAM_COMMIT
-            || artifact.profile != Profile::default()
+            || artifact.profile != selected_profile(rules)
+            || artifact.movement_profile_sha256.as_deref()
+                != rules.map(MovementProfile::source_sha256)
             || !valid_bounds(&artifact.bounds)
             || !valid_sha(&artifact.world_sha256)
             || !valid_sha(&artifact.geometry_sha256)
@@ -459,6 +524,9 @@ impl NavMesh {
             || artifact.map_name != map_name
         {
             return err("navmesh_identity_mismatch");
+        }
+        if rules.is_some() && !artifact.drop_links.is_empty() {
+            return err("navmesh_profiled_drop_links_unsupported");
         }
         let byte_limit = if reference {
             MAX_REFERENCE_BYTES
@@ -477,7 +545,7 @@ impl NavMesh {
                 artifact.detour_data.len() as c_int,
                 artifact.bounds.min.map(|v| v as f32).as_ptr(),
                 artifact.bounds.max.map(|v| v as f32).as_ptr(),
-                c_int::from(reference),
+                bake_mode(reference, rules.is_some()),
                 node_limit,
             )
         };
@@ -493,6 +561,11 @@ impl NavMesh {
     }
     /// Runtime coverage comes from the loaded collision world, not artifact assertions.
     pub fn validate_coverage(&self, world: &crate::collision::CollisionWorld) -> Result<(), Error> {
+        if self.artifact.movement_profile_sha256.is_some()
+            && world.source_sha256() != self.artifact.world_sha256
+        {
+            return err("navmesh_source_mismatch");
+        }
         if world.metadata().map_name != self.artifact.map_name
             || !world.metadata().physics_regions.iter().any(|r| {
                 r.ground_verified
@@ -510,6 +583,12 @@ impl NavMesh {
     }
     pub fn artifact(&self) -> &Artifact {
         &self.artifact
+    }
+    pub fn body(&self) -> crate::bot_physics::Body {
+        crate::bot_physics::Body {
+            max_slope_degrees: self.artifact.profile.max_slope_degrees,
+            ..Default::default()
+        }
     }
     pub fn route(&self, start: Point, goal: Point, goal_radius: f64) -> Result<Route, Error> {
         if !valid_point(start)
