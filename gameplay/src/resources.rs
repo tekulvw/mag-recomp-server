@@ -492,6 +492,7 @@ pub(crate) mod tests {
 
     fn saved_equipment(unresolved_inventory: Option<usize>) -> loadouts::SavedLoadouts {
         let mut saved = loadouts::SavedLoadouts {
+            layout_revision: 0,
             selected_index: 0,
             update_ids: [1; 5],
             inventories: [[None; 22]; 5],

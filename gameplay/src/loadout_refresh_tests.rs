@@ -81,6 +81,142 @@ fn assert_error(response: Response, want: &str) {
 }
 
 #[test]
+fn compacted_layout_refresh_supersedes_the_old_numeric_preference() {
+    let mut engine = fixture();
+    engine
+        .active
+        .as_mut()
+        .unwrap()
+        .reservation
+        .character
+        .loadouts
+        .as_mut()
+        .unwrap()
+        .selected_index = 1;
+    dispatch(&mut engine, &[0x02, 0x52, 0xf9], 100).unwrap();
+    let actor = engine.active.as_ref().unwrap();
+    let old_pending = actor.pending_loadout_selection.clone().unwrap();
+    assert_eq!(old_pending.layout_revision, 0);
+    assert!(
+        serde_json::to_value(&old_pending)
+            .unwrap()
+            .get("layout_revision")
+            .is_none()
+    );
+    let current_equipped = actor.equipped_loadout().unwrap();
+    let current_handle = actor.current_inventory_handle.unwrap();
+    let current_ammo = actor.observed_primary;
+    let previous = snapshot(&engine, 1);
+    let mut compacted = previous.clone();
+    compacted.inventories.copy_within(1.., 0);
+    compacted.update_ids.copy_within(1.., 0);
+    compacted.inventories[4] = [None; 22];
+    compacted.update_ids[4] = 0;
+    compacted.selected_index = 0;
+    compacted.layout_revision = 1;
+    let req = request(1, 1, &compacted);
+    assert!(refresh(&mut engine, &req, 1000).ok);
+    assert_eq!(snapshot(&engine, 1), compacted);
+    let actor = engine.active.as_ref().unwrap();
+    assert!(actor.selected_loadout.is_none());
+    assert!(actor.pending_loadout_selection.is_none());
+    let retained_handle = actor.current_inventory_handle.unwrap();
+    assert_eq!(
+        retained_handle.inventory_index,
+        current_handle.inventory_index
+    );
+    assert_eq!(retained_handle.update_id, current_handle.update_id);
+    assert_eq!(actor.observed_primary, current_ammo);
+    assert_eq!(
+        actor.equipped_loadout().unwrap().inventories[0].slots,
+        current_equipped.inventories[0].slots
+    );
+    assert!(refresh(&mut engine, &req, 1001).ok);
+    assert_error(
+        refresh(&mut engine, &request(1, 2, &previous), 1002),
+        "refresh_loadouts_stale_layout",
+    );
+    // A fresh selection is on the compacted rows. Settling the old receipt
+    // must never clear it, even when old bytes are already in flight.
+    dispatch(&mut engine, &[0x02, 0x52, 0], 1100).unwrap();
+    let pending = engine
+        .active
+        .as_ref()
+        .unwrap()
+        .pending_loadout_selection
+        .clone()
+        .unwrap();
+    assert_eq!(pending.layout_revision, 1);
+    assert_eq!(
+        serde_json::to_value(&pending).unwrap()["layout_revision"],
+        1
+    );
+    let old_ack = json!({
+        "v":2,"op":"loadout_selection_settled","request_id":"synthetic-old-ack",
+        "reservation_id":old_pending.reservation_id,"world_id":old_pending.world_id,
+        "player_id":old_pending.player_id,"selection_id":old_pending.selection_id,
+        "revision":old_pending.revision,"status":"persisted"
+    });
+    assert!(
+        engine
+            .handle(
+                parse_request(old_ack.to_string().as_bytes()).unwrap(),
+                Duration::from_millis(1101),
+                1
+            )
+            .ok
+    );
+    assert_eq!(
+        engine
+            .active
+            .as_ref()
+            .unwrap()
+            .pending_loadout_selection
+            .as_ref(),
+        Some(&pending)
+    );
+    assert!(refresh(&mut engine, &req, 1102).ok);
+    assert_eq!(
+        engine
+            .active
+            .as_ref()
+            .unwrap()
+            .pending_loadout_selection
+            .as_ref(),
+        Some(&pending)
+    );
+
+    let actor = engine.active.as_mut().unwrap();
+    actor.life = CharacterLife::AwaitingRespawn { generation: 4 };
+    actor.objective_assigned = true;
+    actor.objective_needs_clear = false;
+    dispatch(&mut engine, &0x0211u16.to_be_bytes(), 1200).unwrap();
+    let bytes = replication::ObjectUpdate {
+        header: replication::UpdateHeader {
+            sequence: 1,
+            nak_sequence: 0,
+            client_index: 0,
+            object_type_mask: 0,
+            timestamp_ms: 1300,
+        },
+        wire: &[],
+    }
+    .encode_empty_with_profile(engine.wire_profile)
+    .unwrap();
+    dispatch(&mut engine, &bytes, 1300).unwrap();
+    let actor = engine.active.as_ref().unwrap();
+    assert!(matches!(
+        actor.life,
+        CharacterLife::Alive { generation: 5, .. }
+    ));
+    assert_eq!(actor.current_inventory_handle.unwrap().inventory_index, 0);
+    assert_eq!(
+        actor.equipped_loadout().unwrap().inventories[0].slots[0],
+        Some(2)
+    );
+}
+
+#[test]
 fn valid_refresh_preserves_current_kit_pending_preference_and_live_hit_until_new_spawn() {
     let mut engine = fixture();
     dispatch(&mut engine, &[0x02, 0x52, 0xf9], 100).unwrap();
@@ -367,5 +503,10 @@ fn refresh_codec_is_strict_and_hello_advertises_both_armory_capabilities() {
         response
             .capabilities
             .contains(&"active_loadout_refresh_v1".to_owned())
+    );
+    assert!(
+        response
+            .capabilities
+            .contains(&"loadout_layout_revision_v1".to_owned())
     );
 }

@@ -53,6 +53,7 @@ namespace Server.Medius
         readonly CancellationTokenSource _loadoutRefreshCancellation = new CancellationTokenSource();
         Task _loadoutRefreshWorker = Task.CompletedTask;
         bool _selectionRetry;
+        bool _supportsLoadoutLayoutChanges;
         DateTime _nextSelectionPoll;
         bool _rewardRetry;
         DateTime _nextRewardPoll;
@@ -190,6 +191,7 @@ namespace Server.Medius
         {
             _supportsPartyReservations = hello?.SupportsPartyReservations == true;
             RequireLoadoutSelectionCapability(hello);
+            _supportsLoadoutLayoutChanges = hello.SupportsLoadoutLayoutChanges;
             InitializeFactionMatchmaking(hello);
             _independentMatchCohorts = hello.Capabilities.Contains("independent_match_cohorts_v1", StringComparer.Ordinal);
             _supportsFragoKillBonus = hello.Capabilities.Contains("frago_kill_bonus_v1", StringComparer.Ordinal);
@@ -290,7 +292,7 @@ namespace Server.Medius
                     if (UsesFactionMatchmaking ? character.Faction!=_formedProfile.AttackingFaction&&character.Faction!=_formedProfile.DefendingFaction : !_allowedFactions.Contains(character.Faction)) return JoinResponse(request.TransactionId, 4);
                     var record = character.ToRecord();
                     GameplayAdmissionLoadouts admissionLoadouts;
-                    try { admissionLoadouts = GameplayLoadoutAdmission.Project(character, record, _store.LoadoutCatalog); }
+                    try { admissionLoadouts = GameplayLoadoutAdmission.Project(character, record, _store.LoadoutCatalog, _supportsLoadoutLayoutChanges); }
                     catch (InvalidDataException) { return failure; }
                     var allocation = await admissionWorld.OnJoinGameRequest(new MediusServerJoinGameRequest { ConnectInfo = new NetConnectionInfo { SessionKey = session.SessionKey } });
                     if (allocation.Confirmation != MGCL_ERROR_CODE.MGCL_SUCCESS || !admissionWorld.Clients.TryGetValue(allocation.DmeClientIndex, out client)) return failure;
@@ -590,7 +592,11 @@ namespace Server.Medius
         {
             var character = _store.ReadForAccount(target.AccountId).SingleOrDefault(row => row.Id == target.CharacterId);
             if (character == null || _store.LoadoutCatalog == null) throw new InvalidDataException("Current Armory catalog or character unavailable.");
-            return GameplayLoadoutAdmission.Project(character, character.ToRecord(), _store.LoadoutCatalog);
+            return GameplayLoadoutAdmission.Project(character, character.ToRecord(), _store.LoadoutCatalog, _supportsLoadoutLayoutChanges);
+        }
+        public bool SupportsLoadoutLayoutChanges
+        {
+            get { lock (_gate) return _applicationId == 20231 && _supportsLoadoutLayoutChanges && ReadyForGameplay; }
         }
         public void ArmoryLoadoutCommitted(string account, uint characterId)
         {
@@ -673,7 +679,7 @@ namespace Server.Medius
                     var action = actions.Dequeue();
                     if (!seen.Add((action.SelectionId, action.Revision))) { retry = true; continue; }
                     string status = _loadoutSelections.Settle(action, DateTime.UtcNow, IsCurrentLoadoutOwner,
-                        selection => _store.SaveLastUsedLoadoutForAccount(selection.AccountId, selection.CharacterId, selection.InventoryIndex));
+                        selection => _store.SaveLastUsedLoadoutForAccount(selection.AccountId, selection.CharacterId, selection.InventoryIndex, selection.LayoutRevision));
                     if (status == null) { retry = true; continue; }
                     var ack = await _bridge.RequestLoadoutSelectionSettlementAsync(new { v = 2, request_id = Id(), op = "loadout_selection_settled",
                         reservation_id = action.ReservationId, world_id = action.WorldId, player_id = action.PlayerId,

@@ -127,7 +127,7 @@ namespace Server.Medius
                         var character = _store.ReadForAccount(session.AuthenticatedAccount).SingleOrDefault(c => c.Id == session.CharacterId);
                         if (character == null || character.Faction != party.Ticket.Human.Faction) return false;
                         var record = character.ToRecord();
-                        var loadouts = GameplayLoadoutAdmission.Project(character, record, _store.LoadoutCatalog);
+                        var loadouts = GameplayLoadoutAdmission.Project(character, record, _store.LoadoutCatalog, _supportsLoadoutLayoutChanges);
                         var allocation = await admissionWorld.OnJoinGameRequest(new MediusServerJoinGameRequest
                         {
                             ConnectInfo = new NetConnectionInfo { SessionKey = session.SessionKey }

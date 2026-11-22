@@ -1353,6 +1353,7 @@ pub(crate) mod hospital_primary_tests {
             20231,
         ).unwrap().with_retail_combat(combat_catalog());
         let mut saved = crate::loadouts::SavedLoadouts {
+            layout_revision: 0,
             selected_index: 0,
             update_ids: [1; 5],
             inventories: [[None; 22]; 5],

@@ -3064,6 +3064,7 @@ mod tests {
         assert!(select(&mut engine, "formation-1", "p-0-0-1").ok);
         assert!(reserve(&mut engine).ok);
         let receipt = loadout_selection::CommittedLoadoutSelection {
+            layout_revision: 0,
             selection_id: "synthetic-selection".into(),
             reservation_id: "synthetic-reservation-0001".into(),
             world_id: 7,
@@ -3227,6 +3228,7 @@ mod tests {
         assert!(reserve(&mut engine).ok);
         engine.active.as_mut().unwrap().pending_loadout_selection =
             Some(loadout_selection::CommittedLoadoutSelection {
+                layout_revision: 0,
                 selection_id: "synthetic-selection".into(),
                 reservation_id: "synthetic-reservation-0001".into(),
                 world_id: 7,

@@ -57,6 +57,8 @@ namespace Server.Medius
         public StoredLoadout[] Loadouts { get; set; }
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
         public byte LastUsedLoadout { get; set; }
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+        public ulong LoadoutLayoutRevision { get; set; }
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public byte? SkillPoints { get; set; }
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -392,6 +394,41 @@ namespace Server.Medius
             Commit(path, all); // Success is returned only after the existing atomic durable commit.
             return Outcome(MagNetResult.Success, "loadout-committed");
         }
+        public CharacterCreationOutcome DeleteLoadoutForAccount(string account, uint characterId, byte loadoutIndex)
+        {
+            if (!MagDevelopmentAccountPolicy.ValidAccount(account) || characterId == 0 || loadoutIndex >= 5)
+                return Outcome(MagNetResult.Error, "invalid-loadout-delete");
+            var catalog = LoadoutCatalog;
+            if (catalog?.ApplicationId != 20231) return Outcome(MagNetResult.Error, "retail-loadout-catalog-unavailable");
+            string path = ValidPath(); Directory.CreateDirectory(Path.GetDirectoryName(path));
+            using var lease = AcquireLock(path + ".lock");
+            var all = ReadAll().ToList();
+            var character = all.SingleOrDefault(c => c.Account == account && c.Id == characterId);
+            if (character == null) return Outcome(MagNetResult.Error, "character-not-owned");
+            if (character.LoadoutLayoutRevision == ulong.MaxValue) return Outcome(MagNetResult.Error, "loadout-layout-revision-exhausted");
+            var rows = character.Loadouts;
+            if (rows == null || rows.All(row => row.Items.All(id => id == -1)))
+                rows = catalog.DefaultsForFaction(character.Faction)?.Select(StoredLoadout.FromLoadout).ToArray();
+            if (rows == null) return Outcome(MagNetResult.Error, "authored-faction-defaults-unavailable");
+            if (!catalog.HasValidPrimary(rows[loadoutIndex].ToLoadout())) return Outcome(MagNetResult.Error, "loadout-delete-row-empty");
+
+            Array.Copy(rows, loadoutIndex + 1, rows, loadoutIndex, rows.Length - 1 - loadoutIndex);
+            rows[^1] = StoredLoadout.FromLoadout(new MagLoadout { UpdateId = 0 });
+            if (rows.Any(row => !catalog.ValidForFaction(row.ToLoadout(), character.Faction)))
+                return Outcome(MagNetResult.Error, "invalid-faction-loadout");
+            if (!catalog.HasValidPrimary(rows[0].ToLoadout())) return Outcome(MagNetResult.Error, "primary-loadout-required");
+            byte preferred = character.LastUsedLoadout;
+            if (preferred > loadoutIndex) preferred--;
+            else if (preferred == loadoutIndex) preferred = 0;
+            if (!catalog.HasValidPrimary(rows[preferred].ToLoadout())) preferred = 0;
+            if (!HasLoadoutOwnership(character, catalog, rows[preferred].Items))
+                return Outcome(MagNetResult.Error, "loadout-item-not-owned");
+            character.Loadouts = rows;
+            character.LastUsedLoadout = preferred;
+            character.LoadoutLayoutRevision++;
+            Commit(path, all);
+            return Outcome(MagNetResult.Success, "loadout-delete-committed");
+        }
         public CharacterCreationOutcome PurchaseSkillForAccount(string account, uint characterId, int skillId)
         {
             if (!MagDevelopmentAccountPolicy.ValidAccount(account) || characterId == 0 || skillId < 0 || skillId > 127)
@@ -414,7 +451,7 @@ namespace Server.Medius
             Commit(path, all); // Atomic durable save must finish before the session acknowledges the purchase.
             return Outcome(MagNetResult.Success, "skill-purchase-committed");
         }
-        public CharacterCreationOutcome SaveLastUsedLoadoutForAccount(string account, uint characterId, byte loadoutIndex)
+        public CharacterCreationOutcome SaveLastUsedLoadoutForAccount(string account, uint characterId, byte loadoutIndex, ulong expectedLayoutRevision = 0)
         {
             if (!MagDevelopmentAccountPolicy.ValidAccount(account) || characterId == 0 || loadoutIndex >= 5)
                 return Outcome(MagNetResult.Error, "invalid-last-used-loadout");
@@ -423,6 +460,7 @@ namespace Server.Medius
             var all = ReadAll().ToList();
             var character = all.SingleOrDefault(c => c.Account == account && c.Id == characterId);
             if (character == null) return Outcome(MagNetResult.Error, "character-not-owned");
+            if (expectedLayoutRevision != character.LoadoutLayoutRevision) return Outcome(MagNetResult.Error, "stale-loadout-layout");
             var catalog = LoadoutCatalog;
             if (catalog == null) return Outcome(MagNetResult.Error, "loadout-catalog-unavailable");
             var rows = character.Loadouts?.Select(row => row.ToLoadout()).ToArray() ?? catalog.DefaultsForFaction(character.Faction);

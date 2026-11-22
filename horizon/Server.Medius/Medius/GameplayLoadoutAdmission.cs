@@ -9,30 +9,35 @@ namespace Server.Medius
     public sealed class GameplayAdmissionLoadouts
     {
         [JsonPropertyName("selected_index")] public byte SelectedIndex { get; }
+        [JsonPropertyName("layout_revision"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+        public ulong LayoutRevision { get; }
         readonly int[] _updateIds;
         readonly ushort?[][] _inventories;
         [JsonPropertyName("update_ids")] public int[] UpdateIds => (int[])_updateIds.Clone();
         [JsonPropertyName("inventories")] public ushort?[][] Inventories => _inventories.Select(row => (ushort?[])row.Clone()).ToArray();
-        internal GameplayAdmissionLoadouts(MagCharacterRecord record)
+        internal GameplayAdmissionLoadouts(MagCharacterRecord record, ulong layoutRevision)
         {
             SelectedIndex = record.LastUsedLoadout;
+            LayoutRevision = layoutRevision;
             _updateIds = record.Loadouts.Select(row => (int)row.UpdateId).ToArray();
             _inventories = record.Loadouts.Select(row => row.Items.Select(item => item < 0 ? (ushort?)null : (ushort)item).ToArray()).ToArray();
         }
-        GameplayAdmissionLoadouts(byte selected, int[] updates, ushort?[][] inventories)
+        GameplayAdmissionLoadouts(byte selected, int[] updates, ushort?[][] inventories, ulong layoutRevision)
         {
             SelectedIndex = selected;
+            LayoutRevision = layoutRevision;
             _updateIds = (int[])updates.Clone();
             _inventories = inventories.Select(row => (ushort?[])row.Clone()).ToArray();
         }
-        internal GameplayAdmissionLoadouts Snapshot() => new GameplayAdmissionLoadouts(SelectedIndex, _updateIds, _inventories);
+        internal GameplayAdmissionLoadouts Snapshot() => new GameplayAdmissionLoadouts(SelectedIndex, _updateIds, _inventories, LayoutRevision);
     }
 
     /// <summary>Admission projects the actual record's saved or configured default
     /// inventories. It does not replace the running actor's equipped kit.</summary>
     public static class GameplayLoadoutAdmission
     {
-        public static GameplayAdmissionLoadouts Project(StoredCharacter character, MagCharacterRecord record, MagLoadoutCatalog catalog)
+        public static GameplayAdmissionLoadouts Project(StoredCharacter character, MagCharacterRecord record, MagLoadoutCatalog catalog,
+            bool supportsLayoutChanges = false)
         {
             if (character == null || record == null) throw new ArgumentNullException();
             // With no configured catalog, preserve the previous absent-inventory
@@ -44,7 +49,7 @@ namespace Server.Medius
             if (catalog != null && (record.Loadouts.Any(row => !catalog.ValidForFaction(row, character.Faction)) ||
                 !catalog.HasValidPrimary(record.Loadouts[0]) || !catalog.HasValidPrimary(record.Loadouts[record.LastUsedLoadout])))
                 throw new InvalidDataException("Invalid authored loadout admission record.");
-            return new GameplayAdmissionLoadouts(record);
+            return new GameplayAdmissionLoadouts(record, supportsLayoutChanges ? character.LoadoutLayoutRevision : 0);
         }
     }
 }

@@ -16,6 +16,8 @@ pub struct CommittedLoadoutSelection {
     pub character_id: u32,
     pub revision: u64,
     pub inventory_index: u8,
+    #[serde(default, skip_serializing_if = "loadouts::layout_revision_is_zero")]
+    pub layout_revision: u64,
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -112,6 +114,7 @@ impl<W: Write> Engine<W> {
             character_id,
             revision,
             inventory_index: index,
+            layout_revision: saved.layout_revision,
         }))
     }
     pub(super) fn pending_loadout_selections(&self) -> Vec<CommittedLoadoutSelection> {

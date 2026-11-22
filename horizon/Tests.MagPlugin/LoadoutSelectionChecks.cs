@@ -39,7 +39,13 @@ internal static class LoadoutSelectionChecks
             "Committed loadout action and capability must parse as typed v2 data");
         var selection = parsed.LoadoutSelections.Single();
         Check(selection.AccountId == "synthetic" && selection.CharacterId == 1 && selection.WorldId == 7 && selection.PlayerId == 2 &&
-            selection.Revision == 1 && selection.InventoryIndex == 2, "Typed action fields lost");
+            selection.Revision == 1 && selection.InventoryIndex == 2 && selection.LayoutRevision == 0 && !parsed.SupportsLoadoutLayoutChanges,
+            "Legacy action fields or capability changed");
+        var compacted = Reply();
+        compacted["capabilities"]!.AsArray().Add("loadout_layout_revision_v1");
+        compacted["loadout_selections"]![0]!["layout_revision"] = 2;
+        Check(Parse(compacted, out var revised) && revised.SupportsLoadoutLayoutChanges && revised.LoadoutSelections.Single().LayoutRevision == 2,
+            "Compacted layout receipt or capability was not retained");
         LocalDmeHost.RequireLoadoutSelectionCapability(parsed);
         Check(selection.MatchesOwner("reservation00001", 7, 2, "synthetic", 1), "Exact owner rejected");
         Check(!selection.MatchesOwner("reservation00002", 7, 2, "synthetic", 1) &&
@@ -53,7 +59,8 @@ internal static class LoadoutSelectionChecks
             Check(!Parse(bad, out _), "Missing action field admitted: " + field);
         }
         foreach (var pair in new[] { ("inventory_index", "5"), ("revision", "0"), ("revision", "-1"), ("revision", "18446744073709551616"),
-            ("character_id", "0"), ("account_id", "\"Synthetic\""), ("player_id", "65536"), ("world_id", "-1") })
+            ("character_id", "0"), ("account_id", "\"Synthetic\""), ("player_id", "65536"), ("world_id", "-1"),
+            ("layout_revision", "0"), ("layout_revision", "-1"), ("layout_revision", "18446744073709551616") })
         {
             var bad = Reply(); bad["loadout_selections"][0][pair.Item1] = JsonNode.Parse(pair.Item2);
             Check(!Parse(bad, out _), "Invalid action field admitted: " + pair.Item1);

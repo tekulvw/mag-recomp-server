@@ -289,6 +289,7 @@ pub(super) fn defender_at(engine: &mut crate::Engine<Vec<u8>>, slot: u16, now: D
     let tools = Arc::clone(&engine.item_catalog);
     engine.item_catalog = crate::spawn_progression::tests::dynamic_bodies::acquisition_gameplay_tests::capture_fixture().item_catalog;
     let mut saved = crate::loadouts::SavedLoadouts {
+        layout_revision: 0,
         selected_index: 0,
         update_ids: [1; 5],
         inventories: [[None; 22]; 5],

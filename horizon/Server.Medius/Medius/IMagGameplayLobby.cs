@@ -7,6 +7,7 @@ namespace Server.Medius
     public interface IMagGameplayLobby
     {
         bool UsesFactionMatchmaking { get; }
+        bool SupportsLoadoutLayoutChanges { get; }
         MagServerStatusResponse Status(int transactionId);
         void QueueJoin(MagMlsSession session, MagJoinGameRequest request, Action<MagPluginClientMessage> send,
             Func<bool> connected, Action<MagCharacterRecord> notify = null);

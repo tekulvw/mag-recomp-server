@@ -1077,6 +1077,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                 io::Error::other("retail bootstrap must include all supported factions")
             })?;
             let saved = mag_gameplay::loadouts::SavedLoadouts {
+                layout_revision: 0,
                 selected_index: 0,
                 update_ids: std::array::from_fn(|index| bootstrap.inventories[index].update_id),
                 inventories: std::array::from_fn(|index| bootstrap.inventories[index].slots),

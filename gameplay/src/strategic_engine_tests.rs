@@ -9,6 +9,7 @@ use crate::{
 
 fn reserve_actor(engine: &mut Engine<Vec<u8>>, player: u16, faction: u8) {
     let mut loadouts = loadouts::SavedLoadouts {
+        layout_revision: 0,
         selected_index: 0,
         update_ids: [1; 5],
         inventories: [[None; 22]; 5],

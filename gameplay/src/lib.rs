@@ -1839,6 +1839,7 @@ impl<W: Write> Engine<W> {
             match_cohorts::CAPABILITY.into(),
             loadout_selection::CAPABILITY.into(),
             loadout_refresh::CAPABILITY.into(),
+            loadout_refresh::LAYOUT_CAPABILITY.into(),
             frago::CAPABILITY.into(),
             frago::ACTION_CAPABILITY.into(),
             frago::OBJECTIVE_CAPABILITY.into(),
