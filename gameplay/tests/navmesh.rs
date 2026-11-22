@@ -1,6 +1,160 @@
 // SYNTHETIC: all inputs in this suite are authored in code; no game catalogs or captures.
 use mag_gameplay::{collision::PhysicsRegion, navmesh::*};
 use sha2::{Digest, Sha256};
+use std::{fs, process::Command};
+
+#[test]
+fn reference_cli_bakes_full_grid_without_physics_authority() {
+    let root = std::env::temp_dir().join(format!("mag-nav-reference-suite-{}", std::process::id()));
+    fs::create_dir(&root).unwrap();
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = Cleanup(root.clone());
+    let input_path = root.join("input.json");
+    let bundle = root.join("mesh");
+    let mut input = wide_fixture(false);
+    input.bounds.max[0] = 870.;
+    input.bounds.max[2] = 820.;
+    fs::write(
+        &input_path,
+        serde_json::to_vec(&serde_json::json!({
+            "format":"mag_navmesh_reference_bake_input_v1","map_name":input.map_name,
+            "world_sha256":input.world_sha256,"geometry_sha256":input.geometry_sha256,
+            "bounds":input.bounds,"physics_regions":[],"vertices":input.vertices,"triangles":input.triangles
+        }))
+        .unwrap(),
+    ).unwrap();
+    let cli = || Command::new(env!("CARGO_BIN_EXE_mag-navmesh"));
+    let output = cli()
+        .arg("bake-reference")
+        .arg("--input")
+        .arg(&input_path)
+        .arg("--output")
+        .arg(&bundle)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let inspect = cli()
+        .arg("inspect-reference")
+        .arg("--mesh")
+        .arg(&bundle)
+        .output()
+        .unwrap();
+    assert!(
+        inspect.status.success(),
+        "{}",
+        String::from_utf8_lossy(&inspect.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&inspect.stdout).unwrap();
+    assert_eq!(report["format"], "mag_navmesh_reference_v1");
+    assert_eq!(report["tiles"], 3);
+
+    let query = || {
+        cli()
+            .arg("query-reference")
+            .arg("--mesh")
+            .arg(&bundle)
+            .args([
+                "--start",
+                "3,0,10",
+                "--goal",
+                "147,0,10",
+                "--goal-radius",
+                "0.2",
+            ])
+            .output()
+            .unwrap()
+    };
+    let output = query();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let route: Route = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(route.format, "mag_navmesh_reference_route_v1");
+    assert_eq!(route.status, Status::Complete);
+    assert!(route.corridor_refs.len() >= 3);
+
+    let manifest: ReferenceManifest =
+        serde_json::from_slice(&fs::read(bundle.join("manifest.json")).unwrap()).unwrap();
+    let data_path = bundle.join("detour.bin");
+    let mut data = fs::read(&data_path).unwrap();
+    let mut runtime_artifact = Artifact {
+        format: manifest.format,
+        map_name: manifest.map_name,
+        world_sha256: manifest.world_sha256,
+        geometry_sha256: manifest.geometry_sha256,
+        profile: manifest.profile,
+        bounds: manifest.bounds,
+        upstream_commit: manifest.upstream_commit,
+        bake_config: manifest.bake_config,
+        detour_sha256: manifest.detour_sha256,
+        detour_data: data.clone(),
+        drop_links: Vec::new(),
+    };
+    assert!(matches!(
+        NavMesh::load(runtime_artifact.clone(), &"0".repeat(64), "synthetic"),
+        Err(Error("navmesh_identity_mismatch"))
+    ));
+    runtime_artifact.format = "mag_navmesh_world_v2".into();
+    runtime_artifact.bake_config = BAKE_CONFIG.into();
+    assert!(matches!(
+        NavMesh::load(runtime_artifact, &"0".repeat(64), "synthetic"),
+        Err(Error("navmesh_invalid_binary"))
+    ));
+    data[99] ^= 1;
+    fs::write(data_path, data).unwrap();
+    let corrupt = query();
+    assert!(!corrupt.status.success());
+    assert!(String::from_utf8_lossy(&corrupt.stderr).contains("navmesh_binary_hash_mismatch"));
+}
+
+#[test]
+fn reference_bake_checks_envelope_grid_and_scope() {
+    let mut input = fixture(false, false, false);
+    input.physics_regions.clear();
+    assert_eq!(
+        bake(input).unwrap_err(),
+        Error("navmesh_geometry_coverage_unknown")
+    );
+    let mut input = fixture(false, false, false);
+    input.format = "mag_navmesh_reference_bake_input_v1".into();
+    input.bounds.max[0] = 1500.;
+    input.bounds.max[2] = 1500.;
+    assert_eq!(
+        bake_reference(input).unwrap_err(),
+        Error("navmesh_reference_grid_limit")
+    );
+    let mut input = fixture(false, false, false);
+    input.format = "mag_navmesh_reference_bake_input_v1".into();
+    input.bounds.max[0] = 19.;
+    assert_eq!(
+        bake_reference(input).unwrap_err(),
+        Error("navmesh_reference_envelope_invalid")
+    );
+}
+
+#[test]
+fn reference_face_culling_preserves_legacy_tile_payloads() {
+    // The separate floor islands include faces entirely outside some tiles.
+    let verified = bake(wide_fixture(true)).unwrap();
+    let mut input = wide_fixture(true);
+    input.format = "mag_navmesh_reference_bake_input_v1".into();
+    input.physics_regions.clear();
+    let (_, reference) = bake_reference(input).unwrap();
+    assert_ne!(verified.detour_data[4..8], reference[4..8]);
+    assert_eq!(verified.detour_data[8..], reference[8..]);
+}
+
 fn quad(
     vertices: &mut Vec<[f32; 3]>,
     triangles: &mut Vec<[u32; 3]>,

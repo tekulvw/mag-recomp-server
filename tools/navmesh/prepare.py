@@ -33,7 +33,7 @@ def bounds_valid(value):
             and all(value['min'][i] < value['max'][i] for i in range(3)))
 
 
-def prepare(world, world_sha256, bounds=None):
+def prepare(world, world_sha256, bounds=None, *, reference=False):
     require(isinstance(world, dict) and world.get('format') == 'mag_collision_world'
             and type(world.get('schema_version')) is int and world['schema_version'] == 1
             and world.get('coordinate_space') == 'world', 'expected neutral world-space schema1')
@@ -41,11 +41,14 @@ def prepare(world, world_sha256, bounds=None):
     metadata = world['metadata']
     require(isinstance(metadata.get('map_name'), str) and metadata['map_name'], 'missing map identity')
     regions = metadata.get('physics_regions', [])
-    verified = [r for r in regions if r.get('ground_verified') is True and r.get('obstacles_verified') is True and bounds_valid(r)]
-    require(verified, 'no verified static coverage region')
-    bounds = bounds or {k: copy.deepcopy(verified[0][k]) for k in ('min', 'max')}
-    require(bounds_valid(bounds) and any(all(bounds['min'][i] >= r['min'][i] and bounds['max'][i] <= r['max'][i]
-                                           for i in range(3)) for r in verified), 'bake bounds exceed verified coverage')
+    if reference:
+        require(bounds is None, 'reference bounds derive from all source geometry')
+    else:
+        verified = [r for r in regions if r.get('ground_verified') is True and r.get('obstacles_verified') is True and bounds_valid(r)]
+        require(verified, 'no verified static coverage region')
+        bounds = bounds or {k: copy.deepcopy(verified[0][k]) for k in ('min', 'max')}
+        require(bounds_valid(bounds) and any(all(bounds['min'][i] >= r['min'][i] and bounds['max'][i] <= r['max'][i]
+                                               for i in range(3)) for r in verified), 'bake bounds exceed verified coverage')
     instances = world['instances']
     require(isinstance(instances, list) and 0 < len(instances) <= 100_000, 'invalid instance count')
     vertices, triangles, names = [], [], set()
@@ -83,16 +86,26 @@ def prepare(world, world_sha256, bounds=None):
         xyz.byteswap(); indices.byteswap()
     digest = hashlib.sha256(GEOMETRY_DOMAIN + struct.pack('<II', len(vertices), len(triangles)))
     digest.update(xyz.tobytes()); digest.update(indices.tobytes())
-    value = dict(format='mag_navmesh_bake_input_v1', map_name=metadata['map_name'], world_sha256=world_sha256,
+    geometry_bounds = dict(min=[min(v[i] for v in vertices) for i in range(3)],
+                           max=[max(v[i] for v in vertices) for i in range(3)])
+    if reference:
+        bounds = copy.deepcopy(geometry_bounds)
+        bounds['min'][1] -= 3.0
+        bounds['max'][1] += 3.0
+        require(bounds_valid(bounds), 'invalid full reference bounds')
+    input_format = 'mag_navmesh_reference_bake_input_v1' if reference else 'mag_navmesh_bake_input_v1'
+    value = dict(format=input_format, map_name=metadata['map_name'], world_sha256=world_sha256,
                  geometry_sha256=digest.hexdigest(), bounds=bounds, physics_regions=copy.deepcopy(regions),
                  vertices=vertices, triangles=triangles)
     report = dict(instances=len(instances), vertices=len(vertices), triangles=len(triangles),
                   winding=winding, max_vertex_f32_rounding_m=max_rounding,
-                  source_geometry_bounds=dict(min=[min(v[i] for v in vertices) for i in range(3)],
-                                              max=[max(v[i] for v in vertices) for i in range(3)]),
+                  source_geometry_bounds=geometry_bounds,
                   geometry_hash_encoding='MAG-NAV-GEOMETRY-v1 NUL;LEu32 vertex_count,triangle_count;LEf32 XYZ;LEu32 triangle indices',
                   coordinate_policy='Native world Y-up; original winding, all faces and instance-local duplicates preserved',
                   metadata=copy.deepcopy(metadata))
+    if reference:
+        report['scope'] = 'offline_reference_geometry_only'
+        report['runtime_movement_authority'] = False
     return value, report
 
 
@@ -101,13 +114,15 @@ def main():
     parser.add_argument('--world', required=True, type=Path)
     parser.add_argument('--expected-world-sha256', required=True)
     parser.add_argument('--output', required=True, type=Path, help='New private output directory')
+    parser.add_argument('--reference', action='store_true',
+                        help='Prepare full geometry for offline reference baking without certifying movement')
     args = parser.parse_args()
     require(not args.output.exists(), 'refusing existing output directory')
     require(args.world.is_file() and args.world.stat().st_size <= 64*1024*1024, 'world file exceeds existing runtime limit')
     raw = args.world.read_bytes()
     digest = hashlib.sha256(raw).hexdigest()
     require(digest == args.expected_world_sha256, 'world source hash mismatch')
-    value, report = prepare(json.loads(raw), digest)
+    value, report = prepare(json.loads(raw), digest, reference=args.reference)
     encoded = (json.dumps(value, separators=(',', ':'), allow_nan=False)+'\n').encode()
     report.update(format='mag_navmesh_prep_manifest_v1', source_world=str(args.world.resolve()),
                   world_sha256=digest, geometry_sha256=value['geometry_sha256'],

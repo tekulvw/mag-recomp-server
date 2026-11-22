@@ -88,6 +88,22 @@ cargo run --manifest-path gameplay/Cargo.toml --bin mag-navmesh -- bake --input 
 
 The preparation tool preserves winding and all faces, rounds vertices to f32, computes a domain-separated geometry hash, and refuses invalid bounds, degenerate triangles or unverified coverage. Baking needs the Rust/C++ toolchain and vendored Recast/Detour described in the build instructions. It produces a local `.mag-nav` JSON artifact accepted by `--navmesh-world`; it does not need a running game or server. The runtime independently binds the navmesh to the collision-world hash. No retail geometry/navmesh is distributed.
 
+### Offline whole-map reference navigation
+
+Use an explicit reference bake to inspect routes through the emitted static geometry of a provisional world. The preparer preserves the original world hash, winding, and region metadata. It derives its bake envelope from the full f32 vertex inventory, with vertical padding for standing clearance.
+
+```sh
+python3 tools/navmesh/prepare.py --reference --world WORLD_JSON --expected-world-sha256 WORLD_SHA256 --output PREP_DIRECTORY
+cargo build --release --locked --manifest-path gameplay/Cargo.toml --bin mag-navmesh
+gameplay/target/release/mag-navmesh bake-reference --input PREP_DIRECTORY/input.json --output REFERENCE_DIRECTORY
+gameplay/target/release/mag-navmesh inspect-reference --mesh REFERENCE_DIRECTORY
+gameplay/target/release/mag-navmesh query-reference --mesh REFERENCE_DIRECTORY --start X,Y,Z --goal X,Y,Z --goal-radius 1.5
+```
+
+The output is a new directory containing `manifest.json` and `detour.bin`. Inspection verifies the binary hash and tile layout and reports the occupied tile count and largest tile polygon count. The reference grid supports up to 512 tiles at 51.2 m per side, 8,192 polygons per tile, and 192 MiB of binary tiles. Queries report the reference route format and retain disconnected and partial results. Keep the source world and its preparation receipt with the bundle so its scope can be verified independently.
+
+The reference bundle is an offline route-planning artifact. It describes the baked static geometry and its represented transforms. Gameplay movement and certified drops require the separate runtime mesh and a verified physics region. Dynamic obstacles, moving bodies, and objective sequences require their own current-state checks.
+
 ## Prototype projections
 
 ```sh

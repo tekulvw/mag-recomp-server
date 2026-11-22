@@ -1,10 +1,12 @@
 mod navmesh_spawn_exit_cli;
-use mag_gameplay::navmesh::{self, Artifact, BakeInput, NavMesh};
+use mag_gameplay::navmesh::{
+    self, Artifact, BakeInput, NavMesh, ReferenceManifest, ReferenceNavMesh,
+};
 use serde_json::json;
 use std::{
     collections::BTreeMap,
     fs,
-    io::{self, Write},
+    io::{self, Read, Write},
     path::Path,
     time::Instant,
 };
@@ -36,9 +38,43 @@ fn write(
     }
     Ok(())
 }
+
+fn read_reference_file(path: &Path, max: u64) -> io::Result<Vec<u8>> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() || metadata.len() > max {
+        return Err(io::Error::other("invalid reference bundle file or size"));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    fs::File::open(path)?
+        .take(max + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max {
+        return Err(io::Error::other("reference bundle file size limit"));
+    }
+    Ok(bytes)
+}
+
+fn open_reference(
+    path: &Path,
+) -> Result<(ReferenceManifest, ReferenceNavMesh), Box<dyn std::error::Error>> {
+    if !fs::symlink_metadata(path)?.file_type().is_dir() {
+        return Err("expected a reference bundle directory".into());
+    }
+    let manifest: ReferenceManifest = serde_json::from_slice(&read_reference_file(
+        &path.join("manifest.json"),
+        64 * 1024,
+    )?)?;
+    if !(100..=navmesh::MAX_REFERENCE_BYTES).contains(&manifest.detour_bytes) {
+        return Err("invalid reference Detour size".into());
+    }
+    let data = read_reference_file(&path.join("detour.bin"), manifest.detour_bytes)?;
+    let mesh = ReferenceNavMesh::load(&manifest, data, &manifest.world_sha256, &manifest.map_name)?;
+    Ok((manifest, mesh))
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
-    let command = args.next().ok_or("expected bake|query|inspect|goals")?;
+    let command = args.next().ok_or("expected a navmesh command")?;
     let mut flags = BTreeMap::new();
     while let Some(key) = args.next() {
         if !key.starts_with("--") || flags.contains_key(&key) {
@@ -53,6 +89,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .ok_or_else(|| format!("missing {key}"))
     };
     match command.as_str() {
+        "bake-reference" => {
+            if flags
+                .keys()
+                .any(|key| !["--input", "--output"].contains(&key.as_str()))
+            {
+                return Err("unknown reference bake flag".into());
+            }
+            let output = Path::new(get("--output")?);
+            if output.exists() {
+                return Err("reference output directory already exists".into());
+            }
+            let input: BakeInput =
+                serde_json::from_slice(&read(get("--input")?, 128 * 1024 * 1024)?)?;
+            let began = Instant::now();
+            let (manifest, data) = navmesh::bake_reference(input)?;
+            fs::create_dir(output)?;
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(output.join("detour.bin"))?
+                .write_all(&data)?;
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(output.join("manifest.json"))?;
+            serde_json::to_writer(&mut file, &manifest)?;
+            file.write_all(b"\n")?;
+            eprintln!(
+                "{}",
+                json!({"op":"reference_bake_complete","elapsed_ms":began.elapsed().as_millis(),
+                    "detour_bytes":manifest.detour_bytes,"world_sha256":manifest.world_sha256,
+                    "detour_sha256":manifest.detour_sha256})
+            );
+        }
+        "inspect-reference" | "query-reference" => {
+            let allowed: &[&str] = if command == "inspect-reference" {
+                &["--mesh", "--output"]
+            } else {
+                &["--mesh", "--start", "--goal", "--goal-radius", "--output"]
+            };
+            if flags.keys().any(|key| !allowed.contains(&key.as_str())) {
+                return Err("unknown reference inspection/query flag".into());
+            }
+            let (manifest, mesh) = open_reference(Path::new(get("--mesh")?))?;
+            if command == "inspect-reference" {
+                let (tiles, max_polygons) = mesh.tile_stats()?;
+                let mut report = serde_json::to_value(manifest)?;
+                report["tiles"] = json!(tiles);
+                report["max_polygons_per_tile"] = json!(max_polygons);
+                write(flags.get("--output"), &report)?;
+            } else {
+                let route = mesh.route(
+                    point(get("--start")?)?,
+                    point(get("--goal")?)?,
+                    get("--goal-radius")?.parse()?,
+                )?;
+                write(flags.get("--output"), &route)?;
+            }
+        }
         "bake" => {
             if flags
                 .keys()
@@ -252,7 +347,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 write(flags.get("--output"), &route)?;
             }
         }
-        _ => return Err("expected bake|query|inspect|goals".into()),
+        _ => return Err("unknown navmesh command".into()),
     }
     Ok(())
 }
