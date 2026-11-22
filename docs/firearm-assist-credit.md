@@ -1,6 +1,6 @@
-# Ordinary firearm assist credit
+# Ordinary firearm and frag assist credit
 
-Firearm assist counters are optional. Pass an explicit external rules file with
+Match assist counters are optional. Pass an explicit external rules file with
 `--firearm-assist-rules /absolute/ASSISTS.json` for application20231. Without
 that option the feature is disabled. Rules contain schema_version1,
 application_id20231 and an unsigned assist_timeout_ms. A zero timeout permits
@@ -27,8 +27,14 @@ expiry. New contributors fill the first empty entry, then replace the earliest
 expiry, with first-entry preference for ties. Invalid, self and friendly hits
 never create a contribution.
 
-At the first ordinary-firearm lethal collapse, eligible current contributors other than the
-killer gain one assist (stat11). Incapacitation settles that collapse; finishing
+Source-qualified ordinary frag damage shares those entries for human victims
+when the typed dose drains through an accepted owner update. The queued dose
+must still belong to the original thrower's allocation and team and name the
+current victim's allocation and life. It can drain after the original thrower
+dies or respawns. The assist timeout starts at authoritative damage application.
+
+At the first qualifying firearm or frag collapse, eligible current contributors
+other than the killer gain one assist (stat11). Incapacitation settles that collapse; finishing
 or bleed-out cannot settle it again. A revived Character begins a fresh ledger.
 The contributing allocation can respawn and keep eligibility, while a different
 human admission or bot allocation in its slot cannot inherit old credit.
@@ -44,8 +50,8 @@ rows in the bounded drain. Selection reads the latest total and preserves the
 queued creation prefix, without waiting for unrelated later traffic. Bot assists join the creation-fenced,
 unsequenced totals stream, retaining reply budgets and reliable FIFO ordering.
 
-This increment covers ordinary on-foot firearms and assist counters. Assist XP,
-other damage sources, native scoreboard acceptance and bot final-results rows
-require their own qualification. Existing legitimate kill/death/XP behavior
-remains intact. Releases require the maintainer's live-match review and manual
-action.
+The existing firearm path covers human and registered bot victims. The frag
+path covers human victims in the authored frag damage mode. Assist XP, other
+damage sources, native scoreboard acceptance and bot final-results rows remain
+outside this qualification. Releases require the maintainer's live-match
+review and manual action.

@@ -77,6 +77,7 @@ fn queue_ordinary_frag(engine: &mut Engine<Vec<u8>>, target: u16) {
     let actor = engine.active.as_ref().unwrap();
     let attacker = 0x0380_0000 | u32::from(actor.reservation.player);
     let world = actor.reservation.world;
+    let owner = firearm_assists::FragOwner::capture(actor);
     let round = engine.round_number;
     engine.frag_character_blast = true;
     queue(engine, target, generation, attacker);
@@ -88,9 +89,10 @@ fn queue_ordinary_frag(engine: &mut Engine<Vec<u8>>, target: u16) {
         .back_mut()
         .unwrap()
         .source = PendingDamageSource::OrdinaryRetailFrag {
+        owner,
         world,
         round,
-        bot_allocation_generation: Some(allocation),
+        target_allocation: FragTargetAllocation::Bot(allocation),
     };
 }
 fn update(engine: &mut Engine<Vec<u8>>, now_ms: u64) -> Result<Vec<OutboundMessage>, &'static str> {
@@ -2014,7 +2016,8 @@ fn ordinary_frag_death_refuses_stale_scope_allocation_or_life_before_damage() {
         let PendingDamageSource::OrdinaryRetailFrag {
             world,
             round,
-            bot_allocation_generation,
+            target_allocation,
+            ..
         } = &mut pending.source
         else {
             unreachable!()
@@ -2022,7 +2025,12 @@ fn ordinary_frag_death_refuses_stale_scope_allocation_or_life_before_damage() {
         match stale {
             "world" => *world += 1,
             "round" => *round += 1,
-            "allocation" => *bot_allocation_generation.as_mut().unwrap() += 1,
+            "allocation" => {
+                let FragTargetAllocation::Bot(allocation) = target_allocation else {
+                    unreachable!()
+                };
+                *allocation += 1;
+            }
             "life" => pending.generation += 1,
             _ => unreachable!(),
         }
@@ -2202,4 +2210,215 @@ fn a_grenade_already_queued_before_shooter_death_still_rewards_its_real_launcher
     assert_eq!(rewards[0].kind, progression::RewardKind::EnemyKilled);
     assert_eq!(rewards[0].account_id, "synthetic-grenade-owner");
     assert_eq!(rewards[0].reservation_id, "synthetic-reservation-0000");
+}
+
+fn mixed_frag_assist_fixture() -> Engine<Vec<u8>> {
+    let mut engine = crate::human_kill_reward_tests::fixture()
+        .with_firearm_assist_rules(firearm_assists::Rules {
+            schema_version: 1,
+            application_id: 20231,
+            assist_timeout_ms: 5000,
+        })
+        .unwrap();
+    crate::spawn_progression::reserve(&mut engine, 2);
+    let template = &engine.peers["synthetic-reservation-0001"];
+    let source = engine.active.as_mut().unwrap();
+    ready(source);
+    source.squad_catalog = template.squad_catalog.clone();
+    source.life = template.life;
+    source.current_inventory_handle = template.current_inventory_handle;
+    source.spawned_loadout = template.spawned_loadout.clone();
+    source.observed_primary = template.observed_primary;
+    source.primary_equipped = true;
+    engine.frag_character_blast = true;
+    engine
+}
+
+fn focus_assist_actor(engine: &mut Engine<Vec<u8>>, player: u16) {
+    let former = engine.active.take().unwrap();
+    engine.peers.insert(former.reservation.id.clone(), former);
+    engine.active = engine
+        .peers
+        .remove(&format!("synthetic-reservation-{player:04}"));
+    assert!(engine.active.is_some());
+}
+
+fn queue_human_frag(engine: &mut Engine<Vec<u8>>, amount: f32) {
+    let source = engine.active.as_ref().unwrap();
+    let world = source.reservation.world;
+    let owner = firearm_assists::FragOwner::capture(source);
+    let attacker = 0x0380_0000 | u32::from(source.reservation.player);
+    let victim = &engine.peers["synthetic-reservation-0000"];
+    let (generation, _) = victim.life.damage_health().unwrap();
+    let reservation = victim.reservation.id.clone();
+    let allocation = victim.allocation_sequence;
+    queue(engine, 0, generation, attacker);
+    let pending = engine
+        .active
+        .as_mut()
+        .unwrap()
+        .grenade_damage
+        .back_mut()
+        .unwrap();
+    pending.target_reservation_id = Some(reservation);
+    pending.damage.amount_hp = amount;
+    pending.source = PendingDamageSource::OrdinaryRetailFrag {
+        owner,
+        world,
+        round: engine.round_number,
+        target_allocation: FragTargetAllocation::Human(allocation),
+    };
+}
+
+fn mixed_frag_assist_count(engine: &Engine<Vec<u8>>) -> i32 {
+    engine.peers["synthetic-reservation-0002"]
+        .reward_statistics
+        .get(&11)
+        .copied()
+        .unwrap_or(0)
+}
+
+#[test]
+fn mixed_frag_assists_share_the_firearm_ledger_in_both_weapon_orders() {
+    for frag_contributor in [true, false] {
+        let mut engine = mixed_frag_assist_fixture();
+        if frag_contributor {
+            queue_human_frag(&mut engine, 5.);
+            update(&mut engine, 1000).unwrap();
+        } else {
+            dispatch(&mut engine, &zero_damage_firearm_hit(0), 1000).unwrap();
+        }
+        assert!(engine.peers["synthetic-reservation-0000"].life.is_alive());
+        focus_assist_actor(&mut engine, 1);
+        if frag_contributor {
+            crate::human_kill_reward_tests::hit(&mut engine, 77, 6000).unwrap();
+        } else {
+            queue_human_frag(&mut engine, 40.);
+            update(&mut engine, 6000).unwrap();
+        }
+        assert!(matches!(
+            engine.peers["synthetic-reservation-0000"].life,
+            CharacterLife::Incapacitated { .. }
+        ));
+        assert_eq!(
+            mixed_frag_assist_count(&engine),
+            1,
+            "frag contribution: {frag_contributor}"
+        );
+        let messages = engine.drain_shared(Vec::new(), 1).unwrap();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.payload_hex == "02040002010b01")
+        );
+        assert!(
+            engine
+                .pending_reward_batch()
+                .iter()
+                .all(|reward| reward.player_id != 2)
+        );
+    }
+}
+
+#[test]
+fn mixed_frag_assists_expire_and_refresh_across_independent_queue_drains() {
+    for (refresh_with_second_dose, expected) in [(false, 0), (true, 1)] {
+        let mut engine = mixed_frag_assist_fixture();
+        queue_human_frag(&mut engine, 5.);
+        if refresh_with_second_dose {
+            queue_human_frag(&mut engine, 5.);
+        }
+        update(&mut engine, 1000).unwrap();
+        let victim = &engine.peers["synthetic-reservation-0000"];
+        assert_eq!(victim.life.damage_health(), Some((4, 100)));
+        assert_eq!(
+            engine.active.as_ref().unwrap().grenade_damage.len(),
+            usize::from(refresh_with_second_dose)
+        );
+        update(&mut engine, 1001).unwrap();
+        assert_eq!(
+            engine.peers["synthetic-reservation-0000"]
+                .life
+                .damage_health(),
+            Some((4, if refresh_with_second_dose { 80 } else { 100 }))
+        );
+        focus_assist_actor(&mut engine, 1);
+        crate::human_kill_reward_tests::hit(&mut engine, 77, 6001).unwrap();
+        assert_eq!(mixed_frag_assist_count(&engine), expected);
+    }
+}
+
+#[test]
+fn mixed_frag_assists_settle_posthumous_grenades_across_owner_life_changes() {
+    for owner_generation in [4, 5] {
+        let mut engine = mixed_frag_assist_fixture();
+        dispatch(&mut engine, &zero_damage_firearm_hit(0), 1000).unwrap();
+        focus_assist_actor(&mut engine, 1);
+        queue_human_frag(&mut engine, 40.);
+        let owner = engine.active.as_mut().unwrap();
+        owner.life = if owner_generation == 4 {
+            CharacterLife::AwaitingRespawn { generation: 4 }
+        } else {
+            CharacterLife::Alive {
+                generation: 5,
+                health_quarter_points: 400,
+            }
+        };
+        update(&mut engine, 1100).unwrap();
+        assert_eq!(mixed_frag_assist_count(&engine), 1);
+        assert!(engine.active.as_ref().unwrap().grenade_damage.is_empty());
+        update(&mut engine, 1101).unwrap();
+        assert_eq!(mixed_frag_assist_count(&engine), 1);
+    }
+}
+
+#[test]
+fn mixed_frag_assists_refuse_stale_allocations_and_retain_pending_state_on_log_failure() {
+    for stale in ["owner", "victim", "victim-life", "record"] {
+        let mut engine = mixed_frag_assist_fixture();
+        dispatch(&mut engine, &zero_damage_firearm_hit(0), 1000).unwrap();
+        focus_assist_actor(&mut engine, 1);
+        queue_human_frag(&mut engine, 40.);
+        let victim = engine.peers.get_mut("synthetic-reservation-0000").unwrap();
+        match stale {
+            "owner" => engine.active.as_mut().unwrap().allocation_sequence += 100,
+            "victim" => victim.allocation_sequence += 100,
+            "victim-life" => {
+                victim.life = CharacterLife::Alive {
+                    generation: 5,
+                    health_quarter_points: 120,
+                };
+            }
+            "record" => engine.max_log = engine.written,
+            _ => unreachable!(),
+        };
+        let ledger = (stale == "record").then(|| {
+            let owner = engine.active.as_ref().unwrap();
+            firearm_assists::Plan::prepare(
+                &engine,
+                1,
+                Duration::from_millis(1100),
+                firearm_assists::Fighter::human(owner),
+                firearm_assists::Fighter::human(&engine.peers["synthetic-reservation-0000"]),
+                true,
+            )
+            .unwrap()
+        });
+        let result = update(&mut engine, 1100);
+        if let Some(ledger) = ledger {
+            assert_eq!(result.unwrap_err(), "log_limit_reached");
+            assert_eq!(ledger.audit().len(), 1);
+            ledger.check_before_record(&engine).unwrap();
+        } else {
+            result.unwrap();
+        }
+        let victim = &engine.peers["synthetic-reservation-0000"];
+        assert_eq!(victim.life.damage_health().unwrap().1, 120);
+        assert_eq!(mixed_frag_assist_count(&engine), 0);
+        assert_eq!(
+            engine.active.as_ref().unwrap().grenade_damage.len(),
+            usize::from(stale == "record")
+        );
+        assert!(engine.pending_reward_batch().is_empty());
+    }
 }
