@@ -287,6 +287,12 @@ unsafe extern "C" {
         refs: *const u64,
         nrefs: c_int,
     ) -> c_int;
+    fn mag_nav_contains_settlement_column(
+        handle: *mut std::ffi::c_void,
+        p: *const f32,
+        refs: *const u64,
+        nrefs: c_int,
+    ) -> c_int;
 }
 pub fn bake(input: BakeInput) -> Result<Artifact, Error> {
     bake_artifact(input, false, None)
@@ -771,6 +777,20 @@ impl NavMesh {
         Ok(results)
     }
     pub fn contains(&self, position: Point, route: &Route) -> bool {
+        self.contains_route_position(position, route, mag_nav_contains)
+    }
+
+    /// Bounded horizontal corridor evidence for vertical settlement only.
+    pub(super) fn contains_settlement_column(&self, position: Point, route: &Route) -> bool {
+        self.contains_route_position(position, route, mag_nav_contains_settlement_column)
+    }
+
+    fn contains_route_position(
+        &self,
+        position: Point,
+        route: &Route,
+        query: unsafe extern "C" fn(*mut std::ffi::c_void, *const f32, *const u64, c_int) -> c_int,
+    ) -> bool {
         if !valid_point(position)
             || route.status != Status::Complete
             || route.world_sha256 != self.artifact.world_sha256
@@ -784,7 +804,7 @@ impl NavMesh {
         };
         let p = position.map(|v| v as f32);
         unsafe {
-            mag_nav_contains(
+            query(
                 h.0,
                 p.as_ptr(),
                 route.corridor_refs.as_ptr(),

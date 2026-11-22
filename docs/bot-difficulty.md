@@ -94,3 +94,11 @@ no personal credit for the bot's action. Tagged leader statistics still use the
 original team, and a human who defuses the charge earns their normal award.
 Synthetic checks establish these server transitions; native match presentation
 and original-map movement acceptance remain separate checks.
+
+## Settling over a walking corridor
+
+A descending body may spend up to 500 ms settling when its feet are still within
+1.5 m above the same corridor and the footprint has verified physics coverage.
+The solver uses current collision and fall damage while horizontal input and
+waypoint progression pause. Walking resumes after a grounded corridor check.
+Routes with certified drops use their separate admission and traversal rules.

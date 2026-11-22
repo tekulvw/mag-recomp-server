@@ -417,4 +417,24 @@ int mag_nav_contains(MagNav* h,const float* p,const unsigned long long* refs,int
     }
     return 0;
 }
+int mag_nav_contains_settlement_column(MagNav* h,const float* p,
+                                         const unsigned long long* refs,int count) {
+    dtQueryFilter filter;
+    filter.setIncludeFlags(1);
+    const float depth=1.5f;
+    const float center[3]={p[0],p[1]-depth*.5f,p[2]};
+    const float extent[3]={.16f,depth*.5f,.16f};
+    dtPolyRef nearby[128];
+    int n=0;
+    const dtStatus status=h->query->queryPolygons(center,extent,&filter,nearby,&n,128);
+    if(dtStatusFailed(status)||dtStatusDetail(status,DT_BUFFER_TOO_SMALL))return 0;
+    for(int j=0;j<n;++j) {
+        if(std::find(refs,refs+count,static_cast<unsigned long long>(nearby[j]))==refs+count)continue;
+        float nearest[3];
+        if(dtStatusFailed(h->query->closestPointOnPoly(nearby[j],p,nearest,nullptr)))continue;
+        const float below=p[1]-nearest[1];
+        if(below>=0.f&&below<=depth&&std::hypot(nearest[0]-p[0],nearest[2]-p[2])<=.15f)return 1;
+    }
+    return 0;
+}
 }

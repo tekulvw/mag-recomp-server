@@ -299,9 +299,7 @@ impl<W: Write> Engine<W> {
             movement,
             navigation,
         });
-        let mut navmesh_state = runtime.navmesh_state;
-        navmesh_state.drop_wait = Duration::ZERO;
-        navmesh_state.navigation_aborted = false;
+        let mut navmesh_state = runtime.navmesh_state.for_new_move();
         navmesh_state.movement.advance(
             retail_movement::MovementIntent::Idle,
             now.saturating_sub(runtime.last_update)
@@ -772,9 +770,7 @@ impl Target {
             movement,
             navigation: Some(navigation),
         });
-        let mut navmesh_state = runtime.navmesh_state;
-        navmesh_state.navigation_aborted = false;
-        navmesh_state.drop_wait = Duration::ZERO;
+        let navmesh_state = runtime.navmesh_state.for_new_move();
         self.runtime = Some(BotRuntime {
             phase: BotPhase::Relocating,
             since: now,
@@ -1013,9 +1009,7 @@ impl Target {
             movement,
             navigation: Some(navigation),
         };
-        let mut navmesh_state = runtime.navmesh_state;
-        navmesh_state.drop_wait = Duration::ZERO;
-        navmesh_state.navigation_aborted = false;
+        let navmesh_state = runtime.navmesh_state.for_new_move();
         let runtime = BotRuntime {
             navmesh_state,
             phase: BotPhase::Relocating,
@@ -1119,9 +1113,7 @@ impl Target {
             movement,
             navigation: Some(navigation),
         });
-        let mut navmesh_state = runtime.navmesh_state;
-        navmesh_state.navigation_aborted = false;
-        navmesh_state.drop_wait = Duration::ZERO;
+        let navmesh_state = runtime.navmesh_state.for_new_move();
         self.runtime = Some(BotRuntime {
             navmesh_state,
             phase: BotPhase::Relocating,
@@ -1663,6 +1655,8 @@ const NAVIGATION_GRACE_MS: u32 = 5000;
 // A geometry work budget belongs to each physical call. Keep late owner
 // updates from putting twenty dense-world substeps into that single budget.
 const NAVIGATION_SOLVER_SLICE_SECONDS: f64 = 0.25;
+const AIRBORNE_SETTLE_MAX_SECONDS: f64 = 0.5;
+const AIRBORNE_SETTLE_SLICE_SECONDS: f64 = 0.05;
 const NAVIGATION_LIMITS: bot_navigation::Limits = bot_navigation::Limits {
     cell_size: 1.0,
     radius_cells: 64,
@@ -1678,6 +1672,15 @@ pub(super) struct NavmeshRuntime {
     pub avoid_left: bool,
     pub drop_wait: Duration,
     pub navigation_aborted: bool,
+    airborne_settle_seconds: f64,
+}
+impl NavmeshRuntime {
+    fn for_new_move(mut self) -> Self {
+        self.drop_wait = Duration::ZERO;
+        self.navigation_aborted = false;
+        self.airborne_settle_seconds = 0.;
+        self
+    }
 }
 #[derive(Clone)]
 struct NavigationContext<'a> {
@@ -1700,6 +1703,85 @@ struct NavigationContext<'a> {
     waited_seconds: f64,
 }
 impl NavigationContext<'_> {
+    fn settle_corridor_column(
+        &mut self,
+        terrain: &bot_physics::WorldTerrain<'_>,
+        mesh: &navmesh::NavMesh,
+        route: &navmesh::Route,
+        mut motion: bot_physics::Motion,
+        waypoint: usize,
+        mut seconds: f64,
+    ) -> Result<NavigationStep, &'static str> {
+        if motion.vertical_velocity > 0. || motion.slide_velocity != [0.; 2] {
+            return Err("bot_navmesh_off_corridor");
+        }
+        let in_column = mesh.contains_settlement_column(motion.position, route);
+        let still_settling =
+            self.state.airborne_settle_seconds > 0. && mesh.contains(motion.position, route);
+        if !(in_column || still_settling) {
+            return Err("bot_navmesh_off_corridor");
+        }
+        let origin = motion.position;
+        terrain
+            .require_horizontal_coverage(origin, origin, self.body)
+            .map_err(navigation_physics_error)?;
+        while seconds > 1e-7
+            && self.state.airborne_settle_seconds + 1e-7 < AIRBORNE_SETTLE_MAX_SECONDS
+        {
+            let slice = seconds
+                .min(AIRBORNE_SETTLE_SLICE_SECONDS)
+                .min(AIRBORNE_SETTLE_MAX_SECONDS - self.state.airborne_settle_seconds);
+            motion = self.advance(terrain, motion, [0.; 3], slice)?;
+            self.state
+                .movement
+                .advance(retail_movement::MovementIntent::Idle, slice)?;
+            self.state.airborne_settle_seconds += slice;
+            seconds -= slice;
+            let drifted = motion.position[0] != origin[0] || motion.position[2] != origin[2];
+            if drifted {
+                terrain
+                    .require_horizontal_coverage(origin, motion.position, self.body)
+                    .map_err(navigation_physics_error)?;
+            }
+            let stopped = if self.hp == 0 {
+                Some("bot_navmesh_fall_lethal")
+            } else if drifted
+                || motion.slide_velocity != [0.; 2]
+                || (motion.grounded && !mesh.contains(motion.position, route))
+            {
+                Some("bot_navmesh_off_corridor")
+            } else {
+                None
+            };
+            if motion.grounded || stopped.is_some() {
+                self.state.airborne_settle_seconds = 0.;
+                return Ok(NavigationStep {
+                    motion,
+                    waypoint,
+                    reached: false,
+                    stopped,
+                });
+            }
+            if !mesh.contains(motion.position, route)
+                && !mesh.contains_settlement_column(motion.position, route)
+            {
+                return Ok(NavigationStep {
+                    motion,
+                    waypoint,
+                    reached: false,
+                    stopped: Some("bot_navmesh_off_corridor"),
+                });
+            }
+        }
+        Ok(NavigationStep {
+            motion,
+            waypoint,
+            reached: false,
+            stopped: (self.state.airborne_settle_seconds + 1e-7 >= AIRBORNE_SETTLE_MAX_SECONDS)
+                .then_some("bot_navmesh_airborne_settle_limit"),
+        })
+    }
+
     fn idle_physics(
         &mut self,
         terrain: &bot_physics::WorldTerrain<'_>,
@@ -2604,6 +2686,21 @@ impl NavigationMove {
             });
         }
         for iteration in 0..NAVIGATION_STEP_LIMIT {
+            // Keep an admitted settlement active even if the falling body
+            // reenters the normal height tolerance before it reaches ground.
+            if !motion.grounded
+                && waypoint > 0
+                && (context.state.airborne_settle_seconds > 0.
+                    || !mesh.contains(motion.position, route))
+                && route
+                    .waypoint_kinds
+                    .iter()
+                    .all(|kind| *kind == WaypointKind::Walk)
+                && route.waypoint_drop_ids.iter().all(Option::is_none)
+            {
+                return context
+                    .settle_corridor_column(terrain, mesh, route, motion, waypoint, seconds);
+            }
             while waypoint < route.waypoints.len()
                 && (route.waypoints[waypoint][0] - motion.position[0])
                     .hypot(route.waypoints[waypoint][2] - motion.position[2])
@@ -3086,3 +3183,7 @@ fn character_position(p: bot_physics::Point) -> replication::CharacterPosition {
         z: p[2] as f32,
     }
 }
+
+#[cfg(test)]
+#[path = "bot_corridor_settlement_tests.rs"]
+mod settlement_tests;
