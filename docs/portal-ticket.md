@@ -61,3 +61,51 @@ sign-in keeps working while the portal is down.
 expected signature and the SHA-256 of the full ticket. A verifier test rebuilds each ticket
 from its fields, appends the signature, checks the hash, and verifies it at the stated time.
 The test key exists only for these vectors.
+
+## Medius verification (operators)
+
+Medius verifies tickets on both of its services, MAPS and MAS, when `MAG_PORTAL_TICKETS=required`.
+The switch is read once at startup:
+
+| Variable | Meaning |
+| --- | --- |
+| `MAG_PORTAL_TICKETS` | `off` (default, also when unset): the development name sign-in is unchanged and the other two variables are ignored. `required`: only valid portal tickets sign in; the plain development name is refused even when `EnableMagDevelopmentAuth` is on. |
+| `MAG_PORTAL_TICKET_KEYS` | Comma-separated `id:base64` entries: the key ID (0 to 255) and the DER SubjectPublicKeyInfo of a P-256 key, as `GET /api/v1/ticket-keys` serves them. List several during rotation. |
+| `MAG_PORTAL_TICKET_AUDIENCE` | This server's host name, exactly as the portal writes it into tickets. |
+
+With `required`, Medius refuses to start when the keys or the audience are missing or invalid,
+naming the variable. The chart sets all three from `portalTickets` (see its README).
+
+What Medius does with a ticket:
+
+- It reassembles the NP authenticate chunks of one session. Every chunk repeats the full size,
+  the chunks add up to it exactly and the last one carries the last-message flag. The full size is
+  at most 2048 bytes, a ticket takes at most 8 chunks, and bytes after a chunk's size must be zero.
+  The RSA words must be zero, as for the development sign-in. Any inconsistency discards the
+  partial ticket.
+- It applies the six rules above. A session gets three failed attempts; after that its NP
+  authenticate messages are ignored until it reconnects. A rejected ticket gets no reply, as a
+  rejected development name does.
+- Accepted nonces are kept in memory until their ticket expires, at most 65536 at a time; when
+  that many live nonces are held, new tickets are refused rather than old nonces forgotten. Each
+  Medius process has its own cache, and MAPS and MAS run in separate processes, so each service
+  accepts a ticket once. A restart forgets the cache; the short ticket lifetime bounds that window.
+- The session's account is the ticket's player name in lowercase, which is how local characters
+  are keyed, so a player who claims their existing name keeps their characters. The portal
+  account ID stays on the session (`PortalAccountId`) for later use. A character's NP ID must
+  still be all zero or carry an online ID equal to that name, ignoring case.
+- Logs carry only the reason class (`ticket=accepted`, `ticket=expired`, `ticket=replayed`, …)
+  in the session state, and the retail no-reply log prints `payload=redacted` for NP
+  authenticate messages. Ticket bytes are never logged.
+
+Rolling out:
+
+1. Fetch the keys from the portal's `GET /api/v1/ticket-keys` and set the audience to the host
+   name players connect to. Keys are public; they need no Secret.
+2. Make sure players have claimed their names on the portal first. Operators import existing
+   names as reserved and assign them to their owners, so nobody else can take them.
+3. Switch to `required` and restart Medius. Clients that still send a plain name can no longer
+   sign in. Switching back to `off` restores the development sign-in.
+4. To rotate, publish the new key on the portal, add it next to the old one here, restart, let
+   the portal sign with it, then remove the old key after the last old tickets have expired
+   (at most an hour).

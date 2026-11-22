@@ -1,0 +1,111 @@
+{
+  "description": "Portal game ticket v1 vectors; see docs/portal-ticket.md. Rebuild each valid ticket from its fields, append the signature, check the SHA-256 and verify at verify_at. Invalid cases mutate valid ticket `base` and must be rejected.",
+  "invalid": [
+    {
+      "audience": "play.magtest.online",
+      "base": 0,
+      "case": "nonce byte changed",
+      "expect": "bad_signature",
+      "mutation": {
+        "xor_byte": {
+          "offset": 30,
+          "value": 1
+        }
+      },
+      "verify_at": 1800000000
+    },
+    {
+      "audience": "play.magtest.online",
+      "base": 0,
+      "case": "signature byte changed",
+      "expect": "bad_signature",
+      "mutation": {
+        "xor_byte": {
+          "offset": 141,
+          "value": 128
+        }
+      },
+      "verify_at": 1800000000
+    },
+    {
+      "audience": "play.magtest.online",
+      "base": 0,
+      "case": "unknown key ID",
+      "expect": "unknown_key",
+      "mutation": {
+        "set_byte": {
+          "offset": 5,
+          "value": 2
+        }
+      },
+      "verify_at": 1800000000
+    },
+    {
+      "audience": "play.magtest.online",
+      "base": 0,
+      "case": "truncated",
+      "expect": "malformed",
+      "mutation": {
+        "truncate": 141
+      },
+      "verify_at": 1800000000
+    },
+    {
+      "audience": "play.magtest.online",
+      "base": 0,
+      "case": "expired",
+      "expect": "expired",
+      "mutation": null,
+      "verify_at": 1800000600
+    },
+    {
+      "audience": "play.magtest.online",
+      "base": 0,
+      "case": "issued too far ahead",
+      "expect": "not_yet_valid",
+      "mutation": null,
+      "verify_at": 1799999939
+    },
+    {
+      "audience": "play.example.test",
+      "base": 0,
+      "case": "other server",
+      "expect": "wrong_audience",
+      "mutation": null,
+      "verify_at": 1800000000
+    }
+  ],
+  "key": {
+    "derivation": "P-256 private scalar = SHA-256 of the ASCII text 'mag-portal ticket test vector key v1'. Test use only.",
+    "key_id": 1,
+    "spki_base64": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEXvgof3Vza4+kYlYDHvNkzoWnOiYVUPKfTwLOxfsFFv2tfRNAngFLgL48OzLv2VMJ+iYgvwndYncrd9TFMMLxrw=="
+  },
+  "valid": [
+    {
+      "account_id": 42,
+      "audience": "play.magtest.online",
+      "expires_at": 1800000600,
+      "issued_at": 1800000000,
+      "key_id": 1,
+      "length": 142,
+      "nonce_hex": "30313233343536373839616263646566",
+      "player_name": "Alpha_Ranger-07",
+      "signature_hex": "840830ee3e3e0976095acafe8c66924c08d3ef74e29d5a8f5f8ba4fd2d90c4525bafaef99394ae8eeb563b6764d5e6ba4f9e9d6a780e2818efff0ae6d2f5f70d",
+      "ticket_sha256": "c688089953d320115c1aeeadb3680719ef16dde943b9fbb9a8e50f3be8a114ee",
+      "verify_at": 1800000001
+    },
+    {
+      "account_id": 4294967295,
+      "audience": "x",
+      "expires_at": 1900003600,
+      "issued_at": 1900000000,
+      "key_id": 1,
+      "length": 112,
+      "nonce_hex": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+      "player_name": "abc",
+      "signature_hex": "24c85522fb4e1814f9d01ae75ec4de6ec9519d0c649b780fefbb24bd714968b83e4056a1e11a2d66d76c58c7b1b091d6470b4934cbcb4b031075ac0537d5e9e3",
+      "ticket_sha256": "979277951e7e9156e5a48da08b4a6fee4ce97b62767e5d15c61ee5e4c3e80629",
+      "verify_at": 1900000001
+    }
+  ]
+}

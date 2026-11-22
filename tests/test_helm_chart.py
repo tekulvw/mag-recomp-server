@@ -111,6 +111,34 @@ class ChartTests(unittest.TestCase):
         for flag in ('--log-segment-bytes', '--log-retention-s'):
             render({'data': {'gameplayExtraArgs': [flag, '60']}}, ok=False)
 
+    def test_optional_portal_tickets(self):
+        def medius_env(docs):
+            return [{e['name']: e.get('value') for e in c.get('env', [])}
+                    for d in docs if d['kind'] == 'Deployment'
+                    for c in d['spec']['template']['spec']['containers'] if c['name'] in ('medius', 'maps')]
+        names = ('MAG_PORTAL_TICKETS', 'MAG_PORTAL_TICKET_AUDIENCE', 'MAG_PORTAL_TICKET_KEYS')
+        for off in (None, {'portalTickets': {'mode': 'off', 'audience': 'play.example.test', 'keys': {'1': 'QUJD'}}}):
+            envs = medius_env(render(off))
+            self.assertEqual(len(envs), 2)
+            self.assertTrue(all(name not in env for env in envs for name in names))
+        key = 'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEXvgof3Vza4+kYlYDHvNkzoWnOiYVUPKfTwLOxfsFFv2tfRNAngFLgL48OzLv2VMJ+iYgvwndYncrd9TFMMLxrw=='
+        envs = medius_env(render({'portalTickets': {'mode': 'required', 'audience': 'play.example.test', 'keys': {'2': key, '1': key}}}))
+        self.assertEqual(len(envs), 2)
+        for env in envs:
+            self.assertEqual(env['MAG_PORTAL_TICKETS'], 'required')
+            self.assertEqual(env['MAG_PORTAL_TICKET_AUDIENCE'], 'play.example.test')
+            self.assertEqual(env['MAG_PORTAL_TICKET_KEYS'], f'1:{key},2:{key}')
+        self.assertIn('keys', render({'portalTickets': {'mode': 'required', 'audience': 'play.example.test'}}, ok=False))
+        for invalid in ({'mode': 'required', 'keys': {'1': key}},
+                        {'mode': 'required', 'audience': '', 'keys': {'1': key}},
+                        {'mode': 'required', 'audience': 'play.example.test', 'keys': {}},
+                        {'mode': 'on', 'audience': 'play.example.test', 'keys': {'1': key}},
+                        {'mode': 'required', 'audience': 'Play.Example.Test', 'keys': {'1': key}},
+                        {'mode': 'required', 'audience': 'play.example.test', 'keys': {'256': key}},
+                        {'mode': 'required', 'audience': 'play.example.test', 'keys': {'1': 'not base64!'}},
+                        {'mode': 'required', 'audience': 'play.example.test', 'keys': {'1': key}, 'extra': True}):
+            render({'portalTickets': invalid}, ok=False)
+
     def test_optional_starting_level(self):
         def medius_env(docs):
             return [{e['name']: e.get('value') for e in c.get('env', [])}

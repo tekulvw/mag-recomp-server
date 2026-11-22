@@ -160,19 +160,24 @@ namespace Server.Medius
                             data.MagMasSession.CharacterDataEnabled = Program.Settings.EnableMagCharacterData;
                             data.MagMasSession.LoginRegistry = Program.MagLoginTickets;
                             data.MagMasSession.CharacterStore = Program.CreateCharacterStore();
+                            data.MagMasSession.PortalTickets = Program.PortalTickets;
                             replies = data.MagMasSession.HandleMany(true, data.ApplicationId, plugin, Utils.GetHighPrecisionUtcTime());
                             sessionState = data.MagMasSession.State + "/" + data.MagMasSession.StorageStatus;
+                            if (Program.PortalTickets != null) sessionState += "/ticket=" + data.MagMasSession.PortalTicketStatus;
                         }
                         else
                         {
                             data.MagMapsSession.DevelopmentAuthEnabled = Program.Settings.EnableMagDevelopmentAuth;
                             data.MagMapsSession.CharacterStorageEnabled = Program.Settings.EnableMagCharacterStorage;
                             data.MagMapsSession.CharacterStore = Program.CreateCharacterStore();
+                            data.MagMapsSession.PortalTickets = Program.PortalTickets;
                             replies = data.MagMapsSession.HandleMany(true, data.ApplicationId, plugin, Utils.GetHighPrecisionUtcTime());
                             sessionState = data.MagMapsSession.State + "/" + data.MagMapsSession.StorageStatus;
+                            if (Program.PortalTickets != null) sessionState += "/ticket=" + data.MagMapsSession.PortalTicketStatus;
                         }
+                        // Portal tickets are bearer credentials until they expire: never log their bytes.
                         if (data.ApplicationId == 20231 && replies.Count == 0)
-                            Logger.Info($"RETAIL MAG no-reply app=20231 plugin={plugin.PluginId} length={plugin.Payload.Length} payload={BitConverter.ToString(plugin.Payload).Replace("-", "").ToLowerInvariant()}");
+                            Logger.Info($"RETAIL MAG no-reply app=20231 plugin={plugin.PluginId} length={plugin.Payload.Length} payload={(Program.PortalTickets != null && MagPortalTicketPolicy.IsTicketMessage(data.ApplicationId, appMessageId) ? "redacted" : BitConverter.ToString(plugin.Payload).Replace("-", "").ToLowerInvariant())}");
                         Logger.Info($"MAG {pluginService} app={data.ApplicationId} plugin={plugin.PluginId} appMessage=0x{appMessageId:X4} length={plugin.Payload.Length} state={sessionState} replies={replies.Count}");
                         foreach (var reply in replies) Queue(reply, clientChannel);
                         break;

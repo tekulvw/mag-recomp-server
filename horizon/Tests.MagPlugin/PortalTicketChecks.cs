@@ -1,0 +1,441 @@
+using System.Numerics;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using RT.Models;
+using RT.Models.MAG;
+using Server.Common.Stream;
+using Server.Medius;
+
+// Portal ticket checks. The vectors are the portal's own synthetic test vectors (a copy of
+// portal/tests/ticket-vectors.json); every other ticket and key is generated here in memory.
+internal static class PortalTicketChecks
+{
+    static void Check(bool condition, string message)
+    {
+        if (!condition) throw new Exception(message);
+    }
+
+    static void Throws(Func<object> action, string needle)
+    {
+        try { action(); }
+        catch (ArgumentException e)
+        {
+            Check(e.Message.Contains(needle), "Wrong configuration error: " + e.Message);
+            return;
+        }
+        throw new Exception("Configuration unexpectedly accepted; expected an error naming " + needle);
+    }
+
+    static JsonElement LoadVectors()
+    {
+        string path = Path.Combine(AppContext.BaseDirectory, "portal-ticket-vectors.json");
+        return JsonDocument.Parse(File.ReadAllBytes(path)).RootElement;
+    }
+
+    static DateTime At(long unix) => DateTime.UnixEpoch.AddSeconds(unix);
+
+    // Ticket version 1 layout from docs/portal-ticket.md.
+    static byte[] Unsigned(byte keyId, long issued, long expires, uint accountId, byte[] nonce, string audience, string name,
+        string magic = "MAGT", byte version = 1)
+    {
+        var bytes = new List<byte>();
+        bytes.AddRange(Encoding.ASCII.GetBytes(magic));
+        bytes.Add(version);
+        bytes.Add(keyId);
+        for (int shift = 56; shift >= 0; shift -= 8) bytes.Add((byte)((ulong)issued >> shift));
+        for (int shift = 56; shift >= 0; shift -= 8) bytes.Add((byte)((ulong)expires >> shift));
+        for (int shift = 24; shift >= 0; shift -= 8) bytes.Add((byte)(accountId >> shift));
+        bytes.AddRange(nonce);
+        bytes.Add((byte)audience.Length);
+        bytes.AddRange(Encoding.ASCII.GetBytes(audience));
+        bytes.Add((byte)name.Length);
+        bytes.AddRange(Encoding.ASCII.GetBytes(name));
+        return bytes.ToArray();
+    }
+
+    static byte[] Sign(ECDsa key, byte[] unsigned) =>
+        unsigned.Concat(key.SignData(unsigned, HashAlgorithmName.SHA256, DSASignatureFormat.IeeeP1363FixedFieldConcatenation)).ToArray();
+
+    static byte[] Nonce(byte seed) => Enumerable.Range(0, 16).Select(i => (byte)(seed + i)).ToArray();
+
+    static MagPortalTicketSettings Settings(string audience, params (byte id, byte[] spki)[] keys) =>
+        MagPortalTicketSettings.Load(name => name switch
+        {
+            MagPortalTicketSettings.ModeVariable => "required",
+            MagPortalTicketSettings.KeysVariable => string.Join(",", keys.Select(k => k.id + ":" + Convert.ToBase64String(k.spki))),
+            MagPortalTicketSettings.AudienceVariable => audience,
+            _ => null
+        });
+
+    static MagNpAuthenticateRequest Chunk(byte[] data, int fullSize, bool last, bool retail = false)
+    {
+        var request = retail ? new MagRetailNpAuthenticateRequest() : new MagNpAuthenticateRequest();
+        request.FullTicketSize = (ushort)fullSize;
+        request.TicketChunkSize = (ushort)data.Length;
+        request.LastMessage = last;
+        data.CopyTo(request.TicketChunk, 0);
+        return request;
+    }
+
+    static MagPortalAuthentication Send(MagPortalTicketPolicy policy, byte[] ticket) =>
+        policy.Authenticate(new MagPortalTicketAssembly(), Chunk(ticket, ticket.Length, true));
+
+    /// <summary>Every portal vector, rebuilt from its fields, plus the high-s form of the first.</summary>
+    public static void Vectors()
+    {
+        var root = LoadVectors();
+        var key = root.GetProperty("key");
+        byte keyId = (byte)key.GetProperty("key_id").GetInt32();
+        byte[] spki = Convert.FromBase64String(key.GetProperty("spki_base64").GetString());
+        var tickets = new List<byte[]>();
+        foreach (var vector in root.GetProperty("valid").EnumerateArray())
+        {
+            byte[] unsigned = Unsigned((byte)vector.GetProperty("key_id").GetInt32(), vector.GetProperty("issued_at").GetInt64(),
+                vector.GetProperty("expires_at").GetInt64(), vector.GetProperty("account_id").GetUInt32(),
+                Convert.FromHexString(vector.GetProperty("nonce_hex").GetString()), vector.GetProperty("audience").GetString(),
+                vector.GetProperty("player_name").GetString());
+            byte[] ticket = unsigned.Concat(Convert.FromHexString(vector.GetProperty("signature_hex").GetString())).ToArray();
+            Check(ticket.Length == vector.GetProperty("length").GetInt32(), "Rebuilt vector length");
+            Check(Convert.ToHexString(SHA256.HashData(ticket)).ToLowerInvariant() == vector.GetProperty("ticket_sha256").GetString(),
+                "Rebuilt vector hash does not match the portal's");
+            long at = vector.GetProperty("verify_at").GetInt64();
+            var policy = new MagPortalTicketPolicy(Settings(vector.GetProperty("audience").GetString(), (keyId, spki)), () => At(at));
+            var result = Send(policy, ticket);
+            Check(result.Accepted, "Valid vector rejected: " + result.Reason.Code());
+            Check(result.Account == vector.GetProperty("player_name").GetString().ToLowerInvariant() &&
+                result.AccountId == vector.GetProperty("account_id").GetUInt32(), "Valid vector bound the wrong identity");
+            tickets.Add(ticket);
+        }
+
+        foreach (var vector in root.GetProperty("invalid").EnumerateArray())
+        {
+            byte[] ticket = tickets[vector.GetProperty("base").GetInt32()].ToArray();
+            var mutation = vector.GetProperty("mutation");
+            if (mutation.ValueKind == JsonValueKind.Object)
+            {
+                if (mutation.TryGetProperty("xor_byte", out var xor))
+                    ticket[xor.GetProperty("offset").GetInt32()] ^= (byte)xor.GetProperty("value").GetInt32();
+                else if (mutation.TryGetProperty("set_byte", out var set))
+                    ticket[set.GetProperty("offset").GetInt32()] = (byte)set.GetProperty("value").GetInt32();
+                else if (mutation.TryGetProperty("truncate", out var truncate))
+                    ticket = ticket.Take(truncate.GetInt32()).ToArray();
+                else throw new Exception("Unknown vector mutation in " + vector.GetProperty("case").GetString());
+            }
+            long at = vector.GetProperty("verify_at").GetInt64();
+            var policy = new MagPortalTicketPolicy(Settings(vector.GetProperty("audience").GetString(), (keyId, spki)), () => At(at));
+            var result = Send(policy, ticket);
+            Check(!result.Accepted && result.Account == null && result.Reason.Code() == vector.GetProperty("expect").GetString(),
+                "Invalid vector '" + vector.GetProperty("case").GetString() + "' gave " + result.Reason.Code());
+        }
+
+        // Either s form verifies: replace s with n - s in the first vector.
+        var n = BigInteger.Parse("0FFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551", System.Globalization.NumberStyles.HexNumber);
+        byte[] high = tickets[0].ToArray();
+        var s = new BigInteger(high.AsSpan(high.Length - 32), isUnsigned: true, isBigEndian: true);
+        byte[] flipped = (n - s).ToByteArray(isUnsigned: true, isBigEndian: true);
+        Check(flipped.Length <= 32, "High-s form overflowed");
+        Array.Clear(high, high.Length - 32, 32);
+        flipped.CopyTo(high, high.Length - flipped.Length);
+        Check(!high.SequenceEqual(tickets[0]), "High-s form equals the original");
+        var first = root.GetProperty("valid")[0];
+        var highPolicy = new MagPortalTicketPolicy(Settings(first.GetProperty("audience").GetString(), (keyId, spki)),
+            () => At(first.GetProperty("verify_at").GetInt64()));
+        Check(Send(highPolicy, high).Accepted, "High-s signature rejected");
+    }
+
+    /// <summary>Rules the vectors do not cover, with freshly generated keys.</summary>
+    public static void Rules()
+    {
+        using var one = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var two = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var stranger = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        const long now = 1_900_000_000;
+        const string audience = "game.example.test";
+        var settings = Settings(audience, (1, one.ExportSubjectPublicKeyInfo()), (7, two.ExportSubjectPublicKeyInfo()));
+        byte seed = 0;
+        MagPortalTicketReason Verify(byte[] ticket) =>
+            Send(new MagPortalTicketPolicy(settings, () => At(now)), ticket).Reason;
+        byte[] Ticket(ECDsa key, byte id = 1, long issued = now - 10, long expires = now + 590, uint account = 9, string name = "Bravo", string magic = "MAGT", byte version = 1) =>
+            Sign(key, Unsigned(id, issued, expires, account, Nonce(seed += 16), audience, name, magic, version));
+
+        Check(Verify(Ticket(one)) == MagPortalTicketReason.Accepted, "Baseline ticket rejected");
+        Check(Verify(Ticket(two, 7)) == MagPortalTicketReason.Accepted, "Second configured key (rotation) rejected");
+        Check(Verify(Ticket(two, 1)) == MagPortalTicketReason.BadSignature, "Ticket verified under another key ID's key");
+        Check(Verify(Ticket(stranger)) == MagPortalTicketReason.BadSignature, "Unconfigured signer accepted");
+        Check(Verify(Ticket(one, 2)) == MagPortalTicketReason.UnknownKey, "Unknown key ID accepted");
+        Check(Verify(Ticket(one, magic: "MAGX")) == MagPortalTicketReason.Malformed, "Bad magic accepted");
+        Check(Verify(Ticket(one, version: 2)) == MagPortalTicketReason.Malformed, "Unknown version accepted");
+        Check(Verify(Ticket(one, name: "Ab")) == MagPortalTicketReason.Malformed, "Two-character name accepted");
+        Check(Verify(Ticket(one, name: "Abcdefghijklmnop")) == MagPortalTicketReason.Malformed, "Sixteen-character name accepted");
+        Check(Verify(Ticket(one).Concat(new byte[] { 0 }).ToArray()) == MagPortalTicketReason.Malformed, "Trailing byte accepted");
+        var emptyAudience = Sign(one, Unsigned(1, now, now + 60, 9, Nonce(200), "", "Bravo"));
+        Check(Verify(emptyAudience) == MagPortalTicketReason.Malformed, "Empty audience accepted");
+        Check(Verify(Ticket(one, issued: now - 100, expires: now - 100 + 3601)) == MagPortalTicketReason.BadLifetime, "Lifetime over 3600 s accepted");
+        Check(Verify(Ticket(one, issued: now - 100, expires: now - 100 + 3600)) == MagPortalTicketReason.Accepted, "Lifetime of exactly 3600 s rejected");
+        Check(Verify(Ticket(one, issued: now + 5, expires: now + 5)) == MagPortalTicketReason.BadLifetime, "Expiry equal to issue accepted");
+        Check(Verify(Ticket(one, issued: now + 60, expires: now + 600)) == MagPortalTicketReason.Accepted, "60 s future skew rejected");
+        Check(Verify(Ticket(one, issued: now + 61, expires: now + 600)) == MagPortalTicketReason.NotYetValid, "61 s future skew accepted");
+        Check(Verify(Ticket(one, issued: now - 600, expires: now)) == MagPortalTicketReason.Expired, "Ticket accepted at its expiry");
+        Check(Verify(Ticket(one, account: 0)) == MagPortalTicketReason.BadIdentity, "Account ID 0 accepted");
+        Check(Verify(Ticket(one, name: "9bravo")) == MagPortalTicketReason.BadIdentity, "Name starting with a digit accepted");
+        Check(Verify(Ticket(one, name: "Bra vo")) == MagPortalTicketReason.BadIdentity, "Name with a space accepted");
+        var other = Sign(one, Unsigned(1, now, now + 60, 9, Nonce(220), "game.example.tes", "Bravo"));
+        Check(Verify(other) == MagPortalTicketReason.WrongAudience, "Audience prefix accepted");
+
+        var policy = new MagPortalTicketPolicy(settings, () => At(now));
+        var signed = Ticket(one);
+        var nonzeroRsa = Chunk(signed, signed.Length, true);
+        nonzeroRsa.RsaWords[3] = 1;
+        Check(policy.Authenticate(new MagPortalTicketAssembly(), nonzeroRsa).Reason == MagPortalTicketReason.BadHeader, "Non-zero RSA words accepted");
+    }
+
+    public static void Reassembly()
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        const long now = 1_900_000_000;
+        var settings = Settings("game.example.test", (1, key.ExportSubjectPublicKeyInfo()));
+        byte seed = 0;
+        byte[] Ticket() => Sign(key, Unsigned(1, now, now + 600, 77, Nonce(seed += 16), "game.example.test", "Charlie_9"));
+        var policy = new MagPortalTicketPolicy(settings, () => At(now));
+
+        // Three chunks that add up exactly.
+        var ticket = Ticket();
+        var assembly = new MagPortalTicketAssembly();
+        Check(policy.Authenticate(assembly, Chunk(ticket[..40], ticket.Length, false)).Reason == MagPortalTicketReason.Pending, "First chunk not pending");
+        Check(assembly.InProgress, "First chunk not kept");
+        Check(policy.Authenticate(assembly, Chunk(ticket[40..100], ticket.Length, false)).Reason == MagPortalTicketReason.Pending, "Second chunk not pending");
+        var done = policy.Authenticate(assembly, Chunk(ticket[100..], ticket.Length, true));
+        Check(done.Accepted && done.Account == "charlie_9" && done.AccountId == 77 && !assembly.InProgress, "Three-chunk ticket rejected");
+
+        MagPortalTicketReason Run(params MagNpAuthenticateRequest[] chunks)
+        {
+            var fresh = new MagPortalTicketAssembly();
+            var reason = MagPortalTicketReason.Pending;
+            foreach (var chunk in chunks)
+            {
+                reason = policy.Authenticate(fresh, chunk).Reason;
+                if (reason != MagPortalTicketReason.Pending) break;
+            }
+            Check(!fresh.InProgress, "Finished exchange left a partial ticket");
+            return reason;
+        }
+        ticket = Ticket();
+        int full = ticket.Length;
+        var bad = new Dictionary<string, MagNpAuthenticateRequest[]>
+        {
+            ["full size changes"] = new[] { Chunk(ticket[..40], full, false), Chunk(ticket[40..], full + 1, true) },
+            ["chunks overflow"] = new[] { Chunk(ticket[..100], full, false), Chunk(ticket[50..], full, true) },
+            ["last flag too early"] = new[] { Chunk(ticket[..40], full, false), Chunk(ticket[40..100], full, true) },
+            ["full without last flag"] = new[] { Chunk(ticket, full, false) },
+            ["empty chunk"] = new[] { Chunk(Array.Empty<byte>(), full, false) },
+            ["too large"] = new[] { Chunk(new byte[900], 2049, false) },
+            ["too many chunks"] = Enumerable.Range(0, 9).Select(i => Chunk(new byte[] { 1 }, 20, false)).ToArray(),
+        };
+        foreach (var (name, chunks) in bad)
+            Check(Run(chunks) == MagPortalTicketReason.BadChunk, "Bad chunk sequence accepted: " + name);
+        var dirty = Chunk(ticket, full, true);
+        dirty.TicketChunk[full] = 1;
+        Check(Run(dirty) == MagPortalTicketReason.BadChunk, "Data after the chunk size accepted");
+        Check(Run(Chunk(ticket, full, true)) == MagPortalTicketReason.Accepted, "Untouched ticket rejected after bad sequences");
+
+        // A rejected exchange discards its partial ticket; a session gets three failed attempts.
+        assembly = new MagPortalTicketAssembly();
+        ticket = Ticket();
+        policy.Authenticate(assembly, Chunk(ticket[..40], ticket.Length, false));
+        Check(policy.Authenticate(assembly, Chunk(ticket[40..], ticket.Length + 5, true)).Reason == MagPortalTicketReason.BadChunk, "Changed size accepted");
+        Check(policy.Authenticate(assembly, Chunk(ticket, ticket.Length, true)).Accepted, "Clean retry rejected after a discarded chunk");
+        assembly = new MagPortalTicketAssembly();
+        for (int i = 0; i < MagPortalTicketPolicy.MaximumFailuresPerSession; i++)
+            Check(policy.Authenticate(assembly, Chunk(Encoding.ASCII.GetBytes("synthetic"), 9, true)).Reason == MagPortalTicketReason.Malformed, "Plain name not malformed");
+        Check(policy.Authenticate(assembly, Chunk(Ticket(), Ticket().Length, true)).Reason == MagPortalTicketReason.TooManyAttempts, "Unlimited attempts");
+    }
+
+    public static void Replay()
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        long now = 1_900_000_000;
+        var settings = Settings("game.example.test", (1, key.ExportSubjectPublicKeyInfo()));
+        byte[] Ticket(byte seed, long expires) => Sign(key, Unsigned(1, now, expires, 5, Nonce(seed), "game.example.test", "Delta"));
+        var policy = new MagPortalTicketPolicy(settings, () => At(now));
+        var ticket = Ticket(1, now + 600);
+        Check(Send(policy, ticket).Accepted, "First use rejected");
+        Check(Send(policy, ticket).Reason == MagPortalTicketReason.Replayed, "Replay accepted");
+        Check(Send(policy, Ticket(1, now + 300)).Reason == MagPortalTicketReason.Replayed, "Nonce reuse in a new ticket accepted");
+        Check(Send(new MagPortalTicketPolicy(settings, () => At(now)), ticket).Accepted, "Nonces leaked between independent caches");
+
+        // Bounded: a full cache of live nonces refuses new tickets, and frees expired ones.
+        var small = new MagPortalTicketPolicy(settings, () => At(now), new MagPortalNonceCache(1));
+        Check(Send(small, Ticket(40, now + 60)).Accepted, "First ticket in a small cache rejected");
+        Check(Send(small, Ticket(41, now + 600)).Reason == MagPortalTicketReason.ReplayCacheFull, "Full cache forgot a live nonce");
+        now += 61;
+        var later = Ticket(42, now + 600);
+        Check(Send(small, later).Accepted && small.Nonces.Count == 1, "Expired nonce not purged");
+
+        // Thread-safe: one of many concurrent uses of a nonce wins.
+        var cache = new MagPortalNonceCache();
+        int accepted = 0;
+        Parallel.For(0, 64, _ => { if (cache.TryAccept(Nonce(90), now + 600, now) == MagPortalTicketReason.Accepted) Interlocked.Increment(ref accepted); });
+        Check(accepted == 1, "Concurrent nonce use accepted " + accepted + " times");
+    }
+
+    public static void Configuration()
+    {
+        using var p256 = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var p384 = ECDsa.Create(ECCurve.NamedCurves.nistP384);
+        using var rsa = RSA.Create(2048);
+        string good = Convert.ToBase64String(p256.ExportSubjectPublicKeyInfo());
+        MagPortalTicketSettings Load(string mode, string keys, string audience) => MagPortalTicketSettings.Load(name => name switch
+        {
+            MagPortalTicketSettings.ModeVariable => mode,
+            MagPortalTicketSettings.KeysVariable => keys,
+            MagPortalTicketSettings.AudienceVariable => audience,
+            _ => null
+        });
+
+        // Off by default; off ignores the other variables, so existing deployments are unchanged.
+        foreach (var off in new[] { Load(null, null, null), Load("", "junk", "UPPER"), Load("off", "junk", null) })
+            Check(off.Mode == MagPortalTicketMode.Off && MagPortalTicketPolicy.FromSettings(off) == null, "Off mode built a policy");
+
+        var two = Load("required", " 1:" + good + " , 200:" + good, "play.example.test");
+        Check(two.Mode == MagPortalTicketMode.Required && two.Keys.Count == 2 && two.Keys.ContainsKey(200) && two.Audience == "play.example.test",
+            "Two-key configuration");
+        Check(MagPortalTicketPolicy.FromSettings(two) != null, "Required mode built no policy");
+
+        Throws(() => Load("on", "1:" + good, "a"), MagPortalTicketSettings.ModeVariable);
+        Throws(() => Load("Required", "1:" + good, "a"), MagPortalTicketSettings.ModeVariable);
+        Throws(() => Load("required", null, "a"), MagPortalTicketSettings.KeysVariable);
+        Throws(() => Load("required", " ", "a"), MagPortalTicketSettings.KeysVariable);
+        Throws(() => Load("required", "1:" + good, null), MagPortalTicketSettings.AudienceVariable);
+        foreach (string audience in new[] { "Play.example.test", "play_example", new string('a', 64), "play.example.test/" })
+            Throws(() => Load("required", "1:" + good, audience), MagPortalTicketSettings.AudienceVariable);
+        foreach (string keys in new[] { good, "1=" + good, "256:" + good, "-1:" + good, "x:" + good, "1:", "1:not base64!",
+            "1:" + good + ",1:" + good, "1:" + good + ",", "1:" + Convert.ToBase64String(p384.ExportSubjectPublicKeyInfo()),
+            "1:" + Convert.ToBase64String(rsa.ExportSubjectPublicKeyInfo()), "1:" + Convert.ToBase64String(p256.ExportSubjectPublicKeyInfo().Concat(new byte[] { 0 }).ToArray()) })
+            Throws(() => Load("required", keys, "play.example.test"), MagPortalTicketSettings.KeysVariable);
+        // Errors name the variable, never the key material.
+        try { Load("required", "1:" + good + "x", "a"); }
+        catch (ArgumentException e) { Check(!e.Message.Contains(good[..20]), "Configuration error echoed key material"); }
+    }
+
+    // ---- Sessions: unchanged off mode, and required mode on the wire.
+
+    static IReadOnlyList<RT_MSG_SERVER_PLUGIN_TO_APP> Wire(Func<RT_MSG_CLIENT_APP_TO_PLUGIN, IReadOnlyList<RT_MSG_SERVER_PLUGIN_TO_APP>> session,
+        MagMessage message, int app)
+    {
+        byte[] payload = MagMessageCodec.SerializeForApplication(message, app);
+        using var stream = new MemoryStream();
+        using (var writer = new BinaryWriter(stream, Encoding.ASCII, true))
+        { writer.Write((ushort)payload.Length); writer.Write((byte)0); writer.Write(payload); }
+        stream.Position = 0;
+        var envelope = new RT_MSG_CLIENT_APP_TO_PLUGIN();
+        using var reader = new MessageReader(stream);
+        envelope.Deserialize(reader);
+        return session(envelope);
+    }
+
+    static bool Succeeded(IReadOnlyList<RT_MSG_SERVER_PLUGIN_TO_APP> replies, int app) =>
+        replies.Count == 1 && MagMessageCodec.TryParseForApplication(replies[0].Payload, app, out var parsed) &&
+        parsed is MagNpAuthenticateResponse response && response.Success;
+
+    static MagNpAuthenticateRequest Plain(int app)
+    {
+        var plain = Chunk(Encoding.ASCII.GetBytes("Synthetic"), 9, true, app == 20231);
+        return plain;
+    }
+
+    public static void Sessions()
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        const long now = 1_900_000_000;
+        var settings = Settings("game.example.test", (1, key.ExportSubjectPublicKeyInfo()));
+        byte seed = 0;
+        byte[] Ticket() => Sign(key, Unsigned(1, now - 5, now + 600, 1234, Nonce(seed += 16), "game.example.test", "Echo_Ranger-07"));
+        int previousApp = Server.Medius.Program.Settings.MagApplicationId;
+        var clock = At(now);
+        try
+        {
+            foreach (int app in new[] { 20230, 20231 })
+            {
+                Server.Medius.Program.Settings.MagApplicationId = app;
+                bool retail = app == 20231;
+                MagMasSession Mas(bool development, MagPortalTicketPolicy policy)
+                {
+                    var mas = new MagMasSession { DevelopmentAuthEnabled = development, PortalTickets = policy };
+                    Wire(e => mas.HandleMany(true, app, e, clock), new MagHello(), app);
+                    Wire(e => mas.HandleMany(true, app, e, clock), new MagProtocolInfo { ProtocolVersion = Server.Medius.Program.Settings.MagProtocolVersion }, app);
+                    Check(mas.State == MagMasSession.SessionState.ProtocolAcknowledged, "MAS handshake");
+                    return mas;
+                }
+
+                // Off: the development name policy is unchanged and no portal state is touched.
+                var off = Mas(true, null);
+                Check(Succeeded(Wire(e => off.HandleMany(true, app, e, clock), Plain(app), app), app) &&
+                    off.AuthenticatedAccount == "synthetic" && off.PortalAccountId == 0 && off.PortalTicketStatus == "inactive",
+                    "Off mode development sign-in changed");
+                var disabled = Mas(false, null);
+                Check(Wire(e => disabled.HandleMany(true, app, e, clock), Plain(app), app).Count == 0 &&
+                    disabled.State == MagMasSession.SessionState.ProtocolAcknowledged, "Off mode signed in without development auth");
+
+                // Required: the plain name is refused even with development auth on; a ticket signs in.
+                var policy = new MagPortalTicketPolicy(settings, () => clock);
+                var mas = Mas(true, policy);
+                Check(Wire(e => mas.HandleMany(true, app, e, clock), Plain(app), app).Count == 0 &&
+                    mas.State == MagMasSession.SessionState.ProtocolAcknowledged && mas.AuthenticatedAccount == null &&
+                    mas.PortalTicketStatus == "malformed", "Required mode accepted the plain development name");
+                var ticket = Ticket();
+                Check(Wire(e => mas.HandleMany(true, app, e, clock), Chunk(ticket[..60], ticket.Length, false, retail), app).Count == 0 &&
+                    mas.PortalTicketStatus == "pending", "First wire chunk answered");
+                Check(Succeeded(Wire(e => mas.HandleMany(true, app, e, clock), Chunk(ticket[60..], ticket.Length, true, retail), app), app) &&
+                    mas.State == MagMasSession.SessionState.LocalDevelopmentAuthenticated && mas.AuthenticatedAccount == "echo_ranger-07" &&
+                    mas.PortalAccountId == 1234 && mas.PortalTicketStatus == "accepted", "Required mode ticket sign-in");
+                var replay = Mas(false, policy);
+                Check(Wire(e => replay.HandleMany(true, app, e, clock), Chunk(ticket, ticket.Length, true, retail), app).Count == 0 &&
+                    replay.PortalTicketStatus == "replayed" && replay.AuthenticatedAccount == null, "Replayed ticket signed in on a second session");
+
+                // Without development auth the portal still opens the account stack: character creation works,
+                // and the NP ID's online ID must match the ticket's name ignoring case.
+                var store = Path.Combine(Path.GetTempPath(), "mag-portal-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(store);
+                try
+                {
+                    var created = Mas(false, policy);
+                    created.CharacterStorageEnabled = true;
+                    created.CharacterStore = new LocalCharacterStore(Path.Combine(store, "characters.json"));
+                    var fresh = Ticket();
+                    Check(Succeeded(Wire(e => created.HandleMany(true, app, e, clock), Chunk(fresh, fresh.Length, true, retail), app), app), "Ticket sign-in for creation");
+                    byte[] npId = new byte[36];
+                    Encoding.ASCII.GetBytes("Echo_Ranger-07").CopyTo(npId, 0);
+                    var reply = Wire(e => created.HandleMany(true, app, e, clock),
+                        new MagCreateCharacterRequest { AccountName = "Echo", Faction = 1, HeadId = 2, VoiceId = 3, UniverseId = 26, NpId = npId }, app);
+                    Check(reply.Count == 1 && created.StorageStatus == "local-profile-committed" &&
+                        created.CharacterStore.ReadForAccount("echo_ranger-07").Single().NpId.SequenceEqual(npId),
+                        "Portal session with a matching NP ID could not create its character: " + created.StorageStatus);
+                    Encoding.ASCII.GetBytes("Echo_Ranger-08").CopyTo(npId, 0);
+                    var mismatch = created.CharacterStore.CreateForAccount(new MagCreateCharacterRequest { AccountName = "Other", Faction = 1, HeadId = 2, VoiceId = 3, UniverseId = 26, NpId = npId },
+                        created.AuthenticatedAccount);
+                    Check(mismatch.Reason == "np-id-account-mismatch", "NP ID for another name accepted: " + mismatch.Reason);
+                }
+                finally { Directory.Delete(store, true); }
+
+                // MAPS: same policy, its own state machine.
+                var maps = new MagMapsSession { DevelopmentAuthEnabled = true, PortalTickets = new MagPortalTicketPolicy(settings, () => clock) };
+                Wire(e => maps.HandleMany(true, app, e, clock), new MagHello(), app);
+                if (!retail) Wire(e => maps.HandleMany(true, app, e, clock), new MagUniverseListRequest(), app);
+                Check(Wire(e => maps.HandleMany(true, app, e, clock), Plain(app), app).Count == 0 && maps.AuthenticatedAccount == null,
+                    "MAPS required mode accepted the plain name");
+                var mapsTicket = Ticket();
+                Check(Succeeded(Wire(e => maps.HandleMany(true, app, e, clock), Chunk(mapsTicket, mapsTicket.Length, true, retail), app), app) &&
+                    maps.AuthenticatedAccount == "echo_ranger-07" && maps.PortalAccountId == 1234, "MAPS ticket sign-in");
+                var mapsOff = new MagMapsSession { DevelopmentAuthEnabled = true };
+                Wire(e => mapsOff.HandleMany(true, app, e, clock), new MagHello(), app);
+                if (!retail) Wire(e => mapsOff.HandleMany(true, app, e, clock), new MagUniverseListRequest(), app);
+                Check(Succeeded(Wire(e => mapsOff.HandleMany(true, app, e, clock), Plain(app), app), app) && mapsOff.AuthenticatedAccount == "synthetic",
+                    "MAPS off mode development sign-in changed");
+            }
+            Check(MagPortalTicketPolicy.IsTicketMessage(20231, 0x0034) && MagPortalTicketPolicy.IsTicketMessage(20230, 0x0031) &&
+                !MagPortalTicketPolicy.IsTicketMessage(20231, 0x0031), "Ticket message IDs for log redaction");
+        }
+        finally { Server.Medius.Program.Settings.MagApplicationId = previousApp; }
+    }
+}

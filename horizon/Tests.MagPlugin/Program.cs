@@ -96,6 +96,12 @@ Test("leadership commit failure, retry, and overflow", LeadershipProgressionChec
 Test("selected kit ownership and complete store preservation", LoadoutPreferenceStoreChecks.Run);
 Test("retail saved loadout delete commits and compacts the owned layout", LoadoutPreferenceStoreChecks.DeleteThroughMls);
 Test("account-bound NP identity creation and persistence", NpIdentityChecks.Run);
+Test("portal ticket vectors from the portal", PortalTicketChecks.Vectors);
+Test("portal ticket layout, key, time and identity rules", PortalTicketChecks.Rules);
+Test("portal ticket chunk reassembly", PortalTicketChecks.Reassembly);
+Test("portal ticket nonce replay cache", PortalTicketChecks.Replay);
+Test("portal ticket environment configuration", PortalTicketChecks.Configuration);
+Test("portal ticket MAS and MAPS sign-in, off mode unchanged", PortalTicketChecks.Sessions);
 
 Test("bounded retail mode capacities", () =>
 {

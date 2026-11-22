@@ -78,6 +78,13 @@ port to 10073 and preserve UDP 10474. The Helm chart supplies these mappings.
 DNS overrides change only hostname resolution; they cannot change client ports
 or replace compatible certificate templates.
 
+## Portal game tickets
+
+`MAG_PORTAL_TICKETS=required` replaces the development name sign-in on MAPS and MAS with
+verified portal game tickets; `MAG_PORTAL_TICKET_KEYS` and `MAG_PORTAL_TICKET_AUDIENCE` supply
+the verifying keys and this server's host name. It is `off` by default. See
+[docs/portal-ticket.md](../docs/portal-ticket.md#medius-verification-operators).
+
 ## Licensing
 
 The upstream Horizon MIT license is retained in `LICENSE`. The vendored HighResolutionTimer license is retained in `HighResolutionTimer/LICENSE`. Package dependencies retain their respective licenses. These licenses cover the distributed code; they do not grant rights to game data or third-party runtime material.

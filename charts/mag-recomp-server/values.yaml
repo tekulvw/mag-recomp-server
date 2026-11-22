@@ -108,6 +108,16 @@ resources:
   init:
     requests: {cpu: 50m, memory: 64Mi}
     limits: {memory: 1Gi}
+# Optional portal game-ticket sign-in for Medius (docs/portal-ticket.md). "off" keeps the
+# development name sign-in and sets no environment. "required" accepts only valid portal
+# tickets and needs the audience and at least one key.
+portalTickets:
+  mode: "off"
+  # This server's host name, exactly as the portal writes it into tickets.
+  audience: ""
+  # Key ID (0-255) to base64 DER SubjectPublicKeyInfo, as served by the portal's
+  # GET /api/v1/ticket-keys. Public keys, not secrets. Keep the old key while rotating.
+  keys: {}
 logs:
   sizeLimit: 2Gi
   # Optional gameplay event-log and tick-telemetry rotation (gameplay images that
