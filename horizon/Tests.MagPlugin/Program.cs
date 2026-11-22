@@ -47,6 +47,7 @@ Test("retail compact party wire", PartyWireChecks.Run);
 Test("retail party authenticated membership", PartyMembershipChecks.Run);
 Test("retail party squad selection and fairness", PartyMembershipChecks.Matchmaking);
 Test("retail party atomic registry placement", LeadershipProgressionChecks.PartyRegistryPlacement);
+Test("retail party terminal cohort and requeue", LeadershipProgressionChecks.PartyTerminalRequeue);
 Test("faction matchmaking fairness and role selection", FactionMatchmakingChecks.Run);
 Test("pending human queue ownership and cancellation", PendingHumanQueueChecks.Run);
 Test("independent terminal cohort transport and requeue", LeadershipProgressionChecks.IndependentMatchCohortAdmission);
