@@ -789,6 +789,19 @@ pub(super) fn heal<W: Write>(
                     .find(|peer| (0x03800000 | u32::from(peer.reservation.player)) == *target_id)
             };
             let Some(target) = target else {
+                if ctx.accepted_client_route
+                    && let Some(session) = ctx.engine.prepare_received_bot_healing(
+                        active,
+                        *target_id,
+                        item,
+                        sequence,
+                        now,
+                        &plan.leadership.modifiers(active),
+                    )?
+                {
+                    plan.combat.bot_healing.push(session);
+                    accepted = true;
+                }
                 continue;
             };
             if target.team() != active.team()

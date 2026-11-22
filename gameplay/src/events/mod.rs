@@ -179,6 +179,7 @@ struct CombatChanges {
     revived_peer: Option<(String, u32, replication::CharacterDamage)>,
     new_healing: Option<Option<progression::HealingSession>>,
     peer_healing: Vec<(String, u32, progression::HealingSession)>,
+    bot_healing: Vec<bot_healing::Received>,
     new_healing_sequence: Option<u64>,
     new_rewards: Vec<progression::RewardEvent>,
     new_heal_allowed: Option<Duration>,
@@ -889,6 +890,9 @@ impl<W: Write> Engine<W> {
         self.commit_leadership(plan.leadership);
         statistics::commit(self, plan.statistics);
         self.commit_rewards(plan.combat.new_rewards);
+        for session in plan.combat.bot_healing {
+            self.install_received_bot_healing(session);
+        }
         for (id, generation, session) in plan.combat.peer_healing {
             if let Some(peer) = self.peers.get_mut(&id)
                 && matches!(peer.life,CharacterLife::Alive{generation:g,..} if g==generation)

@@ -26,15 +26,15 @@ fn reserve(engine: &mut Engine<Vec<u8>>, player: u16) {
     assert!(response.ok, "{:?}", response.error);
 }
 
-pub(crate) fn effect() -> healing::HealingEffect {
+fn healing_items(name: &str) -> item_catalog::ItemCatalog {
     let items = item_catalog::ItemCatalog::from_value_for_application(
         json!({
             "schema_version":2,"application_id":20231,
             "items":{"FactionItemList0:2":{"authored_ref":"FactionItemList0:2",
                 "faction_list":"FactionItemList0","local_ordinal":2,"wire_item_id":null,
-                "name":"synthetic_heal","item_type":"kActiveItem",
-                "definition":{"group":"active_items","name":"synthetic_heal"}}},
-            "definitions":{"active_items":{"synthetic_heal":{"parameters":{}}}},"resources":{}
+                "name":name,"item_type":"kActiveItem",
+                "definition":{"group":"active_items","name":name}}},
+            "definitions":{"active_items":{(name):{"parameters":{}}}},"resources":{}
         }),
         blast_rules::CharacterBlastRules {
             armor_rating_reduction: 0.,
@@ -55,16 +55,20 @@ pub(crate) fn effect() -> healing::HealingEffect {
         "provenance":{},"bullets":{},"grenades":{},"armor":{},
         "body":(0..16).map(|location|json!({"location":location,"armor_area":0,
             "multiplier":1.,"source":{}})).collect::<Vec<_>>(),
-        "healing":{"2":{"authored_ref":"FactionItemList0:2","name":"synthetic_heal",
-            "definition":{},"source":{},"item_source":{},"global_source":{},
+        "healing":{"2":{"authored_ref":"FactionItemList0:2","name":name,
+            "definition":{"group":"active_items","name":name},"source":{},"item_source":{},"global_source":{},
             "cooldown_seconds":1.,"heal_percent":10.,"duration_seconds":1.}},
         "unsupported":{},"limitations":["Independent synthetic values; no game tuning"]
     }).to_string()).unwrap();
+    items.with_retail_combat(combat)
+}
+
+pub(crate) fn effect() -> healing::HealingEffect {
     healing::HealingEffect::new_with_catalog(
         healing::HealItem::Retail(2),
         4,
         Duration::ZERO,
-        &items.with_retail_combat(combat),
+        &healing_items("synthetic_heal"),
     )
     .unwrap()
 }
@@ -259,4 +263,207 @@ fn failed_healing_audit_commits_neither_restored_health_nor_credit() {
     );
     assert!(engine.active.as_ref().unwrap().healing.is_some());
     assert!(engine.pending_reward_batch().is_empty());
+}
+
+fn medkit_request(ids: &[u32]) -> Vec<u8> {
+    let mut request = 0x021bu16.to_be_bytes().to_vec();
+    request.extend((ids.len() as u16).to_be_bytes());
+    for id in ids {
+        request.extend(id.to_be_bytes());
+    }
+    request.push(0);
+    request
+}
+
+fn medkit_bot_fixture() -> (Engine<Vec<u8>>, u16) {
+    let (mut engine, patient) = fixture();
+    let bot = engine.bot_registry.bots.get_mut(&patient).unwrap();
+    bot.target.squad = replication::SquadAddress::from_index(0).unwrap();
+    bot.target.runtime = Some(development_target::BotRuntime::spawned(
+        Duration::ZERO,
+        bot.target.position,
+    ));
+    bot.health = 160;
+    bot.damage.health_quarter_points = 160;
+    bot.damage.last_attacker = u32::MAX;
+    let mut kit = bot.target.loadout.clone();
+    kit.inventories[usize::from(kit.handle.inventory_index)].slots[0] = Some(2);
+    let healer = engine.active.as_mut().unwrap();
+    healer.healing = None;
+    healer.reservation.character.account_id = Some("synthetic-live-healer".into());
+    healer.current_inventory_handle = Some(kit.handle);
+    healer.spawned_loadout = Some(kit);
+    engine.item_catalog = Arc::new(healing_items("medkit"));
+    engine.match_started = true;
+    engine.bot_registry.config.as_mut().unwrap().healing.enabled = false;
+    (engine, patient)
+}
+
+#[test]
+fn human_medkit_native_request_heals_living_registry_bot_with_ai_healing_off() {
+    let (mut engine, bot) = medkit_bot_fixture();
+    let request = medkit_request(&[
+        0x0380_0000 | u32::from(bot),
+        0x0380_0003,
+        0x0380_0000 | u32::from(bot),
+    ]);
+    dispatch(&mut engine, &request, 100).unwrap();
+    assert!(engine.peers["synthetic-reservation-0003"].healing.is_some());
+    assert_eq!(engine.bot_registry.bots[&bot].health, 160);
+    let creation = engine.bot_registry.bots[&bot]
+        .snapshot(Duration::from_millis(101), engine.wire_profile)
+        .unwrap();
+    let healer = engine.active.as_mut().unwrap();
+    let before_frames = healer.pending_shared.len();
+    healer.pending_shared.push_back(creation.clone());
+    engine
+        .bot_registry
+        .known
+        .entry(healer.reservation.id.clone())
+        .or_default()
+        .insert(bot);
+    dispatch(&mut engine, &request, 200).unwrap();
+    assert_eq!(engine.active.as_ref().unwrap().healing_sequence, 1);
+    engine
+        .tick_bot_healing(Duration::from_millis(1100), 1)
+        .unwrap();
+    assert_eq!(engine.bot_registry.bots[&bot].health, 200);
+    let queue = &engine.active.as_ref().unwrap().pending_shared;
+    assert_eq!(queue.len(), before_frames + 2);
+    assert_eq!(queue[before_frames], creation);
+    let expected = replication::CharacterDamageUpdate {
+        sequence: 2,
+        timestamp_ms: 1100,
+        object_index: bot,
+        damage: engine.bot_registry.bots[&bot].damage,
+        forced_state: None,
+    }
+    .encode_with_profile(engine.wire_profile)
+    .unwrap();
+    assert_eq!(queue[before_frames + 1], expected);
+    let rewards = engine.pending_reward_batch();
+    assert_eq!(rewards.len(), 1);
+    assert_eq!(rewards[0].kind, progression::RewardKind::TeammateHealed);
+    assert_eq!(rewards[0].units, 10);
+    assert_eq!(rewards[0].account_id, "synthetic-live-healer");
+    engine
+        .tick_bot_healing(Duration::from_millis(1200), 1)
+        .unwrap();
+    assert_eq!(engine.bot_registry.bots[&bot].health, 200);
+    assert_eq!(engine.pending_reward_batch(), rewards);
+}
+
+#[test]
+fn human_medkit_registry_bot_refuses_ineligible_and_stale_recipients() {
+    for (health, team, dead) in [(400, 0, false), (160, 1, false), (160, 0, true)] {
+        let (mut engine, id) = medkit_bot_fixture();
+        let bot = engine.bot_registry.bots.get_mut(&id).unwrap();
+        bot.health = health;
+        bot.damage.health_quarter_points = health;
+        bot.target.squad = replication::SquadAddress::from_index(team * 16).unwrap();
+        if dead {
+            bot.target.runtime.as_mut().unwrap().phase = development_target::BotPhase::Dead;
+        }
+        let request = medkit_request(&[0x0380_0000 | u32::from(id)]);
+        dispatch(&mut engine, &request, 100).unwrap();
+        assert_eq!(engine.active.as_ref().unwrap().healing_sequence, 0);
+        engine
+            .tick_bot_healing(Duration::from_millis(1100), 1)
+            .unwrap();
+        assert_eq!(engine.bot_registry.bots[&id].health, health);
+    }
+    for replace_allocation in [false, true] {
+        let (mut engine, id) = medkit_bot_fixture();
+        let request = medkit_request(&[0x0380_0000 | u32::from(id)]);
+        dispatch(&mut engine, &request, 100).unwrap();
+        assert_eq!(engine.active.as_ref().unwrap().healing_sequence, 1);
+        let bot = engine.bot_registry.bots.get_mut(&id).unwrap();
+        if replace_allocation {
+            bot.allocation_generation += 1;
+        } else {
+            bot.target.runtime.as_mut().unwrap().generation += 1;
+        }
+        engine
+            .tick_bot_healing(Duration::from_millis(1100), 1)
+            .unwrap();
+        assert_eq!(engine.bot_registry.bots[&id].health, 160);
+        assert!(engine.pending_reward_batch().is_empty());
+    }
+}
+
+#[test]
+fn human_medkit_record_refusal_preserves_session_health_credit_and_fifo() {
+    let (mut denied_start, id) = medkit_bot_fixture();
+    let request = medkit_request(&[0x0380_0000 | u32::from(id), 0x0380_0003]);
+    denied_start.max_log = denied_start.written;
+    assert_eq!(
+        dispatch(&mut denied_start, &request, 100).err(),
+        Some("log_limit_reached")
+    );
+    assert_eq!(denied_start.active.as_ref().unwrap().healing_sequence, 0);
+    assert!(
+        denied_start.peers["synthetic-reservation-0003"]
+            .healing
+            .is_none()
+    );
+    assert_eq!(denied_start.bot_registry.bots[&id].health, 160);
+    assert!(
+        denied_start.bot_registry.bots[&id]
+            .received_healing
+            .is_none()
+    );
+
+    let (mut denied_tick, id) = medkit_bot_fixture();
+    let request = medkit_request(&[0x0380_0000 | u32::from(id)]);
+    dispatch(&mut denied_tick, &request, 100).unwrap();
+    let queue = denied_tick.active.as_ref().unwrap().pending_shared.clone();
+    denied_tick.max_log = denied_tick.written;
+    assert_eq!(
+        denied_tick.tick_bot_healing(Duration::from_millis(1100), 1),
+        Err("log_limit_reached")
+    );
+    assert_eq!(denied_tick.bot_registry.bots[&id].health, 160);
+    assert!(
+        denied_tick.bot_registry.bots[&id]
+            .received_healing
+            .is_some()
+    );
+    assert_eq!(denied_tick.active.as_ref().unwrap().pending_shared, queue);
+    assert!(denied_tick.pending_reward_batch().is_empty());
+}
+
+#[test]
+fn human_medkit_and_bot_self_healing_never_overlap() {
+    for human_first in [false, true] {
+        let (mut engine, id) = medkit_bot_fixture();
+        engine.bot_registry.config.as_mut().unwrap().healing.enabled = true;
+        let bot = engine.bot_registry.bots.get_mut(&id).unwrap();
+        let runtime = bot.target.runtime.as_mut().unwrap();
+        let mut motion = bot_physics::Motion::new(
+            [runtime.position.x, runtime.position.y, runtime.position.z].map(f64::from),
+        );
+        motion.grounded = true;
+        runtime.physics_motion = Some(motion);
+        let kit = &mut bot.target.loadout;
+        kit.inventories[usize::from(kit.handle.inventory_index)].slots[0] = Some(2);
+        let request = medkit_request(&[0x0380_0000 | u32::from(id)]);
+        if human_first {
+            dispatch(&mut engine, &request, 100).unwrap();
+        }
+        engine
+            .tick_bot_healing(Duration::from_millis(101), 1)
+            .unwrap();
+        if !human_first {
+            dispatch(&mut engine, &request, 102).unwrap();
+        }
+        assert_eq!(
+            engine.bot_registry.bots[&id].received_healing.is_some(),
+            human_first
+        );
+        let audit = std::str::from_utf8(&engine.writer).unwrap();
+        assert_eq!(
+            audit.matches("\"op\":\"bot_healing_started\"").count(),
+            usize::from(!human_first)
+        );
+    }
 }
