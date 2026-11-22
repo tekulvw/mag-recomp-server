@@ -277,6 +277,43 @@ pub(crate) struct CharacterEffectNoticeRequest {
     pub mounted: protocol::VictimWasMounted,
 }
 impl<W: Write> Engine<W> {
+    /// Source0/index-1 belongs to the owned KillSelf path, not a weapon row.
+    pub(super) fn plan_self_kill_death(
+        &self,
+        actor: &Active,
+        damage: replication::CharacterDamage,
+        mounted: protocol::VictimWasMounted,
+    ) -> Result<Option<CharacterEffectNotice>, &'static str> {
+        if actor.wire_profile.application_id() != 20231
+            || !actor.ready_for_updates
+            || !actor.entered_game
+            || actor.initial_objects.is_none()
+            || !actor.life.is_alive()
+            || damage.health_quarter_points != 0
+            || self.item_catalog.retail_combat().is_err()
+        {
+            return Ok(None);
+        }
+        let id = 0x0380_0000 | u32::from(actor.reservation.player);
+        if damage.last_attacker != id
+            || damage.last_source_object != u32::MAX
+            || damage.last_location_and_type != 0x10
+            || damage.last_user_data != 0
+        {
+            return Err("invalid_self_kill_death_attribution");
+        }
+        self.character_effect_notice(CharacterEffectNoticeRequest {
+            world: actor.reservation.world,
+            victim: actor.reservation.player,
+            attacker: id,
+            source_type: 0,
+            source_index: -1,
+            location: 0,
+            mounted,
+        })
+        .map(Some)
+    }
+
     /// A qualified self fall uses its own source metadata, not a weapon ID.
     /// Falling damage remains available without the optional combat body map.
     pub(super) fn plan_falling_death(

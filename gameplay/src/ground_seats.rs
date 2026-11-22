@@ -21,6 +21,62 @@ impl Active {
     }
 }
 impl<W: Write> Engine<W> {
+    /// A terminal owned redeploy does not need a physical manual-exit route.
+    /// Resolve the current Ground allocation before sampling its notice flag.
+    pub(crate) fn ground_redeploy_association(
+        &self,
+        actor: &Active,
+    ) -> Result<protocol::VictimWasMounted, &'static str> {
+        let seat = actor.ground_seat.ok_or("ground_redeploy_seat_required")?;
+        if actor.mounted_seat.is_some()
+            || actor.mounted_bunker.is_some()
+            || actor.helo_seat.is_some()
+        {
+            return Err("ground_redeploy_conflicting_mount");
+        }
+        let catalog = self
+            .ground_vehicles
+            .as_ref()
+            .ok_or("ground_redeploy_catalog_required")?;
+        let vehicle = catalog
+            .vehicle(seat.vehicle_index)
+            .ok_or("ground_redeploy_vehicle_missing")?;
+        let supported = vehicle.passenger_seats.contains(&seat.seat)
+            || catalog
+                .driver_seat(seat.vehicle_index)
+                .is_some_and(|driver| driver.seat == seat.seat)
+            || (seat.seat == 1 && catalog.turret_policy(seat.vehicle_index).is_some());
+        if !supported
+            || !self.ground_vehicle_creation_complete(actor.ground_vehicle_batch)
+            || self.current_ground_vehicle(seat.vehicle_index).is_none()
+            || self
+                .active
+                .iter()
+                .chain(self.peers.values())
+                .filter(|other| {
+                    other.reservation.world == actor.reservation.world
+                        && other.ground_seat == Some(seat)
+                })
+                .count()
+                != 1
+        {
+            return Err("ground_redeploy_occupant_unbound");
+        }
+        // Retail GetAssociatedVehicle requires state14 and a current allocation,
+        // independently of its HP, operational state or occupant visibility.
+        Ok(
+            if actor
+                .owner_fields
+                .state
+                .is_some_and(|state| state.state == 14)
+            {
+                protocol::VictimWasMounted::AssociatedVehicle
+            } else {
+                protocol::VictimWasMounted::NoAssociatedVehicle
+            },
+        )
+    }
+
     pub(crate) fn ground_seat_position(
         &self,
         seat: PassengerSeat,

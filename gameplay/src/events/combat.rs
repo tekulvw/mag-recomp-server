@@ -787,10 +787,15 @@ pub(super) fn kill_self<W: Write>(
         && owned
         && let Some((generation, _)) = active.life.damage_health()
     {
-        // Mounted death also needs vehicle-occupancy cleanup. Keep
-        // that untraced transition nonfatal and explicitly bounded.
-        if active.is_mounted() {
-            plan.gameplay_denial = Some("mounted_death_not_supported");
+        let association = if active.ground_seat.is_some() {
+            ctx.engine.ground_redeploy_association(active)
+        } else if active.is_mounted() {
+            Err("mounted_death_not_supported")
+        } else {
+            Ok(protocol::VictimWasMounted::NoAssociatedVehicle)
+        };
+        if let Err(reason) = association {
+            plan.gameplay_denial = Some(reason);
         } else if !history_available {
             plan.gameplay_denial = Some("replication_history_limit");
         } else {
@@ -798,6 +803,9 @@ pub(super) fn kill_self<W: Write>(
                 request.target_character_id,
                 health_before.unwrap(),
             )?;
+            plan.combat.self_kill_notice =
+                ctx.engine
+                    .plan_self_kill_death(active, damage, association.unwrap())?;
             plan.combat.new_damage_model = Some(damage);
             let update = replication::CharacterDamageUpdate {
                 sequence: next_sequence,
