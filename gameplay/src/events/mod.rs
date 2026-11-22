@@ -398,6 +398,11 @@ impl<W: Write> Engine<W> {
             return Err("identity_mismatch");
         }
         if let Ok(protocol::GameMessage::Repair(request)) = &decoded.message
+            && request.target_object_id >> 24 == 2
+        {
+            return self.event_helo_repair(&event, *request, now, wall_secs);
+        }
+        if let Ok(protocol::GameMessage::Repair(request)) = &decoded.message
             && request.target_object_id & 0xffff_0000 == 0x0100_0000
         {
             return self.event_ground_repair(&event, *request, now, wall_secs);

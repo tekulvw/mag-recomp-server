@@ -387,7 +387,7 @@ fn full_reward_outbox_prevents_hp_or_cooldown_commit() {
     assert_eq!(e.pending_reward_batch().len(), 1);
 }
 
-fn set_modifier(e: &mut Engine<Vec<u8>>, value: f32) {
+pub(crate) fn set_modifier(e: &mut Engine<Vec<u8>>, value: f32) {
     let catalog=skill_catalog::SkillCatalog::from_value(json!({
         "schema_version":2,"application_id":20231,"table":{"Skills":{
             "MagCharacterSkill1":{"MagCharacterSkill":{"Default":{"Modifier":"kCharModRepairAmount","ModifierValue":value},

@@ -150,7 +150,7 @@ pub(crate) fn fixture_with_drivers(
     engine
 }
 
-fn add_peer(engine: &mut Engine<Vec<u8>>, player: u16, team: u8, faction: u8) -> String {
+pub(crate) fn add_peer(engine: &mut Engine<Vec<u8>>, player: u16, team: u8, faction: u8) -> String {
     let mut peer = repair_fixture().active.take().unwrap();
     peer.reservation.id = format!("domination-repair-peer-{player}");
     peer.reservation.player = player;

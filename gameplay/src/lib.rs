@@ -128,6 +128,7 @@ pub mod firearm_assists;
 use event_decode::DecodedEvent;
 mod frago;
 mod ground_repair;
+mod helo_repair;
 mod leadership_auto_heal;
 mod leadership_auto_repair;
 mod objective_counters;
@@ -2278,6 +2279,8 @@ mod manual_ground_repair_tests;
 
 #[cfg(test)]
 mod manual_ground_repair_domination_tests;
+#[cfg(test)]
+mod manual_helo_repair_tests;
 
 #[cfg(test)]
 mod objective_reward_tests;
