@@ -16,6 +16,9 @@ use std::{collections::BTreeMap, time::Duration};
 
 pub use crate::objective_catalog::NativeClass;
 
+#[path = "sabotage_objective_runtime.rs"]
+mod sabotage;
+
 #[derive(Clone, Copy, Debug)]
 pub struct ObjectiveActor {
     pub player: u16,
@@ -136,6 +139,7 @@ struct Objective {
     state: ObjectiveControlDelta,
     operation: Option<Operation>,
     native: Option<NativeObjective>,
+    sabotage: Option<sabotage::Capture>,
     current_actor: Option<u16>,
     reward_attacker: Option<u16>,
     reward_defender: Option<u16>,
@@ -274,6 +278,23 @@ impl ObjectiveWorld {
                                     .map_or(100, |state| state.damage_health as u8),
                             },
                             operation: None,
+                            sabotage: (catalog.is_sabotage()
+                                && native.is_none()
+                                && object.demolition.is_none()
+                                && matches!(
+                                    initial,
+                                    ObjectiveState::Inactive
+                                        | ObjectiveState::Deactivated
+                                        | ObjectiveState::Completed
+                                        | ObjectiveState::Locked
+                                ))
+                            .then(|| {
+                                object
+                                    .interaction
+                                    .as_ref()
+                                    .map(|rule| sabotage::Capture::new(initial, rule))
+                            })
+                            .flatten(),
                             native,
                             current_actor: None,
                             reward_attacker: None,
@@ -1094,6 +1115,12 @@ impl ObjectiveWorld {
             self.pristine &= outcome.changed.is_none();
             return outcome;
         }
+        if let Some(mut capture) = object.sabotage.take() {
+            let outcome = capture.interact(object, request, actor, now, timings);
+            object.sabotage = Some(capture);
+            self.pristine &= outcome.changed.is_none();
+            return outcome;
+        }
         let Some(rule) = object.rule.as_ref() else {
             return InteractionOutcome::denied("objective_interaction_not_configured");
         };
@@ -1334,6 +1361,19 @@ impl ObjectiveWorld {
                 }
                 continue;
             }
+            if let Some(mut capture) = object.sabotage.take() {
+                if capture.tick(
+                    object,
+                    now,
+                    actors,
+                    &mut self.reward_actions,
+                    &mut capture_completed,
+                ) {
+                    changed.insert(object.state.object_index, object.state);
+                }
+                object.sabotage = Some(capture);
+                continue;
+            }
             let (Some(rule), Some(operation)) = (object.rule.as_ref(), object.operation.clone())
             else {
                 continue;
@@ -1455,6 +1495,12 @@ impl ObjectiveWorld {
         object.state.deactivation_time_ms = 0;
         object.state.health_percent = 100;
         object.operation = None;
+        if object.sabotage.is_some() {
+            object.sabotage = object
+                .rule
+                .as_ref()
+                .map(|rule| sabotage::Capture::new(state, rule));
+        }
         changed.insert(index, object.state);
     }
 }
@@ -3215,6 +3261,9 @@ pub(crate) mod trigger_box_tests {
             world.objects[&10].operation.as_ref().unwrap().deadline,
             now + Duration::from_millis(u64::from(u32::MAX))
         );
+        let actors = BTreeMap::from([(actor.player, actor)]);
+        assert!(world.tick(now, &actors).is_empty());
+        assert_eq!(world.state(10), Some(ObjectiveState::Activating));
     }
 
     #[test]
