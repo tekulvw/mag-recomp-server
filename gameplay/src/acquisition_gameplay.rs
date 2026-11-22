@@ -30,6 +30,13 @@ pub struct Objective {
     pub fsp: Option<Fsp>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum CaptureCredit {
+    None,
+    Human,
+    Bot,
+}
+
 impl Objective {
     pub fn object_id(&self) -> u32 {
         0x0c80_0000 | u32::from(self.replication.object_index)
@@ -321,7 +328,7 @@ impl Gameplay {
         rates: &mut Rates,
         apply: impl FnMut(&mut Runtime, Effect<'_>) -> Result<(), &'static str>,
     ) -> Result<Publication, &'static str> {
-        self.apply_entry_with_capture(catalog, entry, ground, rates, false, apply)
+        self.apply_entry_with_capture(catalog, entry, ground, rates, CaptureCredit::None, apply)
     }
 
     pub(crate) fn apply_entry_with_capture(
@@ -330,7 +337,7 @@ impl Gameplay {
         entry: &Entry,
         ground: &mut Runtime,
         rates: &mut Rates,
-        qualified_capture: bool,
+        capture_credit: CaptureCredit,
         mut apply: impl FnMut(&mut Runtime, Effect<'_>) -> Result<(), &'static str>,
     ) -> Result<Publication, &'static str> {
         if self.controller != catalog.fingerprint() {
@@ -381,7 +388,7 @@ impl Gameplay {
             None
         };
 
-        if qualified_capture
+        if !matches!(capture_credit, CaptureCredit::None)
             && state == ObjectiveState::Completed
             && previous != ObjectiveState::Completed
             && objective.state.target == ObjectiveState::Completed as i32
@@ -411,11 +418,16 @@ impl Gameplay {
                 },
             )?;
         }
-        objective.commit_state(state, entry.actor_index, entry.timestamp_ms);
+        let published_actor = if matches!(capture_credit, CaptureCredit::Bot) {
+            u16::MAX
+        } else {
+            entry.actor_index
+        };
+        objective.commit_state(state, published_actor, entry.timestamp_ms);
 
         match entry.state {
             EnteredState::Completed => {
-                objective.current_attacker = character_object_id(entry.actor_index);
+                objective.current_attacker = character_object_id(published_actor);
                 objective.current_defender = u32::MAX;
                 objective.replication.health_percent = 0;
                 objective.replication.deactivation_time_ms = 0;
@@ -605,7 +617,11 @@ mod capture_effect_tests {
                     &entry,
                     &mut ground,
                     &mut Rates::default(),
-                    qualified_capture,
+                    if qualified_capture {
+                        CaptureCredit::Human
+                    } else {
+                        CaptureCredit::None
+                    },
                     |ground, effect| {
                         assert!(ground.get(4).unwrap().spawn_cycle_enabled);
                         effects.push(match effect {

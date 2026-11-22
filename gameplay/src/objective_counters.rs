@@ -178,7 +178,7 @@ impl<W: Write> Engine<W> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn stage_objective_counters_for_team(
+    pub(crate) fn stage_objective_counters_for_team(
         &mut self,
         world: u32,
         team: u8,
