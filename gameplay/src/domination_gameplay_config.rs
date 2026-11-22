@@ -56,6 +56,7 @@ struct Core {
     frag_ground_areas: Option<PathBuf>,
     human_static_resupply: Option<PathBuf>,
     projectile_contacts: Option<PathBuf>,
+    infantry_rockets: Option<PathBuf>,
     ground_turrets: Option<PathBuf>,
     initial_filters: PathBuf,
     qualified_poses: PathBuf,
@@ -309,6 +310,10 @@ impl Configuration {
                     "empty_domination_hospital_rocket_source_path",
                 ),
                 (
+                    &mut core.infantry_rockets,
+                    "empty_domination_infantry_rocket_source_path",
+                ),
+                (
                     &mut core.projectile_contacts,
                     "empty_domination_projectile_contact_source_path",
                 ),
@@ -455,6 +460,14 @@ impl Configuration {
             .as_ref()
             .and_then(|core| core.hospital_turrets.as_ref())
             .map(|path| read(path, 256 * 1024))
+            .transpose()
+    }
+
+    pub(crate) fn infantry_rocket_source(&self) -> io::Result<Option<Vec<u8>>> {
+        self.core
+            .as_ref()
+            .and_then(|core| core.infantry_rockets.as_ref())
+            .map(|path| read(path, 1024 * 1024))
             .transpose()
     }
 
@@ -1079,6 +1092,18 @@ impl<W: Write> Engine<W> {
             )
             .map_err(io::Error::other)?;
         }
+        let infantry_rockets = config
+            .infantry_rocket_source()?
+            .map(|source| {
+                validate_infantry_rocket_support(&world).map_err(io::Error::other)?;
+                crate::infantry_rockets::Catalog::from_bytes(
+                    &source,
+                    &self.item_catalog,
+                    &native_elf,
+                )
+                .map_err(io::Error::other)
+            })
+            .transpose()?;
         let hospital_source = config.hospital_turret_source()?;
         let hospital_rockets = config
             .hospital_rocket_source()?
@@ -1156,8 +1181,35 @@ impl<W: Write> Engine<W> {
         self.hospital_rocket_ground = world.state.hospital_rocket_ground.clone();
         self.frag_character_blast = world.state.frag_character_blast;
         self.domination_gameplay = Some(world);
-        Ok(self)
+        if let Some(catalog) = infantry_rockets {
+            self.with_infantry_rockets(catalog)
+                .map_err(io::Error::other)
+        } else {
+            self.infantry_rockets = None;
+            Ok(self)
+        }
     }
+}
+
+pub(crate) fn validate_infantry_rocket_support(world: &World) -> Result<(), &'static str> {
+    let state = &world.state;
+    if state.projectile_contacts.is_none() {
+        return Err("infantry_rocket_contact_bindings_required");
+    }
+    if state.hospital_rocket_ground.is_none() {
+        return Err("infantry_rocket_domination_ground_required");
+    }
+    if state.hospital_hulks.is_none() || state.hospital_blast_areas.is_none() {
+        return Err("infantry_rocket_domination_hospital_required");
+    }
+    if state.helo.is_some()
+        && (state.hospital_rocket_helo_areas.is_none()
+            || state.helo_damage.is_none()
+            || state.helo_collision.is_none())
+    {
+        return Err("infantry_rocket_domination_helo_required");
+    }
+    Ok(())
 }
 
 /// The source profile already owns the filter rows, material/terrain mapping

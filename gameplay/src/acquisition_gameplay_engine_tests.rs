@@ -406,6 +406,17 @@ fn acquisition_setup_fixture(
 }
 
 #[test]
+fn acquisition_setup_replacement_clears_previous_infantry_rocket_binding() {
+    let mut engine = capture_fixture();
+    let (_, replacement) = acquisition_setup_fixture(None, None, false, 4);
+    engine.infantry_rockets = Some(std::sync::Arc::new(
+        crate::infantry_rockets::tests::synthetic_catalog(),
+    ));
+    let engine = engine.with_acquisition_gameplay(replacement).unwrap();
+    assert!(engine.infantry_rockets.is_none());
+}
+
+#[test]
 fn acquisition_rejects_missing_escort_driver_bindings_before_setup_installation() {
     for count in [0, 3] {
         let (engine, setup) = acquisition_setup_fixture(None, None, false, count);

@@ -180,6 +180,7 @@ struct CombatChanges {
     new_heal_allowed: Option<Duration>,
     new_projectiles: Option<projectile::ProjectileFlights>,
     new_hospital_rocket: Option<(u8, hospital_rocket_runtime::Flight)>,
+    infantry_rocket_launch: Option<Box<infantry_rocket_runtime::Launch>>,
     projectile_replicas: projectile_replication::ProjectileReplicas,
     projectile_cleanup: [Option<ProjectileCleanup>; projectile::MAX_PROJECTILE_SLOTS],
     projectile_publications: Vec<ProjectilePublication>,
@@ -963,6 +964,9 @@ impl<W: Write> Engine<W> {
         }
         if let Some((slot, flight)) = plan.combat.new_hospital_rocket {
             active.hospital_rocket_flights.launch(slot, flight);
+        }
+        if let Some(launch) = plan.combat.infantry_rocket_launch {
+            active.infantry_rocket_state = launch.state;
         }
         active.projectile_replicas = plan.combat.projectile_replicas;
         active.projectile_cleanup = plan.combat.projectile_cleanup;

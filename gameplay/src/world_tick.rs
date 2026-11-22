@@ -33,6 +33,7 @@ impl<W: Write> Engine<W> {
             self.queue_squad_orders(now, wall)?;
             self.queue_active_ability_state(now, wall)?;
             messages.extend(self.tick_hospital_rockets(now, wall)?);
+            messages.extend(self.tick_infantry_rockets(now, wall)?);
             messages.extend(self.tick_match_clock(now, wall)?);
             self.queue_projectile_publications(now)?;
             self.tick_human_static_resupply(now, wall)?;

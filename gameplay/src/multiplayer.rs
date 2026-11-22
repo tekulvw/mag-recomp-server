@@ -99,6 +99,7 @@ impl Active {
                     .map(|entry| entry.removal),
             )
             .chain(self.hospital_rocket_flights.removals())
+            .chain(self.infantry_rocket_state.removals())
             .map(|removal| {
                 removal.encode_with_profile(1, now.as_millis() as u32, self.wire_profile)
             })
@@ -667,6 +668,10 @@ impl<W: Write> Engine<W> {
                     );
                     packets.extend(
                         a.hospital_rocket_flights
+                            .snapshot_packets(now.as_millis() as u32, self.wire_profile)?,
+                    );
+                    packets.extend(
+                        a.infantry_rocket_state
                             .snapshot_packets(now.as_millis() as u32, self.wire_profile)?,
                     );
                     Ok(packets)

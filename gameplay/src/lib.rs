@@ -167,6 +167,7 @@ mod hospital_rocket_runtime;
 pub mod hospital_rockets;
 mod hospital_turret_wire;
 mod hospital_turrets;
+mod infantry_rocket_runtime;
 pub mod infantry_rockets;
 pub mod item_catalog;
 mod loadout_refresh;
@@ -1112,6 +1113,7 @@ struct Active {
     next_heal_allowed: Duration,
     projectiles: projectile::ProjectileFlights,
     hospital_rocket_flights: hospital_rocket_runtime::Flights,
+    infantry_rocket_state: infantry_rocket_runtime::State,
     projectile_replicas: projectile_replication::ProjectileReplicas,
     projectile_cleanup: [Option<ProjectileCleanup>; projectile::MAX_PROJECTILE_SLOTS],
     projectile_publications: Vec<ProjectilePublication>,
@@ -1238,6 +1240,7 @@ pub struct Engine<W: Write> {
     domination_round: Option<acquisition_round::Round>,
     domination_gameplay: Option<domination_gameplay_provider::World>,
     hospital_rockets: Option<std::sync::Arc<hospital_rockets::Catalog>>,
+    infantry_rockets: Option<std::sync::Arc<infantry_rockets::Catalog>>,
     hospital_rocket_ground: Option<std::sync::Arc<hospital_rocket_ground::Catalog>>,
     frag_character_blast: bool,
     projectile_contacts: Option<std::sync::Arc<domination_projectile_collision::ContactBindings>>,

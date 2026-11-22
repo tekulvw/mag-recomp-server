@@ -454,6 +454,7 @@ impl<W: Write> Engine<W> {
         self.acquisition_round = Some(Round::new(setup.rules));
         self.frag_character_blast = setup.frag_character_blast;
         self.projectile_contacts = setup.projectile_contacts.clone();
+        self.infantry_rockets = None;
         self.acquisition_gameplay = Some(Runtime::from_setup(Arc::new(setup)));
         Ok(self)
     }

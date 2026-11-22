@@ -214,6 +214,7 @@ impl<W: Write> Engine<W> {
             domination_round: None,
             domination_gameplay: None,
             hospital_rockets: None,
+            infantry_rockets: None,
             hospital_rocket_ground: None,
             frag_character_blast: false,
             projectile_contacts: None,
@@ -238,6 +239,55 @@ impl<W: Write> Engine<W> {
             pending_bunker_damage: Default::default(),
             next_repair: Default::default(),
         }
+    }
+}
+
+impl<W: Write> Engine<W> {
+    pub fn with_infantry_rockets(
+        mut self,
+        catalog: infantry_rockets::Catalog,
+    ) -> Result<Self, &'static str> {
+        if self.wire_profile.application_id() != 20231 {
+            return Err("infantry_rocket_mode_required");
+        }
+        match (
+            self.match_profile().game_type,
+            &self.acquisition_gameplay,
+            &self.domination_gameplay,
+        ) {
+            (1, Some(runtime), None) => {
+                acquisition_gameplay_config::validate_infantry_rocket_support(&runtime.setup)?;
+            }
+            (2, None, Some(world)) => {
+                domination_gameplay_config::validate_infantry_rocket_support(world)?;
+            }
+            _ => return Err("infantry_rocket_mode_required"),
+        }
+        let contacts = self
+            .projectile_contacts
+            .as_ref()
+            .ok_or("infantry_rocket_contact_bindings_required")?;
+        if self.character_damage_rules.is_none()
+            || self.ground_vehicles.is_none()
+            || self.ground_runtime.is_none()
+            || self.objective_catalog.is_none()
+        {
+            return Err("infantry_rocket_world_resources_required");
+        }
+        contacts.validate_static(
+            self.collision_world
+                .as_ref()
+                .ok_or("infantry_rocket_world_resources_required")?,
+        )?;
+        contacts.validate_dynamic(
+            &self
+                .dynamic_body_resources
+                .as_ref()
+                .ok_or("infantry_rocket_world_resources_required")?
+                .catalog,
+        )?;
+        self.infantry_rockets = Some(Arc::new(catalog));
+        Ok(self)
     }
 }
 

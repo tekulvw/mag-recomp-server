@@ -245,6 +245,7 @@ impl<W: Write> Engine<W> {
             .projectiles
             .get(slot)
             .is_some_and(|frag| !frag.completed)
+            || actor.infantry_rocket_state.occupies(slot)
         {
             return Err("projectile_slot_in_use");
         }

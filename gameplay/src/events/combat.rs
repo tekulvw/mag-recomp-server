@@ -467,6 +467,9 @@ pub(super) fn fire_grenade<W: Write>(
     request: protocol::FireGrenade,
 ) -> Result<Value, &'static str> {
     let active = ctx.active;
+    if ctx.engine.infantry_rockets.is_some() && request.ammo_index == infantry_rockets::GEAR_SLOT {
+        return Ok(fire_infantry_rocket(ctx, plan, request));
+    }
     if ctx.engine.hospital_rockets.is_some()
         && active.mounted_bunker.is_some()
         && active.mounted_seat == Some(0)
@@ -508,6 +511,9 @@ pub(super) fn fire_grenade<W: Write>(
     } else if active
         .hospital_rocket_flights
         .occupies(request.projectile_index as u8)
+        || active
+            .infantry_rocket_state
+            .occupies(request.projectile_index as u8)
     {
         plan.gameplay_denial = Some("projectile_slot_in_use");
     } else if ctx
@@ -597,6 +603,46 @@ pub(super) fn fire_grenade<W: Write>(
         "projectile_index":request.projectile_index,"projectile_created":created,"damage_applied":false,
         "ammo_remaining":plan.combat.new_grenade_remaining.unwrap_or(active.grenade_remaining)}),
     )
+}
+
+fn fire_infantry_rocket<W: Write>(
+    ctx: &PlanningContext<'_, W>,
+    plan: &mut EventPlan,
+    request: protocol::FireGrenade,
+) -> Value {
+    use infantry_rocket_runtime::LaunchDisposition;
+    let candidate = if !ctx.accepted_client_route {
+        Err("infantry_rocket_requires_native_client_route")
+    } else if !ctx.history_available {
+        Err("replication_history_limit")
+    } else {
+        ctx.engine.plan_infantry_rocket_launch(
+            ctx.active,
+            request,
+            ctx.decoded.bytes,
+            ctx.now,
+            ctx.next_sequence,
+            &plan.leadership.modifiers(ctx.active),
+        )
+    };
+    match candidate {
+        Ok(LaunchDisposition::Created(launch)) => {
+            plan.outgoing = Some(launch.packet.clone());
+            plan.replication.projectile_delta = Some(launch.packet.clone());
+            let audit = launch.audit.clone();
+            plan.combat.infantry_rocket_launch = Some(launch);
+            audit
+        }
+        Ok(LaunchDisposition::Duplicate) => {
+            json!({"type":"infantry_rocket_launch","disposition":"duplicate",
+                "slot":request.projectile_index})
+        }
+        Err(reason) => {
+            plan.gameplay_denial = Some(reason);
+            json!({"type":"infantry_rocket_launch","disposition":"denied",
+                "slot":request.projectile_index,"reason":reason})
+        }
+    }
 }
 
 fn fire_hospital_rocket<W: Write>(
