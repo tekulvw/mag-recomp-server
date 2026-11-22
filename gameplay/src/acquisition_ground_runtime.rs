@@ -452,7 +452,7 @@ impl Runtime {
     }
 
     /// Validate bounds before applying a sparse report to an isolated candidate.
-    /// The caller supplies the authenticated, currently seated Escort driver.
+    /// The caller supplies the authenticated, currently seated Ground driver.
     pub(crate) fn apply_driver_dynamics(
         &mut self,
         report: ground_vehicles::OwnerDynamics,
