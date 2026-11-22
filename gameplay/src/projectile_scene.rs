@@ -6,7 +6,7 @@ use crate::{
     domination_projectile_collision::ContactBindings,
     domination_structural_world::SequenceCollisionState,
     dynamic_collision::{QueryLimits, Snapshot},
-    projectile_contact::{ConvexObstacle, ObstacleId, SphereSweep, TriangleId, sweep_sphere},
+    projectile_contact::{self, ConvexObstacle, ObstacleId, Sweep, TriangleId},
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -110,7 +110,7 @@ impl<'a> Scene<'a> {
 
     pub(crate) fn query(
         &self,
-        sweep: SphereSweep,
+        query: impl Into<Sweep>,
         budget: &mut usize,
     ) -> Result<Option<OwnedContact>, &'static str> {
         self.bindings.validate_static(self.static_world)?;
@@ -121,6 +121,8 @@ impl<'a> Scene<'a> {
         if *budget > limits.max_support_points {
             return Err("projectile_contact_invalid_limits");
         }
+        let query = query.into();
+        let sweep = query.discovery_envelope(limits.boundary_epsilon)?;
         let row = self.filter_rows[23];
         let coverage = self.bindings.coverage();
         let mut triangles = self
@@ -155,14 +157,14 @@ impl<'a> Scene<'a> {
             }
         }
         Ok(
-            sweep_sphere(sweep, coverage, &triangles, &convex, limits, budget)?.map(|contact| {
-                OwnedContact {
+            projectile_contact::sweep(query, coverage, &triangles, &convex, limits, budget)?.map(
+                |contact| OwnedContact {
                     obstacle: contact.obstacle.into(),
                     fraction: contact.fraction,
                     center: contact.center,
                     normal: contact.normal,
-                }
-            }),
+                },
+            ),
         )
     }
 }
@@ -174,6 +176,7 @@ mod tests {
         acquisition_atomic::WorldKey,
         acquisition_volume_damage::Target,
         dynamic_collision::{Catalog, Pose},
+        projectile_contact::{CapsuleSweep, SphereSweep},
     };
     use serde_json::json;
 
@@ -326,6 +329,76 @@ mod tests {
         ));
         assert_eq!(
             run(&moved_overlays, filters, key, 2),
+            Err("projectile_contact_work_limit")
+        );
+    }
+
+    #[test]
+    fn projectile_capsule_discovers_forward_extension_but_tests_the_exact_shape() {
+        let world = static_world(true);
+        let bindings = bindings(&world);
+        let snapshot = snapshot();
+        let mut overlays = SequenceCollisionState::default();
+        overlays.synthetic_projectile_hospital(4, 4., "a".repeat(64));
+        let mut filters = [0; 32];
+        filters[23] = (1 << 0) | (1 << 9);
+        let mut scene = Scene::new(&world, &overlays, &snapshot, &bindings, filters);
+        scene.dynamic_verified = true;
+        let capsule = CapsuleSweep {
+            start: [3., 0., 0.],
+            end: [5.6, 0., 0.],
+            spine: [[0., 0., -0.25], [0., 0., 0.5]],
+            radius: 0.05,
+            rotation: [[0., 0., 1.], [0., 1., 0.], [-1., 0., 0.]],
+            associated_character: None,
+        };
+        let hit = scene.query(capsule, &mut 10_000).unwrap().unwrap();
+        assert!(matches!(hit.obstacle, OwnedObstacleId::Static { .. }));
+        assert!((hit.center[0] - 5.45).abs() < 1e-6);
+        assert_eq!(
+            scene.query(
+                SphereSweep {
+                    start: capsule.start,
+                    end: capsule.end,
+                    radius: capsule.radius,
+                    associated_character: None
+                },
+                &mut 10_000
+            ),
+            Ok(None)
+        );
+
+        // Orientation perpendicular to motion still discovers the candidate
+        // through the same broad envelope, but exact contact is clear.
+        assert_eq!(
+            scene.query(
+                CapsuleSweep {
+                    rotation: Pose::at([0.; 3]).rotation,
+                    ..capsule
+                },
+                &mut 10_000
+            ),
+            Ok(None)
+        );
+        filters[23] = (1 << 0) | (1 << 22);
+        scene.filter_rows = filters;
+        let hit = scene
+            .query(
+                CapsuleSweep {
+                    end: [3.6, 0., 0.],
+                    ..capsule
+                },
+                &mut 10_000,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(hit.obstacle, OwnedObstacleId::Sequence { placement, .. }
+            if placement == "hospital-4")
+        );
+        assert!((hit.center[0] - 3.45).abs() < 1e-6);
+        assert_eq!(
+            scene.query(capsule, &mut 2),
             Err("projectile_contact_work_limit")
         );
     }
