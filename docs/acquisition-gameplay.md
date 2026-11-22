@@ -84,10 +84,12 @@ firearm or radial-blast body coverage.
 
 ## Automatic vehicle repair
 
-The scheduler consumes the effective `kCharModAutoRepair` for living, ready
-occupants of source-type9 Escorts. The authoritative occupied seat selects the
-current vehicle; no equipped repair tool or client repair request is needed.
-Bound Ground occupants use the current vehicle root for leadership proximity.
+The scheduler consumes effective `kCharModAutoRepair` for living, ready
+occupants of source-type-9 Escorts and source-type-3 APCs. Qualified passengers,
+drivers and gunners use their authoritative occupied seat and the current vehicle
+root for leadership proximity. Gunners need a current seat grant and can receive
+the passive before initializing their primary. The passive uses neither an
+equipped repair tool nor a client repair request and grants no repair work or XP.
 
 Each character life owns its repair timer. An elapsed interval strictly greater
 than 1.5 seconds produces at most one attempt per scheduler update, carrying the

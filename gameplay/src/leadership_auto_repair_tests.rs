@@ -3,7 +3,7 @@ use super::*;
 use crate::leadership_passives::LeadershipCatalog;
 use crate::leadership_runtime::RolePolicy;
 
-fn fixture() -> Engine<Vec<u8>> {
+fn passive_rules() -> (LeadershipCatalog, RolePolicy) {
     let catalog=LeadershipCatalog::from_json(&json!({
         "schema_version":1,"application_id":20231,
         "source":{"member":"scripts/character_leadership_abilities.zpr","member_sha256":"a".repeat(64),
@@ -22,7 +22,12 @@ fn fixture() -> Engine<Vec<u8>> {
         .to_string(),
     )
     .unwrap();
-    let mut e=crate::spawn_progression::tests::dynamic_bodies::acquisition_gameplay_tests::automatic_repair_fixture(catalog,policy);
+    (catalog, policy)
+}
+
+fn fixture() -> Engine<Vec<u8>> {
+    let (catalog, policy) = passive_rules();
+    let mut e = crate::spawn_progression::tests::dynamic_bodies::acquisition_gameplay_tests::automatic_repair_fixture(catalog, policy);
     let ground = e.ground_runtime.as_mut().unwrap();
     let key = ground.get(4).unwrap().key;
     ground.apply_damage(key, 160, 0x0380_0007).unwrap(); // 150 max HP -> 110 HP.
@@ -445,4 +450,176 @@ fn quiet_timer_observations_do_not_consume_the_evidence_log_budget() {
     }
     assert_eq!(e.written, written);
     assert_eq!(hp(&e), 440);
+}
+
+fn apc(engine: &Engine<Vec<u8>>) -> &crate::acquisition_ground_runtime::Vehicle {
+    engine.ground_runtime.as_ref().unwrap().get(0).unwrap()
+}
+
+fn mount_for_repair(engine: &mut Engine<Vec<u8>>, index: u16, seat: u8, now: u64) {
+    let position = engine.current_ground_vehicle(index).unwrap().position;
+    let actor = engine.active.as_mut().unwrap();
+    actor
+        .tracking
+        .server_position(position, player_tracking::PositionOrigin::ServerSpawn, now);
+    let character = 0x0380_0000 | u32::from(actor.reservation.player);
+    let mut wire = 0x0216u16.to_be_bytes().to_vec();
+    wire.extend((0x0100_0000 | u32::from(index)).to_be_bytes());
+    wire.extend(u32::from(seat).to_be_bytes());
+    wire.extend(character.to_be_bytes());
+    crate::spawn_progression::dispatch(engine, &wire, now).unwrap();
+    assert_eq!(
+        engine.active.as_ref().unwrap().ground_seat,
+        Some(ground_seats::PassengerSeat {
+            vehicle_index: index,
+            seat
+        })
+    );
+}
+
+fn apc_repair_fixture(domination_seat: Option<u8>) -> Engine<Vec<u8>> {
+    let (catalog, policy) = passive_rules();
+    let mut engine = if let Some(seat) = domination_seat {
+        let mut engine =
+            crate::manual_ground_repair_domination_tests::fixture_with_drivers(0, 0, true);
+        let mut actor = engine.active.take().unwrap();
+        actor.reservation.account = 1;
+        actor.reservation.character.character_id = Some(1);
+        engine = engine
+            .with_development_control()
+            .with_leadership_passives(catalog, policy)
+            .unwrap();
+        engine.active = Some(actor);
+        crate::ground_turrets::tests::opt_in(&mut engine, 0);
+        mount_for_repair(&mut engine, 0, seat, 3240);
+        if seat == 1 {
+            let actor = engine.active.as_ref().unwrap();
+            assert!(apc(&engine).turret.as_ref().unwrap().grant_matches(actor));
+            assert!(
+                apc(&engine)
+                    .turret
+                    .as_ref()
+                    .unwrap()
+                    .primary_for(actor)
+                    .is_none()
+            );
+        }
+        engine
+    } else {
+        crate::spawn_progression::tests::dynamic_bodies::acquisition_gameplay_tests::automatic_repair_fixture_for_modeled_vehicle(catalog, policy, true)
+    };
+    let key = apc(&engine).key;
+    engine
+        .ground_runtime
+        .as_mut()
+        .unwrap()
+        .apply_grenade_damage(key, 50., 0x0380_0007, 0x1080_0002)
+        .unwrap();
+    assert_eq!(apc(&engine).health_quarter_points, 400);
+    assert_eq!(
+        engine
+            .plan_leadership(Duration::from_millis(3250))
+            .unwrap()
+            .modifiers(engine.active.as_ref().unwrap())
+            .value("kCharModAutoRepair"),
+        1.
+    );
+    engine
+}
+
+#[test]
+fn occupied_apc_passengers_and_crew_repair_without_weapon_readiness() {
+    for seat in [None, Some(0), Some(1), Some(2)] {
+        let mut engine = apc_repair_fixture(seat);
+        let before = apc(&engine).clone();
+        engine
+            .tick_leadership_auto_repair(Duration::from_millis(3250), 3)
+            .unwrap();
+        engine
+            .tick_leadership_auto_repair(Duration::from_millis(4750), 3)
+            .unwrap();
+        assert_eq!(apc(&engine), &before);
+        engine
+            .tick_leadership_auto_repair(Duration::from_millis(4800), 3)
+            .unwrap();
+        let vehicle = apc(&engine);
+        assert_eq!(vehicle.health_hp(), 102.25, "APC seat {seat:?}");
+        assert_eq!(vehicle.health_quarter_points, 409);
+        assert_eq!(vehicle.key, before.key);
+        assert_eq!(vehicle.pose, before.pose);
+        assert_eq!(
+            vehicle.damage_wire().last_attacker,
+            before.damage_wire().last_attacker
+        );
+        assert_eq!(
+            vehicle.damage_wire().last_source_object,
+            before.damage_wire().last_source_object
+        );
+        assert_eq!(
+            vehicle.damage_wire().last_location_and_type,
+            before.damage_wire().last_location_and_type
+        );
+        assert_eq!(
+            vehicle.damage_wire().last_user_data,
+            before.damage_wire().last_user_data
+        );
+    }
+}
+
+#[test]
+fn apc_auto_repair_refuses_stale_gunner_grant_and_rolls_back_refused_record() {
+    let mut engine = apc_repair_fixture(Some(1));
+    engine
+        .tick_leadership_auto_repair(Duration::from_millis(3250), 3)
+        .unwrap();
+    let hp_before = apc(&engine).clone();
+    let timers_before = engine.automatic_repair.clone();
+    let pending_before = engine.active.as_ref().unwrap().pending_shared.clone();
+    let log_limit = engine.max_log;
+    engine.max_log = engine.written;
+    assert_eq!(
+        engine.tick_leadership_auto_repair(Duration::from_millis(4800), 3),
+        Err("log_limit_reached")
+    );
+    assert_eq!(apc(&engine), &hp_before);
+    assert_eq!(engine.automatic_repair, timers_before);
+    assert_eq!(
+        engine.active.as_ref().unwrap().pending_shared,
+        pending_before
+    );
+    engine.failed = false;
+    engine.max_log = log_limit;
+    engine
+        .tick_leadership_auto_repair(Duration::from_millis(4800), 3)
+        .unwrap();
+    assert_eq!(apc(&engine).health_quarter_points, 409);
+    engine.active.as_mut().unwrap().life = CharacterLife::Alive {
+        generation: 2,
+        health_quarter_points: 400,
+    };
+    for ms in [4850, 6400] {
+        engine
+            .tick_leadership_auto_repair(Duration::from_millis(ms), 3)
+            .unwrap();
+    }
+    assert_eq!(apc(&engine).health_quarter_points, 409);
+}
+
+#[test]
+fn qualified_escort_gunner_auto_repairs_before_primary_initialization() {
+    let mut engine = fixture();
+    crate::ground_turrets::tests::opt_in(&mut engine, 4);
+    mount_for_repair(&mut engine, 4, 1, 3240);
+    let vehicle = engine.ground_runtime.as_ref().unwrap().get(4).unwrap();
+    let turret = vehicle.turret.as_ref().unwrap();
+    let actor = engine.active.as_ref().unwrap();
+    assert!(turret.grant_matches(actor));
+    assert!(turret.primary_for(actor).is_none());
+    engine
+        .tick_leadership_auto_repair(Duration::from_millis(3250), 3)
+        .unwrap();
+    engine
+        .tick_leadership_auto_repair(Duration::from_millis(4800), 3)
+        .unwrap();
+    assert_eq!(hp(&engine), 449);
 }

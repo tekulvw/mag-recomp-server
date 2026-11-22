@@ -373,6 +373,17 @@ impl<W: Write> Engine<W> {
         Some(self.ground_turret_policy(seat.vehicle_index)?.kind)
     }
 
+    pub(crate) fn current_ground_gunner_kind(&self, actor: &Active) -> Option<PolicyKind> {
+        let seat = actor.ground_seat?;
+        let kind = self.ground_gunner_kind(actor)?;
+        (actor
+            .owner_fields
+            .state
+            .is_some_and(|state| state.state == 14)
+            && self.ground_turret(seat.vehicle_index)?.grant_matches(actor))
+        .then_some(kind)
+    }
+
     fn ground_turret(&self, index: u16) -> Option<&Turret> {
         self.ground_runtime.as_ref()?.get(index)?.turret.as_ref()
     }
