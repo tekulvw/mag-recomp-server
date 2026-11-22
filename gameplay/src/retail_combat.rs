@@ -903,16 +903,17 @@ impl RetailBulletProfile {
             };
             // Native SimWeaponKit keeps host ammo for these compatible
             // primary attachments when the replacement weapon is empty.
-            let required = match slot {
-                16 => BulletAttachmentKind::Suppressor,
-                17 => BulletAttachmentKind::Bipod,
-                _ => return Err("unsupported_bullet_attachment"),
-            };
-            if items
+            let kind = items
                 .zip(weapon)
-                .and_then(|(items, weapon)| items.retail_primary_attachment(weapon, attachment))
-                != Some(required)
-            {
+                .and_then(|(items, weapon)| items.retail_primary_attachment(weapon, attachment));
+            if !matches!(
+                (slot, kind),
+                (16, Some(BulletAttachmentKind::Suppressor))
+                    | (
+                        17,
+                        Some(BulletAttachmentKind::Bipod | BulletAttachmentKind::ForwardGrip)
+                    )
+            ) {
                 return Err("unsupported_bullet_attachment");
             }
         }

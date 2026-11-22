@@ -35,6 +35,7 @@ pub struct BulletParameters {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BulletAttachmentKind {
     Bipod,
+    ForwardGrip,
     Suppressor,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -847,6 +848,9 @@ impl ItemCatalog {
         ) {
             ("kWepCategoryAssaultRifle", "kAttachTypeSuppressor") => {
                 Some(BulletAttachmentKind::Suppressor)
+            }
+            ("kWepCategoryAssaultRifle", "kAttachTypeForwardGrip") => {
+                Some(BulletAttachmentKind::ForwardGrip)
             }
             ("kWepCategoryMachineGun", "kAttachTypeBipod") => Some(BulletAttachmentKind::Bipod),
             _ => None,
