@@ -29,6 +29,8 @@ A new interval uses the authored tick rate and the effective
 `kCharModResupplyRate` modifier. On a due update the worker consumes one stored
 interval, refreshes it from the current modifier, and fills the selected frag
 budget to its authored cap. The normal grenade launch path spends that budget.
+The worker requires a finite, positive effective interval. This defensive
+bound keeps invalid external tuning from scheduling a continuous refill.
 The worker records a pulse before changing the session or ammunition. It emits
 no new ammo-count message. The retail client has separate local clip and reserve
 timing.

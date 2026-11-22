@@ -660,6 +660,49 @@ mod tests {
     }
 
     #[test]
+    fn human_static_resupply_refused_staged_lethal_preserves_live_session() {
+        use crate::acquisition_character_effects::{NativeState, Request, Target};
+        let mut engine = fixture();
+        dispatch(&mut engine, &request(0, FAMILY_PREFIX), 200).unwrap();
+        let actor = engine.active.as_ref().unwrap();
+        assert_eq!(actor.static_resupply.len(), 1);
+        let target = Target {
+            character_id: 0x0380_0000 | u32::from(actor.reservation.player),
+            generation: 4,
+            world: actor.reservation.world,
+        };
+        let mut native = std::collections::BTreeMap::from([(
+            target.character_id,
+            NativeState {
+                invulnerability: Some(2),
+                associated_vehicle: Some(protocol::VictimWasMounted::NoAssociatedVehicle),
+            },
+        )]);
+        let candidate = engine
+            .prepare_acquisition_character_effects(
+                &[(
+                    target,
+                    Request::VolumeLethal {
+                        victim_vector: [1., 0., 0.],
+                    },
+                )],
+                &native,
+                Duration::from_millis(250),
+            )
+            .unwrap();
+        assert!(engine.active.as_ref().unwrap().life.is_alive());
+        engine.max_log = engine.written;
+        assert!(
+            engine
+                .record_acquisition_character_effects(candidate, &mut native, 1)
+                .is_err()
+        );
+        let actor = engine.active.as_ref().unwrap();
+        assert!(actor.life.is_alive());
+        assert_eq!(actor.static_resupply.len(), 1);
+    }
+
+    #[test]
     fn human_static_resupply_late_update_consumes_only_one_interval() {
         let mut engine = fixture();
         engine.active.as_mut().unwrap().grenade_remaining = 0;
@@ -669,6 +712,36 @@ mod tests {
         let session = &engine.active.as_ref().unwrap().static_resupply[0];
         assert_eq!(session.elapsed, 2.5);
         assert_eq!(session.updated, Duration::from_millis(3700));
+    }
+
+    #[test]
+    fn human_static_resupply_due_uses_stored_interval_before_refreshing_modifier() {
+        let qualified_modifiers = |modifier| {
+            let catalog = skill_catalog::SkillCatalog::from_value(json!({
+                "application_id":20231,"schema_version":2,
+                "table":{"Skills":{"MagCharacterSkill0":{"MagCharacterSkill":{
+                    "Default":{"Modifier":"kCharModResupplyRate","ModifierValue":modifier},
+                    "Green":{"Available":true},"Black":{"Available":true},"Red":{"Available":true}
+                }}}}
+            }))
+            .unwrap();
+            catalog.resolve(0, &[1, 0, 0, 0, 0]).unwrap()
+        };
+        let mut engine = fixture();
+        let actor = engine.active.as_mut().unwrap();
+        actor.modifiers = qualified_modifiers(0.25);
+        actor.grenade_remaining = 0;
+        dispatch(&mut engine, &request(0, FAMILY_PREFIX), 200).unwrap();
+        let actor = engine.active.as_mut().unwrap();
+        assert_eq!(actor.static_resupply[0].interval, 1.25);
+        actor.modifiers = qualified_modifiers(0.5);
+        tick(&mut engine, 1449).unwrap();
+        assert_eq!(ammo(&engine), 0);
+        tick(&mut engine, 1450).unwrap();
+        assert_eq!(ammo(&engine), 1);
+        let session = &engine.active.as_ref().unwrap().static_resupply[0];
+        assert_eq!(session.interval, 1.5);
+        assert_eq!(session.elapsed, 0.0);
     }
 
     #[test]
