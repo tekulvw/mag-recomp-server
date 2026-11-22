@@ -844,39 +844,56 @@ fn primary_attachment_hit_fixture(
     category: &str,
     kind: &str,
 ) -> Engine<Vec<u8>> {
+    attachment_hit_fixture(
+        slot.map(|slot| (slot, kind)).as_slice(),
+        attachment,
+        category,
+    )
+}
+
+fn attachment_hit_fixture(
+    attachments: &[(usize, &str)],
+    attachment: PrimaryAttachment,
+    category: &str,
+) -> Engine<Vec<u8>> {
     use sha2::{Digest, Sha256};
 
     let (mut raw, mut metadata) = combat_fixture_documents(false, 0.0, 0.0, None, false, false);
     let host = &mut raw["definitions"]["weapons"]["synthetic_rifle"]["parameters"];
     host["id"] = json!("synthetic_rifle");
     host["category"] = json!(category);
-    host["attachment_list"] = match attachment {
-        PrimaryAttachment::Incompatible => json!({}),
-        _ => json!({"WeaponAttachment0":{"WeaponAttachment":{"name":"synthetic_attachment"}}}),
-    };
-    raw["items"]["FactionItemList0:7"] = json!({
-        "authored_ref":"FactionItemList0:7","faction_list":"FactionItemList0","local_ordinal":7,
-        "wire_item_id":null,"name":"synthetic_attachment","item_type":"kAttachmentItem",
-        "definition":{"group":"attachments","name":"synthetic_attachment"}
-    });
-    raw["definitions"]["attachments"]["synthetic_attachment"]["parameters"] = json!({
-        "id":"synthetic_attachment",
-        "attachment_type":if matches!(attachment, PrimaryAttachment::WrongType) {
-            "kAttachTypeScope"
-        } else {
-            kind
-        },
-        "weapon_name":if matches!(attachment, PrimaryAttachment::Replacement) {
-            "synthetic_replacement"
-        } else {
-            ""
+    host["attachment_list"] = json!({});
+    for (ordinal, &(_, kind)) in attachments.iter().enumerate() {
+        let name = format!("synthetic_attachment_{ordinal}");
+        let item_id = 7 + ordinal;
+        let item = format!("FactionItemList0:{item_id}");
+        if !matches!(attachment, PrimaryAttachment::Incompatible) {
+            let row = format!("WeaponAttachment{ordinal}");
+            raw["definitions"]["weapons"]["synthetic_rifle"]["parameters"]["attachment_list"]
+                [row] = json!({"WeaponAttachment":{"name":name}});
         }
-    });
-    if matches!(attachment, PrimaryAttachment::MissingReplacement) {
-        raw["definitions"]["attachments"]["synthetic_attachment"]["parameters"]
-            .as_object_mut()
-            .unwrap()
-            .remove("weapon_name");
+        raw["items"][&item] = json!({
+            "authored_ref":item,"faction_list":"FactionItemList0","local_ordinal":item_id,
+            "wire_item_id":null,"name":name,"item_type":"kAttachmentItem",
+            "definition":{"group":"attachments","name":name}
+        });
+        let parameters = &mut raw["definitions"]["attachments"][&name]["parameters"];
+        *parameters = json!({
+            "id":name,
+            "attachment_type":if matches!(attachment, PrimaryAttachment::WrongType) {
+                "kAttachTypeScope"
+            } else {
+                kind
+            },
+            "weapon_name":if matches!(attachment, PrimaryAttachment::Replacement) {
+                "synthetic_replacement"
+            } else {
+                ""
+            }
+        });
+        if matches!(attachment, PrimaryAttachment::MissingReplacement) {
+            parameters.as_object_mut().unwrap().remove("weapon_name");
+        }
     }
     let bytes = serde_json::to_vec(&raw).unwrap();
     metadata["provenance"]["catalog_sha256"] = json!(if matches!(
@@ -892,7 +909,7 @@ fn primary_attachment_hit_fixture(
             .unwrap()
     } else {
         let path = std::env::temp_dir().join(format!(
-            "mag-synthetic-primary-attachment-{}-{:?}-{slot:?}",
+            "mag-synthetic-primary-attachment-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
@@ -913,16 +930,15 @@ fn primary_attachment_hit_fixture(
 
     let mut engine = fixture();
     engine.item_catalog = finish_combat_fixture(items, &metadata);
-    if let Some(slot) = slot {
-        engine
-            .active
-            .as_mut()
-            .unwrap()
-            .spawned_loadout
-            .as_mut()
-            .unwrap()
-            .inventories[0]
-            .slots[slot] = Some(7);
+    let kit = engine
+        .active
+        .as_mut()
+        .unwrap()
+        .spawned_loadout
+        .as_mut()
+        .unwrap();
+    for (ordinal, &(slot, _)) in attachments.iter().enumerate() {
+        kit.inventories[0].slots[slot] = Some(7 + u16::try_from(ordinal).unwrap());
     }
     engine
         .peers
@@ -1037,25 +1053,29 @@ fn native_assault_rifle_hit_with_compatible_suppressor_uses_host_ammo() {
 
 #[test]
 fn native_assault_rifle_hit_preserves_unqualified_firepoint_denials() {
+    assert_unqualified_assault_attachments_denied("kAttachTypeSuppressor", 16, 17);
+}
+
+fn assert_unqualified_assault_attachments_denied(kind: &str, allowed: usize, other: usize) {
     use PrimaryAttachment::*;
     for (slot, attachment, category, mounted) in [
         (15, Compatible, "kWepCategoryAssaultRifle", false),
-        (17, Compatible, "kWepCategoryAssaultRifle", false),
-        (16, Compatible, "kWepCategoryMachineGun", false),
-        (16, Compatible, "kWepCategoryAssaultRifle", true),
-        (16, Incompatible, "kWepCategoryAssaultRifle", false),
-        (16, Replacement, "kWepCategoryAssaultRifle", false),
-        (16, WrongType, "kWepCategoryAssaultRifle", false),
-        (16, Unbound, "kWepCategoryAssaultRifle", false),
-        (16, MismatchedSource, "kWepCategoryAssaultRifle", false),
-        (16, MissingReplacement, "kWepCategoryAssaultRifle", false),
+        (other, Compatible, "kWepCategoryAssaultRifle", false),
+        (allowed, Compatible, "kWepCategoryMachineGun", false),
+        (allowed, Compatible, "kWepCategoryAssaultRifle", true),
+        (allowed, Incompatible, "kWepCategoryAssaultRifle", false),
+        (allowed, Replacement, "kWepCategoryAssaultRifle", false),
+        (allowed, WrongType, "kWepCategoryAssaultRifle", false),
+        (allowed, Unbound, "kWepCategoryAssaultRifle", false),
+        (allowed, MismatchedSource, "kWepCategoryAssaultRifle", false),
+        (
+            allowed,
+            MissingReplacement,
+            "kWepCategoryAssaultRifle",
+            false,
+        ),
     ] {
-        let mut engine = primary_attachment_hit_fixture(
-            Some(slot),
-            attachment,
-            category,
-            "kAttachTypeSuppressor",
-        );
+        let mut engine = primary_attachment_hit_fixture(Some(slot), attachment, category, kind);
         if mounted {
             let seat = domination_helo::PassengerSeat {
                 object_index: 0,
@@ -1080,4 +1100,34 @@ fn native_assault_rifle_hit_preserves_unqualified_firepoint_denials() {
             "{slot} {attachment:?} {category} mounted={mounted}"
         );
     }
+}
+
+#[test]
+fn native_assault_rifle_hit_keeps_host_ammo_with_forward_grip() {
+    let cases: [&[(usize, &str)]; 3] = [
+        &[],
+        &[(17, "kAttachTypeForwardGrip")],
+        &[
+            (16, "kAttachTypeSuppressor"),
+            (17, "kAttachTypeForwardGrip"),
+        ],
+    ];
+    let results = cases.map(|attachments| {
+        let mut engine = attachment_hit_fixture(
+            attachments,
+            PrimaryAttachment::Compatible,
+            "kWepCategoryAssaultRifle",
+        );
+        hit(&mut engine, 55, 1000).unwrap();
+        (
+            victim(&engine).life.damage_health(),
+            victim(&engine).last_damage.last_location_and_type,
+        )
+    });
+    assert_eq!(results, [(Some((4, 240)), 0x13); 3]);
+}
+
+#[test]
+fn native_assault_rifle_hit_rejects_unqualified_forward_grips() {
+    assert_unqualified_assault_attachments_denied("kAttachTypeForwardGrip", 17, 16);
 }
