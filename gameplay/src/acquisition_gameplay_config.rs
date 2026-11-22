@@ -47,6 +47,7 @@ pub struct Configuration {
     human_static_resupply: Option<PathBuf>,
     projectile_contacts: Option<PathBuf>,
     infantry_rockets: Option<PathBuf>,
+    guided_launchers: Option<PathBuf>,
     smoke_grenades: Option<PathBuf>,
     gas_grenades: Option<PathBuf>,
     flash_grenades: Option<PathBuf>,
@@ -237,6 +238,14 @@ impl Configuration {
             }
             *source = directory.join(&*source);
         }
+        if let Some(source) = &mut result.guided_launchers {
+            if source.as_os_str().is_empty() {
+                return Err(io::Error::other(
+                    "empty_acquisition_guided_launcher_source_path",
+                ));
+            }
+            *source = directory.join(&*source);
+        }
         if let Some(source) = &mut result.projectile_contacts {
             *source = directory.join(&*source);
         }
@@ -372,6 +381,22 @@ impl Configuration {
                     .read_to_end(&mut raw)?;
                 if raw.len() > 1 << 20 {
                     return Err(io::Error::other("invalid_infantry_rocket_rules"));
+                }
+                Ok(raw)
+            })
+            .transpose()
+    }
+
+    pub fn guided_launcher_source(&self) -> io::Result<Option<Vec<u8>>> {
+        self.guided_launchers
+            .as_ref()
+            .map(|path| {
+                let mut raw = Vec::new();
+                File::open(path)?
+                    .take((1 << 20) + 1)
+                    .read_to_end(&mut raw)?;
+                if raw.len() > 1 << 20 {
+                    return Err(io::Error::other("invalid_guided_launcher_rules"));
                 }
                 Ok(raw)
             })

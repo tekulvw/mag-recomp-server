@@ -224,7 +224,7 @@ impl Weapon {
             ])
     }
 
-    fn matches(self, weapon: &Value) -> bool {
+    pub(crate) fn matches(self, weapon: &Value) -> bool {
         let fire = &weapon["fire_mode"];
         let modes = &fire["fire_modes"];
         self.valid()
@@ -300,7 +300,7 @@ impl Flight {
 }
 
 impl Blast {
-    fn matches(self, ammo: &Value) -> bool {
+    pub(crate) fn matches(self, ammo: &Value) -> bool {
         let damage = &ammo["damage"];
         self.half_radius_m < self.outer_radius_m
             && bounded(&[

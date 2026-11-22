@@ -459,6 +459,7 @@ impl ChangePlayerSquadResult {
 }
 #[derive(Clone)]
 pub enum GameMessage<'a> {
+    RocketLockState(crate::guided_launcher_warnings::LockReport),
     StaticResupply(StaticResupply),
     ClaimReservation(ClaimReservation<'a>),
     /// Retail NetMessageProtocolInfo: the client's reply to the server's handshake.
@@ -638,6 +639,9 @@ impl<'a> GameMessage<'a> {
                 Ok(Self::EnterGame(EnterGame))
             }
             0x020f => Ok(Self::Hit(crate::bullet_hit::NetMessageHit::decode(bytes)?)),
+            0x0229 if profile.application_id() == 20231 => Ok(Self::RocketLockState(
+                crate::guided_launcher_warnings::LockReport::decode(bytes)?,
+            )),
             0x0210 => Ok(Self::FireGrenade(FireGrenade::decode(bytes, profile)?)),
             0x021b => {
                 if bytes.len() < 5 {

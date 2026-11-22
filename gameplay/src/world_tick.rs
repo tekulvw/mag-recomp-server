@@ -34,6 +34,7 @@ impl<W: Write> Engine<W> {
             self.queue_active_ability_state(now, wall)?;
             messages.extend(self.tick_hospital_rockets(now, wall)?);
             messages.extend(self.tick_infantry_rockets(now, wall)?);
+            self.tick_guided_warnings(now, wall)?;
             messages.extend(self.tick_match_clock(now, wall)?);
             messages.extend(self.tick_gas_grenades(now, wall)?);
             self.queue_projectile_publications(now)?;

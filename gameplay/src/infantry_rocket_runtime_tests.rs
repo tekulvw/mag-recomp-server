@@ -194,13 +194,13 @@ fn infantry_rocket_range_is_strict_and_requested_capsule_uses_the_local_spine() 
     };
     variant.flight.auto_explode_distance_m = 56.;
     let step = source
-        .step(2000, None, |shape| {
+        .step(2000, None, None, |shape| {
             assert_eq!(shape.spine, [[0., 0., -0.125], [0., 0., 0.125]]);
             Ok(None)
         })
         .unwrap();
     assert!(matches!(step, Step::Move(_)));
-    let step = source.step(2001, None, |_| Ok(None)).unwrap();
+    let step = source.step(2001, None, None, |_| Ok(None)).unwrap();
     assert!(matches!(
         step,
         Step::Explode {
