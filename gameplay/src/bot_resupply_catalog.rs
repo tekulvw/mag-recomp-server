@@ -90,7 +90,7 @@ impl Provider {
     }
 }
 
-fn authored_axes(angles: [f64; 3]) -> [[f64; 3]; 3] {
+pub(crate) fn authored_axes(angles: [f64; 3]) -> [[f64; 3]; 3] {
     let [(sx, cx), (sy, cy), (sz, cz)] = angles.map(|angle| angle.to_radians().sin_cos());
     [
         [cz * cy, sz * cy, -sy],

@@ -30,6 +30,7 @@ pub struct Setup {
     pub ground_capabilities: Vec<(u16, acquisition_ground_runtime::Capabilities)>,
     pub ground_damage: Option<acquisition_ground_damage::Policy>,
     pub frag_character_blast: bool,
+    pub(crate) human_static_resupply: Option<Arc<human_static_resupply::Catalog>>,
     pub(crate) frag_ground_areas: Option<Arc<acquisition_frag_ground::Catalog>>,
     pub vehicle_reinforcement_intervals_ms: [u32; 2],
     pub structural: Option<crate::acquisition_structural::Setup>,
@@ -63,6 +64,23 @@ struct CaptureWitness {
 }
 
 impl Setup {
+    pub fn has_human_static_resupply(&self) -> bool {
+        self.human_static_resupply.is_some()
+    }
+
+    pub fn validate_human_static_resupply(
+        &self,
+        spawn: &spawn_catalog::SpawnCatalog,
+        collision: Option<&collision::CollisionWorld>,
+        objectives: &objective_catalog::ObjectiveCatalog,
+        items: &item_catalog::ItemCatalog,
+    ) -> Result<(), &'static str> {
+        if let Some(catalog) = &self.human_static_resupply {
+            catalog.bind(spawn, collision, objectives, items)?;
+        }
+        Ok(())
+    }
+
     pub fn has_frag_ground_areas(&self) -> bool {
         self.frag_ground_areas.is_some()
     }
@@ -305,6 +323,14 @@ impl<W: Write> Engine<W> {
             .as_ref()
             .ok_or("objective_catalog_unavailable")?;
         setup.validate_structural(catalog)?;
+        setup.validate_human_static_resupply(
+            self.spawn_catalog
+                .as_ref()
+                .ok_or("spawn_catalog_unavailable")?,
+            self.collision_world.as_ref(),
+            catalog,
+            &self.item_catalog,
+        )?;
         setup.validate_frag_character_blast(&self.item_catalog, self.collision_world.as_ref())?;
         setup.validate_frag_ground(
             &self.item_catalog,

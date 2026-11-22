@@ -58,6 +58,7 @@ impl Active {
         self.life = if damage.health_quarter_points == 0 {
             self.healing = None;
             self.pending_damage = None;
+            self.static_resupply.clear();
             self.clear_live_projectiles(now)?;
             self.last_exit = None;
             self.pending_spawn_deadline = None;

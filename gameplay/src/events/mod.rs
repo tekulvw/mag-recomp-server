@@ -184,6 +184,7 @@ struct CombatChanges {
     projectile_cleanup: [Option<ProjectileCleanup>; projectile::MAX_PROJECTILE_SLOTS],
     projectile_publications: Vec<ProjectilePublication>,
     new_grenade_remaining: Option<u8>,
+    static_resupply: Option<human_static_resupply::Change>,
     new_grenade_damage: Option<std::collections::VecDeque<PendingDamage>>,
     queued_fall: Option<PendingDamage>,
     dummy_created: bool,
@@ -321,6 +322,27 @@ fn plan_message<W: Write>(
             objectives::interaction(ctx, plan, request)
         }
         Ok(protocol::GameMessage::Hit(request)) => combat::hit(ctx, plan, request),
+        Ok(protocol::GameMessage::StaticResupply(request)) => {
+            let result = if ctx.accepted_client_route {
+                ctx.engine
+                    .plan_static_resupply(ctx.active, request, ctx.now, &plan.leadership)
+            } else {
+                Err("static_resupply_requires_native_client_route")
+            };
+            match result {
+                Ok(change) => {
+                    plan.combat.static_resupply = change;
+                    Ok(json!({"type":"static_resupply","target":request.target,
+                        "phase":format!("{:?}",request.phase),"accepted":true}))
+                }
+                Err(reason) => {
+                    plan.gameplay_denial = Some(reason);
+                    Ok(
+                        json!({"type":"static_resupply","target":request.target,"accepted":false,"reason":reason}),
+                    )
+                }
+            }
+        }
         Ok(protocol::GameMessage::FireGrenade(request)) => combat::fire_grenade(ctx, plan, request),
         Ok(protocol::GameMessage::Heal(request)) => combat::heal(ctx, plan, request),
         Ok(protocol::GameMessage::Resuscitate(request)) => resuscitate::plan(ctx, plan, request),
@@ -947,6 +969,25 @@ impl<W: Write> Engine<W> {
         active
             .projectile_publications
             .extend(plan.combat.projectile_publications);
+        if let Some(change) = plan.combat.static_resupply {
+            use human_static_resupply::Change;
+            let target = match change {
+                Change::Start(session) => session.target,
+                Change::Stop(target) => target,
+            };
+            active
+                .static_resupply
+                .retain(|session| session.target != target);
+            if let Change::Start(session) = change {
+                active.static_resupply.push(session);
+            }
+        }
+        if seating_transition
+            || plan.replication.spawn_delta.is_some()
+            || plan.combat.new_life.is_some_and(|life| !life.is_alive())
+        {
+            active.static_resupply.clear();
+        }
         if let Some(remaining) = plan.combat.new_grenade_remaining {
             active.grenade_remaining = remaining;
         }

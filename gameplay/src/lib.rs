@@ -82,6 +82,7 @@ pub mod dynamic_collision;
 pub mod dynamic_collision_runtime;
 #[cfg(test)]
 mod human_kill_reward_tests;
+mod human_static_resupply;
 pub mod incapacitation;
 mod incapacitation_runtime;
 #[cfg(test)]
@@ -1106,6 +1107,7 @@ struct Active {
     projectile_cleanup: [Option<ProjectileCleanup>; projectile::MAX_PROJECTILE_SLOTS],
     projectile_publications: Vec<ProjectilePublication>,
     grenade_remaining: u8,
+    static_resupply: Vec<human_static_resupply::Session>,
     observed_primary: Option<replication::InventoryItem>,
     observed_secondary: Option<replication::InventoryItem>,
     primary_equipped: bool,
