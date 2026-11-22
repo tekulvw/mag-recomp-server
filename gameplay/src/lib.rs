@@ -1447,12 +1447,13 @@ impl<W: Write> Engine<W> {
             }
             .ok_or("bullet_equipped_item_unavailable")?;
             return Ok(CharacterHitProfile::Retail(
-                retail_combat::RetailBulletProfile::from_equipped(
-                    self.item_catalog.retail_combat()?,
+                retail_combat::RetailBulletProfile::from_equipped_with_items(
+                    &self.item_catalog,
                     &kit,
                     equipped,
                     request.gear_index,
                     request.fire_mode,
+                    !active.is_mounted(),
                 )?,
             ));
         }
