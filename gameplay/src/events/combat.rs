@@ -100,6 +100,7 @@ pub(super) fn hit<W: Write>(
     // the wire has no attacker or unique shot ID. Repeated bytes can be shots.
     let mut profile_item = None;
     let mut ordinary_retail_firearm = false;
+    let mut ground_primary = false;
     let mut death_weapon = None;
     let mut damage_kind = None;
     let mut damage_calculation = None;
@@ -170,6 +171,11 @@ pub(super) fn hit<W: Write>(
             let profile = ctx.engine.bullet_profile(active, &request)?;
             ordinary_retail_firearm =
                 matches!(profile, CharacterHitProfile::Retail(_)) && !active.is_mounted();
+            ground_primary = matches!(
+                profile,
+                CharacterHitProfile::GroundApcPrimary(_)
+                    | CharacterHitProfile::GroundEscortPrimary(_)
+            );
             death_weapon = match profile {
                 CharacterHitProfile::Retail(_) if ordinary_retail_firearm => {
                     Some(death_notifications::Weapon::Firearm(profile.item_id()))
@@ -270,27 +276,41 @@ pub(super) fn hit<W: Write>(
             };
             Ok::<_, &'static str>(Some((amount, damage)))
         })();
-        if ordinary_retail_firearm
-            && ctx.accepted_client_route
+        let assists = if ctx.accepted_client_route
             && let Ok(effect) = &resolved
-            && let Some(target) = peer_target
-                .map(firearm_assists::Fighter::human)
-                .or_else(|| {
-                    registry_target.map(|bot| firearm_assists::Fighter {
-                        index: bot.object_index,
-                        reservation: None,
-                        generation: bot.generation,
-                    })
-                })
-            && let Some(assists) = firearm_assists::Plan::prepare(
-                ctx.engine,
-                active.reservation.world,
-                now,
-                firearm_assists::Fighter::human(active),
-                target,
-                effect.is_some_and(|(_, damage)| damage.health_quarter_points == 0),
-            )
         {
+            let collapsed = effect.is_some_and(|(_, damage)| damage.health_quarter_points == 0);
+            if ordinary_retail_firearm {
+                let target = peer_target
+                    .map(firearm_assists::Fighter::human)
+                    .or_else(|| {
+                        registry_target.map(|bot| firearm_assists::Fighter {
+                            index: bot.object_index,
+                            reservation: None,
+                            generation: bot.generation,
+                        })
+                    });
+                target.and_then(|target| {
+                    firearm_assists::Plan::prepare(
+                        ctx.engine,
+                        active.reservation.world,
+                        now,
+                        firearm_assists::Fighter::human(active),
+                        target,
+                        collapsed,
+                    )
+                })
+            } else if ground_primary && collapsed {
+                peer_target.and_then(|victim| {
+                    firearm_assists::Plan::prepare_ground_primary(ctx.engine, active, victim, now)
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(assists) = assists {
             let frame = plan.frago_frame(ctx.engine);
             let victim_position = peer_target
                 .and_then(|actor| ctx.engine.frago_character_position(actor, frame))

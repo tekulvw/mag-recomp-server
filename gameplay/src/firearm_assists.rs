@@ -259,8 +259,57 @@ impl FragOwner {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct GroundCrew {
+    gunner: Victim,
+    vehicle: acquisition_ground_runtime::Key,
+    spawn_counter: u16,
+    driver: Option<Victim>,
+}
+
+impl GroundCrew {
+    fn capture<W: Write>(engine: &Engine<W>, gunner: &Active) -> Option<Self> {
+        let seat = gunner.ground_seat?;
+        if !engine.ground_gunner_authority(gunner, seat.vehicle_index)
+            || engine.current_ground_gunner_kind(gunner).is_none()
+        {
+            return None;
+        }
+        let vehicle = engine.ground_runtime.as_ref()?.get(seat.vehicle_index)?;
+        let mut drivers = engine
+            .active
+            .iter()
+            .chain(engine.peers.values())
+            .filter(|driver| {
+                driver.reservation.world == gunner.reservation.world
+                    && driver.team() == gunner.team()
+                    && driver.reservation.character.faction == vehicle.faction
+                    && driver
+                        .owner_fields
+                        .state
+                        .is_some_and(|state| state.state == 14)
+                    && engine.ground_driver_authority(driver, seat.vehicle_index)
+            });
+        let driver = drivers.next().filter(|_| drivers.next().is_none());
+        let identity = |actor: &Active| Victim {
+            actor: Actor {
+                index: actor.reservation.player,
+                allocation: Allocation::Human(actor.allocation_sequence),
+            },
+            generation: Fighter::human(actor).generation,
+        };
+        Some(Self {
+            gunner: identity(gunner),
+            vehicle: vehicle.key,
+            spawn_counter: vehicle.spawn_counter,
+            driver: driver.map(identity),
+        })
+    }
+}
+
 enum Source {
     Firearm(Victim),
+    GroundPrimary(GroundCrew),
     QueuedFrag {
         index: u16,
         owner: FragOwner,
@@ -276,6 +325,17 @@ impl Source {
     fn matches<W: Write>(&self, engine: &Engine<W>, world: u32) -> bool {
         match *self {
             Self::Firearm(source) => source.matches(engine, world, true),
+            Self::GroundPrimary(crew) => {
+                engine
+                    .active
+                    .iter()
+                    .chain(engine.peers.values())
+                    .any(|gunner| {
+                        gunner.reservation.world == world
+                            && gunner.reservation.player == crew.gunner.actor.index
+                            && GroundCrew::capture(engine, gunner) == Some(crew)
+                    })
+            }
             Self::Rocket {
                 index,
                 allocation,
@@ -335,6 +395,27 @@ impl Plan {
             (actor, team, identity),
             target,
             collapsed,
+        )
+    }
+
+    pub(super) fn prepare_ground_primary<W: Write>(
+        engine: &Engine<W>,
+        gunner: &Active,
+        victim: &Active,
+        now: Duration,
+    ) -> Option<Self> {
+        let crew = GroundCrew::capture(engine, gunner)?;
+        Self::prepare_hit(
+            engine,
+            gunner.reservation.world,
+            now,
+            (
+                crew.gunner.actor,
+                gunner.team(),
+                Source::GroundPrimary(crew),
+            ),
+            Fighter::human(victim),
+            true,
         )
     }
 
@@ -439,7 +520,13 @@ impl Plan {
         // Duration's whole-millisecond range plus any u32 timeout fits in u128.
         let now_ms = now.as_millis();
         if killer_team != victim_team {
-            ledger.remember(killer, now_ms + u128::from(rules.assist_timeout_ms));
+            let expiry = now_ms + u128::from(rules.assist_timeout_ms);
+            ledger.remember(killer, expiry);
+            if let Source::GroundPrimary(crew) = source
+                && let Some(driver) = crew.driver
+            {
+                ledger.remember(driver.actor, expiry);
+            }
         }
         let awards = if collapsed {
             ledger
