@@ -73,7 +73,9 @@ struct Loaded {
     infantry_rocket_source: Option<Arc<[u8]>>,
     infantry_rockets: Option<Arc<crate::infantry_rockets::Catalog>>,
     smoke_grenade_source: Option<Arc<[u8]>>,
+    gas_grenade_source: Option<Arc<[u8]>>,
     smoke_grenades: Option<Arc<crate::smoke_grenades::Catalog>>,
+    gas_grenades: Option<Arc<crate::gas_grenades::Catalog>>,
     underbarrel_launcher_source: Option<Arc<[u8]>>,
     underbarrel_launchers: Option<Arc<crate::underbarrel_launchers::Catalog>>,
     ground_turret_source: Option<Arc<[u8]>>,
@@ -333,6 +335,7 @@ impl Registry {
                 acquisition_ground_turrets,
                 acquisition_rocket_source,
                 acquisition_smoke_source,
+                acquisition_gas_source,
                 acquisition_underbarrel_source,
             ) = if let Some(path) = &source.acquisition_gameplay {
                 let world = collision.as_ref().ok_or_else(|| {
@@ -371,6 +374,7 @@ impl Registry {
                     config.ground_turret_source()?.map(Arc::from),
                     config.infantry_rocket_source()?.map(Arc::from),
                     config.smoke_grenade_source()?.map(Arc::from),
+                    config.gas_grenade_source()?.map(Arc::from),
                     config.underbarrel_launcher_source()?.map(Arc::from),
                 )
             } else {
@@ -384,7 +388,7 @@ impl Registry {
                         "acquisition_gameplay_configuration_required"
                     }));
                 }
-                (None, None, None, None, None)
+                (None, None, None, None, None, None)
             };
             let damage = source
                 .character_damage_rules
@@ -408,6 +412,7 @@ impl Registry {
                 hospital_rocket_source,
                 infantry_rocket_source,
                 smoke_grenade_source,
+                gas_grenade_source,
                 underbarrel_launcher_source,
             ) = if let Some(path) = &source.domination_gameplay {
                 if policy.game_type != 2
@@ -453,6 +458,7 @@ impl Registry {
                     rocket_source,
                     config.infantry_rocket_source()?.map(Arc::from),
                     config.smoke_grenade_source()?.map(Arc::from),
+                    config.gas_grenade_source()?.map(Arc::from),
                     config.underbarrel_launcher_source()?.map(Arc::from),
                 )
             } else {
@@ -463,6 +469,7 @@ impl Registry {
                     None,
                     acquisition_rocket_source,
                     acquisition_smoke_source,
+                    acquisition_gas_source,
                     acquisition_underbarrel_source,
                 )
             };
@@ -530,7 +537,9 @@ impl Registry {
                     infantry_rocket_source,
                     infantry_rockets: None,
                     smoke_grenade_source,
+                    gas_grenade_source,
                     smoke_grenades: None,
+                    gas_grenades: None,
                     underbarrel_launcher_source,
                     underbarrel_launchers: None,
                     ground_turret_source,
@@ -574,6 +583,53 @@ impl Registry {
         self.profiles
             .values()
             .any(|profile| profile.smoke_grenades.is_some())
+    }
+
+    pub fn bind_gas_grenades(
+        &mut self,
+        items: &item_catalog::ItemCatalog,
+    ) -> Result<(), &'static str> {
+        for profile in self.profiles.values_mut() {
+            let Some(source) = profile.gas_grenade_source.as_ref() else {
+                continue;
+            };
+            if !matches!(
+                (
+                    profile.summary.game_type,
+                    &profile.acquisition,
+                    &profile.domination
+                ),
+                (1, Some(_), None) | (2, None, Some(_))
+            ) {
+                return Err("gas_grenade_mode_required");
+            }
+            if profile.acquisition.as_ref().is_some_and(|setup| {
+                setup.structural.is_none() || setup.filter_rows[6] & (1 << 21) == 0
+            }) || profile
+                .domination
+                .as_ref()
+                .is_some_and(|world| world.frag_blast_collision().filter_rows[6] & (1 << 21) == 0)
+                || profile.damage.is_none()
+            {
+                return Err("gas_grenade_world_required");
+            }
+            let objectives = profile
+                .objectives
+                .as_ref()
+                .ok_or("gas_grenade_objectives_required")?;
+            profile.gas_grenades = Some(Arc::new(crate::gas_grenades::Catalog::from_bytes(
+                source,
+                items,
+                &objectives.source().source_image_sha256,
+            )?));
+        }
+        Ok(())
+    }
+
+    pub fn has_gas_grenades(&self) -> bool {
+        self.profiles
+            .values()
+            .any(|profile| profile.gas_grenades.is_some())
     }
 
     pub fn bind_underbarrel_launchers(
@@ -1072,8 +1128,12 @@ impl<W: Write> Engine<W> {
         registry.bind_ground_turrets(&self.item_catalog)?;
         registry.bind_infantry_rockets(&self.item_catalog)?;
         registry.bind_smoke_grenades(&self.item_catalog)?;
+        registry.bind_gas_grenades(&self.item_catalog)?;
         registry.bind_underbarrel_launchers(&self.item_catalog)?;
         if self.dynamic_body_resources.is_none() {
+            if registry.has_gas_grenades() {
+                return Err("gas_grenades_require_dynamic_bodies");
+            }
             if registry.has_domination_gameplay() {
                 return Err("domination_profiles_require_dynamic_bodies");
             }
@@ -1099,6 +1159,7 @@ impl<W: Write> Engine<W> {
             self.hospital_rockets = None;
             self.infantry_rockets = None;
             self.smoke_grenades = None;
+            self.gas_grenades = None;
             self.underbarrel_launchers = None;
             self.hospital_rocket_ground = None;
             self.frag_character_blast = false;
@@ -1224,6 +1285,7 @@ impl<W: Write> Engine<W> {
         self.hospital_rockets = loaded.hospital_rockets;
         self.infantry_rockets = loaded.infantry_rockets;
         self.smoke_grenades = loaded.smoke_grenades;
+        self.gas_grenades = loaded.gas_grenades;
         self.underbarrel_launchers = loaded.underbarrel_launchers;
         self.hospital_rocket_ground = loaded
             .domination
@@ -1979,7 +2041,9 @@ mod tests {
                 infantry_rocket_source: None,
                 infantry_rockets: None,
                 smoke_grenade_source: None,
+                gas_grenade_source: None,
                 smoke_grenades: None,
+                gas_grenades: None,
                 underbarrel_launcher_source: None,
                 underbarrel_launchers: None,
                 ground_turret_source: None,

@@ -11,12 +11,32 @@ use crate::{
     wire_profile::WireProfile,
 };
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Volume {
     pub object_index: u16,
     pub generation: u32,
     pub creation: ProjectileCreation,
     pub expires: Duration,
+    pub poison: Option<Poison>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Poison {
+    pub projectile_id: u32,
+    pub source: crate::active_ability_gas_world::GasSource,
+    pub round: u64,
+    pub timing: crate::active_ability_gas_world::PulseTiming,
+    pub falloff: crate::active_ability_effects::BlastFalloff,
+    pub raw_hp: f32,
+}
+impl Volume {
+    fn expired(&self, now: Duration) -> bool {
+        if self.poison.is_some() {
+            now > self.expires
+        } else {
+            now >= self.expires
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -38,9 +58,34 @@ impl State {
         self.volumes.push(volume);
     }
 
+    pub(crate) fn advance_poison(
+        &mut self,
+        now: Duration,
+        round: u64,
+    ) -> Vec<crate::active_ability_gas_world::GasPulse> {
+        self.volumes
+            .iter_mut()
+            .filter_map(|volume| {
+                use crate::active_ability_gas_world::{GasPulse, Pulse};
+                let poison = volume.poison.as_mut()?;
+                (poison.round == round && poison.timing.advance(now) == Pulse::Damage).then(|| {
+                    let p = volume.creation.position;
+                    GasPulse {
+                        projectile_id: Some(poison.projectile_id),
+                        origin: [p.x, p.y, p.z],
+                        falloff: poison.falloff,
+                        raw_hp: poison.raw_hp,
+                        source: poison.source.clone(),
+                        operation: "gas_grenade_pulse",
+                    }
+                })
+            })
+            .collect()
+    }
+
     pub(crate) fn take_due(&mut self, now: Duration) -> Vec<Volume> {
         self.volumes
-            .extract_if(.., |volume| volume.expires <= now)
+            .extract_if(.., |volume| volume.expired(now))
             .collect()
     }
 
@@ -51,7 +96,7 @@ impl State {
         profile: WireProfile,
     ) -> Result<Vec<Vec<u8>>, &'static str> {
         let mut packets = Vec::new();
-        for volume in self.volumes.iter().filter(|volume| now < volume.expires) {
+        for volume in self.volumes.iter().filter(|volume| !volume.expired(now)) {
             let creation = &volume.creation;
             if creation.slot >= projectile_slot_count(profile) {
                 return Err("invalid_projectile_type");
@@ -136,6 +181,7 @@ mod tests {
                 shooter_id: 0x0380_0011,
             },
             expires: Duration::from_millis(expires_ms),
+            poison: None,
         }
     }
 

@@ -3,7 +3,7 @@ use crate::{
     acquisition_character_effects::{self as character, NativeState},
     acquisition_ground_damage, acquisition_ground_runtime as ground,
     acquisition_volume_damage::TargetKind,
-    active_ability_effects::{BlastFalloff, BombletSample, GasVolume},
+    active_ability_effects::{BlastFalloff, BombletSample},
     domination_projectile_collision::{
         BodyBinding, ContactBindings, SequenceBinding, SurfaceBinding,
     },
@@ -503,17 +503,19 @@ impl<W: Write> Engine<W> {
 
     pub(crate) fn collect_gas_pulse_characters(
         &self,
-        volume: GasVolume,
+        origin: [f32; 3],
+        falloff: BlastFalloff,
+        raw_hp: f32,
         collision: BlastCollision<'_>,
     ) -> Result<Vec<BlastObservation>, &'static str> {
         let DamageWork::Blast { observations, .. } = self.collect_domination_blast(
-            BlastSource::GasPulse(volume.falloff),
+            BlastSource::GasPulse(falloff),
             u32::MAX,
             InstantaneousBlast {
-                origins: vec![volume.origin],
-                inner_radius: volume.falloff.inner_radius,
-                outer_radius: volume.falloff.outer_radius,
-                damage: volume.damage_per_second * 0.5,
+                origins: vec![origin],
+                inner_radius: falloff.inner_radius,
+                outer_radius: falloff.outer_radius,
+                damage: raw_hp,
                 material_penetration: 0.,
             },
             collision,

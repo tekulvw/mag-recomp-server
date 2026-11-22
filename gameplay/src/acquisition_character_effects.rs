@@ -61,6 +61,13 @@ pub enum Request {
         from_direction: [f32; 3],
         attacker: u32,
     },
+    /// A poison pulse carrying the retained ordinary grenade entity separately from its firer.
+    GrenadeGasPulse {
+        raw_hp: f32,
+        from_direction: [f32; 3],
+        attacker: u32,
+        projectile_id: u32,
+    },
     /// A qualified target in the Structural objective's periodic damage scan.
     StructuralArea {
         raw_hp: f32,
@@ -267,6 +274,21 @@ impl<W: Write> Engine<W> {
                 }
                 projectile_id
             }
+            Request::GrenadeGasPulse {
+                attacker,
+                projectile_id,
+                ..
+            } => {
+                let index = projectile_id as u16;
+                if usize::from(index) >= crate::MAX_MATCH_PLAYERS
+                    || !(16..=19).contains(&(projectile_id >> 24))
+                    || projectile_id & 0x00ff_0000 != 0x0080_0000
+                    || (attacker != u32::MAX && attacker != (0x0380_0000 | u32::from(index)))
+                {
+                    return Err("invalid_grenade_gas_character_source");
+                }
+                projectile_id
+            }
             _ => u32::MAX,
         };
         let (
@@ -372,11 +394,20 @@ impl<W: Write> Engine<W> {
                 raw_hp,
                 from_direction,
                 attacker,
+            }
+            | Request::GrenadeGasPulse {
+                raw_hp,
+                from_direction,
+                attacker,
+                ..
             } => {
                 if !raw_hp.is_finite() || raw_hp <= 0. {
                     return Err("invalid_acquisition_explosion_damage");
                 }
-                let (kind, wire_damage_type) = if matches!(request, Request::AirStrikeGas { .. }) {
+                let (kind, wire_damage_type) = if matches!(
+                    request,
+                    Request::AirStrikeGas { .. } | Request::GrenadeGasPulse { .. }
+                ) {
                     (damage::DamageKind::Poison, 4)
                 } else {
                     (damage::DamageKind::Explosive, 10)
@@ -393,7 +424,7 @@ impl<W: Write> Engine<W> {
                     attacker,
                     match request {
                         Request::AirStrikeExplosion { .. } => 4,
-                        Request::AirStrikeGas { .. } => 7,
+                        Request::AirStrikeGas { .. } | Request::GrenadeGasPulse { .. } => 7,
                         Request::StructuralExplosion { .. } => 6,
                         _ => 5,
                     },
@@ -783,6 +814,7 @@ actor_effect_state! {
     published_wave_deadline: Option<Duration>,
 }
 struct EffectState {
+    gas_cooldowns: crate::active_ability_gas_world::GasCooldowns,
     assists: firearm_assists::State,
     team_waves: [Option<TeamWaveClock>; 2],
     objective_world: Option<objective_control::ObjectiveWorld>,
@@ -796,6 +828,7 @@ impl EffectState {
     fn capture<W: Write>(engine: &Engine<W>) -> Self {
         Self {
             assists: engine.firearm_assists.clone(),
+            gas_cooldowns: engine.gas_cooldowns.clone(),
             objective_world: engine.objective_world.clone(),
             active_abilities: engine.active_abilities.clone(),
             team_waves: engine.team_waves,
@@ -821,6 +854,7 @@ impl EffectState {
     }
     fn install<W: Write>(mut self, engine: &mut Engine<W>) {
         engine.firearm_assists = self.assists;
+        engine.gas_cooldowns = self.gas_cooldowns;
         engine.active_abilities = self.active_abilities;
         engine.team_waves = self.team_waves;
         engine.objective_world = self.objective_world;

@@ -259,6 +259,15 @@ fn equipped_grenade<W: Write>(actor: &Active, engine: &Engine<W>) -> Option<(u16
         .inventories
         .get(usize::from(kit.handle.inventory_index))?
         .slots[4]?;
+    if engine
+        .gas_grenades
+        .as_deref()
+        .and_then(|catalog| catalog.variant(actor.reservation.character.faction, item))
+        .is_some()
+        && !crate::gas_grenades::owns_poison_skill(actor)
+    {
+        return None;
+    }
     // Exactly the same configured item/faction capability authorizes launch.
     let cap = engine
         .grenade_parameters(actor.reservation.character.faction, item)?

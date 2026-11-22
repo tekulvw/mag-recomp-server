@@ -237,6 +237,8 @@ impl<W: Write> Engine<W> {
             hospital_rockets: None,
             infantry_rockets: None,
             smoke_grenades: None,
+            gas_cooldowns: Default::default(),
+            gas_grenades: None,
             underbarrel_launchers: None,
             hospital_rocket_ground: None,
             frag_character_blast: false,
@@ -295,6 +297,12 @@ impl<W: Write> Engine<W> {
             .as_deref()
             .and_then(|catalog| catalog.variant(faction, item))
             .map(|variant| variant.parameters())
+            .or_else(|| {
+                self.gas_grenades
+                    .as_deref()?
+                    .variant(faction, item)
+                    .map(|v| v.parameters())
+            })
             .or_else(|| self.item_catalog.grenade(item).ok())
     }
 

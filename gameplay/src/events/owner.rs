@@ -322,25 +322,48 @@ fn plan_owner_report<W: Write>(
                     }
                     let terminals = flights.take_due(now.as_millis() as u64, generation);
                     for terminal in terminals {
-                        if let Some(variant) =
-                            ctx.engine.smoke_grenades.as_deref().and_then(|catalog| {
-                                catalog
-                                    .variant(active.reservation.character.faction, terminal.item_id)
-                            })
+                        let faction = active.reservation.character.faction;
+                        let smoke = ctx
+                            .engine
+                            .smoke_grenades
+                            .as_deref()
+                            .and_then(|catalog| catalog.variant(faction, terminal.item_id));
+                        let gas = ctx
+                            .engine
+                            .gas_grenades
+                            .as_deref()
+                            .and_then(|catalog| catalog.variant(faction, terminal.item_id));
+                        if let Some(duration) = smoke
+                            .map(|v| v.volume_duration_ms)
+                            .or_else(|| gas.map(|v| v.volume_duration_ms))
                         {
                             let expired = flights.get(terminal.slot).is_some_and(|flight| {
                                 (now.as_millis() as u64).saturating_sub(flight.launched_at_ms)
                                     >= flight.expiry_after_ms
                             });
+                            let source = flights
+                                .get(terminal.slot)
+                                .and_then(|flight| flight.poison_source.as_deref());
+                            let gas_source =
+                                gas.zip(source.filter(|source| {
+                                    source.current(active, ctx.engine.round_number)
+                                }));
                             if terminal.reason
                                 == projectile::ProjectileTerminalReason::ReportedDetonation
+                                && (gas.is_none() || gas_source.is_some())
                                 && !expired
                                 && ctx.engine.round_combat_allowed(now)
                             {
-                                match plan_smoke_terminal(ctx, plan, &terminal, variant) {
+                                match plan_smoke_terminal(
+                                    ctx,
+                                    plan,
+                                    &terminal,
+                                    duration,
+                                    gas_source.map(|(variant, source)| (*variant, source)),
+                                ) {
                                     Ok(index) => plan.audit.smoke_terminals.push(json!({
                                         "terminal":terminal,"volume_index":index,"created":true,
-                                        "volume_duration_ms":variant.volume_duration_ms
+                                        "volume_duration_ms":duration
                                     })),
                                     Err(code) => {
                                         flights.defer_terminal(terminal.slot, terminal.generation);
@@ -359,7 +382,7 @@ fn plan_owner_report<W: Write>(
                                     json!({"terminal":terminal,"created":false,"retired":true}),
                                 );
                             }
-                            // A nondamaging Volume terminal never enters any frag consumer.
+                            // A persistent Volume terminal never enters any frag consumer.
                             continue;
                         }
                         plan.audit.projectile_terminals.push(terminal);
@@ -458,7 +481,8 @@ fn plan_smoke_terminal<W: Write>(
     ctx: &PlanningContext<'_, W>,
     plan: &mut EventPlan,
     terminal: &projectile::ProjectileTerminal,
-    variant: &smoke_grenades::Variant,
+    duration: u64,
+    gas: Option<(gas_grenades::Variant, &gas_grenades::LaunchSource)>,
 ) -> Result<u16, &'static str> {
     let position = terminal
         .position
@@ -469,7 +493,7 @@ fn plan_smoke_terminal<W: Write>(
         .ok_or("smoke_volume_pool_full")?;
     let expires = ctx
         .now
-        .checked_add(Duration::from_millis(variant.volume_duration_ms))
+        .checked_add(Duration::from_millis(duration))
         .ok_or("smoke_volume_time_overflow")?;
     let mut creation = plan
         .combat
@@ -511,7 +535,11 @@ fn plan_smoke_terminal<W: Write>(
         .take_removal(terminal.slot, terminal.generation)?
         .ok_or("missing_smoke_parent")?;
     plan.combat.projectile_cleanup[usize::from(terminal.slot)] = Some(ProjectileCleanup {
-        due: expires,
+        due: if gas.is_some() {
+            expires.saturating_add(Duration::from_nanos(1))
+        } else {
+            expires
+        },
         removal,
     });
     plan.combat.smoke_volumes.push(smoke_runtime::Volume {
@@ -519,6 +547,24 @@ fn plan_smoke_terminal<W: Write>(
         generation: terminal.generation,
         creation,
         expires,
+        poison: gas.map(|(gas, launch)| crate::smoke_runtime::Poison {
+            source: launch.gas.clone(),
+            projectile_id: launch.projectile_id,
+            round: launch.round,
+            timing: crate::active_ability_gas_world::PulseTiming::grenade(
+                ctx.now,
+                duration as u32,
+                Duration::from_millis(gas.warmup_ms),
+                Duration::from_millis(gas.interval_ms),
+            ),
+            falloff: crate::active_ability_effects::BlastFalloff {
+                inner_radius: gas.inner_radius_m,
+                inner_scale: gas.inner_scale,
+                outer_radius: gas.outer_radius_m,
+                outer_scale: gas.outer_scale,
+            },
+            raw_hp: gas.character_hp_per_pulse,
+        }),
     });
     // The admitted local Timer/Volume path already executed its effect while
     // reporting state4. Replaying remote2 to that local object can explode it

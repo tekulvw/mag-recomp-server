@@ -251,6 +251,7 @@ pub struct ProjectileFlight {
     pub terminal_reported: bool,
     pub completed: bool,
     fingerprint: Vec<u8>,
+    pub(crate) poison_source: Option<Box<crate::gas_grenades::LaunchSource>>,
 }
 #[derive(Clone, Default)]
 pub struct ProjectileFlights {
@@ -260,6 +261,21 @@ pub struct ProjectileFlights {
 impl ProjectileFlights {
     pub fn get(&self, slot: u8) -> Option<&ProjectileFlight> {
         self.slots.get(usize::from(slot)).and_then(Option::as_ref)
+    }
+    pub(crate) fn set_poison_source(
+        &mut self,
+        slot: u8,
+        generation: u32,
+        source: crate::gas_grenades::LaunchSource,
+    ) -> Result<(), &'static str> {
+        let flight = self
+            .slots
+            .get_mut(usize::from(slot))
+            .and_then(Option::as_mut)
+            .filter(|flight| flight.generation == generation)
+            .ok_or("gas_grenade_flight_missing")?;
+        flight.poison_source = Some(Box::new(source));
+        Ok(())
     }
     /// Admit launch metadata only. Caller validates owned shooter, kit and ammo,
     /// emits the typed creation, and consumes ammo only on Created.
@@ -398,6 +414,7 @@ impl ProjectileFlights {
             terminal_reported: false,
             completed: false,
             fingerprint: fingerprint.to_vec(),
+            poison_source: None,
         });
         Ok(LaunchDisposition::Created { generation })
     }

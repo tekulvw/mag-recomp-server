@@ -39,6 +39,7 @@ struct DefaultKit {
 }
 #[derive(Debug)]
 pub struct RetailArmory {
+    skill_purchases_sha256: Option<String>,
     items: BTreeMap<u16, Item>,
 }
 fn invalid(reason: &str) -> io::Error {
@@ -64,6 +65,10 @@ impl RetailArmory {
         }
         let mut result = Self {
             items: BTreeMap::new(),
+            skill_purchases_sha256: file
+                .source_sha256
+                .get("gameplay/data/retail-skill-purchases.json")
+                .cloned(),
         };
         for item in file.items {
             if item.wire_id >= 4096
@@ -105,6 +110,10 @@ impl RetailArmory {
         }
         Ok(result)
     }
+    pub(crate) fn skill_purchases_sha256(&self) -> Option<&str> {
+        self.skill_purchases_sha256.as_deref()
+    }
+
     fn validate_row(&self, faction: u8, row: &[Option<u16>; 22]) -> Result<(), &'static str> {
         for id in row.iter().flatten() {
             let item = self.items.get(id).ok_or("unknown_retail_saved_item")?;

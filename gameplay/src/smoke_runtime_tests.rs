@@ -381,6 +381,7 @@ fn smoke_runtime_full_late_join_bootstrap_preserves_ordinary_queue_budget() {
                     shooter_id: 0x0380_0000 | u32::from(player),
                 },
                 expires: now + Duration::from_secs(1),
+                poison: None,
             });
         }
         bootstrap.extend(smoke.snapshot_packets(1100, now, profile).unwrap());
@@ -413,4 +414,240 @@ fn smoke_runtime_full_late_join_bootstrap_preserves_ordinary_queue_budget() {
     }
     assert_eq!(actor.ordinary_shared_len(), 65);
     assert_eq!(actor.pending_shared.len(), 65);
+}
+
+fn gas_fixture() -> Engine<Vec<u8>> {
+    let mut engine = fixture();
+    let smoke = engine.smoke_grenades.take().unwrap();
+    engine
+        .active
+        .as_mut()
+        .unwrap()
+        .spawned_loadout
+        .as_mut()
+        .unwrap()
+        .inventories[MARKSMAN]
+        .slots[12] = Some(3);
+    engine.gas_grenades = Some(Arc::new(gas_grenades::Catalog::synthetic(
+        std::array::from_fn(|i| {
+            let s = smoke.variants()[i];
+            gas_grenades::Variant {
+                faction: s.faction,
+                item_id: s.item_id,
+                ammo_token: s.ammo_token,
+                initial_count: s.initial_count,
+                fuse_ms: s.fuse_ms,
+                projectile_lifetime_ms: s.projectile_lifetime_ms,
+                volume_duration_ms: 3000,
+                warmup_ms: 1000,
+                interval_ms: 500,
+                inner_radius_m: 3.0,
+                inner_scale: 0.5,
+                outer_radius_m: 5.0,
+                outer_scale: 0.0,
+                character_hp_per_pulse: 20.0,
+            }
+        }),
+    )));
+    engine
+}
+
+#[test]
+fn gas_grenade_native_terminal_builds_one_volume_and_a_due_poison_pulse() {
+    let mut engine = gas_fixture();
+    let request = rocket_fixture::launch_wire(&engine, 3, 4);
+    dispatch(&mut engine, &request, 1000).unwrap();
+    assert_eq!(engine.active.as_ref().unwrap().grenade_remaining, 2);
+
+    engine.active.as_mut().unwrap().reservation.character.skills = Some([0, 1 << 18, 0, 0, 0]);
+    dispatch(&mut engine, &request, 1001).unwrap();
+    assert_eq!(engine.active.as_ref().unwrap().grenade_remaining, 1);
+    dispatch(&mut engine, &request, 1002).unwrap();
+    assert_eq!(engine.active.as_ref().unwrap().grenade_remaining, 1);
+    drain_shared(&mut engine, 1002);
+
+    let early = owner_terminal(&engine, 1100);
+    dispatch(&mut engine, &early, 1100).unwrap();
+    assert!(
+        engine
+            .active
+            .as_ref()
+            .unwrap()
+            .smoke_volumes
+            .volumes()
+            .is_empty()
+    );
+    let terminal = owner_terminal(&engine, 1101);
+    dispatch(&mut engine, &terminal, 1101).unwrap();
+    assert_eq!(
+        engine
+            .active
+            .as_ref()
+            .unwrap()
+            .smoke_volumes
+            .volumes()
+            .len(),
+        1
+    );
+    assert!(engine.active.as_ref().unwrap().grenade_damage.is_empty());
+
+    for ms in [1601, 2100] {
+        engine
+            .tick_gas_grenades(Duration::from_millis(ms), 1)
+            .unwrap();
+        assert_eq!(engine.peers[OBSERVER].life.damage_health().unwrap().1, 400);
+    }
+    engine
+        .tick_gas_grenades(Duration::from_millis(2101), 1)
+        .unwrap();
+    let victim = &engine.peers[OBSERVER];
+    assert!(victim.life.damage_health().unwrap().1 < 400);
+    assert_eq!(victim.last_damage.last_location_and_type, 0x41);
+    assert_eq!(victim.last_damage.last_source_object, 0x1380_0000);
+    assert_eq!(victim.last_damage.last_attacker, 0x0380_0000);
+
+    drain_shared(&mut engine, 4101);
+    assert_eq!(
+        engine
+            .active
+            .as_ref()
+            .unwrap()
+            .smoke_volumes
+            .volumes()
+            .len(),
+        1
+    );
+    drain_shared(&mut engine, 4102);
+    assert!(
+        engine
+            .active
+            .as_ref()
+            .unwrap()
+            .smoke_volumes
+            .volumes()
+            .is_empty()
+    );
+}
+
+#[test]
+fn gas_grenade_pulse_recorder_refusal_keeps_health_and_pending_volume() {
+    let mut engine = gas_fixture();
+    engine.active.as_mut().unwrap().reservation.character.skills = Some([0, 1 << 18, 0, 0, 0]);
+    let request = rocket_fixture::launch_wire(&engine, 3, 4);
+    dispatch(&mut engine, &request, 1000).unwrap();
+    let report = owner_terminal(&engine, 1100);
+    dispatch(&mut engine, &report, 1100).unwrap();
+    engine
+        .tick_gas_grenades(Duration::from_millis(1600), 1)
+        .unwrap();
+    let victim_before = engine.peers[OBSERVER].pending_shared.clone();
+    engine.max_log = engine.written;
+    assert!(
+        engine
+            .tick_gas_grenades(Duration::from_millis(2100), 1)
+            .is_err()
+    );
+    let victim = &engine.peers[OBSERVER];
+    assert_eq!(victim.life.damage_health().unwrap().1, 400);
+    assert_eq!(victim.pending_shared, victim_before);
+    assert_eq!(
+        engine
+            .active
+            .as_ref()
+            .unwrap()
+            .smoke_volumes
+            .volumes()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn gas_grenade_stale_launch_does_not_create_a_volume_in_a_later_round() {
+    let mut engine = gas_fixture();
+    engine.active.as_mut().unwrap().reservation.character.skills = Some([0, 1 << 18, 0, 0, 0]);
+    let request = rocket_fixture::launch_wire(&engine, 3, 4);
+    dispatch(&mut engine, &request, 1000).unwrap();
+    engine.round_number += 1;
+    let report = owner_terminal(&engine, 1100);
+    dispatch(&mut engine, &report, 1100).unwrap();
+    let actor = engine.active.as_ref().unwrap();
+    assert!(actor.smoke_volumes.volumes().is_empty());
+    assert!(actor.grenade_damage.is_empty());
+    assert!(actor.projectiles.get(3).unwrap().completed);
+}
+
+#[test]
+fn gas_grenade_and_leadership_pulse_share_one_current_life_cooldown() {
+    use crate::active_ability_gas_world::{GasPulse, GasSource};
+
+    let mut engine = gas_fixture();
+    engine.active.as_mut().unwrap().reservation.character.skills = Some([0, 1 << 18, 0, 0, 0]);
+    let request = rocket_fixture::launch_wire(&engine, 3, 4);
+    dispatch(&mut engine, &request, 1000).unwrap();
+    let report = owner_terminal(&engine, 1100);
+    dispatch(&mut engine, &report, 1100).unwrap();
+    let now = Duration::from_millis(2100);
+    engine.tick_gas_grenades(now, 1).unwrap();
+    let owner = engine.active.as_ref().unwrap();
+    let gas = owner.smoke_volumes.volumes()[0].poison.as_ref().unwrap();
+    let falloff = gas.falloff;
+    let source = GasSource {
+        allocation: None,
+        ..gas.source.clone()
+    };
+    let victim_health = engine.peers[OBSERVER].life.damage_health().unwrap().1;
+    assert!(victim_health < 400);
+    let mut rows = [0; 32];
+    rows[6] = 1 << 21;
+    let native = engine.owned_acquisition_characters();
+    let next = engine
+        .prepare_acquisition_character_callback(&native, now, |engine, native| {
+            engine.stage_gas_pulses(
+                [GasPulse {
+                    projectile_id: None,
+                    origin: [ORIGIN.x, ORIGIN.y, ORIGIN.z],
+                    falloff,
+                    raw_hp: 200.0,
+                    source,
+                    operation: "gas_bombardment_pulse",
+                }],
+                native,
+                now,
+                domination_structural_world::BlastCollision {
+                    filter_rows: &rows,
+                    limits: Default::default(),
+                    sequences: &Default::default(),
+                    material_costs: &Default::default(),
+                    terrain_materials: None,
+                },
+            )
+        })
+        .unwrap();
+    assert_eq!(next.audit()[0]["op"], "gas_bombardment_pulse");
+    assert!(
+        next.audit()
+            .iter()
+            .all(|entry| entry["on_character_hit"] != true)
+    );
+}
+
+#[test]
+fn gas_grenade_unresolved_firer_keeps_the_historical_projectile_source() {
+    let mut engine = gas_fixture();
+    engine.active.as_mut().unwrap().reservation.character.skills = Some([0, 1 << 18, 0, 0, 0]);
+    let request = rocket_fixture::launch_wire(&engine, 3, 4);
+    dispatch(&mut engine, &request, 1000).unwrap();
+    let report = owner_terminal(&engine, 1100);
+    dispatch(&mut engine, &report, 1100).unwrap();
+    // Exercise mismatched allocation in the shared receiver without attributing
+    // this fixture's retained cloud to the replacement occupant.
+    engine.active.as_mut().unwrap().allocation_sequence += 1;
+    engine
+        .tick_gas_grenades(Duration::from_millis(2100), 1)
+        .unwrap();
+    let victim = &engine.peers[OBSERVER];
+    assert!(victim.life.damage_health().unwrap().1 < 400);
+    assert_eq!(victim.last_damage.last_attacker, u32::MAX);
+    assert_eq!(victim.last_damage.last_source_object, 0x1380_0000);
 }

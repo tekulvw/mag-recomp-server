@@ -506,6 +506,13 @@ pub(super) fn fire_grenade<W: Write>(
         .as_ref()
         .and_then(|k| k.inventories.get(k.handle.inventory_index as usize))
         .and_then(|i| i.slots[4]);
+    let gas = grenade_item.is_some_and(|id| {
+        ctx.engine
+            .gas_grenades
+            .as_deref()
+            .and_then(|catalog| catalog.variant(active.reservation.character.faction, id))
+            .is_some()
+    });
     let grenade = grenade_item.and_then(|id| {
         ctx.engine
             .grenade_parameters(active.reservation.character.faction, id)
@@ -516,6 +523,8 @@ pub(super) fn fire_grenade<W: Write>(
         plan.gameplay_denial = Some("unowned_projectile_shooter");
     } else if !eligible || active.is_mounted() {
         plan.gameplay_denial = Some("projectile_requires_living_on_foot_character");
+    } else if gas && !gas_grenades::owns_poison_skill(active) {
+        plan.gameplay_denial = Some("gas_grenade_requires_owned_skill");
     } else if request.ammo_index != 4
         || request.projectile_index
             >= u16::from(projectile::projectile_slot_count(ctx.engine.wire_profile))
@@ -599,6 +608,17 @@ pub(super) fn fire_grenade<W: Write>(
                             .remember_creation(flight_generation, creation)?;
                         plan.outgoing = Some(packet.clone());
                         plan.replication.projectile_delta = Some(packet);
+                        if gas {
+                            flights.set_poison_source(
+                                slot,
+                                flight_generation,
+                                gas_grenades::LaunchSource::from_actor(
+                                    active,
+                                    ctx.engine.round_number,
+                                    slot,
+                                ),
+                            )?;
+                        }
                         plan.combat.new_projectiles = Some(flights);
                         plan.combat.new_grenade_remaining = Some(active.grenade_remaining - 1);
                         created = true;

@@ -1067,6 +1067,15 @@ impl<W: Write> Engine<W> {
                                     catalog.variant(active.reservation.character.faction, id)
                                 })
                                 .map(|variant| variant.parameters())
+                                .or_else(|| {
+                                    self.gas_grenades
+                                        .as_deref()
+                                        .and_then(|catalog| {
+                                            catalog
+                                                .variant(active.reservation.character.faction, id)
+                                        })
+                                        .map(|variant| variant.parameters())
+                                })
                                 .or_else(|| self.item_catalog.grenade(id).ok())
                         })
                         .map_or(0, |p| p.initial_count);

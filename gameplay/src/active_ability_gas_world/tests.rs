@@ -29,26 +29,36 @@ fn volume_pulses_once_per_update_and_retains_remainder() {
 
 #[test]
 fn overlapping_clouds_share_cooldown_until_exactly_half_a_second() {
-    let mut world = GasWorld::default();
+    let mut world = GasCooldowns::default();
     let victim = Target {
         character_id: 0x0380_0005,
         generation: 8,
         world: 3,
     };
     let first = Duration::from_secs(2);
-    world.mark_applied(victim, Some("first"), first);
-    assert!(world.cooling_down(victim, Some("first"), first));
-    assert!(world.cooling_down(victim, Some("first"), first + Duration::from_millis(499)));
-    assert!(!world.cooling_down(victim, Some("first"), first + Duration::from_millis(500)));
-    assert!(!world.cooling_down(victim, Some("second"), first));
+    let allocation = TargetAllocation::Human(4, "first".into());
+    world.mark_applied(1, victim, allocation.clone(), first);
+    assert!(world.cooling_down(1, victim, &allocation, first));
+    assert!(world.cooling_down(1, victim, &allocation, first + Duration::from_millis(499)));
+    assert!(!world.cooling_down(1, victim, &allocation, first + Duration::from_millis(500)));
     assert!(!world.cooling_down(
+        1,
+        victim,
+        &TargetAllocation::Human(5, "first".into()),
+        first
+    ));
+    assert!(!world.cooling_down(2, victim, &allocation, first));
+    assert!(!world.cooling_down(
+        1,
         Target {
             generation: 9,
             ..victim
         },
-        Some("first"),
-        first
+        &allocation,
+        first,
     ));
+    world.mark_applied(1, victim, TargetAllocation::Bot(7), first);
+    assert!(!world.cooling_down(1, victim, &TargetAllocation::Bot(8), first));
 }
 
 #[test]
@@ -85,6 +95,7 @@ fn overlapping_gas_hits_new_occupant_once_without_crediting_reused_source_slot()
     let items = std::sync::Arc::clone(&engine.item_catalog);
     let actor = actor_mut(&mut engine, 0);
     let source = GasSource {
+        allocation: None,
         attacker: 0x0380_0000,
         world: actor.reservation.world,
         team: actor.team(),
@@ -165,4 +176,25 @@ fn overlapping_gas_hits_new_occupant_once_without_crediting_reused_source_slot()
     assert_eq!(damaged.last_damage.last_attacker, u32::MAX);
     assert_eq!(damaged.last_damage.last_location_and_type, 0x41);
     assert!(damaged.life.damage_health().unwrap().1 < 400);
+}
+
+#[test]
+fn grenade_warmup_consumes_early_pulse_and_expiry_is_strict() {
+    let mut timing = PulseTiming::grenade(
+        Duration::ZERO,
+        30_000,
+        Duration::from_secs(1),
+        Duration::from_millis(500),
+    );
+    for (ms, expected) in [
+        (500, Pulse::Waiting),
+        (999, Pulse::Waiting),
+        (1_000, Pulse::Damage),
+        (1_001, Pulse::Waiting),
+        (1_500, Pulse::Damage),
+        (30_000, Pulse::Damage),
+        (30_001, Pulse::Expired),
+    ] {
+        assert_eq!(timing.advance(Duration::from_millis(ms)), expected, "{ms}");
+    }
 }
