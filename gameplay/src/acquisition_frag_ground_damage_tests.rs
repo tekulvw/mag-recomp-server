@@ -83,6 +83,7 @@ fn fixture(friendly: bool) -> Engine<Vec<u8>> {
 fn rocket_source(engine: &Engine<Vec<u8>>) -> LaunchSource {
     let actor = engine.active.as_ref().unwrap();
     LaunchSource {
+        allocation_sequence: actor.allocation_sequence,
         reservation: actor.reservation.id.clone(),
         world: actor.reservation.world,
         round: engine.round_number,

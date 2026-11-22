@@ -765,6 +765,7 @@ actor_effect_state! {
     last_damage: replication::CharacterDamage,
     healing: Option<progression::HealingSession>,
     reward_statistics: std::collections::BTreeMap<u8, i32>,
+    pending_firearm_assist_rows: std::collections::BTreeMap<u16, firearm_assist_publication::Pending>,
     repair_credit: crate::repair_rewards::State,
     projectiles: projectile::ProjectileFlights,
     projectile_replicas: projectile_replication::ProjectileReplicas,
@@ -782,6 +783,7 @@ actor_effect_state! {
     published_wave_deadline: Option<Duration>,
 }
 struct EffectState {
+    assists: firearm_assists::State,
     team_waves: [Option<TeamWaveClock>; 2],
     objective_world: Option<objective_control::ObjectiveWorld>,
     active_abilities: Option<active_ability_engine::Runtime>,
@@ -793,6 +795,7 @@ struct EffectState {
 impl EffectState {
     fn capture<W: Write>(engine: &Engine<W>) -> Self {
         Self {
+            assists: engine.firearm_assists.clone(),
             objective_world: engine.objective_world.clone(),
             active_abilities: engine.active_abilities.clone(),
             team_waves: engine.team_waves,
@@ -817,6 +820,7 @@ impl EffectState {
         ids == self.actors.keys().map(String::as_str).collect()
     }
     fn install<W: Write>(mut self, engine: &mut Engine<W>) {
+        engine.firearm_assists = self.assists;
         engine.active_abilities = self.active_abilities;
         engine.team_waves = self.team_waves;
         engine.objective_world = self.objective_world;
@@ -839,8 +843,8 @@ pub const MAX_CHARACTER_EFFECTS: usize = 2048;
 type NativeMap = std::collections::BTreeMap<u32, NativeState>;
 #[derive(PartialEq, Eq)]
 struct Topology {
-    humans: std::collections::BTreeMap<String, (u32, u16, String)>,
-    bots: std::collections::BTreeMap<u16, (u32, u16)>,
+    humans: std::collections::BTreeMap<String, (u32, u16, u64, String)>,
+    bots: std::collections::BTreeMap<u16, (u32, u16, u32)>,
 }
 impl Topology {
     fn capture<W: Write>(engine: &Engine<W>) -> Self {
@@ -855,6 +859,7 @@ impl Topology {
                         (
                             actor.reservation.world,
                             actor.reservation.player,
+                            actor.allocation_sequence,
                             format!("{:?}", actor.life),
                         ),
                     )
@@ -867,7 +872,11 @@ impl Topology {
                 .map(|(&id, bot)| {
                     (
                         id,
-                        (bot.target.runtime.map_or(0, |r| r.generation), bot.health),
+                        (
+                            bot.target.runtime.map_or(0, |r| r.generation),
+                            bot.health,
+                            bot.allocation_generation,
+                        ),
                     )
                 })
                 .collect(),
@@ -883,6 +892,7 @@ pub struct Candidate {
     native_before: NativeMap,
     origin: std::sync::Arc<()>,
     revision: u64,
+    assist_revision: u64,
     round: u64,
     topology: Topology,
     now: Duration,
@@ -972,6 +982,7 @@ impl<W: Write> Engine<W> {
         let before = EffectState::capture(self);
         let origin = std::sync::Arc::clone(&self.acquisition_effect_origin);
         let revision = self.sequence;
+        let assist_revision = self.firearm_assists.revision();
         let round = self.round_number;
         let topology = Topology::capture(self);
         let mut owned_native = native.clone();
@@ -993,6 +1004,7 @@ impl<W: Write> Engine<W> {
             native_before: native.clone(),
             origin,
             revision,
+            assist_revision,
             round,
             topology,
             now,
@@ -1007,6 +1019,68 @@ impl<W: Write> Engine<W> {
         now: Duration,
     ) -> Result<Candidate, &'static str> {
         self.prepare_acquisition_character_effects_with_moves(&[], effects, native, now)
+    }
+    pub(crate) fn prepare_rocket_character_effects(
+        &mut self,
+        source: &crate::hospital_rocket_runtime::LaunchSource,
+        effects: &[(Target, Request)],
+        native: &NativeMap,
+        now: Duration,
+    ) -> Result<Candidate, &'static str> {
+        let attacker = self.hospital_rocket_blast_attacker(source)?;
+        if effects.len() > MAX_CHARACTER_EFFECTS {
+            return Err("acquisition_character_effect_limit");
+        }
+        self.prepare_acquisition_character_callback(native, now, |engine, native| {
+            let mut audit = Vec::with_capacity(effects.len());
+            let mut messages = Vec::new();
+            for &(target, request) in effects {
+                if target.world != source.world
+                    || !matches!(request, Request::HospitalRocketExplosion {
+                        attacker: id, projectile_id, ..
+                    } if id == attacker && projectile_id == source.projectile_id)
+                {
+                    return Err("invalid_hospital_rocket_character_source");
+                }
+                let state = native
+                    .get_mut(&target.character_id)
+                    .ok_or("acquisition_character_native_state_missing")?;
+                let plan =
+                    engine.plan_acquisition_character_effect(target, request, *state, now)?;
+                let assist = plan
+                    .damage
+                    .filter(|damage| damage.health_quarter_points < plan.expected.health)
+                    .and_then(|damage| {
+                        firearm_assists::Plan::prepare_rocket(
+                            engine,
+                            source,
+                            now,
+                            firearm_assists::Fighter {
+                                index: target.character_id as u16,
+                                reservation: plan.expected.reservation.as_deref(),
+                                generation: target.generation,
+                            },
+                            damage.health_quarter_points == 0,
+                        )
+                    });
+                let statistic = assist
+                    .as_ref()
+                    .map(|assist| {
+                        assist.check_before_record(engine)?;
+                        events::plan_bot_firearm_assists(engine, assist)
+                    })
+                    .transpose()?;
+                let mut effect_audit = plan.audit().clone();
+                messages.extend(engine.commit_acquisition_character_effect(plan, state)?);
+                if let (Some(assist), Some(statistic)) = (assist, statistic) {
+                    effect_audit["assists"] = json!(assist.audit());
+                    messages.extend(statistic.commit(engine));
+                    assist.install(engine)?;
+                }
+                audit.push(effect_audit);
+            }
+            Ok((audit, messages))
+        })
     }
     /// Convenience API for a pre-resolved batch. World-query callbacks that must
     /// update later cast layers after each death use the interleaved closure API.
@@ -1051,6 +1125,7 @@ impl<W: Write> Engine<W> {
     ) -> Result<(), &'static str> {
         if !std::sync::Arc::ptr_eq(&self.acquisition_effect_origin, &candidate.origin)
             || self.sequence != candidate.revision
+            || self.firearm_assists.revision() != candidate.assist_revision
             || self.round_number != candidate.round
             || *native != candidate.native_before
             || Topology::capture(self) != candidate.topology
