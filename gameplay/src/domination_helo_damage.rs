@@ -401,7 +401,17 @@ impl<W: Write> Engine<W> {
             .as_ref()
             .ok_or("domination_helo_armor_catalog_required")?
             .damage_catalog();
-        let (weapon, damage) = self.retail_vehicle_bullet_parameters(actor, request)?;
+        let (weapon, damage) = if actor.is_indexed_hospital_gunner() {
+            let qualified = self.hospital_primary_for_actor(actor, request)?;
+            let primary = retail_combat::RetailBulletProfile::from_hospital_primary(
+                self.item_catalog.retail_combat()?,
+                qualified,
+                request,
+            )?;
+            (primary.item_id(), primary.vehicle_damage())
+        } else {
+            self.retail_vehicle_bullet_parameters(actor, request)?
+        };
         let friendly = if actor.team() == 0 {
             catalog.friendly_fire_multiplier()
         } else {
