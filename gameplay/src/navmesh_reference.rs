@@ -33,7 +33,7 @@ fn bake_scoped(
     input: BakeInput,
     rules: Option<&MovementProfile>,
 ) -> Result<(ReferenceManifest, Vec<u8>), Error> {
-    let artifact = bake_artifact(input, true, rules)?;
+    let artifact = bake_artifact(input, true, rules, None)?;
     let manifest = ReferenceManifest {
         format: artifact.format,
         map_name: artifact.map_name,
@@ -129,6 +129,7 @@ impl ReferenceNavMesh {
             true,
             node_limit,
             rules,
+            false,
         )
         .map(|mut mesh| {
             // Detour already owns checked copies of the tiles.

@@ -10,6 +10,10 @@ pub struct RegionalCollision {
     pub(crate) ground_sha256: String,
     pub(crate) dynamic_catalog_sha256: String,
     pub(crate) structural_clv_sha256: String,
+    #[serde(default)]
+    walking_coverage_sha256: Option<String>,
+    #[serde(default)]
+    walking_detour_sha256: Option<String>,
     min: [f64; 3],
     max: [f64; 3],
 }
@@ -23,16 +27,23 @@ impl RegionalCollision {
             &self.dynamic_catalog_sha256,
             &self.structural_clv_sha256,
         ];
-        if !hashes.into_iter().all(|hash| {
-            hash.len() == 64
-                && hash
-                    .bytes()
-                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-        }) || (0..3).any(|i| {
-            !self.min[i].is_finite()
-                || !self.max[i].is_finite()
-                || !(0.0 < self.max[i] - self.min[i] && self.max[i] - self.min[i] <= 128.)
-        }) {
+        if !hashes
+            .into_iter()
+            .chain(self.walking_coverage_sha256.iter())
+            .chain(self.walking_detour_sha256.iter())
+            .all(|hash| {
+                hash.len() == 64
+                    && hash
+                        .bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            })
+            || self.walking_coverage_sha256.is_some() != self.walking_detour_sha256.is_some()
+            || (0..3).any(|i| {
+                !self.min[i].is_finite()
+                    || !self.max[i].is_finite()
+                    || !(0.0 < self.max[i] - self.min[i] && self.max[i] - self.min[i] <= 128.)
+            })
+        {
             return Err("bot_regional_invalid_scope");
         }
         Ok(())
@@ -50,6 +61,18 @@ impl RegionalCollision {
             .dynamic_body_resources
             .as_ref()
             .ok_or("bot_regional_dynamic_unavailable")?;
+        let walking = engine
+            .navmesh_world
+            .as_ref()
+            .and_then(|mesh| mesh.regional_coverage());
+        if self.walking_coverage_sha256.is_some() || walking.is_some() {
+            let mesh = engine
+                .navmesh_world
+                .as_ref()
+                .ok_or("bot_regional_walking_coverage_mismatch")?;
+            self.validate_walking_mesh(mesh)?;
+            mesh.validate_coverage(world).map_err(|e| e.0)?;
+        }
         if engine.match_profile().game_type != 1
             || engine.wire_profile.application_id() != 20231
             || world.metadata().map_name != engine.map_name()
@@ -65,12 +88,14 @@ impl RegionalCollision {
                 .map(ground_vehicles::Catalog::raw_sha256)
                 != Some(self.ground_sha256.as_str())
             || dynamic.catalog.fingerprint() != self.dynamic_catalog_sha256
-            || !world.metadata().physics_regions.iter().any(|region| {
-                region.ground_verified
-                    && region.obstacles_verified
-                    && !region.provenance.is_empty()
-                    && (0..3).all(|i| region.min[i] <= self.min[i] && region.max[i] >= self.max[i])
-            })
+            || (walking.is_none()
+                && !world.metadata().physics_regions.iter().any(|region| {
+                    region.ground_verified
+                        && region.obstacles_verified
+                        && !region.provenance.is_empty()
+                        && (0..3)
+                            .all(|i| region.min[i] <= self.min[i] && region.max[i] >= self.max[i])
+                }))
         {
             return Err("bot_regional_source_mismatch");
         }
@@ -100,6 +125,20 @@ impl RegionalCollision {
     pub(crate) fn contains_body(&self, position: [f64; 3], body: bot_physics::Body) -> bool {
         let bounds = Bounds::body(position, body);
         (0..3).all(|i| bounds.min[i] >= self.min[i] && bounds.max[i] <= self.max[i])
+    }
+
+    pub fn validate_walking_mesh(&self, mesh: &navmesh::NavMesh) -> Result<(), &'static str> {
+        let coverage = mesh
+            .regional_coverage()
+            .ok_or("bot_regional_walking_coverage_mismatch")?;
+        if self.walking_coverage_sha256.as_deref() != Some(coverage.source_sha256())
+            || self.walking_detour_sha256.as_deref() != Some(mesh.artifact().detour_sha256.as_str())
+            || coverage.bounds().min != self.min
+            || coverage.bounds().max != self.max
+        {
+            return Err("bot_regional_walking_coverage_mismatch");
+        }
+        self.validate_navmesh(mesh.artifact())
     }
 
     pub(crate) fn validate_navmesh(&self, mesh: &navmesh::Artifact) -> Result<(), &'static str> {
@@ -204,13 +243,17 @@ impl RegionalCollision {
         world: &collision::CollisionWorld,
         obstacles: &[Bounds],
     ) -> collision::CollisionWorld {
-        world.with_bot_regional_guard(bot_physics::RegionalGuard::new(
+        let mut guard = bot_physics::RegionalGuard::new(
             Bounds {
                 min: self.min,
                 max: self.max,
             },
             obstacles,
-        ))
+        );
+        if self.walking_coverage_sha256.is_some() {
+            guard = guard.with_walking_coverage();
+        }
+        world.with_bot_regional_guard(guard)
     }
 
     pub(crate) fn capture<W: Write>(
@@ -303,6 +346,8 @@ mod tests {
             .unwrap();
         engine.collision_world = Some(floor);
         let scope = RegionalCollision {
+            walking_coverage_sha256: None,
+            walking_detour_sha256: None,
             world_sha256: engine
                 .collision_world
                 .as_ref()

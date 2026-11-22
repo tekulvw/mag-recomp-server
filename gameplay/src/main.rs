@@ -127,6 +127,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     let mut tick_budget_us = None;
     let mut collision_path: Option<PathBuf> = None;
     let mut navmesh_path: Option<PathBuf> = None;
+    let mut regional_walk_path: Option<PathBuf> = None;
     let mut movement_profile_path: Option<PathBuf> = None;
     let mut bot_population_path: Option<PathBuf> = None;
     let mut bot_resupply_catalog_path: Option<PathBuf> = None;
@@ -261,6 +262,15 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                 navmesh_path = Some(
                     args.next()
                         .ok_or_else(|| io::Error::other("--navmesh-world requires a path"))?
+                        .into(),
+                );
+            }
+            "--regional-walk-coverage" => {
+                regional_walk_path = Some(
+                    args.next()
+                        .ok_or_else(|| {
+                            io::Error::other("--regional-walk-coverage requires an absolute path")
+                        })?
                         .into(),
                 );
             }
@@ -546,10 +556,25 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             }
             _ => {
                 return Err(io::Error::other(
-                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--match-profiles /absolute/MATCH_PROFILES.json] [--active-abilities /absolute/ACTIVE_ABILITIES.json] [--squad-orders /absolute/ORDERS.json] [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--dynamic-bodies /absolute/BODIES.json] [--static-partition /absolute/PARTITION.json] [--acquisition-gameplay /absolute/GAMEPLAY.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--firearm-assist-rules /absolute/ASSISTS.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--worker-id ID] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json] [--navmesh-world MESH.mag-nav] [--movement-profile /absolute/MOVEMENT.json] [--bot-fill-total N --bot-population POPULATION.json] [--bot-names /absolute/NAMES.json] [--bot-resupply-catalog /absolute/SUPPLY.json] [--bot-resupply-approach-policy /absolute/APPROACH.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS] [--log-segment-bytes BYTES [--log-retention-s SECONDS]]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
+                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--match-profiles /absolute/MATCH_PROFILES.json] [--active-abilities /absolute/ACTIVE_ABILITIES.json] [--squad-orders /absolute/ORDERS.json] [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--dynamic-bodies /absolute/BODIES.json] [--static-partition /absolute/PARTITION.json] [--acquisition-gameplay /absolute/GAMEPLAY.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--firearm-assist-rules /absolute/ASSISTS.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--worker-id ID] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json] [--navmesh-world MESH.mag-nav] [--regional-walk-coverage /absolute/COVERAGE.json] [--movement-profile /absolute/MOVEMENT.json] [--bot-fill-total N --bot-population POPULATION.json] [--bot-names /absolute/NAMES.json] [--bot-resupply-catalog /absolute/SUPPLY.json] [--bot-resupply-approach-policy /absolute/APPROACH.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS] [--log-segment-bytes BYTES [--log-retention-s SECONDS]]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
                 ));
             }
         }
+    }
+    if let Some(path) = &regional_walk_path
+        && (!path.is_absolute()
+            || application_id != Some(20231)
+            || navmesh_path.is_none()
+            || bot_population_path.is_none()
+            || bot_fill_total == 0
+            || match_profiles_path.is_some()
+            || movement_profile_path.is_some()
+            || development_dummy
+            || collision_query.is_some())
+    {
+        return Err(io::Error::other(
+            "--regional-walk-coverage requires an absolute path, direct retail config, regional bot population and default-profile navmesh",
+        ));
     }
     if let Some(path) = &movement_profile_path {
         if !path.is_absolute() {
@@ -641,21 +666,42 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         if std::fs::metadata(&path)?.len() > mag_gameplay::navmesh::MAX_ARTIFACT_JSON_BYTES {
             return Err(io::Error::other("navmesh artifact size limit"));
         }
-        let artifact: mag_gameplay::navmesh::Artifact =
-            serde_json::from_slice(&std::fs::read(path)?).map_err(io::Error::other)?;
-        use mag_gameplay::navmesh::{MovementProfile, NavMesh};
-        let hash = world.source_sha256();
-        let map = &world.metadata().map_name;
-        let mesh = match movement_profile_path.as_ref() {
-            Some(path) => NavMesh::load_with_movement_profile(
-                artifact,
-                hash,
-                map,
-                &MovementProfile::load(path)?,
-            ),
-            None => NavMesh::load(artifact, hash, map),
-        }
-        .map_err(io::Error::other)?;
+        use mag_gameplay::navmesh::{self, MovementProfile, NavMesh};
+        let raw = std::fs::read(path)?;
+        let mesh = if let Some(path) = regional_walk_path.as_ref() {
+            let artifact = serde_json::from_slice(&raw).map_err(io::Error::other)?;
+            let coverage = navmesh::regional::Coverage::load(path)?;
+            let mesh =
+                navmesh::regional::load(artifact, world, coverage).map_err(io::Error::other)?;
+            let population = mag_gameplay::bot_registry::BotPopulation::load(
+                bot_population_path
+                    .as_ref()
+                    .expect("checked regional bot population"),
+            )
+            .map_err(io::Error::other)?;
+            population
+                .regional_collision
+                .as_ref()
+                .filter(|_| !population.autonomous)
+                .ok_or_else(|| io::Error::other("bot_regional_walking_requires_fixed_region"))?
+                .validate_walking_mesh(&mesh)
+                .map_err(io::Error::other)?;
+            mesh
+        } else {
+            let artifact = serde_json::from_slice(&raw).map_err(io::Error::other)?;
+            let hash = world.source_sha256();
+            let map = &world.metadata().map_name;
+            match movement_profile_path.as_ref() {
+                Some(path) => NavMesh::load_with_movement_profile(
+                    artifact,
+                    hash,
+                    map,
+                    &MovementProfile::load(path)?,
+                ),
+                None => NavMesh::load(artifact, hash, map),
+            }
+            .map_err(io::Error::other)?
+        };
         mesh.validate_coverage(world).map_err(io::Error::other)?;
         Some(mesh)
     } else {

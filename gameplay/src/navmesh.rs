@@ -10,6 +10,8 @@ pub use drops::{DropLink, WaypointKind};
 mod movement_profile;
 #[path = "navmesh_reference.rs"]
 mod reference;
+#[path = "navmesh_regional.rs"]
+pub mod regional;
 pub use movement_profile::MovementProfile;
 #[cfg(test)]
 #[path = "navmesh_movement_profile_tests.rs"]
@@ -295,13 +297,13 @@ unsafe extern "C" {
     ) -> c_int;
 }
 pub fn bake(input: BakeInput) -> Result<Artifact, Error> {
-    bake_artifact(input, false, None)
+    bake_artifact(input, false, None, None)
 }
 pub fn bake_with_movement_profile(
     input: BakeInput,
     rules: &MovementProfile,
 ) -> Result<Artifact, Error> {
-    bake_artifact(input, false, Some(rules))
+    bake_artifact(input, false, Some(rules), None)
 }
 
 fn bake_mode(reference: bool, profiled: bool) -> c_int {
@@ -329,8 +331,11 @@ fn bake_artifact(
     input: BakeInput,
     reference: bool,
     rules: Option<&MovementProfile>,
+    coverage: Option<&regional::Coverage>,
 ) -> Result<Artifact, Error> {
-    let expected_format = if reference {
+    let expected_format = if coverage.is_some() {
+        regional::INPUT_SCHEMA
+    } else if reference {
         REFERENCE_INPUT
     } else {
         "mag_navmesh_bake_input_v1"
@@ -346,7 +351,17 @@ fn bake_artifact(
     {
         return err("navmesh_invalid_input");
     }
-    if !reference
+    if let Some(coverage) = coverage {
+        coverage.validate_mesh(
+            &input.map_name,
+            &input.world_sha256,
+            &input.geometry_sha256,
+            &input.bounds,
+        )?;
+        if !input.physics_regions.is_empty() {
+            return err("navmesh_regional_physics_regions_unsupported");
+        }
+    } else if !reference
         && !input.physics_regions.iter().any(|r| {
             r.ground_verified
                 && r.obstacles_verified
@@ -451,7 +466,12 @@ fn bake_artifact(
     unsafe { mag_nav_free_bytes(data) };
     let (format, config) = format_and_config(reference, rules.is_some());
     Ok(Artifact {
-        format: format.into(),
+        format: if coverage.is_some() {
+            regional::MESH_FORMAT
+        } else {
+            format
+        }
+        .into(),
         map_name: input.map_name,
         world_sha256: input.world_sha256,
         geometry_sha256: input.geometry_sha256,
@@ -475,6 +495,7 @@ impl Drop for Native {
 }
 pub struct NavMesh {
     artifact: Artifact,
+    regional_coverage: Option<regional::Coverage>,
     native: Mutex<Native>,
 }
 impl NavMesh {
@@ -486,6 +507,7 @@ impl NavMesh {
             false,
             QUERY_NODE_LIMIT,
             None,
+            false,
         )
     }
     pub fn load_with_movement_profile(
@@ -501,6 +523,7 @@ impl NavMesh {
             false,
             QUERY_NODE_LIMIT,
             Some(rules),
+            false,
         )
     }
     fn load_artifact(
@@ -510,9 +533,16 @@ impl NavMesh {
         reference: bool,
         node_limit: c_int,
         rules: Option<&MovementProfile>,
+        regional: bool,
     ) -> Result<Self, Error> {
         let (format, config) = format_and_config(reference, rules.is_some());
-        let legacy_single = !reference
+        let format = if regional {
+            regional::MESH_FORMAT
+        } else {
+            format
+        };
+        let legacy_single = !regional
+            && !reference
             && rules.is_none()
             && artifact.format == "mag_navmesh_world_v1"
             && artifact.bake_config == LEGACY_BAKE_CONFIG;
@@ -560,6 +590,7 @@ impl NavMesh {
         }
         let mesh = Self {
             artifact,
+            regional_coverage: None,
             native: Mutex::new(Native(handle)),
         };
         mesh.validate_drop_links()?;
@@ -567,6 +598,9 @@ impl NavMesh {
     }
     /// Runtime coverage comes from the loaded collision world, not artifact assertions.
     pub fn validate_coverage(&self, world: &crate::collision::CollisionWorld) -> Result<(), Error> {
+        if let Some(scope) = &self.regional_coverage {
+            return scope.validate_world(world);
+        }
         if self.artifact.movement_profile_sha256.is_some()
             && world.source_sha256() != self.artifact.world_sha256
         {
@@ -587,6 +621,9 @@ impl NavMesh {
         }
         Ok(())
     }
+    pub(crate) fn regional_coverage(&self) -> Option<&regional::Coverage> {
+        self.regional_coverage.as_ref()
+    }
     pub fn artifact(&self) -> &Artifact {
         &self.artifact
     }
@@ -603,6 +640,17 @@ impl NavMesh {
             || !(0.05..=5.).contains(&goal_radius)
         {
             return err("navmesh_invalid_request");
+        }
+        let in_region = |point: Point| {
+            self.regional_coverage.as_ref().is_none_or(|coverage| {
+                (0..3).all(|axis| {
+                    point[axis] >= coverage.bounds().min[axis]
+                        && point[axis] <= coverage.bounds().max[axis]
+                })
+            })
+        };
+        if !in_region(start) || !in_region(goal) {
+            return err("navmesh_route_outside_walking_coverage");
         }
         let began = Instant::now();
         let s = start.map(|v| v as f32);
@@ -649,6 +697,9 @@ impl NavMesh {
             .iter()
             .map(|p| [p[0] as f64, p[1] as f64, p[2] as f64])
             .collect();
+        if waypoints.iter().any(|&point| !in_region(point)) {
+            return err("navmesh_route_outside_walking_coverage");
+        }
         refs.truncate(nr as usize);
         let length_m = waypoints
             .windows(2)

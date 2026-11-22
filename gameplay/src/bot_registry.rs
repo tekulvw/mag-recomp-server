@@ -773,6 +773,15 @@ impl<W: Write> Engine<W> {
             )
             .map_err(|e| e.0)?;
         }
+        if self
+            .navmesh_world
+            .as_ref()
+            .and_then(|mesh| mesh.regional_coverage())
+            .is_some()
+            && (config.regional_collision.is_none() || config.autonomous)
+        {
+            return Err("bot_regional_walking_requires_fixed_region");
+        }
         let regional_static = config
             .regional_collision
             .as_ref()

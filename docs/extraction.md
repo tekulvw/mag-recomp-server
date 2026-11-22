@@ -224,3 +224,48 @@ Checks exercise newly invented Lua tables, PSARC resources, ZRB headers, transfo
 
 Domination profile and controller extraction, including the external initial-load
 qualification inputs, is described in [Domination runtime](domination-runtime.md).
+
+## Regional walking coverage
+
+A direct retail Acquisition worker can opt a fixed bot population into one
+bounded region of the represented initial fixed triangles. The operator
+supplies and approves external source qualification. The projector compares
+complete ordered geometry and fixed-root membership, verifies archive and CLV
+identity, and rechecks the retained original ELF spans for source-qualified
+omissions. The supplied proofs establish the interpretation of those spans and
+the resource census. The runtime checks the resulting identities and bounds.
+
+```sh
+python3 tools/navmesh/project-regional-walk-coverage.py \
+  --world "$world" --assembled-world "$assembled_world" --assembly "$assembly" \
+  --root-inventory "$root_inventory" --absence "$absence_receipt" \
+  --level-archive "$level_archive" --main-archive "$main_archive" --retail-elf "$elf" \
+  --min "$min_x" "$min_y" "$min_z" --max "$max_x" "$max_y" "$max_z" \
+  --output "$walk_coverage"
+python3 tools/navmesh/prepare.py --world "$world" \
+  --expected-world-sha256 "$world_sha256" --regional-walk-coverage "$walk_coverage" \
+  --output "$prep_dir"
+mag-navmesh bake-regional-walk --input "$prep_dir/input.json" \
+  --coverage "$walk_coverage" --output "$walk_mesh"
+mag-navmesh query-regional-walk --mesh "$walk_mesh" --collision-world "$world" \
+  --coverage "$walk_coverage" --start "$start_xyz" --goal "$goal_xyz" --goal-radius 2
+```
+
+Query endpoints are comma-separated X,Y,Z points. The regional bake uses the
+existing 45-degree profile. Set `walking_coverage_sha256` to the raw sidecar
+digest and `walking_detour_sha256` to the artifact's `mesh.detour_sha256` in the
+population's `regional_collision` object. Keep the exact sidecar bounds and
+existing world, spawn, Ground, dynamic-catalog and Structural identities there.
+
+Alongside the normal direct Acquisition inputs, use `--application-id 20231`,
+`--navmesh-world "$walk_mesh"`, `--regional-walk-coverage "$walk_coverage"`, and
+the fixed `--bot-population` and `--bot-fill-total` options. Supply the coverage
+path as an absolute path. This scope requires a fixed regional population and
+rejects autonomous movement and drop links. The runtime checks current
+obstructions and the full body sweep separately from the baked route. Catalog
+validation checks artifact and config bindings. A connected scheduler replay
+tests allocation, walking, and live obstruction.
+
+The original collision world and its metadata are unchanged. Static material
+and projectile queries, certified drops, ordinary verified navmeshes, and
+offline reference navmeshes retain their existing coverage contracts.
