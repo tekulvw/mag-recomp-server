@@ -1,25 +1,39 @@
 //! Ground effects from the vehicle channel of an authoritative hospital rocket.
 use super::*;
 use crate::{
-    hospital_rocket_ground::Catalog, hospital_rocket_runtime::LaunchSource, hospital_rockets::Blast,
+    hospital_rocket_ground::Catalog, hospital_rocket_runtime::LaunchSource,
+    hospital_rockets::Blast, item_catalog::TargetDamageParameters,
 };
 
 #[derive(Clone, Copy)]
 pub(crate) struct GroundRocketDose {
-    vehicle_hp: f32,
+    damage: TargetDamageParameters,
     half_radius_m: f32,
     outer_radius_m: f32,
     material_penetration: f32,
 }
 
-impl From<Blast> for GroundRocketDose {
-    fn from(blast: Blast) -> Self {
+impl GroundRocketDose {
+    pub(crate) fn equipment(damage: TargetDamageParameters, blast: Blast) -> Self {
         Self {
-            vehicle_hp: blast.vehicle_hp,
+            damage,
             half_radius_m: blast.half_radius_m,
             outer_radius_m: blast.outer_radius_m,
             material_penetration: blast.material_penetration,
         }
+    }
+}
+
+impl From<Blast> for GroundRocketDose {
+    fn from(blast: Blast) -> Self {
+        Self::equipment(
+            TargetDamageParameters {
+                amount: blast.vehicle_hp,
+                armor_pierce: 0.,
+                armor_redux: 0.,
+            },
+            blast,
+        )
     }
 }
 
@@ -46,8 +60,14 @@ impl<W: Write> Engine<W> {
         let attacker = self.hospital_rocket_blast_attacker(source)?;
         let origin_f32 = origin.map(|component| component as f32);
         if !origin_f32.into_iter().all(f32::is_finite)
-            || !dose.vehicle_hp.is_finite()
-            || dose.vehicle_hp <= 0.0
+            || dose.damage.amount <= 0.
+            || ![
+                dose.damage.amount,
+                dose.damage.armor_pierce,
+                dose.damage.armor_redux,
+            ]
+            .into_iter()
+            .all(|value| value.is_finite() && value >= 0.)
             || !dose.half_radius_m.is_finite()
             || !dose.outer_radius_m.is_finite()
             || dose.half_radius_m <= 0.0
@@ -156,9 +176,9 @@ impl<W: Write> Engine<W> {
             }
             let location = rules.location(&creation, pose, origin)?;
             let friendly = source.team == creation.team;
-            let amount = policy.classified_vehicle_blast_amount(
+            let amount = policy.classified_equipment_blast_amount(
                 &creation,
-                dose.vehicle_hp,
+                dose.damage,
                 scale,
                 location,
                 friendly,
@@ -329,16 +349,35 @@ pub(crate) mod tests {
         rules: &Catalog,
         origin: [f64; 3],
     ) -> Result<GroundRocketCandidate, &'static str> {
+        plan_dose(
+            engine,
+            source,
+            rules,
+            origin,
+            Blast {
+                character_hp: 1.,
+                vehicle_hp: 250.,
+                half_radius_m: 2.,
+                outer_radius_m: 4.,
+                material_penetration: 0.,
+                objective_hp: 0.,
+            }
+            .into(),
+        )
+    }
+
+    fn plan_dose(
+        engine: &Engine<Vec<u8>>,
+        source: &LaunchSource,
+        rules: &Catalog,
+        origin: [f64; 3],
+        dose: GroundRocketDose,
+    ) -> Result<GroundRocketCandidate, &'static str> {
         let state = &engine.domination_gameplay.as_ref().unwrap().state;
         engine.prepare_hospital_rocket_ground_blast(
             source,
             origin,
-            GroundRocketDose {
-                vehicle_hp: 250.0,
-                half_radius_m: 2.0,
-                outer_radius_m: 4.0,
-                material_penetration: 0.0,
-            },
+            dose,
             rules,
             engine.projectile_contacts.as_deref().unwrap(),
             BlastCollision {
@@ -398,6 +437,57 @@ pub(crate) mod tests {
                 .get(0)
                 .unwrap()
                 .pending_death
+        );
+    }
+
+    #[test]
+    fn underbarrel_ground_vehicle_blast_preserves_the_typed_armor_reduction() {
+        let (engine, source, rules) = ground_rocket_fixture();
+        let origin = [1.5, 2.5, 4.];
+        let blast = Blast {
+            character_hp: 1.,
+            vehicle_hp: 80.,
+            half_radius_m: 2.,
+            outer_radius_m: 4.,
+            material_penetration: 0.,
+            objective_hp: 0.,
+        };
+        let legacy = plan_dose(&engine, &source, &rules, origin, blast.into()).unwrap();
+        let equipment = plan_dose(
+            &engine,
+            &source,
+            &rules,
+            origin,
+            GroundRocketDose::equipment(
+                TargetDamageParameters {
+                    amount: blast.vehicle_hp,
+                    armor_pierce: 0.,
+                    armor_redux: 0.1,
+                },
+                blast,
+            ),
+        )
+        .unwrap();
+        let legacy_hp = legacy.audit[0]["amount_hp"].as_f64().unwrap();
+        let equipment_hp = equipment.audit[0]["amount_hp"].as_f64().unwrap();
+        assert!((equipment_hp - legacy_hp * 0.8 / 0.75).abs() < 0.001);
+        let after = equipment.after.unwrap();
+        let wire = after.get(0).unwrap().damage_wire();
+        assert_eq!(wire.last_location_and_type, 0xa2);
+        assert_eq!(wire.last_source_object, u32::MAX);
+        assert!(
+            wire.health_quarter_points
+                < legacy.after.unwrap().get(0).unwrap().health_quarter_points
+        );
+        assert_eq!(
+            engine
+                .ground_runtime
+                .as_ref()
+                .unwrap()
+                .get(0)
+                .unwrap()
+                .health_quarter_points,
+            600
         );
     }
 

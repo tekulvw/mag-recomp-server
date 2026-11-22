@@ -58,6 +58,7 @@ struct Core {
     projectile_contacts: Option<PathBuf>,
     infantry_rockets: Option<PathBuf>,
     smoke_grenades: Option<PathBuf>,
+    underbarrel_launchers: Option<PathBuf>,
     ground_turrets: Option<PathBuf>,
     initial_filters: PathBuf,
     qualified_poses: PathBuf,
@@ -319,6 +320,10 @@ impl Configuration {
                     "empty_domination_smoke_grenade_source_path",
                 ),
                 (
+                    &mut core.underbarrel_launchers,
+                    "empty_domination_underbarrel_launcher_source_path",
+                ),
+                (
                     &mut core.projectile_contacts,
                     "empty_domination_projectile_contact_source_path",
                 ),
@@ -480,6 +485,14 @@ impl Configuration {
         self.core
             .as_ref()
             .and_then(|core| core.smoke_grenades.as_ref())
+            .map(|path| read(path, 1024 * 1024))
+            .transpose()
+    }
+
+    pub(crate) fn underbarrel_launcher_source(&self) -> io::Result<Option<Vec<u8>>> {
+        self.core
+            .as_ref()
+            .and_then(|core| core.underbarrel_launchers.as_ref())
             .map(|path| read(path, 1024 * 1024))
             .transpose()
     }
@@ -1112,6 +1125,20 @@ impl<W: Write> Engine<W> {
             })
             .transpose()
             .map_err(io::Error::other)?;
+        let underbarrel_launchers = config
+            .underbarrel_launcher_source()?
+            .map(|source| {
+                crate::underbarrel_launchers::map_support(validate_infantry_rocket_support(
+                    &world,
+                ))?;
+                crate::underbarrel_launchers::Catalog::from_bytes(
+                    &source,
+                    &self.item_catalog,
+                    &native_elf,
+                )
+            })
+            .transpose()
+            .map_err(io::Error::other)?;
         let infantry_rockets = config
             .infantry_rocket_source()?
             .map(|source| {
@@ -1205,6 +1232,12 @@ impl<W: Write> Engine<W> {
         if let Some(catalog) = smoke_grenades {
             self = self
                 .with_smoke_grenades(Arc::new(catalog))
+                .map_err(io::Error::other)?;
+        }
+        self.underbarrel_launchers = None;
+        if let Some(catalog) = underbarrel_launchers {
+            self = self
+                .with_underbarrel_launchers(Arc::new(catalog))
                 .map_err(io::Error::other)?;
         }
         if let Some(catalog) = infantry_rockets {

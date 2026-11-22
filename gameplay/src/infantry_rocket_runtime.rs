@@ -1,7 +1,7 @@
 //! Owner-bound launcher budgets and server-owned infantry rocket flights.
 use crate::{
     hospital_rocket_runtime::LaunchSource,
-    infantry_rockets::{self, Catalog, RoundBudget, Variant},
+    infantry_rockets::{self, Catalog, RoundBudget, Variant as RocketVariant},
     projectile::ProjectileCreation,
     projectile_motion::{Limits, Motion},
     projectile_replication::ProjectileRemoval,
@@ -18,6 +18,7 @@ const REQUEST_BYTES: usize = 57;
 pub(crate) struct State {
     slots: [Option<Box<Slot>>; projectile::MAX_PROJECTILE_SLOTS],
     budget: Option<LifeBudget>,
+    underbarrel_budget: Option<LifeBudget>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -41,8 +42,122 @@ struct Flight {
     variant: Variant,
     rotation: [[f64; 3]; 3],
     origin: [f64; 3],
-    motion: Motion,
+    motion: FlightMotion,
     last_published: Duration,
+}
+
+/// Both launchers share wire slots and atomic terminal publication. Equipment,
+/// ammunition budgets and propulsion remain separate.
+#[derive(Clone, Copy, Debug)]
+enum Variant {
+    Rocket(RocketVariant),
+    Underbarrel {
+        weapon: underbarrel_launchers::Variant,
+        ammo: underbarrel_launchers::Authored,
+        token: u32,
+    },
+}
+
+impl Variant {
+    fn item(self) -> u16 {
+        match self {
+            Self::Rocket(v) => v.item_id,
+            Self::Underbarrel { weapon, .. } => weapon.attachment_item_id,
+        }
+    }
+    fn is_underbarrel(self) -> bool {
+        matches!(self, Self::Underbarrel { .. })
+    }
+    fn weapon(self) -> infantry_rockets::Weapon {
+        match self {
+            Self::Rocket(v) => v.weapon,
+            Self::Underbarrel { weapon, .. } => infantry_rockets::Weapon {
+                magazine_size: weapon.magazine_capacity,
+                initial_magazine_count: weapon.initial_magazine_count,
+                refire_seconds: weapon.refire_seconds,
+                reload_seconds: weapon.reload_seconds,
+            },
+        }
+    }
+    fn token(self) -> u32 {
+        match self {
+            Self::Rocket(v) => v.ammo_token,
+            Self::Underbarrel { token, .. } => token,
+        }
+    }
+    fn spine(self) -> [f64; 3] {
+        match self {
+            Self::Rocket(v) => v.flight.capsule_spine_local_xyz,
+            Self::Underbarrel { ammo, .. } => ammo.capsule_height,
+        }
+    }
+    fn radius(self) -> f64 {
+        match self {
+            Self::Rocket(v) => v.flight.radius_m,
+            Self::Underbarrel { ammo, .. } => ammo.radius,
+        }
+    }
+    fn speed(self) -> f32 {
+        match self {
+            Self::Rocket(v) => v.flight.speed_mps,
+            Self::Underbarrel { ammo, .. } => ammo.launch_velocity,
+        }
+    }
+    fn blast(self) -> hospital_rockets::Blast {
+        match self {
+            Self::Rocket(v) => hospital_rockets::Blast {
+                character_hp: v.blast.character_hp,
+                vehicle_hp: v.blast.vehicle_hp,
+                objective_hp: 0.,
+                half_radius_m: v.blast.half_radius_m,
+                outer_radius_m: v.blast.outer_radius_m,
+                material_penetration: v.blast.material_penetration,
+            },
+            Self::Underbarrel { ammo, .. } => hospital_rockets::Blast {
+                character_hp: ammo.damage.character,
+                vehicle_hp: ammo.damage.vehicle,
+                // No logical-objective callback has been qualified for this path.
+                objective_hp: 0.,
+                half_radius_m: ammo.half_damage_radius,
+                outer_radius_m: ammo.full_damage_radius,
+                material_penetration: ammo.material_penetration,
+            },
+        }
+    }
+    fn vehicle_damage(self) -> item_catalog::TargetDamageParameters {
+        match self {
+            Self::Rocket(v) => item_catalog::TargetDamageParameters {
+                amount: v.blast.vehicle_hp,
+                armor_pierce: 0.,
+                armor_redux: 0.,
+            },
+            Self::Underbarrel { ammo, .. } => item_catalog::TargetDamageParameters {
+                amount: ammo.damage.vehicle,
+                armor_pierce: ammo.damage.vehicle_apierce,
+                armor_redux: ammo.damage.vehicle_aredux,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum FlightMotion {
+    Rocket(Motion),
+    Ballistic(ballistic_projectile_motion::Motion<projectile_scene::OwnedObstacleId>),
+}
+impl FlightMotion {
+    fn position(&self) -> [f64; 3] {
+        match self {
+            Self::Rocket(m) => m.position(),
+            Self::Ballistic(m) => m.position(),
+        }
+    }
+    fn advanced_at_ms(&self) -> u64 {
+        match self {
+            Self::Rocket(m) => m.advanced_at_ms(),
+            Self::Ballistic(m) => m.advanced_at_ms(),
+        }
+    }
 }
 
 pub(crate) enum LaunchDisposition {
@@ -56,13 +171,28 @@ pub(crate) struct Launch {
     pub(crate) audit: Value,
 }
 
-fn equipped<'a>(actor: &Active, catalog: &'a Catalog) -> Option<&'a Variant> {
+fn equipped<'a>(actor: &Active, catalog: &'a Catalog) -> Option<&'a RocketVariant> {
     let kit = actor.equipped_loadout()?;
     let inventory = kit
         .inventories
         .get(usize::from(kit.handle.inventory_index))?;
     let item = inventory.slots[usize::from(infantry_rockets::GEAR_SLOT)]?;
     catalog.variant(actor.reservation.character.faction, item)
+}
+
+fn equipped_underbarrel<'a>(
+    actor: &Active,
+    catalog: &'a underbarrel_launchers::Catalog,
+) -> Option<&'a underbarrel_launchers::Variant> {
+    let kit = actor.equipped_loadout()?;
+    let inventory = kit
+        .inventories
+        .get(usize::from(kit.handle.inventory_index))?;
+    catalog.variant(
+        actor.reservation.character.faction,
+        inventory.slots[0]?,
+        inventory.slots[17]?,
+    )
 }
 
 impl State {
@@ -98,6 +228,43 @@ impl State {
 
     pub(crate) fn can_resupply(actor: &Active, catalog: &Catalog) -> bool {
         equipped(actor, catalog).is_some()
+    }
+
+    pub(crate) fn can_resupply_underbarrel(
+        actor: &Active,
+        catalog: &underbarrel_launchers::Catalog,
+    ) -> bool {
+        equipped_underbarrel(actor, catalog).is_some()
+    }
+
+    /// Merge into an already staged rocket refill rather than overwriting it.
+    pub(crate) fn refill_underbarrel_for(
+        actor: &Active,
+        catalog: &underbarrel_launchers::Catalog,
+        staged: Option<Self>,
+    ) -> Result<Option<Self>, &'static str> {
+        let CharacterLife::Alive { generation, .. } = actor.life else {
+            return Ok(staged);
+        };
+        let Some(variant) = equipped_underbarrel(actor, catalog) else {
+            return Ok(staged);
+        };
+        let Some(budget) = actor
+            .infantry_rocket_state
+            .underbarrel_budget
+            .filter(|budget| {
+                budget.life == generation && budget.item == variant.attachment_item_id
+            })
+        else {
+            return Ok(staged);
+        };
+        let rounds = budget.rounds.refilled();
+        if rounds == budget.rounds {
+            return Ok(staged);
+        }
+        let mut next = staged.unwrap_or_else(|| actor.infantry_rocket_state.clone());
+        next.underbarrel_budget = Some(LifeBudget { rounds, ..budget });
+        Ok(Some(next))
     }
 
     pub(crate) fn refill_for(
@@ -146,10 +313,30 @@ impl<W: Write> Engine<W> {
         next_sequence: u32,
         modifiers: &skill_catalog::OwnedModifiers,
     ) -> Result<LaunchDisposition, &'static str> {
-        let catalog = self
-            .infantry_rockets
-            .as_deref()
-            .ok_or("infantry_rocket_rules_required")?;
+        let variant = match request.ammo_index {
+            infantry_rockets::GEAR_SLOT => Variant::Rocket(
+                *equipped(
+                    actor,
+                    self.infantry_rockets
+                        .as_deref()
+                        .ok_or("infantry_rocket_rules_required")?,
+                )
+                .ok_or("infantry_rocket_weapon_unqualified")?,
+            ),
+            17 => {
+                let catalog = self
+                    .underbarrel_launchers
+                    .as_deref()
+                    .ok_or("underbarrel_launcher_rules_required")?;
+                Variant::Underbarrel {
+                    weapon: *equipped_underbarrel(actor, catalog)
+                        .ok_or("underbarrel_launcher_weapon_unqualified")?,
+                    ammo: catalog.ammo().authored,
+                    token: catalog.ammo().token,
+                }
+            }
+            _ => return Err("infantry_rocket_weapon_unqualified"),
+        };
         if actor.wire_profile.application_id() != 20231
             || !matches!(self.match_profile().game_type, 1 | 2)
             || !self.match_started
@@ -177,10 +364,6 @@ impl<W: Write> Engine<W> {
         {
             return Err("infantry_rocket_requires_living_on_foot_owner");
         }
-        if request.ammo_index != infantry_rockets::GEAR_SLOT {
-            return Err("infantry_rocket_weapon_unqualified");
-        }
-        let variant = *equipped(actor, catalog).ok_or("infantry_rocket_weapon_unqualified")?;
         let slot = u8::try_from(request.projectile_index)
             .ok()
             .filter(|slot| *slot < projectile::projectile_slot_count(self.wire_profile))
@@ -194,7 +377,7 @@ impl<W: Write> Engine<W> {
             if previous.fingerprint == fingerprint
                 && previous.source.allocation_sequence == actor.allocation_sequence
                 && previous.source.life_generation == generation
-                && previous.source.item == variant.item_id
+                && previous.source.item == variant.item()
                 && previous.source.round == self.round_number
             {
                 return Ok(LaunchDisposition::Duplicate);
@@ -216,33 +399,57 @@ impl<W: Write> Engine<W> {
         let position = wire_position(origin);
         position.validate()?;
         let power = request.throw_power;
+        // The native writer clamps before packing, despite the wider decoder.
         if !(0.0..=1.0).contains(&power) {
             return Err("invalid_infantry_rocket_power");
         }
-        let speed = power.mul_add(modifiers.value("kCharModGrenadeThrowPower"), power)
-            * variant.flight.speed_mps;
+        let speed =
+            power.mul_add(modifiers.value("kCharModGrenadeThrowPower"), power) * variant.speed();
         let velocity = std::array::from_fn(|axis| {
             // The authored velocity lies along the request quaternion's +Z.
             rotation[axis][2] * f64::from(speed) + f64::from(request.initial_velocity[axis])
         });
         let maximum_speed = velocity.into_iter().fold(0.0_f64, f64::hypot) * (1.0 + 1e-12);
-        let motion = Motion::launch(
-            origin,
-            velocity,
-            millis(now)?,
-            Limits {
-                radius: variant.flight.radius_m,
-                lifetime_ms: authored_millis(variant.flight.lifetime_seconds)?,
-                grace_ms: authored_millis(variant.flight.age_grace_seconds)?,
-                maximum_speed_mps: maximum_speed,
-                maximum_duration_ms: 70_000,
-            },
-        )?;
-        let rounds = match state.budget {
-            Some(budget) if budget.life == generation && budget.item == variant.item_id => {
+        let motion = match variant {
+            Variant::Rocket(v) => FlightMotion::Rocket(Motion::launch(
+                origin,
+                velocity,
+                millis(now)?,
+                Limits {
+                    radius: v.flight.radius_m,
+                    lifetime_ms: authored_millis(v.flight.lifetime_seconds)?,
+                    grace_ms: authored_millis(v.flight.age_grace_seconds)?,
+                    maximum_speed_mps: maximum_speed,
+                    maximum_duration_ms: 70_000,
+                },
+            )?),
+            Variant::Underbarrel { ammo, .. } => {
+                FlightMotion::Ballistic(ballistic_projectile_motion::Motion::launch(
+                    origin,
+                    velocity,
+                    millis(now)?,
+                    ballistic_projectile_motion::Limits {
+                        armed_ms: authored_millis(ammo.armed_time)?,
+                        lifetime_ms: authored_millis(ammo.lifetime)?,
+                        grace_ms: 2_000,
+                        linear_damping: f64::from(ammo.linear_damping),
+                        restitution: f64::from(ammo.restitution),
+                        maximum_speed_mps: maximum_speed.max(1.),
+                        maximum_duration_ms: 70_000,
+                    },
+                )?)
+            }
+        };
+        let current_budget = if variant.is_underbarrel() {
+            state.underbarrel_budget
+        } else {
+            state.budget
+        };
+        let rounds = match current_budget {
+            Some(budget) if budget.life == generation && budget.item == variant.item() => {
                 budget.rounds
             }
-            _ => RoundBudget::new(variant.weapon)?,
+            _ => RoundBudget::new(variant.weapon())?,
         }
         .after_shot(now)?;
         let source = LaunchSource {
@@ -255,14 +462,14 @@ impl<W: Write> Engine<W> {
             player,
             life_generation: generation,
             team: actor.team(),
-            item: variant.item_id,
+            item: variant.item(),
             projectile_id: ((16 + u32::from(slot)) << 24) | 0x0080_0000 | u32::from(player),
         };
         let creation = ProjectileCreation {
             slot,
             object_index: player,
             owner_index: player,
-            ammo_token: variant.ammo_token,
+            ammo_token: variant.token(),
             position,
             rotation_xyzw: request.rotation_xyzw,
             shooter_id,
@@ -272,13 +479,20 @@ impl<W: Write> Engine<W> {
             self.wire_profile,
         )?;
         let audit = json!({"type":"infantry_rocket_launch","source":source,"allocation_sequence":actor.allocation_sequence,"slot":slot,
-            "origin":origin,"velocity":velocity,"rounds_remaining":rounds.remaining()});
+            "origin":origin,"velocity":velocity,"gear":request.ammo_index,
+            "motion_authority":if variant.is_underbarrel() { "server_bounded_ballistic" } else { "server_straight" },
+            "rounds_remaining":rounds.remaining()});
         let mut state = state.clone();
-        state.budget = Some(LifeBudget {
+        let budget = Some(LifeBudget {
             life: generation,
-            item: variant.item_id,
+            item: variant.item(),
             rounds,
         });
+        if variant.is_underbarrel() {
+            state.underbarrel_budget = budget;
+        } else {
+            state.budget = budget;
+        }
         state.slots[usize::from(slot)] = Some(Box::new(Slot {
             flight: Flight {
                 source,
@@ -370,7 +584,7 @@ use crate::{
 };
 
 enum Step {
-    Move(Motion),
+    Move(FlightMotion),
     Explode {
         position: [f64; 3],
         reason: &'static str,
@@ -414,10 +628,55 @@ impl Flight {
         &self,
         now_ms: u64,
         associated_character: Option<TargetKey>,
-        query: impl FnOnce(CapsuleSweep) -> Result<Option<OwnedContact>, &'static str>,
+        mut query: impl FnMut(CapsuleSweep) -> Result<Option<OwnedContact>, &'static str>,
     ) -> Result<Step, &'static str> {
-        let spine = self.variant.flight.capsule_spine_local_xyz;
-        let advance = self.motion.advance(now_ms, |start, end, radius| {
+        let spine = self.variant.spine();
+        if let FlightMotion::Ballistic(motion) = &self.motion {
+            let advance = motion.advance(now_ms, |start, end| {
+                query(CapsuleSweep {
+                    start,
+                    end,
+                    radius: self.variant.radius(),
+                    associated_character,
+                    spine: [spine.map(|axis| -0.5 * axis), spine.map(|axis| 0.5 * axis)],
+                    rotation: self.rotation,
+                })
+                .map(|hit| {
+                    hit.map(|obstacle| ballistic_projectile_motion::Contact {
+                        fraction: obstacle.fraction,
+                        normal: obstacle.normal,
+                        key: obstacle.obstacle.clone(),
+                        obstacle,
+                    })
+                })
+            })?;
+            use ballistic_projectile_motion::{
+                Advance as BallisticAdvance, TerminalReason as Reason,
+            };
+            return Ok(match advance {
+                BallisticAdvance::Flying(next) => Step::Move(FlightMotion::Ballistic(next)),
+                BallisticAdvance::Terminal { next, terminal } => {
+                    debug_assert!(terminal.elapsed_ms <= next.advanced_at_ms() as f64);
+                    Step::Explode {
+                        position: terminal.position,
+                        reason: match terminal.reason {
+                            Reason::Contact(_) => "contact",
+                            Reason::AgeExpired => "age",
+                        },
+                        contact: match terminal.reason {
+                            Reason::Contact(hit) => Some(hit),
+                            Reason::AgeExpired => None,
+                        },
+                    }
+                }
+                BallisticAdvance::AlreadyTerminal => return Err("unexpected_ballistic_terminal"),
+            });
+        }
+        let (FlightMotion::Rocket(motion), Variant::Rocket(variant)) = (&self.motion, self.variant)
+        else {
+            return Err("launcher_motion_kind_mismatch");
+        };
+        let advance = motion.advance(now_ms, |start, end, radius| {
             query(CapsuleSweep {
                 start,
                 end,
@@ -438,14 +697,12 @@ impl Flight {
                 .into_iter()
                 .zip(self.origin)
                 .fold(0.0_f64, |norm, (value, origin)| norm.hypot(value - origin));
-            displacement > f64::from(self.variant.flight.auto_explode_distance_m)
+            displacement > f64::from(variant.flight.auto_explode_distance_m)
         };
         Ok(match advance {
             Advance::Terminal { terminal, .. } => match terminal.reason {
                 TerminalReason::Contact(contact) => {
-                    if ((terminal.elapsed_ms / 1000.0) as f32)
-                        < self.variant.flight.armed_time_seconds
-                    {
+                    if ((terminal.elapsed_ms / 1000.0) as f32) < variant.flight.armed_time_seconds {
                         // Native pre-arm response is outside this replacement.
                         // Retire without damage instead of bouncing or tunnelling.
                         Step::Retire("infantry_rocket_prearm_contact_unqualified")
@@ -467,14 +724,14 @@ impl Flight {
                     contact: None,
                 },
             },
-            Advance::Flying(next) if next != self.motion && at_sample(next.position()) => {
+            Advance::Flying(next) if next != *motion && at_sample(next.position()) => {
                 Step::Explode {
                     position: next.position(),
                     reason: "range",
                     contact: None,
                 }
             }
-            Advance::Flying(next) => Step::Move(next),
+            Advance::Flying(next) => Step::Move(FlightMotion::Rocket(next)),
             Advance::AlreadyTerminal => return Err("infantry_rocket_unexpected_terminal"),
         })
     }
@@ -486,7 +743,7 @@ impl<W: Write> Engine<W> {
         now: Duration,
         wall: u64,
     ) -> Result<Vec<OutboundMessage>, &'static str> {
-        if self.infantry_rockets.is_none() {
+        if self.infantry_rockets.is_none() && self.underbarrel_launchers.is_none() {
             return Ok(Vec::new());
         }
         let mut flights = Vec::new();
@@ -863,15 +1120,8 @@ impl<W: Write> Engine<W> {
         now: Duration,
     ) -> Result<Effects, &'static str> {
         self.infantry_attacker(flight)?;
-        let dose = flight.variant.blast;
-        let blast = hospital_rockets::Blast {
-            character_hp: dose.character_hp,
-            vehicle_hp: dose.vehicle_hp,
-            objective_hp: 0.0,
-            half_radius_m: dose.half_radius_m,
-            outer_radius_m: dose.outer_radius_m,
-            material_penetration: dose.material_penetration,
-        };
+        let blast = flight.variant.blast();
+        let vehicle_damage = flight.variant.vehicle_damage();
         if let Some(world) = &self.domination_gameplay {
             let state = &world.state;
             let helo_rules = state.hospital_rocket_helo_areas.clone();
@@ -901,7 +1151,7 @@ impl<W: Write> Engine<W> {
                     self.prepare_hospital_rocket_ground_blast(
                         &flight.source,
                         position,
-                        GroundRocketDose::from(blast),
+                        GroundRocketDose::equipment(vehicle_damage, blast),
                         rules,
                         self.projectile_contacts
                             .as_deref()
@@ -917,7 +1167,7 @@ impl<W: Write> Engine<W> {
                     self.prepare_hospital_rocket_helo_blast(
                         &flight.source,
                         position,
-                        HeloRocketDose::from(blast),
+                        HeloRocketDose::equipment(vehicle_damage, blast),
                         rules,
                         collision,
                         now,
@@ -926,13 +1176,24 @@ impl<W: Write> Engine<W> {
                 .transpose()?;
             let hospital = hospital_enabled
                 .then(|| {
-                    self.prepare_hospital_rocket_hospital_blast(
-                        &flight.source,
-                        position,
-                        blast,
-                        collision,
-                        now,
-                    )
+                    if flight.variant.is_underbarrel() {
+                        self.prepare_equipment_hospital_blast(
+                            &flight.source,
+                            position,
+                            vehicle_damage,
+                            blast,
+                            collision,
+                            now,
+                        )
+                    } else {
+                        self.prepare_hospital_rocket_hospital_blast(
+                            &flight.source,
+                            position,
+                            blast,
+                            collision,
+                            now,
+                        )
+                    }
                 })
                 .transpose()?;
             Ok(Effects {
@@ -957,12 +1218,21 @@ impl<W: Write> Engine<W> {
                 collision,
                 now,
             )?;
-            let ground = self.prepare_infantry_rocket_acquisition_ground(
-                &flight.source,
-                position,
-                dose,
-                now,
-            )?;
+            let ground = match flight.variant {
+                Variant::Rocket(v) => self.prepare_infantry_rocket_acquisition_ground(
+                    &flight.source,
+                    position,
+                    v.blast,
+                    now,
+                )?,
+                Variant::Underbarrel { .. } => self.prepare_underbarrel_acquisition_ground(
+                    &flight.source,
+                    position,
+                    vehicle_damage,
+                    blast,
+                    now,
+                )?,
+            };
             let ground = Some(GroundRocketCandidate {
                 after: ground.after,
                 packet: ground.packet,
@@ -982,3 +1252,7 @@ impl<W: Write> Engine<W> {
 #[cfg(test)]
 #[path = "infantry_rocket_runtime_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "underbarrel_launcher_runtime_tests.rs"]
+mod underbarrel_tests;

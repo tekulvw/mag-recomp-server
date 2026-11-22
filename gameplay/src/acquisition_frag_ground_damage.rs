@@ -3,7 +3,9 @@ use super::*;
 use crate::{
     dynamic_collision_runtime::{OwnerCollisionView, vehicle_pose},
     hospital_rocket_runtime::LaunchSource,
+    hospital_rockets::Blast,
     infantry_rockets::Blast as InfantryRocketBlast,
+    item_catalog::TargetDamageParameters,
     projectile::{ProjectileTerminal, ProjectileTerminalReason},
 };
 
@@ -20,7 +22,7 @@ pub(crate) struct GroundFragCandidate {
 
 struct GroundBlastDose {
     origin: [f64; 3],
-    amount_hp: f32,
+    damage: TargetDamageParameters,
     half_radius: f32,
     outer_radius: f32,
     penetration: f32,
@@ -78,8 +80,13 @@ impl<'a> GroundBlastPlan<'a> {
         dose: GroundBlastDose,
     ) -> Result<(), &'static str> {
         let origin_f32 = dose.origin.map(|component| component as f32);
-        if !dose.amount_hp.is_finite()
-            || dose.amount_hp < 0.
+        if ![
+            dose.damage.amount,
+            dose.damage.armor_pierce,
+            dose.damage.armor_redux,
+        ]
+        .into_iter()
+        .all(|value| value.is_finite() && value >= 0.)
             || !dose.half_radius.is_finite()
             || dose.half_radius <= 0.
             || !dose.outer_radius.is_finite()
@@ -93,7 +100,7 @@ impl<'a> GroundBlastPlan<'a> {
                 "invalid_infantry_rocket_ground_dose"
             });
         }
-        if dose.amount_hp == 0. {
+        if dose.damage.amount == 0. {
             return Ok(());
         }
 
@@ -171,13 +178,23 @@ impl<'a> GroundBlastPlan<'a> {
             }
             let location = self.rules.location(&creation, pose, dose.origin)?;
             let friendly = self.source.team == creation.team;
-            let amount = self.policy.classified_vehicle_blast_amount(
-                &creation,
-                dose.amount_hp,
-                scale,
-                location,
-                friendly,
-            )?;
+            let amount = if dose.frag_slot_and_generation.is_some() {
+                self.policy.classified_vehicle_blast_amount(
+                    &creation,
+                    dose.damage.amount,
+                    scale,
+                    location,
+                    friendly,
+                )?
+            } else {
+                self.policy.classified_equipment_blast_amount(
+                    &creation,
+                    dose.damage,
+                    scale,
+                    location,
+                    friendly,
+                )?
+            };
             if amount == 0. {
                 continue;
             }
@@ -311,7 +328,11 @@ impl<W: Write> Engine<W> {
                 self,
                 GroundBlastDose {
                     origin: [position.x, position.y, position.z].map(f64::from),
-                    amount_hp: frag.damage.vehicle as f32,
+                    damage: TargetDamageParameters {
+                        amount: frag.damage.vehicle as f32,
+                        armor_pierce: 0.,
+                        armor_redux: 0.,
+                    },
                     half_radius: frag.half_radius as f32,
                     outer_radius: frag.full_radius as f32,
                     penetration: frag
@@ -335,8 +356,57 @@ impl<W: Write> Engine<W> {
         blast: InfantryRocketBlast,
         now: Duration,
     ) -> Result<GroundFragCandidate, &'static str> {
+        self.prepare_acquisition_equipment_ground(
+            source,
+            GroundBlastDose {
+                origin,
+                damage: TargetDamageParameters {
+                    amount: blast.vehicle_hp,
+                    armor_pierce: 0.,
+                    armor_redux: 0.,
+                },
+                half_radius: blast.half_radius_m,
+                outer_radius: blast.outer_radius_m,
+                penetration: blast.material_penetration,
+                projectile_id: source.projectile_id,
+                frag_slot_and_generation: None,
+            },
+            now,
+        )
+    }
+
+    pub(crate) fn prepare_underbarrel_acquisition_ground(
+        &self,
+        source: &LaunchSource,
+        origin: [f64; 3],
+        damage: TargetDamageParameters,
+        blast: Blast,
+        now: Duration,
+    ) -> Result<GroundFragCandidate, &'static str> {
+        self.prepare_acquisition_equipment_ground(
+            source,
+            GroundBlastDose {
+                origin,
+                damage,
+                half_radius: blast.half_radius_m,
+                outer_radius: blast.outer_radius_m,
+                penetration: blast.material_penetration,
+                projectile_id: source.projectile_id,
+                frag_slot_and_generation: None,
+            },
+            now,
+        )
+    }
+
+    fn prepare_acquisition_equipment_ground(
+        &self,
+        source: &LaunchSource,
+        dose: GroundBlastDose,
+        now: Duration,
+    ) -> Result<GroundFragCandidate, &'static str> {
         let attacker = self.hospital_rocket_blast_attacker(source)?;
-        if !origin
+        if !dose
+            .origin
             .into_iter()
             .all(|component| (component as f32).is_finite())
         {
@@ -383,18 +453,7 @@ impl<W: Write> Engine<W> {
                 team: source.team,
             },
         );
-        plan.apply(
-            self,
-            GroundBlastDose {
-                origin,
-                amount_hp: blast.vehicle_hp,
-                half_radius: blast.half_radius_m,
-                outer_radius: blast.outer_radius_m,
-                penetration: blast.material_penetration,
-                projectile_id: source.projectile_id,
-                frag_slot_and_generation: None,
-            },
-        )?;
+        plan.apply(self, dose)?;
         plan.finish(self, now)
     }
 }

@@ -337,6 +337,12 @@ impl<W: Write> Engine<W> {
                 .infantry_rockets
                 .as_deref()
                 .is_some_and(|catalog| infantry_rocket_runtime::State::can_resupply(actor, catalog))
+            && !self
+                .underbarrel_launchers
+                .as_deref()
+                .is_some_and(|catalog| {
+                    infantry_rocket_runtime::State::can_resupply_underbarrel(actor, catalog)
+                })
         {
             return Err("static_resupply_ordinary_frag_required");
         }
@@ -393,6 +399,9 @@ impl<W: Write> Engine<W> {
                 .infantry_rockets
                 .as_deref()
                 .filter(|catalog| infantry_rocket_runtime::State::can_resupply(actor, catalog));
+            let underbarrel = self.underbarrel_launchers.as_deref().filter(|catalog| {
+                infantry_rocket_runtime::State::can_resupply_underbarrel(actor, catalog)
+            });
             let mut launcher_state = None;
             let modifiers = leadership.modifiers(actor);
             let mut health_update = None;
@@ -410,7 +419,11 @@ impl<W: Write> Engine<W> {
                     audit.push(json!({"reservation":actor.reservation.id,"provider":session.target,"operation":"cancel"}));
                     continue;
                 };
-                if provider.percent_refresh_rate == 0.0 && frag.is_none() && launcher.is_none() {
+                if provider.percent_refresh_rate == 0.0
+                    && frag.is_none()
+                    && launcher.is_none()
+                    && underbarrel.is_none()
+                {
                     changed = true;
                     audit.push(json!({"reservation":actor.reservation.id,"provider":session.target,"operation":"cancel"}));
                     continue;
@@ -447,12 +460,19 @@ impl<W: Write> Engine<W> {
                 {
                     launcher_state = infantry_rocket_runtime::State::refill_for(actor, catalog)?;
                 }
+                if let Some(catalog) = underbarrel {
+                    launcher_state = infantry_rocket_runtime::State::refill_underbarrel_for(
+                        actor,
+                        catalog,
+                        launcher_state,
+                    )?;
+                }
                 audit.push(json!({"reservation":actor.reservation.id,"provider":session.target,"operation":"pulse",
                     "world":actor.reservation.world,"round":session.round,"generation":session.generation,
                     "item":frag.map(|(item, _)| item),"before":remaining,"after":after,"interval_seconds":next.interval,
                     "health_before":before.health_quarter_points,
                     "health_after":heal.map(|model| model.health_quarter_points),
-                    "infantry_rocket_refilled":launcher_state.is_some()}));
+                    "launcher_refilled":launcher_state.is_some()}));
                 remaining = after;
                 sessions.push(next);
                 changed = true;

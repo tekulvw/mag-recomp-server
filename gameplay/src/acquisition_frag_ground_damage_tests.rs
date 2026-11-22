@@ -169,6 +169,46 @@ fn acquisition_infantry_rocket_prepares_classified_escort_damage_without_install
 }
 
 #[test]
+fn acquisition_underbarrel_blast_applies_authored_redux_to_escort_candidate() {
+    let engine = ground_blast_fixture(false);
+    let source = rocket_source(&engine);
+    let origin = rocket_origin(&engine);
+    let now = Duration::from_millis(3400);
+    let shape = crate::hospital_rockets::Blast {
+        character_hp: ROCKET_BLAST.character_hp,
+        vehicle_hp: ROCKET_BLAST.vehicle_hp,
+        half_radius_m: ROCKET_BLAST.half_radius_m,
+        outer_radius_m: ROCKET_BLAST.outer_radius_m,
+        material_penetration: ROCKET_BLAST.material_penetration,
+        objective_hp: 0.,
+    };
+    let original = engine
+        .prepare_infantry_rocket_acquisition_ground(&source, origin, ROCKET_BLAST, now)
+        .unwrap();
+    let qualified = engine
+        .prepare_underbarrel_acquisition_ground(
+            &source,
+            origin,
+            crate::item_catalog::TargetDamageParameters {
+                amount: shape.vehicle_hp,
+                armor_pierce: 0.,
+                armor_redux: 0.1,
+            },
+            shape,
+            now,
+        )
+        .unwrap();
+    assert_eq!(original.audit[0]["amount_hp"], 52.5);
+    assert_eq!(qualified.audit[0]["amount_hp"], 56.);
+    let after = qualified.after.unwrap();
+    let wire = after.get(ESCORT).unwrap().damage_wire();
+    assert_eq!(wire.health_quarter_points, 376);
+    assert_eq!(wire.last_location_and_type, 0xa6);
+    assert!(qualified.packet.is_some());
+    assert_eq!(vehicle_damage(&engine).health_quarter_points, 600);
+}
+
+#[test]
 fn acquisition_infantry_rocket_respects_material_cover_and_source_round() {
     let mut engine = ground_blast_fixture(false);
     let source = rocket_source(&engine);

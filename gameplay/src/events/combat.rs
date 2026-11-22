@@ -467,7 +467,9 @@ pub(super) fn fire_grenade<W: Write>(
     request: protocol::FireGrenade,
 ) -> Result<Value, &'static str> {
     let active = ctx.active;
-    if ctx.engine.infantry_rockets.is_some() && request.ammo_index == infantry_rockets::GEAR_SLOT {
+    if (ctx.engine.infantry_rockets.is_some() && request.ammo_index == infantry_rockets::GEAR_SLOT)
+        || (ctx.engine.underbarrel_launchers.is_some() && request.ammo_index == 17)
+    {
         return Ok(fire_infantry_rocket(ctx, plan, request));
     }
     if ctx.engine.hospital_rockets.is_some()

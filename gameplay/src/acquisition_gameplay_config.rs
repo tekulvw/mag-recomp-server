@@ -48,6 +48,7 @@ pub struct Configuration {
     projectile_contacts: Option<PathBuf>,
     infantry_rockets: Option<PathBuf>,
     smoke_grenades: Option<PathBuf>,
+    underbarrel_launchers: Option<PathBuf>,
     vehicle_reinforcement_intervals_ms: [u32; 2],
     structural: Option<crate::acquisition_structural::Files>,
 }
@@ -193,6 +194,14 @@ impl Configuration {
             if source.as_os_str().is_empty() {
                 return Err(io::Error::other(
                     "empty_acquisition_smoke_grenade_source_path",
+                ));
+            }
+            *source = directory.join(&*source);
+        }
+        if let Some(source) = &mut result.underbarrel_launchers {
+            if source.as_os_str().is_empty() {
+                return Err(io::Error::other(
+                    "empty_acquisition_underbarrel_launcher_source_path",
                 ));
             }
             *source = directory.join(&*source);
@@ -352,6 +361,22 @@ impl Configuration {
                     .read_to_end(&mut raw)?;
                 if raw.len() > 1 << 20 {
                     return Err(io::Error::other("invalid_smoke_grenade_rules"));
+                }
+                Ok(raw)
+            })
+            .transpose()
+    }
+
+    pub fn underbarrel_launcher_source(&self) -> io::Result<Option<Vec<u8>>> {
+        self.underbarrel_launchers
+            .as_ref()
+            .map(|path| {
+                let mut raw = Vec::new();
+                File::open(path)?
+                    .take((1 << 20) + 1)
+                    .read_to_end(&mut raw)?;
+                if raw.len() > 1 << 20 {
+                    return Err(io::Error::other("invalid_underbarrel_launcher_rules"));
                 }
                 Ok(raw)
             })

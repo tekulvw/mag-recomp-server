@@ -74,6 +74,8 @@ struct Loaded {
     infantry_rockets: Option<Arc<crate::infantry_rockets::Catalog>>,
     smoke_grenade_source: Option<Arc<[u8]>>,
     smoke_grenades: Option<Arc<crate::smoke_grenades::Catalog>>,
+    underbarrel_launcher_source: Option<Arc<[u8]>>,
+    underbarrel_launchers: Option<Arc<crate::underbarrel_launchers::Catalog>>,
     ground_turret_source: Option<Arc<[u8]>>,
 }
 pub struct Registry {
@@ -328,6 +330,7 @@ impl Registry {
                 acquisition_ground_turrets,
                 acquisition_rocket_source,
                 acquisition_smoke_source,
+                acquisition_underbarrel_source,
             ) = if let Some(path) = &source.acquisition_gameplay {
                 let world = collision.as_ref().ok_or_else(|| {
                     io::Error::other("acquisition_gameplay_requires_collision_world")
@@ -365,6 +368,7 @@ impl Registry {
                     config.ground_turret_source()?.map(Arc::from),
                     config.infantry_rocket_source()?.map(Arc::from),
                     config.smoke_grenade_source()?.map(Arc::from),
+                    config.underbarrel_launcher_source()?.map(Arc::from),
                 )
             } else {
                 if objectives.as_ref().is_some_and(|catalog| {
@@ -377,7 +381,7 @@ impl Registry {
                         "acquisition_gameplay_configuration_required"
                     }));
                 }
-                (None, None, None, None)
+                (None, None, None, None, None)
             };
             let damage = source
                 .character_damage_rules
@@ -401,6 +405,7 @@ impl Registry {
                 hospital_rocket_source,
                 infantry_rocket_source,
                 smoke_grenade_source,
+                underbarrel_launcher_source,
             ) = if let Some(path) = &source.domination_gameplay {
                 if policy.game_type != 2
                     || domination_round.is_none()
@@ -445,6 +450,7 @@ impl Registry {
                     rocket_source,
                     config.infantry_rocket_source()?.map(Arc::from),
                     config.smoke_grenade_source()?.map(Arc::from),
+                    config.underbarrel_launcher_source()?.map(Arc::from),
                 )
             } else {
                 (
@@ -454,6 +460,7 @@ impl Registry {
                     None,
                     acquisition_rocket_source,
                     acquisition_smoke_source,
+                    acquisition_underbarrel_source,
                 )
             };
             let ability_manifest = active_ability_config::manifest_path(
@@ -521,6 +528,8 @@ impl Registry {
                     infantry_rockets: None,
                     smoke_grenade_source,
                     smoke_grenades: None,
+                    underbarrel_launcher_source,
+                    underbarrel_launchers: None,
                     ground_turret_source,
                 },
             );
@@ -562,6 +571,53 @@ impl Registry {
         self.profiles
             .values()
             .any(|profile| profile.smoke_grenades.is_some())
+    }
+
+    pub fn bind_underbarrel_launchers(
+        &mut self,
+        items: &item_catalog::ItemCatalog,
+    ) -> Result<(), &'static str> {
+        for profile in self.profiles.values_mut() {
+            let Some(source) = profile.underbarrel_launcher_source.as_ref() else {
+                continue;
+            };
+            crate::underbarrel_launchers::map_support(
+                match (
+                    profile.summary.game_type,
+                    &profile.acquisition,
+                    &profile.domination,
+                ) {
+                    (1, Some(setup), None) => {
+                        acquisition_gameplay_config::validate_infantry_rocket_support(setup)
+                    }
+                    (2, None, Some(world)) => {
+                        domination_gameplay_config::validate_infantry_rocket_support(world)
+                    }
+                    _ => Err("infantry_rocket_mode_required"),
+                },
+            )?;
+            if profile.damage.is_none() || profile.collision.is_none() || profile.vehicles.is_none()
+            {
+                return Err("underbarrel_launcher_world_resources_required");
+            }
+            let objectives = profile
+                .objectives
+                .as_ref()
+                .ok_or("underbarrel_launcher_objectives_required")?;
+            profile.underbarrel_launchers =
+                Some(Arc::new(crate::underbarrel_launchers::Catalog::from_bytes(
+                    source,
+                    items,
+                    &objectives.source().source_image_sha256,
+                )?));
+        }
+        Ok(())
+    }
+
+    pub fn has_underbarrel_launchers(&self) -> bool {
+        self.profiles
+            .values()
+            .any(|profile| profile.underbarrel_launchers.is_some())
     }
 
     /// Fit the optional launcher to each profile's current source ELF and receivers.
@@ -1013,6 +1069,7 @@ impl<W: Write> Engine<W> {
         registry.bind_ground_turrets(&self.item_catalog)?;
         registry.bind_infantry_rockets(&self.item_catalog)?;
         registry.bind_smoke_grenades(&self.item_catalog)?;
+        registry.bind_underbarrel_launchers(&self.item_catalog)?;
         if self.dynamic_body_resources.is_none() {
             if registry.has_domination_gameplay() {
                 return Err("domination_profiles_require_dynamic_bodies");
@@ -1039,6 +1096,7 @@ impl<W: Write> Engine<W> {
             self.hospital_rockets = None;
             self.infantry_rockets = None;
             self.smoke_grenades = None;
+            self.underbarrel_launchers = None;
             self.hospital_rocket_ground = None;
             self.frag_character_blast = false;
             self.projectile_contacts = None;
@@ -1163,6 +1221,7 @@ impl<W: Write> Engine<W> {
         self.hospital_rockets = loaded.hospital_rockets;
         self.infantry_rockets = loaded.infantry_rockets;
         self.smoke_grenades = loaded.smoke_grenades;
+        self.underbarrel_launchers = loaded.underbarrel_launchers;
         self.hospital_rocket_ground = loaded
             .domination
             .as_ref()
@@ -1918,6 +1977,8 @@ mod tests {
                 infantry_rockets: None,
                 smoke_grenade_source: None,
                 smoke_grenades: None,
+                underbarrel_launcher_source: None,
+                underbarrel_launchers: None,
                 ground_turret_source: None,
                 acquisition: Some(sample.acquisition_gameplay.unwrap().setup),
             },
@@ -2069,6 +2130,32 @@ mod tests {
             Err("infantry_rocket_mode_required")
         );
         assert!(!registry.has_infantry_rockets());
+    }
+
+    #[test]
+    fn underbarrel_registry_requires_contact_support_and_clears_on_profile_switch() {
+        let files = Files::new();
+        let mut engine = engine(&files, Vec::new(), 100_000);
+        add_gameplay_profile(&mut engine);
+        let items = Arc::clone(&engine.item_catalog);
+        let registry = engine.match_profiles.as_mut().unwrap();
+        let profile = registry.profiles.get_mut("acquisition-world").unwrap();
+        profile.underbarrel_launcher_source = Some(Arc::from(&b"{}"[..]));
+        assert_eq!(
+            registry.bind_underbarrel_launchers(&items),
+            Err("underbarrel_launcher_contact_bindings_required")
+        );
+        assert!(!registry.has_underbarrel_launchers());
+
+        let profile = registry.profiles.get_mut("acquisition-world").unwrap();
+        profile.underbarrel_launcher_source = None;
+        profile.underbarrel_launchers = Some(Arc::new(
+            crate::underbarrel_launchers::tests::synthetic_catalog(),
+        ));
+        assert!(select(&mut engine, "underbarrel-enabled", "acquisition-world").ok);
+        assert!(engine.underbarrel_launchers.is_some());
+        assert!(select(&mut engine, "underbarrel-disabled", "p-0-0-1").ok);
+        assert!(engine.underbarrel_launchers.is_none());
     }
 
     #[test]
