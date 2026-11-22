@@ -41,7 +41,7 @@ impl<W: Write> Engine<W> {
     /// The association is independent of Heal's life/critical/full-HP gates:
     /// a due attempt on a valid association consumes its interval even if Heal
     /// declines. The occupied attachment supplies the current Ground key.
-    fn automatic_repair_association(&self, actor: &Active) -> Option<Key> {
+    pub(super) fn current_passive_ground_association(&self, actor: &Active) -> Option<Key> {
         if actor.wire_profile.application_id() != 20231
             || !actor.entered_game
             || !actor.ready_for_updates
@@ -175,7 +175,7 @@ impl<W: Write> Engine<W> {
             if !modifier.is_finite() {
                 return Err("invalid_automatic_repair_modifier");
             }
-            let association = self.automatic_repair_association(actor);
+            let association = self.current_passive_ground_association(actor);
             let Some(key) = association.filter(|_| modifier.abs() >= MODIFIER_EPSILON) else {
                 // Reset elapsed time, retaining the current life clock so a
                 // restored association counts its first ordinary update delta.

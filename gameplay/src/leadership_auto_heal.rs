@@ -1,4 +1,4 @@
-//! Scheduled self-healing for qualified living, on-foot retail characters.
+//! Scheduled self-healing for qualified living retail characters.
 use super::*;
 use std::collections::BTreeMap;
 
@@ -66,12 +66,24 @@ impl<W: Write> Engine<W> {
             else {
                 continue;
             };
+            // Self-healing belongs to the Character, independently of the
+            // associated vehicle's separate automatic repair timer.
+            let supported_state = actor
+                .owner_fields
+                .state
+                .is_some_and(|state| match state.state {
+                    1 => !actor.is_mounted(),
+                    14 => {
+                        actor.mounted_seat.is_none()
+                            && self.current_passive_ground_association(actor).is_some()
+                    }
+                    _ => false,
+                });
             if actor.wire_profile.application_id() != 20231
                 || !actor.entered_game
                 || !actor.ready_for_updates
                 || actor.initial_objects.is_none()
-                || actor.is_mounted()
-                || actor.owner_fields.state.is_none_or(|s| s.state != 1)
+                || !supported_state
             {
                 continue;
             }
