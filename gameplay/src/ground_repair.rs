@@ -82,7 +82,7 @@ impl<W: Write> Engine<W> {
         let supported = if self.domination_gameplay.is_some() {
             matches!(source.spawn_type, 3 | 7)
         } else {
-            source.spawn_type == 9
+            matches!(source.spawn_type, 3 | 9)
         };
         if !supported || actor.team() != creation.team {
             return Err("ground_repair_requires_allied_supported_vehicle");

@@ -1889,3 +1889,8 @@ fn registered_bot_source_capture_start_and_cancellation_are_record_first() {
         );
     }
 }
+
+// Source-shaped v1 APC/Motor Pool allocations, without any APC crew binding.
+pub(crate) fn ground_manual_repair_sources() -> Engine<Vec<u8>> {
+    capture_fixture_with_reinforcements(None, None, true)
+}

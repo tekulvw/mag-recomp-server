@@ -594,3 +594,246 @@ fn manual_repair_uses_frozen_bot_team_instead_of_replacement_allegiance() {
         }
     }
 }
+
+fn apc_fixture() -> Engine<Vec<u8>> {
+    let mut e = fixture();
+    let donor = spawn_progression::tests::dynamic_bodies::acquisition_gameplay_tests::ground_manual_repair_sources();
+    e.ground_vehicles = donor.ground_vehicles;
+    e.ground_runtime = donor.ground_runtime;
+    e.spawn_catalog = donor.spawn_catalog;
+    let batch = e.ground_vehicles.as_ref().unwrap().batch_count();
+    let actor = e.active.as_mut().unwrap();
+    actor.ground_vehicle_batch = batch;
+    actor.squad_catalog =
+        std::sync::Arc::new(e.spawn_catalog.as_ref().unwrap().for_squad(0).unwrap());
+    actor.pending_shared.clear();
+    e.bunker_world = Some(
+        structural_repair_authority::tests::synthetic_repair_bunker_world_with_parameters(3., 0.5),
+    );
+    let key = e.ground_runtime.as_ref().unwrap().get(0).unwrap().key;
+    e.ground_runtime
+        .as_mut()
+        .unwrap()
+        .apply_grenade_damage(key, 40., 0x0380_0007, 0x1080_0002)
+        .unwrap();
+    e
+}
+
+#[test]
+fn acquisition_apc_native_repair_does_not_require_crew_and_preserves_current_body() {
+    let mut e = apc_fixture();
+    assert!(e.ground_vehicles.as_ref().unwrap().driver_seat(0).is_none());
+    let before = e.ground_runtime.as_ref().unwrap().get(0).unwrap().clone();
+    assert_eq!(before.health_quarter_points, 440);
+    let messages = repair(&mut e, 0x0100_0000, 4000, Transport::Tcp).unwrap();
+    let after = e.ground_runtime.as_ref().unwrap().get(0).unwrap();
+    assert_eq!(after.health_quarter_points, 452);
+    assert_eq!(
+        (after.key, after.pose, after.state, &after.body),
+        (before.key, before.pose, before.state, &before.body)
+    );
+    let damage = after.damage_wire();
+    assert_eq!(
+        (
+            damage.last_attacker,
+            damage.last_source_object,
+            damage.last_location_and_type
+        ),
+        (0x0380_0007, 0x1080_0002, 0xa0)
+    );
+    assert_eq!(messages.len(), 1);
+    assert_eq!(
+        e.active.as_ref().unwrap().reward_statistics.get(&35),
+        Some(&1)
+    );
+    assert_eq!(e.pending_reward_batch()[0].units, 1);
+    assert_eq!(
+        e.next_repair[&e.active.as_ref().unwrap().reservation.id],
+        Duration::from_millis(4500)
+    );
+    repair(&mut e, 0x0100_0000, 4499, Transport::Tcp).unwrap();
+    assert_eq!(
+        e.ground_runtime
+            .as_ref()
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .health_quarter_points,
+        452
+    );
+    repair(&mut e, 0x0100_0000, 4500, Transport::Tcp).unwrap();
+    assert_eq!(
+        e.ground_runtime
+            .as_ref()
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .health_quarter_points,
+        464
+    );
+}
+
+#[test]
+fn acquisition_apc_repair_keeps_existing_authority_and_unsupported_source_fences() {
+    for guard in [
+        "type7", "unknown", "team", "tool", "life", "critical", "dead", "body",
+    ] {
+        let mut e = apc_fixture();
+        let mut target = 0x0100_0000;
+        let key = e.ground_runtime.as_ref().unwrap().get(0).unwrap().key;
+        match guard {
+            "type7" => target = 0x0100_0008,
+            "unknown" => target = 0x0100_001f,
+            "team" => {
+                e.active.as_mut().unwrap().squad_catalog =
+                    std::sync::Arc::new(e.spawn_catalog.as_ref().unwrap().for_squad(16).unwrap())
+            }
+            "tool" => {
+                e.active
+                    .as_mut()
+                    .unwrap()
+                    .observed_primary
+                    .as_mut()
+                    .unwrap()
+                    .inventory_update_id += 1
+            }
+            "life" => {
+                e.active.as_mut().unwrap().life = CharacterLife::AwaitingRespawn { generation: 1 }
+            }
+            "critical" => {
+                e.ground_runtime
+                    .as_mut()
+                    .unwrap()
+                    .apply_damage(key, 360, u32::MAX)
+                    .unwrap();
+            }
+            "dead" => {
+                e.ground_runtime
+                    .as_mut()
+                    .unwrap()
+                    .apply_damage(key, 440, u32::MAX)
+                    .unwrap();
+            }
+            "body" => {
+                e.ground_runtime
+                    .as_mut()
+                    .unwrap()
+                    .configure(
+                        key,
+                        acquisition_ground_runtime::Capabilities {
+                            delivered_inert_seconds: Some(1.),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                e.ground_runtime.as_mut().unwrap().deliver(key).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let before = e.ground_runtime.clone();
+        repair(&mut e, target, 4000, Transport::Tcp).unwrap();
+        assert_eq!(e.ground_runtime, before, "{guard}");
+        assert!(e.next_repair.is_empty(), "{guard}");
+        assert!(e.pending_reward_batch().is_empty(), "{guard}");
+        let actor = e.active.as_ref().unwrap();
+        assert_eq!(
+            actor.repair_credit,
+            repair_rewards::State::default(),
+            "{guard}"
+        );
+        assert!(actor.pending_shared.is_empty(), "{guard}");
+    }
+}
+
+#[test]
+fn acquisition_apc_repair_record_and_reward_refusal_are_atomic_then_retry_once() {
+    for refusal in ["record", "outbox"] {
+        let mut e = apc_fixture();
+        let before = e.ground_runtime.clone();
+        let log_limit = e.max_log;
+        if refusal == "record" {
+            e.max_log = e.written;
+        } else {
+            let recipient =
+                progression::RewardRecipient::from_active(e.active.as_ref().unwrap()).unwrap();
+            e.commit_rewards(
+                (0..progression::MAX_PENDING_REWARDS)
+                    .map(|i| {
+                        recipient.event(
+                            format!("apc-pending-{i}"),
+                            progression::RewardKind::EnemyFinished,
+                            1,
+                        )
+                    })
+                    .collect(),
+            );
+        }
+        let credit_before = e.pending_reward_batch();
+        assert_eq!(
+            repair(&mut e, 0x0100_0000, 4000, Transport::Tcp).err(),
+            Some(if refusal == "record" {
+                "log_limit_reached"
+            } else {
+                "reward_outbox_full"
+            })
+        );
+        assert_eq!(e.ground_runtime, before);
+        assert_eq!(e.pending_reward_batch(), credit_before);
+        assert!(e.next_repair.is_empty());
+        let actor = e.active.as_ref().unwrap();
+        assert_eq!(actor.repair_credit, repair_rewards::State::default());
+        assert!(actor.pending_shared.is_empty());
+        e.max_log = log_limit;
+        e.failed = false;
+        e.pending_rewards.clear();
+        e.reward_order.clear();
+        repair(&mut e, 0x0100_0000, 4000, Transport::Tcp).unwrap();
+        repair(&mut e, 0x0100_0000, 4000, Transport::Tcp).unwrap();
+        assert_eq!(
+            e.ground_runtime
+                .as_ref()
+                .unwrap()
+                .get(0)
+                .unwrap()
+                .health_quarter_points,
+            452
+        );
+        assert_eq!(e.pending_reward_batch().len(), 1);
+        assert_eq!(
+            e.active.as_ref().unwrap().reward_statistics.get(&35),
+            Some(&1)
+        );
+    }
+}
+
+#[test]
+fn acquisition_apc_repair_uses_modifier_work_and_friendly_damage_credit_policy() {
+    for friendly in [false, true] {
+        let mut e = apc_fixture();
+        set_modifier(&mut e, 0.3);
+        if friendly {
+            let key = e.ground_runtime.as_ref().unwrap().get(0).unwrap().key;
+            e.ground_runtime
+                .as_mut()
+                .unwrap()
+                .apply_damage(key, 1, 0x0380_0000)
+                .unwrap();
+        }
+        repair(&mut e, 0x0100_0000, 4000, Transport::Tcp).unwrap();
+        let vehicle = e.ground_runtime.as_ref().unwrap().get(0).unwrap();
+        assert!((vehicle.health_hp() - if friendly { 113.65 } else { 113.9 }).abs() < 0.0001);
+        assert_eq!(
+            vehicle.health_quarter_points,
+            if friendly { 454 } else { 455 }
+        );
+        let actor = e.active.as_ref().unwrap();
+        if friendly {
+            assert_eq!(actor.repair_credit, repair_rewards::State::default());
+            assert!(e.pending_reward_batch().is_empty());
+        } else {
+            assert!((actor.repair_credit.carry - 0.3).abs() < 0.0001);
+            assert_eq!(actor.reward_statistics.get(&35), Some(&1));
+            assert_eq!(e.pending_reward_batch()[0].units, 1);
+        }
+    }
+}
