@@ -1,7 +1,11 @@
-//! Transactional on-foot retail firearm and knife death notifications.
+//! Transactional retail firearm and knife notices for an on-foot victim.
 use super::*;
 
-// Other damage sources and mounted deaths use their own qualified planners.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShooterMount {
+    Hospital(u16),
+    Ground(ground_seats::PassengerSeat),
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Participant {
@@ -11,6 +15,7 @@ struct Participant {
     world: u32,
     squad: u16,
     health: u16,
+    mount: Option<ShooterMount>,
 }
 
 /// Owned and consumed exactly at the successful terminal damage commit.
@@ -29,6 +34,7 @@ pub(super) struct Plan {
 pub(super) enum Weapon {
     Firearm(u16),
     Melee(u16),
+    MountedPrimary(retail_combat::RetailBulletProfile),
 }
 impl Weapon {
     fn validate(self, catalog: &retail_combat::RetailCombatCatalog) -> Result<u16, &'static str> {
@@ -41,6 +47,9 @@ impl Weapon {
                 .melee_for_damage(item)
                 .map(|_| item)
                 .map_err(|_| "unsupported_death_melee"),
+            // Only the admitted, source-bound Hospital/APC/Escort branches
+            // construct this variant, after validating the held grant.
+            Self::MountedPrimary(profile) => Ok(profile.item_id()),
         }
     }
 }
@@ -106,6 +115,7 @@ impl<W: Write> Engine<W> {
                 world,
                 squad: bot.target.squad.squad_index(),
                 health: bot.health,
+                mount: None,
             });
         }
         let human = self
@@ -113,11 +123,7 @@ impl<W: Write> Engine<W> {
             .iter()
             .chain(self.peers.values())
             .find(|a| a.reservation.player == id && a.reservation.world == world)?;
-        if !human.ready_for_updates
-            || !human.entered_game
-            || human.initial_objects.is_none()
-            || human.is_mounted()
-        {
+        if !human.ready_for_updates || !human.entered_game || human.initial_objects.is_none() {
             return None;
         }
         let CharacterLife::Alive {
@@ -130,6 +136,15 @@ impl<W: Write> Engine<W> {
         if health_quarter_points == 0 {
             return None;
         }
+        let mount = if human.is_indexed_hospital_gunner() {
+            Some(ShooterMount::Hospital(human.mounted_bunker?))
+        } else if self.is_ground_gunner(human) {
+            Some(ShooterMount::Ground(human.ground_seat?))
+        } else if human.is_mounted() {
+            return None;
+        } else {
+            None
+        };
         Some(Participant {
             id,
             generation,
@@ -137,6 +152,7 @@ impl<W: Write> Engine<W> {
             world,
             squad: human.squad_catalog.squad_index(),
             health: health_quarter_points,
+            mount,
         })
     }
 
@@ -161,6 +177,11 @@ impl<W: Write> Engine<W> {
         let Some(victim) = self.death_participant(victim, world) else {
             return Ok(None);
         };
+        if victim.mount.is_some()
+            || attacker.mount.is_some() != matches!(weapon, Weapon::MountedPrimary(_))
+        {
+            return Ok(None);
+        }
         let catalog = self.item_catalog.retail_combat()?;
         let item = weapon.validate(catalog)?;
         let (damage_source_type, damage_source_index) = weapon_source(item);
@@ -170,8 +191,7 @@ impl<W: Write> Engine<W> {
             damage_source_type,
             damage_source_index,
             head_region_hit: head_flag(catalog, location)?,
-            // Both actual participants were admitted on foot before death clears
-            // mount state. No vehicle/seat-only inference is admitted here.
+            // This Hit path admits only an on-foot victim, even for mounted fire.
             victim_was_mounted: protocol::VictimWasMounted::NoAssociatedVehicle,
         }
         .encode()?;
