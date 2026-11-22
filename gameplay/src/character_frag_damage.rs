@@ -1,6 +1,6 @@
 //! Record-bound ordinary retail frag damage from the owner event's accepted pose.
 use crate::{
-    Active, CharacterLife, Engine, PendingDamage, PendingDamageSource,
+    Active, CharacterLife, Engine, FragTargetAllocation, PendingDamage, PendingDamageSource,
     acquisition_character_effects, armor,
     blast_visibility::MAX_BLAST_TARGETS,
     damage,
@@ -88,7 +88,7 @@ impl<W: Write> Engine<W> {
                         && (0x0380_0000 | u32::from(actor.reservation.player))
                             == target.character_id
                 });
-                let (reservation, bot_allocation_generation, armor) = if let Some(actor) = actor {
+                let (reservation, target_allocation, armor) = if let Some(actor) = actor {
                     if !actor.ready_for_updates
                         || !actor.entered_game
                         || actor.initial_objects.is_none()
@@ -103,7 +103,11 @@ impl<W: Write> Engine<W> {
                     } else {
                         armor
                     };
-                    (Some(actor.reservation.id.clone()), None, armor)
+                    (
+                        Some(actor.reservation.id.clone()),
+                        FragTargetAllocation::Human(actor.allocation_sequence),
+                        armor,
+                    )
                 } else {
                     let bot = self
                         .bot_registry
@@ -117,7 +121,7 @@ impl<W: Write> Engine<W> {
                         .ok_or("missing_target_loadout")?;
                     (
                         None,
-                        Some(bot.allocation_generation),
+                        FragTargetAllocation::Bot(bot.allocation_generation),
                         armor::ArmorProfile::from_retail_loadout(&bot.target.loadout, catalog)?,
                     )
                 };
@@ -155,9 +159,10 @@ impl<W: Write> Engine<W> {
                         user_data,
                     },
                     source: PendingDamageSource::OrdinaryRetailFrag {
+                        owner: crate::firearm_assists::FragOwner::capture(source),
                         world,
                         round: self.round_number,
-                        bot_allocation_generation,
+                        target_allocation,
                     },
                 });
                 plan.audit.push(json!({
@@ -547,9 +552,12 @@ mod tests {
         assert_eq!(
             queued.source,
             PendingDamageSource::OrdinaryRetailFrag {
+                owner: crate::firearm_assists::FragOwner::capture(actor),
                 world: actor.reservation.world,
                 round: engine.round_number,
-                bot_allocation_generation: None,
+                target_allocation: FragTargetAllocation::Human(
+                    engine.peers["synthetic-rocket-target"].allocation_sequence,
+                ),
             },
         );
         assert!(queued.damage.kinetic_response);

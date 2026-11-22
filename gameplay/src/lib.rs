@@ -1000,13 +1000,20 @@ impl CharacterLife {
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FragTargetAllocation {
+    Human(u64),
+    Bot(u32),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PendingDamageSource {
     Falling,
     Other,
     OrdinaryRetailFrag {
+        owner: firearm_assists::FragOwner,
         world: u32,
         round: u64,
-        bot_allocation_generation: Option<u32>,
+        target_allocation: FragTargetAllocation,
     },
 }
 

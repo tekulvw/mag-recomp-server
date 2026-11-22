@@ -21,6 +21,17 @@ pub(super) fn plan_pending_damage<W: Write>(
             && b.generation == pending.generation
             && b.health_quarter_points > 0
     });
+    let human_target = ctx
+        .engine
+        .active
+        .iter()
+        .chain(ctx.engine.peers.values())
+        .find(|actor| {
+            actor.reservation.world == active.reservation.world
+                && pending.target_reservation_id.as_deref() == Some(actor.reservation.id.as_str())
+                && pending.target_character_id
+                    == (0x0380_0000 | u32::from(actor.reservation.player))
+        });
     let qualified_frag = matches!(
         pending.source,
         PendingDamageSource::OrdinaryRetailFrag { .. }
@@ -29,20 +40,27 @@ pub(super) fn plan_pending_damage<W: Write>(
         PendingDamageSource::OrdinaryRetailFrag {
             world,
             round,
-            bot_allocation_generation,
+            target_allocation,
+            owner,
         } => {
             world == active.reservation.world
                 && round == ctx.engine.round_number
-                && match (bot_allocation_generation, &pending.target_reservation_id) {
-                    (Some(allocation), None) => registry_target.is_some_and(|target| {
-                        let bot = &ctx.engine.bot_registry.bots[&target.object_index];
-                        bot.allocation_generation == allocation
-                            && bot.target.runtime.is_some_and(|runtime| {
-                                !matches!(runtime.phase, development_target::BotPhase::Dead)
-                            })
-                    }),
-                    (None, Some(_)) => true,
-                    _ => false,
+                && owner == firearm_assists::FragOwner::capture(active)
+                && pending.damage.attacker_id
+                    == (0x0380_0000 | u32::from(active.reservation.player))
+                && match target_allocation {
+                    FragTargetAllocation::Bot(allocation) => {
+                        registry_target.is_some_and(|target| {
+                            let bot = &ctx.engine.bot_registry.bots[&target.object_index];
+                            bot.allocation_generation == allocation
+                                && bot.target.runtime.is_some_and(|runtime| {
+                                    !matches!(runtime.phase, development_target::BotPhase::Dead)
+                                })
+                        })
+                    }
+                    FragTargetAllocation::Human(allocation) => {
+                        human_target.is_some_and(|victim| victim.allocation_sequence == allocation)
+                    }
                 }
         }
         PendingDamageSource::Falling | PendingDamageSource::Other => true,
@@ -67,10 +85,7 @@ pub(super) fn plan_pending_damage<W: Write>(
             }
             _ => None,
         }
-    } else if let Some(peer) = ctx.engine.peers.values().find(|p| {
-        0x03800000 | u32::from(p.reservation.player) == pending.target_character_id
-            && pending.target_reservation_id.as_deref() == Some(p.reservation.id.as_str())
-    }) {
+    } else if let Some(peer) = human_target {
         match peer.life.damage_health() {
             Some((generation, health_quarter_points))
                 if generation == pending.generation && !peer.is_mounted() =>
@@ -119,22 +134,26 @@ pub(super) fn plan_pending_damage<W: Write>(
             pending.damage.apply(health_quarter_points)?
         };
         let mut human_life = None;
-        if let Some(victim) = ctx
-            .engine
-            .active
-            .iter()
-            .chain(ctx.engine.peers.values())
-            .find(|p| {
-                pending.target_reservation_id.as_deref() == Some(p.reservation.id.as_str())
-                    && pending.target_character_id
-                        == (0x0380_0000 | u32::from(p.reservation.player))
-            })
-        {
+        if let Some(victim) = human_target {
             let (model, life) =
                 ctx.engine
                     .plan_human_damage(victim, pending.damage.amount_hp, resolved, now)?;
             resolved = model;
             human_life = Some(life);
+            if ctx.accepted_owner_route
+                && let PendingDamageSource::OrdinaryRetailFrag { owner, .. } = pending.source
+                && let Some(assists) = firearm_assists::Plan::prepare_ordinary_frag(
+                    ctx.engine,
+                    now,
+                    active,
+                    owner,
+                    victim,
+                    resolved.health_quarter_points == 0,
+                )
+            {
+                statistics::firearm_assists(plan, &assists);
+                plan.combat.firearm_assists = Some(assists);
+            }
             if matches!(victim.life,CharacterLife::Incapacitated{downed,..} if !downed.is_expired(now))
                 && matches!(life, CharacterLife::AwaitingRespawn { .. })
                 && let Some(killer) = ctx
@@ -204,11 +223,7 @@ pub(super) fn plan_pending_damage<W: Write>(
                     health_quarter_points: resolved.health_quarter_points,
                 }
             }));
-        } else if let Some(peer) =
-            ctx.engine.peers.values().find(|p| {
-                0x03800000 | u32::from(p.reservation.player) == pending.target_character_id
-            })
-        {
+        } else if let Some(peer) = human_target {
             plan.combat
                 .peer_damage
                 .push((peer.reservation.id.clone(), generation, resolved));

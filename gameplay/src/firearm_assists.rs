@@ -239,10 +239,48 @@ struct Award {
     after: i32,
 }
 
+/// Identity of the reservation that accepted and still owns a queued frag dose.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FragOwner {
+    allocation: u64,
+    team: u8,
+}
+
+impl FragOwner {
+    pub(crate) fn capture(owner: &Active) -> Self {
+        Self {
+            allocation: owner.allocation_sequence,
+            team: owner.team(),
+        }
+    }
+}
+
+enum Source {
+    Firearm(Victim),
+    QueuedFrag { index: u16, owner: FragOwner },
+}
+
+impl Source {
+    fn matches<W: Write>(&self, engine: &Engine<W>, world: u32) -> bool {
+        match *self {
+            Self::Firearm(source) => source.matches(engine, world, true),
+            Self::QueuedFrag { index, owner } => engine
+                .active
+                .iter()
+                .chain(engine.peers.values())
+                .any(|actor| {
+                    actor.reservation.world == world
+                        && actor.reservation.player == index
+                        && FragOwner::capture(actor) == owner
+                }),
+        }
+    }
+}
+
 pub(super) struct Plan {
     scope: (u32, u64),
     revision: u64,
-    source: Victim,
+    source: Source,
     victim: Victim,
     after: Option<Ledger>,
     awards: Vec<Award>,
@@ -257,6 +295,63 @@ impl Plan {
         target: Fighter<'_>,
         collapsed: bool,
     ) -> Option<Self> {
+        let (actor, team) = source.current(engine, world)?;
+        let identity = Source::Firearm(Victim {
+            actor,
+            generation: source.generation,
+        });
+        Self::prepare_hit(
+            engine,
+            world,
+            now,
+            (actor, team, identity),
+            target,
+            collapsed,
+        )
+    }
+
+    pub(super) fn prepare_ordinary_frag<W: Write>(
+        engine: &Engine<W>,
+        now: Duration,
+        owner: &Active,
+        binding: FragOwner,
+        target: &Active,
+        collapsed: bool,
+    ) -> Option<Self> {
+        if FragOwner::capture(owner) != binding {
+            return None;
+        }
+        let index = owner.reservation.player;
+        let actor = Actor {
+            index,
+            allocation: Allocation::Human(binding.allocation),
+        };
+        // The queue retains doses owed to peers after its owner dies or respawns.
+        Self::prepare_hit(
+            engine,
+            owner.reservation.world,
+            now,
+            (
+                actor,
+                binding.team,
+                Source::QueuedFrag {
+                    index,
+                    owner: binding,
+                },
+            ),
+            Fighter::human(target),
+            collapsed,
+        )
+    }
+
+    fn prepare_hit<W: Write>(
+        engine: &Engine<W>,
+        world: u32,
+        now: Duration,
+        (killer, killer_team, source): (Actor, u8, Source),
+        target: Fighter<'_>,
+        collapsed: bool,
+    ) -> Option<Self> {
         let rules = engine.firearm_assists.rules?;
         if engine.wire_profile.application_id() != rules.application_id
             || !engine.match_started
@@ -265,19 +360,13 @@ impl Plan {
         {
             return None;
         }
-        let ((killer, killer_team), (actor, victim_team)) = source
-            .current(engine, world)
-            .zip(target.current(engine, world))?;
+        let (actor, victim_team) = target.current(engine, world)?;
         if killer.index == actor.index || (killer_team == victim_team && !collapsed) {
             return None;
         }
         let victim = Victim {
             actor,
             generation: target.generation,
-        };
-        let source = Victim {
-            actor: killer,
-            generation: source.generation,
         };
         let scope = (world, engine.round_number);
         let mut ledger = engine
@@ -373,7 +462,7 @@ impl Plan {
                 .iter()
                 .chain(engine.peers.values())
                 .any(|actor| actor.reservation.world == world)
-            && self.source.matches(engine, world, true)
+            && self.source.matches(engine, world)
             && self.victim.matches(engine, world, victim_alive)
     }
 
@@ -392,7 +481,7 @@ impl Plan {
         Ok(())
     }
 
-    /// Called after the enclosing firearm record and installed damage. Human
+    /// Called after the enclosing damage record and installed damage. Human
     /// awards use the event's staged ordinary statistic publication.
     pub(super) fn install<W: Write>(self, engine: &mut Engine<W>) -> Result<(), &'static str> {
         if !self.current(engine, self.after.is_some())
