@@ -831,6 +831,7 @@ enum PrimaryAttachment {
     HostAsLauncherWeapon,
     WrongLauncherCategory,
     WrongLauncherAmmo,
+    MismatchedHostAmmo,
 }
 
 fn machine_gun_hit_fixture(slot: Option<usize>, attachment: PrimaryAttachment) -> Engine<Vec<u8>> {
@@ -865,8 +866,22 @@ fn attachment_hit_fixture(
     let (mut raw, mut metadata) = combat_fixture_documents(false, 0.0, 0.0, None, false, false);
     let host = &mut raw["definitions"]["weapons"]["synthetic_rifle"]["parameters"];
     host["id"] = json!("synthetic_rifle");
-    host["ammo_name"] = json!("synthetic_hitscan");
+    host["ammo_name"] = json!(
+        if matches!(attachment, PrimaryAttachment::MismatchedHostAmmo) {
+            "synthetic_other_bullet"
+        } else {
+            "synthetic_bullet"
+        }
+    );
     host["category"] = json!(category);
+    host["initial_fire_mode"] = json!("kSemiAuto");
+    host["fire_mode"] = json!({
+        "fire_modes": {
+            "FireModeTypeClass0": {"FireModeTypeClass": {"fire_mode_value": "kSemiAuto"}},
+            "FireModeTypeClass1": {"FireModeTypeClass": {"fire_mode_value": "kDual"}},
+            "FireModeTypeClass2": {"FireModeTypeClass": {"fire_mode_value": "kAuto"}},
+        }
+    });
     host["attachment_list"] = json!({});
     for (ordinal, &(_, kind)) in attachments.iter().enumerate() {
         let name = format!("synthetic_attachment_{ordinal}");
@@ -993,6 +1008,77 @@ fn attachment_hit_fixture(
         health_quarter_points: 400,
     };
     engine
+}
+
+#[test]
+fn native_retail_firearm_mode_index_uses_the_current_host_ammo_pool() {
+    for mode in 0..=2 {
+        let mut engine = primary_attachment_hit_fixture(
+            None,
+            PrimaryAttachment::Compatible,
+            "kWepCategoryAssaultRifle",
+            "kAttachTypeSuppressor",
+        );
+        let mut wire = native_hit(0x0380_0000, 55);
+        wire[3] = mode;
+        dispatch(&mut engine, &wire, 1000).unwrap();
+        assert_eq!(
+            victim(&engine).life.damage_health(),
+            Some((4, 240)),
+            "mode {mode}"
+        );
+        assert_eq!(victim(&engine).last_damage.last_location_and_type, 0x13);
+    }
+}
+
+#[test]
+fn native_retail_firearm_mode_index_requires_matching_current_source_and_pool() {
+    use PrimaryAttachment::*;
+    for (mode, attachment, pool, denied) in [
+        (3, Compatible, 0, "unsupported_retail_bullet_fire_mode"),
+        (255, Compatible, 0, "unsupported_retail_bullet_fire_mode"),
+        (1, Unbound, 0, "unsupported_retail_bullet_fire_mode"),
+        (
+            1,
+            MismatchedSource,
+            0,
+            "unsupported_retail_bullet_fire_mode",
+        ),
+        (
+            1,
+            MismatchedHostAmmo,
+            0,
+            "unsupported_retail_bullet_fire_mode",
+        ),
+        (1, Compatible, 1, "unsupported_bullet_magazine"),
+    ] {
+        let mut engine = primary_attachment_hit_fixture(
+            None,
+            attachment,
+            "kWepCategoryAssaultRifle",
+            "kAttachTypeSuppressor",
+        );
+        engine
+            .active
+            .as_mut()
+            .unwrap()
+            .observed_primary
+            .as_mut()
+            .unwrap()
+            .ammo_pool = pool;
+        let mut wire = native_hit(0x0380_0000, 55);
+        wire[3] = mode;
+        dispatch(&mut engine, &wire, 1000).unwrap();
+        assert_eq!(victim(&engine).life.damage_health(), Some((4, 400)));
+        assert!(
+            std::str::from_utf8(&engine.writer)
+                .unwrap()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .any(|entry| entry["gameplay_denial"] == denied),
+            "mode={mode} pool={pool} source={attachment:?}"
+        );
+    }
 }
 
 #[test]
