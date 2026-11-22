@@ -121,7 +121,7 @@ namespace Server.Medius
                 // A partially admitted ticket is still owned by the queue until
                 // its callback runs. Count that slot only once for capacity.
                 foreach (var ticket in pending)
-                    if (!liveAccounts.Contains(ticket.Value.Account)) pendingCounts[ticket.Human.Faction]++;
+                    if (!liveAccounts.Contains(ticket.Value.Account)) pendingCounts[ticket.Human.Faction] += ticket.Human.Size;
                 int live = liveCounts.Sum();
                 bool ready = ReadyForGameplay;
                 bool draining = Draining;
@@ -138,8 +138,9 @@ namespace Server.Medius
             lock (_gate)
             {
                 PurgeHumanQueue();
-                var ownership = _humanQueue.Snapshot().Any(ticket => ticket.Value.Account == account)
+                var ownership = _humanQueue.Snapshot().Any(ticket => ticket.Value.Accounts.Contains(account, StringComparer.Ordinal))
                     ? LocalDmeAccountOwnership.Queued : LocalDmeAccountOwnership.None;
+                if (_provisionalPartyAccounts.Contains(account)) ownership |= LocalDmeAccountOwnership.PendingRelease;
                 foreach (var reservation in _reservations.Values.Where(r => r.Account == account))
                     ownership |= IsResultsCohort(reservation) ? LocalDmeAccountOwnership.Terminal : LocalDmeAccountOwnership.Live;
                 foreach (var release in _pendingReleases.Values.Where(r => r.Reservation.Account == account))

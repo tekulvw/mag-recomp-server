@@ -43,6 +43,7 @@ namespace Server.Medius
             _config = config ?? throw new ArgumentNullException(nameof(config));
             _store = store ?? throw new ArgumentNullException(nameof(store));
             _configPath = configPath;
+            if (config.PartyInviteSeconds is int seconds) _parties = new MagPartyDirectory(TimeSpan.FromSeconds(seconds));
             _drainingWorkers = config.Workers.Where(w=>w.Draining).Select(w=>w.WorkerId).ToHashSet(StringComparer.Ordinal);
             _manager = new Server.Dme.MediusManager(config.ApplicationId) { LocalOnly = true };
             _slots = config.Workers.Select(row => {
@@ -74,6 +75,9 @@ namespace Server.Medius
             await Task.WhenAll(_slots.Select(InitializeSlotAsync));
             if (!_slots.Any(s => s.Host.GetPlacement().Ready))
             { await DisposeAsync(); throw new IOException("No configured gameplay worker is ready."); }
+            if (PartyMembershipEnabled && !_slots.Any(s => !s.Faulted && s.Host.GetPlacement() is { Ready: true } placement &&
+                placement.Profiles.Any(profile => profile.SquadCounts != null)))
+            { await DisposeAsync(); throw new IOException("Party matchmaking requires an opted-in worker with authored squad capacity."); }
         }
         async Task InitializeSlotAsync(Slot slot)
         {
@@ -101,6 +105,7 @@ namespace Server.Medius
             ReloadDrainPolicy();
             if (_transportStarted) await _ownedTransport.HandleIncomingMessages();
             await Task.WhenAll(_slots.Where(s => !s.Faulted).Select(TickSlotAsync));
+            PrunePartySessions();
             SendQueueNotices(); StartPlacement();
             if (_transportStarted) {
                 await _ownedTransport.HandleOutgoingMessages();
@@ -159,7 +164,7 @@ namespace Server.Medius
                 }
             }
             QueueEntry[] waiting; lock (_gate) waiting = _humans.Snapshot().Select(e => e.Value).Where(e => e.Assigned == null && e.Alive).ToArray();
-            foreach (var entry in waiting) result.QueueSizes[(int)entry.Request.Value * 3 + entry.Faction]++;
+            foreach (var entry in waiting) result.QueueSizes[(int)entry.Request.Value * 3 + entry.Faction] += (uint)(entry.Party?.Length ?? 1);
             return result;
         }
         public async ValueTask DisposeAsync()

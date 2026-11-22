@@ -5,8 +5,8 @@ using System.Linq;
 namespace Server.Medius
 {
     public sealed record MagMatchProfile(string ProfileId, int GameType, byte AttackingFaction,
-        byte DefendingFaction, int MaximumPlayers, int TeamCapacity);
-    public sealed record MagQueuedHuman(string TicketId, int GameType, byte Faction, long Order);
+        byte DefendingFaction, int MaximumPlayers, int TeamCapacity, int? SquadCapacity = null, IReadOnlyList<int> SquadCounts = null);
+    public sealed record MagQueuedHuman(string TicketId, int GameType, byte Faction, long Order, int Size = 1);
     public sealed record MagFactionSelection(MagMatchProfile Profile, IReadOnlyList<MagQueuedHuman> Players);
 
     /// <summary>Pure saved-faction matchmaking. Callers supply real human tickets,
@@ -70,6 +70,9 @@ namespace Server.Medius
                 minima.Any(minimum => minimum > profile.TeamCapacity)) return null;
             var eligible = ordered.Where(player => player.GameType == profile.GameType &&
                 (player.Faction == profile.AttackingFaction || player.Faction == profile.DefendingFaction)).ToArray();
+            if (eligible.Any(player => player.Size != 1))
+                return GroupedCohort(eligible, profile, minimumPlayers, maximum, minima);
+
             var roles = new[] { profile.AttackingFaction, profile.DefendingFaction };
             var selected = new List<MagQueuedHuman>();
             var ids = new HashSet<string>(StringComparer.Ordinal);
@@ -95,13 +98,81 @@ namespace Server.Medius
                 .ThenBy(player => player.TicketId, StringComparer.Ordinal).ToArray()));
         }
 
+        static MagFactionSelection GroupedCohort(MagQueuedHuman[] eligible, MagMatchProfile profile,
+            int minimum, int maximum, int[] minima)
+        {
+            var units = eligible.Where(player => player.Size == 1 || player.Size <= profile.SquadCapacity.GetValueOrDefault()).ToArray();
+            int attackingLimit = profile.SquadCounts?[0] ?? 0;
+            int defendingLimit = profile.SquadCounts?[1] ?? 0;
+            var attackers = new ulong[units.Length + 1, attackingLimit + 1];
+            var defenders = new ulong[units.Length + 1, defendingLimit + 1];
+            for (int cap = 0; cap <= attackingLimit; cap++) attackers[units.Length, cap] = 1;
+            for (int cap = 0; cap <= defendingLimit; cap++) defenders[units.Length, cap] = 1;
+            for (int i = units.Length - 1; i >= 0; i--)
+            {
+                var unit = units[i];
+                bool attacker = unit.Faction == profile.AttackingFaction;
+                void AddUnit(ulong[,] counts, int limit, bool belongs)
+                {
+                    for (int cap = 0; cap <= limit; cap++)
+                    {
+                        ulong possible = counts[i + 1, cap];
+                        int cost = unit.Size == 1 ? 0 : 1;
+                        if (belongs && cap >= cost) possible |= counts[i + 1, cap - cost] << unit.Size;
+                        counts[i, cap] = possible;
+                    }
+                }
+                AddUnit(attackers, attackingLimit, attacker);
+                AddUnit(defenders, defendingLimit, !attacker);
+            }
+
+            bool Fits(ulong leftCounts, ulong rightCounts, int a, int d)
+            {
+                for (int left = Math.Max(0, minima[0] - a); left <= profile.TeamCapacity - a; left++)
+                {
+                    if ((leftCounts & (1UL << left)) == 0) continue;
+                    int low = Math.Max(0, Math.Max(minima[1] - d, minimum - a - d - left));
+                    int high = Math.Min(profile.TeamCapacity - d, maximum - a - d - left);
+                    if (high < low) continue;
+                    ulong mask = ((1UL << (high + 1)) - 1) ^ ((1UL << low) - 1);
+                    if ((rightCounts & mask) != 0) return true;
+                }
+                return false;
+            }
+
+            // Reserve parties before solos and budget each party a distinct eligible squad.
+            bool CanFinish(int index, int a, int d, int attackingSquads, int defendingSquads) =>
+                Fits(attackers[index, attackingSquads], defenders[index, defendingSquads], a, d);
+
+            if (!CanFinish(0, 0, 0, attackingLimit, defendingLimit)) return null;
+            var selected = new List<MagQueuedHuman>();
+            int a = 0, d = 0;
+            int attackingSquads = attackingLimit, defendingSquads = defendingLimit;
+            for (int i = 0; i < units.Length; i++)
+            {
+                var unit = units[i];
+                bool attacker = unit.Faction == profile.AttackingFaction;
+                int nextA = a + (attacker ? unit.Size : 0);
+                int nextD = d + (attacker ? 0 : unit.Size);
+                int nextAttackingSquads = attackingSquads - (attacker && unit.Size > 1 ? 1 : 0);
+                int nextDefendingSquads = defendingSquads - (!attacker && unit.Size > 1 ? 1 : 0);
+                if (nextAttackingSquads < 0 || nextDefendingSquads < 0 ||
+                    !CanFinish(i + 1, nextA, nextD, nextAttackingSquads, nextDefendingSquads)) continue;
+                selected.Add(unit);
+                a = nextA; d = nextD;
+                attackingSquads = nextAttackingSquads;
+                defendingSquads = nextDefendingSquads;
+            }
+            return new MagFactionSelection(profile, selected.AsReadOnly());
+        }
+
         static MagQueuedHuman[] ValidateWaiting(IReadOnlyList<MagQueuedHuman> waiting)
         {
             if (waiting == null) throw new ArgumentNullException(nameof(waiting));
             var ids = new HashSet<string>(StringComparer.Ordinal);
             foreach (var player in waiting)
                 if (player == null || string.IsNullOrWhiteSpace(player.TicketId) || player.GameType < 0 ||
-                    player.GameType > 2 || player.Faction > 2 || !ids.Add(player.TicketId))
+                    player.GameType > 2 || player.Faction > 2 || player.Size < 1 || player.Size > 32 || !ids.Add(player.TicketId))
                     throw new ArgumentException("Human tickets require unique identities, mode 0..2 and saved faction 0..2.", nameof(waiting));
             return waiting.OrderBy(player => player.Order).ThenBy(player => player.TicketId, StringComparer.Ordinal).ToArray();
         }
@@ -112,7 +183,9 @@ namespace Server.Medius
             if (string.IsNullOrWhiteSpace(profile.ProfileId) || profile.GameType < 0 || profile.GameType > 2 ||
                 profile.AttackingFaction > 2 || profile.DefendingFaction > 2 ||
                 profile.AttackingFaction == profile.DefendingFaction || profile.MaximumPlayers < 1 ||
-                profile.MaximumPlayers > 64 || profile.TeamCapacity < 1 || profile.TeamCapacity > 32)
+                profile.MaximumPlayers > 64 || profile.TeamCapacity < 1 || profile.TeamCapacity > 32 ||
+                (profile.SquadCapacity.HasValue && (profile.SquadCapacity < 1 || profile.SquadCapacity > profile.TeamCapacity)) ||
+                (profile.SquadCounts != null && (profile.SquadCounts.Count != 2 || profile.SquadCounts.Any(n => n < 1 || n > 32))))
                 throw new ArgumentException("Profiles require an identity, mode 0..2, opposing factions and bounded capacities.", nameof(profile));
         }
 

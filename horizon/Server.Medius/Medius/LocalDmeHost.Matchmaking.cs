@@ -20,6 +20,10 @@ namespace Server.Medius
             public Func<bool> Connected;
             public Action<MagPluginClientMessage> Send;
             public Action<MagCharacterRecord> Notify;
+            public MagPartyAdmissionMember[] Party;
+            public Func<Func<bool>, bool> WithPartyOwnership;
+            public Action<IReadOnlyList<MagJoinGameResponse>> CompleteParty;
+            public IEnumerable<string> Accounts => Party == null ? new[] { Account } : Party.Select(member => member.Session.AuthenticatedAccount);
             public bool Alive => Connected() && Session.State==MagMlsSession.SessionState.Ready &&
                 !Session.IsExpired(DateTime.UtcNow) && Session.AuthenticatedAccount==Account && Session.CharacterId==Character;
         }
@@ -60,7 +64,7 @@ namespace Server.Medius
                     _formationTeamMinima.All(minimum => minimum <= profile.TeamCapacity) &&
                     (long)profile.TeamCapacity * 2 >= _formationStartup.MinimumPlayers).ToArray());
             }
-            _matchProfiles = profiles;
+            _matchProfiles = _supportsPartyReservations ? profiles : Array.AsReadOnly(profiles.Select(profile => profile with { SquadCapacity = null, SquadCounts = null }).ToArray());
         }
         bool RequestedModeIsCurrent(uint mode)
         {
@@ -166,7 +170,7 @@ namespace Server.Medius
             status.MinimumPlayers=Enumerable.Repeat((uint)_formationStartup.MinimumPlayers,4).ToArray();
             foreach(var ticket in _humanQueue.Snapshot())if(!_reservations.Values.Any(r=>IsLiveCohort(r)&&r.Accepted&&
                 r.Account==ticket.Value.Account&&r.CharacterId==ticket.Value.Character))
-                status.QueueSizes[ticket.Human.GameType*3+ticket.Human.Faction]++;
+                status.QueueSizes[ticket.Human.GameType*3+ticket.Human.Faction] += (uint)ticket.Human.Size;
             if(ReadyForAdmission)
                 foreach(var profile in _matchProfiles)
                 {status.QueueEnabled[profile.GameType*3+profile.AttackingFaction]=true;status.QueueEnabled[profile.GameType*3+profile.DefendingFaction]=true;}
@@ -207,6 +211,7 @@ namespace Server.Medius
             _formedProfile = null;
             _formationId = null;
             _formationConfigured = false;
+            _formationAdmissionEpoch = null;
             _formationEverAdmitted = false;
             _registryFormationStaged = false;
         }
@@ -220,7 +225,8 @@ namespace Server.Medius
                 ResetFormation();
             }
             foreach (var ticket in abandoned.Where(ticket => ticket.Value.Alive))
-                ticket.Value.Send(JoinResponse(ticket.Value.Request.TransactionId, 6));
+                if (ticket.Value.Party != null) ticket.Value.CompleteParty(null);
+                else ticket.Value.Send(JoinResponse(ticket.Value.Request.TransactionId, 6));
         }
         async Task PumpFactionMatchmakingAsync()
         {
@@ -234,7 +240,7 @@ namespace Server.Medius
                     lock(_gate)
                     {
                         if(!ReadyForAdmission||!_humanQueue.IsCurrent(ticket)||!ticket.Value.Alive)continue;
-                        release=ReleasePriorResultsAsync(ticket.Value.Account,ticket.Value.Character);
+                        release = ticket.Value.Party == null ? ReleasePriorResultsAsync(ticket.Value.Account,ticket.Value.Character) : Task.CompletedTask;
                     }
                     await release;
                 }
@@ -275,7 +281,7 @@ namespace Server.Medius
                     var startup=_formationStartup.WithProfileMaximum(profile.MaximumPlayers);
                     if(!await _bridge.RequestAsync(startup.ConfigureRequest(Id(),_applicationId)))
                     {lock(_gate)_nextFormationAttempt=DateTime.UtcNow.AddSeconds(1);return;}
-                    lock(_gate){if(!ReadyForAdmission||_matchmakingCancellation.IsCancellationRequested)return;_formationConfigured=true;}
+                    lock(_gate){if(!ReadyForAdmission||_matchmakingCancellation.IsCancellationRequested)return;_formationAdmissionEpoch = reply.SelectedMatch.AdmissionEpoch; _formationConfigured=true;}
                 }
                 MagPendingHumanQueue<QueuedJoin>.Entry[] cohort;
                 lock(_gate)
@@ -296,24 +302,36 @@ namespace Server.Medius
                         else
                         {
                             var ids=selection.Players.Select(p=>p.TicketId).ToHashSet(StringComparer.Ordinal);
-                            cohort=_humanQueue.Snapshot().Where(e=>ids.Contains(e.Human.TicketId)).ToArray();
+                            cohort=_humanQueue.Snapshot().Where(e=>ids.Contains(e.Human.TicketId)).OrderByDescending(e=>e.Human.Size).ToArray();
                         }
                     }
                     else
                     {
                         // Late admission preserves the chosen pair and observes
                         // existing per-side occupancy before considering a ticket.
-                        cohort=_humanQueue.Snapshot().Where(e=>e.Human.GameType==profile.GameType&&
+                        cohort=_humanQueue.Snapshot().Where(e=>e.Human.Size==1&&e.Human.GameType==profile.GameType&&
                             (e.Human.Faction==profile.AttackingFaction||e.Human.Faction==profile.DefendingFaction)&&
                             _reservations.Values.Count(r=>IsLiveCohort(r)&&r.Faction==e.Human.Faction)<profile.TeamCapacity)
                             .Take(_reservations.Values.Count(IsLiveCohort)<Math.Min(_maximumPlayers,profile.MaximumPlayers)?1:0).ToArray();
                     }
                 }
                 if (cohort == null) { AbandonRegistryFormation(); return; }
+                var parties = cohort.Where(ticket => ticket.Value.Party != null).ToArray();
+                if (parties.Length != 0)
+                {
+                    if (!await AdmitRegistryPartiesAsync(parties, profile, formation))
+                    {
+                        lock (_gate) _nextFormationAttempt = DateTime.UtcNow.AddSeconds(1);
+                        AbandonRegistryFormation();
+                        return;
+                    }
+                    lock (_gate) foreach (var party in parties) _humanQueue.Remove(party);
+                }
                 foreach(var ticket in cohort)
                 {
                     bool TicketCurrent() => _humanQueue.IsCurrent(ticket) && ticket.Value.Alive;
                     lock(_gate)if(!ReadyForAdmission||_matchmakingCancellation.IsCancellationRequested||!TicketCurrent())continue;
+                    if (ticket.Value.Party != null) continue;
                     var reply=await JoinAsync(ticket.Value.Session,ticket.Value.Request,ticket.Value.Notify,TicketCurrent);
                     bool current;lock(_gate){current=_humanQueue.IsCurrent(ticket)&&ticket.Value.Alive;
                         if(InRegistry||reply.Result!=6||!current)_humanQueue.Remove(ticket);

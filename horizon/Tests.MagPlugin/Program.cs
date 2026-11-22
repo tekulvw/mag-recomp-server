@@ -31,7 +31,10 @@ void Test(string name, Action action)
 Test("configured world registry validation and placement", ConfiguredRegistryChecks.Run);
 Test("configured registry simultaneous worlds and transfer", RegistryCoordinationChecks.Run);
 if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(RealRegistryWorkerChecks.BinaryVariable)))
+{
     Test("configured registry real workers", RealRegistryWorkerChecks.Run);
+    Test("configured registry real workers grouped", RealRegistryWorkerChecks.RunParties);
+}
 Test("registry DME host world and lease isolation", RegistryDmeHostChecks.Run);
 Test("bundled server NEWS formatting and bounds", ServerNewsChecks.Formatting);
 Test("bundled server NEWS and EULA wire responses", ServerNewsChecks.Run);
@@ -40,6 +43,10 @@ Test("active Armory loadout refresh", ActiveLoadoutRefreshChecks.Run);
 Test("typed worker match profile bridge", MatchProfileBridgeChecks.Run);
 Test("gameplay worker identity fencing", GameplayWorkerIdentityChecks.Run);
 Test("retail waiting and cancellation wire", QueueWireChecks.Run);
+Test("retail compact party wire", PartyWireChecks.Run);
+Test("retail party authenticated membership", PartyMembershipChecks.Run);
+Test("retail party squad selection and fairness", PartyMembershipChecks.Matchmaking);
+Test("retail party atomic registry placement", LeadershipProgressionChecks.PartyRegistryPlacement);
 Test("faction matchmaking fairness and role selection", FactionMatchmakingChecks.Run);
 Test("pending human queue ownership and cancellation", PendingHumanQueueChecks.Run);
 Test("independent terminal cohort transport and requeue", LeadershipProgressionChecks.IndependentMatchCohortAdmission);

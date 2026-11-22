@@ -57,6 +57,8 @@ namespace Server.Medius {
   public IReadOnlyList<string> ReservationIds {get;}
   internal GameplayMatchTerminal(uint world,string match,string reason,IReadOnlyList<string> reservations) { WorldId=world;MatchId=match;Reason=reason;ReservationIds=reservations; }
  }
+ public sealed record GameplayPartyReservation(string Status, string FormationId, string ProfileId, string CohortId,
+  uint WorldId, ulong AdmissionEpoch, byte? Team, ushort? Squad, IReadOnlyList<string> ReservationIds);
  public sealed class GameplayBridgeResponse {
   public bool Ok {get;}
   public string Error {get;}
@@ -71,10 +73,12 @@ namespace Server.Medius {
   public IReadOnlyList<MagMatchProfile> MatchProfiles {get;}
   public GameplaySelectedMatch SelectedMatch {get;}
   public GameplayWorkerIdentity WorkerIdentity {get;}
+  public GameplayPartyReservation PartyReservation {get;}
+  public bool SupportsPartyReservations => Capabilities.Contains("party_reservation_v1",StringComparer.Ordinal);
   public bool SupportsActiveLoadoutRefresh => Capabilities.Contains("active_loadout_refresh_v1",StringComparer.Ordinal);
   public bool SupportsCommittedLoadoutSelections => Capabilities.Contains("committed_loadout_selection_v1",StringComparer.Ordinal);
   public bool SupportsWorkerRegistry => Capabilities.Contains("worker_registry_v1",StringComparer.Ordinal);
-  internal GameplayBridgeResponse(bool ok,string error,IReadOnlyList<GameplayBridgeMessage> messages,GameplayBridgeFailure failure=GameplayBridgeFailure.None,IReadOnlyList<GameplayReward> rewards=null,GameplayMatchTerminal matchTerminal=null,IReadOnlyList<GameplayLoadoutSelection> loadoutSelections=null,IReadOnlyList<string> capabilities=null,IReadOnlyList<MagMatchProfile> matchProfiles=null,GameplaySelectedMatch selectedMatch=null,GameplayWorkerIdentity workerIdentity=null){MatchProfiles=matchProfiles??Array.Empty<MagMatchProfile>();SelectedMatch=selectedMatch;WorkerIdentity=workerIdentity;LoadoutSelections=loadoutSelections??Array.Empty<GameplayLoadoutSelection>();Capabilities=capabilities??Array.Empty<string>();Ok=ok;Error=error;Messages=messages;Failure=failure;Rewards=rewards??Array.Empty<GameplayReward>();MatchTerminal=matchTerminal;}
+  internal GameplayBridgeResponse(bool ok,string error,IReadOnlyList<GameplayBridgeMessage> messages,GameplayBridgeFailure failure=GameplayBridgeFailure.None,IReadOnlyList<GameplayReward> rewards=null,GameplayMatchTerminal matchTerminal=null,IReadOnlyList<GameplayLoadoutSelection> loadoutSelections=null,IReadOnlyList<string> capabilities=null,IReadOnlyList<MagMatchProfile> matchProfiles=null,GameplaySelectedMatch selectedMatch=null,GameplayWorkerIdentity workerIdentity=null,GameplayPartyReservation partyReservation=null){PartyReservation=partyReservation;MatchProfiles=matchProfiles??Array.Empty<MagMatchProfile>();SelectedMatch=selectedMatch;WorkerIdentity=workerIdentity;LoadoutSelections=loadoutSelections??Array.Empty<GameplayLoadoutSelection>();Capabilities=capabilities??Array.Empty<string>();Ok=ok;Error=error;Messages=messages;Failure=failure;Rewards=rewards??Array.Empty<GameplayReward>();MatchTerminal=matchTerminal;}
   internal static GameplayBridgeResponse Failed(GameplayBridgeFailure failure,long elapsed)=>new GameplayBridgeResponse(false,null,Array.Empty<GameplayBridgeMessage>(),failure){ElapsedMilliseconds=elapsed};
  }
  /// <summary>Strict bridge v2 reply codec. Event and release replies may carry bounded, independently addressed reliable messages.</summary>
@@ -110,7 +114,8 @@ namespace Server.Medius {
     bool hasProfiles=root.TryGetProperty("match_profiles",out var profiles);
     bool hasSelectedMatch=root.TryGetProperty("selected_match",out var selectedMatch);
     bool hasWorkerIdentity=root.TryGetProperty("worker_identity",out var workerIdentity);
-    var fields=new List<string>{"v","request_id","ok","error","messages"};if(hasProfiles)fields.Add("match_profiles");if(hasSelectedMatch)fields.Add("selected_match");if(hasSelections)fields.Add("loadout_selections");if(hasCapabilities)fields.Add("capabilities");if(hasRewards)fields.Add("rewards");if(hasTerminal)fields.Add("match_terminal");if(hasWorkerIdentity)fields.Add("worker_identity");
+    bool hasParty=root.TryGetProperty("party_reservation",out var party);
+    var fields=new List<string>{"v","request_id","ok","error","messages"};if(hasParty)fields.Add("party_reservation");if(hasProfiles)fields.Add("match_profiles");if(hasSelectedMatch)fields.Add("selected_match");if(hasSelections)fields.Add("loadout_selections");if(hasCapabilities)fields.Add("capabilities");if(hasRewards)fields.Add("rewards");if(hasTerminal)fields.Add("match_terminal");if(hasWorkerIdentity)fields.Add("worker_identity");
     if(!ExactFields(root,fields.ToArray())||!root.GetProperty("v").TryGetInt32(out var version)||version!=2||
      root.GetProperty("request_id").ValueKind!=JsonValueKind.String||root.GetProperty("request_id").GetString()!=requestId)return false;
     GameplayWorkerIdentity parsedIdentity=null;
@@ -192,8 +197,37 @@ namespace Server.Medius {
     IReadOnlyList<MagMatchProfile> parsedProfiles=Array.Empty<MagMatchProfile>();GameplaySelectedMatch parsedMatch=null;
     if(hasProfiles&&!GameplayMatchProfileCodec.Profiles(profiles,success,out parsedProfiles))return false;
     if(hasSelectedMatch&&!GameplayMatchProfileCodec.Selection(selectedMatch,success,out parsedMatch))return false;
-    response=new GameplayBridgeResponse(success,error.ValueKind==JsonValueKind.String?error.GetString():null,parsed.AsReadOnly(),rewards:parsedRewards.AsReadOnly(),matchTerminal:parsedTerminal,loadoutSelections:parsedSelections.AsReadOnly(),capabilities:parsedCapabilities.AsReadOnly(),matchProfiles:parsedProfiles,selectedMatch:parsedMatch,workerIdentity:parsedIdentity);return true;
-   }catch(Exception e)when(e is JsonException||e is InvalidOperationException||e is FormatException||e is ArgumentException){return false;}
+    GameplayPartyReservation parsedParty=null;
+    if(hasParty && party.ValueKind!=JsonValueKind.Null) {
+     if(!success||eventReply||party.ValueKind!=JsonValueKind.Object)return false;
+     var status=party.GetProperty("status").GetString();
+     var keys=new[]{"status","formation_id","profile_id","cohort_id","world_id","admission_epoch","reservation_ids"};
+     bool reserved=status=="reserved";
+     if((!reserved&&status!="released")||!ExactFields(party,reserved ? keys.Concat(new[]{"team","squad"}).ToArray() : keys))return false;
+     var formation=party.GetProperty("formation_id").GetString();
+     var profile=party.GetProperty("profile_id").GetString();
+     var cohort=party.GetProperty("cohort_id").GetString();
+     if(!Identifier(formation)||!Identifier(cohort)||string.IsNullOrEmpty(profile)||profile.Length>64||
+      !profile.All(c=>char.IsAsciiLetterOrDigit(c)||c=='-'||c=='_')||
+      !party.GetProperty("world_id").TryGetUInt32(out var world)||
+      !party.GetProperty("admission_epoch").TryGetUInt64(out var epoch)||epoch==0)return false;
+     var members=party.GetProperty("reservation_ids");
+     if(members.ValueKind!=JsonValueKind.Array||members.GetArrayLength()>32||(reserved&&members.GetArrayLength()<2))return false;
+     var ids=new List<string>();
+     foreach(var member in members.EnumerateArray()) {
+      var id=member.GetString();
+      if(!Identifier(id)||ids.Contains(id,StringComparer.Ordinal))return false;
+      ids.Add(id);
+     }
+     byte? team=null; ushort? squad=null;
+     if(reserved) {
+      if(!party.GetProperty("team").TryGetByte(out var side)||side>1||!party.GetProperty("squad").TryGetUInt16(out var unit)||unit/16!=side)return false;
+      team=side;squad=unit;
+     }
+     parsedParty=new GameplayPartyReservation(status,formation,profile,cohort,world,epoch,team,squad,ids.AsReadOnly());
+    }
+    response=new GameplayBridgeResponse(success,error.ValueKind==JsonValueKind.String?error.GetString():null,parsed.AsReadOnly(),rewards:parsedRewards.AsReadOnly(),matchTerminal:parsedTerminal,loadoutSelections:parsedSelections.AsReadOnly(),capabilities:parsedCapabilities.AsReadOnly(),matchProfiles:parsedProfiles,selectedMatch:parsedMatch,workerIdentity:parsedIdentity,partyReservation:parsedParty);return true;
+   }catch(Exception e)when(e is JsonException||e is InvalidOperationException||e is FormatException||e is ArgumentException||e is KeyNotFoundException){return false;}
   }
  }
 }
