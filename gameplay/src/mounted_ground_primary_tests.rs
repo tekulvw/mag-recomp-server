@@ -20,8 +20,13 @@ const ESCORT: u32 = 0x0100_0004;
 const HELO: u32 = 0x0280_0000;
 
 fn domination(hospital: bool) -> Engine<Vec<u8>> {
+    domination_with_drivers(hospital, false)
+}
+
+fn domination_with_drivers(hospital: bool, drivers: bool) -> Engine<Vec<u8>> {
     let (faction, team) = if hospital { (2, 1) } else { (0, 0) };
-    let mut engine = manual_ground_repair_domination_tests::fixture(faction, team);
+    let mut engine =
+        manual_ground_repair_domination_tests::fixture_with_drivers(faction, team, drivers);
     engine.item_catalog = Arc::new(
         Arc::try_unwrap(combat_items_for_ground_test(50.))
             .unwrap()
@@ -621,9 +626,13 @@ fn acquisition_escort_primary_does_not_enter_domination_helo_damage() {
 const NOTICE_VICTIM: &str = "synthetic-mounted-notice-target";
 
 fn mounted_notice_fixture(item: u16) -> Engine<Vec<u8>> {
+    mounted_notice_fixture_with_drivers(item, false)
+}
+
+fn mounted_notice_fixture_with_drivers(item: u16, drivers: bool) -> Engine<Vec<u8>> {
     let mut engine = match item {
         4 => domination(true),
-        5 => domination(false),
+        5 => domination_with_drivers(false, drivers),
         6 => {
             let mut engine = ground_firearm_fixture(50., true);
             engine.item_catalog = Arc::new(
@@ -808,4 +817,152 @@ fn mounted_primary_death_requires_the_current_gunner_grant() {
     ));
     assert!(death_notice_bytes(engine.active.as_ref().unwrap()).is_empty());
     assert!(death_notice_bytes(&engine.peers[NOTICE_VICTIM]).is_empty());
+}
+
+const ASSIST_DRIVER: &str = "synthetic-ground-assist-driver";
+
+fn mounted_assist_fixture(item: u16) -> Engine<Vec<u8>> {
+    let mut engine = mounted_notice_fixture_with_drivers(item, true)
+        .with_firearm_assist_rules(firearm_assists::Rules {
+            schema_version: 1,
+            application_id: 20231,
+            assist_timeout_ms: 5_000,
+        })
+        .unwrap();
+    let gunner = engine.active.as_mut().unwrap();
+    gunner.owner_fields.state = Some(gunner.ground_seat.unwrap().character_state());
+    let mut driver = human_kill_reward_tests::fixture().active.take().unwrap();
+    let gunner = engine.active.as_ref().unwrap();
+    let seat = ground_seats::PassengerSeat {
+        vehicle_index: gunner.ground_seat.unwrap().vehicle_index,
+        seat: 0,
+    };
+    driver.reservation.id = ASSIST_DRIVER.into();
+    driver.reservation.player = 3;
+    driver.reservation.world = gunner.reservation.world;
+    driver.reservation.character.faction = gunner.reservation.character.faction;
+    driver.reservation.character.assist_rewards_enabled = Some(true);
+    driver.squad_catalog = gunner.squad_catalog.clone();
+    driver.ground_vehicle_batch = gunner.ground_vehicle_batch;
+    driver.ground_seat = Some(seat);
+    driver.owner_fields.state = Some(seat.character_state());
+    assert!(engine.ground_driver_authority(&driver, seat.vehicle_index));
+    engine.peers.insert(ASSIST_DRIVER.into(), driver);
+    engine
+}
+
+#[test]
+fn ground_primary_first_collapse_awards_current_driver_once() {
+    for item in [5, 6] {
+        let mut engine = mounted_assist_fixture(item);
+        let hit = native_hit(0x0380_0002, 190);
+        dispatch_hit(&mut engine, &hit, Transport::Tcp, 3300).unwrap();
+        assert_eq!(
+            engine.peers[ASSIST_DRIVER].reward_statistics.get(&11),
+            Some(&1),
+            "item {item}"
+        );
+        assert_eq!(
+            engine.active.as_ref().unwrap().reward_statistics.get(&10),
+            Some(&1)
+        );
+        assert_eq!(
+            engine.peers[NOTICE_VICTIM].reward_statistics.get(&12),
+            Some(&1)
+        );
+        assert_eq!(
+            engine
+                .pending_reward_batch()
+                .iter()
+                .filter(
+                    |reward| reward.kind == progression::RewardKind::EnemyKillAssist
+                        && reward.player_id == 3
+                )
+                .count(),
+            1
+        );
+        dispatch_hit(&mut engine, &hit, Transport::Udp, 3301).unwrap();
+        assert_eq!(
+            engine.peers[ASSIST_DRIVER].reward_statistics.get(&11),
+            Some(&1)
+        );
+    }
+}
+
+#[test]
+fn ground_primary_assists_preserve_prior_contributors_and_record_atomicity() {
+    let mut engine = mounted_assist_fixture(5);
+    let mut prior = human_kill_reward_tests::fixture().active.take().unwrap();
+    let driver = &engine.peers[ASSIST_DRIVER];
+    prior.reservation.id = "synthetic-earlier-ground-contributor".into();
+    prior.reservation.player = 4;
+    prior.reservation.world = driver.reservation.world;
+    prior.reservation.character.faction = driver.reservation.character.faction;
+    prior.squad_catalog = driver.squad_catalog.clone();
+    let prior_id = prior.reservation.id.clone();
+    engine.peers.insert(prior_id.clone(), prior);
+    let seat = engine
+        .peers
+        .get_mut(ASSIST_DRIVER)
+        .unwrap()
+        .ground_seat
+        .take();
+    for id in [&prior_id, &ASSIST_DRIVER.to_owned()] {
+        let source = &engine.peers[id];
+        let victim = &engine.peers[NOTICE_VICTIM];
+        let ordinary = firearm_assists::Plan::prepare(
+            &engine,
+            source.reservation.world,
+            Duration::from_millis(1_000),
+            firearm_assists::Fighter::human(source),
+            firearm_assists::Fighter::human(victim),
+            false,
+        )
+        .unwrap();
+        ordinary.install(&mut engine).unwrap();
+    }
+    engine.peers.get_mut(ASSIST_DRIVER).unwrap().ground_seat = seat;
+    let hit = native_hit(0x0380_0002, 190);
+    dispatch_hit(&mut engine, &hit, Transport::Tcp, 3300).unwrap();
+    assert_eq!(
+        engine.peers[ASSIST_DRIVER].reward_statistics.get(&11),
+        Some(&1)
+    );
+    assert_eq!(engine.peers[&prior_id].reward_statistics.get(&11), Some(&1));
+
+    let mut refused = mounted_assist_fixture(5);
+    refused.max_log = refused.written;
+    assert!(dispatch_hit(&mut refused, &hit, Transport::Tcp, 3300).is_err());
+    assert!(refused.peers[NOTICE_VICTIM].life.is_alive());
+    assert!(
+        !refused.peers[ASSIST_DRIVER]
+            .reward_statistics
+            .contains_key(&11)
+    );
+    assert!(refused.pending_reward_batch().is_empty());
+}
+
+#[test]
+fn ground_primary_denies_an_unassociated_or_friendly_driver_assist() {
+    for friendly in [false, true] {
+        let mut engine = mounted_assist_fixture(5);
+        if friendly {
+            engine.peers.get_mut(NOTICE_VICTIM).unwrap().squad_catalog =
+                engine.active.as_ref().unwrap().squad_catalog.clone();
+        } else {
+            engine.peers.get_mut(ASSIST_DRIVER).unwrap().ground_seat = None;
+        }
+        dispatch_hit(
+            &mut engine,
+            &native_hit(0x0380_0002, 190),
+            Transport::Tcp,
+            3300,
+        )
+        .unwrap();
+        assert!(
+            !engine.peers[ASSIST_DRIVER]
+                .reward_statistics
+                .contains_key(&11)
+        );
+    }
 }

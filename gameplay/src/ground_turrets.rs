@@ -388,7 +388,7 @@ impl<W: Write> Engine<W> {
         self.ground_runtime.as_ref()?.get(index)?.turret.as_ref()
     }
 
-    fn ground_gunner_authority(&self, actor: &Active, index: u16) -> bool {
+    pub(crate) fn ground_gunner_authority(&self, actor: &Active, index: u16) -> bool {
         self.is_ground_gunner(actor)
             && actor
                 .ground_seat
