@@ -55,6 +55,15 @@ includes current turret definition and state. Shared seat updates retain FIFO
 delivery behind creation, with existing record-before-install guarantees and
 packet bounds.
 
+## Leadership AutoRepair
+
+A living, ready occupant of a source-type-3 APC can apply effective Platoon
+AutoRepair to the current hull. The scheduler uses the occupied passenger,
+driver or gunner seat and the current vehicle root for leadership proximity.
+A gunner's current seat grant qualifies before their primary is initialized.
+The existing strict repair timer and recorded field 18 health update apply.
+This passive awards no repair work or XP.
+
 ## Supported damage and acceptance
 
 Only the initialized primary, gear0, ammo pool0 and fire mode0 can enter a damage

@@ -1,6 +1,6 @@
-//! Scheduler-owned automatic repair for the qualified Acquisition Ground path.
+//! Scheduler-owned automatic repair for qualified occupied Ground vehicles.
 use super::*;
-use crate::acquisition_ground_runtime::Key;
+use crate::{acquisition_ground_runtime::Key, ground_turrets::PolicyKind};
 use std::collections::BTreeMap;
 
 const INTERVAL_SECONDS: f32 = 1.5;
@@ -40,7 +40,7 @@ impl State {
 impl<W: Write> Engine<W> {
     /// The association is independent of Heal's life/critical/full-HP gates:
     /// a due attempt on a valid association consumes its interval even if Heal
-    /// declines. Only source-type9 is qualified for this first consumer.
+    /// declines. The occupied attachment supplies the current Ground key.
     fn automatic_repair_association(&self, actor: &Active) -> Option<Key> {
         if actor.wire_profile.application_id() != 20231
             || !actor.entered_game
@@ -60,11 +60,30 @@ impl<W: Write> Engine<W> {
         let seat = actor.ground_seat?;
         let catalog = self.ground_vehicles.as_ref()?;
         let creation = catalog.vehicle(seat.vehicle_index)?;
+        let vehicle = self.ground_runtime.as_ref()?.get(seat.vehicle_index)?;
+        let gunner_kind = match vehicle.source_spawn_type {
+            Some(9) if self.acquisition_gameplay.is_some() => PolicyKind::Escort,
+            Some(3)
+                if catalog.source_spawn_type(creation) == Some(3)
+                    && vehicle.source_spawn_point_index == creation.spawn_point_index
+                    && vehicle.source_spawn_point_token == creation.spawn_point_token
+                    && vehicle.faction == actor.reservation.character.faction
+                    && actor
+                        .owner_fields
+                        .state
+                        .is_some_and(|state| state.state == 14) =>
+            {
+                PolicyKind::Apc
+            }
+            _ => return None,
+        };
+        let passenger = creation.passenger_seats.contains(&seat.seat);
+        let driver = catalog
+            .driver_seat(seat.vehicle_index)
+            .is_some_and(|driver| driver.seat == seat.seat);
+        let gunner = self.current_ground_gunner_kind(actor) == Some(gunner_kind);
         if creation.team != actor.team()
-            || (!creation.passenger_seats.contains(&seat.seat)
-                && !catalog
-                    .driver_seat(seat.vehicle_index)
-                    .is_some_and(|driver| driver.seat == seat.seat))
+            || !(passenger || driver || gunner)
             || self
                 .active
                 .iter()
@@ -78,8 +97,7 @@ impl<W: Write> Engine<W> {
         {
             return None;
         }
-        let vehicle = self.ground_runtime.as_ref()?.get(seat.vehicle_index)?;
-        (vehicle.source_spawn_type == Some(9)).then_some(vehicle.key)
+        Some(vehicle.key)
     }
 
     pub(crate) fn tick_leadership_auto_repair(
@@ -87,7 +105,10 @@ impl<W: Write> Engine<W> {
         now: Duration,
         wall: u64,
     ) -> Result<(), &'static str> {
-        if self.acquisition_gameplay.is_none()
+        let domination_with_ground = self.domination_gameplay.is_some()
+            && self.ground_runtime.is_some()
+            && self.leadership.is_some();
+        if (self.acquisition_gameplay.is_none() && !domination_with_ground)
             || !self.match_started
             || self.match_terminal.is_some()
         {

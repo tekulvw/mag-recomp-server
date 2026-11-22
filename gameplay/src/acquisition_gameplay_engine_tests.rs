@@ -26,7 +26,15 @@ pub(crate) fn automatic_repair_fixture(
     catalog: crate::leadership_passives::LeadershipCatalog,
     policy: crate::leadership_runtime::RolePolicy,
 ) -> Engine<Vec<u8>> {
-    let mut engine = capture_fixture()
+    automatic_repair_fixture_for_modeled_vehicle(catalog, policy, false)
+}
+
+pub(crate) fn automatic_repair_fixture_for_modeled_vehicle(
+    catalog: crate::leadership_passives::LeadershipCatalog,
+    policy: crate::leadership_runtime::RolePolicy,
+    apc_passenger: bool,
+) -> Engine<Vec<u8>> {
+    let mut engine = capture_fixture_with_reinforcements(None, None, apc_passenger)
         .with_development_control()
         .with_leadership_passives(catalog, policy)
         .unwrap();
@@ -36,16 +44,20 @@ pub(crate) fn automatic_repair_fixture(
         .unwrap();
     engine.tick_acquisition_ground_registration(2).unwrap();
     let actor = engine.active.as_mut().unwrap();
-    actor.ground_seat = Some(crate::ground_seats::PassengerSeat {
-        vehicle_index: 4,
-        seat: 0,
-    });
+    let seat = if apc_passenger {
+        crate::ground_seats::PassengerSeat {
+            vehicle_index: 0,
+            seat: 2,
+        }
+    } else {
+        crate::ground_seats::PassengerSeat {
+            vehicle_index: 4,
+            seat: 0,
+        }
+    };
+    actor.ground_seat = Some(seat);
     actor.ground_vehicle_batch = 1;
-    actor.owner_fields.state = Some(crate::replication::CharacterState {
-        state: 14,
-        stance: 0,
-        user_data: [1, 4, 0],
-    });
+    actor.owner_fields.state = Some(seat.character_state());
     engine.enable_world_ticks();
     engine
 }

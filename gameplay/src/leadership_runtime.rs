@@ -740,6 +740,7 @@ impl<W: Write> Engine<W> {
                 && !catalog
                     .driver_seat(seat.vehicle_index)
                     .is_some_and(|driver| driver.seat == seat.seat)
+                && self.current_ground_gunner_kind(actor).is_none()
             {
                 return None;
             }
