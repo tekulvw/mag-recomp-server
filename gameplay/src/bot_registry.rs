@@ -174,6 +174,7 @@ pub(super) struct WorldBot {
     pub(super) resupply_planning: Option<crate::bot_resupply::PlanningReservation>,
     pub(super) resupply_planning_retry_at: Duration,
     pub(super) healing: crate::bot_healing::State,
+    pub(super) received_healing: Option<crate::bot_healing::Received>,
     pub(super) move_attempted: bool,
     due_respawn_wave: Option<(u32, Duration)>,
     respawn_wait: Option<Duration>,
@@ -1050,6 +1051,7 @@ impl<W: Write> Engine<W> {
                 bot.resupply_planning = None;
                 bot.resupply_planning_retry_at = Duration::ZERO;
                 bot.healing = Default::default();
+                bot.received_healing = None;
                 runtime.phase = BotPhase::Dead;
                 runtime.since = now;
                 runtime.last_update = now;
@@ -1122,6 +1124,24 @@ impl<W: Write> Engine<W> {
             recipient.queue_shared(packet.clone());
         }
     }
+    pub(super) fn broadcast_known_bot_heal(&mut self, index: u16, packet: Vec<u8>) {
+        let known = &self.bot_registry.known;
+        for recipient in self
+            .active
+            .iter_mut()
+            .chain(self.peers.values_mut())
+            .filter(|actor| {
+                actor.ready_for_updates
+                    && actor.initial_objects.is_some()
+                    && known
+                        .get(&actor.reservation.id)
+                        .is_some_and(|bots| bots.contains(&index))
+            })
+        {
+            recipient.queue_shared(packet.clone());
+        }
+    }
+
     pub(super) fn retire_bot_for_human(
         &mut self,
         index: u16,
@@ -1353,6 +1373,7 @@ impl<W: Write> Engine<W> {
                 bot.resupply_planning = None;
                 bot.resupply_planning_retry_at = Duration::ZERO;
                 bot.healing = Default::default();
+                bot.received_healing = None;
                 bot.damage = initial_damage();
                 bot.move_attempted = false;
                 bot.task = Default::default();
@@ -2904,6 +2925,7 @@ impl<W: Write> Engine<W> {
                     resupply_planning: None,
                     resupply_planning_retry_at: Duration::ZERO,
                     healing: Default::default(),
+                    received_healing: None,
                     move_attempted: false,
                     due_respawn_wave: None,
                     respawn_wait: None,

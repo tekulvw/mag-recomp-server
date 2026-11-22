@@ -31,7 +31,220 @@ pub(super) struct State {
     effect: Option<healing::HealingEffect>,
     next_allowed: Duration,
 }
+/// A normal human Medkit treatment bound to the bot's current allocation and life.
+#[derive(Clone, Debug)]
+pub(super) struct Received {
+    index: u16,
+    allocation: u32,
+    world: u32,
+    round: u64,
+    team: u8,
+    healer_allocation: u64,
+    session: progression::HealingSession,
+}
+
+impl Received {
+    fn matches(&self, bot: &bot_registry::WorldBot) -> bool {
+        bot.allocation_generation == self.allocation
+            && bot.health > 0
+            && bot.target.squad.team() == self.team
+            && bot.target.runtime.is_some_and(|runtime| {
+                runtime.generation == self.session.generation
+                    && !matches!(runtime.phase, development_target::BotPhase::Dead)
+            })
+    }
+}
+
 impl<W: Write> Engine<W> {
+    pub(super) fn prepare_received_bot_healing(
+        &self,
+        healer: &Active,
+        target: u32,
+        item: healing::HealItem,
+        sequence: u64,
+        now: Duration,
+        healer_modifiers: &skill_catalog::OwnedModifiers,
+    ) -> Result<Option<Received>, &'static str> {
+        let index = target as u16;
+        if !self.match_started
+            || self.match_terminal.is_some()
+            || !self.round_combat_allowed(now)
+            || self.wire_profile.application_id() != 20231
+            || target != (0x0380_0000 | u32::from(index))
+        {
+            return Ok(None);
+        }
+        let Some(bot) = self.bot_registry.bots.get(&index) else {
+            return Ok(None);
+        };
+        let Some(runtime) = bot.target.runtime else {
+            return Ok(None);
+        };
+        let recipient_modifiers = skill_catalog::OwnedModifiers::default();
+        if !self.item_catalog.retail_combat().is_ok_and(|combat| {
+            combat
+                .healing_for_schedule(item.item_id())
+                .is_ok_and(|profile| {
+                    profile.definition["group"] == "active_items"
+                        && profile.definition["name"] == "medkit"
+                })
+        }) || bot.target.squad.team() != healer.team()
+            || matches!(runtime.phase, development_target::BotPhase::Dead)
+            || bot.health == 0
+            || bot.health >= recipient_modifiers.max_health_quarter_points()?
+            || (bot.healing.generation == Some(runtime.generation) && bot.healing.effect.is_some())
+            || bot
+                .received_healing
+                .as_ref()
+                .is_some_and(|session| session.matches(bot))
+        {
+            return Ok(None);
+        }
+        let effect = healing::HealingEffect::new_for_recipient(
+            item,
+            runtime.generation,
+            now,
+            &self.item_catalog,
+            healer_modifiers,
+            &recipient_modifiers,
+        )?;
+        Ok(Some(Received {
+            index,
+            allocation: bot.allocation_generation,
+            world: healer.reservation.world,
+            round: self.round_number,
+            team: healer.team(),
+            healer_allocation: healer.allocation_sequence,
+            session: progression::HealingSession {
+                effect,
+                healer: progression::RewardRecipient::from_active(healer),
+                effect_id: format!(
+                    "heal-{}-{sequence:016x}-bot-{index:04x}-{:08x}-{:08x}",
+                    healer.reservation.id, bot.allocation_generation, runtime.generation,
+                ),
+            },
+        }))
+    }
+
+    pub(super) fn install_received_bot_healing(&mut self, received: Received) {
+        if let Some(bot) = self.bot_registry.bots.get_mut(&received.index)
+            && received.matches(bot)
+        {
+            bot.received_healing = Some(received);
+        }
+    }
+
+    fn tick_received_bot_healing(&mut self, now: Duration, wall: u64) -> Result<(), &'static str> {
+        let current_world = self
+            .active
+            .iter()
+            .chain(self.peers.values())
+            .next()
+            .map(|actor| actor.reservation.world);
+        let ids: Vec<_> = self
+            .bot_registry
+            .bots
+            .iter()
+            .filter_map(|(&index, bot)| bot.received_healing.as_ref().map(|_| index))
+            .collect();
+        for index in ids {
+            let bot = &self.bot_registry.bots[&index];
+            let received = bot.received_healing.as_ref().unwrap();
+            if current_world != Some(received.world)
+                || self.round_number != received.round
+                || self.match_terminal.is_some()
+                || !self.round_combat_allowed(now)
+                || !received.matches(bot)
+            {
+                self.bot_registry
+                    .bots
+                    .get_mut(&index)
+                    .unwrap()
+                    .received_healing = None;
+                continue;
+            }
+            let before = bot.health;
+            let maximum = skill_catalog::OwnedModifiers::default().max_health_quarter_points()?;
+            let Some((damage, remaining, ticks)) =
+                received.session.advance_with_receipts(now, bot.damage)
+            else {
+                continue;
+            };
+            let mut rewards = Vec::new();
+            if let Some(healer) = &received.session.healer
+                && !self.attacker_is_friendly(
+                    bot.damage.last_attacker,
+                    received.world,
+                    received.team,
+                )
+            {
+                let current_healer = self.active.iter().chain(self.peers.values()).find(|actor| {
+                    actor.allocation_sequence == received.healer_allocation
+                        && healer.matches_active(actor)
+                });
+                for (tick, units) in &ticks {
+                    if *units == 0 {
+                        continue;
+                    }
+                    let reward = healer.event(
+                        format!("{}-{tick:02x}", received.session.effect_id),
+                        progression::RewardKind::TeammateHealed,
+                        *units,
+                    );
+                    let reward = if let Some(actor) = current_healer {
+                        self.frago_action_reward(
+                            reward,
+                            actor,
+                            bot.target
+                                .runtime
+                                .map(|runtime| frago::point(runtime.position)),
+                            frago::Frame::default(),
+                        )
+                    } else {
+                        reward
+                    };
+                    rewards.push(reward);
+                }
+            }
+            let mut next = received.clone();
+            let generation = next.session.generation;
+            let packet = (!ticks.is_empty())
+                .then(|| {
+                    replication::CharacterDamageUpdate {
+                        sequence: 2,
+                        timestamp_ms: now.as_millis() as u32,
+                        object_index: index,
+                        damage,
+                        forced_state: None,
+                    }
+                    .encode_with_profile(self.wire_profile)
+                })
+                .transpose()?;
+            self.check_reward_capacity(&rewards)?;
+            self.record(json!({
+                "op":"received_bot_healing_tick","object_index":index,"generation":generation,
+                "allocation_generation":next.allocation,"world_id":next.world,"round":next.round,
+                "timestamp_ms":now.as_millis() as u64,"health_before":before,
+                "health_after":damage.health_quarter_points,"restored_hp_per_tick":ticks,
+                "completed":remaining.is_none(),"rewards":rewards,
+            }), wall)?;
+            if let Some(packet) = packet {
+                self.commit_bot_healing(index, generation, before, damage, maximum)?;
+                self.broadcast_known_bot_heal(index, packet);
+            }
+            self.commit_rewards(rewards);
+            self.bot_registry
+                .bots
+                .get_mut(&index)
+                .unwrap()
+                .received_healing = remaining.map(|effect| {
+                next.session.effect = effect;
+                next
+            });
+        }
+        Ok(())
+    }
+
     /// Healing alone admits HP increases. Keep the damage-only guard strict.
     pub(crate) fn commit_bot_healing(
         &mut self,
@@ -64,6 +277,7 @@ impl<W: Write> Engine<W> {
         now: Duration,
         wall: u64,
     ) -> Result<(), &'static str> {
+        self.tick_received_bot_healing(now, wall)?;
         let policy = self.bot_registry.config.as_ref().map(|c| c.healing.clone());
         // Registry bots own no skills/account. Use the same unmodified 100 HP
         // character rules they use for spawn and damage, without human identity.
@@ -132,6 +346,7 @@ impl<W: Write> Engine<W> {
             let generation = runtime.generation;
             let mut receipts = Vec::new();
             if state.effect.is_none()
+                && bot.received_healing.is_none()
                 && now >= state.next_allowed
                 && before < maximum
                 && u32::from(before) * 1000
