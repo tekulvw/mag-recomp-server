@@ -2980,15 +2980,13 @@ pub(crate) mod identity_tests {
             "metadata":{"map_name":"synthetic_arena","build":"synthetic","coverage":"provisional","provenance":["Synthetic identity test floor"],"unknowns":["Not a game map"],
             "physics_regions":[{"min":[-10.,-5.,-10.],"max":[10.,8.,10.],"ground_verified":true,"obstacles_verified":true,"provenance":["Synthetic floor"]}]},
             "instances":[{"id":"floor","vertices_xyz":[[-10.,0.,-10.],[10.,0.,-10.],[10.,0.,10.],[-10.,0.,10.]],"triangles":[[0,2,1],[0,3,2]]}]});
-        let path = std::env::temp_dir().join(format!(
-            "mag-synthetic-identity-floor-{}-{prefix}.json",
-            std::process::id()
-        ));
-        std::fs::write(&path, serde_json::to_vec(&world).unwrap()).unwrap();
         engine = engine.with_collision_world(
-            collision::CollisionWorld::load(&path, collision::CollisionLimits::default()).unwrap(),
+            collision::CollisionWorld::from_bytes(
+                &serde_json::to_vec(&world).unwrap(),
+                collision::CollisionLimits::default(),
+            )
+            .unwrap(),
         );
-        std::fs::remove_file(path).unwrap();
         let config:BotPopulation=serde_json::from_value(json!({"format":"mag_bot_population_v1","map_name":"synthetic_arena","firearms":{"enabled":false},"slots":[
             {"team":0,"position":{"x":2.,"y":0.,"z":2.}}, {"team":1,"position":{"x":6.,"y":0.,"z":2.}}]})).unwrap();
         engine.with_bot_population(config, 2).unwrap()
