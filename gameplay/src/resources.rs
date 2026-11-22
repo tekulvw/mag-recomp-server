@@ -216,6 +216,7 @@ impl<W: Write> Engine<W> {
             hospital_rockets: None,
             infantry_rockets: None,
             smoke_grenades: None,
+            underbarrel_launchers: None,
             hospital_rocket_ground: None,
             frag_character_blast: false,
             projectile_contacts: None,
@@ -296,10 +297,25 @@ impl<W: Write> Engine<W> {
         (0..smoke_volume_replication::CAPACITY).find(|index| !occupied.contains(index))
     }
 
+    pub fn with_underbarrel_launchers(
+        mut self,
+        catalog: Arc<crate::underbarrel_launchers::Catalog>,
+    ) -> Result<Self, &'static str> {
+        crate::underbarrel_launchers::map_support(self.validate_infantry_projectile_support())?;
+        self.underbarrel_launchers = Some(catalog);
+        Ok(self)
+    }
+
     pub fn with_infantry_rockets(
         mut self,
         catalog: infantry_rockets::Catalog,
     ) -> Result<Self, &'static str> {
+        self.validate_infantry_projectile_support()?;
+        self.infantry_rockets = Some(Arc::new(catalog));
+        Ok(self)
+    }
+
+    fn validate_infantry_projectile_support(&self) -> Result<(), &'static str> {
         if self.wire_profile.application_id() != 20231 {
             return Err("infantry_rocket_mode_required");
         }
@@ -339,8 +355,7 @@ impl<W: Write> Engine<W> {
                 .ok_or("infantry_rocket_world_resources_required")?
                 .catalog,
         )?;
-        self.infantry_rockets = Some(Arc::new(catalog));
-        Ok(self)
+        Ok(())
     }
 }
 

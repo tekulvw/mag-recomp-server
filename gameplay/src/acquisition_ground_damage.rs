@@ -135,17 +135,34 @@ impl Policy {
         location: u8,
         friendly: bool,
     ) -> Result<f32, &'static str> {
+        self.classified_equipment_blast_amount(
+            creation,
+            TargetDamageParameters {
+                amount: raw_hp,
+                armor_pierce: 0.0,
+                armor_redux: 0.0,
+            },
+            radial_scale,
+            location,
+            friendly,
+        )
+    }
+
+    pub(crate) fn classified_equipment_blast_amount(
+        &self,
+        creation: &ground_vehicles::Creation,
+        damage: TargetDamageParameters,
+        radial_scale: f32,
+        location: u8,
+        friendly: bool,
+    ) -> Result<f32, &'static str> {
         if !(1..=6).contains(&location) {
             return Err("unsupported_vehicle_hit_location");
         }
         self.bullet_amount(
             creation.vehicle_type_token,
             creation.faction,
-            TargetDamageParameters {
-                amount: raw_hp,
-                armor_pierce: 0.0,
-                armor_redux: 0.0,
-            },
+            damage,
             radial_scale,
             location,
             friendly,
@@ -476,6 +493,34 @@ mod tests {
             policy
                 .classified_vehicle_blast_amount(&creation, 100.0, 0.5, 0, false)
                 .is_err()
+        );
+        assert_eq!(
+            policy.classified_equipment_blast_amount(
+                &creation,
+                TargetDamageParameters {
+                    amount: 100.,
+                    armor_pierce: 0.,
+                    armor_redux: 0.1,
+                },
+                0.5,
+                5,
+                false,
+            ),
+            Ok(64.)
+        );
+        assert_eq!(
+            policy.classified_equipment_blast_amount(
+                &creation,
+                TargetDamageParameters {
+                    amount: 100.,
+                    armor_pierce: 10.,
+                    armor_redux: 0.25,
+                },
+                0.5,
+                5,
+                true,
+            ),
+            Ok(43.75)
         );
     }
 

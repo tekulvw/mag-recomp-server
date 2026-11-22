@@ -189,7 +189,10 @@ fn infantry_rocket_range_is_strict_and_requested_capsule_uses_the_local_spine() 
     let mut engine = fixture();
     launch(&mut engine, 3, 511, 1000);
     let mut source = flight(&engine, 3).clone();
-    source.variant.flight.auto_explode_distance_m = 56.;
+    let Variant::Rocket(variant) = &mut source.variant else {
+        panic!("rocket fixture");
+    };
+    variant.flight.auto_explode_distance_m = 56.;
     let step = source
         .step(2000, None, |shape| {
             assert_eq!(shape.spine, [[0., 0., -0.125], [0., 0., 0.125]]);

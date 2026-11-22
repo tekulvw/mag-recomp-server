@@ -119,6 +119,68 @@ fn ordinary_frag_hospital_applies_the_vehicle_channel_at_its_current_body() {
     assert_eq!(hit.last_user_data, (128 | 512) << 20);
 }
 
+#[test]
+fn underbarrel_hospital_vehicle_blast_applies_typed_armor_reduction() {
+    let mut engine = frag_fixture(true);
+    let actor = engine.active.as_ref().unwrap();
+    let source = LaunchSource {
+        allocation_sequence: actor.allocation_sequence,
+        reservation: actor.reservation.id.clone(),
+        world: actor.reservation.world,
+        round: engine.round_number,
+        match_id: actor.reward_match_id.clone(),
+        character_id: actor.reservation.character.character_id,
+        player: actor.reservation.player,
+        life_generation: actor.life.damage_health().unwrap().0,
+        team: actor.team(),
+        item: 42,
+        projectile_id: 0x1380_0000,
+    };
+    let collision = engine
+        .domination_gameplay
+        .as_ref()
+        .unwrap()
+        .frag_blast_collision();
+    let origin = [3., 2.5, 1.];
+    let blast = Blast {
+        vehicle_hp: 80.,
+        character_hp: 1.,
+        objective_hp: 0.,
+        half_radius_m: 2.,
+        outer_radius_m: 5.,
+        material_penetration: 1.25,
+    };
+    let now = Duration::from_millis(1100);
+    let original = engine
+        .prepare_hospital_rocket_hospital_blast(&source, origin, blast, collision, now)
+        .unwrap();
+    let reduced = engine
+        .prepare_equipment_hospital_blast(
+            &source,
+            origin,
+            crate::item_catalog::TargetDamageParameters {
+                amount: 80.,
+                armor_pierce: 0.,
+                armor_redux: 0.1,
+            },
+            blast,
+            collision,
+            now,
+        )
+        .unwrap();
+    // 80 × .75 falloff − 6 rating, times .5 or .6 after armor reduction.
+    assert_eq!(original.audit[0]["amount_hp"], 27.);
+    let applied = reduced.audit[0]["amount_hp"].as_f64().unwrap();
+    assert!((applied - 32.4).abs() < 0.001, "applied {applied}");
+    assert_eq!(damage(&engine).health_quarter_points, 800);
+    assert!(reduced.packet.is_some());
+    reduced.patch.install(engine.bunker_world.as_mut().unwrap());
+    let hit = damage(&engine);
+    assert_eq!(hit.health_quarter_points, 670);
+    assert_eq!(hit.last_location_and_type, 0xa2);
+    assert_eq!(hit.last_source_object, u32::MAX);
+}
+
 fn event(engine: &Engine<Vec<u8>>) -> Value {
     engine
         .writer

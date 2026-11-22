@@ -4,6 +4,7 @@ use crate::{
     dynamic_collision_runtime::OwnerCollisionView,
     hospital_rocket_runtime::LaunchSource,
     hospital_rockets::Blast,
+    item_catalog::TargetDamageParameters,
     projectile::{ProjectileTerminal, ProjectileTerminalReason},
     structures::HospitalBlastDose,
 };
@@ -24,7 +25,7 @@ struct HospitalBlastCredit {
 struct HospitalVehicleBlast {
     origin: [f64; 3],
     projectile_id: u32,
-    vehicle_hp: f32,
+    damage: TargetDamageParameters,
     half_radius: f32,
     outer_radius: f32,
     penetration: f32,
@@ -62,7 +63,11 @@ impl<W: Write> Engine<W> {
             blasts.push(HospitalVehicleBlast {
                 origin: [position.x, position.y, position.z].map(f64::from),
                 projectile_id: ((16 + u32::from(terminal.slot)) << 24) | 0x0080_0000 | player,
-                vehicle_hp,
+                damage: TargetDamageParameters {
+                    amount: vehicle_hp,
+                    armor_pierce: 0.,
+                    armor_redux: 0.,
+                },
                 half_radius: frag.half_radius as f32,
                 outer_radius: frag.full_radius as f32,
                 penetration: frag
@@ -92,6 +97,29 @@ impl<W: Write> Engine<W> {
         collision: BlastCollision<'_>,
         now: Duration,
     ) -> Result<HospitalBlastCandidate, &'static str> {
+        self.prepare_equipment_hospital_blast(
+            source,
+            origin,
+            TargetDamageParameters {
+                amount: blast.vehicle_hp,
+                armor_pierce: 0.,
+                armor_redux: 0.,
+            },
+            blast,
+            collision,
+            now,
+        )
+    }
+
+    pub(crate) fn prepare_equipment_hospital_blast(
+        &self,
+        source: &LaunchSource,
+        origin: [f64; 3],
+        damage: TargetDamageParameters,
+        blast: Blast,
+        collision: BlastCollision<'_>,
+        now: Duration,
+    ) -> Result<HospitalBlastCandidate, &'static str> {
         let attacker = self.hospital_rocket_blast_attacker(source)?;
         self.prepare_hospital_vehicle_blasts(
             HospitalBlastCredit {
@@ -102,7 +130,7 @@ impl<W: Write> Engine<W> {
             &[HospitalVehicleBlast {
                 origin,
                 projectile_id: source.projectile_id,
-                vehicle_hp: blast.vehicle_hp,
+                damage,
                 half_radius: blast.half_radius_m,
                 outer_radius: blast.outer_radius_m,
                 penetration: blast.material_penetration,
@@ -127,8 +155,14 @@ impl<W: Write> Engine<W> {
                 .map(|value| value as f32)
                 .into_iter()
                 .all(f32::is_finite)
-                || !blast.vehicle_hp.is_finite()
-                || blast.vehicle_hp <= 0.
+                || blast.damage.amount <= 0.
+                || ![
+                    blast.damage.amount,
+                    blast.damage.armor_pierce,
+                    blast.damage.armor_redux,
+                ]
+                .into_iter()
+                .all(|value| value.is_finite() && value >= 0.)
                 || !blast.half_radius.is_finite()
                 || blast.half_radius <= 0.
                 || !blast.outer_radius.is_finite()
@@ -255,7 +289,7 @@ impl<W: Write> Engine<W> {
                     .apply_classified_hospital_blast(
                         index,
                         HospitalBlastDose {
-                            vehicle_hp: blast.vehicle_hp,
+                            damage: blast.damage,
                             radial_scale: scale,
                             source_team: credit.team,
                             attacker: credit.attacker,

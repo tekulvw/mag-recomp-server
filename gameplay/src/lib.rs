@@ -147,6 +147,7 @@ pub fn drop_passages_exclusive(
     bot_traffic_flow::passages_exclusive(a, b, entry_buffer_m)
 }
 mod acquisition_frag_ground;
+mod ballistic_projectile_motion;
 pub mod character_damage_rules;
 mod character_frag_damage;
 pub mod domination_helo;
@@ -215,6 +216,7 @@ pub mod structure_catalog;
 pub mod structures;
 pub mod telemetry;
 pub mod turret;
+pub mod underbarrel_launchers;
 pub mod vehicle_exit;
 pub mod wire_profile;
 pub mod worker_identity;
@@ -1250,6 +1252,7 @@ pub struct Engine<W: Write> {
     domination_gameplay: Option<domination_gameplay_provider::World>,
     hospital_rockets: Option<std::sync::Arc<hospital_rockets::Catalog>>,
     infantry_rockets: Option<std::sync::Arc<infantry_rockets::Catalog>>,
+    underbarrel_launchers: Option<std::sync::Arc<underbarrel_launchers::Catalog>>,
     smoke_grenades: Option<std::sync::Arc<smoke_grenades::Catalog>>,
     hospital_rocket_ground: Option<std::sync::Arc<hospital_rocket_ground::Catalog>>,
     frag_character_blast: bool,

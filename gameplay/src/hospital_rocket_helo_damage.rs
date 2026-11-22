@@ -13,20 +13,33 @@ use crate::{
 
 #[derive(Clone, Copy)]
 pub(crate) struct HeloVehicleDose {
-    vehicle_hp: f32,
+    damage: TargetDamageParameters,
     half_radius_m: f32,
     outer_radius_m: f32,
     material_penetration: f32,
 }
 
-impl From<Blast> for HeloVehicleDose {
-    fn from(blast: Blast) -> Self {
+impl HeloVehicleDose {
+    pub(crate) fn equipment(damage: TargetDamageParameters, blast: Blast) -> Self {
         Self {
-            vehicle_hp: blast.vehicle_hp,
+            damage,
             half_radius_m: blast.half_radius_m,
             outer_radius_m: blast.outer_radius_m,
             material_penetration: blast.material_penetration,
         }
+    }
+}
+
+impl From<Blast> for HeloVehicleDose {
+    fn from(blast: Blast) -> Self {
+        Self::equipment(
+            TargetDamageParameters {
+                amount: blast.vehicle_hp,
+                armor_pierce: 0.,
+                armor_redux: 0.,
+            },
+            blast,
+        )
     }
 }
 
@@ -126,7 +139,11 @@ impl<W: Write> Engine<W> {
                 origin: [position.x, position.y, position.z].map(f64::from),
                 projectile_id: ((16 + u32::from(terminal.slot)) << 24) | 0x0080_0000 | player,
                 dose: HeloVehicleDose {
-                    vehicle_hp,
+                    damage: TargetDamageParameters {
+                        amount: vehicle_hp,
+                        armor_pierce: 0.,
+                        armor_redux: 0.,
+                    },
                     half_radius_m: frag.half_radius as f32,
                     outer_radius_m: frag.full_radius as f32,
                     material_penetration: frag
@@ -171,8 +188,14 @@ impl<W: Write> Engine<W> {
                 .map(|value| value as f32)
                 .into_iter()
                 .all(f32::is_finite)
-                || !dose.vehicle_hp.is_finite()
-                || dose.vehicle_hp <= 0.
+                || dose.damage.amount <= 0.
+                || ![
+                    dose.damage.amount,
+                    dose.damage.armor_pierce,
+                    dose.damage.armor_redux,
+                ]
+                .into_iter()
+                .all(|value| value.is_finite() && value >= 0.)
                 || !dose.half_radius_m.is_finite()
                 || !dose.outer_radius_m.is_finite()
                 || dose.half_radius_m <= 0.
@@ -328,11 +351,7 @@ impl<W: Write> Engine<W> {
                 let location = rules.location(faction, live_pose, origin)?;
                 let profile = damage.profile(faction)?;
                 let amount = item_catalog::apply_vehicle_armor(
-                    TargetDamageParameters {
-                        amount: dose.vehicle_hp,
-                        armor_pierce: 0.,
-                        armor_redux: 0.,
-                    },
+                    dose.damage,
                     scale,
                     friendly_factor,
                     armor.armor(profile.armor_type)?,
@@ -942,11 +961,19 @@ pub(crate) mod tests {
         engine: &Engine<Vec<u8>>,
         source: &LaunchSource,
     ) -> Result<HeloBlastCandidate, &'static str> {
+        candidate_with_dose(engine, source, DOSE.into())
+    }
+
+    fn candidate_with_dose(
+        engine: &Engine<Vec<u8>>,
+        source: &LaunchSource,
+        dose: HeloVehicleDose,
+    ) -> Result<HeloBlastCandidate, &'static str> {
         let state = &engine.domination_gameplay.as_ref().unwrap().state;
         engine.prepare_hospital_rocket_helo_blast(
             source,
             ORIGIN,
-            DOSE.into(),
+            dose,
             &Catalog::synthetic(),
             BlastCollision {
                 filter_rows: &state.filter_rows,
@@ -1005,6 +1032,33 @@ pub(crate) mod tests {
         assert_eq!(bits.read(32), Ok(u32::MAX));
         assert_eq!(bits.read(32), Ok((128 | 512) << 20));
         assert_eq!(bits.read(9), Ok(0)); // Remaining fields and list terminator.
+    }
+
+    #[test]
+    fn underbarrel_helo_vehicle_blast_preserves_the_typed_armor_reduction() {
+        let (engine, source) = fixture();
+        let legacy = candidate(&engine, &source).unwrap();
+        let reduced = candidate_with_dose(
+            &engine,
+            &source,
+            HeloVehicleDose::equipment(
+                TargetDamageParameters {
+                    amount: DOSE.vehicle_hp,
+                    armor_pierce: 0.,
+                    armor_redux: 0.1,
+                },
+                DOSE,
+            ),
+        )
+        .unwrap();
+        assert_eq!(legacy.audit[0]["amount_hp"], 27.);
+        let amount = reduced.audit[0]["amount_hp"].as_f64().unwrap();
+        assert!((amount - 32.4).abs() < 0.001);
+        let wire = reduced.after.unwrap().carriers[0].damage.wire;
+        assert!(wire.health_quarter_points < 292);
+        assert_eq!(wire.last_location_and_type, 0xa2);
+        assert_eq!(wire.last_source_object, u32::MAX);
+        assert_eq!(helo_wire(&engine).health_quarter_points, 400);
     }
 
     #[test]

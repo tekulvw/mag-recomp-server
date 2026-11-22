@@ -424,7 +424,7 @@ pub(crate) struct HospitalDamagePatch {
 }
 
 pub(crate) struct HospitalBlastDose {
-    pub(crate) vehicle_hp: f32,
+    pub(crate) damage: item_catalog::TargetDamageParameters,
     pub(crate) radial_scale: f32,
     pub(crate) source_team: u8,
     pub(crate) attacker: u32,
@@ -806,11 +806,7 @@ impl BunkerWorld {
             1.
         };
         let amount_hp = item_catalog::apply_vehicle_armor(
-            item_catalog::TargetDamageParameters {
-                amount: dose.vehicle_hp,
-                armor_pierce: 0.,
-                armor_redux: 0.,
-            },
+            dose.damage,
             dose.radial_scale,
             friendly_factor,
             self.catalog.armor(bunker.profile.armor_type)?,
