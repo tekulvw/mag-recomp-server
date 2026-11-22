@@ -644,6 +644,17 @@ pub(crate) struct Runtime {
 }
 
 impl Runtime {
+    pub(crate) fn bot_regional_bounds(
+        &self,
+        clv_sha256: &str,
+        budget: &mut usize,
+    ) -> Result<Vec<crate::actor_collision::Bounds>, &'static str> {
+        if self.setup.bindings.level_clv_sha256 != clv_sha256 {
+            return Err("bot_regional_structural_source_mismatch");
+        }
+        self.collisions.bot_regional_bounds(budget)
+    }
+
     pub(crate) fn new(setup: Setup) -> Self {
         Self {
             setup,

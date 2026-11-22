@@ -365,6 +365,25 @@ pub(crate) struct Body {
     pub(crate) live_layer: u8,
     pub(crate) dead_layer: Option<u8>,
 }
+impl Body {
+    pub(crate) fn bot_regional_bounds(
+        &self,
+        budget: &mut usize,
+    ) -> Result<crate::actor_collision::Bounds, &'static str> {
+        let mut min = [0.; 3];
+        let mut max = [0.; 3];
+        for i in 0..3 {
+            let mut axis = [0.; 3];
+            axis[i] = 1.;
+            max[i] =
+                geometry::support(&self.shape, self.pose, axis, budget)?[i] + self.shape.radius();
+            axis[i] = -1.;
+            min[i] =
+                geometry::support(&self.shape, self.pose, axis, budget)?[i] - self.shape.radius();
+        }
+        Ok(crate::actor_collision::Bounds { min, max })
+    }
+}
 pub struct BodySet {
     target: Target,
     pub(crate) bodies: Vec<Body>,

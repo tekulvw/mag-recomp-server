@@ -799,6 +799,26 @@ impl Target {
                 .sqrt(),
         ))
     }
+    #[cfg(test)]
+    pub(crate) fn begin_regional_test_walk(&mut self, destination: replication::CharacterPosition) {
+        let runtime = self.runtime.as_mut().unwrap();
+        runtime.phase = BotPhase::Relocating;
+        self.pending_move = Some(PendingMove {
+            movement_id: "synthetic_regional_walk".into(),
+            supply_parent: None,
+            from: runtime.position,
+            movement: BotMove {
+                mode: BotMoveMode::Physical,
+                destination,
+                duration_ms: 1_000,
+                update_ms: 250,
+                yaw: None,
+                sprint: false,
+            },
+            navigation: None,
+        });
+    }
+
     pub(super) fn begin_registry_move(
         &mut self,
         mesh: Arc<navmesh::NavMesh>,
@@ -1237,6 +1257,29 @@ impl Target {
             DropAdmission::Unrestricted,
         )
     }
+    /// End an obstructed route at its existing deadline and never simulate its
+    /// rejected interval on a later clear tick.
+    pub(super) fn hold_regional_step(&mut self, now: Duration) {
+        let Some(runtime) = self.runtime.as_mut() else {
+            return;
+        };
+        runtime.last_update = now;
+        let Some(pending) = self.pending_move.as_ref() else {
+            return;
+        };
+        let deadline = Duration::from_millis(
+            u64::from(pending.movement.duration_ms) + u64::from(NAVIGATION_GRACE_MS),
+        );
+        if now
+            .saturating_sub(runtime.since)
+            .saturating_sub(runtime.navmesh_state.drop_wait)
+            >= deadline
+        {
+            runtime.phase = BotPhase::Complete;
+            self.pending_move = None;
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn movement_step_with_drop_admission(
         &self,
@@ -1422,6 +1465,9 @@ impl Target {
                     });
                     navigation_receipt = Some(receipt);
                 }
+                Err(error) if error == bot_physics::PhysicsError::RegionalBlocked.code() => {
+                    return Err(error);
+                }
                 Err(error) => {
                     position = runtime.position;
                     navigation_error = Some(error);
@@ -1486,6 +1532,9 @@ impl Target {
                     finished = finished
                         && (motion.grounded
                             || elapsed >= u128::from(pending.movement.duration_ms) + 5000);
+                }
+                Err(bot_physics::PhysicsError::RegionalBlocked) => {
+                    return Err(bot_physics::PhysicsError::RegionalBlocked.code());
                 }
                 Err(error) => {
                     position = runtime.position;
@@ -1790,6 +1839,7 @@ fn navigation_physics_error(error: bot_physics::PhysicsError) -> &'static str {
         bot_physics::PhysicsError::Unavailable
         | bot_physics::PhysicsError::MapMismatch
         | bot_physics::PhysicsError::CoverageUnknown => "bot_navigation_geometry_unavailable",
+        bot_physics::PhysicsError::RegionalBlocked => error.code(),
         bot_physics::PhysicsError::QueryFailed => "bot_navigation_query_failed",
         bot_physics::PhysicsError::InvalidQuery => "bot_navigation_invalid_request",
     }
