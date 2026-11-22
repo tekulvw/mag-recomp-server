@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pack private JSON inputs and verify/extract immutable bundles. Python 3.11+."""
+"""Pack private runtime catalogs and verify/extract immutable bundles. Python 3.11+."""
 import argparse
 import gzip
 import hashlib
@@ -18,6 +18,10 @@ import tempfile
 MANIFEST = ".mag-data-manifest.json"
 MANIFEST_LIMIT = 4 * 1024 * 1024
 SCHEMA = "mag-data-bundle"
+TERRAIN_GRID = "mag_domination_terrain_material_grid_v1"
+TERRAIN_INDEX_LIMIT = 65536
+TERRAIN_BYTES = 4096**2
+MATERIAL_SLOTS = set(range(27)) | {255}
 DENIED_NAMES = {"account", "accounts", "character", "characters", "credential",
                 "credentials", "secret", "secrets", "certificate", "certificates",
                 "cert", "certs", "key", "keys", "private", "users", "sessions",
@@ -43,14 +47,14 @@ def positive(value):
     return number
 
 
-def safe_path(name):
+def safe_path(name, suffix=".json"):
     require(isinstance(name, str) and len(name.encode("utf-8")) <= 240,
             "invalid member path")
     require(bool(name) and not name.startswith("/") and "\\" not in name,
             "absolute or platform-specific member path")
     require(all(re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", p)
                 and p not in {".", ".."} for p in name.split("/")), "unsafe member path")
-    require(PurePosixPath(name).suffix == ".json", "only JSON catalog files are allowed")
+    require(PurePosixPath(name).suffix == suffix, "unsupported catalog file type")
     for component in PurePosixPath(name).parts:
         tokens = set(re.split(r"[_.-]+", component.lower()))
         require(not tokens.intersection(DENIED_NAMES), "sensitive file path is forbidden")
@@ -117,12 +121,41 @@ def open_regular(path):
     return handle
 
 
+def terrain_pairs(value, max_members):
+    require(isinstance(value, list) and 0 < len(value) <= max_members,
+            "invalid terrain grid selection")
+    grids = {}
+    indexes = set()
+    for pair in value:
+        require(isinstance(pair, dict) and set(pair) == {"index", "materials"},
+                "invalid terrain grid pair")
+        index = safe_path(pair["index"])
+        materials = safe_path(pair["materials"], ".bin")
+        require(PurePosixPath(index).parent == PurePosixPath(materials).parent,
+                "terrain index and materials must be siblings")
+        require(index not in indexes and materials not in grids, "duplicate terrain grid member")
+        indexes.add(index)
+        grids[materials] = index
+    return grids
+
+
+def member_path(name, grids):
+    return safe_path(name, ".bin" if isinstance(name, str) and name in grids else ".json")
+
+
+def valid_sha256(value):
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
 def validate_manifest(value, args):
-    require(isinstance(value, dict) and set(value) == {
-        "schema", "version", "compatibility", "data_revision", "source_hash", "files"},
-        "unsupported manifest fields")
-    require(value["schema"] == SCHEMA and type(value["version"]) is int and value["version"] == 1,
+    require(isinstance(value, dict) and value.get("schema") == SCHEMA
+            and type(value.get("version")) is int and value["version"] in (1, 2),
             "unsupported bundle schema/version")
+    keys = {"schema", "version", "compatibility", "data_revision", "source_hash", "files"}
+    if value["version"] == 2:
+        keys.add("terrain_material_grids")
+    require(set(value) == keys, "unsupported manifest fields")
+    grids = terrain_pairs(value["terrain_material_grids"], args.max_members) if value["version"] == 2 else {}
     require(value["compatibility"] == "operator-validated", "unsupported compatibility policy")
     for field in ("data_revision", "source_hash"):
         require(isinstance(value[field], str) and len(value[field]) <= 512 and
@@ -135,19 +168,46 @@ def validate_manifest(value, args):
     for entry in files:
         require(isinstance(entry, dict) and set(entry) == {"path", "size", "sha256"},
                 "invalid manifest file entry")
-        name = safe_path(entry["path"])
+        name = member_path(entry["path"], grids)
         require(name not in expected, "duplicate manifest path")
         size = entry["size"]
         require(type(size) is int and 0 <= size <= args.max_file_bytes, "file exceeds byte limit")
-        require(isinstance(entry["sha256"], str) and re.fullmatch(r"[0-9a-f]{64}", entry["sha256"]),
-                "invalid file SHA-256")
+        require(valid_sha256(entry["sha256"]), "invalid file SHA-256")
         total += size
         require(total <= args.max_total_bytes, "bundle exceeds total byte limit")
         expected[name] = entry
     for name in expected:
         require(not any(str(parent) in expected for parent in PurePosixPath(name).parents),
                 "conflicting member paths")
-    return expected
+    for materials, index in grids.items():
+        require(materials in expected and index in expected, "missing selected terrain grid member")
+        require(expected[materials]["size"] == TERRAIN_BYTES, "invalid terrain material byte count")
+        require(expected[index]["size"] <= TERRAIN_INDEX_LIMIT, "terrain index exceeds byte limit")
+    return expected, grids
+
+
+def validate_terrain_grid(index_path, materials_path, expected_sha256):
+    with index_path.open("rb") as handle:
+        raw = handle.read(TERRAIN_INDEX_LIMIT + 1)
+    require(len(raw) <= TERRAIN_INDEX_LIMIT, "terrain index exceeds byte limit")
+    index = parse_json(raw, screen_secrets=True)
+    require(isinstance(index, dict) and index.get("schema") == TERRAIN_GRID,
+            "invalid terrain index schema")
+    columns = index.get("columns")
+    tile_hashes = index.get("source_tile_sha256")
+    require(isinstance(index.get("map"), str) and bool(index["map"])
+            and all(valid_sha256(index.get(key)) for key in
+                    ("level_archive_sha256", "level_clv_sha256", "retail_elf_sha256"))
+            and type(columns) is int and columns in (8, 16)
+            and index.get("cell_size") == 1024 // columns
+            and type(index.get("tile_width")) is int and index["tile_width"] == 4096 // columns
+            and isinstance(tile_hashes, list) and len(tile_hashes) == columns**2
+            and all(valid_sha256(value) for value in tile_hashes), "invalid terrain index dimensions or source")
+    require(type(index.get("byte_count")) is int and index["byte_count"] == TERRAIN_BYTES
+            and index.get("materials_sha256") == expected_sha256, "terrain index does not bind the materials")
+    with materials_path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            require(set(chunk) <= MATERIAL_SLOTS, "invalid terrain material slot")
 
 
 def tar_add(tar, name, handle, size):
@@ -169,37 +229,50 @@ def pack(args):
     require(not any((parent / ".git").exists() for parent in output.parents),
             "private bundle output must be outside a Git checkout")
     names = list(args.include or [])
+    grids = {}
     if args.selection_manifest:
         with open_regular(args.selection_manifest) as handle:
             selection = parse_json(handle.read(MANIFEST_LIMIT + 1))
-        require(isinstance(selection, dict) and set(selection) == {"files"} and
-                isinstance(selection["files"], list), "selection manifest must contain only a files list")
+        require(isinstance(selection, dict) and set(selection) in ({"files"}, {"files", "terrain_material_grids"}) and
+                isinstance(selection["files"], list), "invalid selection manifest fields")
         names.extend(selection["files"])
+        if "terrain_material_grids" in selection:
+            grids = terrain_pairs(selection["terrain_material_grids"], args.max_members)
     require(0 < len(names) <= args.max_members, "explicit file selection required within member limit")
-    names = [safe_path(name) for name in names]
+    names = [member_path(name, grids) for name in names]
     require(len(names) == len(set(names)), "duplicate input selection")
     names.sort()
     with tempfile.TemporaryDirectory(prefix="mag-bundle-pack-") as scratch:
         scratch = Path(scratch)
         entries = []
+        staged = {}
         total = 0
         for index, name in enumerate(names):
             candidate = source
             for component in PurePosixPath(name).parts:
                 candidate = candidate / component
                 require(not candidate.is_symlink(), "symlink input component is forbidden")
+            limit = min(args.max_file_bytes, TERRAIN_BYTES) if name in grids else args.max_file_bytes
             with open_regular(source / name) as handle:
-                data = handle.read(args.max_file_bytes + 1)
-            require(len(data) <= args.max_file_bytes, "file exceeds byte limit")
+                data = handle.read(limit + 1)
+            require(len(data) <= limit, "file exceeds byte limit")
             total += len(data)
             require(total <= args.max_total_bytes, "bundle exceeds total byte limit")
-            parse_json(data, screen_secrets=True)
-            (scratch / str(index)).write_bytes(data)
+            if name not in grids:
+                parse_json(data, screen_secrets=True)
+            staged[name] = scratch / str(index)
+            staged[name].write_bytes(data)
             entries.append({"path": name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
         manifest = {"schema": SCHEMA, "version": 1, "compatibility": "operator-validated",
                     "data_revision": args.data_revision, "source_hash": args.source_hash,
                     "files": entries}
-        validate_manifest(manifest, args)
+        if grids:
+            manifest["version"] = 2
+            manifest["terrain_material_grids"] = [{"index": grids[name], "materials": name}
+                                                  for name in sorted(grids)]
+        expected, grids = validate_manifest(manifest, args)
+        for materials, index in grids.items():
+            validate_terrain_grid(staged[index], staged[materials], expected[materials]["sha256"])
         encoded = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode() + b"\n"
         require(len(encoded) <= MANIFEST_LIMIT, "manifest exceeds byte limit")
         descriptor, temporary = tempfile.mkstemp(prefix=".mag-bundle-", dir=output.parent)
@@ -274,16 +347,17 @@ def unpack(args):
                         require(info.name == MANIFEST and 0 <= info.size <= MANIFEST_LIMIT,
                                 "first archive member must be bounded manifest")
                         data = exact_read(compressed, info.size)
-                        expected = validate_manifest(parse_json(data), args)
+                        expected, grids = validate_manifest(parse_json(data), args)
                     else:
-                        safe_path(info.name)
+                        member_path(info.name, grids)
                         require(info.name in expected, "unlisted archive member")
                         entry = expected[info.name]
                         require(info.size == entry["size"], "manifest file size mismatch")
                         data = exact_read(compressed, info.size)
                         require(hashlib.sha256(data).hexdigest() == entry["sha256"],
                                 "manifest file SHA-256 mismatch")
-                        parse_json(data, screen_secrets=True)
+                        if info.name not in grids:
+                            parse_json(data, screen_secrets=True)
                     target = staged / info.name
                     target.parent.mkdir(parents=True, exist_ok=True)
                     with target.open("xb") as handle:
@@ -292,6 +366,8 @@ def unpack(args):
                     require(not exact_read(compressed, (-info.size) % 512).strip(b"\0"), "invalid tar padding")
                 require(expected is not None and seen == set(expected) | {MANIFEST},
                         "archive missing listed files")
+                for materials, index in grids.items():
+                    validate_terrain_grid(staged / index, staged / materials, expected[materials]["sha256"])
             require(set(output.iterdir()) == {staged}, "output changed during bundle validation")
             promoted = []
             try:

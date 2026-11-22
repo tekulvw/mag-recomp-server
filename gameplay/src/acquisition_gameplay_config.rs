@@ -177,10 +177,15 @@ impl Configuration {
         File::open(path)?
             .take(MAX_BYTES as u64 + 1)
             .read_to_string(&mut text)?;
-        let mut result = Self::from_json(&text)?;
+        let mut result = Self::parse(&text)?;
         let directory = path
             .parent()
             .ok_or_else(|| io::Error::other("acquisition_config_directory_missing"))?;
+        crate::resources::resolve_manifest_path(directory, &mut result.controller_path)?;
+        if let Some(binding) = &mut result.arrival_static {
+            crate::resources::resolve_manifest_path(directory, &mut binding.path)?;
+        }
+        result.validate().map_err(io::Error::other)?;
         if let Some(structural) = &mut result.structural {
             structural.resolve(directory);
         }
@@ -224,12 +229,16 @@ impl Configuration {
     }
 
     pub fn from_json(text: &str) -> io::Result<Self> {
+        let configuration = Self::parse(text)?;
+        configuration.validate().map_err(io::Error::other)?;
+        Ok(configuration)
+    }
+
+    fn parse(text: &str) -> io::Result<Self> {
         if text.len() > MAX_BYTES {
             return Err(io::Error::other("acquisition_configuration_too_large"));
         }
-        let configuration: Self = serde_json::from_str(text)?;
-        configuration.validate().map_err(io::Error::other)?;
-        Ok(configuration)
+        Ok(serde_json::from_str(text)?)
     }
 
     fn validate(&self) -> Result<(), &'static str> {

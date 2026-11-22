@@ -10,16 +10,17 @@ Engine checks are separate from native live-match acceptance.
 
 For a standalone worker, add `--acquisition-gameplay /absolute/GAMEPLAY.json` to
 the explicit retail mode1 startup inputs. For faction matchmaking, put an
-absolute `acquisition_gameplay` path in each enabled match-profile entry instead
-of supplying that standalone flag. The registry retains fixed character
+absolute or registry-relative `acquisition_gameplay` path in each enabled
+match-profile entry instead of supplying that standalone flag. The registry retains fixed character
 factions, longest-waiting eligible faction priority and the selected pair's roles.
 
 The strict `mag_acquisition_gameplay` configuration binds the selected map/spawn
 catalog, controller, initial objective identity evidence, startup rules and game
 rules. It supplies ordered objective/squad inputs, four FSP joins, actual damage
 and Arrival geometry, current filter rows, vehicle capabilities/armor and
-reinforcement intervals. Controller paths and external data stay external to the
-public source repository. Hashes identify supplied inputs; they do not certify
+reinforcement intervals. The controller and Arrival static paths in a file can
+be absolute or relative to that configuration's directory. The inputs stay
+external to the public source repository. Hashes identify supplied inputs; they do not certify
 their semantics independently.
 
 Enabled configurations require all four distinct Escort allocations and their

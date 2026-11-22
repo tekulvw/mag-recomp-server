@@ -1,6 +1,6 @@
-# Private runtime JSON bundles
+# Private runtime data bundles
 
-Extracted game JSON is an external, private runtime input. Keep it out of this
+Projected runtime data is an external, private input. Keep it out of this
 repository, GHCR images, chart packages, ConfigMaps and public CI artifacts.
 Use a private S3-compatible object store, including an existing RustFS service,
 for the catalogs. The server's small configuration stays in a ConfigMap;
@@ -24,8 +24,9 @@ Synthetic tests in this repository prove tooling behavior, not compatibility
 with an original game or semantic correctness of extracted data.
 
 The packer requires an explicit relative file list. It does not recursively
-collect a directory. The selection must contain regular UTF-8 JSON files with
-safe relative paths. Symlink files or directories, duplicate JSON keys, NaN,
+collect a directory. Ordinary members are regular UTF-8 JSON files with safe
+relative paths. A typed terrain pair can also include a projected binary grid.
+Symlink files or directories, duplicate JSON keys, NaN,
 Infinity and overflowing floating point numbers are rejected. Archives, raw game
 files, account/character stores, common credential/certificate/key filenames,
 credential-like JSON keys and PEM private key/certificate content are rejected.
@@ -69,6 +70,37 @@ strings carried inside the private manifest; they are operator assertions.
 Identical inputs, selections and metadata produce identical archive bytes with
 the same Python/compressor implementation. Timestamps, file owner IDs and source
 file modes do not affect the archive.
+
+## Include a projected terrain grid
+
+Acquisition and Domination can use the JSON index and material-slot array
+produced by `tools/extraction/project-retail-domination-terrain-materials.py`
+for the selected map and mode. List both files and their explicit pairing.
+
+```json
+{
+  "files": ["profiles.json", "terrain/example/index.json", "terrain/example/materials.bin"],
+  "terrain_material_grids": [
+    {"index": "terrain/example/index.json", "materials": "terrain/example/materials.bin"}
+  ]
+}
+```
+
+The siblings must be unique regular files. The index declares schema
+`mag_domination_terrain_material_grid_v1`, source digests, the expected grid
+dimensions, and the SHA-256 of exactly 16,777,216 material bytes. The packer and
+verifier both check this binding and accept material slots 0–26 or 255. Binary
+members require this pairing. A selection with terrain pairs writes manifest
+version `2`, which requires a verifier that supports it. A JSON-only selection
+writes version `1`.
+
+For a relocatable match profile, keep each map's active-ability sidecar beside
+its gameplay configuration and use [manifest-relative paths](worker-match-profiles.md).
+List each Sequence `index.json` and referenced neutral mesh JSON separately.
+Keep source-bound catalog and mesh bytes verbatim. After unpacking into an
+unrelated directory, run the matching worker with `--validate-catalogs` and
+absolute CLI paths rooted at that directory. The chart uses `/data` as its
+mount root for the same internal manifest paths.
 
 ## Upload and pin one object
 
@@ -146,9 +178,10 @@ keeps applications from observing promotion in progress. An interrupted or
 failed promotion must never be accepted as a complete bundle; the next init run
 clears it, or recreate the Pod. The init containers must be the only writers.
 
-Manifest schema `mag-data-bundle`, version `1`, contains an exact file list with
+Manifest schema `mag-data-bundle` contains an exact file list with
 per-file byte size and SHA-256, `data_revision`, `source_hash` and
-`compatibility: operator-validated`. Unsupported versions or policies fail.
+`compatibility: operator-validated`. Version `2` also binds its exact typed
+terrain pairs. Unsupported versions or policies fail.
 This policy means the operator is responsible for semantic compatibility; the
 manifest itself does not prove it. The outer SHA-256 must come from trusted
 private GitOps values: a hash copied from an untrusted object is not

@@ -173,6 +173,59 @@ class DataBundleTests(unittest.TestCase):
         self.cli("pack", "--input-dir", self.inputs, "--include", "redirect/catalog.json",
                  "--output", self.root / "invalid.tar.gz", ok=False)
 
+    def terrain_fixture(self, payload):
+        index_name, materials = "terrain/invented/index.json", "terrain/invented/materials.bin"
+        index = {"schema": "mag_domination_terrain_material_grid_v1", "map": "invented",
+                 "level_archive_sha256": "a" * 64, "level_clv_sha256": "b" * 64,
+                 "retail_elf_sha256": "c" * 64, "columns": 8, "cell_size": 128,
+                 "tile_width": 512, "byte_count": len(payload), "source_tile_sha256": ["d" * 64] * 64,
+                 "materials_sha256": hashlib.sha256(payload).hexdigest()}
+        return index, {"index": index_name, "materials": materials}
+
+    def test_typed_terrain_roundtrip_and_unqualified_binary_denial(self):
+        data = bytes([7]) * (4096**2)
+        index, pair = self.terrain_fixture(data)
+        index_file, payload_file = (self.inputs / pair[key] for key in ("index", "materials"))
+        index_file.parent.mkdir(parents=True)
+        index_file.write_text(json.dumps(index))
+        payload_file.write_bytes(data)
+        selection = self.root / "selection.json"
+        archive = self.root / "typed.tar.gz"
+        arguments = ("pack", "--input-dir", self.inputs, "--output", archive,
+                     "--selection-manifest", selection)
+        files = ["catalog.json", *pair.values()]
+        for missing_pair in ({"files": files}, {"files": files[:-1], "terrain_material_grids": [pair]}):
+            selection.write_text(json.dumps(missing_pair))
+            self.cli(*arguments, ok=False)
+            self.assertFalse(archive.exists())
+        selection.write_text(json.dumps({"files": files, "terrain_material_grids": [pair]}))
+        self.cli(*arguments)
+        output = self.unpack(archive)
+        self.assertEqual((output / pair["materials"]).read_bytes(), data)
+        self.assertEqual((output / pair["materials"]).stat().st_mode & 0o777, 0o444)
+        manifest = json.loads((output / MANIFEST).read_bytes())
+        self.assertEqual(manifest["version"], 2)
+        self.assertEqual(manifest["terrain_material_grids"], [pair])
+
+    def test_typed_terrain_rejects_bound_invalid_pixels_and_mismatched_index(self):
+        data = bytes([255]) * (4096**2)
+        invalid_slot = bytes([27]) + data[1:]
+        pairs = [(data, self.terrain_fixture(data)[0] | {"materials_sha256": "0" * 64}),
+                 (invalid_slot, self.terrain_fixture(invalid_slot)[0]),
+                 (data[:-1], self.terrain_fixture(data[:-1])[0])]
+        for payload, index in pairs:
+            with self.subTest(index=index["materials_sha256"]):
+                _, pair = self.terrain_fixture(payload)
+                documents = {pair["index"]: json.dumps(index).encode(), pair["materials"]: payload}
+                manifest = {"schema": "mag-data-bundle", "version": 2,
+                            "compatibility": "operator-validated", "data_revision": "synthetic",
+                            "source_hash": "synthetic", "terrain_material_grids": [pair],
+                            "files": [{"path": name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+                                      for name, raw in documents.items()]}
+                output = self.unpack(self.malicious([(name, raw, None) for name, raw in documents.items()], manifest),
+                                     ok=False)
+                self.assertEqual(list(output.iterdir()), [])
+
     def test_manifest_schema_and_limits_are_enforced(self):
         archive = self.pack()
         with tarfile.open(archive) as tar:

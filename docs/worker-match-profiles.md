@@ -18,8 +18,10 @@ vehicle behavior, live compatibility or match performance.
 ## Manifest and resource validation
 
 The manifest is a JSON object with format `mag_match_profiles_v1` and between one
-and 64 rows. Every path, including the manifest path, must be absolute. Profile
-identifiers are unique, 1–64 ASCII letters, digits, hyphens or underscores.
+and 64 rows. Pass the manifest's absolute path to the worker. Resource paths
+inside it can be absolute or relative to the manifest's directory. Relative
+paths contain ordinary, nonempty components. Profile identifiers are unique,
+1–64 ASCII letters, digits, hyphens or underscores.
 Unknown fields fail validation. A manifest example using invented paths is:
 
 ```json
@@ -91,13 +93,13 @@ Profiles with an Acquisition or Domination gameplay provider enable squad
 ClusterBomb and Sensor where the native mode and role make them available.
 By default the worker loads `<map_name>--active-abilities.json` from the
 gameplay configuration's directory. To relocate a manifest, set the profile's
-`active_abilities` field to its absolute path. A fixed Acquisition worker can
-use `--active-abilities` for the same override. Startup requires native squad
+`active_abilities` field to its absolute or registry-relative path. A fixed
+Acquisition worker can use `--active-abilities` for the same override. Startup requires native squad
 election without development bindings and validates the manifest against the
 profile's collision world and objective catalog. Sabotage grants no active
 squad commands.
 
-The setup manifest uses absolute paths to external files.
+The setup manifest accepts absolute paths and paths relative to its own directory.
 
 ```json
 {

@@ -1,6 +1,27 @@
 //! Explicit gameplay dependencies and development-only disk loading.
 use super::*;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+
+/// Resolve an explicitly relative child without relying on process cwd.
+pub(crate) fn resolve_manifest_path(directory: &Path, child: &mut PathBuf) -> io::Result<()> {
+    if child.is_absolute() {
+        return Ok(());
+    }
+    if !directory.is_absolute()
+        || child.as_os_str().is_empty()
+        || !child
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "relative catalog path requires an absolute manifest directory and normal components",
+        ));
+    }
+    *child = directory.join(&*child);
+    Ok(())
+}
 
 /// Loaded dependencies for engine construction. Loading and validation happen
 /// before supplying this value; constructing the engine performs no file I/O.
