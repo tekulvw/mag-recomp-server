@@ -132,7 +132,7 @@ pub(crate) fn engine() -> Engine<Vec<u8>> {
 pub(crate) fn reserve(engine: &mut Engine<Vec<u8>>, player: u16) {
     reserve_faction(engine, player, 1);
 }
-fn reserve_faction(engine: &mut Engine<Vec<u8>>, player: u16, faction: u8) {
+pub(crate) fn reserve_faction(engine: &mut Engine<Vec<u8>>, player: u16, faction: u8) {
     let response = reserve_identity(
         engine,
         player,

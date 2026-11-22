@@ -1,4 +1,4 @@
-//! Secure-and-hold interaction requests for the authored Domination rule.
+//! Secure-and-hold interaction requests shared by qualified objective modes.
 //! The owner of the world transaction resolves contacts and applies entry effects.
 
 use crate::replication::ObjectiveState::{self, *};

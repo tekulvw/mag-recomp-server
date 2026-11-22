@@ -243,6 +243,10 @@ impl ObjectiveCatalog {
         value.validate().map_err(io::Error::other)?;
         Ok(value)
     }
+    pub(crate) fn is_sabotage(&self) -> bool {
+        self.game_type == 0
+    }
+
     pub fn is_domination_gameplay(&self) -> bool {
         self.game_type == 2 && self.source.capture_qualification == "native_source_gameplay"
     }
