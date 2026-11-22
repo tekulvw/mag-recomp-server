@@ -124,6 +124,7 @@ impl<'a> Scene<'a> {
         let query = query.into();
         let sweep = query.discovery_envelope(limits.boundary_epsilon)?;
         let row = self.filter_rows[23];
+        self.bindings.validate_scene_filter(row)?;
         let coverage = self.bindings.coverage();
         let mut triangles = self
             .static_world
@@ -400,6 +401,43 @@ mod tests {
         assert_eq!(
             scene.query(capsule, &mut 2),
             Err("projectile_contact_work_limit")
+        );
+    }
+
+    #[test]
+    fn acquisition_projectile_scene_keeps_ground_chassis_and_rejects_foreign_overlays() {
+        let world = static_world(true);
+        let mut raw = crate::domination_projectile_collision::acquisition_tests::acquisition();
+        raw["static_world_sha256"] = json!(world.source_sha256());
+        let bindings =
+            ContactBindings::from_acquisition_json(&serde_json::to_vec(&raw).unwrap()).unwrap();
+        let snapshot = snapshot();
+        let mut overlays = SequenceCollisionState::default();
+        let mut filters = [0; 32];
+        filters[23] = raw["filter_row23"].as_u64().unwrap() as u32;
+        let associated = Some(TargetKey {
+            id: 2,
+            generation: 1,
+        });
+        let run = |filters, overlays: &SequenceCollisionState| {
+            let mut scene = Scene::new(&world, overlays, &snapshot, &bindings, filters);
+            scene.dynamic_verified = true;
+            scene.query(sweep(associated), &mut 10_000)
+        };
+        assert!(matches!(
+            run(filters, &overlays).unwrap().unwrap().obstacle,
+            OwnedObstacleId::Dynamic { root, .. } if root == "chassis"
+        ));
+        let mut stale_filters = filters;
+        stale_filters[23] &= !(1 << 22);
+        assert_eq!(
+            run(stale_filters, &overlays),
+            Err("projectile_contact_filter_mismatch")
+        );
+        overlays.synthetic_projectile_hospital(4, 7., "a".repeat(64));
+        assert_eq!(
+            run(filters, &overlays),
+            Err("projectile_overlay_scope_mismatch")
         );
     }
 

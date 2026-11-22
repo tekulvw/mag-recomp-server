@@ -117,6 +117,9 @@ impl Registry {
                 contacts.validate_dynamic(catalog)?;
             }
             if let Some(setup) = &profile.acquisition {
+                if let Some(contacts) = &setup.projectile_contacts {
+                    contacts.validate_dynamic(catalog)?;
+                }
                 setup.validate_ground_hulk_templates(catalog)?;
                 if setup.has_frag_ground_areas() {
                     setup.validate_frag_ground_dynamic(
@@ -336,6 +339,9 @@ impl Registry {
                         .map_err(io::Error::other)?;
                     let config = acquisition_gameplay_config::Configuration::load(path)?;
                     let setup = config.build(&spawns, catalog, &runtime)?;
+                    setup
+                        .validate_projectile_contact_static(Some(world))
+                        .map_err(io::Error::other)?;
                     setup
                         .validate_ground_drivers(ground)
                         .map_err(io::Error::other)?;
@@ -787,9 +793,13 @@ impl Registry {
     pub fn has_projectile_contacts(&self) -> bool {
         self.profiles.values().any(|profile| {
             profile
-                .domination
+                .acquisition
                 .as_ref()
-                .is_some_and(|world| world.state.projectile_contacts.is_some())
+                .is_some_and(|setup| setup.has_projectile_contacts())
+                || profile
+                    .domination
+                    .as_ref()
+                    .is_some_and(|world| world.state.projectile_contacts.is_some())
         })
     }
 
@@ -883,8 +893,13 @@ impl<W: Write> Engine<W> {
         registry.validate_runtime(&self.item_catalog, self.wire_profile)?;
         registry.bind_hospital_turrets(&self.item_catalog)?;
         registry.bind_ground_turrets(&self.item_catalog)?;
-        if registry.has_domination_gameplay() && self.dynamic_body_resources.is_none() {
-            return Err("domination_profiles_require_dynamic_bodies");
+        if self.dynamic_body_resources.is_none() {
+            if registry.has_domination_gameplay() {
+                return Err("domination_profiles_require_dynamic_bodies");
+            }
+            if registry.has_projectile_contacts() {
+                return Err("acquisition_projectile_contacts_require_dynamic_bodies");
+            }
         }
         registry.validate_domination_static_partitions(
             self.acquisition_static_partitions
@@ -1018,10 +1033,11 @@ impl<W: Write> Engine<W> {
         self.active_abilities = active_abilities;
         self.acquisition_round = acquisition_round;
         self.domination_round = loaded.domination_round;
-        self.projectile_contacts = loaded
-            .domination
-            .as_ref()
-            .and_then(|world| world.state.projectile_contacts.clone());
+        self.projectile_contacts = match (&self.acquisition_gameplay, &loaded.domination) {
+            (Some(runtime), None) => runtime.setup.projectile_contacts.clone(),
+            (None, Some(world)) => world.state.projectile_contacts.clone(),
+            _ => None,
+        };
         self.hospital_rockets = loaded.hospital_rockets;
         self.hospital_rocket_ground = loaded
             .domination
@@ -1899,6 +1915,38 @@ mod tests {
 
         assert!(select(&mut engine, "sabotage-1", "p-0-0-1").ok);
         assert!(engine.acquisition_gameplay.is_none() && engine.acquisition_round.is_none());
+    }
+
+    #[test]
+    fn acquisition_projectile_contacts_survive_replay_and_clear_on_profile_switch() {
+        use crate::domination_projectile_collision::{ContactBindings, acquisition_tests};
+
+        let files = Files::new();
+        let mut engine = engine(&files, Vec::new(), 100_000);
+        add_gameplay_profile(&mut engine);
+        let profile = engine
+            .match_profiles
+            .as_mut()
+            .unwrap()
+            .profiles
+            .get_mut("acquisition-world")
+            .unwrap();
+        let raw = serde_json::to_vec(&acquisition_tests::acquisition()).unwrap();
+        let contacts = Arc::new(ContactBindings::from_acquisition_json(&raw).unwrap());
+        Arc::get_mut(profile.acquisition.as_mut().unwrap())
+            .unwrap()
+            .projectile_contacts = Some(Arc::clone(&contacts));
+
+        for _ in 0..2 {
+            assert!(select(&mut engine, "acquisition-contacts", "acquisition-world").ok);
+            assert!(Arc::ptr_eq(
+                engine.projectile_contacts.as_ref().unwrap(),
+                &contacts
+            ));
+            assert!(engine.domination_gameplay.is_none());
+        }
+        assert!(select(&mut engine, "switch-without-contacts", "p-0-0-1").ok);
+        assert!(engine.projectile_contacts.is_none() && engine.acquisition_gameplay.is_none());
     }
 
     #[test]

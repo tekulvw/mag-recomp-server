@@ -141,6 +141,10 @@ pub struct Setup {
 }
 
 impl Setup {
+    pub(crate) fn projectile_sequence_assets(&self) -> &SequenceCollisionAssets {
+        &self.assets
+    }
+
     pub(crate) fn validate_frag_character_inputs(
         &self,
         items: &crate::item_catalog::ItemCatalog,
