@@ -300,7 +300,9 @@ fn acquisition_setup_fixture(
         if fsp.is_some() {
             row["interaction"] = json!({"owner_team":1,"activate_ms":3000,"complete_ms":0,
                 "deactivate_ms":3000,"can_deactivate":true,"position":[100.,3.,100.],
-                "trigger_count":1,"maximum_distance_m":2.,"distance_policy":"development_point_distance"});
+                "trigger_count":1,"maximum_distance_m":2.,"distance_policy":"authored_trigger_box",
+                "trigger_volumes":[{"centre":[100.,3.,100.],"axes":[[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]],
+                    "half_extents":[2.,2.,2.]}]});
         }
         objective_rows.push(row);
     }
@@ -1608,4 +1610,269 @@ fn acquisition_structural_native_spawn_retains_supported_local_category_zero() {
     assert_eq!(actor.squad_spawn, fallback);
     assert_eq!(actor.selected_spawn.unwrap().spawn_point_index, fallback);
     assert!(actor.squad_catalog.alpha(native_point).is_none());
+}
+
+pub(crate) fn registered_capture_operator() -> (Engine<Vec<u8>>, u16) {
+    let mut engine = capture_fixture();
+    prepare_capture_actor(&mut engine, 0, 100);
+    let names = crate::bot_registry::identity_tests::engine("Capture Operator");
+    engine.maximum_players = engine.admission_capacity();
+    engine.item_catalog = names.item_catalog;
+    engine.bot_names = crate::bot_names::Catalog::from_json(
+        br#"{"entries":[{"name":"Synthetic Alpha"},{"name":"Synthetic Bravo"},{"name":"Synthetic Charlie"}]}"#,
+    ).unwrap();
+    let scene = json!({
+        "format":"mag_collision_world","schema_version":1,"coordinate_space":"world",
+        "metadata":{"map_name":"synthetic_arena","build":"synthetic","coverage":"provisional",
+            "provenance":["synthetic"],"unknowns":[],
+            "physics_regions":[{"min":[90.,-2.,90.],"max":[130.,12.,130.],
+                "ground_verified":true,"obstacles_verified":true,"provenance":["invented floor"]}]},
+        "instances":[{"id":"floor","vertices_xyz":[[90.,3.,90.],[130.,3.,90.],
+            [130.,3.,130.],[90.,3.,130.]],"triangles":[[0,2,1],[0,3,2]]}]
+    });
+    engine.collision_world = Some(
+        crate::collision::CollisionWorld::from_bytes(
+            &serde_json::to_vec(&scene).unwrap(),
+            Default::default(),
+        )
+        .unwrap(),
+    );
+    let population = serde_json::from_value(json!({
+        "format":"mag_bot_population_v1","map_name":"synthetic_arena","firearms":{"enabled":false},
+        "slots":[{"team":0,"position":{"x":101.,"y":3.5,"z":100.}},
+                 {"team":0,"position":{"x":105.,"y":3.5,"z":100.}},
+                 {"team":1,"position":{"x":120.,"y":3.5,"z":120.}},
+                 {"team":1,"position":{"x":122.,"y":3.5,"z":120.}}]
+    }))
+    .unwrap();
+    let mut engine = engine.with_bot_population(population, 3).unwrap();
+    engine.tick_bots(Duration::from_millis(112), 1).unwrap();
+    let (&id, bot) = engine
+        .bot_registry
+        .bots
+        .iter()
+        .find(|(_, bot)| bot.target.squad.team() == 0)
+        .unwrap();
+    let terrain =
+        crate::bot_physics::WorldTerrain::new(engine.collision_world.as_ref(), engine.map_name())
+            .unwrap();
+    let motion = terrain
+        .advance(
+            bot.target.runtime.unwrap().physics_motion.unwrap(),
+            [0.; 3],
+            1.,
+            Default::default(),
+        )
+        .unwrap();
+    assert!(motion.grounded && !motion.blocked);
+    let bot = engine.bot_registry.bots.get_mut(&id).unwrap();
+    let runtime = bot.target.runtime.as_mut().unwrap();
+    runtime.physics_motion = Some(motion);
+    bot.task.operator = true;
+    bot.task.objective = Some(FIRST_CAPTURE);
+    bot.task.set_life_for_test(runtime.generation);
+    let config = engine.bot_registry.config.as_mut().unwrap();
+    config.autonomous = true;
+    config
+        .objective_policy
+        .as_mut()
+        .unwrap()
+        .interactions_enabled = true;
+    (engine, id)
+}
+
+#[test]
+fn registered_bot_source_capture_starts_and_completes_at_the_source_deadline() {
+    let (mut engine, id) = registered_capture_operator();
+    claim_capture_actor(&mut engine);
+    let source = engine.acquisition_gameplay.as_mut().unwrap();
+    let capture_token = source.state.token_for_index(FIRST_CAPTURE).unwrap();
+    assert_eq!(
+        source.state.squad(0).unwrap().assignment.primary_index,
+        FIRST_CAPTURE
+    );
+    source
+        .state
+        .set_manual_tag(0, 0x0c80_0000 | u32::from(FIRST_CAPTURE))
+        .unwrap();
+    engine
+        .tick_acquisition_objectives(Duration::from_millis(200), 2)
+        .unwrap();
+    assert_eq!(
+        engine
+            .objective_world
+            .as_ref()
+            .unwrap()
+            .interaction_owner(FIRST_CAPTURE)
+            .map(|owner| owner.0),
+        Some(id)
+    );
+    engine
+        .tick_acquisition_objectives(Duration::from_millis(3199), 3)
+        .unwrap();
+    assert_eq!(
+        engine
+            .ground_runtime
+            .as_ref()
+            .unwrap()
+            .get(4)
+            .unwrap()
+            .state,
+        0
+    );
+    engine
+        .tick_acquisition_objectives(Duration::from_millis(3200), 4)
+        .unwrap();
+    assert_eq!(
+        engine
+            .objective_world
+            .as_ref()
+            .unwrap()
+            .state(FIRST_CAPTURE),
+        Some(ObjectiveState::Completed)
+    );
+    let snapshot = engine.objective_world.as_ref().unwrap().snapshot(1, 3200);
+    let delta = snapshot
+        .objectives
+        .iter()
+        .find(|delta| delta.object_index == FIRST_CAPTURE)
+        .unwrap();
+    assert_eq!(delta.state_actor.actor_index, u16::MAX);
+    let source = engine.acquisition_gameplay.as_ref().unwrap();
+    assert_eq!(
+        source
+            .state
+            .objective(capture_token)
+            .unwrap()
+            .current_attacker,
+        u32::MAX
+    );
+    let human = engine.active.as_ref().unwrap();
+    assert_eq!(human.reward_statistics.get(&41), Some(&1));
+    assert!(!human.reward_statistics.contains_key(&58));
+    assert_eq!(human.match_experience, 0);
+    assert!(engine.pending_reward_batch().is_empty());
+    engine.tick_acquisition_ground_registration(4).unwrap();
+    assert_eq!(
+        engine
+            .ground_runtime
+            .as_ref()
+            .unwrap()
+            .get(4)
+            .unwrap()
+            .state,
+        2
+    );
+}
+
+#[test]
+fn registered_bot_source_capture_reallocation_cancels_before_fresh_human_timer() {
+    let (mut engine, id) = registered_capture_operator();
+    engine
+        .tick_acquisition_objectives(Duration::from_millis(200), 2)
+        .unwrap();
+    claim_capture_actor(&mut engine);
+    engine
+        .bot_registry
+        .bots
+        .get_mut(&id)
+        .unwrap()
+        .allocation_generation += 1;
+    engine
+        .tick_acquisition_objectives(Duration::from_millis(3200), 3)
+        .unwrap();
+    assert_eq!(
+        engine
+            .objective_world
+            .as_ref()
+            .unwrap()
+            .state(FIRST_CAPTURE),
+        Some(ObjectiveState::Deactivated)
+    );
+    assert_eq!(
+        engine
+            .ground_runtime
+            .as_ref()
+            .unwrap()
+            .get(4)
+            .unwrap()
+            .state,
+        0
+    );
+    crate::objective_reward_tests::interact(
+        &mut engine,
+        FIRST_CAPTURE,
+        protocol::ObjectiveInteractionKind::Activate,
+        3300,
+    )
+    .unwrap();
+    engine
+        .tick_acquisition_objectives(Duration::from_millis(6299), 4)
+        .unwrap();
+    assert_eq!(
+        engine
+            .objective_world
+            .as_ref()
+            .unwrap()
+            .interaction_owner(FIRST_CAPTURE)
+            .map(|owner| owner.0),
+        Some(0)
+    );
+    assert!(
+        !engine
+            .active
+            .as_ref()
+            .unwrap()
+            .reward_statistics
+            .contains_key(&58)
+    );
+    engine
+        .tick_acquisition_objectives(Duration::from_millis(6300), 5)
+        .unwrap();
+    assert_eq!(
+        engine.active.as_ref().unwrap().reward_statistics.get(&58),
+        Some(&1)
+    );
+}
+
+#[test]
+fn registered_bot_source_capture_start_and_cancellation_are_record_first() {
+    for cancel in [false, true] {
+        let (mut engine, id) = registered_capture_operator();
+        if cancel {
+            engine
+                .tick_acquisition_objectives(Duration::from_millis(200), 2)
+                .unwrap();
+            engine.bot_registry.bots.get_mut(&id).unwrap().task.operator = false;
+        }
+        let previous = engine
+            .objective_world
+            .as_ref()
+            .unwrap()
+            .state(FIRST_CAPTURE);
+        let expected_owner = cancel.then_some(id);
+        engine.max_log = engine.written;
+        assert_eq!(
+            engine
+                .tick_acquisition_objectives(Duration::from_millis(350), 3)
+                .unwrap_err(),
+            "log_limit_reached"
+        );
+        let world = engine.objective_world.as_ref().unwrap();
+        assert_eq!(world.state(FIRST_CAPTURE), previous);
+        assert_eq!(
+            world.interaction_owner(FIRST_CAPTURE).map(|owner| owner.0),
+            expected_owner
+        );
+        assert_eq!(
+            engine
+                .ground_runtime
+                .as_ref()
+                .unwrap()
+                .get(4)
+                .unwrap()
+                .state,
+            0
+        );
+    }
 }

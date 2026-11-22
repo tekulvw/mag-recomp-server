@@ -74,12 +74,29 @@ struct Operation {
     started_at: Duration,
     contact_arming: bool,
     recipient: Option<RewardRecipient>,
-    capture_actor: Option<CaptureActorIdentity>,
+    capture_actor: Option<CaptureActor>,
     bot_plant: Option<BotPlantSource>,
     player: u16,
     generation: u32,
     trigger_index: u8,
     deadline: Duration,
+}
+
+#[derive(Clone)]
+pub(crate) enum CaptureActor {
+    Human(CaptureActorIdentity),
+    Bot(BotCaptureSource),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct BotCaptureSource {
+    pub player: u16,
+    pub allocation: u32,
+    pub life: u32,
+    pub team: u8,
+    pub world: u32,
+    pub round: u64,
+    pub trigger: u8,
 }
 
 #[derive(Clone)]
@@ -887,7 +904,7 @@ impl ObjectiveWorld {
             && operation
                 .capture_actor
                 .as_ref()
-                .is_none_or(|identity| identity.matches(actor))
+                .is_none_or(|identity| matches!(identity, CaptureActor::Human(identity) if identity.matches(actor)))
         {
             if operation.recipient.is_none() {
                 operation.recipient = RewardRecipient::from_active(actor);
@@ -896,7 +913,7 @@ impl ObjectiveWorld {
                 && object.demolition.is_none()
                 && operation.capture_actor.is_none()
             {
-                operation.capture_actor = Some(CaptureActorIdentity::from_active(actor));
+                operation.capture_actor = Some(CaptureActor::Human(CaptureActorIdentity::from_active(actor)));
             }
         }
     }
@@ -1080,6 +1097,15 @@ impl ObjectiveWorld {
         let Some(rule) = object.rule.as_ref() else {
             return InteractionOutcome::denied("objective_interaction_not_configured");
         };
+        if matches!(
+            object
+                .operation
+                .as_ref()
+                .and_then(|operation| operation.capture_actor.as_ref()),
+            Some(CaptureActor::Bot(_))
+        ) {
+            return InteractionOutcome::denied("objective_busy");
+        }
         // A release must remain possible after stepping out of the trigger volume.
         // FF is also accepted for release, matching the no-trigger ACK sentinel.
         if request.kind != ObjectiveInteractionKind::Release
@@ -1161,6 +1187,109 @@ impl ObjectiveWorld {
             }
             _ => InteractionOutcome::denied("objective_interaction_unsupported"),
         }
+    }
+
+    pub(crate) fn acquisition_bot_capture(&self, index: u16) -> Option<BotCaptureSource> {
+        match self.objects.get(&index)?.operation.as_ref()?.capture_actor {
+            Some(CaptureActor::Bot(source)) => Some(source),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn cancel_acquisition_bot_capture(
+        &mut self,
+        index: u16,
+        now: Duration,
+    ) -> Option<ObjectiveControlDelta> {
+        self.acquisition_bot_capture(index)?;
+        let object = self.objects.get_mut(&index)?;
+        cancel(object, now);
+        self.pristine = false;
+        Some(object.state)
+    }
+
+    pub(crate) fn cancel_acquisition_bot_completion(
+        &mut self,
+        index: u16,
+        now: Duration,
+    ) -> Result<ObjectiveControlDelta, &'static str> {
+        let object = self
+            .objects
+            .get_mut(&index)
+            .ok_or("objective_unknown_target")?;
+        if object.native.is_some()
+            || object.demolition.is_some()
+            || object.operation.is_some()
+            || object.state.state_actor.state != ObjectiveState::Completed
+        {
+            return Err("invalid_acquisition_bot_capture_completion");
+        }
+        cancel(object, now);
+        self.pristine = false;
+        Ok(object.state)
+    }
+
+    pub(crate) fn start_acquisition_bot_capture(
+        &mut self,
+        index: u16,
+        actor: ObjectiveActor,
+        source: BotCaptureSource,
+        now: Duration,
+    ) -> Option<ObjectiveControlDelta> {
+        let object = self.objects.get(&index)?;
+        if object.native.is_some()
+            || object.demolition.is_some()
+            || object
+                .rule
+                .as_ref()
+                .is_none_or(|rule| rule.complete_ms != 0)
+            || object.state.state_actor.state != ObjectiveState::Deactivated
+            || source.player != actor.player
+            || source.life != actor.generation
+            || source.team != actor.team
+            || !self.acquisition_capture_trigger(index, actor, source.trigger)
+        {
+            return None;
+        }
+        let outcome = self.interact(
+            ObjectiveInteraction {
+                kind: ObjectiveInteractionKind::Activate,
+                target_object_id: 0x0c80_0000 | u32::from(index),
+                actor_index: source.player,
+                trigger_index: source.trigger,
+            },
+            actor,
+            now,
+        );
+        let delta = outcome.changed?;
+        self.objects
+            .get_mut(&index)?
+            .operation
+            .as_mut()?
+            .capture_actor = Some(CaptureActor::Bot(source));
+        Some(delta)
+    }
+
+    pub(crate) fn acquisition_capture_trigger(
+        &self,
+        index: u16,
+        actor: ObjectiveActor,
+        trigger: u8,
+    ) -> bool {
+        self.objects.get(&index).is_some_and(|object| {
+            object.rule.as_ref().is_some_and(|rule| {
+                trigger < rule.trigger_count
+                    && actor.team != rule.owner_team
+                    && at_native_trigger(actor.position, rule.range(), trigger)
+            })
+        })
+    }
+
+    pub(crate) fn acquisition_capture_trigger_count(&self, index: u16) -> u8 {
+        self.objects
+            .get(&index)
+            .and_then(|object| object.rule.as_ref())
+            .map_or(0, |rule| rule.trigger_count)
     }
 
     /// The caller supplies only living, entered actors. A new life invalidates a hold.
@@ -1333,7 +1462,7 @@ impl ObjectiveWorld {
 pub(crate) struct CaptureCompletion {
     pub(crate) object_index: u16,
     pub(crate) player: u16,
-    pub(crate) actor: Option<CaptureActorIdentity>,
+    pub(crate) actor: Option<CaptureActor>,
 }
 
 #[derive(Clone, Debug)]

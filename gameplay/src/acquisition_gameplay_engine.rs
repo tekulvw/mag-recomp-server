@@ -3,14 +3,14 @@ use crate::{
     acquisition_atomic::{EnteredState, Entry},
     acquisition_character_effects::{Candidate as CharacterCandidate, NativeState},
     acquisition_control::Catalog,
-    acquisition_gameplay::{Effect, Gameplay},
+    acquisition_gameplay::{CaptureCredit, Effect, Gameplay},
     acquisition_round::{Round, Rules, ScoreIntent},
     acquisition_spawn_effects::Clearance,
     acquisition_volume_effects::VolumeRequest,
     acquisition_world::Settings,
     dynamic_collision::QueryBox,
     objective_catalog::NativeClass,
-    objective_control::{ObjectiveActor, ObjectiveWorld},
+    objective_control::{BotCaptureSource, CaptureActor, ObjectiveActor, ObjectiveWorld},
     objective_range::TriggerBox,
     replication::{ObjectiveControlDelta, ObjectiveState},
     *,
@@ -648,9 +648,11 @@ impl<W: Write> Engine<W> {
             .iter()
             .filter_map(|d| {
                 let owner = world.interaction_owner(d.object_index)?;
-                if runtime.structural.as_ref().is_some_and(|structural| {
-                    structural.bot_owns_hold(&world, d.object_index, owner.0)
-                }) {
+                if world.acquisition_bot_capture(d.object_index).is_some()
+                    || runtime.structural.as_ref().is_some_and(|structural| {
+                        structural.bot_owns_hold(&world, d.object_index, owner.0)
+                    })
+                {
                     return None;
                 }
                 Some((d.object_index, (d.state_actor.state, owner)))
@@ -659,6 +661,7 @@ impl<W: Write> Engine<W> {
         let mut changed: BTreeMap<u16, ObjectiveControlDelta> = BTreeMap::new();
         let mut entry_actors = BTreeMap::new();
         let mut capture_witnesses = BTreeMap::new();
+        let mut capture_audit = Vec::new();
         let abilities_enabled = self.active_abilities.is_some();
         if !abilities_enabled {
             stage_objective_observations(
@@ -669,6 +672,7 @@ impl<W: Write> Engine<W> {
                 &mut changed,
                 &mut entry_actors,
                 &mut capture_witnesses,
+                &mut capture_audit,
             )?;
         }
         let starting = !runtime.started;
@@ -708,7 +712,7 @@ impl<W: Write> Engine<W> {
         };
         let native = self.owned_acquisition_characters();
         let characters = self.prepare_acquisition_character_callback(&native, now, |engine, native| {
-            let mut audit = Vec::new();
+            let mut audit = std::mem::take(&mut capture_audit);
             let mut messages = Vec::new();
             let mut delivery_rewards = BTreeMap::new();
             let (rows, output) = engine.stage_acquisition_vehicle_waves(&mut runtime, &mut ground, now, native, &mut ground_changes)?;
@@ -738,7 +742,7 @@ impl<W: Write> Engine<W> {
                 if !commit.helo_doses.is_empty() { return Err("acquisition_unexpected_helo_strike_target"); }
             }
             if abilities_enabled {
-                stage_objective_observations(engine, &mut runtime, &mut world, now, &mut changed, &mut entry_actors, &mut capture_witnesses)?;
+                stage_objective_observations(engine, &mut runtime, &mut world, now, &mut changed, &mut entry_actors, &mut capture_witnesses, &mut audit)?;
             }
             audit.extend(engine.stage_acquisition_capture_rewards(world.take_reward_actions(), &runtime, &ground)?);
             let assignments: Vec<_> = (0..32).filter_map(|index| runtime.state.squad(index).map(|s|(index,s.assignment))).collect();
@@ -790,6 +794,9 @@ impl<W: Write> Engine<W> {
                     return Ok((audit, messages));
                 };
                 let state = objective_catalog::native_state(target as u8).ok_or("unsupported_acquisition_target_state")?;
+                let capture_witness = take_capture_witness(
+                    &runtime, token, &mut capture_witnesses, &mut entry_actors,
+                );
                 let object = runtime.state.objective(token).ok_or("unknown_acquisition_gameplay_objective")?;
                 let attributed = if state == ObjectiveState::Completed { object.current_attacker } else { object.current_defender };
                 let actor_index = entry_actors.remove(&token).unwrap_or({
@@ -800,32 +807,55 @@ impl<W: Write> Engine<W> {
                     let effects=engine.stage_acquisition_delivery_reward(&runtime, &ground, token, witness)?;
                     audit.extend(effects.audit); messages.extend(effects.messages);
                 }
-                let qualified_capture = capture_witnesses.remove(&token).is_some_and(|witness| {
-                    state == ObjectiveState::Completed
+                let mut capture_credit = CaptureCredit::None;
+                let mut bot_credit = None;
+                if let Some(witness) = capture_witness {
+                    let valid_entry = state == ObjectiveState::Completed
                         && actor_index == witness.completion.player
-                        && runtime.state.target_version(token) == Some(witness.target_version)
-                        && {
-                            let actor = engine.active.iter().chain(engine.peers.values())
-                                .find(|actor| actor.reservation.player == actor_index);
-                            match (witness.completion.actor.as_ref(), actor) {
-                                (Some(identity), Some(actor)) => {
-                                    actor.entered_game && actor.claimed.is_some() && identity.matches(actor)
-                                }
-                                (None, None) => engine.bot_registry.bots.contains_key(&actor_index),
-                                _ => false,
+                        && runtime.state.target_version(token) == Some(witness.target_version);
+                    match witness.completion.actor {
+                        Some(CaptureActor::Human(identity)) if valid_entry => {
+                            if engine.active.iter().chain(engine.peers.values()).any(|actor| {
+                                actor.reservation.player == actor_index
+                                    && actor.entered_game && actor.claimed.is_some() && identity.matches(actor)
+                            }) {
+                                capture_credit = CaptureCredit::Human;
                             }
                         }
-                });
+                        Some(CaptureActor::Bot(source)) if state == ObjectiveState::Completed => {
+                            let index = witness.completion.object_index;
+                            if let Some(delta) = resolve_bot_capture_completion(
+                                engine, &mut runtime, &mut world,
+                                token, source, now, valid_entry,
+                            )? {
+                                changed.insert(index, delta);
+                                entry_actors.insert(token, u16::MAX);
+                                audit.push(bot_capture_audit("acquisition_bot_capture_cancelled", index, source));
+                                continue;
+                            }
+                            capture_credit = CaptureCredit::Bot;
+                            bot_credit = Some(source);
+                            audit.push(bot_capture_audit("acquisition_bot_capture_completed", index, source));
+                        }
+                        _ => {}
+                    }
+                }
                 let callback = setup.controller.objective_tokens().any(|t| t == token);
                 let delta = if callback && matches!(state, ObjectiveState::Completed | ObjectiveState::Deactivated) {
                     let entry = Entry { objective_token: token, state: if state == ObjectiveState::Completed { EnteredState::Completed } else { EnteredState::Deactivated }, actor_index, timestamp_ms: now.as_millis() as u32 };
                     let mut rates = round.rates_mut().clone();
-                    let publication = runtime.state.apply_entry_with_capture(&setup.controller, &entry, &mut ground, &mut rates, qualified_capture, |ground, effect| {
+                    let publication = runtime.state.apply_entry_with_capture(&setup.controller, &entry, &mut ground, &mut rates, capture_credit, |ground, effect| {
                         let previous = engine.ground_runtime.replace(ground.clone()).ok_or("ground_vehicle_runtime_required")?;
                         let result = match effect {
                             Effect::CaptureCompleted { object_index, actor_index, squads, vehicle_capture } => {
                                 let assignments: Vec<_> = squads.iter().map(|(&index,squad)|(index,squad.assignment)).collect();
-                                let effects = engine.stage_objective_counters(actor_index, object_index, if vehicle_capture { &[58] } else { &[] }, true, &assignments)?;
+                                let effects = if let Some(source) = bot_credit {
+                                    engine.stage_objective_counters_for_team(
+                                        source.world, source.team, None, object_index, &[], true, &assignments,
+                                    )?
+                                } else {
+                                    engine.stage_objective_counters(actor_index, object_index, if vehicle_capture { &[58] } else { &[] }, true, &assignments)?
+                                };
                                 Ok((effects.audit,effects.messages))
                             }
                             Effect::Blockers(source) => engine.stage_respawn_clearance(Clearance { source, physics: setup.physics, filter_rows: setup.filter_rows, now }, native, &mut ground_changes),
@@ -1053,8 +1083,8 @@ impl<W: Write> Engine<W> {
     }
 }
 
-pub(crate) fn objective_actors<W: Write>(engine: &Engine<W>) -> BTreeMap<u16, ObjectiveActor> {
-    let mut actors: BTreeMap<_, _> = engine
+fn human_objective_actors<W: Write>(engine: &Engine<W>) -> BTreeMap<u16, ObjectiveActor> {
+    engine
         .active
         .iter()
         .chain(engine.peers.values())
@@ -1075,7 +1105,11 @@ pub(crate) fn objective_actors<W: Write>(engine: &Engine<W>) -> BTreeMap<u16, Ob
                 },
             ))
         })
-        .collect();
+        .collect()
+}
+
+pub(crate) fn objective_actors<W: Write>(engine: &Engine<W>) -> BTreeMap<u16, ObjectiveActor> {
+    let mut actors = human_objective_actors(engine);
     for (&id, bot) in &engine.bot_registry.bots {
         if let Some(r) = bot.target.runtime
             && bot.health > 0
@@ -1094,8 +1128,185 @@ pub(crate) fn objective_actors<W: Write>(engine: &Engine<W>) -> BTreeMap<u16, Ob
     actors
 }
 
+fn bot_capture_actor<W: Write>(
+    engine: &Engine<W>,
+    runtime: &Runtime,
+    index: u16,
+    source: BotCaptureSource,
+    now: Duration,
+) -> Option<ObjectiveActor> {
+    if !runtime.started
+        || source.round != engine.round_number
+        || !engine.round_combat_allowed(now)
+        || !engine.accepts_subscription_world(source.world)
+        || engine
+            .active
+            .iter()
+            .chain(engine.peers.values())
+            .any(|actor| actor.reservation.player == source.player)
+        || !engine.bot_registry.config.as_ref().is_some_and(|config| {
+            config.autonomous
+                && config
+                    .objective_policy
+                    .as_ref()
+                    .is_some_and(|policy| policy.interactions_enabled)
+        })
+    {
+        return None;
+    }
+    let bot = engine.bot_registry.bots.get(&source.player)?;
+    let motion = bot.target.runtime?;
+    let physics = motion.physics_motion?;
+    let squad = runtime.state.squad(bot.target.squad.squad_index())?;
+    if bot.allocation_generation != source.allocation
+        || motion.generation != source.life
+        || bot.target.squad.team() != source.team
+        || squad.assignment.primary_index != index
+        || !bot.task.is_operator_for(index, source.life)
+        || bot.task.recovering
+        || !matches!(motion.phase, crate::development_target::BotPhase::Complete)
+        || physics.blocked
+        || !crate::bot_objectives::operator_safe(bot)
+    {
+        return None;
+    }
+    let [x, y, z] = physics.position.map(|value| value as f32);
+    Some(ObjectiveActor {
+        player: source.player,
+        team: source.team,
+        generation: source.life,
+        position: replication::CharacterPosition { x, y, z },
+    })
+}
+
+fn take_capture_witness(
+    runtime: &Runtime,
+    token: u32,
+    capture_witnesses: &mut BTreeMap<u32, CaptureWitness>,
+    entry_actors: &mut BTreeMap<u32, u16>,
+) -> Option<CaptureWitness> {
+    let witness = capture_witnesses.remove(&token)?;
+    if matches!(witness.completion.actor, Some(CaptureActor::Bot(_)))
+        && runtime.state.target_version(token) != Some(witness.target_version)
+    {
+        // The newer controller target and its actor own entry.
+        entry_actors.remove(&token);
+        return None;
+    }
+    Some(witness)
+}
+
+fn resolve_bot_capture_completion<W: Write>(
+    engine: &Engine<W>,
+    runtime: &mut Runtime,
+    world: &mut ObjectiveWorld,
+    token: u32,
+    source: BotCaptureSource,
+    now: Duration,
+    valid_entry: bool,
+) -> Result<Option<ObjectiveControlDelta>, &'static str> {
+    let index = runtime
+        .state
+        .objective(token)
+        .ok_or("unknown_acquisition_gameplay_objective")?
+        .replication
+        .object_index;
+    if valid_entry
+        && bot_capture_actor(engine, runtime, index, source, now)
+            .is_some_and(|actor| world.acquisition_capture_trigger(index, actor, source.trigger))
+    {
+        return Ok(None);
+    }
+    let delta = world.cancel_acquisition_bot_completion(index, now)?;
+    runtime
+        .state
+        .request_state(token, ObjectiveState::Deactivated)?;
+    Ok(Some(delta))
+}
+
+fn bot_capture_audit(operation: &str, index: u16, source: BotCaptureSource) -> Value {
+    json!({
+        "op":operation, "object":index, "world":source.world, "round":source.round,
+        "player":source.player, "allocation":source.allocation, "life":source.life,
+        "team":source.team, "trigger":source.trigger,
+    })
+}
+
+fn stage_bot_captures<W: Write>(
+    engine: &Engine<W>,
+    runtime: &Runtime,
+    world: &mut ObjectiveWorld,
+    actors: &mut BTreeMap<u16, ObjectiveActor>,
+    now: Duration,
+    changed: &mut BTreeMap<u16, ObjectiveControlDelta>,
+    audit: &mut Vec<Value>,
+) {
+    let world_id = engine
+        .active
+        .iter()
+        .chain(engine.peers.values())
+        .next()
+        .map(|actor| actor.reservation.world);
+    for (token, object) in runtime.state.objectives() {
+        if object.fsp.is_none() || !runtime.state.has_callback(token) {
+            continue;
+        }
+        let index = object.replication.object_index;
+        if let Some(source) = world.acquisition_bot_capture(index) {
+            if let Some(actor) = bot_capture_actor(engine, runtime, index, source, now)
+                .filter(|actor| world.acquisition_capture_trigger(index, *actor, source.trigger))
+            {
+                actors.insert(source.player, actor);
+            } else if let Some(delta) = world.cancel_acquisition_bot_capture(index, now) {
+                changed.insert(index, delta);
+                audit.push(bot_capture_audit(
+                    "acquisition_bot_capture_cancelled",
+                    index,
+                    source,
+                ));
+            }
+            continue;
+        }
+        let Some(world_id) = world_id else {
+            continue;
+        };
+        if world.state(index) != Some(ObjectiveState::Deactivated) {
+            continue;
+        }
+        let selected = engine.bot_registry.bots.iter().find_map(|(&player, bot)| {
+            let mut source = BotCaptureSource {
+                player,
+                allocation: bot.allocation_generation,
+                life: bot.target.runtime?.generation,
+                team: bot.target.squad.team(),
+                world: world_id,
+                round: engine.round_number,
+                trigger: 0,
+            };
+            if !bot.task.is_operator_for(index, source.life) {
+                return None;
+            }
+            let actor = bot_capture_actor(engine, runtime, index, source, now)?;
+            source.trigger = (0..world.acquisition_capture_trigger_count(index))
+                .find(|&trigger| world.acquisition_capture_trigger(index, actor, trigger))?;
+            let delta = world.start_acquisition_bot_capture(index, actor, source, now)?;
+            Some((source, actor, delta))
+        });
+        if let Some((source, actor, delta)) = selected {
+            actors.insert(source.player, actor);
+            changed.insert(index, delta);
+            audit.push(bot_capture_audit(
+                "acquisition_bot_capture_started",
+                index,
+                source,
+            ));
+        }
+    }
+}
+
 // Keep the established objective phase for default-off worlds; the opted-in
 // native pass calls this after squad/platoon effects have changed actor state.
+#[allow(clippy::too_many_arguments)]
 fn stage_objective_observations<W: Write>(
     engine: &Engine<W>,
     runtime: &mut Runtime,
@@ -1104,9 +1315,12 @@ fn stage_objective_observations<W: Write>(
     changed: &mut BTreeMap<u16, ObjectiveControlDelta>,
     entry_actors: &mut BTreeMap<u32, u16>,
     capture_witnesses: &mut BTreeMap<u32, CaptureWitness>,
+    audit: &mut Vec<Value>,
 ) -> Result<(), &'static str> {
-    let (changes, captures) = world.tick_with_capture_completions(now, &objective_actors(engine));
-    *changed = changes.into_iter().map(|d| (d.object_index, d)).collect();
+    let mut actors = human_objective_actors(engine);
+    stage_bot_captures(engine, runtime, world, &mut actors, now, changed, audit);
+    let (changes, captures) = world.tick_with_capture_completions(now, &actors);
+    changed.extend(changes.into_iter().map(|d| (d.object_index, d)));
     for (token, object) in runtime.state.objectives().collect::<Vec<_>>() {
         if let Some(delta) = changed.get(&object.replication.object_index) {
             entry_actors.insert(token, delta.state_actor.actor_index);
@@ -1183,5 +1397,124 @@ pub(crate) mod test_support {
         Arc::get_mut(&mut runtime.setup).unwrap().structural = Some(setup.clone());
         runtime.structural = Some(crate::acquisition_structural::Runtime::new(setup));
         runtime.started = true;
+    }
+}
+
+#[cfg(test)]
+mod capture_callback_tests {
+    use super::*;
+    use crate::spawn_progression::tests::dynamic_bodies::acquisition_gameplay_tests::registered_capture_operator;
+
+    #[test]
+    fn newer_source_target_drops_a_stale_bot_capture_witness_and_actor() {
+        let (mut engine, _) = registered_capture_operator();
+        engine
+            .tick_acquisition_objectives(Duration::from_millis(200), 2)
+            .unwrap();
+        let mut runtime = engine.acquisition_gameplay.clone().unwrap();
+        let mut world = engine.objective_world.clone().unwrap();
+        let mut changed = BTreeMap::new();
+        let mut actors = BTreeMap::new();
+        let mut witnesses = BTreeMap::new();
+        stage_objective_observations(
+            &engine,
+            &mut runtime,
+            &mut world,
+            Duration::from_millis(3200),
+            &mut changed,
+            &mut actors,
+            &mut witnesses,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let (&token, witness) = witnesses.first_key_value().unwrap();
+        assert_eq!(actors.get(&token), Some(&witness.completion.player));
+        let object_id = runtime.state.objective(token).unwrap().object_id();
+        // The source Ground notification can request Completed again on the same slot.
+        runtime
+            .state
+            .request_forced_fsp_deactivation(object_id, 0x0380_0000, 0)
+            .unwrap();
+        assert!(take_capture_witness(&runtime, token, &mut witnesses, &mut actors).is_none());
+        assert!(!actors.contains_key(&token));
+        assert_eq!(
+            runtime.state.objective(token).unwrap().current_attacker,
+            0x0380_0000
+        );
+        assert_eq!(
+            runtime
+                .state
+                .pending_transitions()
+                .find(|(id, _)| *id == token),
+            Some((token, ObjectiveState::Completed as i32))
+        );
+    }
+
+    #[test]
+    fn lost_bot_after_clock_resets_capture_candidate_before_source_entry() {
+        let (mut engine, player) = registered_capture_operator();
+        engine
+            .tick_acquisition_objectives(Duration::from_millis(200), 2)
+            .unwrap();
+        let mut runtime = engine.acquisition_gameplay.clone().unwrap();
+        let mut world = engine.objective_world.clone().unwrap();
+        let now = Duration::from_millis(3200);
+        let mut changed = BTreeMap::new();
+        let mut actors = BTreeMap::new();
+        let mut witnesses = BTreeMap::new();
+        let mut audit = Vec::new();
+        stage_objective_observations(
+            &engine,
+            &mut runtime,
+            &mut world,
+            now,
+            &mut changed,
+            &mut actors,
+            &mut witnesses,
+            &mut audit,
+        )
+        .unwrap();
+        let (token, witness) = witnesses.pop_first().unwrap();
+        let index = witness.completion.object_index;
+        let Some(CaptureActor::Bot(source)) = witness.completion.actor else {
+            panic!("expected an exact registered bot completion");
+        };
+        assert_eq!(
+            runtime.state.target_version(token),
+            Some(witness.target_version)
+        );
+        assert_eq!(world.state(index), Some(ObjectiveState::Completed));
+        engine.bot_registry.bots.get_mut(&player).unwrap().health = 0;
+        let delta = resolve_bot_capture_completion(
+            &engine,
+            &mut runtime,
+            &mut world,
+            token,
+            source,
+            now,
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(delta.state_actor.actor_index, u16::MAX);
+        assert_eq!(world.state(index), Some(ObjectiveState::Deactivated));
+        assert_eq!(world.interaction_owner(index), None);
+        assert_eq!(
+            runtime
+                .state
+                .pending_transitions()
+                .find(|(target, _)| *target == token),
+            Some((token, ObjectiveState::Deactivated as i32))
+        );
+        assert_eq!(
+            engine
+                .ground_runtime
+                .as_ref()
+                .unwrap()
+                .get(4)
+                .unwrap()
+                .state,
+            0
+        );
     }
 }

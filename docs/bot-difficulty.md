@@ -95,6 +95,23 @@ original team, and a human who defuses the charge earns their normal award.
 Synthetic checks establish these server transitions; native match presentation
 and original-map movement acceptance remain separate checks.
 
+## Source Acquisition Capture
+
+With an autonomous population and `objective_policy.interactions_enabled`, a
+selected attacking bot can hold its source-assigned primary Capture at the
+authored trigger. Admission requires a stationary, grounded body with no
+conflicting recovery, passage or supply task. The same Capture clock and
+callback used by human players activate the linked Escort and forward spawn.
+This covers authored Capture rules that complete at the end of the activation
+hold. A Capture selected only through a manual FRAGO is outside this scope.
+
+The hold stays with the same world, round, allocation, life, team and operator
+role. If those conditions lapse, the recorded cancellation clears the hold and
+a later human interaction starts a new timer. A bot completion preserves the
+source team's tagged leader statistics without awarding personal XP, and the
+completed state uses the uncredited actor marker so a reused slot does not
+appear as the capturer. Ordinary movement and collision admission still apply.
+
 ## Settling over a walking corridor
 
 A descending body may spend up to 500 ms settling when its feet are still within
