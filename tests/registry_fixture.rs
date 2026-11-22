@@ -17,6 +17,7 @@ fn main() {
     }
 
     let mut profiles = Vec::new();
+    let mut party_profiles = Vec::new();
     for attacking in 0..3 {
         for defending in 0..3 {
             if attacking == defending {
@@ -36,11 +37,31 @@ fn main() {
             });
             fs::write(&spawns, serde_json::to_vec(&catalog).unwrap()).unwrap();
             profiles.push(json!({"profile_id":name,"spawn_catalog":spawns}));
+
+            let mut party_catalog = catalog;
+            party_catalog["match_profile"]["team_capacity"] = json!(4);
+            party_catalog["match_profile"]["squad_capacity"] = json!(2);
+            party_catalog["maps"][0]["squads"]
+                .as_array_mut()
+                .unwrap()
+                .extend([
+                    json!({"index":1,"team":0,"platoon":0,"squad":1,"faction":null,"available":[0],"default_spawn":0}),
+                    json!({"index":17,"team":1,"platoon":0,"squad":1,"faction":defending,"available":[0],"default_spawn":0}),
+                ]);
+            let party_spawns = output.join(format!("party-{name}.json"));
+            fs::write(&party_spawns, serde_json::to_vec(&party_catalog).unwrap()).unwrap();
+            party_profiles.push(json!({"profile_id":name,"spawn_catalog":party_spawns}));
         }
     }
     let manifest = json!({"format":"mag_match_profiles_v1","profiles":profiles});
     fs::write(
         output.join("profiles.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    let manifest = json!({"format":"mag_match_profiles_v1","profiles":party_profiles});
+    fs::write(
+        output.join("party-profiles.json"),
         serde_json::to_vec(&manifest).unwrap(),
     )
     .unwrap();

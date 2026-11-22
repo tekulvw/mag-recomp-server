@@ -20,14 +20,14 @@ namespace Server.Medius
             _nextTicketId = nextTicketId ?? (() => Guid.NewGuid().ToString("N"));
         }
 
-        public Entry Put(string owner, int gameType, byte faction, T value)
+        public Entry Put(string owner, int gameType, byte faction, T value, int size = 1)
         {
             ValidateOwner(owner);
-            if (gameType < 0 || gameType > 2 || faction > 2)
+            if (gameType < 0 || gameType > 2 || faction > 2 || size < 1 || size > 32)
                 throw new ArgumentException("Pending humans require mode 0..2 and saved faction 0..2.");
             if (value == null) throw new ArgumentNullException(nameof(value));
             _entries.TryGetValue(owner, out var previous);
-            if (previous != null && previous.Human.GameType == gameType && previous.Human.Faction == faction)
+            if (previous != null && previous.Human.GameType == gameType && previous.Human.Faction == faction && previous.Human.Size == size)
             {
                 var refreshed = new Entry(owner, previous.Human, value);
                 _entries[owner] = refreshed;
@@ -42,7 +42,7 @@ namespace Server.Medius
                     (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == ':') ||
                 _entries.Values.Any(entry => entry.Human.TicketId == ticketId))
                 throw new InvalidOperationException("Ticket generator must return a unique pending identifier of at most 64 characters.");
-            var replacement = new Entry(owner, new MagQueuedHuman(ticketId, gameType, faction, _nextOrder), value);
+            var replacement = new Entry(owner, new MagQueuedHuman(ticketId, gameType, faction, _nextOrder, size), value);
             _entries[owner] = replacement;
             _nextOrder = followingOrder;
             return replacement;

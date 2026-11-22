@@ -18,7 +18,15 @@ internal static class RealRegistryWorkerChecks
         string catalogPath = Environment.GetEnvironmentVariable(CatalogsVariable);
         if (string.IsNullOrWhiteSpace(catalogPath))
             throw new InvalidOperationException($"{CatalogsVariable} must point to generated synthetic catalogs.");
-        LeadershipProgressionChecks.RealRegistryWorkers(binary, Path.GetFullPath(catalogPath));
+        string catalogs = Path.GetFullPath(catalogPath);
+        LeadershipProgressionChecks.RealRegistryWorkers(binary, catalogs);
+    }
+
+    public static void RunParties()
+    {
+        string binary = Path.GetFullPath(Environment.GetEnvironmentVariable(BinaryVariable));
+        string catalogs = Path.GetFullPath(Environment.GetEnvironmentVariable(CatalogsVariable));
+        LeadershipProgressionChecks.RealRegistryParties(binary, catalogs);
     }
 
     internal sealed class Worker : IAsyncDisposable
@@ -37,7 +45,7 @@ internal static class RealRegistryWorkerChecks
             _errors = process.StandardError.ReadToEndAsync();
         }
 
-        public static async Task<Worker> StartAsync(string id, string directory, string binary, string catalogs)
+        public static async Task<Worker> StartAsync(string id, string directory, string binary, string catalogs, bool parties = false)
         {
             string workingDirectory = Directory.CreateDirectory(Path.Combine(directory, id)).FullName;
             string journal = Path.Combine(workingDirectory, "worker.jsonl");
@@ -55,13 +63,14 @@ internal static class RealRegistryWorkerChecks
                 ("--item-catalog", "items.json"), ("--spawn-catalog", "spawns.json"), ("--wire-profiles", "wire.json"),
                 ("--character-blast-rules", "blast.json"), ("--bootstrap-loadouts", "bootstrap.json"),
                 ("--retail-combat-metadata", "combat.json"), ("--retail-armory-catalog", "armory.json"),
-                ("--skill-catalog", "skills.json"), ("--fall-damage-rules", "fall.json"), ("--match-profiles", "profiles.json")
+                ("--skill-catalog", "skills.json"), ("--fall-damage-rules", "fall.json"), ("--match-profiles", parties ? "party-profiles.json" : "profiles.json")
             })
             {
                 start.ArgumentList.Add(option);
                 start.ArgumentList.Add(Path.Combine(catalogs, file));
             }
 
+            if (parties) start.ArgumentList.Add("--party-reservations");
             var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start the owned synthetic worker.");
             var worker = new Worker(id, process, journal);
             try

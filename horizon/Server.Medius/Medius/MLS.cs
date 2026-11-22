@@ -39,6 +39,7 @@ namespace Server.Medius
         {
             if (cancel.PartyId != 0)
             {
+                if (lobby is MagWorldRegistry registry && registry.CancelPartyQueue(session, cancel.PartyId)) return;
                 _logger.Warn($"MAG retail cancel ignored: reason=party_cancel_unsupported transaction={cancel.TransactionId} partyId={cancel.PartyId}");
                 return;
             }
@@ -240,6 +241,13 @@ namespace Server.Medius
                         if (Program.GameplayLobby != null && data.MagMlsSession.State == MagMlsSession.SessionState.Ready &&
                             plugin.IsValid && plugin.PluginId == 0 && RT.Models.MAG.MagMessageCodec.TryParseClientForApplication(plugin.Payload, data.ApplicationId, out var gameplay))
                         {
+                            if (gameplay is RT.Models.MAG.MagRetailPartyMessage party)
+                            {
+                                if (Program.GameplayLobby is not MagWorldRegistry registry ||
+                                    !registry.RoutePartyMembership(data.MagMlsSession, party))
+                                    Logger.Warn($"MAG retail party operation refused: type={party.MessageType:X4}");
+                                break;
+                            }
                             if (gameplay is RT.Models.MAG.MagServerStatusRequest status)
                             { Queue(RT.Models.MAG.MagMessageCodec.ToPluginMessageForApplication(Program.GameplayLobby.Status(status.TransactionId), data.ApplicationId), clientChannel); break; }
                             if (gameplay is RT.Models.MAG.MagRetailCancelJoinRequest cancel)
@@ -268,6 +276,23 @@ namespace Server.Medius
                         data.MagMlsSession.CharacterStore = Program.CreateCharacterStore();
                         data.MagMlsSession.LoadoutCommitted = (account, character) => Program.GameplayLobby?.ArmoryLoadoutCommitted(account, character);
                         var replies = data.MagMlsSession.HandleMany(plugin, magNow);
+                        if (Program.GameplayLobby is MagWorldRegistry partyRegistry && partyRegistry.PartyMembershipEnabled &&
+                            data.MagMlsSession.State == MagMlsSession.SessionState.Ready)
+                        {
+                            var partySession = data.MagMlsSession;
+                            var partyCharacter = partySession.CharacterId;
+                            bool CurrentPartySession() => clientChannel.Active && ReferenceEquals(data.MagMlsSession, partySession);
+                            void SendPartyMessage(RT.Models.MAG.MagMessage reply)
+                            {
+                                if (CurrentPartySession())
+                                    Queue(RT.Models.MAG.MagMessageCodec.ToPluginMessageForApplication(reply, partySession.ApplicationId), clientChannel);
+                            }
+                            partyRegistry.RegisterPartySession(partySession, CurrentPartySession, SendPartyMessage, record =>
+                            {
+                                if (record.AccountId == partyCharacter)
+                                    SendPartyMessage(new RT.Models.MAG.MagCharacterRecordNotification {Record = record});
+                            });
+                        }
                         Logger.Info($"MAG MLS plugin type={plugin.ApplicationMessageType:X4} bytes={plugin.Payload?.Length ?? 0} state={data.MagMlsSession.State}/{data.MagMlsSession.StorageStatus} refresh={data.MagMlsSession.LoadoutRefreshStatus} replies={replies.Count}");
                         Queue(replies, clientChannel);
                         break;

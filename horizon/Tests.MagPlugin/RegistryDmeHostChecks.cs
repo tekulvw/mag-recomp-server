@@ -213,6 +213,11 @@ internal static partial class LeadershipProgressionChecks
         public ConcurrentQueue<JsonObject> Reservations { get; } = new();
         public string SelectedProfile { get; private set; }
         public volatile bool PauseHeartbeat;
+        public bool SupportsParties;
+        public Func<JsonObject, Task> BeforePartyReply;
+        public volatile bool DropNextPartyReply;
+        public Func<JsonObject, bool> RefuseParty;
+        readonly ConcurrentDictionary<string, string[]> _partyReservations = new(StringComparer.Ordinal);
         public volatile string IncarnationId = "fixture-1";
 
         private static readonly JsonObject[] Profiles = (from byte attacker in new byte[] { 0, 1, 2 }
@@ -273,6 +278,15 @@ internal static partial class LeadershipProgressionChecks
                             response["capabilities"] = new JsonArray("committed_loadout_selection_v1", "active_loadout_refresh_v1",
                                 "match_profiles_v1", "independent_match_cohorts_v1", "worker_registry_v1");
                             response["match_profiles"] = new JsonArray(Profiles.Select(p => p.DeepClone()).ToArray());
+                            if (SupportsParties)
+                            {
+                                response["capabilities"]!.AsArray().Add("party_reservation_v1");
+                                foreach (var profile in response["match_profiles"]!.AsArray())
+                                {
+                                    profile["squad_capacity"] = 2;
+                                    profile["squad_counts"] = new JsonArray(2, 2);
+                                }
+                            }
                             if (PendingReward is JsonNode reward) response["rewards"] = new JsonArray(reward.DeepClone());
                             break;
                         case "progression_committed":
@@ -284,10 +298,44 @@ internal static partial class LeadershipProgressionChecks
                             selected.Remove("maximum_players");
                             selected.Remove("team_capacity");
                             selected["formation_id"] = request["formation_id"]!.DeepClone();
+                            if (SupportsParties) selected["admission_epoch"] = 1;
                             response["selected_match"] = selected;
                             break;
                         case "reserve":
                             Reservations.Enqueue(request);
+                            break;
+                        case "reserve_party":
+                        case "release_party":
+                            if (BeforePartyReply != null) await BeforePartyReply(request);
+                            if (op == "reserve_party" && RefuseParty?.Invoke(request) == true)
+                            {
+                                response["ok"] = false; response["error"] = "synthetic_party_refusal";
+                                break;
+                            }
+                            var party = new JsonObject();
+                            foreach (var field in new[] { "formation_id", "profile_id", "cohort_id", "world_id", "admission_epoch" })
+                                party[field] = request[field]!.DeepClone();
+                            party["status"] = op == "reserve_party" ? "reserved" : "released";
+                            party["reservation_ids"] = new JsonArray();
+                            if (op == "reserve_party")
+                            {
+                                var members = request["members"]!.AsArray();
+                                var ids = members.Select(member => member["reservation_id"]!.GetValue<string>()).ToArray();
+                                _partyReservations.TryAdd(request["cohort_id"]!.GetValue<string>(), ids);
+                                foreach (var reservation in ids) party["reservation_ids"]!.AsArray().Add(reservation);
+                                var faction = members[0]["character"]!["faction"]!.GetValue<byte>();
+                                int team = faction == byte.Parse(SelectedProfile.Split('-')[1]) ? 0 : 1;
+                                party["team"] = team;
+                                var draws = Requests.Where(call => call["op"]!.GetValue<string>() == "reserve_party" &&
+                                    call["formation_id"]!.GetValue<string>() == request["formation_id"]!.GetValue<string>() &&
+                                    call["members"]![0]!["character"]!["faction"]!.GetValue<byte>() == faction)
+                                    .Select(call => call["cohort_id"]!.GetValue<string>()).Distinct().ToList();
+                                party["squad"] = 16 * team + draws.IndexOf(request["cohort_id"]!.GetValue<string>());
+                                if (DropNextPartyReply) { DropNextPartyReply = false; return; }
+                            }
+                            else if (_partyReservations.TryGetValue(request["cohort_id"]!.GetValue<string>(), out var released))
+                                foreach (var reservation in released) party["reservation_ids"]!.AsArray().Add(reservation);
+                            response["party_reservation"] = party;
                             break;
                     }
                     await ReplyAsync(response);

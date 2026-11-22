@@ -92,10 +92,10 @@ namespace Server.Medius
             return ready ? "admission_accepted" : "admission_not_ready";
         }
         /// <summary>First reason a join request's own fields are unsupported here, or null.</summary>
-        public static string JoinRequestRejection(MagJoinGameRequest request, bool retailApplication, Func<uint, bool> modeIsCurrent)
+        public static string JoinRequestRejection(MagJoinGameRequest request, bool retailApplication, Func<uint, bool> modeIsCurrent, bool authorizedParty = false)
         {
             if ((request is MagRetailJoinGameRequest) != retailApplication) return "request_application_mismatch";
-            if (request is MagRetailJoinGameRequest retail && retail.PartyId != 0) return "party_join_unsupported";
+            if (request is MagRetailJoinGameRequest retail && retail.PartyId != 0 && !authorizedParty) return "party_join_unsupported";
             if (request.Preference != 1) return "preference_unsupported";
             if (!modeIsCurrent(request.Value)) return "mode_not_current";
             if (request.ClientType != 0) return "client_type_unsupported";
@@ -188,6 +188,7 @@ namespace Server.Medius
         }
         void InitializeGameplayHello(GameplayBridgeResponse hello)
         {
+            _supportsPartyReservations = hello?.SupportsPartyReservations == true;
             RequireLoadoutSelectionCapability(hello);
             InitializeFactionMatchmaking(hello);
             _independentMatchCohorts = hello.Capabilities.Contains("independent_match_cohorts_v1", StringComparer.Ordinal);
@@ -294,44 +295,9 @@ namespace Server.Medius
                     var allocation = await admissionWorld.OnJoinGameRequest(new MediusServerJoinGameRequest { ConnectInfo = new NetConnectionInfo { SessionKey = session.SessionKey } });
                     if (allocation.Confirmation != MGCL_ERROR_CODE.MGCL_SUCCESS || !admissionWorld.Clients.TryGetValue(allocation.DmeClientIndex, out client)) return failure;
                     client.ApplicationId = _applicationId;
-                    var progressionCatalog = _store.ProgressionCatalog;
-                    bool assistRewardsEnabled = _supportsAssistRewards && _applicationId == 20231 && progressionCatalog?.AssistRewardsEnabled == true;
-                    reservation = new Reservation {
-                        Id = Id(), AccountId = character.Id, Account = session.AuthenticatedAccount, CharacterId = character.Id,
-                        Faction = character.Faction, Notify = notify, Client = client, Deadline = DateTime.UtcNow.AddSeconds(30),
-                        QueueSession = ownerCurrent == null ? null : session,
-                        QueueRequest = ownerCurrent == null ? null : request,
-                        FragoActionBonusEnabled = _supportsFragoActionBonus && _applicationId == 20231 && progressionCatalog?.FragoActionBonusEnabled == true,
-                        FragoObjectiveBonusEnabled = _supportsFragoObjectiveBonus && _applicationId == 20231 && progressionCatalog?.FragoBonusEnabled == true,
-                        ExtendedObjectiveRewardsEnabled = _supportsExtendedObjectiveRewards && _applicationId == 20231 &&
-                            progressionCatalog?.ExtendedObjectiveRewardsEnabled == true,
-                        RepairRewardsEnabled = _supportsRepairRewards && _applicationId == 20231 && progressionCatalog?.RepairRewardsEnabled == true,
-                        AssistRewardsEnabled = assistRewardsEnabled,
-                        AssistFragoBonusEnabled = assistRewardsEnabled && _supportsFragoKillBonus && progressionCatalog?.FragoBonusEnabled == true
-                    };
-                    var admissionCharacter = new Dictionary<string, object> {
-                        ["loadout_account_id"] = reservation.Account,
-                        ["leadership"] = character.Leadership == null ? null : new GameplayLeadershipRecord(character.Leadership),
-                        ["leadership_progression_enabled"] = progressionCatalog?.InitialLeadershipPoints.HasValue == true,
-                        ["account_id"] = progressionCatalog == null ? null : reservation.Account,
-                        ["progression"] = progressionCatalog == null ? null : new { experience = record.Experience, level = record.Level, skill_points = record.SkillPoints },
-                        ["skills"] = record.Skills, ["character_id"] = record.AccountId, ["name"] = record.Name,
-                        ["faction"] = record.Faction, ["head"] = record.HeadId, ["voice"] = record.VoiceId,
-                        ["universe_id"] = record.UniverseId, ["loadouts"] = admissionLoadouts
-                    };
-                    // Older workers reject unknown character fields even when their value is false.
-                    if (_supportsFragoKillBonus)
-                        admissionCharacter["frago_bonus_enabled"] = _applicationId == 20231 && progressionCatalog?.FragoBonusEnabled == true;
-                    if (_supportsFragoActionBonus)
-                        admissionCharacter["frago_action_bonus_enabled"] = reservation.FragoActionBonusEnabled;
-                    if (_supportsFragoObjectiveBonus)
-                        admissionCharacter["frago_objective_bonus_enabled"] = reservation.FragoObjectiveBonusEnabled;
-                    if (_supportsExtendedObjectiveRewards)
-                        admissionCharacter["extended_objective_rewards_enabled"] = reservation.ExtendedObjectiveRewardsEnabled;
-                    if (_supportsRepairRewards)
-                        admissionCharacter["repair_rewards_enabled"] = reservation.RepairRewardsEnabled;
-                    if (_supportsAssistRewards)
-                        admissionCharacter["assist_rewards_enabled"] = reservation.AssistRewardsEnabled;
+                    var prepared = PrepareReservation(session, ownerCurrent == null ? null : request, notify, character, record, admissionLoadouts, client);
+                    reservation = prepared.Owner;
+                    var admissionCharacter = prepared.Character;
                     var reserve = new { v = 2, request_id = Id(), op = "reserve", reservation_id = reservation.Id,
                         world_id = (uint)World.WorldId, player_id = (ushort)client.DmeId, account_id = character.Id, session_key = client.SessionKey, access_key = client.Token,
                         character = admissionCharacter };
@@ -408,14 +374,68 @@ namespace Server.Medius
                 // Reconcile once after admission, closing saves committed between
                 // the initial store read and registration/reserve acknowledgement.
                 ArmoryLoadoutCommitted(reservation.Account, reservation.CharacterId);
-                var response = JoinResponse(request.TransactionId, 0);
-                response.MediusWorldUid = (uint)World.WorldId; response.ConnectionType = 3; response.AddressType = 1;
-                response.ServerAddress = FixedAscii(_options.AdvertisedAddress.ToString(), 16); response.ServerPort = _options.GameTcpPort;
-                response.WorldId = (uint)World.WorldId; response.AccessKey = FixedAscii(client.Token, 17);
-                return response;
+                return PrepareJoinDescriptor(request.TransactionId, client);
             }
             finally { _admission.Release(); }
         }
+        (Reservation Owner, Dictionary<string, object> Character) PrepareReservation(
+            MagMlsSession session, MagJoinGameRequest request, Action<MagCharacterRecord> notify,
+            StoredCharacter character, MagCharacterRecord record, GameplayAdmissionLoadouts admissionLoadouts, DmeClient client)
+        {
+        var progressionCatalog = _store.ProgressionCatalog;
+        bool assistRewardsEnabled = _supportsAssistRewards && _applicationId == 20231 && progressionCatalog?.AssistRewardsEnabled == true;
+        var reservation = new Reservation {
+            Id = Id(), AccountId = character.Id, Account = session.AuthenticatedAccount, CharacterId = character.Id,
+            Faction = character.Faction, Notify = notify, Client = client, Deadline = DateTime.UtcNow.AddSeconds(30),
+            QueueSession = request == null ? null : session,
+            QueueRequest = request,
+            FragoActionBonusEnabled = _supportsFragoActionBonus && _applicationId == 20231 && progressionCatalog?.FragoActionBonusEnabled == true,
+            FragoObjectiveBonusEnabled = _supportsFragoObjectiveBonus && _applicationId == 20231 && progressionCatalog?.FragoBonusEnabled == true,
+            ExtendedObjectiveRewardsEnabled = _supportsExtendedObjectiveRewards && _applicationId == 20231 &&
+                progressionCatalog?.ExtendedObjectiveRewardsEnabled == true,
+            RepairRewardsEnabled = _supportsRepairRewards && _applicationId == 20231 && progressionCatalog?.RepairRewardsEnabled == true,
+            AssistRewardsEnabled = assistRewardsEnabled,
+            AssistFragoBonusEnabled = assistRewardsEnabled && _supportsFragoKillBonus && progressionCatalog?.FragoBonusEnabled == true
+        };
+        var admissionCharacter = new Dictionary<string, object> {
+            ["loadout_account_id"] = reservation.Account,
+            ["leadership"] = character.Leadership == null ? null : new GameplayLeadershipRecord(character.Leadership),
+            ["leadership_progression_enabled"] = progressionCatalog?.InitialLeadershipPoints.HasValue == true,
+            ["account_id"] = progressionCatalog == null ? null : reservation.Account,
+            ["progression"] = progressionCatalog == null ? null : new { experience = record.Experience, level = record.Level, skill_points = record.SkillPoints },
+            ["skills"] = record.Skills, ["character_id"] = record.AccountId, ["name"] = record.Name,
+            ["faction"] = record.Faction, ["head"] = record.HeadId, ["voice"] = record.VoiceId,
+            ["universe_id"] = record.UniverseId, ["loadouts"] = admissionLoadouts
+        };
+        // Older workers reject unknown character fields even when their value is false.
+        if (_supportsFragoKillBonus)
+            admissionCharacter["frago_bonus_enabled"] = _applicationId == 20231 && progressionCatalog?.FragoBonusEnabled == true;
+        if (_supportsFragoActionBonus)
+            admissionCharacter["frago_action_bonus_enabled"] = reservation.FragoActionBonusEnabled;
+        if (_supportsFragoObjectiveBonus)
+            admissionCharacter["frago_objective_bonus_enabled"] = reservation.FragoObjectiveBonusEnabled;
+        if (_supportsExtendedObjectiveRewards)
+            admissionCharacter["extended_objective_rewards_enabled"] = reservation.ExtendedObjectiveRewardsEnabled;
+        if (_supportsRepairRewards)
+            admissionCharacter["repair_rewards_enabled"] = reservation.RepairRewardsEnabled;
+        if (_supportsAssistRewards)
+            admissionCharacter["assist_rewards_enabled"] = reservation.AssistRewardsEnabled;
+            return (reservation, admissionCharacter);
+        }
+
+        MagJoinGameResponse PrepareJoinDescriptor(int transaction, DmeClient client)
+        {
+            var response = JoinResponse(transaction, 0);
+            response.MediusWorldUid = (uint)World.WorldId;
+            response.ConnectionType = 3;
+            response.AddressType = 1;
+            response.ServerAddress = FixedAscii(_options.AdvertisedAddress.ToString(), 16);
+            response.ServerPort = _options.GameTcpPort;
+            response.WorldId = (uint)World.WorldId;
+            response.AccessKey = FixedAscii(client.Token, 17);
+            return response;
+        }
+
         MagJoinGameResponse JoinResponse(int transactionId, byte result)
         {
             MagJoinGameResponse response = _applicationId == 20231 ? new MagRetailJoinGameResponse() : new MagJoinGameResponse();

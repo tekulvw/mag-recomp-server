@@ -17,8 +17,9 @@ namespace Server.Medius
         public IPAddress ClientAddress { get; }
         public ushort ClientTcpPort { get; }
         public IReadOnlyList<MagConfiguredWorker> Workers { get; }
-        MagWorldRegistryConfig(int application, IPAddress address, ushort port, MagConfiguredWorker[] workers)
-        { ApplicationId = application; ClientAddress = address; ClientTcpPort = port; Workers = Array.AsReadOnly(workers); }
+        public int? PartyInviteSeconds { get; }
+        MagWorldRegistryConfig(int application, IPAddress address, ushort port, MagConfiguredWorker[] workers, int? partyInviteSeconds)
+        { ApplicationId = application; ClientAddress = address; ClientTcpPort = port; Workers = Array.AsReadOnly(workers); PartyInviteSeconds = partyInviteSeconds; }
 
         public static MagWorldRegistryConfig Load(string path)
         {
@@ -34,7 +35,10 @@ namespace Server.Medius
             {
                 using var doc = JsonDocument.Parse(json);
                 var root = doc.RootElement;
-                Exact(root, "format", "application_id", "client_address", "client_tcp_port", "workers");
+                bool parties = root.TryGetProperty("party_invite_seconds", out _);
+                if (parties) Exact(root, "format", "application_id", "client_address", "client_tcp_port", "workers", "party_invite_seconds");
+                else Exact(root, "format", "application_id", "client_address", "client_tcp_port", "workers");
+                int? inviteSeconds = parties ? Integer(root, "party_invite_seconds", 1, 300) : null;
                 if (root.GetProperty("format").GetString() != "mag_world_registry_v1" ||
                     Integer(root, "application_id", 20231, 20231) != 20231) throw Invalid();
                 string address = Text(root, "client_address");
@@ -65,14 +69,14 @@ namespace Server.Medius
                     if (drain.ValueKind != JsonValueKind.True && drain.ValueKind != JsonValueKind.False) throw Invalid();
                     workers.Add(new MagConfiguredWorker(id, host, workerPort, policy.MinimumPlayers, maximum, Array.AsReadOnly(teams), drain.GetBoolean()));
                 }
-                return new MagWorldRegistryConfig(20231, network.Address, (ushort)port, workers.ToArray());
+                return new MagWorldRegistryConfig(20231, network.Address, (ushort)port, workers.ToArray(), inviteSeconds);
             }
             catch (Exception error) when (error is JsonException || error is InvalidOperationException || error is FormatException || error is OverflowException)
             { throw Invalid(); }
         }
         public void ValidateDrainReload(MagWorldRegistryConfig next)
         {
-            if (next == null || ApplicationId != next.ApplicationId || !ClientAddress.Equals(next.ClientAddress) || ClientTcpPort != next.ClientTcpPort || Workers.Count != next.Workers.Count) throw Invalid();
+            if (next == null || ApplicationId != next.ApplicationId || !ClientAddress.Equals(next.ClientAddress) || ClientTcpPort != next.ClientTcpPort || PartyInviteSeconds != next.PartyInviteSeconds || Workers.Count != next.Workers.Count) throw Invalid();
             foreach (var worker in Workers)
             {
                 var other = next.Workers.SingleOrDefault(w => w.WorkerId == worker.WorkerId);

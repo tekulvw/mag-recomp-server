@@ -37,6 +37,37 @@ Account ownership is global. One account cannot hold live reservations in two wo
 
 Each scoped bridge binds one worker incarnation. Requests, subscription frames and receipts must retain that exact identity. Worker restarts are not automatically adopted by an existing host. A lost stream lease or sticky identity fault stops new admission to that entry; healthy workers can continue. This does not provide durable recovery of a crashed worker's lost reward outbox.
 
+## Private parties
+
+Configured retail registries can opt in with `"party_invite_seconds": 30`
+at the top level of the JSON. The supported range is 1–300 seconds and
+omitting the field leaves party matchmaking disabled. Start at least one
+eligible profiled gameplay worker with `--party-reservations`. Its discovery
+reply supplies actual per-profile squad capacity and counts for each side.
+A worker without those fields can still admit solo players. Standalone
+lobbies continue to offer solo matchmaking.
+
+Private invites bind current authenticated accounts and their fixed selected
+characters. A party is same-faction and its leader is first in the roster.
+Only that current leader can queue or cancel the party entry. After
+publication, a cancel releases the original entry's still-unclaimed
+reservations and leaves claimed members in the match. A leader leaving
+dissolves the party. An invite response carries no generation
+on the wire, so a party never reissues an invitation to the same account.
+Expiry, departure and capacity are replacement policy. This scope does not
+emit the native decline-presentation event or support open parties and voice.
+
+A group counts toward the human startup and team limits as one indivisible
+entry. It occupies one authored squad in a new formation. Solo late joins
+still use the ordinary placement path. Horizon prepares every selected
+party before releasing any descriptors for that formation. The worker
+acknowledges cohort, formation, profile, world, admission epoch, squad and
+ordered reservation IDs. Horizon revalidates all owners before exposing
+their DME tokens and then continues with ordinary solo admission. An
+uncertain reply is reconciled by the same cohort identity. A prepublication
+failure rolls back the attempted cohorts and ordinary per-person transport
+lifecycle applies after publication.
+
 ## Drain and reconstruction
 
 Replace the configuration file atomically to change `draining` flags. Horizon checks once per second and publishes one complete drain-policy snapshot. Draining blocks new placement and leaves existing world processing active. Other configuration changes are rejected on reload and require controlled reconstruction. A replacement Rust process likewise requires reconstructing its Horizon host rather than rebinding old reservations to a new incarnation. Preserve outstanding receipts and owned sessions when planning that operation.

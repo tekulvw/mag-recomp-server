@@ -17,6 +17,13 @@ namespace Server.Medius
         public static MagWorldPlacementDecision PlanNext(IReadOnlyList<MagQueuedHuman> humans,
             IReadOnlyList<MagWorldPlacementState> worlds, Func<int, int> random)
         {
+            MagWorldPlacementDecision fresh = null;
+            if (humans.Any(human => human.Size > 1))
+            {
+                fresh = PlanNewFormation(humans, worlds, random);
+                if (fresh?.Players.Any(human => human.Size > 1) == true) return fresh;
+            }
+
             foreach (var world in worlds.Where(w => w.Ready && !w.Draining && w.CurrentProfile != null)
                 .OrderByDescending(w => w.LiveCount + w.PendingCount))
             {
@@ -27,12 +34,18 @@ namespace Server.Medius
                 foreach (var human in humans.OrderBy(h => h.Order))
                 {
                     if (selected.Count >= room) break;
-                    if (human.GameType != profile.GameType || (human.Faction != profile.AttackingFaction && human.Faction != profile.DefendingFaction) ||
+                    if (human.Size != 1 || human.GameType != profile.GameType || (human.Faction != profile.AttackingFaction && human.Faction != profile.DefendingFaction) ||
                         counts[human.Faction] >= profile.TeamCapacity) continue;
                     selected.Add(human); counts[human.Faction]++;
                 }
                 if (selected.Count > 0) return new(world.WorkerId, profile, selected.AsReadOnly(), false);
             }
+            return fresh ?? PlanNewFormation(humans, worlds, random);
+        }
+
+        static MagWorldPlacementDecision PlanNewFormation(IReadOnlyList<MagQueuedHuman> humans,
+            IReadOnlyList<MagWorldPlacementState> worlds, Func<int, int> random)
+        {
             var candidates = new List<MagWorldPlacementDecision>();
             foreach (var world in worlds.Where(w => w.Ready && !w.Draining && w.CanForm))
             {

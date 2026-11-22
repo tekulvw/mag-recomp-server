@@ -22,7 +22,8 @@ namespace RT.Models.MAG
 
         public static bool TryParseClientForApplication(byte[] payload, int applicationId, out MagMessage message)
         {
-            if (TryParseForApplication(payload, applicationId, out message) && (message is MagRetailCancelJoinRequest || message is MagTrainingCompletedRequest || message is MagKeepAlive || message is MagJoinGameRequest || message is MagServerStatusRequest || message is MagHello || message is MagProtocolInfo || message is MagAccountLoginRequest || message is MagCharacterDataRequest ||
+            if (TryParseForApplication(payload, applicationId, out message) && (message is MagRetailPartyInvite || message is MagRetailPartyInviteResponse ||
+                message is MagRetailPartyLeave || message is MagRetailCancelJoinRequest || message is MagTrainingCompletedRequest || message is MagKeepAlive || message is MagJoinGameRequest || message is MagServerStatusRequest || message is MagHello || message is MagProtocolInfo || message is MagAccountLoginRequest || message is MagCharacterDataRequest ||
                 message is MagNpAuthenticateRequest || message is MagUniverseListRequest || message is MagRetailPatchRequest ||
                 message is MagNewsEulaRequest || message is MagCharacterListRequest || message is MagCreateCharacterRequest || message is MagLoadoutUpdateRequest || message is MagPurchaseSkillRequest)) return true;
             message = null;
@@ -43,13 +44,19 @@ namespace RT.Models.MAG
                 var reader = new MagBitReader(payload);
                 ushort messageType = reader.ReadUInt16();
                 // Retail0031 is logout, not prototype NP auth. Never fall back for conflicting IDs.
-                MagMessage parsed = applicationId == 20231 && ((messageType >= 0x0011 && messageType <= 0x0015) || (messageType >= 0x002b && messageType <= 0x002f) || (messageType >= 0x0031 && messageType <= 0x0038) || messageType == 0x01f5 || messageType == 0x01f6)
+                MagMessage parsed = applicationId == 20231 && ((messageType >= 0x0011 && messageType <= 0x0015) || (messageType >= 0x001a && messageType <= 0x0021) || (messageType >= 0x002b && messageType <= 0x002f) || (messageType >= 0x0031 && messageType <= 0x0038) || messageType == 0x01f5 || messageType == 0x01f6)
                     ? messageType switch
                     {
                         0x0012 => new MagRetailJoinGameRequest(),
                         0x0013 => new MagRetailJoinGameResponse(),
                         0x0014 => new MagRetailJoinGameUpdate(),
                         0x0015 => new MagRetailCancelJoinRequest(),
+                        0x001a => new MagRetailPartyInvite(),
+                        0x001b => new MagRetailPartyInviteResponse(),
+                        0x001c => new MagRetailPartyLeave(),
+                        0x001f => new MagRetailPartyJoined(),
+                        0x0020 => new MagRetailPartyLeft(),
+                        0x0021 => new MagRetailPartyRoster(),
                         0x002d => new MagTrainingCompletedRequest(),
                         0x002e => new MagRetailAccountLoginRequest(),
                         0x002f => new MagRetailAccountLoginResponse(),
@@ -129,6 +136,32 @@ namespace RT.Models.MAG
                         join.ClientType=reader.ReadByte(); join.PartyId=reader.ReadUInt32(); break;
                     case MagJoinGameRequest join:
                         join.Preference=reader.ReadByte(); join.Value=reader.ReadUInt32(); join.ClientType=reader.ReadByte(); break;
+                    case MagRetailPartyInvite invite:
+                        invite.PartyId = reader.ReadUInt32(); invite.Invitee = reader.ReadUInt32(); invite.Inviter = reader.ReadUInt32();
+                        break;
+                    case MagRetailPartyInviteResponse answer:
+                        answer.Response = reader.ReadByte(); answer.PartyId = reader.ReadUInt32();
+                        answer.Responder = reader.ReadUInt32(); answer.Inviter = reader.ReadUInt32();
+                        break;
+                    case MagRetailPartyLeave leave:
+                        leave.PartyId = reader.ReadUInt32();
+                        break;
+                    case MagRetailPartyJoined joined:
+                        joined.PartyId = reader.ReadUInt32();
+                        break;
+                    case MagRetailPartyLeft left:
+                        left.PartyId = reader.ReadUInt32();
+                        break;
+                    case MagRetailPartyRoster roster:
+                        int count = reader.ReadUInt16();
+                        if (payload.Length != 11 + count * 4) return false;
+                        roster.Members = new uint[count];
+                        for (int i = 0; i < count; i++) roster.Members[i] = reader.ReadUInt32();
+                        roster.PartyId = reader.ReadUInt32();
+                        roster.Status = unchecked((sbyte)reader.ReadByte());
+                        roster.GameType = unchecked((sbyte)reader.ReadByte());
+                        roster.OpenInvite = reader.ReadBoolean();
+                        break;
                     case MagRetailCancelJoinRequest cancel:
                         cancel.PartyId=reader.ReadUInt32();break;
                     case MagRetailJoinGameUpdate update:
@@ -228,7 +261,7 @@ namespace RT.Models.MAG
         // Legacy callers retain prototype behavior; the explicit retail summary type carries its profile.
         // Shared full-record/update types must use the application's explicit serializer at session boundaries.
         public static byte[] Serialize(MagMessage message) =>
-            SerializeForApplication(message, message is MagTrainingCompletedRequest || message is MagRetailCharacterListResponse || message is MagRetailAccountLoginRequest || message is MagRetailAccountLoginResponse || message is MagRetailJoinGameRequest || message is MagRetailJoinGameResponse ? 20231 : 20230);
+            SerializeForApplication(message, message is MagRetailPartyMessage || message is MagTrainingCompletedRequest || message is MagRetailCharacterListResponse || message is MagRetailAccountLoginRequest || message is MagRetailAccountLoginResponse || message is MagRetailJoinGameRequest || message is MagRetailJoinGameResponse ? 20231 : 20230);
 
         public static byte[] SerializeForApplication(MagMessage message, int applicationId)
         {
@@ -246,6 +279,8 @@ namespace RT.Models.MAG
                 throw new ArgumentException("Training request is retail-only.", nameof(message));
             if ((message is MagRetailJoinGameUpdate || message is MagRetailCancelJoinRequest) && applicationId != 20231)
                 throw new ArgumentException("Queue message is retail-only.",nameof(message));
+            if (message is MagRetailPartyMessage && applicationId != 20231)
+                throw new ArgumentException("Party messages are retail-only.", nameof(message));
             var writer = new MagBitWriter();
             writer.WriteUInt16(message.MessageType);
             if (message is MagPluginClientMessage common) WriteHeader(writer, common);
@@ -287,6 +322,32 @@ namespace RT.Models.MAG
                     writer.WriteByte(join.ClientType); writer.WriteUInt32(join.PartyId); break;
                 case MagJoinGameRequest join:
                     writer.WriteByte(join.Preference); writer.WriteUInt32(join.Value); writer.WriteByte(join.ClientType); break;
+                case MagRetailPartyInvite invite:
+                    writer.WriteUInt32(invite.PartyId); writer.WriteUInt32(invite.Invitee); writer.WriteUInt32(invite.Inviter);
+                    break;
+                case MagRetailPartyInviteResponse answer:
+                    writer.WriteByte(answer.Response); writer.WriteUInt32(answer.PartyId);
+                    writer.WriteUInt32(answer.Responder); writer.WriteUInt32(answer.Inviter);
+                    break;
+                case MagRetailPartyLeave leave:
+                    writer.WriteUInt32(leave.PartyId);
+                    break;
+                case MagRetailPartyJoined joined:
+                    writer.WriteUInt32(joined.PartyId);
+                    break;
+                case MagRetailPartyLeft left:
+                    writer.WriteUInt32(left.PartyId);
+                    break;
+                case MagRetailPartyRoster roster:
+                    if (roster.Members == null || roster.Members.Length > (MaximumPayloadBytes - 11) / 4)
+                        throw new ArgumentException("Party roster exceeds the application message bound.", nameof(message));
+                    writer.WriteUInt16((ushort)roster.Members.Length);
+                    foreach (var member in roster.Members) writer.WriteUInt32(member);
+                    writer.WriteUInt32(roster.PartyId);
+                    writer.WriteByte(unchecked((byte)roster.Status));
+                    writer.WriteByte(unchecked((byte)roster.GameType));
+                    writer.WriteBoolean(roster.OpenInvite);
+                    break;
                 case MagRetailCancelJoinRequest cancel:
                     writer.WriteUInt32(cancel.PartyId);break;
                 case MagRetailJoinGameUpdate update:

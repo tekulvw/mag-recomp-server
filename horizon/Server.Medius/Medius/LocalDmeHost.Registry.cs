@@ -32,6 +32,7 @@ namespace Server.Medius
         bool _operatorDraining;
         Func<bool> _readDrainPolicy;
         bool _registryFormationStaged;
+        int _registryExpectedParties;
         int _registryBatchDepth;
         Task _worldCleanupWorker = Task.CompletedTask;
 
@@ -121,7 +122,7 @@ namespace Server.Medius
                 // A partially admitted ticket is still owned by the queue until
                 // its callback runs. Count that slot only once for capacity.
                 foreach (var ticket in pending)
-                    if (!liveAccounts.Contains(ticket.Value.Account)) pendingCounts[ticket.Human.Faction]++;
+                    if (!liveAccounts.Contains(ticket.Value.Account)) pendingCounts[ticket.Human.Faction] += ticket.Human.Size;
                 int live = liveCounts.Sum();
                 bool ready = ReadyForGameplay;
                 bool draining = Draining;
@@ -138,8 +139,9 @@ namespace Server.Medius
             lock (_gate)
             {
                 PurgeHumanQueue();
-                var ownership = _humanQueue.Snapshot().Any(ticket => ticket.Value.Account == account)
+                var ownership = _humanQueue.Snapshot().Any(ticket => ticket.Value.Accounts.Contains(account, StringComparer.Ordinal))
                     ? LocalDmeAccountOwnership.Queued : LocalDmeAccountOwnership.None;
+                if (_provisionalPartyAccounts.Contains(account)) ownership |= LocalDmeAccountOwnership.PendingRelease;
                 foreach (var reservation in _reservations.Values.Where(r => r.Account == account))
                     ownership |= IsResultsCohort(reservation) ? LocalDmeAccountOwnership.Terminal : LocalDmeAccountOwnership.Live;
                 foreach (var release in _pendingReleases.Values.Where(r => r.Reservation.Account == account))
@@ -169,18 +171,20 @@ namespace Server.Medius
             !_reservations.Values.Any(IsLiveCohort) && !_pendingReleases.Values.Any(r => !IsResultsCohort(r.Reservation)) &&
             (!_admissionTerminal || HasResultsCapacity());
 
-        public bool TryStageRegistryFormation(string profileId)
+        public bool TryStageRegistryFormation(string profileId, int expectedParties = 0)
         {
             lock (_gate)
             {
                 PurgeHumanQueue();
-                if (!CanStageRegistryFormation(ReadyForAdmission)) return false;
+                if (expectedParties < 0 || !CanStageRegistryFormation(ReadyForAdmission)) return false;
                 var profile = _matchProfiles.FirstOrDefault(p => p.ProfileId == profileId);
-                if (profile == null || !AdvanceTerminalCohort()) return false;
+                if (profile == null || (expectedParties > 0 && (!_supportsPartyReservations || profile.SquadCounts == null ||
+                    expectedParties > profile.SquadCounts.Sum())) || !AdvanceTerminalCohort()) return false;
                 ResetFormation();
                 _formedProfile = profile;
                 _formationId = Id();
                 _registryFormationStaged = true;
+                _registryExpectedParties = expectedParties;
                 return true;
             }
         }
