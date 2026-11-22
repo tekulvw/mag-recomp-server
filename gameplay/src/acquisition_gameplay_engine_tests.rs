@@ -895,6 +895,14 @@ fn engine_release_requeue_restarts_native_capture_and_escort_cycle() {
 }
 
 pub(crate) fn ground_firearm_fixture(amount_hp: f32, friendly: bool) -> Engine<Vec<u8>> {
+    ground_firearm_fixture_with_reinforcement(amount_hp, friendly, false)
+}
+
+fn ground_firearm_fixture_with_reinforcement(
+    amount_hp: f32,
+    friendly: bool,
+    reinforcements: bool,
+) -> Engine<Vec<u8>> {
     let policy = serde_json::from_value(json!({
         "friendly_fire_multiplier": 0.5,
         "profiles":[{
@@ -905,7 +913,7 @@ pub(crate) fn ground_firearm_fixture(amount_hp: f32, friendly: bool) -> Engine<V
         "areas": vec![json!({"armor_area":0,"multiplier":1.0});16]
     }))
     .unwrap();
-    let mut e = configured_capture_fixture(Some(policy), None);
+    let mut e = capture_fixture_with_reinforcements(Some(policy), None, reinforcements);
     e.item_catalog = crate::human_kill_reward_tests::combat_items_for_ground_test(amount_hp);
     start_capture(&mut e, 0, 100);
     e.tick_acquisition_objectives(Duration::from_millis(3200), 2)
@@ -996,6 +1004,87 @@ fn engine_firearm_log_failure_does_not_install_ground_damage() {
     assert_eq!(ground_hit(&mut e, 3300).err(), Some("log_limit_reached"));
     assert_eq!(e.ground_runtime, before);
     assert_eq!(e.active.as_ref().unwrap().pending_shared.len(), queued);
+}
+
+#[test]
+fn engine_acquisition_apc_bullet_preserves_native_vehicle_damage_transaction() {
+    let mut e = ground_firearm_fixture_with_reinforcement(20., false, true);
+    let apc = crate::human_kill_reward_tests::native_hit(0x0100_0000, 44);
+    let before = e.ground_runtime.clone();
+    let queue = e.active.as_ref().unwrap().pending_shared.len();
+    e.max_log = e.written;
+    assert_eq!(
+        dispatch(&mut e, &apc, 3300).err(),
+        Some("log_limit_reached")
+    );
+    assert_eq!(e.ground_runtime, before);
+    assert_eq!(e.active.as_ref().unwrap().pending_shared.len(), queue);
+    let mut e = ground_firearm_fixture_with_reinforcement(20., false, true);
+    dispatch(&mut e, &apc, 3300).unwrap();
+    let damage = e
+        .ground_runtime
+        .as_ref()
+        .unwrap()
+        .get(0)
+        .unwrap()
+        .damage_wire();
+    assert_eq!(damage.health_quarter_points, 520);
+    assert_eq!(damage.last_location_and_type, 0x13);
+    assert_eq!(damage.last_attacker, 0x0380_0001);
+    assert_eq!(damage.last_source_object, u32::MAX);
+    assert_eq!(damage.last_user_data, 44);
+
+    let packet = e.active.as_ref().unwrap().pending_shared.back().unwrap();
+    let mut bits = replication::BitReader::with_profile(packet, e.wire_profile);
+    bits.position = e.wire_profile.header_bits();
+    assert_eq!(bits.read(1), Ok(1));
+    assert_eq!(bits.read(16), Ok(0));
+    for _ in 0..18 {
+        assert_eq!(bits.read(1), Ok(0));
+    }
+    assert_eq!(bits.read(1), Ok(1));
+    assert_eq!(bits.read(8), Ok(0x13));
+    assert_eq!(bits.read(16), Ok(520));
+    assert_eq!(bits.read(32), Ok(0x0380_0001));
+    assert_eq!(bits.read(32), Ok(u32::MAX));
+    assert_eq!(bits.read(32), Ok(44));
+    for _ in 19..30 {
+        assert_eq!(bits.read(1), Ok(0));
+    }
+    assert_eq!(bits.read(1), Ok(0));
+
+    let motor_pool = crate::human_kill_reward_tests::native_hit(0x0100_0008, 45);
+    dispatch(&mut e, &motor_pool, 3310).unwrap();
+    assert_eq!(
+        e.ground_runtime
+            .as_ref()
+            .unwrap()
+            .get(8)
+            .unwrap()
+            .health_quarter_points,
+        600
+    );
+    let wrong_id = crate::human_kill_reward_tests::native_hit(0x0101_0000, 46);
+    dispatch(&mut e, &wrong_id, 3320).unwrap();
+    assert_eq!(
+        e.ground_runtime
+            .as_ref()
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .health_quarter_points,
+        520
+    );
+
+    let runtime = e.ground_runtime.as_mut().unwrap();
+    let apc_body = runtime.get(0).unwrap();
+    runtime
+        .apply_damage(apc_body.key, apc_body.health_quarter_points, u32::MAX)
+        .unwrap();
+    let dead = e.ground_runtime.clone();
+    dispatch(&mut e, &apc, 3330).unwrap();
+    assert_eq!(e.ground_runtime, dead);
+    assert!(String::from_utf8_lossy(&e.writer).contains("ground_bullet_target_not_operational"));
 }
 
 #[test]

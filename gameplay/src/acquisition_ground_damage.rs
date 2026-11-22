@@ -260,7 +260,7 @@ impl<W: Write> Engine<W> {
             if self.domination_gameplay.is_some() {
                 !matches!(source.spawn_type, 3 | 7)
             } else {
-                source.spawn_type != 9
+                source.spawn_type != 9 && (source.spawn_type != 3 || mounted_primary)
             }
         }) {
             return Err("unsupported_ground_bullet_target");
