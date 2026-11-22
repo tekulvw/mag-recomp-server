@@ -31,5 +31,6 @@ the batch until later world work can drain it.
 The cloud survives a thrower's death within the same reservation and
 allocation. Disconnect or teardown uses the existing removal path for both
 objects. If the source identity no longer matches at a pulse, the damage
-has no credited attacker. A full family-5 pool defers the terminal rather
+has no credited attacker. The damage model still receives the retained
+parent projectile as its source object. A full family-5 pool defers the terminal rather
 than evicting a visible volume.

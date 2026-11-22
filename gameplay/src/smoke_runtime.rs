@@ -22,6 +22,7 @@ pub(crate) struct Volume {
 
 #[derive(Clone, Debug)]
 pub(crate) struct Poison {
+    pub projectile_id: u32,
     pub source: crate::active_ability_gas_world::GasSource,
     pub round: u64,
     pub timing: crate::active_ability_gas_world::PulseTiming,
@@ -70,6 +71,7 @@ impl State {
                 (poison.round == round && poison.timing.advance(now) == Pulse::Damage).then(|| {
                     let p = volume.creation.position;
                     GasPulse {
+                        projectile_id: Some(poison.projectile_id),
                         origin: [p.x, p.y, p.z],
                         falloff: poison.falloff,
                         raw_hp: poison.raw_hp,

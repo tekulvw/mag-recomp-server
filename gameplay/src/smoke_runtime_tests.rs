@@ -503,7 +503,7 @@ fn gas_grenade_native_terminal_builds_one_volume_and_a_due_poison_pulse() {
     let victim = &engine.peers[OBSERVER];
     assert!(victim.life.damage_health().unwrap().1 < 400);
     assert_eq!(victim.last_damage.last_location_and_type, 0x41);
-    assert_eq!(victim.last_damage.last_source_object, u32::MAX);
+    assert_eq!(victim.last_damage.last_source_object, 0x1380_0000);
     assert_eq!(victim.last_damage.last_attacker, 0x0380_0000);
 
     drain_shared(&mut engine, 4101);
@@ -605,6 +605,7 @@ fn gas_grenade_and_leadership_pulse_share_one_current_life_cooldown() {
         .prepare_acquisition_character_callback(&native, now, |engine, native| {
             engine.stage_gas_pulses(
                 [GasPulse {
+                    projectile_id: None,
                     origin: [ORIGIN.x, ORIGIN.y, ORIGIN.z],
                     falloff,
                     raw_hp: 200.0,
@@ -629,4 +630,24 @@ fn gas_grenade_and_leadership_pulse_share_one_current_life_cooldown() {
             .iter()
             .all(|entry| entry["on_character_hit"] != true)
     );
+}
+
+#[test]
+fn gas_grenade_unresolved_firer_keeps_the_historical_projectile_source() {
+    let mut engine = gas_fixture();
+    engine.active.as_mut().unwrap().reservation.character.skills = Some([0, 1 << 18, 0, 0, 0]);
+    let request = rocket_fixture::launch_wire(&engine, 3, 4);
+    dispatch(&mut engine, &request, 1000).unwrap();
+    let report = owner_terminal(&engine, 1100);
+    dispatch(&mut engine, &report, 1100).unwrap();
+    // Exercise mismatched allocation in the shared receiver without attributing
+    // this fixture's retained cloud to the replacement occupant.
+    engine.active.as_mut().unwrap().allocation_sequence += 1;
+    engine
+        .tick_gas_grenades(Duration::from_millis(2100), 1)
+        .unwrap();
+    let victim = &engine.peers[OBSERVER];
+    assert!(victim.life.damage_health().unwrap().1 < 400);
+    assert_eq!(victim.last_damage.last_attacker, u32::MAX);
+    assert_eq!(victim.last_damage.last_source_object, 0x1380_0000);
 }

@@ -549,6 +549,7 @@ fn plan_smoke_terminal<W: Write>(
         expires,
         poison: gas.map(|(gas, launch)| crate::smoke_runtime::Poison {
             source: launch.gas.clone(),
+            projectile_id: launch.projectile_id,
             round: launch.round,
             timing: crate::active_ability_gas_world::PulseTiming::grenade(
                 ctx.now,

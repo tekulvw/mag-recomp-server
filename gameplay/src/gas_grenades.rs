@@ -330,12 +330,16 @@ impl<W: std::io::Write> crate::Engine<W> {
 #[derive(Clone, Debug)]
 pub(crate) struct LaunchSource {
     pub round: u64,
+    pub projectile_id: u32,
     pub gas: crate::active_ability_gas_world::GasSource,
 }
 impl LaunchSource {
-    pub(crate) fn from_actor(actor: &crate::Active, round: u64) -> Self {
+    pub(crate) fn from_actor(actor: &crate::Active, round: u64, slot: u8) -> Self {
         Self {
             round,
+            projectile_id: ((16 + u32::from(slot)) << 24)
+                | 0x0080_0000
+                | u32::from(actor.reservation.player),
             gas: crate::active_ability_gas_world::GasSource {
                 allocation: Some(actor.allocation_sequence),
                 attacker: 0x0380_0000 | u32::from(actor.reservation.player),

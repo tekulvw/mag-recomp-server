@@ -191,6 +191,7 @@ impl GasWorld {
             });
         engine.stage_gas_pulses(
             pulses.into_iter().map(|(volume, source)| GasPulse {
+                projectile_id: None,
                 origin: volume.origin,
                 falloff: volume.falloff,
                 raw_hp: volume.damage_per_second * 0.5,
@@ -205,6 +206,7 @@ impl GasWorld {
 }
 
 pub(crate) struct GasPulse {
+    pub projectile_id: Option<u32>,
     pub origin: [f32; 3],
     pub falloff: crate::active_ability_effects::BlastFalloff,
     pub raw_hp: f32,
@@ -226,6 +228,7 @@ impl<W: Write> Engine<W> {
         let mut audit = Vec::new();
         let mut messages = Vec::new();
         for GasPulse {
+            projectile_id,
             origin,
             falloff,
             raw_hp,
@@ -250,7 +253,7 @@ impl<W: Write> Engine<W> {
                 self.collect_gas_pulse_characters(origin, falloff, raw_hp, collision)?;
             audit.push(json!({
                 "op": operation, "world": source.world, "attacker": attacker,
-                "origin": origin, "pairs": observations.len(),
+                "origin": origin, "pairs": observations.len(), "projectile_id": projectile_id,
             }));
             let previous_team = self.active_ability_damage_team;
             self.active_ability_damage_team =
@@ -297,16 +300,22 @@ impl<W: Write> Engine<W> {
                     let state = native
                         .get_mut(&target.character_id)
                         .ok_or("gas_volume_native_state_missing")?;
-                    let plan = self.plan_acquisition_character_effect(
-                        target,
-                        Request::AirStrikeGas {
-                            raw_hp: raw_hp * scale,
+                    let raw_hp = raw_hp * scale;
+                    let request = match projectile_id {
+                        Some(projectile_id) => Request::GrenadeGasPulse {
+                            raw_hp,
+                            from_direction: displacement,
+                            attacker,
+                            projectile_id,
+                        },
+                        None => Request::AirStrikeGas {
+                            raw_hp,
                             from_direction: displacement,
                             attacker,
                         },
-                        *state,
-                        now,
-                    )?;
+                    };
+                    let plan =
+                        self.plan_acquisition_character_effect(target, request, *state, now)?;
                     let applied = plan.outcome() == Outcome::Applied;
                     audit.push(plan.audit().clone());
                     messages.extend(self.commit_acquisition_character_effect(plan, state)?);

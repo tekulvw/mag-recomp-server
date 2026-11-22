@@ -615,6 +615,7 @@ pub(super) fn fire_grenade<W: Write>(
                                 gas_grenades::LaunchSource::from_actor(
                                     active,
                                     ctx.engine.round_number,
+                                    slot,
                                 ),
                             )?;
                         }
