@@ -41,6 +41,7 @@ pub struct Configuration {
     ground_capabilities: Vec<GroundCapability>,
     ground_damage: Option<crate::acquisition_ground_damage::Policy>,
     ground_turrets: Option<PathBuf>,
+    apc_turrets: Option<PathBuf>,
     #[serde(default)]
     frag_character_blast: bool,
     frag_ground_areas: Option<PathBuf>,
@@ -195,6 +196,9 @@ impl Configuration {
         if let Some(source) = &mut result.ground_turrets {
             *source = directory.join(&*source);
         }
+        if let Some(source) = &mut result.apc_turrets {
+            crate::resources::resolve_manifest_path(directory, source)?;
+        }
         if let Some(source) = &mut result.frag_ground_areas {
             *source = directory.join(&*source);
         }
@@ -269,10 +273,10 @@ impl Configuration {
     }
 
     fn validate(&self) -> Result<(), &'static str> {
-        if self
-            .ground_turrets
-            .as_ref()
-            .is_some_and(|path| path.as_os_str().is_empty())
+        if [&self.ground_turrets, &self.apc_turrets]
+            .into_iter()
+            .flatten()
+            .any(|path| path.as_os_str().is_empty())
         {
             return Err("empty_acquisition_ground_turret_source_path");
         }
@@ -335,8 +339,16 @@ impl Configuration {
     }
 
     pub(crate) fn ground_turret_source(&self) -> io::Result<Option<Vec<u8>>> {
+        Self::read_ground_turret_source(self.ground_turrets.as_ref())
+    }
+
+    pub(crate) fn apc_turret_source(&self) -> io::Result<Option<Vec<u8>>> {
+        Self::read_ground_turret_source(self.apc_turrets.as_ref())
+    }
+
+    fn read_ground_turret_source(path: Option<&PathBuf>) -> io::Result<Option<Vec<u8>>> {
         const MAX_TURRET_BYTES: usize = 256 * 1024;
-        let Some(path) = &self.ground_turrets else {
+        let Some(path) = path else {
             return Ok(None);
         };
         let mut bytes = Vec::new();
@@ -359,16 +371,14 @@ impl Configuration {
         items: &crate::item_catalog::ItemCatalog,
         objectives: &ObjectiveCatalog,
     ) -> io::Result<()> {
-        if let Some(source) = self.ground_turret_source()? {
-            grounds.set_turret_policies(crate::ground_turrets::qualify(
-                &source,
-                grounds,
-                spawns,
-                items,
-                &objectives.source().source_image_sha256,
-            )?);
-        }
-        Ok(())
+        crate::ground_turrets::bind_acquisition(
+            grounds,
+            spawns,
+            items,
+            &objectives.source().source_image_sha256,
+            self.ground_turret_source()?.as_deref(),
+            self.apc_turret_source()?.as_deref(),
+        )
     }
 
     pub fn infantry_rocket_source(&self) -> io::Result<Option<Vec<u8>>> {

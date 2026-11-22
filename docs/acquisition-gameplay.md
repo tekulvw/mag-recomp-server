@@ -165,3 +165,30 @@ additional ability effects require their own admitted mechanics. Supporting a
 template or decoding a field does not enable those features.
 
 Releases remain manual after the maintainer's live-match review.
+
+## Optional APC crew
+
+Acquisition can opt into the four source-bound insertion APCs' driver and
+primary gunner seats. Use the v2 Ground catalog and set `apc_turrets` in the
+Acquisition gameplay config alongside its existing `ground_turrets` Escort
+source. The loader checks both turret documents against the selected map and
+exact Spawn and v2 Ground bytes before installing their disjoint policies.
+Existing v1 Ground catalogs continue to use the Escort-only driver scope.
+The offline worker reports `acquisition_apc_crew_validated` after binding.
+
+`tools/extraction/project-acquisition-apc-crew.py` composes new candidates from
+an owner-qualified Acquisition registry and crew qualification, the retail
+APC turret projection, and the matching Acquisition Escort turret projection.
+It writes six new Ground documents, a new APC turret document and an Escort
+document rebound to those new Ground bytes. Keep the inputs and prior output
+directories for reproduction. The projector consumes qualified external
+evidence and does not extract retail vehicle properties itself.
+
+Seat 0 uses the existing Ground driver authority and bounded motion policy.
+Seat 1 uses turret-zero primary authority. Reinforcement still selects from
+passenger seats 2–9, and all occupants count toward the single cap of eight.
+Moving exits use the current pose and collision checks. Destruction ejects
+occupants and revokes grants before the existing Ground reinforcement cycle.
+The stock infantry rocket and ordinary frag paths can damage operational APCs
+when their source-backed resources are active. The Acquisition direct bullet
+target and manual repair scopes continue to cover Escort only.

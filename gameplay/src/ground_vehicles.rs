@@ -489,6 +489,22 @@ impl Catalog {
         self.turret_policies = policies;
     }
 
+    pub fn has_acquisition_apc_crew(&self) -> bool {
+        self.schema_version == 2
+    }
+
+    pub(crate) fn validate_acquisition_apc_turrets(&self) -> Result<(), &'static str> {
+        if self.has_acquisition_apc_crew()
+            && self.vehicles.iter().any(|vehicle| {
+                self.source_spawn_type(vehicle) == Some(3)
+                    && self.turret_policy(vehicle.index).is_none()
+            })
+        {
+            return Err("acquisition_apc_turret_source_required");
+        }
+        Ok(())
+    }
+
     pub(crate) fn raw_sha256(&self) -> &str {
         &self.raw_sha256
     }
@@ -502,7 +518,7 @@ impl Catalog {
         spawns: &crate::spawn_catalog::SpawnCatalog,
     ) -> Result<(), &'static str> {
         if self.format != "mag_ground_vehicles"
-            || self.schema_version != 1
+            || !matches!(self.schema_version, 1 | 2)
             || self.vehicles.is_empty()
             || self.vehicles.len() > 32
         {
@@ -530,6 +546,15 @@ impl Catalog {
         let domination_scope = scope == Some("native_domination_vehicle_source_points");
         if domination != domination_scope || (!domination && policy.game_type != 1) {
             return Err("ground_vehicles_require_matching_profile_scope");
+        }
+        let acquisition_apc_crew = self.has_acquisition_apc_crew();
+        if acquisition_apc_crew
+            && (policy.game_type != 1
+                || scope != Some("native_vehicle_source_points")
+                || self.driver_seats.len() != 8
+                || self.seat_visibility.is_none())
+        {
+            return Err("invalid_acquisition_apc_crew_scope");
         }
         let domination_drivers = domination && !self.driver_seats.is_empty();
         if domination
@@ -641,18 +666,59 @@ impl Catalog {
                 .ok_or("unknown_ground_driver_vehicle")?;
             if !drivers.insert(driver.vehicle_index)
                 || driver.seat >= 16
-                || (domination && driver.seat != 0)
+                || ((domination || acquisition_apc_crew) && driver.seat != 0)
                 || !driver.maximum_speed_mps.is_finite()
                 || driver.maximum_speed_mps <= 0.
                 || vehicle.passenger_seats.contains(&driver.seat)
                 || vehicle.maximum_mount_distance_m.is_none()
                 || vehicle.maximum_mount_position_age_ms.is_none()
                 || vehicle.exit_policy().is_none()
-                || source_points
-                    .get(&driver.vehicle_index)
-                    .is_none_or(|s| s.spawn_type != driver_spawn_type)
+                || source_points.get(&driver.vehicle_index).is_none_or(|s| {
+                    s.spawn_type != driver_spawn_type
+                        && !(acquisition_apc_crew && s.spawn_type == 3)
+                })
             {
                 return Err("invalid_ground_driver_policy");
+            }
+        }
+        if acquisition_apc_crew {
+            for (role, expected) in [(3, 4), (9, 4)] {
+                if source_points
+                    .values()
+                    .filter(|source| source.spawn_type == role)
+                    .count()
+                    != expected
+                    || drivers
+                        .iter()
+                        .filter(|index| source_points[*index].spawn_type == role)
+                        .count()
+                        != expected
+                {
+                    return Err("invalid_acquisition_apc_crew_roster");
+                }
+            }
+            for index in &drivers {
+                let source = source_points[index];
+                if source.spawn_type == 3 {
+                    let vehicle = self
+                        .vehicle(*index)
+                        .ok_or("unknown_ground_driver_vehicle")?;
+                    if !source.authored_active
+                        || source.team != 0
+                        || vehicle.maximum_occupancy != Some(8)
+                        || !vehicle.passenger_seats.iter().copied().eq(2..=9)
+                        || self.seat_occupant_visible(*index, 0) != Some(false)
+                        || !self.passenger_spawns.iter().any(|spawn| {
+                            (
+                                spawn.vehicle_index,
+                                spawn.spawn_point_index,
+                                spawn.spawn_point_token,
+                            ) == (*index, source.spawn_point_index, source.spawn_point_token)
+                        })
+                    {
+                        return Err("invalid_acquisition_apc_crew_seats");
+                    }
+                }
             }
         }
         let mut ids = BTreeSet::new();
@@ -1036,6 +1102,7 @@ impl<W: io::Write> crate::Engine<W> {
                 .as_ref()
                 .ok_or("spawn_catalog_unavailable")?,
         )?;
+        catalog.validate_acquisition_apc_turrets()?;
         if let Some(resources) = &self.dynamic_body_resources {
             resources.validate_vehicles(&catalog)?;
         }

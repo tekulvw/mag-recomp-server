@@ -83,6 +83,7 @@ struct Loaded {
     underbarrel_launcher_source: Option<Arc<[u8]>>,
     underbarrel_launchers: Option<Arc<crate::underbarrel_launchers::Catalog>>,
     ground_turret_source: Option<Arc<[u8]>>,
+    acquisition_apc_turret_source: Option<Arc<[u8]>>,
 }
 pub struct Registry {
     profiles: BTreeMap<String, Loaded>,
@@ -337,6 +338,7 @@ impl Registry {
             let (
                 acquisition,
                 acquisition_ground_turrets,
+                acquisition_apc_turret_source,
                 acquisition_rocket_source,
                 acquisition_guided_source,
                 acquisition_smoke_source,
@@ -378,6 +380,7 @@ impl Registry {
                 (
                     Some(Arc::new(setup)),
                     config.ground_turret_source()?.map(Arc::from),
+                    config.apc_turret_source()?.map(Arc::from),
                     config.infantry_rocket_source()?.map(Arc::from),
                     config.guided_launcher_source()?.map(Arc::from),
                     config.smoke_grenade_source()?.map(Arc::from),
@@ -396,7 +399,7 @@ impl Registry {
                         "acquisition_gameplay_configuration_required"
                     }));
                 }
-                (None, None, None, None, None, None, None, None)
+                (None, None, None, None, None, None, None, None, None)
             };
             let damage = source
                 .character_damage_rules
@@ -561,6 +564,7 @@ impl Registry {
                     underbarrel_launcher_source,
                     underbarrel_launchers: None,
                     ground_turret_source,
+                    acquisition_apc_turret_source,
                 },
             );
         }
@@ -890,9 +894,14 @@ impl Registry {
         items: &item_catalog::ItemCatalog,
     ) -> Result<(), &'static str> {
         for profile in self.profiles.values_mut() {
-            let Some(source) = &profile.ground_turret_source else {
+            let escort_or_domination = profile.ground_turret_source.as_deref();
+            let acquisition_apc = profile.acquisition_apc_turret_source.as_deref();
+            if escort_or_domination.is_none() && acquisition_apc.is_none() {
+                if let Some(grounds) = &profile.vehicles {
+                    grounds.validate_acquisition_apc_turrets()?;
+                }
                 continue;
-            };
+            }
             let grounds = profile
                 .vehicles
                 .as_mut()
@@ -901,16 +910,29 @@ impl Registry {
                 .objectives
                 .as_ref()
                 .ok_or("ground_turret_objectives_required")?;
-            grounds.set_turret_policies(
-                crate::ground_turrets::qualify(
-                    source,
+            let native_elf = &objectives.source().source_image_sha256;
+            if profile.acquisition.is_some() {
+                crate::ground_turrets::bind_acquisition(
                     grounds,
                     &profile.spawns,
                     items,
-                    &objectives.source().source_image_sha256,
+                    native_elf,
+                    escort_or_domination,
+                    acquisition_apc,
                 )
-                .map_err(|_| "invalid_match_profile_ground_turrets")?,
-            );
+                .map_err(|_| "invalid_match_profile_ground_turrets")?;
+            } else if let Some(source) = escort_or_domination {
+                grounds.set_turret_policies(
+                    crate::ground_turrets::qualify(
+                        source,
+                        grounds,
+                        &profile.spawns,
+                        items,
+                        native_elf,
+                    )
+                    .map_err(|_| "invalid_match_profile_ground_turrets")?,
+                );
+            }
         }
         Ok(())
     }
@@ -1071,6 +1093,15 @@ impl Registry {
                     .domination
                     .as_ref()
                     .is_some_and(|world| world.state.human_static_resupply.is_some())
+        })
+    }
+
+    pub fn has_acquisition_apc_crew(&self) -> bool {
+        self.profiles.values().any(|profile| {
+            profile.vehicles.as_ref().is_some_and(|grounds| {
+                grounds.has_acquisition_apc_crew()
+                    && grounds.validate_acquisition_apc_turrets().is_ok()
+            })
         })
     }
 
@@ -2178,6 +2209,7 @@ mod tests {
                 underbarrel_launcher_source: None,
                 underbarrel_launchers: None,
                 ground_turret_source: None,
+                acquisition_apc_turret_source: None,
                 acquisition: Some(sample.acquisition_gameplay.unwrap().setup),
             },
         );

@@ -1540,3 +1540,94 @@ pub(crate) mod domination_ground_driver;
 
 #[path = "ground_redeploy_tests.rs"]
 mod ground_redeploy;
+
+#[test]
+fn acquisition_apc_crew_requires_exact_v2_roster_and_bound_turrets() {
+    let mut spawn = acquisition_entry::acquisition_spawns();
+    let mut claim = catalog(&acquisition_entry::acquisition());
+    claim["source"]["creation_scope"] = json!("native_vehicle_source_points");
+    let example = claim["vehicles"][0].clone();
+    let mut creations = Vec::new();
+    let mut sources = Vec::new();
+    let mut drivers = Vec::new();
+    let mut passengers = Vec::new();
+    let mut visibility = Vec::new();
+    spawn["maps"][0]["spawn_count"] = json!(24);
+    let points = spawn["maps"][0]["locations"].as_array_mut().unwrap();
+    for index in 0..8 {
+        let apc = index < 4;
+        let point = 16 + index;
+        let token = 1000 + point;
+        let position = example["position"].clone();
+        points.push(json!({
+            "index":point,"token":token,"position":position,
+            "kind":if apc {"vehicle_passenger"} else {"unsupported"},"active":apc
+        }));
+        let mut vehicle = example.clone();
+        vehicle["index"] = json!(index);
+        vehicle["spawn_point_index"] = json!(point);
+        vehicle["spawn_point_token"] = json!(token);
+        vehicle["initial_state"] = json!(if apc { 2 } else { 0 });
+        vehicle["maximum_mount_distance_m"] = json!(8.);
+        vehicle["maximum_mount_position_age_ms"] = json!(750);
+        vehicle["passenger_exit_candidates"] = json!([
+            {"position_offset":[3.,0.,0.],"ranking_offset":[3.,0.,0.]}
+        ]);
+        let seats: Vec<_> = if apc { (2..=9).collect() } else { Vec::new() };
+        vehicle["passenger_seats"] = json!(seats);
+        if apc {
+            vehicle["maximum_occupancy"] = json!(8);
+            passengers.push(json!({
+                "vehicle_index":index,"spawn_point_index":point,"spawn_point_token":token
+            }));
+        }
+        visibility.push(json!({
+            "vehicle_index":index,"properties_member_sha256":"d".repeat(64),
+            "seats":std::iter::once(0).chain(seats).map(|seat|
+                json!({"seat":seat,"occupant_visible":false})).collect::<Vec<_>>()
+        }));
+        creations.push(vehicle);
+        sources.push(json!({
+            "vehicle_index":index,"spawn_point_index":point,"spawn_point_token":token,
+            "vehicle_type_token":12345,"spawn_type":if apc {3} else {9},
+            "user_class":if apc {0} else {1},"source_family":35,"authored_active":apc,"team":0
+        }));
+        drivers.push(json!({"vehicle_index":index,"seat":0,"maximum_speed_mps":25.}));
+    }
+    let spawns = spawns_from_value(spawn);
+    claim["source"]["spawn_catalog_sha256"] = json!(spawns.source_sha256().unwrap());
+    claim["vehicles"] = json!(creations);
+    claim["vehicle_sources"] = json!(sources);
+    claim["driver_seats"] = json!(drivers);
+    claim["passenger_spawns"] = json!(passengers);
+    claim["seat_visibility"] = json!({
+        "archive_sha256":"e".repeat(64),"registry_member_sha256":"f".repeat(64),
+        "vehicles":visibility
+    });
+    assert_eq!(
+        Catalog::from_json(&claim.to_string(), &spawns)
+            .unwrap_err()
+            .to_string(),
+        "invalid_ground_driver_policy"
+    );
+    claim["schema_version"] = json!(2);
+    let crew = Catalog::from_json(&claim.to_string(), &spawns).unwrap();
+    assert!(crew.has_acquisition_apc_crew());
+    assert_eq!(
+        crew.validate_acquisition_apc_turrets(),
+        Err("acquisition_apc_turret_source_required")
+    );
+    assert_eq!(crew.driver_seat(0).unwrap().seat, 0);
+    assert_eq!(crew.driver_seat(7).unwrap().seat, 0);
+    assert_eq!(
+        crew.vehicle(0).unwrap().passenger_seats,
+        (2..=9).collect::<Vec<_>>()
+    );
+    claim["driver_seats"].as_array_mut().unwrap().remove(0);
+    assert_eq!(
+        Catalog::from_json(&claim.to_string(), &spawns)
+            .unwrap_err()
+            .to_string(),
+        "invalid_acquisition_apc_crew_scope"
+    );
+}

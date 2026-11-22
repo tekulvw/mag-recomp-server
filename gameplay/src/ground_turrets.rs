@@ -74,7 +74,9 @@ pub(crate) enum PolicyKind {
 impl PolicyKind {
     fn for_schema(schema: &str, game_type: i8) -> Result<Self, &'static str> {
         match (schema, game_type) {
-            ("mag_domination_apc_turrets_v1", 2) => Ok(Self::Apc),
+            ("mag_domination_apc_turrets_v1", 2) | ("mag_acquisition_apc_turrets_v1", 1) => {
+                Ok(Self::Apc)
+            }
             ("mag_acquisition_escort_turrets_v1", 1) => Ok(Self::Escort),
             _ => Err("ground_turret_source_mismatch"),
         }
@@ -87,9 +89,10 @@ impl PolicyKind {
         }
     }
 
-    fn placements(self) -> usize {
+    fn placements(self, game_type: i8) -> usize {
         match self {
-            Self::Apc => 8,
+            Self::Apc if game_type == 2 => 8,
+            Self::Apc => 4,
             Self::Escort => 4,
         }
     }
@@ -143,6 +146,50 @@ pub(crate) fn qualify(
         .map_err(std::io::Error::other)
 }
 
+/// Prepare both Acquisition bindings before installing either one.
+pub(crate) fn bind_acquisition(
+    grounds: &mut Catalog,
+    spawns: &SpawnCatalog,
+    items: &ItemCatalog,
+    native_elf: &str,
+    escort_source: Option<&[u8]>,
+    apc_source: Option<&[u8]>,
+) -> std::io::Result<()> {
+    use std::io::Error;
+    if grounds.has_acquisition_apc_crew() != apc_source.is_some() {
+        return Err(Error::other("acquisition_apc_crew_source_mismatch"));
+    }
+    if grounds.has_acquisition_apc_crew() && grounds.native_elf_sha256() != native_elf {
+        return Err(Error::other("acquisition_apc_crew_source_mismatch"));
+    }
+    if grounds.has_acquisition_apc_crew() && escort_source.is_none() {
+        return Err(Error::other("acquisition_apc_crew_requires_escort_turrets"));
+    }
+    let mut combined = BTreeMap::new();
+    for (source, expected_schema) in [
+        (escort_source, "mag_acquisition_escort_turrets_v1"),
+        (apc_source, "mag_acquisition_apc_turrets_v1"),
+    ] {
+        let Some(raw) = source else {
+            continue;
+        };
+        let rules: Rules = serde_json::from_slice(raw).map_err(Error::other)?;
+        if rules.schema != expected_schema {
+            return Err(Error::other("ground_turret_source_mismatch"));
+        }
+        for (index, policy) in rules
+            .bind(grounds, spawns, items, native_elf)
+            .map_err(Error::other)?
+        {
+            if combined.insert(index, policy).is_some() {
+                return Err(Error::other("duplicate_acquisition_ground_turret_policy"));
+            }
+        }
+    }
+    grounds.set_turret_policies(combined);
+    Ok(())
+}
+
 impl Rules {
     fn bind(
         &self,
@@ -153,7 +200,12 @@ impl Rules {
     ) -> Result<BTreeMap<u16, Policy>, &'static str> {
         let combat = items.retail_combat()?;
         let source = &self.source;
-        let kind = PolicyKind::for_schema(&self.schema, spawns.match_profile().game_type)?;
+        let game_type = spawns.match_profile().game_type;
+        let kind = PolicyKind::for_schema(&self.schema, game_type)?;
+        if game_type == 1 && kind == PolicyKind::Apc && !grounds.has_acquisition_apc_crew() {
+            return Err("acquisition_apc_crew_catalog_required");
+        }
+        let expected_placements = kind.placements(game_type);
         if [
             &source.item_catalog_sha256,
             &source.retail_elf_sha256,
@@ -218,7 +270,7 @@ impl Rules {
                 || !valid_hash(&profile.ground_catalog_sha256)
                 || !spawn_hashes.insert(&profile.spawn_catalog_sha256)
                 || !ground_hashes.insert(&profile.ground_catalog_sha256)
-                || profile.vehicles.len() != kind.placements()
+                || profile.vehicles.len() != expected_placements
                 || profile.vehicles.iter().any(|vehicle| {
                     vehicle.vehicle_index >= 32
                         || vehicle.spawn_point_index >= 128
@@ -241,12 +293,12 @@ impl Rules {
             return Err("invalid_ground_turret_profile");
         }
         let active = active.ok_or("ground_turret_profile_required")?;
-        if kind == PolicyKind::Escort
+        if game_type == 1
             && grounds
                 .creations()
                 .filter(|vehicle| grounds.source_spawn_type(vehicle) == Some(kind.spawn_type()))
                 .count()
-                != kind.placements()
+                != expected_placements
         {
             return Err("ground_turret_placement_mismatch");
         }
@@ -493,3 +545,22 @@ impl<W: Write> Engine<W> {
 #[cfg(test)]
 #[path = "ground_turret_runtime_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod crew_scope_tests {
+    use super::*;
+
+    #[test]
+    fn acquisition_apc_binding_is_distinct_from_escort_and_domination() {
+        let schema = "mag_acquisition_apc_turrets_v1";
+        assert_eq!(
+            PolicyKind::for_schema(schema, 2),
+            Err("ground_turret_source_mismatch")
+        );
+        assert_eq!(
+            PolicyKind::for_schema("mag_domination_apc_turrets_v1", 1),
+            Err("ground_turret_source_mismatch")
+        );
+        assert_eq!(PolicyKind::for_schema(schema, 1), Ok(PolicyKind::Apc));
+    }
+}
