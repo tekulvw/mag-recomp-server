@@ -179,25 +179,33 @@ fn helo_hull(engine: &Engine<Vec<u8>>) -> HullDamage {
         .damage
 }
 
-#[test]
-fn hospital_helo_primary_applies_vehicle_damage_and_follows_helo_creation() {
-    let mut engine = helo_fixture(true);
+fn check_mounted_helo_primary(
+    hospital: bool,
+    transport: Transport,
+    weapon: u16,
+    amount: f64,
+    health: u32,
+) {
+    let mut engine = helo_fixture(hospital);
     let observer = manual_ground_repair_domination_tests::add_peer(&mut engine, 1, 0, 0);
     let waiting = manual_ground_repair_domination_tests::add_peer(&mut engine, 2, 0, 0);
     engine.peers.get_mut(&observer).unwrap().helo_creation_sent = true;
     assert!(!engine.peers[&waiting].helo_creation_sent);
-    assert_eq!(engine.active.as_ref().unwrap().team(), 1);
+    assert_eq!(engine.active.as_ref().unwrap().team(), u8::from(hospital));
     assert_eq!(helo_hull(&engine).wire.health_quarter_points, 400);
     let wire = native_hit(HELO, 181);
-    dispatch_hit(&mut engine, &wire, Transport::Tcp, 3300).unwrap();
+    let xp = engine.active.as_ref().unwrap().match_experience;
+    dispatch_hit(&mut engine, &wire, transport, 3300).unwrap();
 
     let record = last_record(&engine);
     assert_eq!(record["gameplay_denial"], Value::Null, "{record}");
     assert_eq!(record["decoded"]["type"], "domination_helo_bullet_hit");
-    assert_eq!(record["decoded"]["weapon_item"], 4);
-    assert_eq!(record["decoded"]["amount_hp"], 3.0);
+    assert_eq!(record["decoded"]["weapon_item"], weapon);
+    assert_eq!(record["decoded"]["amount_hp"], amount);
+    assert_eq!(record["rewards"], json!([]));
+    assert_eq!(engine.active.as_ref().unwrap().match_experience, xp);
     let damage = helo_hull(&engine).wire;
-    assert_eq!(damage.health_quarter_points, 388);
+    assert_eq!(u32::from(damage.health_quarter_points), health);
     assert_eq!(damage.last_location_and_type, 0x13);
     assert_eq!(damage.last_attacker, 0x0380_0000);
     assert_eq!(damage.last_source_object, u32::MAX);
@@ -216,7 +224,7 @@ fn hospital_helo_primary_applies_vehicle_damage_and_follows_helo_creation() {
     }
     assert_eq!(bits.read(1), Ok(1));
     assert_eq!(bits.read(8), Ok(0x13));
-    assert_eq!(bits.read(16), Ok(388));
+    assert_eq!(bits.read(16), Ok(health));
     assert_eq!(bits.read(32), Ok(0x0380_0000));
     assert_eq!(bits.read(32), Ok(u32::MAX));
     assert_eq!(bits.read(32), Ok(181));
@@ -226,6 +234,20 @@ fn hospital_helo_primary_applies_vehicle_damage_and_follows_helo_creation() {
     assert_eq!(bits.read(1), Ok(0));
     assert_eq!(engine.peers[&observer].pending_shared.front(), Some(packet));
     assert!(engine.peers[&waiting].pending_shared.is_empty());
+}
+
+#[test]
+fn hospital_helo_primary_applies_vehicle_damage_and_follows_helo_creation() {
+    check_mounted_helo_primary(true, Transport::Tcp, 4, 3., 388);
+}
+
+#[test]
+fn apc_helo_primary_applies_friendly_vehicle_damage_after_creation() {
+    for transport in [Transport::Tcp, Transport::Udp] {
+        // Synthetic data uses 50 HP, a 0.25 friendly factor, armor rating 1,
+        // and 0.5 prevention at the chosen body location.
+        check_mounted_helo_primary(false, transport, 5, 5.75, 377);
+    }
 }
 
 #[test]
@@ -305,14 +327,6 @@ fn hospital_helo_primary_retains_round_grant_and_target_guards() {
         "vehicle_hit_requires_living_onfoot_actor"
     );
     assert_eq!(helo_hull(&passenger).wire.health_quarter_points, 400);
-
-    let mut apc = helo_fixture(false);
-    dispatch_hit(&mut apc, &hit, Transport::Udp, 3306).unwrap();
-    assert_eq!(
-        last_record(&apc)["gameplay_denial"],
-        "ground_apc_primary_requires_character_target"
-    );
-    assert_eq!(helo_hull(&apc).wire.health_quarter_points, 400);
 }
 
 #[test]
@@ -450,4 +464,156 @@ fn ground_primary_keeps_acquisition_onfoot_only_and_accepts_ordinary_tcp_hits() 
         "ground_hit_requires_living_onfoot_actor"
     );
     assert_eq!(target(&mounted, ESCORT).health_quarter_points, 600);
+}
+
+#[test]
+fn apc_helo_primary_rejects_invalid_gunner_and_hull_state() {
+    let hit = native_hit(HELO, 186);
+    let mut engine = helo_fixture(false);
+    for byte in [2, 3] {
+        let mut wrong = hit.clone();
+        wrong[byte] = 1;
+        dispatch_hit(&mut engine, &wrong, Transport::Tcp, 3300).unwrap();
+        assert_eq!(
+            last_record(&engine)["gameplay_denial"],
+            "unsupported_ground_turret_fire_mode"
+        );
+    }
+    dispatch_hit(
+        &mut engine,
+        &native_hit(HELO | 7, 186),
+        Transport::Tcp,
+        3301,
+    )
+    .unwrap();
+    assert_eq!(
+        last_record(&engine)["gameplay_denial"],
+        "unknown_domination_helo_bullet_target"
+    );
+    engine.match_started = false;
+    dispatch_hit(&mut engine, &hit, Transport::Tcp, 3302).unwrap();
+    assert_eq!(
+        last_record(&engine)["gameplay_denial"],
+        "ground_apc_primary_requires_active_round"
+    );
+    engine.match_started = true;
+    let (uninitialized, _) = engine
+        .ground_turret_seat_change(engine.active.as_ref().unwrap(), APC as u16, true)
+        .unwrap();
+    engine
+        .ground_runtime
+        .as_mut()
+        .unwrap()
+        .install_turret(APC as u16, uninitialized);
+    dispatch_hit(&mut engine, &hit, Transport::Udp, 3303).unwrap();
+    assert_eq!(
+        last_record(&engine)["gameplay_denial"],
+        "ground_turret_primary_not_initialized"
+    );
+    equip_synthetic_ground_turret(&mut engine, APC as u16);
+    engine.active.as_mut().unwrap().life = CharacterLife::Alive {
+        generation: 2,
+        health_quarter_points: 400,
+    };
+    dispatch_hit(&mut engine, &hit, Transport::Udp, 3304).unwrap();
+    assert_eq!(
+        last_record(&engine)["gameplay_denial"],
+        "ground_turret_requires_living_exclusive_gunner"
+    );
+    equip_synthetic_ground_turret(&mut engine, APC as u16);
+    engine
+        .active
+        .as_mut()
+        .unwrap()
+        .ground_seat
+        .as_mut()
+        .unwrap()
+        .seat = 0;
+    dispatch_hit(&mut engine, &hit, Transport::Udp, 3305).unwrap();
+    assert_eq!(
+        last_record(&engine)["gameplay_denial"],
+        "vehicle_hit_requires_living_onfoot_actor"
+    );
+
+    equip_synthetic_ground_turret(&mut engine, APC as u16);
+    engine
+        .domination_gameplay
+        .as_mut()
+        .unwrap()
+        .state
+        .helo
+        .as_mut()
+        .unwrap()
+        .carriers[0]
+        .published_state = domination_helo::FlightState::Dormant;
+    dispatch_hit(&mut engine, &hit, Transport::Tcp, 3306).unwrap();
+    assert_eq!(helo_hull(&engine).wire.health_quarter_points, 400);
+    assert!(engine.active.as_ref().unwrap().pending_shared.is_empty());
+}
+
+#[test]
+fn apc_helo_primary_refused_record_keeps_hull_and_recipients_unchanged() {
+    let mut engine = helo_fixture(false);
+    let observer = manual_ground_repair_domination_tests::add_peer(&mut engine, 1, 0, 0);
+    engine.peers.get_mut(&observer).unwrap().helo_creation_sent = true;
+    let before = engine.writer.clone();
+    engine.max_log = engine.written;
+    assert!(matches!(
+        dispatch_hit(&mut engine, &native_hit(HELO, 187), Transport::Tcp, 3300),
+        Err("log_limit_reached")
+    ));
+    assert_eq!(engine.writer, before);
+    assert_eq!(helo_hull(&engine).wire.health_quarter_points, 400);
+    assert!(engine.active.as_ref().unwrap().pending_shared.is_empty());
+    assert!(engine.peers[&observer].pending_shared.is_empty());
+}
+
+#[test]
+fn ordinary_helo_primary_uses_both_authenticated_hit_transports() {
+    for transport in [Transport::Tcp, Transport::Udp] {
+        let mut engine = helo_fixture(false);
+        let defend = Arc::new(
+            engine
+                .spawn_catalog
+                .as_ref()
+                .unwrap()
+                .for_squad(16)
+                .unwrap(),
+        );
+        let actor = engine.active.as_mut().unwrap();
+        actor.ground_seat = None;
+        actor.squad_catalog = defend;
+        let inventory = actor.current_inventory_handle.unwrap();
+        actor.spawned_loadout.as_mut().unwrap().inventories
+            [usize::from(inventory.inventory_index)]
+        .slots[0] = Some(2);
+        actor.observed_primary = Some(replication::InventoryItem {
+            inventory_update_id: inventory.update_id,
+            gear_slot: 0,
+            ammo_pool: 0,
+            ammo_count: 9,
+            reloading: false,
+        });
+        actor.primary_equipped = true;
+        let hit = native_hit(HELO, 188);
+        dispatch_hit(&mut engine, &hit, transport, 3300).unwrap();
+        let record = last_record(&engine);
+        assert_eq!(record["gameplay_denial"], Value::Null, "{record}");
+        assert_eq!(record["decoded"]["weapon_item"], 2);
+        assert_eq!(record["decoded"]["amount_hp"], 24.5);
+        assert_eq!(helo_hull(&engine).wire.health_quarter_points, 302);
+    }
+}
+
+#[test]
+fn acquisition_escort_primary_does_not_enter_domination_helo_damage() {
+    let mut engine = ground_firearm_fixture(100.125, false);
+    opt_in(&mut engine, ESCORT as u16);
+    equip_synthetic_ground_turret(&mut engine, ESCORT as u16);
+    let hit = native_hit(HELO, 189);
+    dispatch_hit(&mut engine, &hit, Transport::Tcp, 3300).unwrap();
+    assert_eq!(
+        last_record(&engine)["gameplay_denial"],
+        "ground_escort_primary_requires_supported_target"
+    );
 }

@@ -11,6 +11,8 @@ pub(super) fn hit<W: Write>(
     let ground_gunner = gunner_kind.is_some();
     let ground_target = request.defender >> 24 == 1;
     let domination = ctx.engine.domination_gameplay.is_some();
+    let helo_target = domination && request.defender >> 24 == 2;
+    let apc_helo_primary = helo_target && gunner_kind == Some(ground_turrets::PolicyKind::Apc);
     if let Some(kind) = gunner_kind {
         use ground_turrets::PolicyKind;
         let denial = if !ctx.accepted_client_route {
@@ -25,6 +27,7 @@ pub(super) fn hit<W: Write>(
             })
         } else if request.defender >> 16 != 0x0380
             && !(ground_target && ctx.engine.ground_gunner_accepts_ground_target(ctx.active))
+            && !apc_helo_primary
         {
             Some(match kind {
                 PolicyKind::Apc => "ground_apc_primary_requires_character_target",
@@ -50,13 +53,8 @@ pub(super) fn hit<W: Write>(
         });
         return Ok(json!({"type":"bullet_hit","target_id":request.defender}));
     }
-    if request.defender >> 24 == 2 && domination {
-        let accepted_route = if indexed_hospital {
-            ctx.accepted_client_route
-        } else {
-            ctx.accepted_owner_route
-        };
-        let result = if accepted_route {
+    if helo_target {
+        let result = if ctx.accepted_client_route {
             ctx.engine
                 .prepare_domination_helo_hit(ctx.active, &request, ctx.now)
         } else {
@@ -66,7 +64,7 @@ pub(super) fn hit<W: Write>(
             Ok(hit) => {
                 plan.helo_runtime = Some(hit.fleet);
                 plan.helo_damage_relay.extend(hit.packet);
-                plan.helo_damage_requires_creation = indexed_hospital;
+                plan.helo_damage_requires_creation = indexed_hospital || apc_helo_primary;
                 hit.audit
             }
             Err(code) => {

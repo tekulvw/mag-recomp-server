@@ -401,13 +401,14 @@ impl<W: Write> Engine<W> {
             .as_ref()
             .ok_or("domination_helo_armor_catalog_required")?
             .damage_catalog();
-        let (weapon, damage) = if actor.is_indexed_hospital_gunner() {
-            let qualified = self.hospital_primary_for_actor(actor, request)?;
-            let primary = retail_combat::RetailBulletProfile::from_hospital_primary(
-                self.item_catalog.retail_combat()?,
-                qualified,
-                request,
-            )?;
+        let apc_gunner = self.ground_gunner_kind(actor) == Some(ground_turrets::PolicyKind::Apc);
+        let (weapon, damage) = if actor.is_indexed_hospital_gunner() || apc_gunner {
+            let (CharacterHitProfile::HospitalPrimary(primary)
+            | CharacterHitProfile::GroundApcPrimary(primary)) =
+                self.mounted_primary_profile(actor, request)?
+            else {
+                return Err("unsupported_helo_mounted_primary");
+            };
             (primary.item_id(), primary.vehicle_damage())
         } else {
             self.retail_vehicle_bullet_parameters(actor, request)?

@@ -82,7 +82,8 @@ secondary definitions, the named gunner seat fallback and the hulk's last yaw.
 Primary hitscan supports Characters, the scoped Domination Ground targets and
 operational Helos. A current Hospital gunner can hit a Helo with an authenticated
 TCP or UDP Hit, and the resulting damage update follows that recipient's Helo
-creation. The on-foot Helo Hit keeps its existing UDP route.
+creation. On-foot Helo Hit also accepts authenticated TCP or UDP. Owner
+reports still use UDP.
 Heat simulation, Objective targets and native live-match presentation require
 their own qualification and acceptance. See [Hospital secondary rockets](hospital-secondary-rockets.md)
 for the separate projectile path. The independent
