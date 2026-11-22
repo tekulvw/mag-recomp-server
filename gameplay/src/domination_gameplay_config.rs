@@ -57,6 +57,7 @@ struct Core {
     human_static_resupply: Option<PathBuf>,
     projectile_contacts: Option<PathBuf>,
     infantry_rockets: Option<PathBuf>,
+    smoke_grenades: Option<PathBuf>,
     ground_turrets: Option<PathBuf>,
     initial_filters: PathBuf,
     qualified_poses: PathBuf,
@@ -314,6 +315,10 @@ impl Configuration {
                     "empty_domination_infantry_rocket_source_path",
                 ),
                 (
+                    &mut core.smoke_grenades,
+                    "empty_domination_smoke_grenade_source_path",
+                ),
+                (
                     &mut core.projectile_contacts,
                     "empty_domination_projectile_contact_source_path",
                 ),
@@ -467,6 +472,14 @@ impl Configuration {
         self.core
             .as_ref()
             .and_then(|core| core.infantry_rockets.as_ref())
+            .map(|path| read(path, 1024 * 1024))
+            .transpose()
+    }
+
+    pub(crate) fn smoke_grenade_source(&self) -> io::Result<Option<Vec<u8>>> {
+        self.core
+            .as_ref()
+            .and_then(|core| core.smoke_grenades.as_ref())
             .map(|path| read(path, 1024 * 1024))
             .transpose()
     }
@@ -1092,6 +1105,13 @@ impl<W: Write> Engine<W> {
             )
             .map_err(io::Error::other)?;
         }
+        let smoke_grenades = config
+            .smoke_grenade_source()?
+            .map(|source| {
+                crate::smoke_grenades::Catalog::from_bytes(&source, &self.item_catalog, &native_elf)
+            })
+            .transpose()
+            .map_err(io::Error::other)?;
         let infantry_rockets = config
             .infantry_rocket_source()?
             .map(|source| {
@@ -1181,6 +1201,12 @@ impl<W: Write> Engine<W> {
         self.hospital_rocket_ground = world.state.hospital_rocket_ground.clone();
         self.frag_character_blast = world.state.frag_character_blast;
         self.domination_gameplay = Some(world);
+        self.smoke_grenades = None;
+        if let Some(catalog) = smoke_grenades {
+            self = self
+                .with_smoke_grenades(Arc::new(catalog))
+                .map_err(io::Error::other)?;
+        }
         if let Some(catalog) = infantry_rockets {
             self.with_infantry_rockets(catalog)
                 .map_err(io::Error::other)

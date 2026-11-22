@@ -234,6 +234,7 @@ impl<W: Write> Engine<W> {
             projectiles: projectile::ProjectileFlights::default(),
             hospital_rocket_flights: Default::default(),
             infantry_rocket_state: Default::default(),
+            smoke_volumes: Default::default(),
             projectile_replicas: projectile_replication::ProjectileReplicas::with_profile(
                 self.wire_profile,
             ),
@@ -259,6 +260,7 @@ impl<W: Write> Engine<W> {
             prefer_statistics: false,
             pending_firearm_assist_rows: Default::default(),
             hospital_bootstrap: 0..0,
+            smoke_bootstrap: 0..0,
             ordered_health_pending: false,
             replication_backlogged: false,
             objective_delta: None,

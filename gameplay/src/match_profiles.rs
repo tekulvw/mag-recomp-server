@@ -72,6 +72,8 @@ struct Loaded {
     hospital_rockets: Option<Arc<crate::hospital_rockets::Catalog>>,
     infantry_rocket_source: Option<Arc<[u8]>>,
     infantry_rockets: Option<Arc<crate::infantry_rockets::Catalog>>,
+    smoke_grenade_source: Option<Arc<[u8]>>,
+    smoke_grenades: Option<Arc<crate::smoke_grenades::Catalog>>,
     ground_turret_source: Option<Arc<[u8]>>,
 }
 pub struct Registry {
@@ -321,57 +323,62 @@ impl Registry {
                 .as_ref()
                 .map(|p| ground_vehicles::Catalog::load(p, &spawns))
                 .transpose()?;
-            let (acquisition, acquisition_ground_turrets, acquisition_rocket_source) =
-                if let Some(path) = &source.acquisition_gameplay {
-                    let world = collision.as_ref().ok_or_else(|| {
-                        io::Error::other("acquisition_gameplay_requires_collision_world")
-                    })?;
-                    if world.stats().triangles == 0 {
-                        return Err(io::Error::other(
-                            "acquisition_gameplay_requires_nonempty_collision_world",
-                        ));
+            let (
+                acquisition,
+                acquisition_ground_turrets,
+                acquisition_rocket_source,
+                acquisition_smoke_source,
+            ) = if let Some(path) = &source.acquisition_gameplay {
+                let world = collision.as_ref().ok_or_else(|| {
+                    io::Error::other("acquisition_gameplay_requires_collision_world")
+                })?;
+                if world.stats().triangles == 0 {
+                    return Err(io::Error::other(
+                        "acquisition_gameplay_requires_nonempty_collision_world",
+                    ));
+                }
+                let catalog = objectives
+                    .as_ref()
+                    .ok_or_else(|| io::Error::other("acquisition_gameplay_requires_objectives"))?;
+                let ground = vehicles.as_ref().ok_or_else(|| {
+                    io::Error::other("acquisition_gameplay_requires_ground_vehicles")
+                })?;
+                let runtime = acquisition_ground_runtime::Runtime::from_catalog(ground)
+                    .map_err(io::Error::other)?;
+                let config = acquisition_gameplay_config::Configuration::load(path)?;
+                let setup = config.build(&spawns, catalog, &runtime)?;
+                setup
+                    .validate_projectile_contact_static(Some(world))
+                    .map_err(io::Error::other)?;
+                setup
+                    .validate_ground_drivers(ground)
+                    .map_err(io::Error::other)?;
+                if let Some(policy) = &setup.ground_damage {
+                    for creation in ground.creations() {
+                        policy
+                            .validate_vehicle(creation)
+                            .map_err(io::Error::other)?;
                     }
-                    let catalog = objectives.as_ref().ok_or_else(|| {
-                        io::Error::other("acquisition_gameplay_requires_objectives")
-                    })?;
-                    let ground = vehicles.as_ref().ok_or_else(|| {
-                        io::Error::other("acquisition_gameplay_requires_ground_vehicles")
-                    })?;
-                    let runtime = acquisition_ground_runtime::Runtime::from_catalog(ground)
-                        .map_err(io::Error::other)?;
-                    let config = acquisition_gameplay_config::Configuration::load(path)?;
-                    let setup = config.build(&spawns, catalog, &runtime)?;
-                    setup
-                        .validate_projectile_contact_static(Some(world))
-                        .map_err(io::Error::other)?;
-                    setup
-                        .validate_ground_drivers(ground)
-                        .map_err(io::Error::other)?;
-                    if let Some(policy) = &setup.ground_damage {
-                        for creation in ground.creations() {
-                            policy
-                                .validate_vehicle(creation)
-                                .map_err(io::Error::other)?;
-                        }
-                    }
-                    (
-                        Some(Arc::new(setup)),
-                        config.ground_turret_source()?.map(Arc::from),
-                        config.infantry_rocket_source()?.map(Arc::from),
-                    )
-                } else {
-                    if objectives.as_ref().is_some_and(|catalog| {
-                        catalog.source().capture_qualification == "native_source_gameplay"
-                            && !(policy.game_type == 2 && source.domination_gameplay.is_some())
-                    }) {
-                        return Err(io::Error::other(if policy.game_type == 2 {
-                            "domination_gameplay_configuration_required"
-                        } else {
-                            "acquisition_gameplay_configuration_required"
-                        }));
-                    }
-                    (None, None, None)
-                };
+                }
+                (
+                    Some(Arc::new(setup)),
+                    config.ground_turret_source()?.map(Arc::from),
+                    config.infantry_rocket_source()?.map(Arc::from),
+                    config.smoke_grenade_source()?.map(Arc::from),
+                )
+            } else {
+                if objectives.as_ref().is_some_and(|catalog| {
+                    catalog.source().capture_qualification == "native_source_gameplay"
+                        && !(policy.game_type == 2 && source.domination_gameplay.is_some())
+                }) {
+                    return Err(io::Error::other(if policy.game_type == 2 {
+                        "domination_gameplay_configuration_required"
+                    } else {
+                        "acquisition_gameplay_configuration_required"
+                    }));
+                }
+                (None, None, None, None)
+            };
             let damage = source
                 .character_damage_rules
                 .as_ref()
@@ -393,6 +400,7 @@ impl Registry {
                 ground_turret_source,
                 hospital_rocket_source,
                 infantry_rocket_source,
+                smoke_grenade_source,
             ) = if let Some(path) = &source.domination_gameplay {
                 if policy.game_type != 2
                     || domination_round.is_none()
@@ -436,6 +444,7 @@ impl Registry {
                     ground_turret_source,
                     rocket_source,
                     config.infantry_rocket_source()?.map(Arc::from),
+                    config.smoke_grenade_source()?.map(Arc::from),
                 )
             } else {
                 (
@@ -444,6 +453,7 @@ impl Registry {
                     acquisition_ground_turrets,
                     None,
                     acquisition_rocket_source,
+                    acquisition_smoke_source,
                 )
             };
             let ability_manifest = active_ability_config::manifest_path(
@@ -509,12 +519,51 @@ impl Registry {
                     hospital_rockets: None,
                     infantry_rocket_source,
                     infantry_rockets: None,
+                    smoke_grenade_source,
+                    smoke_grenades: None,
                     ground_turret_source,
                 },
             );
         }
         Ok(Self { profiles })
     }
+    pub fn bind_smoke_grenades(
+        &mut self,
+        items: &item_catalog::ItemCatalog,
+    ) -> Result<(), &'static str> {
+        for profile in self.profiles.values_mut() {
+            let Some(source) = profile.smoke_grenade_source.as_ref() else {
+                continue;
+            };
+            if !matches!(
+                (
+                    profile.summary.game_type,
+                    &profile.acquisition,
+                    &profile.domination
+                ),
+                (1, Some(_), None) | (2, None, Some(_))
+            ) {
+                return Err("smoke_grenade_mode_required");
+            }
+            let objectives = profile
+                .objectives
+                .as_ref()
+                .ok_or("smoke_grenade_objectives_required")?;
+            profile.smoke_grenades = Some(Arc::new(crate::smoke_grenades::Catalog::from_bytes(
+                source,
+                items,
+                &objectives.source().source_image_sha256,
+            )?));
+        }
+        Ok(())
+    }
+
+    pub fn has_smoke_grenades(&self) -> bool {
+        self.profiles
+            .values()
+            .any(|profile| profile.smoke_grenades.is_some())
+    }
+
     /// Fit the optional launcher to each profile's current source ELF and receivers.
     pub fn bind_infantry_rockets(
         &mut self,
@@ -963,6 +1012,7 @@ impl<W: Write> Engine<W> {
         registry.bind_hospital_turrets(&self.item_catalog)?;
         registry.bind_ground_turrets(&self.item_catalog)?;
         registry.bind_infantry_rockets(&self.item_catalog)?;
+        registry.bind_smoke_grenades(&self.item_catalog)?;
         if self.dynamic_body_resources.is_none() {
             if registry.has_domination_gameplay() {
                 return Err("domination_profiles_require_dynamic_bodies");
@@ -988,6 +1038,7 @@ impl<W: Write> Engine<W> {
             self.active_abilities = None;
             self.hospital_rockets = None;
             self.infantry_rockets = None;
+            self.smoke_grenades = None;
             self.hospital_rocket_ground = None;
             self.frag_character_blast = false;
             self.projectile_contacts = None;
@@ -1111,6 +1162,7 @@ impl<W: Write> Engine<W> {
         };
         self.hospital_rockets = loaded.hospital_rockets;
         self.infantry_rockets = loaded.infantry_rockets;
+        self.smoke_grenades = loaded.smoke_grenades;
         self.hospital_rocket_ground = loaded
             .domination
             .as_ref()
@@ -1864,6 +1916,8 @@ mod tests {
                 hospital_rockets: None,
                 infantry_rocket_source: None,
                 infantry_rockets: None,
+                smoke_grenade_source: None,
+                smoke_grenades: None,
                 ground_turret_source: None,
                 acquisition: Some(sample.acquisition_gameplay.unwrap().setup),
             },

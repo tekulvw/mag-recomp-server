@@ -335,9 +335,35 @@ impl ProjectileFlights {
         profile: WireProfile,
     ) -> Result<LaunchDisposition, &'static str> {
         let parameters = catalog.grenade(item_id)?;
+        self.admit_parameters(
+            slot,
+            life,
+            now,
+            floor,
+            fingerprint,
+            item_id,
+            parameters,
+            catalog.grenade_expiry_grace_ms(),
+            profile,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn admit_parameters(
+        &mut self,
+        slot: u8,
+        life: u32,
+        now: u64,
+        floor: u32,
+        fingerprint: &[u8],
+        item_id: u16,
+        parameters: item_catalog::GrenadeParameters,
+        expiry_grace_ms: u64,
+        profile: WireProfile,
+    ) -> Result<LaunchDisposition, &'static str> {
         let expiry_after_ms = parameters
             .authored_lifetime_ms
-            .checked_add(catalog.grenade_expiry_grace_ms())
+            .checked_add(expiry_grace_ms)
             .ok_or("invalid_projectile_lifetime")?;
         if slot >= projectile_slot_count(profile) || fingerprint.len() != 57 {
             return Err("invalid_projectile_launch");
@@ -374,6 +400,19 @@ impl ProjectileFlights {
             fingerprint: fingerprint.to_vec(),
         });
         Ok(LaunchDisposition::Created { generation })
+    }
+
+    /// A bounded persistent-volume allocation can defer a reported terminal
+    /// without losing its accepted owner pose or spending another round.
+    pub(crate) fn defer_terminal(&mut self, slot: u8, generation: u32) {
+        if let Some(flight) = self
+            .slots
+            .get_mut(usize::from(slot))
+            .and_then(Option::as_mut)
+            && flight.generation == generation
+        {
+            flight.completed = false;
+        }
     }
     /// Owner data remains client-reported physics; caller checks the authenticated
     /// index and validates the whole packet before calling this method.

@@ -253,15 +253,16 @@ fn interval(base: f32, modifier: f32) -> Result<f32, &'static str> {
     }
 }
 
-fn equipped_frag(actor: &Active, items: &item_catalog::ItemCatalog) -> Option<(u16, u8)> {
+fn equipped_grenade<W: Write>(actor: &Active, engine: &Engine<W>) -> Option<(u16, u8)> {
     let kit = actor.equipped_loadout()?;
     let item = kit
         .inventories
         .get(usize::from(kit.handle.inventory_index))?
         .slots[4]?;
-    // This scope only admits the selected ordinary retail frag via the same
-    // slot and catalog that authorize its normal launch.
-    let cap = items.grenade(item).ok()?.initial_count;
+    // Exactly the same configured item/faction capability authorizes launch.
+    let cap = engine
+        .grenade_parameters(actor.reservation.character.faction, item)?
+        .initial_count;
     (cap > 0).then_some((item, cap))
 }
 
@@ -331,7 +332,7 @@ impl<W: Write> Engine<W> {
         }
         let generation = living_generation(actor).ok_or("static_resupply_character_ineligible")?;
         if provider.percent_refresh_rate == 0.0
-            && equipped_frag(actor, &self.item_catalog).is_none()
+            && equipped_grenade(actor, self).is_none()
             && !self
                 .infantry_rockets
                 .as_deref()
@@ -387,7 +388,7 @@ impl<W: Write> Engine<W> {
                 continue;
             }
             let generation = living_generation(actor);
-            let frag = equipped_frag(actor, &self.item_catalog);
+            let frag = equipped_grenade(actor, self);
             let launcher = self
                 .infantry_rockets
                 .as_deref()
@@ -616,6 +617,46 @@ mod tests {
 
     fn ammo(engine: &Engine<Vec<u8>>) -> u8 {
         engine.active.as_ref().unwrap().grenade_remaining
+    }
+
+    #[test]
+    fn human_static_resupply_refills_configured_smoke_without_frag_metadata() {
+        let mut engine = fixture();
+        let faction = engine
+            .active
+            .as_ref()
+            .unwrap()
+            .reservation
+            .character
+            .faction;
+        let variants = std::array::from_fn(|index| crate::smoke_grenades::Variant {
+            faction: index as u8,
+            item_id: 451 + index as u16,
+            ammo_token: 800 + index as u32,
+            initial_count: 2,
+            fuse_ms: 100,
+            projectile_lifetime_ms: 2000,
+            volume_duration_ms: 750,
+        });
+        engine.smoke_grenades = Some(Arc::new(crate::smoke_grenades::Catalog::synthetic(
+            variants,
+        )));
+        let actor = engine.active.as_mut().unwrap();
+        actor.spawned_loadout.as_mut().unwrap().inventories[0].slots[4] =
+            Some(451 + u16::from(faction));
+        actor.grenade_remaining = 0;
+        dispatch(&mut engine, &request(0, FAMILY_PREFIX), 200).unwrap();
+        tick(&mut engine, 1199).unwrap();
+        assert_eq!(ammo(&engine), 0);
+        tick(&mut engine, 1200).unwrap();
+        assert_eq!(ammo(&engine), 2);
+        for (slot, now) in [(3, 1201), (2, 1202)] {
+            let launch = hospital_rocket_runtime::tests::launch_wire(&engine, slot, 4);
+            dispatch(&mut engine, &launch, now).unwrap();
+        }
+        assert_eq!(ammo(&engine), 0);
+        assert!(engine.active.as_ref().unwrap().projectiles.get(2).is_some());
+        assert!(engine.active.as_ref().unwrap().projectiles.get(3).is_some());
     }
 
     #[test]

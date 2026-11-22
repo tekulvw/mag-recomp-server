@@ -201,6 +201,13 @@ pub mod retail_melee;
 pub mod rotating_log;
 mod score_clock;
 pub mod skill_catalog;
+#[cfg(test)]
+mod smoke_admission_tests;
+pub mod smoke_grenades;
+mod smoke_runtime;
+#[cfg(test)]
+mod smoke_runtime_tests;
+pub mod smoke_volume_replication;
 pub mod spawn_catalog;
 mod spawn_progression;
 mod structural_repair_authority;
@@ -1114,6 +1121,7 @@ struct Active {
     projectiles: projectile::ProjectileFlights,
     hospital_rocket_flights: hospital_rocket_runtime::Flights,
     infantry_rocket_state: infantry_rocket_runtime::State,
+    smoke_volumes: smoke_runtime::State,
     projectile_replicas: projectile_replication::ProjectileReplicas,
     projectile_cleanup: [Option<ProjectileCleanup>; projectile::MAX_PROJECTILE_SLOTS],
     projectile_publications: Vec<ProjectilePublication>,
@@ -1143,6 +1151,7 @@ struct Active {
         std::collections::BTreeMap<u16, firearm_assist_publication::Pending>,
     /// Contiguous one-time hospital bootstrap inside the reliable FIFO.
     hospital_bootstrap: std::ops::Range<usize>,
+    smoke_bootstrap: std::ops::Range<usize>,
     /// Health replies must join the FIFO until scheduled health drains.
     ordered_health_pending: bool,
     replication_backlogged: bool,
@@ -1241,6 +1250,7 @@ pub struct Engine<W: Write> {
     domination_gameplay: Option<domination_gameplay_provider::World>,
     hospital_rockets: Option<std::sync::Arc<hospital_rockets::Catalog>>,
     infantry_rockets: Option<std::sync::Arc<infantry_rockets::Catalog>>,
+    smoke_grenades: Option<std::sync::Arc<smoke_grenades::Catalog>>,
     hospital_rocket_ground: Option<std::sync::Arc<hospital_rocket_ground::Catalog>>,
     frag_character_blast: bool,
     projectile_contacts: Option<std::sync::Arc<domination_projectile_collision::ContactBindings>>,

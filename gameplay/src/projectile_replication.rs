@@ -150,6 +150,14 @@ impl ProjectileReplicas {
         });
         Ok(())
     }
+
+    pub(crate) fn creation(&self, slot: u8, generation: u32) -> Option<ProjectileCreation> {
+        self.slots
+            .get(usize::from(slot))?
+            .as_ref()
+            .filter(|replica| replica.generation == generation)
+            .map(|replica| replica.creation)
+    }
     /// Call only after aggregate body validation and ProjectileFlights acceptance.
     /// A rejected/stale report must never be published or alter late-join state.
     pub fn accept_owner(

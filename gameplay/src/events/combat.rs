@@ -495,7 +495,10 @@ pub(super) fn fire_grenade<W: Write>(
         .as_ref()
         .and_then(|k| k.inventories.get(k.handle.inventory_index as usize))
         .and_then(|i| i.slots[4]);
-    let grenade = grenade_item.and_then(|id| ctx.engine.item_catalog.grenade(id).ok());
+    let grenade = grenade_item.and_then(|id| {
+        ctx.engine
+            .grenade_parameters(active.reservation.character.faction, id)
+    });
     if !qualified_route {
         plan.gameplay_denial = Some("grenade_requires_native_client_route");
     } else if !owned {
@@ -537,14 +540,15 @@ pub(super) fn fire_grenade<W: Write>(
     } else if let CharacterLife::Alive { generation, .. } = active.life {
         let slot = request.projectile_index as u8;
         let mut flights = active.projectiles.clone();
-        match flights.admit_item_with_profile(
+        match flights.admit_parameters(
             slot,
             generation,
             now.as_millis() as u64,
             active.latest_owner_sequence,
             bytes,
             grenade_item.ok_or("missing_grenade_item")?,
-            &ctx.engine.item_catalog,
+            grenade.ok_or("unsupported_grenade_item")?,
+            ctx.engine.item_catalog.grenade_expiry_grace_ms(),
             ctx.engine.wire_profile,
         ) {
             Ok(projectile::LaunchDisposition::Duplicate { .. }) => (),
