@@ -303,6 +303,8 @@ impl Source {
     }
 }
 
+pub(crate) const XP_CAPABILITY: &str = "assist_rewards_v1";
+
 pub(super) struct Plan {
     scope: (u32, u64),
     revision: u64,
@@ -495,6 +497,40 @@ impl Plan {
         self.awards
             .iter()
             .filter_map(|award| award.reservation.as_deref())
+    }
+
+    pub(super) fn rewards<W: Write>(
+        &self,
+        engine: &Engine<W>,
+        victim_position: Option<[f32; 3]>,
+        frame: crate::frago::Frame<'_>,
+    ) -> Vec<crate::progression::RewardEvent> {
+        self.humans()
+            .filter_map(|reservation| {
+                let actor = engine
+                    .active
+                    .iter()
+                    .chain(engine.peers.values())
+                    .find(|actor| actor.reservation.id == reservation)?;
+                if actor.wire_profile.application_id() != 20231
+                    || actor.reservation.character.assist_rewards_enabled != Some(true)
+                {
+                    return None;
+                }
+                let recipient = crate::progression::RewardRecipient::from_active(actor)?;
+                let victim = self.victim;
+                let identity = format!(
+                    "human-assist-v1-{}-{}-{}-{}",
+                    actor.reservation.id, engine.sequence, victim.actor.index, victim.generation
+                );
+                Some(engine.frago_combat_reward(
+                    recipient.event(identity, crate::progression::RewardKind::EnemyKillAssist, 1),
+                    actor,
+                    victim_position,
+                    frame,
+                ))
+            })
+            .collect()
     }
 
     pub(super) fn audit(&self) -> Vec<Value> {

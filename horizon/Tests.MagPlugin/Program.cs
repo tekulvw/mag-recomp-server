@@ -66,6 +66,8 @@ Test("FRAGO support durable XP and match points settlement", LeadershipProgressi
 Test("repair reward catalog and bridge schema", LeadershipProgressionChecks.RepairRewardSchema);
 Test("repair reward admission compatibility", LeadershipProgressionChecks.RepairRewardAdmissionCompatibility);
 Test("repair reward durable XP and match points settlement", LeadershipProgressionChecks.RepairRewardDurableSettlement);
+Test("assist reward admission compatibility", LeadershipProgressionChecks.AssistRewardAdmission);
+Test("assist reward durable XP and match points settlement", LeadershipProgressionChecks.AssistRewardDurableSettlement);
 Test("objective FRAGO bridge receipt schema", LeadershipProgressionChecks.ObjectiveFragoBridgeSchema);
 Test("objective FRAGO admission compatibility", LeadershipProgressionChecks.ObjectiveFragoAdmissionCapability);
 Test("objective FRAGO admission opt-in survives reservation release", LeadershipProgressionChecks.ObjectiveFragoAdmissionRetainedOnRelease);

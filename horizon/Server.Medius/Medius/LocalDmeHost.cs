@@ -22,7 +22,7 @@ namespace Server.Medius
     {
         sealed class Reservation
         {
-            public string Id; public uint AccountId; public string Account; public uint CharacterId; public Action<MagCharacterRecord> Notify; public DmeClient Client; public DateTime Deadline; public byte Faction; public bool Accepted; public bool Claimed; public bool Invalidated; public string ReleaseReason; public string TerminalMatchId; public bool FragoActionBonusEnabled; public bool FragoObjectiveBonusEnabled; public bool ExtendedObjectiveRewardsEnabled; public bool RepairRewardsEnabled;
+            public string Id; public uint AccountId; public string Account; public uint CharacterId; public Action<MagCharacterRecord> Notify; public DmeClient Client; public DateTime Deadline; public byte Faction; public bool Accepted; public bool Claimed; public bool Invalidated; public string ReleaseReason; public string TerminalMatchId; public bool FragoActionBonusEnabled; public bool FragoObjectiveBonusEnabled; public bool ExtendedObjectiveRewardsEnabled; public bool RepairRewardsEnabled; public bool AssistRewardsEnabled; public bool AssistFragoBonusEnabled;
             public MagMlsSession QueueSession;
             public MagJoinGameRequest QueueRequest;
         }
@@ -71,6 +71,7 @@ namespace Server.Medius
         bool _supportsFragoObjectiveBonus;
         bool _supportsExtendedObjectiveRewards;
         bool _supportsRepairRewards;
+        bool _supportsAssistRewards;
         bool _ready; bool _started; bool _disposed;
         bool _ownsIntegratedDme;
         public DmeWorld World { get; private set; }
@@ -195,6 +196,7 @@ namespace Server.Medius
             _supportsFragoObjectiveBonus = hello.Capabilities.Contains("frago_objective_bonus_v1", StringComparer.Ordinal);
             _supportsExtendedObjectiveRewards = hello.Capabilities.Contains("extended_objective_rewards_v1", StringComparer.Ordinal);
             _supportsRepairRewards = hello.Capabilities.Contains("repair_rewards_v1", StringComparer.Ordinal);
+            _supportsAssistRewards = hello.Capabilities.Contains("assist_rewards_v1", StringComparer.Ordinal);
         }
         public static void RequireLoadoutSelectionCapability(GameplayBridgeResponse hello)
         {
@@ -293,6 +295,7 @@ namespace Server.Medius
                     if (allocation.Confirmation != MGCL_ERROR_CODE.MGCL_SUCCESS || !admissionWorld.Clients.TryGetValue(allocation.DmeClientIndex, out client)) return failure;
                     client.ApplicationId = _applicationId;
                     var progressionCatalog = _store.ProgressionCatalog;
+                    bool assistRewardsEnabled = _supportsAssistRewards && _applicationId == 20231 && progressionCatalog?.AssistRewardsEnabled == true;
                     reservation = new Reservation {
                         Id = Id(), AccountId = character.Id, Account = session.AuthenticatedAccount, CharacterId = character.Id,
                         Faction = character.Faction, Notify = notify, Client = client, Deadline = DateTime.UtcNow.AddSeconds(30),
@@ -302,7 +305,9 @@ namespace Server.Medius
                         FragoObjectiveBonusEnabled = _supportsFragoObjectiveBonus && _applicationId == 20231 && progressionCatalog?.FragoBonusEnabled == true,
                         ExtendedObjectiveRewardsEnabled = _supportsExtendedObjectiveRewards && _applicationId == 20231 &&
                             progressionCatalog?.ExtendedObjectiveRewardsEnabled == true,
-                        RepairRewardsEnabled = _supportsRepairRewards && _applicationId == 20231 && progressionCatalog?.RepairRewardsEnabled == true
+                        RepairRewardsEnabled = _supportsRepairRewards && _applicationId == 20231 && progressionCatalog?.RepairRewardsEnabled == true,
+                        AssistRewardsEnabled = assistRewardsEnabled,
+                        AssistFragoBonusEnabled = assistRewardsEnabled && _supportsFragoKillBonus && progressionCatalog?.FragoBonusEnabled == true
                     };
                     var admissionCharacter = new Dictionary<string, object> {
                         ["loadout_account_id"] = reservation.Account,
@@ -325,6 +330,8 @@ namespace Server.Medius
                         admissionCharacter["extended_objective_rewards_enabled"] = reservation.ExtendedObjectiveRewardsEnabled;
                     if (_supportsRepairRewards)
                         admissionCharacter["repair_rewards_enabled"] = reservation.RepairRewardsEnabled;
+                    if (_supportsAssistRewards)
+                        admissionCharacter["assist_rewards_enabled"] = reservation.AssistRewardsEnabled;
                     var reserve = new { v = 2, request_id = Id(), op = "reserve", reservation_id = reservation.Id,
                         world_id = (uint)World.WorldId, player_id = (ushort)client.DmeId, account_id = character.Id, session_key = client.SessionKey, access_key = client.Token,
                         character = admissionCharacter };
@@ -684,6 +691,9 @@ namespace Server.Medius
                         { _rewardRetry = true; Logger.Warn("Gameplay reward rejected: admission identity mismatch"); return; }
                         if (reward.Kind == MagProgressionCatalog.RepairRewardKind && !owner.RepairRewardsEnabled)
                         { _rewardRetry = true; Logger.Warn("Gameplay reward rejected: repair rewards were disabled at admission"); return; }
+                        if (reward.Kind == MagProgressionCatalog.AssistRewardKind &&
+                            (!owner.AssistRewardsEnabled || reward.Frago == true && !owner.AssistFragoBonusEnabled))
+                        { _rewardRetry = true; Logger.Warn("Gameplay reward rejected: assist reward or context was disabled at admission"); return; }
                         if (MagProgressionCatalog.IsExtendedObjectiveRewardKind(reward.Kind) && !owner.ExtendedObjectiveRewardsEnabled)
                         { _rewardRetry = true; Logger.Warn("Gameplay reward rejected: extended objectives were disabled at admission"); return; }
                         if (reward.Frago == true && MagProgressionCatalog.IsFragoSupportKind(reward.Kind) && !owner.FragoActionBonusEnabled)

@@ -146,15 +146,17 @@ impl<W: Write> Engine<W> {
             _ => None,
         }
     }
-    pub(crate) fn frago_kill_reward(
+    pub(crate) fn frago_combat_reward(
         &self,
         event: progression::RewardEvent,
         killer: &Active,
         context_position: Option<[f32; 3]>,
         frame: Frame<'_>,
     ) -> progression::RewardEvent {
-        if event.kind != progression::RewardKind::EnemyKilled
-            || event.units != 1
+        if !matches!(
+            event.kind,
+            progression::RewardKind::EnemyKilled | progression::RewardKind::EnemyKillAssist
+        ) || event.units != 1
             || !killer
                 .reservation
                 .character

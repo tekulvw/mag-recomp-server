@@ -935,7 +935,14 @@ impl<W: Write> Engine<W> {
                 {
                     receipts[shot_receipt]["firearm_assists"] = json!(assists.audit());
                     if assists.humans().next().is_some() {
-                        assist_statistics = Some(events::plan_bot_firearm_assists(self, &assists)?);
+                        let staged = events::plan_bot_firearm_assists(
+                            self,
+                            &assists,
+                            Some(target.feet.map(|value| value as f32)),
+                        )?;
+                        staged.validate(self)?;
+                        receipts[shot_receipt]["assist_settlement"] = staged.audit();
+                        assist_statistics = Some(staged);
                     }
                     firearm_assists = Some(assists);
                 }

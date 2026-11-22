@@ -1656,7 +1656,7 @@ fn firearm_assists_four_contributors_reach_seven_recipients_within_shared_budget
     )
     .unwrap();
     assert_eq!(terminal.audit().len(), 4);
-    let stats = events::plan_bot_firearm_assists(&engine, &terminal).unwrap();
+    let stats = events::plan_bot_firearm_assists(&engine, &terminal, None).unwrap();
     let death = events::plan_bot_killed_human(&engine, victim, 4).unwrap();
     terminal.check_before_record(&engine).unwrap();
     engine
@@ -2213,7 +2213,11 @@ fn a_grenade_already_queued_before_shooter_death_still_rewards_its_real_launcher
 }
 
 fn mixed_frag_assist_fixture() -> Engine<Vec<u8>> {
-    let mut engine = crate::human_kill_reward_tests::fixture()
+    configure_mixed_frag_assist_fixture(crate::human_kill_reward_tests::fixture())
+}
+
+fn configure_mixed_frag_assist_fixture(engine: Engine<Vec<u8>>) -> Engine<Vec<u8>> {
+    let mut engine = engine
         .with_firearm_assist_rules(firearm_assists::Rules {
             schema_version: 1,
             application_id: 20231,
@@ -2232,6 +2236,12 @@ fn mixed_frag_assist_fixture() -> Engine<Vec<u8>> {
     source.primary_equipped = true;
     engine.frag_character_blast = true;
     engine
+}
+
+fn enable_assist_xp(actor: &mut Active) {
+    actor.reservation.character.assist_rewards_enabled = Some(true);
+    actor.reservation.character.account_id = Some("synthetic-assister".into());
+    actor.reservation.character.character_id = Some(3);
 }
 
 fn focus_assist_actor(engine: &mut Engine<Vec<u8>>, player: u16) {
@@ -2537,6 +2547,7 @@ fn rocket_assist_settles_both_mixed_orders_and_preserves_posthumous_attribution(
 fn rocket_assist_failed_record_keeps_hp_ledger_and_publication_unchanged() {
     let mut engine =
         crate::human_kill_reward_tests::enable_incoming_base(mixed_frag_assist_fixture(), 0.25);
+    enable_assist_xp(engine.active.as_mut().unwrap());
     dispatch(&mut engine, &zero_damage_firearm_hit(0), 1000).unwrap();
     focus_assist_actor(&mut engine, 1);
     let source = rocket_assist_source(&engine);
@@ -2551,6 +2562,10 @@ fn rocket_assist_failed_record_keeps_hp_ledger_and_publication_unchanged() {
         )
         .unwrap();
     assert_eq!(candidate.audit()[0]["assists"][0]["player_id"], 2);
+    assert_eq!(
+        candidate.audit()[0]["assist_settlement"]["rewards"][0]["kind"],
+        "enemy_kill_assist"
+    );
     let revision = engine.firearm_assists.revision();
     let pending = engine
         .active
@@ -2572,12 +2587,14 @@ fn rocket_assist_failed_record_keeps_hp_ledger_and_publication_unchanged() {
     );
     assert!(engine.peers["synthetic-reservation-0000"].life.is_alive());
     assert_eq!(mixed_frag_assist_count(&engine), 0);
+    assert!(engine.pending_reward_batch().is_empty());
 }
 
 #[test]
 fn rocket_assist_batch_settles_each_victim_and_fences_stale_candidates() {
     let mut engine =
         crate::human_kill_reward_tests::enable_incoming_base(mixed_frag_assist_fixture(), 0.25);
+    enable_assist_xp(engine.active.as_mut().unwrap());
     crate::spawn_progression::reserve(&mut engine, 3);
     let template = &engine.peers["synthetic-reservation-0000"];
     let second = engine.active.as_mut().unwrap();
@@ -2632,6 +2649,37 @@ fn rocket_assist_batch_settles_each_victim_and_fences_stale_candidates() {
             .err(),
         Some("stale_hospital_rocket_character_source"),
     );
+    let recipient =
+        progression::RewardRecipient::from_active(&engine.peers["synthetic-reservation-0002"])
+            .unwrap();
+    engine.commit_rewards(
+        (0..progression::MAX_PENDING_REWARDS - 1)
+            .map(|id| {
+                recipient.event(
+                    format!("outbox-seed-{id}"),
+                    progression::RewardKind::EnemyKilled,
+                    1,
+                )
+            })
+            .collect(),
+    );
+    let revision = engine.firearm_assists.revision();
+    assert_eq!(
+        engine
+            .prepare_rocket_character_effects(&killer, &lethal, &native, now)
+            .err(),
+        Some("reward_outbox_full")
+    );
+    assert_eq!(engine.firearm_assists.revision(), revision);
+    assert_eq!(mixed_frag_assist_count(&engine), 0);
+    assert!(engine.peers["synthetic-reservation-0000"].life.is_alive());
+    assert!(engine.peers["synthetic-reservation-0003"].life.is_alive());
+    assert_eq!(
+        engine.pending_rewards.len(),
+        progression::MAX_PENDING_REWARDS - 1
+    );
+    engine.pending_rewards.clear();
+    engine.reward_order.clear();
     let candidate = engine
         .prepare_rocket_character_effects(&killer, &lethal, &native, now)
         .unwrap();
@@ -2641,6 +2689,15 @@ fn rocket_assist_batch_settles_each_victim_and_fences_stale_candidates() {
         .record_acquisition_character_effects(candidate, &mut native, 1)
         .unwrap();
     assert_eq!(mixed_frag_assist_count(&engine), 2);
+    let rewards: Vec<_> = engine
+        .pending_reward_batch()
+        .into_iter()
+        .filter(|reward| reward.kind == progression::RewardKind::EnemyKillAssist)
+        .collect();
+    assert_eq!(rewards.len(), 2);
+    assert_ne!(rewards[0].reward_id, rewards[1].reward_id);
+    assert!(rewards.iter().all(|reward| reward.player_id == 2));
+
     for id in [0, 3] {
         assert!(
             !engine.peers[&format!("synthetic-reservation-{id:04}")]
@@ -2656,4 +2713,105 @@ fn rocket_assist_batch_settles_each_victim_and_fences_stale_candidates() {
             .pending_firearm_assist_rows
             .is_empty()
     );
+}
+
+#[test]
+fn human_assist_xp_follows_first_collapse_in_both_firearm_and_frag_orders() {
+    for frag_contributor in [true, false] {
+        let mut engine = mixed_frag_assist_fixture();
+        enable_assist_xp(engine.active.as_mut().unwrap());
+        if frag_contributor {
+            queue_human_frag(&mut engine, 5.);
+            update(&mut engine, 1000).unwrap();
+        } else {
+            dispatch(&mut engine, &zero_damage_firearm_hit(0), 1000).unwrap();
+        }
+        assert!(engine.pending_reward_batch().is_empty());
+        focus_assist_actor(&mut engine, 1);
+        if frag_contributor {
+            crate::human_kill_reward_tests::hit(&mut engine, 77, 6000).unwrap();
+        } else {
+            queue_human_frag(&mut engine, 40.);
+            update(&mut engine, 6000).unwrap();
+        }
+        assert_eq!(mixed_frag_assist_count(&engine), 1);
+        let rewards: Vec<_> = engine
+            .pending_reward_batch()
+            .into_iter()
+            .filter(|reward| reward.player_id == 2)
+            .collect();
+        assert_eq!(rewards.len(), 1);
+        assert_eq!(
+            serde_json::to_value(rewards[0].kind).unwrap(),
+            "enemy_kill_assist"
+        );
+        assert_eq!(rewards[0].units, 1);
+    }
+}
+
+#[test]
+fn human_assist_xp_freezes_context_from_the_accepted_victim_pose() {
+    let base =
+        crate::spawn_progression::tests::dynamic_bodies::acquisition_gameplay_tests::capture_fixture();
+    let mut engine = configure_mixed_frag_assist_fixture(
+        crate::human_kill_reward_tests::configured_fixture(base),
+    );
+    crate::frago_tests::configure_geometry(&mut engine);
+    let actor = engine.active.as_mut().unwrap();
+    enable_assist_xp(actor);
+    actor.reservation.character.frago_bonus_enabled = Some(true);
+    actor.tracking.server_position(
+        replication::CharacterPosition {
+            x: 130.,
+            y: 3.,
+            z: 100.,
+        },
+        player_tracking::PositionOrigin::ServerSpawn,
+        0,
+    );
+    let squad = actor.squad_catalog.squad_index();
+    let assignment = &mut engine
+        .acquisition_gameplay
+        .as_mut()
+        .unwrap()
+        .state
+        .squad_mut(squad)
+        .unwrap()
+        .assignment;
+    assignment.primary_index = u16::MAX;
+    let objective = engine.objective_catalog.as_ref().unwrap().objects[0].object_index;
+    assignment.tagged_object = 0x0c80_0000 | u32::from(objective);
+    engine
+        .peers
+        .get_mut("synthetic-reservation-0000")
+        .unwrap()
+        .tracking
+        .server_position(
+            replication::CharacterPosition {
+                x: 104.,
+                y: 3.,
+                z: 103.,
+            },
+            player_tracking::PositionOrigin::ServerSpawn,
+            0,
+        );
+    dispatch(&mut engine, &zero_damage_firearm_hit(0), 1000).unwrap();
+    focus_assist_actor(&mut engine, 1);
+    crate::human_kill_reward_tests::hit(&mut engine, 77, 1001).unwrap();
+    let reward = engine
+        .pending_reward_batch()
+        .into_iter()
+        .find(|reward| reward.kind == progression::RewardKind::EnemyKillAssist)
+        .unwrap();
+    assert_eq!(reward.frago, Some(true));
+    engine
+        .acquisition_gameplay
+        .as_mut()
+        .unwrap()
+        .state
+        .squad_mut(squad)
+        .unwrap()
+        .assignment
+        .tagged_object = u32::MAX;
+    assert_eq!(engine.pending_rewards[&reward.reward_id], reward);
 }

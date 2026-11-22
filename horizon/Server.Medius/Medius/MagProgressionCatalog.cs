@@ -11,6 +11,7 @@ namespace Server.Medius
     public sealed class MagProgressionCatalog
     {
         internal const string RepairRewardKind = "repair_units";
+        internal const string AssistRewardKind = "enemy_kill_assist";
         private sealed class LevelRow { public int Threshold; public byte Points; }
         private readonly SortedDictionary<byte, LevelRow> _levels = new SortedDictionary<byte, LevelRow>();
         private readonly Dictionary<string, float> _objectiveAwards = new Dictionary<string, float>(StringComparer.Ordinal);
@@ -42,6 +43,7 @@ namespace Server.Medius
         private int _enemyKilled;
         private float _healOther;
         private float? _experiencePerRepairUnit;
+        private float? _enemyKillAssist;
         private float? _fragoBonusModifier;
         public byte MaximumLevel => _levels.Keys.Last();
         public byte InitialLevel { get; private set; }
@@ -51,6 +53,7 @@ namespace Server.Medius
         internal bool FragoBonusEnabled => _fragoBonusModifier.HasValue;
         internal bool FragoActionBonusEnabled => FragoBonusEnabled && _optionalActionAwards.ContainsKey("teammate_resuscitated");
         internal bool RepairRewardsEnabled => _experiencePerRepairUnit.HasValue;
+        internal bool AssistRewardsEnabled => _enemyKillAssist.HasValue;
         internal bool ExtendedObjectiveRewardsEnabled => _objectiveAwards.Count == ObjectiveAwardKeys.Count + ExtendedObjectiveAwardKeys.Count;
         private MagProgressionCatalog() { }
         public static MagProgressionCatalog Load(string path, int applicationId = 20230)
@@ -110,6 +113,13 @@ namespace Server.Medius
                     if (!float.IsFinite(ratio) || authoredRepairAward.GetDouble() < 0)
                         throw new InvalidDataException("Invalid repair experience ratio.");
                     result._experiencePerRepairUnit = ratio;
+                }
+                if (awards.TryGetProperty("EnemyKillAssist", out var authoredAssistAward))
+                {
+                    float award = authoredAssistAward.GetSingle();
+                    if (!float.IsFinite(award) || (double)award > int.MaxValue || authoredAssistAward.GetDouble() < 0)
+                        throw new InvalidDataException("Invalid assist experience award.");
+                    result._enemyKillAssist = award;
                 }
                 if (awards.TryGetProperty("FRAGOBonusPointModifer", out var authoredFragoBonus))
                 {
@@ -250,7 +260,7 @@ namespace Server.Medius
         internal static bool IsFinalRewardKind(string kind) => kind != null && VictoryModifierKeys.ContainsKey(kind);
         internal static bool ValidKindUnits(string kind, int units) => units > 0 && units <= ushort.MaxValue &&
             (kind is "teammate_healed" or RepairRewardKind ||
-                units == 1 && (kind == "enemy_killed" || IsFragoObjectiveKind(kind) ||
+                units == 1 && (kind is "enemy_killed" or AssistRewardKind || IsFragoObjectiveKind(kind) ||
                     kind != null && (OptionalActionAwardKeys.ContainsKey(kind) || IsFinalRewardKind(kind))));
         internal static bool IsFragoSupportKind(string kind) => kind is "teammate_healed" or "teammate_resuscitated" or RepairRewardKind;
         internal static bool IsExtendedObjectiveRewardKind(string kind) =>
@@ -259,10 +269,11 @@ namespace Server.Medius
             kind != null && (ObjectiveAwardKeys.ContainsKey(kind) || IsExtendedObjectiveRewardKind(kind));
         internal static bool ValidFragoContext(string kind, int units, bool? frago) =>
             frago == null || frago == true &&
-            (kind == "enemy_killed" || IsFragoSupportKind(kind) || IsFragoObjectiveKind(kind)) && ValidKindUnits(kind, units);
+            (kind is "enemy_killed" or AssistRewardKind || IsFragoSupportKind(kind) || IsFragoObjectiveKind(kind)) && ValidKindUnits(kind, units);
         internal bool CanApplyFragoBonus(string kind) => kind switch {
             "teammate_resuscitated" => FragoActionBonusEnabled,
             RepairRewardKind => FragoBonusEnabled && RepairRewardsEnabled,
+            AssistRewardKind => FragoBonusEnabled && AssistRewardsEnabled,
             _ => FragoBonusEnabled
         };
         internal bool TryFinalAward(string kind, int units, int matchExperience, out int experience)
@@ -284,6 +295,11 @@ namespace Server.Medius
             float reward;
             if (kind == "enemy_killed") { if (units != 1) return false; reward = (float)_enemyKilled; }
             else if (kind == "teammate_healed") reward = _healOther;
+            else if (kind == AssistRewardKind)
+            {
+                if (_enemyKillAssist is not float award) return false;
+                reward = award;
+            }
             else if (kind == RepairRewardKind)
             {
                 if (_experiencePerRepairUnit is not float ratio) return false;

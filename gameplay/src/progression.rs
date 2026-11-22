@@ -48,6 +48,7 @@ impl ProgressionSnapshot {
 #[serde(rename_all = "snake_case")]
 pub enum RewardKind {
     EnemyKilled,
+    EnemyKillAssist,
     EnemyFinished,
     TeammateHealed,
     TeammateResuscitated,
@@ -494,7 +495,10 @@ impl<W: Write> Engine<W> {
         for reward in rewards {
             if let Some(frago) = reward.frago
                 && (!frago
-                    || !(reward.kind == RewardKind::EnemyKilled && reward.units == 1
+                    || !((matches!(
+                        reward.kind,
+                        RewardKind::EnemyKilled | RewardKind::EnemyKillAssist
+                    ) && reward.units == 1)
                         || reward.kind.is_frago_action(reward.units)
                         || reward.kind.is_frago_objective(reward.units)))
             {

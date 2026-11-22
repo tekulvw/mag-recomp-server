@@ -271,6 +271,8 @@ pub struct Character {
     pub extended_objective_rewards_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repair_rewards_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assist_rewards_enabled: Option<bool>,
 }
 fn deserialize_skills<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -1739,6 +1741,7 @@ impl<W: Write> Engine<W> {
             frago::OBJECTIVE_CAPABILITY.into(),
             objective_rewards::EXTENDED_CAPABILITY.into(),
             repair_rewards::CAPABILITY.into(),
+            firearm_assists::XP_CAPABILITY.into(),
         ];
         let match_profiles = self
             .match_profiles

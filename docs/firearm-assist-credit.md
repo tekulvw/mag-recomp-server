@@ -1,4 +1,4 @@
-# Ordinary firearm and frag assist credit
+# Firearm, frag and rocket assist credit
 
 Match assist counters are optional. Pass an explicit external rules file with
 `--firearm-assist-rules /absolute/ASSISTS.json` for application20231. Without
@@ -33,7 +33,7 @@ must still belong to the original thrower's allocation and team and name the
 current victim's allocation and life. It can drain after the original thrower
 dies or respawns. The assist timeout starts at authoritative damage application.
 
-At the first qualifying firearm or frag collapse, eligible current contributors
+At the first qualifying firearm, frag or rocket collapse, eligible current contributors
 other than the killer gain one assist (stat11). Incapacitation settles that collapse; finishing
 or bleed-out cannot settle it again. A revived Character begins a fresh ledger.
 The contributing allocation can respawn and keep eligibility, while a different
@@ -50,8 +50,25 @@ rows in the bounded drain. Selection reads the latest total and preserves the
 queued creation prefix, without waiting for unrelated later traffic. Bot assists join the creation-fenced,
 unsequenced totals stream, retaining reply budgets and reliable FIFO ordering.
 
-The existing firearm path covers human and registered bot victims. The frag
-path covers human victims in the authored frag damage mode. Assist XP, other
-damage sources, native scoreboard acceptance and bot final-results rows remain
-outside this qualification. Releases require the maintainer's live-match
-review and manual action.
+The firearm path covers human and registered bot victims. The frag and rocket
+paths cover their source-qualified Character damage. Rocket attribution retains
+the launch allocation through ordinary death or respawn.
+
+## Human assist experience
+
+Gameplay advertises `assist_rewards_v1`. Horizon enables the optional
+`assist_rewards_enabled` admission field when a compatible retail worker and
+the selected progression catalog provide the authored
+`Awards.EnemyKillAssist` value. The stat 11 counter remains independent of
+this handshake. Each settled human contribution produces one
+`enemy_kill_assist` receipt in the enclosing damage transaction.
+
+When the existing FRAGO capability and source-bound assignment geometry admit
+the contributor or the victim's accepted position, the receipt freezes that
+context. Horizon applies the authored XP through the shared fractional carry
+and adds the authored FRAGO bonus. Durable replay acknowledges the same award,
+and the XP acknowledgment does not increment stat 11 again. Older Horizon
+readers cannot open a character store containing this receipt kind.
+
+Native scoreboard and bot final-results presentation remain separate.
+Releases require the maintainer's live-match review and manual action.
