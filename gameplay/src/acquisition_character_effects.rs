@@ -722,6 +722,7 @@ impl<W: Write> Engine<W> {
                     victim.life = life;
                 }
                 if !victim.life.is_alive() {
+                    victim.flash_yaw = None;
                     victim
                         .grenade_damage
                         .retain(|hit| hit.target_character_id != plan.target.character_id);
@@ -787,6 +788,7 @@ macro_rules! actor_effect_state {
 }
 actor_effect_state! {
     life: CharacterLife,
+    flash_yaw: Option<crate::flash_grenades::YawWitness>,
     tracking: player_tracking::PlayerTracking,
     owner_fields: player_tracking::ClientCharacterFields,
     fall_tracker: fall_damage::Tracker,

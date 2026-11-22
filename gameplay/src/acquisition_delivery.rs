@@ -282,6 +282,7 @@ impl<W: Write> Engine<W> {
                 exit.position.y,
             )?;
             actor.ground_seat = None;
+            actor.flash_yaw = None;
             actor.helo_seat = None;
             actor.mounted_seat = None;
             actor.mounted_bunker = None;

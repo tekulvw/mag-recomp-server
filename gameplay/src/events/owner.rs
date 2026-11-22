@@ -17,6 +17,32 @@ pub(super) fn object_update<W: Write>(
         body_supported,
         accepted_stance,
     } = plan_owner_report(ctx, plan, &update)?;
+    for terminal in std::mem::take(&mut plan.combat.flash_pending) {
+        match ctx.engine.plan_flash(
+            active,
+            &terminal,
+            crate::domination_structural_world::OnFootBlastPose {
+                position: plan.session.client_position.map(|(p, _)| p),
+                stance: accepted_stance,
+            },
+            plan.ground_runtime.as_ref(),
+            if plan.session.clear_flash_yaw {
+                None
+            } else {
+                plan.session.flash_yaw.or(active.flash_yaw)
+            },
+        ) {
+            Ok((messages, audit)) => {
+                plan.messages.extend(messages);
+                plan.audit.flash_terminals.extend(audit);
+            }
+            Err(code) => {
+                plan.audit
+                    .flash_terminals
+                    .push(json!({"terminal":terminal,"supported":false,"reason":code}));
+            }
+        }
+    }
     let mut grenade_queue = plan_grenade_blasts(ctx, plan, h, body_supported, accepted_stance)?;
     if let Some(fall) = plan.combat.queued_fall.take() {
         if grenade_queue.len() < 64 {
@@ -58,6 +84,7 @@ pub(super) fn object_update<W: Write>(
         "applied_damage":plan.audit.applied_damage,"applied_healing":plan.audit.applied_healing,
         "projectile_reports":plan.audit.projectile_reports,"projectile_terminals":plan.audit.projectile_terminals,
         "smoke_terminals":plan.audit.smoke_terminals,
+        "flash_terminals":plan.audit.flash_terminals,
         "grenade_blast_checks":plan.audit.grenade_blast_checks,
         "grenade_visibility_policy":if ctx.engine.frag_character_blast {"current_body_stance_material_ray"} else if ctx.engine.development_grenade_radius {"disk_triangles_three_body_samples"} else {"unknown_no_damage"},
         "initial_objectives":plan.replication.objective_delta.is_some(),"objective_count":plan.replication.objective_count,
@@ -251,6 +278,28 @@ fn plan_owner_report<W: Write>(
             if h.client_index == 0 && h.nak_sequence == 0 && qualified_owner_route {
                 plan.session.new_owner_sequence =
                     Some(active.latest_owner_sequence.max(h.sequence));
+                if ctx.accepted_owner_route
+                    && h.sequence > active.latest_owner_sequence
+                    && fields.state.is_some_and(|s| matches!(s.state, 7 | 14))
+                {
+                    plan.session.clear_flash_yaw = true;
+                }
+                if ctx.accepted_owner_route
+                    && fields
+                        .state
+                        .or(active.owner_fields.state)
+                        .is_none_or(|s| !matches!(s.state, 7 | 14))
+                    && h.sequence > active.latest_owner_sequence
+                    && !active.is_mounted()
+                    && let CharacterLife::Alive { generation, .. } = active.life
+                    && let Some(yaw) = fields.yaw
+                {
+                    plan.session.flash_yaw = Some(crate::flash_grenades::YawWitness {
+                        allocation: active.allocation_sequence,
+                        generation,
+                        yaw,
+                    });
+                }
                 if h.sequence > active.latest_owner_sequence && active.life.is_alive() {
                     plan.combat.observed_primary = fields.primary;
                     plan.combat.observed_secondary = fields.secondary;
@@ -333,6 +382,71 @@ fn plan_owner_report<W: Write>(
                             .gas_grenades
                             .as_deref()
                             .and_then(|catalog| catalog.variant(faction, terminal.item_id));
+                        if ctx
+                            .engine
+                            .flash_grenades
+                            .as_deref()
+                            .is_some_and(|c| c.variant(faction, terminal.item_id).is_some())
+                        {
+                            let valid = flights.get(terminal.slot).is_some_and(|f| {
+                                f.flash_source.as_ref().is_some_and(|source| {
+                                    source.current(active, ctx.engine.round_number)
+                                }) && (now.as_millis() as u64).saturating_sub(f.launched_at_ms)
+                                    < f.expiry_after_ms
+                            }) && ctx.accepted_owner_route
+                                && h.sequence > active.latest_owner_sequence
+                                && ctx.engine.round_combat_allowed(now)
+                                && terminal.reason
+                                    == projectile::ProjectileTerminalReason::ReportedDetonation;
+                            if valid {
+                                plan.combat.flash_pending.push(terminal);
+                            }
+                            if let Some(removal) = plan
+                                .combat
+                                .projectile_replicas
+                                .take_removal(terminal.slot, terminal.generation)?
+                            {
+                                if valid {
+                                    let update = projectile::ProjectileOwnerUpdate {
+                                        slot: terminal.slot,
+                                        object_index: active.reservation.player,
+                                        fields: projectile::ProjectileOwnerFields {
+                                            state: Some(2),
+                                            position: terminal.position,
+                                            rotation_xyzw: None,
+                                        },
+                                    };
+                                    let wire = projectile_replication::ProjectileOwnerDelta {
+                                        header: replication::UpdateHeader {
+                                            sequence: 1,
+                                            nak_sequence: 0,
+                                            client_index: 0,
+                                            object_type_mask: 1 << (16 + terminal.slot),
+                                            timestamp_ms: now.as_millis() as u32,
+                                        },
+                                        update: &update,
+                                    }
+                                    .encode_with_profile(ctx.engine.wire_profile)?;
+                                    plan.combat.projectile_publications.push(
+                                        ProjectilePublication {
+                                            include_owner: false,
+                                            wire,
+                                        },
+                                    );
+                                }
+                                plan.combat.projectile_cleanup[usize::from(terminal.slot)] =
+                                    Some(ProjectileCleanup {
+                                        due: if valid {
+                                            now.checked_add(Duration::from_millis(500))
+                                                .ok_or("flash_cleanup_overflow")?
+                                        } else {
+                                            now
+                                        },
+                                        removal,
+                                    });
+                            }
+                            continue;
+                        }
                         if let Some(duration) = smoke
                             .map(|v| v.volume_duration_ms)
                             .or_else(|| gas.map(|v| v.volume_duration_ms))

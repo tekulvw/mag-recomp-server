@@ -871,3 +871,30 @@ fn gas_pulse_uses_poison_damage_and_volume_death_attribution() {
     assert_eq!(dead.last_damage.last_attacker, attacker.character_id);
     assert_eq!(&notice(dead)[6..11], &[7, 255, 255, 255, 255]);
 }
+
+#[test]
+fn flash_speculative_lethal_callback_and_refused_record_preserve_facing_witness() {
+    let mut engine = crate::human_kill_reward_tests::fixture();
+    let target = target(&engine, true);
+    let actor = engine.active.as_mut().unwrap();
+    actor.flash_yaw = Some(crate::flash_grenades::YawWitness {
+        allocation: actor.allocation_sequence,
+        generation: 4,
+        yaw: 256,
+    });
+    let mut native = states(target, native(0, false));
+    let candidate = engine
+        .prepare_acquisition_character_effects(
+            &[(target, lethal())],
+            &native,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+    assert_eq!(engine.active.as_ref().unwrap().flash_yaw.unwrap().yaw, 256);
+    engine.max_log = engine.written;
+    assert!(matches!(
+        engine.record_acquisition_character_effects(candidate, &mut native, 1),
+        Err("log_limit_reached")
+    ));
+    assert_eq!(engine.active.as_ref().unwrap().flash_yaw.unwrap().yaw, 256);
+}

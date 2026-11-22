@@ -367,6 +367,107 @@ impl BlastCollision<'_> {
             Err("domination_structural_blast_dynamic_material_required")
         }
     }
+    /// Flash cover preserves query errors; only a qualified obstruction selects weak.
+    pub(crate) fn flash_clear_path(
+        &self,
+        scene: &collision::CollisionWorld,
+        snapshot: &dynamic_collision::Snapshot,
+        ray: ([f64; 3], [f64; 3], f32),
+        contacts: &ContactBindings,
+        budget: &mut usize,
+    ) -> Result<bool, &'static str> {
+        let (start, end, penetration) = ray;
+        if self.filter_rows[24] != 0x0040_0601 {
+            return Err("flash_filter_row_mismatch");
+        }
+        if start == end {
+            return Ok(true);
+        }
+        let row = self.filter_rows[24];
+        let excludes = [None; 2];
+        let mut hits = scene
+            .filtered_material_ray_hits(start, end, row, budget)
+            .map_err(|_| "flash_static_material_query_failed")?;
+        for surface in self.sequences.active.values().flatten() {
+            let binding = surface
+                .projectile
+                .as_ref()
+                .ok_or("flash_sequence_binding_required")?;
+            let (root, properties) = binding.layers(contacts)?;
+            let child = properties
+                .ok_or("flash_sequence_child_required")?
+                .child_filter_info;
+            if row & (1 << root) == 0 || row & (1 << child) == 0 {
+                continue;
+            }
+            hits.extend(
+                surface
+                    .mesh
+                    .material_ray_hits(surface.local(start), surface.local(end), budget)
+                    .map_err(|_| "flash_sequence_material_query_failed")?,
+            );
+        }
+        // Fixed root layers are source-bound by the validated existing hospital/transport assets.
+        for (surfaces, layer) in [
+            (&self.sequences.hulks, 17),
+            (&self.sequences.hospitals, 22),
+            (&self.sequences.helos, 22),
+        ] {
+            if row & (1 << layer) == 0 {
+                continue;
+            }
+            for surface in surfaces.values() {
+                hits.extend(
+                    surface
+                        .mesh
+                        .material_ray_hits(surface.local(start), surface.local(end), budget)
+                        .map_err(|_| "flash_overlay_material_query_failed")?,
+                );
+            }
+        }
+        for hit in hits.iter_mut().filter(|h| h.terrain) {
+            let terrain = self
+                .terrain_materials
+                .ok_or("domination_terrain_material_grid_required")?;
+            let x = (start[0] + (end[0] - start[0]) * hit.fraction) as f32;
+            let z = (start[2] + (end[2] - start[2]) * hit.fraction) as f32;
+            hit.material_index = Some(terrain.sample(x, z)?);
+        }
+        if !can_penetrate(&mut hits, penetration, self.material_costs)? {
+            return Ok(false);
+        }
+        if !snapshot.positive_ray_hit_ignoring(
+            start,
+            end,
+            excludes,
+            *self.filter_rows,
+            self.limits,
+        )? {
+            return Ok(true);
+        }
+        // The row24 collector leaves fallback off for primitive ground roots.
+        // Their null material blocks damage. Refuse unqualified eligible roots.
+        if snapshot
+            .bodies()
+            .iter()
+            .filter(|root| {
+                !excludes.contains(&Some(root.target.key.id))
+                    && self.filter_rows[24] & (1 << root.layer) != 0
+            })
+            .all(|root| {
+                root.layer == 22
+                    && root.target.kind == TargetKind::GroundVehicle
+                    && matches!(
+                        root.shape.as_ref(),
+                        Geometry::Hull { .. } | Geometry::Box { .. }
+                    )
+            })
+        {
+            Ok(false)
+        } else {
+            Err("domination_structural_blast_dynamic_material_required")
+        }
+    }
 }
 
 pub(crate) struct DamageCommit {
@@ -698,7 +799,7 @@ impl<W: Write> Engine<W> {
         })
     }
 
-    fn domination_character_blast_anchor(
+    pub(crate) fn domination_character_blast_anchor(
         &self,
         body: acquisition_volume_damage::Target,
         world: u32,
@@ -2787,5 +2888,158 @@ mod tests {
         assert!(state.cooling_down(7, 2, Duration::from_millis(999)));
         assert!(!state.cooling_down(7, 2, Duration::from_secs(1)));
         assert!(!state.cooling_down(7, 3, Duration::from_millis(999)));
+    }
+}
+
+#[cfg(test)]
+mod flash_cover_tests {
+    use super::*;
+    fn mesh(x: f64, filtered: bool) -> collision::CollisionWorld {
+        let mut face = json!({"id":"flash-face","material_index":1,"vertices_xyz":[[x,0.,0.],[x,2.,0.],[x,0.,2.]],"triangles":[[0,1,2]]});
+        if filtered {
+            face["collision"] = json!({"filter_info":9,"ray_child_filter_info":0,"convex_radius":0.,"child_filter_policy":"uniform","provenance":"synthetic"});
+        }
+        collision::CollisionWorld::from_bytes(json!({"format":"mag_collision_world","schema_version":1,"coordinate_space":"world","metadata":{"map_name":"synthetic","build":"synthetic","coverage":"provisional","provenance":["synthetic"],"unknowns":[]},"instances":[face]}).to_string().as_bytes(),Default::default()).unwrap()
+    }
+    fn bindings(tag: u8, mesh: &collision::CollisionWorld) -> (SurfaceBinding, ContactBindings) {
+        let digest = "a".repeat(64);
+        let binding = SequenceBinding {
+            source_sha256: digest.clone(),
+            neutral_sha256: mesh.source_sha256().to_owned(),
+            collision_tag: tag,
+            part_ids: vec!["flash-face".into()],
+        };
+        let raw = json!({"schema":"mag_acquisition_projectile_contacts_v1","mode":1,"map_name":"synthetic","retail_elf_sha256":digest,"proof_sha256":digest,"static_world_sha256":digest,"dynamic_catalog_sha256":digest,"ground_phantom_roots":["wheel"],"static_coverage_policy":"represented_reference_pose","filter_row23":1,"sequence":[{"binding":{"source_sha256":binding.source_sha256,"neutral_sha256":binding.neutral_sha256,"collision_tag":tag,"part_ids":["flash-face"]},"contact":{"root_filter_info":tag,"child_filter_info":0,"convex_radius":0.}}]});
+        (
+            SurfaceBinding::Sequence(binding),
+            ContactBindings::from_acquisition_json(raw.to_string().as_bytes()).unwrap(),
+        )
+    }
+    fn snapshot() -> dynamic_collision::Snapshot {
+        dynamic_collision::Snapshot::capture(
+            crate::acquisition_atomic::WorldKey {
+                world_id: 1,
+                incarnation: 1,
+            },
+            0,
+            &[],
+            vec![],
+            0,
+        )
+        .unwrap()
+    }
+    #[test]
+    fn flash_cover_filters_outer_sequence_metadata_without_inventing_leaf_filters() {
+        let static_world = mesh(100., true);
+        let snapshot = snapshot();
+        let mut rows = [0; 32];
+        rows[24] = 0x0040_0601;
+        let ray = ([3., 0.25, 0.25], [5., 0.25, 0.25], 1.7);
+        for tag in [11, 29, 9] {
+            let mesh = mesh(0., false);
+            let (binding, contacts) = bindings(tag, &mesh);
+            let mut sequences = SequenceCollisionState::default();
+            sequences.active.insert(
+                (1, 0),
+                vec![SequenceSurface {
+                    projectile: Some(binding),
+                    pose: Pose::at([4., 0., 0.]),
+                    mesh,
+                }],
+            );
+            let costs = BTreeMap::from([(1, -1.)]);
+            let context = BlastCollision {
+                filter_rows: &rows,
+                limits: Default::default(),
+                sequences: &sequences,
+                material_costs: &costs,
+                terrain_materials: None,
+            };
+            assert_eq!(
+                context.flash_clear_path(&static_world, &snapshot, ray, &contacts, &mut 100),
+                Ok(tag != 9)
+            );
+            // Existing damage semantics remain unchanged for the same real crossing.
+            assert_eq!(
+                context.clear_path(
+                    &static_world,
+                    &snapshot,
+                    BlastRay {
+                        start: ray.0,
+                        end: ray.1,
+                        excludes: [None; 2],
+                        penetration: ray.2,
+                        zero_penetration_strike: false,
+                        filter_static: false
+                    },
+                    &mut 100
+                ),
+                Ok(false)
+            );
+        }
+    }
+    #[test]
+    fn flash_cover_strict_material_cost_and_query_errors_stay_distinct() {
+        let static_world = mesh(100., true);
+        let snapshot = snapshot();
+        let mut rows = [0; 32];
+        rows[24] = 0x0040_0601;
+        let mesh = mesh(0., false);
+        let (binding, contacts) = bindings(9, &mesh);
+        let mut sequences = SequenceCollisionState::default();
+        sequences.active.insert(
+            (1, 0),
+            vec![SequenceSurface {
+                projectile: Some(binding),
+                pose: Pose::at([4., 0., 0.]),
+                mesh,
+            }],
+        );
+        let ray = ([3., 0.25, 0.25], [5., 0.25, 0.25], 1.7);
+        for (cost, expected) in [(1., true), (1.7, false)] {
+            let costs = BTreeMap::from([(1, cost)]);
+            let context = BlastCollision {
+                filter_rows: &rows,
+                limits: Default::default(),
+                sequences: &sequences,
+                material_costs: &costs,
+                terrain_materials: None,
+            };
+            assert_eq!(
+                context.flash_clear_path(&static_world, &snapshot, ray, &contacts, &mut 100),
+                Ok(expected)
+            );
+            assert!(
+                context
+                    .flash_clear_path(&static_world, &snapshot, ray, &contacts, &mut 0)
+                    .is_err()
+            );
+        }
+        let no_cost = BTreeMap::new();
+        let context = BlastCollision {
+            filter_rows: &rows,
+            limits: Default::default(),
+            sequences: &sequences,
+            material_costs: &no_cost,
+            terrain_materials: None,
+        };
+        assert!(
+            context
+                .flash_clear_path(&static_world, &snapshot, ray, &contacts, &mut 100)
+                .is_err()
+        );
+        sequences.active.get_mut(&(1, 0)).unwrap()[0].projectile = None;
+        let costs = BTreeMap::from([(1, -1.)]);
+        let context = BlastCollision {
+            filter_rows: &rows,
+            limits: Default::default(),
+            sequences: &sequences,
+            material_costs: &costs,
+            terrain_materials: None,
+        };
+        assert_eq!(
+            context.flash_clear_path(&static_world, &snapshot, ray, &contacts, &mut 100),
+            Err("flash_sequence_binding_required")
+        );
     }
 }

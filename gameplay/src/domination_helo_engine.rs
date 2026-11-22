@@ -393,6 +393,7 @@ impl<W: Write> Engine<W> {
                         exit.pose.position.y,
                     )?;
                     actor.helo_seat = None;
+                    actor.flash_yaw = None;
                     actor.last_exit = None;
                     actor.owner_fields.state = Some(exit.state);
                     actor.owner_fields.position = Some(exit.pose.position);

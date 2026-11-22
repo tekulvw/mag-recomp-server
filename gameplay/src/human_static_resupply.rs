@@ -689,6 +689,40 @@ mod tests {
     }
 
     #[test]
+    fn human_static_resupply_refills_configured_flash_to_three_without_skill_53() {
+        let mut engine = fixture();
+        let variants = std::array::from_fn(|f| crate::flash_grenades::Variant {
+            faction: f as u8,
+            item_id: 451 + f as u16,
+            ammo_token: 800 + f as u32,
+            initial_count: 3,
+            fuse_ms: 100,
+            projectile_lifetime_ms: 2000,
+            inner_radius_m: 10.,
+            outer_radius_m: 40.,
+            material_penetration: 1.7,
+        });
+        engine.flash_grenades = Some(Arc::new(crate::flash_grenades::Catalog::synthetic(
+            variants,
+        )));
+        let actor = engine.active.as_mut().unwrap();
+        actor.spawned_loadout.as_mut().unwrap().inventories[0].slots[4] =
+            Some(451 + u16::from(actor.reservation.character.faction));
+        actor.grenade_remaining = 0;
+        actor.reservation.character.skills = Some([1, 0, 0, 0, 0]);
+        dispatch(&mut engine, &request(0, FAMILY_PREFIX), 200).unwrap();
+        tick(&mut engine, 1199).unwrap();
+        assert_eq!(ammo(&engine), 0);
+        tick(&mut engine, 1200).unwrap();
+        assert_eq!(ammo(&engine), 3);
+        for (slot, now) in [(3, 1201), (2, 1202), (1, 1203)] {
+            let wire = hospital_rocket_runtime::tests::launch_wire(&engine, slot, 4);
+            dispatch(&mut engine, &wire, now).unwrap();
+        }
+        assert_eq!(ammo(&engine), 0);
+    }
+
+    #[test]
     fn human_static_resupply_native_start_duplicate_due_and_refire() {
         let mut engine = fixture();
         let launch = hospital_rocket_runtime::tests::launch_wire(&engine, 3, 4);

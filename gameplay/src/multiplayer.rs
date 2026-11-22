@@ -65,6 +65,7 @@ impl Active {
         }
         self.last_damage = damage;
         if damage.health_quarter_points == 0 {
+            self.flash_yaw = None;
             self.revive_state_pending = false;
         }
         self.life = if damage.health_quarter_points == 0 {

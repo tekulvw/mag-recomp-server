@@ -1119,6 +1119,37 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     {
         return Err(io::Error::other("gas_grenades_require_character_collision"));
     }
+    let flash_grenades = acquisition_config
+        .as_ref()
+        .map(|config| config.flash_grenade_source())
+        .transpose()?
+        .flatten()
+        .map(|source| {
+            mag_gameplay::flash_grenades::Catalog::from_bytes(
+                &source,
+                &item_catalog,
+                &objective_catalog
+                    .as_ref()
+                    .expect("direct Acquisition objectives")
+                    .source()
+                    .source_image_sha256,
+            )
+            .map_err(io::Error::other)
+        })
+        .transpose()?;
+    if flash_grenades.is_some()
+        && (dynamic_bodies.is_none()
+            || acquisition_setup.as_ref().is_none_or(|setup| {
+                setup.structural.is_none()
+                    || !setup.has_projectile_contacts()
+                    || setup.filter_rows[24] != 0x0040_0601
+                    || setup.filter_rows[6] & (1 << 21) == 0
+            }))
+    {
+        return Err(io::Error::other(
+            "flash_grenades_require_character_collision",
+        ));
+    }
     let underbarrel_launchers = acquisition_config
         .as_ref()
         .map(|config| config.underbarrel_launcher_source())
@@ -1661,8 +1692,14 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             .bind_gas_grenades(&item_catalog)
             .map_err(io::Error::other)?;
         registry
+            .bind_flash_grenades(&item_catalog)
+            .map_err(io::Error::other)?;
+        registry
             .bind_underbarrel_launchers(&item_catalog)
             .map_err(io::Error::other)?;
+        if registry.has_flash_grenades() && dynamic_bodies.is_none() {
+            return Err(io::Error::other("flash_grenades_require_dynamic_bodies"));
+        }
         if registry.has_gas_grenades() && dynamic_bodies.is_none() {
             return Err(io::Error::other("gas_grenades_require_dynamic_bodies"));
         }
@@ -1698,7 +1735,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         }
         println!(
             "{}",
-            serde_json::json!({"event":"catalogs_validated","application_id":application_id,"skill_application_id":skill_catalog.application_id(),"bunkers":bunker_info,"fall_damage_enabled":fall_rules.is_some(),"incapacitation_enabled":incapacitation_rules.is_some(),"character_damage_rules_enabled":character_damage_rules.is_some(),"firearm_assists_enabled":firearm_assist_rules.is_some(),"bot_resupply_validated":bot_resupply_catalog.is_some(),"bot_resupply_approach_validated":bot_resupply_approach_policy.is_some(),"bot_resupply_drop_validated":bot_resupply_approach_policy.as_ref().is_some_and(|policy|policy.allowed_drop_id().is_some()),"dynamic_body_catalog_validated":dynamic_bodies.is_some(),"static_partitions_validated":static_partitions.len(),"acquisition_gameplay_validated":acquisition_setup.is_some(),"squad_orders_validated":squad_orders.is_some(),"active_abilities_validated":active_abilities.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_active_abilities()),"domination_gameplay_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_domination_gameplay()),"infantry_rockets_validated":infantry_rockets.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_infantry_rockets()),"gas_grenades_validated":gas_grenades.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_gas_grenades()),"smoke_grenades_validated":smoke_grenades.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_smoke_grenades()),"underbarrel_launchers_validated":underbarrel_launchers.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_underbarrel_launchers()),"hospital_rockets_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rockets()),"hospital_rocket_ground_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rocket_ground()),"hospital_rocket_helo_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rocket_helo()),"frag_character_blast_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.frag_character_blast) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_frag_character_blast()),"human_static_resupply_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.has_human_static_resupply()) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_human_static_resupply()),"frag_ground_areas_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.has_frag_ground_areas()) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_frag_ground_areas()),"frag_helo_areas_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_frag_helo_areas()),"hospital_blast_areas_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_blast_areas()),"projectile_contacts_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.has_projectile_contacts()) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_projectile_contacts()),"scope":"schema_and_profile_validation_not_client_acceptance"})
+            serde_json::json!({"event":"catalogs_validated","application_id":application_id,"skill_application_id":skill_catalog.application_id(),"bunkers":bunker_info,"fall_damage_enabled":fall_rules.is_some(),"incapacitation_enabled":incapacitation_rules.is_some(),"character_damage_rules_enabled":character_damage_rules.is_some(),"firearm_assists_enabled":firearm_assist_rules.is_some(),"bot_resupply_validated":bot_resupply_catalog.is_some(),"bot_resupply_approach_validated":bot_resupply_approach_policy.is_some(),"bot_resupply_drop_validated":bot_resupply_approach_policy.as_ref().is_some_and(|policy|policy.allowed_drop_id().is_some()),"dynamic_body_catalog_validated":dynamic_bodies.is_some(),"static_partitions_validated":static_partitions.len(),"acquisition_gameplay_validated":acquisition_setup.is_some(),"squad_orders_validated":squad_orders.is_some(),"active_abilities_validated":active_abilities.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_active_abilities()),"domination_gameplay_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_domination_gameplay()),"infantry_rockets_validated":infantry_rockets.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_infantry_rockets()),"flash_grenades_validated":flash_grenades.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_flash_grenades()),"gas_grenades_validated":gas_grenades.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_gas_grenades()),"smoke_grenades_validated":smoke_grenades.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_smoke_grenades()),"underbarrel_launchers_validated":underbarrel_launchers.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_underbarrel_launchers()),"hospital_rockets_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rockets()),"hospital_rocket_ground_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rocket_ground()),"hospital_rocket_helo_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rocket_helo()),"frag_character_blast_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.frag_character_blast) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_frag_character_blast()),"human_static_resupply_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.has_human_static_resupply()) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_human_static_resupply()),"frag_ground_areas_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.has_frag_ground_areas()) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_frag_ground_areas()),"frag_helo_areas_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_frag_helo_areas()),"hospital_blast_areas_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_blast_areas()),"projectile_contacts_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.has_projectile_contacts()) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_projectile_contacts()),"scope":"schema_and_profile_validation_not_client_acceptance"})
         );
         return Ok(());
     }
@@ -1760,6 +1797,11 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         if let Some(catalog) = gas_grenades {
             engine = engine
                 .with_gas_grenades(Arc::new(catalog))
+                .map_err(io::Error::other)?;
+        }
+        if let Some(catalog) = flash_grenades {
+            engine = engine
+                .with_flash_grenades(Arc::new(catalog))
                 .map_err(io::Error::other)?;
         }
         if let Some(catalog) = underbarrel_launchers {

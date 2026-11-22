@@ -158,6 +158,8 @@ struct SessionChanges {
         player_tracking::PositionOrigin,
     )>,
     new_owner_sequence: Option<u32>,
+    flash_yaw: Option<crate::flash_grenades::YawWitness>,
+    clear_flash_yaw: bool,
     new_turret_fields: Option<turret::ClientTurretFields>,
 }
 
@@ -180,6 +182,7 @@ struct CombatChanges {
     new_rewards: Vec<progression::RewardEvent>,
     new_heal_allowed: Option<Duration>,
     new_projectiles: Option<projectile::ProjectileFlights>,
+    flash_pending: Vec<projectile::ProjectileTerminal>,
     new_hospital_rocket: Option<(u8, hospital_rocket_runtime::Flight)>,
     infantry_rocket_launch: Option<Box<infantry_rocket_runtime::Launch>>,
     projectile_replicas: projectile_replication::ProjectileReplicas,
@@ -254,6 +257,7 @@ struct EventAudit {
     projectile_reports: Vec<Value>,
     projectile_terminals: Vec<projectile::ProjectileTerminal>,
     smoke_terminals: Vec<Value>,
+    flash_terminals: Vec<Value>,
     grenade_blast_checks: Vec<blast_visibility::GrenadeBlastCheck>,
     ground_grenade_checks: Vec<Value>,
     native_grenade_character_checks: Vec<Value>,
@@ -864,6 +868,7 @@ impl<W: Write> Engine<W> {
             if let Some(peer) = self.peers.get_mut(&id) {
                 peer.life = life;
                 if !life.is_alive() {
+                    peer.flash_yaw = None;
                     peer.ground_seat = None;
                     peer.helo_seat = None;
                     peer.helo_creation_sent = false;
@@ -1020,6 +1025,21 @@ impl<W: Write> Engine<W> {
         if let Some(remaining) = plan.combat.new_grenade_remaining {
             active.grenade_remaining = remaining;
         }
+        if let Some(witness) = plan.session.flash_yaw {
+            active.flash_yaw = Some(witness);
+        }
+        // A terminal transition wins over a yaw staged from the old alive snapshot.
+        if plan.session.clear_flash_yaw
+            || seating_transition
+            || plan.session.new_mounted_seat.is_some()
+            || plan.session.new_ground_seat.is_some()
+            || plan.session.new_helo_seat.is_some()
+            || plan.session.spawn_pose.is_some()
+            || plan.replication.spawn_delta.is_some()
+            || plan.combat.new_life.is_some_and(|life| !life.is_alive())
+        {
+            active.flash_yaw = None;
+        }
         if let Some(sequence) = plan.session.new_owner_sequence {
             active.latest_owner_sequence = sequence;
         }
@@ -1091,6 +1111,12 @@ impl<W: Write> Engine<W> {
                                                 .variant(active.reservation.character.faction, id)
                                         })
                                         .map(|variant| variant.parameters())
+                                })
+                                .or_else(|| {
+                                    self.flash_grenades
+                                        .as_deref()?
+                                        .variant(active.reservation.character.faction, id)
+                                        .map(|v| v.parameters())
                                 })
                                 .or_else(|| self.item_catalog.grenade(id).ok())
                         })
@@ -1531,5 +1557,76 @@ mod ground_grenade_commit_tests {
         assert!(truck.pending_death);
         assert_eq!(truck.pose, original_pose);
         assert!(engine.active.as_ref().unwrap().ground_seat.is_none());
+    }
+}
+
+#[cfg(test)]
+mod flash_transition_tests {
+    use super::*;
+    #[test]
+    fn flash_staged_yaw_cannot_survive_same_event_downing_revive_or_mount() {
+        for transition in [0, 1, 2] {
+            let mut engine = crate::flash_runtime_tests::fixture();
+            let active = engine.active.as_ref().unwrap();
+            let player = active.reservation.player;
+            let event = EventInput {
+                reservation_id: active.reservation.id.clone(),
+                world_id: active.reservation.world,
+                player_id: player,
+                transport: Transport::Udp,
+                direction: Direction::ClientToServer,
+                rt_type: 0x3d,
+                plugin_id: Some(1),
+                payload_hex: String::new(),
+            };
+            let mut plan = EventPlan::new(active);
+            let witness = crate::flash_grenades::YawWitness {
+                allocation: active.allocation_sequence,
+                generation: 4,
+                yaw: 512,
+            };
+            // Precisely the old-Alive report/new-downing ordering boundary.
+            plan.session.flash_yaw = Some(witness);
+            match transition {
+                0 => {
+                    plan.combat.new_life = Some(CharacterLife::Incapacitated {
+                        generation: 4,
+                        downed: incapacitation::Downed {
+                            deadline: Duration::from_secs(10),
+                            accumulated_damage_hp: 0.,
+                        },
+                    })
+                }
+                1 => {
+                    plan.session.new_mounted_seat = Some(Some(0));
+                    plan.session.new_mounted_bunker = Some(5);
+                }
+                _ => {
+                    plan.session.spawn_pose = Some((
+                        replication::CharacterState {
+                            state: 1,
+                            stance: 0,
+                            user_data: [0; 3],
+                        },
+                        0,
+                    ))
+                }
+            }
+            let decoded = DecodedEvent::with_profile(&[], player, engine.wire_profile, false);
+            engine
+                .commit_event(&event, &decoded, plan, Duration::from_millis(1100))
+                .unwrap();
+            let active = engine.active.as_mut().unwrap();
+            assert!(active.flash_yaw.is_none());
+            if transition == 0 {
+                let damage = replication::CharacterDamage {
+                    health_quarter_points: 400,
+                    conditions: 0,
+                    ..active.last_damage
+                };
+                active.commit_revive(4, damage).unwrap();
+                assert!(active.flash_yaw.is_none());
+            }
+        }
     }
 }
