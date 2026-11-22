@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Project Panama Acquisition static resupply providers from owned retail files."""
+"""Project source-qualified Acquisition and Domination static resupply providers."""
 import argparse
 from collections import Counter
 import json
@@ -7,6 +7,7 @@ import math
 from pathlib import Path
 import runpy
 import struct
+from typing import NamedTuple
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,14 +17,42 @@ SHARED = runpy.run_path(str(TOOLS / "extract-retail-objective-volumes.py"))
 MAP_HELPERS = runpy.run_path(str(TOOLS / "retail_map_helpers.py"))
 NATIVE = runpy.run_path(str(TOOLS / "extract-retail-falling-damage.py"))
 require, sha = SHARED["require"], SHARED["sha"]
-MAP = "mag_panama_military_base_final"
-MEMBER = f"/run/mag/ps3/levels/{MAP}/{MAP}.clv"
 RETAIL_SHA = NATIVE["SOURCES"]["retail"]
-LEVEL_SHA = "232e7abf68e89c669bcf6b3335830748975ce4216d3f5ed6b8b3317910e6b1f2"
-CLV_SHA = "c054fe57e5fc8b81f2769368ac756cff36eafc8bf071cccc64ff912e330f1c6e"
+DOM_SPAWN_BINDINGS_SHA = "7ef4dd3e613b001dd27bdbfae4140e9b320ca9e6f2eab6ef1c68e64c7f989918"
 SCOPE = "retail_fresh_successful_compiled_load"
 SUPPLY_CLASS = "SupplyPointObjectProperties"
 IDENTITY = (1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)
+
+
+class MapSource(NamedTuple):
+    mode: int
+    defender: int
+    archive_sha: str
+    clv_sha: str
+    instance_count: int
+    provider_count: int
+
+
+MAPS = {
+    "mag_alaska_subpen_final": MapSource(1, 0,
+        "fb0e9c12653dcecd9c6f444ec6c5a997aec7f99f481f7951065bf4b64a39f7a0",
+        "b4c2cfe7db94901b98c10a11f1d57a52cfed4941e061196627b3a753a3fe3a7e", 8506, 10),
+    "mag_panama_military_base_final": MapSource(1, 1,
+        "232e7abf68e89c669bcf6b3335830748975ce4216d3f5ed6b8b3317910e6b1f2",
+        "c054fe57e5fc8b81f2769368ac756cff36eafc8bf071cccc64ff912e330f1c6e", 9908, 9),
+    "mag_voz_final": MapSource(1, 2,
+        "e8bf8760097604ef7186583ef9f1208f5d8dc5fddc4f972f30990a79590cead4",
+        "19f7fc0bcf9877633776ca5b1ae4910404499f79315003f5f0671e536c355a65", 8535, 11),
+    "mag_baku_final": MapSource(2, 2,
+        "e355622ac2b42c91d9aa22c0b46f80cbbc190dc61cc75c710157d08b4ba674e7",
+        "64add78c0f427360d58f82afa09eacf3abe743eb6bb5f57ae236a1c733f39e6f", 12164, 20),
+    "mag_canal_final": MapSource(2, 1,
+        "90295495a150c06762284b15de411fca11657557cb228fba8f854ee68ee6059e",
+        "7eff93236d9c5d2f56aadcb406cb7095ea9d69a18d96407e0801343ee859fdce", 11530, 20),
+    "mag_unalaska_final": MapSource(2, 0,
+        "bbd2f66f3664aca428b04f879e9268df121b6d7fb4ca155f3e0b53a7a241b8ed",
+        "bdc4a33b6f3542ac84756f1bd22f6babc30f150aa07dbcc8ccf7e62a94aff0c3", 11959, 21),
+}
 
 
 def native_data(elf):
@@ -218,46 +247,64 @@ def project_providers(clv, instances, definition, native):
 
 def validate_profile(spawn_raw, world_raw):
     spawn = json.loads(spawn_raw)
+    map_name = spawn["active"]["map_name"]
+    level = MAPS.get(map_name)
+    require(level is not None, f"unsupported static supply map {map_name}")
     profile = spawn["match_profile"]
     mode, attacker = profile["game_type"], profile["attacking_faction"]
     require(spawn["format"] == "mag_spawn_catalog" and type(spawn["schema_version"]) is int
-            and spawn["schema_version"] == 1 and spawn["active"]["map_name"] == MAP
-            and type(mode) is int and mode == 1 and type(attacker) is int and attacker in (0, 2),
-            "spawn catalog must select current Panama Acquisition")
+            and spawn["schema_version"] == 1 and type(mode) is int and mode == level.mode
+            and type(attacker) is int and attacker in (0, 1, 2) and attacker != level.defender,
+            f"spawn catalog must select a qualified mode and attacking faction for {map_name}")
+    map_rows = [row for row in spawn["maps"] if row["name"] == map_name]
+    require(len(map_rows) == 1 and type(map_rows[0]["owner_faction"]) is int
+            and map_rows[0]["owner_faction"] == level.defender, "wrong spawn catalog defending faction")
     source = json.loads(spawn["source"])
-    require(source["map"] == MAP and source["level_archive_sha256"] == LEVEL_SHA
-            and source["level_clv_sha256"] == CLV_SHA and source["native_elf_sha256"] == RETAIL_SHA,
-            "spawn catalog source must match supported original Panama")
+    require(source["map"] == map_name and source["level_archive_sha256"] == level.archive_sha
+            and source["level_clv_sha256"] == level.clv_sha,
+            f"spawn catalog source must match supported original {map_name}")
+    if mode == 1:
+        require(source.get("native_elf_sha256") == RETAIL_SHA, "wrong Acquisition native ELF source")
+    else:
+        # Current Domination spawn catalogs bind the qualified original
+        # family-35 witness, which carries this same original ELF identity.
+        require(source.get("native_spawn_bindings_sha256") == DOM_SPAWN_BINDINGS_SHA
+                and source.get("native_elf_sha256", RETAIL_SHA) == RETAIL_SHA,
+                "wrong Domination native spawn witness")
     world = json.loads(world_raw)
     metadata = world["metadata"]
     require(world["format"] == "mag_collision_world" and type(world["schema_version"]) is int
             and world["schema_version"] == 1 and world["coordinate_space"] == "world"
-            and metadata["map_name"] == MAP and metadata["build"] == "retail-bcus98110-01.00"
+            and metadata["map_name"] == map_name and metadata["build"] == "retail-bcus98110-01.00"
             and isinstance(metadata["provenance"], list)
-            and f"Original CLV SHA256 {CLV_SHA}" in metadata["provenance"],
-            "collision world source must match supported original Panama")
-    return {"attacking_faction": attacker, "spawn_sha256": sha(spawn_raw), "collision_sha256": sha(world_raw)}
+            and f"Original CLV SHA256 {level.clv_sha}" in metadata["provenance"],
+            f"collision world source must match supported original {map_name}")
+    return {"map": map_name, "mode": mode, "attacking_faction": attacker,
+            "spawn_sha256": sha(spawn_raw), "collision_sha256": sha(world_raw)}
 
 
 def project(elf, archive_raw, spawn_raw, world_raw):
     profile = validate_profile(spawn_raw, world_raw)
-    require(sha(archive_raw) == LEVEL_SHA, "unsupported original Panama level archive")
+    map_name = profile["map"]
+    level = MAPS[map_name]
+    member = f"/run/mag/ps3/levels/{map_name}/{map_name}.clv"
+    require(sha(archive_raw) == level.archive_sha, f"unsupported original {map_name} level archive")
     archive = SPAWN["Psarc"](archive_raw)
-    require(archive.names.count(MEMBER) == 1, "expected one original Panama CLV member")
-    raw = archive.extract(archive.names.index(MEMBER) + 1)
-    require(sha(raw) == CLV_SHA, "unsupported original Panama CLV")
+    require(archive.names.count(member) == 1, f"expected one original {map_name} CLV member")
+    raw = archive.extract(archive.names.index(member) + 1)
+    require(sha(raw) == level.clv_sha, f"unsupported original {map_name} CLV")
     native = native_data(elf)
     clv = SPAWN["retail_clv"](raw)
     definition = parse_definition(clv)
     instances = clv.tables("InstanceProperties")
-    require(len(instances) == 9908, "incomplete original Panama prefab inventory")
+    require(len(instances) == level.instance_count, f"incomplete original {map_name} prefab inventory")
     providers = project_providers(clv, instances, definition, native)
-    require(len(providers) == 9, "incomplete original Panama supply allocation roster")
+    require(len(providers) == level.provider_count, f"incomplete original {map_name} supply allocation roster")
     return {
         "schema_version": 1, "format": "mag_retail_human_static_resupply", "application_id": 20231,
-        "map": MAP, "mode": 1, "entity_family": native["family"], **profile,
-        "source": {"retail_elf_sha256": RETAIL_SHA, "level_archive_sha256": LEVEL_SHA,
-                   "clv_sha256": CLV_SHA, "clv_member": MEMBER, "id_scope": SCOPE,
+        "entity_family": native["family"], **profile,
+        "source": {"retail_elf_sha256": RETAIL_SHA, "level_archive_sha256": level.archive_sha,
+                   "clv_sha256": level.clv_sha, "clv_member": member, "id_scope": SCOPE,
                    "allocation_pool_capacity": native["pool_capacity"],
                    "allocation_proof_sha256": sha(encode(native)),
                    "definition": {name: definition[name] for name in ("offset", "token", "sha256")}},
