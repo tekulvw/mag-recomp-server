@@ -1,5 +1,7 @@
 # Retail poison grenades
 
+Generate the external rules with the [retail gas projector](gas-grenades.md).
+
 Opt in with `gas_grenades` in an Acquisition gameplay configuration or
 `core.gas_grenades` in a Domination profile. The path is relative to the
 configuration file. Use the generated `mag_retail_gas_grenades_v1` rules,

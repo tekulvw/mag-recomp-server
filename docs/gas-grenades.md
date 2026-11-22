@@ -1,6 +1,6 @@
 # Retail gas grenade data
 
-The offline projector derives the three faction gas grenade rows from an owner's original retail files and reviewed source qualification receipts. It verifies the original Skill 50 unlock, each faction's ItemList and Armory binding, the ordinary grenade equipment mode, and the original projectile ammo token. The rules contain the finite initial count, the fuse and projectile lifetime, and the separate volume duration, radii, and pulse parameters.
+The offline projector derives the three faction gas grenade rows from an owner's original retail files and reviewed source qualification receipts. It verifies the original Skill 50 unlock, each faction's ItemList and Armory binding, the ordinary grenade equipment mode, and the original projectile ammo token. The rules contain the finite initial count, the fuse and projectile lifetime, and the separate volume duration, radii, and pulse parameters. See [runtime configuration and behavior](poison-grenades.md) to opt in after projection.
 
 Use Python 3.10 or newer from the source checkout. Put both outputs in a private data directory.
 

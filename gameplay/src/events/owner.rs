@@ -382,7 +382,7 @@ fn plan_owner_report<W: Write>(
                                     json!({"terminal":terminal,"created":false,"retired":true}),
                                 );
                             }
-                            // A nondamaging Volume terminal never enters any frag consumer.
+                            // A persistent Volume terminal never enters any frag consumer.
                             continue;
                         }
                         plan.audit.projectile_terminals.push(terminal);
