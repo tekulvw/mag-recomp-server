@@ -832,6 +832,7 @@ enum PrimaryAttachment {
     WrongLauncherCategory,
     WrongLauncherAmmo,
     MismatchedHostAmmo,
+    Optional,
     OtherRequiredBipod,
     WrongBipodRole,
 }
@@ -890,13 +891,10 @@ fn attachment_hit_fixture(
             .unwrap()
             .retain(|key, _| key == "FireModeTypeClass0");
         host["required_sight_attachment"] = json!("synthetic_attachment_0");
-        host["required_underbarrel_attachment"] = json!(if matches!(
-            attachment,
-            PrimaryAttachment::OtherRequiredBipod
-        ) {
-            "different_required_bipod"
-        } else {
-            "synthetic_attachment_1"
+        host["required_underbarrel_attachment"] = json!(match attachment {
+            PrimaryAttachment::Optional => "",
+            PrimaryAttachment::OtherRequiredBipod => "different_required_bipod",
+            _ => "synthetic_attachment_1",
         });
     }
     host["attachment_list"] = json!({});
@@ -928,7 +926,10 @@ fn attachment_hit_fixture(
                 ""
             }
         });
-        if kind == "kAttachTypeBipod" && category == "kWepCategorySniperRifle" {
+        if matches!(
+            kind,
+            "kAttachTypeBipod" | "kAttachTypeForwardGrip" | "kAttachTypeSuppressor"
+        ) {
             parameters["character_attachment_type"] =
                 json!(if matches!(attachment, PrimaryAttachment::WrongBipodRole) {
                     "kCharAttachTypeBackup"
@@ -1169,6 +1170,79 @@ fn native_heavy_sniper_hit_rejects_unqualified_bipods() {
 }
 
 #[test]
+fn native_ordinary_hits_accept_qualified_optional_attachments() {
+    for (category, kind, slot) in [
+        ("kWepCategorySniperRifle", "kAttachTypeBipod", 17),
+        ("kWepCategorySniperRifle", "kAttachTypeSuppressor", 16),
+        ("kWepCategoryAssaultRifle", "kAttachTypeBipod", 17),
+        ("kWepCategoryMachineGun", "kAttachTypeForwardGrip", 17),
+        ("kWepCategorySubMachineGun", "kAttachTypeSuppressor", 16),
+        ("kWepCategorySniperRifle", "kAttachTypeForwardGrip", 17),
+    ] {
+        let mut engine =
+            primary_attachment_hit_fixture(Some(slot), PrimaryAttachment::Optional, category, kind);
+        hit(&mut engine, 55, 1000).unwrap();
+        assert_eq!(
+            victim(&engine).life.damage_health(),
+            Some((4, 240)),
+            "{category} {kind} in slot {slot}"
+        );
+    }
+}
+
+#[test]
+fn native_ordinary_hits_reject_wrong_optional_roles_or_missing_required_bipod() {
+    use PrimaryAttachment::*;
+    for (category, kind, slot, attachment) in [
+        (
+            "kWepCategorySubMachineGun",
+            "kAttachTypeForwardGrip",
+            Some(17),
+            Optional,
+        ),
+        (
+            "kWepCategoryShotgun",
+            "kAttachTypeSuppressor",
+            Some(16),
+            Optional,
+        ),
+        (
+            "kWepCategoryMachineGun",
+            "kAttachTypeForwardGrip",
+            Some(16),
+            Optional,
+        ),
+        (
+            "kWepCategorySubMachineGun",
+            "kAttachTypeSuppressor",
+            Some(16),
+            WrongBipodRole,
+        ),
+        (
+            "kWepCategorySniperRifle",
+            "kAttachTypeForwardGrip",
+            Some(17),
+            OtherRequiredBipod,
+        ),
+        (
+            "kWepCategorySniperRifle",
+            "kAttachTypeBipod",
+            None,
+            Compatible,
+        ),
+    ] {
+        let mut engine = primary_attachment_hit_fixture(slot, attachment, category, kind);
+        hit(&mut engine, 55, 1000).unwrap();
+        assert_eq!(
+            victim(&engine).life.damage_health(),
+            Some((4, 400)),
+            "{category} {kind} in slot {slot:?}"
+        );
+        assert!(String::from_utf8_lossy(&engine.writer).contains("unsupported_bullet_attachment"));
+    }
+}
+
+#[test]
 fn native_machine_gun_hit_with_compatible_bipod_uses_host_ammo() {
     let mut unmodified = machine_gun_hit_fixture(None, PrimaryAttachment::Compatible);
     let mut attached = machine_gun_hit_fixture(Some(17), PrimaryAttachment::Compatible);
@@ -1278,7 +1352,7 @@ fn assert_unqualified_assault_attachments_denied(kind: &str, allowed: usize, oth
     for (slot, attachment, category, mounted) in [
         (15, Compatible, "kWepCategoryAssaultRifle", false),
         (other, Compatible, "kWepCategoryAssaultRifle", false),
-        (allowed, Compatible, "kWepCategoryMachineGun", false),
+        (allowed, Compatible, "kWepCategoryShotgun", false),
         (allowed, Compatible, "kWepCategoryAssaultRifle", true),
         (allowed, Incompatible, "kWepCategoryAssaultRifle", false),
         (allowed, Replacement, "kWepCategoryAssaultRifle", false),
