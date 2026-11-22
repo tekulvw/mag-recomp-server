@@ -114,6 +114,13 @@ fn validate_acquisition_static_partition(
         .map_err(io::Error::other)
 }
 
+// Keep the by-value Engine builders on the runtime-only path. In debug
+// builds their temporaries otherwise dominate the catalog validation frame.
+#[inline(never)]
+fn run_worker_startup(start: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
+    start()
+}
+
 fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     let mut application_id: Option<u32> = None;
     let mut validate_catalogs = false;
@@ -1571,211 +1578,213 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         );
         return Ok(());
     }
-    let path = log.ok_or_else(|| {
-        io::Error::other("--log is required; existing logs are never overwritten")
-    })?;
-    // Rotation removes the whole-file cap; retention, not a byte ceiling, then bounds disk use.
-    let max_log = if rotation.is_some() {
-        u64::MAX
-    } else {
-        MAX_LOG
-    };
-    let telemetry = telemetry_path
-        .as_ref()
-        .map(|path| open_log(path, rotation).map(|writer| TickRecorder::start(writer, max_log)))
-        .transpose()?;
-    let writer = open_log(&path, rotation)?;
-    let mut engine =
-        Engine::from_resources(writer, max_log, resources).with_skill_catalog(skill_catalog);
-    if let Some(vehicles) = ground_vehicles {
-        engine = engine
-            .with_ground_vehicles(vehicles)
-            .map_err(io::Error::other)?;
-    }
-    if let Some((catalog, bindings)) = dynamic_bodies {
-        engine = engine
-            .with_dynamic_collision_bodies(catalog, bindings)
-            .map_err(io::Error::other)?;
-    }
-    if !static_partitions.is_empty() {
-        engine = engine
-            .with_acquisition_static_partitions(static_partitions)
-            .map_err(io::Error::other)?;
-    }
-    if let Some(objectives) = objective_catalog {
-        engine = engine
-            .with_objective_catalog(objectives)
-            .map_err(io::Error::other)?;
-    }
-    if let Some(rules) = character_damage_rules {
-        engine = engine
-            .with_character_damage_rules(rules)
-            .map_err(io::Error::other)?;
-    }
-    if let Some(world) = collision_world {
-        engine = engine.with_collision_world(world);
-    }
-    if let Some(setup) = acquisition_setup {
-        engine = engine
-            .with_acquisition_gameplay(setup)
-            .map_err(io::Error::other)?;
-    }
-    if let Some(rules) = firearm_assist_rules {
-        engine = engine
-            .with_firearm_assist_rules(rules)
-            .map_err(io::Error::other)?;
-    }
-    if let Some(rules) = incapacitation_rules {
-        engine = engine
-            .with_incapacitation_rules(rules)
-            .map_err(io::Error::other)?;
-    }
-    if let Some(rules) = fall_rules {
-        engine = engine.with_fall_damage_rules(rules);
-    }
-    if let Some(mesh) = navmesh_world {
-        engine = engine.with_navmesh_world(mesh);
-    }
-    if development_control {
-        engine = engine.with_development_control();
-    }
-    if development_grenade_radius {
-        engine = engine.with_development_grenade_radius();
-    }
-    if development_dummy {
-        engine = engine.with_development_dummy();
-    }
-    if let Some(position) = development_dummy_position {
-        engine = engine
-            .with_development_dummy_position(position)
-            .map_err(io::Error::other)?;
-    }
-    if let Some((catalog, policy)) = leadership {
-        engine = engine
-            .with_leadership_passives(catalog, policy)
-            .map_err(io::Error::other)?;
-    }
-    if let Some(setup) = active_abilities {
-        engine = engine
-            .with_active_abilities(setup)
-            .map_err(io::Error::other)?;
-    }
-    if let Some(rules) = squad_orders {
-        engine = engine.with_squad_orders(rules).map_err(io::Error::other)?;
-    }
-    if bot_fill_total > 0 {
-        let path = bot_population_path
+    run_worker_startup(move || {
+        let path = log.ok_or_else(|| {
+            io::Error::other("--log is required; existing logs are never overwritten")
+        })?;
+        // Rotation removes the whole-file cap; retention, not a byte ceiling, then bounds disk use.
+        let max_log = if rotation.is_some() {
+            u64::MAX
+        } else {
+            MAX_LOG
+        };
+        let telemetry = telemetry_path
             .as_ref()
-            .ok_or_else(|| io::Error::other("--bot-fill-total requires --bot-population"))?;
-        let population = mag_gameplay::bot_registry::BotPopulation::load(path)
-            .map_err(|e| io::Error::other(e.to_string()))?;
-        engine = engine
-            .with_bot_population(population, bot_fill_total)
-            .map_err(io::Error::other)?;
-    }
-    if let Some(supply) = bot_resupply_catalog {
-        engine
-            .configure_bot_resupply_catalog(supply)
-            .map_err(io::Error::other)?;
-    }
-    if let Some(policy) = bot_resupply_approach_policy {
-        engine
-            .configure_bot_resupply_approach_policy(policy)
-            .map_err(io::Error::other)?;
-    }
-    if let Some(registry) = match_profiles {
-        engine = engine
-            .with_match_profiles(registry)
-            .map_err(io::Error::other)?;
-    }
-    if let Some(seconds) = headless_sim_seconds {
-        // LOCAL DIAGNOSTIC: virtual-time match with one never-spawning observer.
-        let faction: u8 = std::env::var("MAG_SIM_FACTION")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
-        let wall0 = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let began = Instant::now();
-        engine.enable_world_ticks();
-        engine
-            .headless_sim_join(Duration::ZERO, wall0, faction)
-            .map_err(io::Error::other)?;
-        let snapshots = std::env::var("MAG_SIM_SNAPSHOTS").is_ok_and(|v| v == "1");
-        let step = Duration::from_millis(50);
-        let mut now = step;
-        let mut errors = 0u64;
-        while now <= Duration::from_secs(seconds) {
-            engine.headless_sim_keepalive(now);
-            if snapshots && now.as_millis().is_multiple_of(500) {
-                engine
-                    .headless_sim_snapshot(now, wall0 + now.as_secs())
-                    .map_err(io::Error::other)?;
-            }
-            let r = engine.tick_world(now, wall0 + now.as_secs(), "headless-sim".into());
-            if !r.ok {
-                errors += 1;
-                if errors <= 5 {
-                    eprintln!("tick {} error {:?}", now.as_millis(), r.error);
+            .map(|path| open_log(path, rotation).map(|writer| TickRecorder::start(writer, max_log)))
+            .transpose()?;
+        let writer = open_log(&path, rotation)?;
+        let mut engine =
+            Engine::from_resources(writer, max_log, resources).with_skill_catalog(skill_catalog);
+        if let Some(vehicles) = ground_vehicles {
+            engine = engine
+                .with_ground_vehicles(vehicles)
+                .map_err(io::Error::other)?;
+        }
+        if let Some((catalog, bindings)) = dynamic_bodies {
+            engine = engine
+                .with_dynamic_collision_bodies(catalog, bindings)
+                .map_err(io::Error::other)?;
+        }
+        if !static_partitions.is_empty() {
+            engine = engine
+                .with_acquisition_static_partitions(static_partitions)
+                .map_err(io::Error::other)?;
+        }
+        if let Some(objectives) = objective_catalog {
+            engine = engine
+                .with_objective_catalog(objectives)
+                .map_err(io::Error::other)?;
+        }
+        if let Some(rules) = character_damage_rules {
+            engine = engine
+                .with_character_damage_rules(rules)
+                .map_err(io::Error::other)?;
+        }
+        if let Some(world) = collision_world {
+            engine = engine.with_collision_world(world);
+        }
+        if let Some(setup) = acquisition_setup {
+            engine = engine
+                .with_acquisition_gameplay(setup)
+                .map_err(io::Error::other)?;
+        }
+        if let Some(rules) = firearm_assist_rules {
+            engine = engine
+                .with_firearm_assist_rules(rules)
+                .map_err(io::Error::other)?;
+        }
+        if let Some(rules) = incapacitation_rules {
+            engine = engine
+                .with_incapacitation_rules(rules)
+                .map_err(io::Error::other)?;
+        }
+        if let Some(rules) = fall_rules {
+            engine = engine.with_fall_damage_rules(rules);
+        }
+        if let Some(mesh) = navmesh_world {
+            engine = engine.with_navmesh_world(mesh);
+        }
+        if development_control {
+            engine = engine.with_development_control();
+        }
+        if development_grenade_radius {
+            engine = engine.with_development_grenade_radius();
+        }
+        if development_dummy {
+            engine = engine.with_development_dummy();
+        }
+        if let Some(position) = development_dummy_position {
+            engine = engine
+                .with_development_dummy_position(position)
+                .map_err(io::Error::other)?;
+        }
+        if let Some((catalog, policy)) = leadership {
+            engine = engine
+                .with_leadership_passives(catalog, policy)
+                .map_err(io::Error::other)?;
+        }
+        if let Some(setup) = active_abilities {
+            engine = engine
+                .with_active_abilities(setup)
+                .map_err(io::Error::other)?;
+        }
+        if let Some(rules) = squad_orders {
+            engine = engine.with_squad_orders(rules).map_err(io::Error::other)?;
+        }
+        if bot_fill_total > 0 {
+            let path = bot_population_path
+                .as_ref()
+                .ok_or_else(|| io::Error::other("--bot-fill-total requires --bot-population"))?;
+            let population = mag_gameplay::bot_registry::BotPopulation::load(path)
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            engine = engine
+                .with_bot_population(population, bot_fill_total)
+                .map_err(io::Error::other)?;
+        }
+        if let Some(supply) = bot_resupply_catalog {
+            engine
+                .configure_bot_resupply_catalog(supply)
+                .map_err(io::Error::other)?;
+        }
+        if let Some(policy) = bot_resupply_approach_policy {
+            engine
+                .configure_bot_resupply_approach_policy(policy)
+                .map_err(io::Error::other)?;
+        }
+        if let Some(registry) = match_profiles {
+            engine = engine
+                .with_match_profiles(registry)
+                .map_err(io::Error::other)?;
+        }
+        if let Some(seconds) = headless_sim_seconds {
+            // LOCAL DIAGNOSTIC: virtual-time match with one never-spawning observer.
+            let faction: u8 = std::env::var("MAG_SIM_FACTION")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            let wall0 = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let began = Instant::now();
+            engine.enable_world_ticks();
+            engine
+                .headless_sim_join(Duration::ZERO, wall0, faction)
+                .map_err(io::Error::other)?;
+            let snapshots = std::env::var("MAG_SIM_SNAPSHOTS").is_ok_and(|v| v == "1");
+            let step = Duration::from_millis(50);
+            let mut now = step;
+            let mut errors = 0u64;
+            while now <= Duration::from_secs(seconds) {
+                engine.headless_sim_keepalive(now);
+                if snapshots && now.as_millis().is_multiple_of(500) {
+                    engine
+                        .headless_sim_snapshot(now, wall0 + now.as_secs())
+                        .map_err(io::Error::other)?;
                 }
+                let r = engine.tick_world(now, wall0 + now.as_secs(), "headless-sim".into());
+                if !r.ok {
+                    errors += 1;
+                    if errors <= 5 {
+                        eprintln!("tick {} error {:?}", now.as_millis(), r.error);
+                    }
+                }
+                now += step;
             }
-            now += step;
+            eprintln!(
+                "{}",
+                serde_json::json!({"event":"headless_sim_done","simulated_s":seconds,"wall_ms":began.elapsed().as_millis(),"tick_errors":errors})
+            );
+            return Ok(());
         }
-        eprintln!(
-            "{}",
-            serde_json::json!({"event":"headless_sim_done","simulated_s":seconds,"wall_ms":began.elapsed().as_millis(),"tick_errors":errors})
+        let engine = Arc::new(Mutex::new(engine));
+        let listener = TcpListener::bind(bind)?;
+        let started = Instant::now();
+        let active = Arc::new(AtomicUsize::new(0));
+        let subscriber: SharedSubscriber = Arc::new(Mutex::new(None));
+        spawn_world_scheduler(
+            Arc::clone(&engine),
+            Arc::clone(&subscriber),
+            started,
+            telemetry.clone(),
+            tick_budget_us,
         );
-        return Ok(());
-    }
-    let engine = Arc::new(Mutex::new(engine));
-    let listener = TcpListener::bind(bind)?;
-    let started = Instant::now();
-    let active = Arc::new(AtomicUsize::new(0));
-    let subscriber: SharedSubscriber = Arc::new(Mutex::new(None));
-    spawn_world_scheduler(
-        Arc::clone(&engine),
-        Arc::clone(&subscriber),
-        started,
-        telemetry.clone(),
-        tick_budget_us,
-    );
-    println!(
-        "{}",
-        serde_json::json!({"event":"listening","application_id":application_id.unwrap_or(20230),"match_profiles":match_profiles_path,"active_abilities":active_abilities_path,"squad_orders":squad_orders_path,"profile_selection":if application_id.is_some(){"explicit"}else{"legacy"},"protocol":mag_gameplay::BRIDGE_VERSION,"address":listener.local_addr()?.to_string(),"collision":collision_info,"spawn_catalog":spawn_path,"objective_catalog":objective_info,"item_catalog":item_path,"character_blast_rules":blast_rules_path,"retail_combat_metadata":retail_metadata,"bootstrap_loadouts":bootstrap_loadouts_path,"fall_damage_rules":fall_rules_path,"incapacitation_rules":incapacitation_rules_path,"character_damage_rules":character_damage_rules_path,"firearm_assist_rules":firearm_assist_rules_path,"skill_catalog":skill_path,"retail_armory_catalog":retail_armory_path,"leadership_passives":leadership_passives_path,"leadership_role_policy":leadership_role_policy_path,"bunkers":bunker_info,"tick_telemetry":telemetry_path,"tick_budget_us":tick_budget_us,"scheduler":"independent_50ms_when_subscribed","bot_fill_total":bot_fill_total,"initial_spawn_delay_ms":effective_initial_spawn_delay_ms,"initial_spawn_delay_source":if initial_spawn_delay_ms.is_some(){"override"}else{"catalog"},"bot_population":bot_population_path,"bot_resupply_catalog":bot_resupply_catalog_path,"bot_resupply_approach_policy":bot_resupply_approach_policy_path,"bot_names":bot_names_path,"bot_names_count":bot_names_count,"development_dummy_position":actual_dummy_position})
-    );
-    let context = Arc::new(ConnectionContext {
-        engine,
-        started,
-        telemetry,
-        tick_budget_us,
-        subscriber,
-        worker_identity,
-    });
-    for connection in listener.incoming() {
-        let stream = connection?;
-        if active
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                (n < 8).then_some(n + 1)
-            })
-            .is_err()
-        {
-            drop(stream);
-            continue;
-        }
-        let context = Arc::clone(&context);
-        let active = Arc::clone(&active);
-        std::thread::spawn(move || {
-            let slot = ConnectionSlot(Some(active));
-            if let Err(failure) = serve(stream, &context, slot) {
-                // Fixed categories only: no payload, request ID, credentials or
-                // operating-system error text can reach this diagnostic.
-                let _ = writeln!(io::stderr().lock(), "{}", failure.diagnostic());
-            }
+        println!(
+            "{}",
+            serde_json::json!({"event":"listening","application_id":application_id.unwrap_or(20230),"match_profiles":match_profiles_path,"active_abilities":active_abilities_path,"squad_orders":squad_orders_path,"profile_selection":if application_id.is_some(){"explicit"}else{"legacy"},"protocol":mag_gameplay::BRIDGE_VERSION,"address":listener.local_addr()?.to_string(),"collision":collision_info,"spawn_catalog":spawn_path,"objective_catalog":objective_info,"item_catalog":item_path,"character_blast_rules":blast_rules_path,"retail_combat_metadata":retail_metadata,"bootstrap_loadouts":bootstrap_loadouts_path,"fall_damage_rules":fall_rules_path,"incapacitation_rules":incapacitation_rules_path,"character_damage_rules":character_damage_rules_path,"firearm_assist_rules":firearm_assist_rules_path,"skill_catalog":skill_path,"retail_armory_catalog":retail_armory_path,"leadership_passives":leadership_passives_path,"leadership_role_policy":leadership_role_policy_path,"bunkers":bunker_info,"tick_telemetry":telemetry_path,"tick_budget_us":tick_budget_us,"scheduler":"independent_50ms_when_subscribed","bot_fill_total":bot_fill_total,"initial_spawn_delay_ms":effective_initial_spawn_delay_ms,"initial_spawn_delay_source":if initial_spawn_delay_ms.is_some(){"override"}else{"catalog"},"bot_population":bot_population_path,"bot_resupply_catalog":bot_resupply_catalog_path,"bot_resupply_approach_policy":bot_resupply_approach_policy_path,"bot_names":bot_names_path,"bot_names_count":bot_names_count,"development_dummy_position":actual_dummy_position})
+        );
+        let context = Arc::new(ConnectionContext {
+            engine,
+            started,
+            telemetry,
+            tick_budget_us,
+            subscriber,
+            worker_identity,
         });
-    }
-    Ok(())
+        for connection in listener.incoming() {
+            let stream = connection?;
+            if active
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                    (n < 8).then_some(n + 1)
+                })
+                .is_err()
+            {
+                drop(stream);
+                continue;
+            }
+            let context = Arc::clone(&context);
+            let active = Arc::clone(&active);
+            std::thread::spawn(move || {
+                let slot = ConnectionSlot(Some(active));
+                if let Err(failure) = serve(stream, &context, slot) {
+                    // Fixed categories only: no payload, request ID, credentials or
+                    // operating-system error text can reach this diagnostic.
+                    let _ = writeln!(io::stderr().lock(), "{}", failure.diagnostic());
+                }
+            });
+        }
+        Ok(())
+    })
 }
 #[derive(Clone, Copy, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -2718,19 +2727,26 @@ mod runtime_profile_tests {
 
     #[test]
     fn offline_registry_validation_is_explicit_and_still_requires_base_inputs() {
-        let files = SyntheticCatalogs::new();
-        let manifest = synthetic_match_profile(&files);
-        let mut args = files.args();
-        args.extend(["--match-profiles".into(), manifest.display().to_string()]);
-        assert!(run(args.clone()).is_ok());
-        let spawn_flag = args.iter().position(|s| s == "--spawn-catalog").unwrap();
-        args.drain(spawn_flag..=spawn_flag + 1);
-        assert!(
-            run(args)
-                .unwrap_err()
-                .to_string()
-                .contains("--spawn-catalog")
-        );
+        std::thread::Builder::new()
+            .stack_size(1024 * 1024)
+            .spawn(|| {
+                let files = SyntheticCatalogs::new();
+                let manifest = synthetic_match_profile(&files);
+                let mut args = files.args();
+                args.extend(["--match-profiles".into(), manifest.display().to_string()]);
+                assert!(run(args.clone()).is_ok());
+                let spawn_flag = args.iter().position(|s| s == "--spawn-catalog").unwrap();
+                args.drain(spawn_flag..=spawn_flag + 1);
+                assert!(
+                    run(args)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("--spawn-catalog")
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
