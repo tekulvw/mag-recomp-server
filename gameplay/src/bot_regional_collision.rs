@@ -97,6 +97,11 @@ impl RegionalCollision {
         Ok(world)
     }
 
+    pub(crate) fn contains_body(&self, position: [f64; 3], body: bot_physics::Body) -> bool {
+        let bounds = Bounds::body(position, body);
+        (0..3).all(|i| bounds.min[i] >= self.min[i] && bounds.max[i] <= self.max[i])
+    }
+
     pub(crate) fn validate_navmesh(&self, mesh: &navmesh::Artifact) -> Result<(), &'static str> {
         if mesh.world_sha256 != self.world_sha256
             || (0..3).any(|i| mesh.bounds.min[i] < self.min[i] || mesh.bounds.max[i] > self.max[i])
