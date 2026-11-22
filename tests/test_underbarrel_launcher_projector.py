@@ -8,6 +8,38 @@ PROJECTOR = runpy.run_path(str(TOOL))
 
 
 class UnderbarrelProjectorTests(unittest.TestCase):
+    def test_upgraded_host_is_the_unique_faction_rifle_in_the_skill_grant(self):
+        find = PROJECTOR["upgraded_host"]
+        rows = {"ItemListData3": {"id": "stock", "item_type": "kWeapon"},
+                "ItemListData4": {"id": "upgraded", "item_type": "kWeapon"},
+                "ItemListData5": {"id": "grip", "item_type": "kAttachmentItem"},
+                "ItemListData6": {}}
+        weapons = {name: {"category": "kWepCategoryAssaultRifle"}
+                   for name in ("stock", "upgraded")}
+        skill = {"Available": True, "Equipment": {
+            "tier_rifle": {"element": "upgraded"}, "tier_grip": {"element": "grip"}}}
+        self.assertEqual(find("FactionItemList2", rows, skill, weapons),
+                         ("FactionItemList2:4", "upgraded"))
+        for bad in ({**skill, "Available": False}, {**skill, "Equipment": {}},
+                    {**skill, "Equipment": {**skill["Equipment"],
+                                            "extra": {"element": "stock"}}}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                find("FactionItemList2", rows, bad, weapons)
+
+    def test_unlocked_host_armory_row_matches_the_original_item_identity(self):
+        match = PROJECTOR["inventory_bit"]
+        row = {"name": "upgraded", "authored_ref": "FactionItemList1:70",
+               "factions": [0], "available_bit": 120}
+        purchases = {"network_item_id_to_available_item_bit": {"1144": 120},
+                     "equipment_token_item_ids": {"upgraded": [120]}}
+        self.assertEqual(match({1144: row}, purchases, 0, 1144,
+                               "FactionItemList1:70", "upgraded"), 120)
+        for altered in ({**row, "factions": [1]}, {**row, "available_bit": 121},
+                        {**row, "authored_ref": "FactionItemList1:71"}):
+            with self.subTest(altered=altered), self.assertRaises(ValueError):
+                match({1144: altered}, purchases, 0, 1144,
+                      "FactionItemList1:70", "upgraded")
+
     def test_authored_physics_and_damage_channels_remain_independent(self):
         ammo = {**PROJECTOR["AMMO_STRATEGIES"],
                 **dict.fromkeys(PROJECTOR["AUTHORED_SCALARS"], 1),

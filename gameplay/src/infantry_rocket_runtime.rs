@@ -18,7 +18,7 @@ const REQUEST_BYTES: usize = 57;
 pub(crate) struct State {
     slots: [Option<Box<Slot>>; projectile::MAX_PROJECTILE_SLOTS],
     budget: Option<LifeBudget>,
-    underbarrel_budget: Option<LifeBudget>,
+    underbarrel_budgets: [Option<LifeBudget>; underbarrel_launchers::MAX_VARIANTS_PER_FACTION],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -237,6 +237,12 @@ impl State {
         equipped_underbarrel(actor, catalog).is_some()
     }
 
+    fn underbarrel_budget_index(&self, life: u32, item: u16) -> Option<usize> {
+        self.underbarrel_budgets.iter().position(|entry| {
+            entry.is_some_and(|budget| budget.life == life && budget.item == item)
+        })
+    }
+
     /// Merge into an already staged rocket refill rather than overwriting it.
     pub(crate) fn refill_underbarrel_for(
         actor: &Active,
@@ -249,21 +255,18 @@ impl State {
         let Some(variant) = equipped_underbarrel(actor, catalog) else {
             return Ok(staged);
         };
-        let Some(budget) = actor
-            .infantry_rocket_state
-            .underbarrel_budget
-            .filter(|budget| {
-                budget.life == generation && budget.item == variant.attachment_item_id
-            })
+        let current = staged.as_ref().unwrap_or(&actor.infantry_rocket_state);
+        let Some(index) = current.underbarrel_budget_index(generation, variant.attachment_item_id)
         else {
             return Ok(staged);
         };
+        let budget = current.underbarrel_budgets[index].expect("matched launcher budget");
         let rounds = budget.rounds.refilled();
         if rounds == budget.rounds {
             return Ok(staged);
         }
         let mut next = staged.unwrap_or_else(|| actor.infantry_rocket_state.clone());
-        next.underbarrel_budget = Some(LifeBudget { rounds, ..budget });
+        next.underbarrel_budgets[index] = Some(LifeBudget { rounds, ..budget });
         Ok(Some(next))
     }
 
@@ -440,10 +443,24 @@ impl<W: Write> Engine<W> {
                 )?)
             }
         };
-        let current_budget = if variant.is_underbarrel() {
-            state.underbarrel_budget
+        let underbarrel_index = if variant.is_underbarrel() {
+            Some(
+                state
+                    .underbarrel_budget_index(generation, variant.item())
+                    .or_else(|| {
+                        state
+                            .underbarrel_budgets
+                            .iter()
+                            .position(|entry| entry.is_none_or(|budget| budget.life != generation))
+                    })
+                    .ok_or("underbarrel_launcher_budget_capacity")?,
+            )
         } else {
-            state.budget
+            None
+        };
+        let current_budget = match underbarrel_index {
+            Some(index) => state.underbarrel_budgets[index],
+            None => state.budget,
         };
         let rounds = match current_budget {
             Some(budget) if budget.life == generation && budget.item == variant.item() => {
@@ -488,8 +505,8 @@ impl<W: Write> Engine<W> {
             item: variant.item(),
             rounds,
         });
-        if variant.is_underbarrel() {
-            state.underbarrel_budget = budget;
+        if let Some(index) = underbarrel_index {
+            state.underbarrel_budgets[index] = budget;
         } else {
             state.budget = budget;
         }

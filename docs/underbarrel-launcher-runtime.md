@@ -1,8 +1,11 @@
 # Rifle underbarrel launchers
 
-The optional retail path accepts the three stock-rifle launchers projected by
-`tools/extraction/project-retail-underbarrel-launchers.py`. The owner supplies
-the original files and keeps the generated rules outside the public source.
+The optional retail path accepts the three stock-rifle launcher pairs in the
+version-one catalog. The opt-in version-two catalog also covers the three
+tier-two rifle pairs. Its worker configuration requires ordinary firearm
+projections for those hosts. Both catalogs are generated from owner-supplied
+retail inputs by `tools/extraction/project-retail-underbarrel-launchers.py`.
+Keep the generated rules outside the public source.
 Set `underbarrel_launchers` in Acquisition configuration, or
 `core.underbarrel_launchers` in Domination configuration, to that file.
 Relative paths resolve against the configuration. Omission leaves the feature
@@ -24,7 +27,10 @@ initialized, on foot, and in an open combat round. Unsupported rifles, factions
 and attachment combinations remain refused. Ordinary rifle hits continue to
 use the host rifle's ammunition and damage path.
 
-The launcher has its own life-scoped finite supply and authored refire fence.
+Each launcher has its own life-scoped finite supply and authored refire fence.
+Returning to a previously used launcher in the same life preserves its spent
+rounds and refire deadline. A static supply pulse refills the currently equipped
+launcher when it has a budget for that life.
 Firing an equipped rocket does not replenish it, and firing a grenade does not
 replenish rockets. Exact active-launch retries do not spend ammunition twice.
 The native client handles reload timing and presentation. An admitted static
