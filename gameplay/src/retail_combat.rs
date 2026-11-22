@@ -4,7 +4,7 @@
 //! and healing authority; schema4 adds slot-owned melee and facing rules.
 //! Projectile motion remains authenticated owner-reported.
 
-use crate::item_catalog::TargetDamageParameters;
+use crate::item_catalog::{BulletAttachmentKind, ItemCatalog, TargetDamageParameters};
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -849,6 +849,35 @@ impl RetailBulletProfile {
         gear: u8,
         magazine: u8,
     ) -> Result<Self, &'static str> {
+        Self::resolve_equipped(catalog, kit, equipped, gear, magazine, None)
+    }
+
+    pub(crate) fn from_equipped_with_items(
+        items: &ItemCatalog,
+        kit: &crate::replication::CharacterLoadout,
+        equipped: crate::replication::InventoryItem,
+        gear: u8,
+        magazine: u8,
+        on_foot: bool,
+    ) -> Result<Self, &'static str> {
+        Self::resolve_equipped(
+            items.retail_combat()?,
+            kit,
+            equipped,
+            gear,
+            magazine,
+            on_foot.then_some(items),
+        )
+    }
+
+    fn resolve_equipped(
+        catalog: &RetailCombatCatalog,
+        kit: &crate::replication::CharacterLoadout,
+        equipped: crate::replication::InventoryItem,
+        gear: u8,
+        magazine: u8,
+        items: Option<&ItemCatalog>,
+    ) -> Result<Self, &'static str> {
         if equipped.inventory_update_id != kit.handle.update_id {
             return Err("stale_equipped_inventory");
         }
@@ -867,10 +896,23 @@ impl RetailBulletProfile {
             .inventories
             .get(usize::from(kit.handle.inventory_index))
             .ok_or("unsupported_inventory_index")?;
-        if attachments.iter().any(|i| inventory.slots[*i].is_some()) {
-            return Err("unsupported_bullet_attachment");
+        let weapon = inventory.slots[usize::from(gear)];
+        for &slot in attachments {
+            let Some(attachment) = inventory.slots[slot] else {
+                continue;
+            };
+            // Native SimWeaponKit keeps the host's ammo for a compatible
+            // primary-underbarrel bipod with an empty replacement weapon.
+            if slot != 17
+                || items
+                    .zip(weapon)
+                    .and_then(|(items, weapon)| items.retail_primary_bipod(weapon, attachment))
+                    != Some(BulletAttachmentKind::Bipod)
+            {
+                return Err("unsupported_bullet_attachment");
+            }
         }
-        let item_id = inventory.slots[usize::from(gear)].ok_or("missing_bullet_weapon")?;
+        let item_id = weapon.ok_or("missing_bullet_weapon")?;
         let p = catalog
             .bullet_for_damage(item_id)
             .map_err(|_| "unsupported_retail_bullet_weapon")?;

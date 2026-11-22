@@ -2,6 +2,7 @@
 //! The raw catalog retains every extracted item; typed views cover only equipment
 //! whose runtime authority and native formulas have already been established.
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     io,
@@ -105,6 +106,7 @@ pub struct ItemCatalog {
     character_blast_rules: crate::blast_rules::CharacterBlastRules,
     valor_defaults: Option<crate::loadouts::SavedLoadouts>,
     retail_item_refs: BTreeMap<u16, String>,
+    retail_item_source_sha256: Option<String>,
     bootstrap_loadouts: Option<crate::bootstrap_loadouts::BootstrapLoadouts>,
     retail_combat: Option<crate::retail_combat::RetailCombatCatalog>,
     retail_armory: Option<crate::retail_armory::RetailArmory>,
@@ -201,13 +203,15 @@ impl ItemCatalog {
         match application_id {
             20230 => Self::load_with_blast_rules(path, rules_path),
             20231 => {
-                let raw = serde_json::from_reader(io::BufReader::new(std::fs::File::open(path)?))
-                    .map_err(|e| invalid(e.to_string()))?;
-                Self::from_value_for_application(
+                let bytes = std::fs::read(path)?;
+                let raw = serde_json::from_slice(&bytes).map_err(|e| invalid(e.to_string()))?;
+                let mut catalog = Self::from_value_for_application(
                     raw,
                     crate::blast_rules::CharacterBlastRules::load(rules_path)?,
                     application_id,
-                )
+                )?;
+                catalog.retail_item_source_sha256 = Some(format!("{:x}", Sha256::digest(&bytes)));
+                Ok(catalog)
             }
             _ => Err(invalid("unsupported item catalog application")),
         }
@@ -318,6 +322,7 @@ impl ItemCatalog {
             character_blast_rules,
             valor_defaults: None,
             retail_item_refs,
+            retail_item_source_sha256: None,
             bootstrap_loadouts: None,
             retail_combat: None,
             retail_armory: None,
@@ -631,6 +636,7 @@ impl ItemCatalog {
             character_blast_rules,
             valor_defaults: Some(valor_defaults),
             retail_item_refs: BTreeMap::new(),
+            retail_item_source_sha256: None,
             bootstrap_loadouts: None,
             retail_combat: None,
             retail_armory: None,
@@ -803,6 +809,38 @@ impl ItemCatalog {
             .get("parameters")
             .ok_or("missing_weapon_reticule_parameters")
     }
+    pub(crate) fn retail_primary_bipod(
+        &self,
+        weapon_id: u16,
+        attachment_id: u16,
+    ) -> Option<BulletAttachmentKind> {
+        let source_sha256 = self.retail_item_source_sha256.as_deref()?;
+        let combat = self.retail_combat().ok()?;
+        let bullet = combat.bullet_metadata(weapon_id)?;
+        let weapon = self.weapon_parameters(weapon_id).ok()?;
+        let attachment = self.item(attachment_id).ok()?;
+        let name = attachment["name"].as_str()?;
+        if combat.provenance()["catalog_sha256"].as_str() != Some(source_sha256)
+            || self.retail_authored_ref(weapon_id) != Some(bullet.authored_ref.as_str())
+            || weapon["id"].as_str() != Some(bullet.name.as_str())
+            || weapon["category"].as_str() != Some("kWepCategoryMachineGun")
+            || attachment["item_type"].as_str() != Some("kAttachmentItem")
+            || attachment["definition"]["group"].as_str() != Some("attachments")
+            || attachment["definition"]["name"].as_str() != Some(name)
+        {
+            return None;
+        }
+        let parameters = &self.raw["definitions"]["attachments"][name]["parameters"];
+        let compatible = weapon["attachment_list"]
+            .as_object()?
+            .values()
+            .any(|row| row["WeaponAttachment"]["name"].as_str() == Some(name));
+        (compatible
+            && parameters["id"].as_str() == Some(name)
+            && parameters["attachment_type"].as_str() == Some("kAttachTypeBipod")
+            && parameters["weapon_name"].as_str() == Some(""))
+        .then_some(BulletAttachmentKind::Bipod)
+    }
     pub fn character_blast_rules(&self) -> crate::blast_rules::CharacterBlastRules {
         self.character_blast_rules
     }
@@ -956,6 +994,7 @@ pub(crate) mod bunker_test_items {
             },
             valor_defaults: None,
             retail_item_refs: BTreeMap::new(),
+            retail_item_source_sha256: None,
             bootstrap_loadouts: None,
             retail_combat: None,
             retail_armory: None,

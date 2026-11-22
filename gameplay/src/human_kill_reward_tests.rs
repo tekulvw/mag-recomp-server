@@ -42,6 +42,38 @@ fn combat_fixture_items(
     bot_firearm: bool,
     melee: bool,
 ) -> Arc<item_catalog::ItemCatalog> {
+    let (raw, metadata) = combat_fixture_documents(
+        grenade,
+        vehicle_hp,
+        grenade_vehicle_hp,
+        material_penetration,
+        bot_firearm,
+        melee,
+    );
+    finish_combat_fixture(
+        item_catalog::ItemCatalog::from_value_for_application(raw, synthetic_blast_rules(), 20231)
+            .unwrap(),
+        &metadata,
+    )
+}
+
+fn synthetic_blast_rules() -> blast_rules::CharacterBlastRules {
+    blast_rules::CharacterBlastRules {
+        armor_rating_reduction: 0.0,
+        armor_prevention_reduction: 0.0,
+        hit_location: 3,
+        damage_type: 10,
+    }
+}
+
+fn combat_fixture_documents(
+    grenade: bool,
+    vehicle_hp: f32,
+    grenade_vehicle_hp: f32,
+    material_penetration: Option<f64>,
+    bot_firearm: bool,
+    melee: bool,
+) -> (Value, Value) {
     let mut weapon = json!({"magazine_capacity":9});
     if bot_firearm {
         weapon["reticule_params_stand"] = json!({
@@ -51,7 +83,7 @@ fn combat_fixture_items(
             "SpreadNormalization":0,"WidthCombineOp":"kWCO_Add",
         });
     }
-    let items = item_catalog::ItemCatalog::from_value_for_application(json!({
+    let raw = json!({
         "schema_version":2,"application_id":20231,
         "items":{
             "FactionItemList0:2":{"authored_ref":"FactionItemList0:2","faction_list":"FactionItemList0","local_ordinal":2,"wire_item_id":null,
@@ -60,17 +92,7 @@ fn combat_fixture_items(
                 "name":"synthetic_armor","item_type":"kArmor","definition":{"group":"armor","name":"synthetic_armor"}}
         },
         "definitions":{"weapons":{"synthetic_rifle":{"parameters":weapon}},"armor":{"synthetic_armor":{"parameters":{}}}},"resources":{}
-    }), blast_rules::CharacterBlastRules {armor_rating_reduction:0.0,armor_prevention_reduction:0.0,hit_location:3,damage_type:10},20231).unwrap();
-    let armory = retail_armory::RetailArmory::from_json(&json!({
-        "schema_version":1,"application_id":20231,"source_sha256":{"synthetic":"a".repeat(64)},
-        "items":[
-            {"wire_id":2,"name":"synthetic_rifle","authored_ref":"FactionItemList0:2","available_bit":2,"factions":[0,1,2],"primary_ammo":9},
-            {"wire_id":3,"name":"synthetic_armor","authored_ref":"FactionItemList0:3","available_bit":3,"factions":[0,1,2],"primary_ammo":null}
-        ],
-        "factions":(0..3).map(|faction|json!({"faction":faction,"available_item_bits":[2,3],"skill_ids":[],
-            "loadouts":(0..5).map(|_|json!({"update_id":1,"items":vec![None::<u16>;22]})).collect::<Vec<_>>()
-        })).collect::<Vec<_>>()
-    }).to_string()).unwrap();
+    });
     let mut metadata = json!({
         "schema_version":2,"application_id":20231,"status":"synthetic",
         "authority":{"bullet_damage":true,"armor_reduction":true,"body_damage":true,"grenade_damage":false,"grenade_physics":false,"healing_schedule":false,"ammo_tokens":false},
@@ -139,6 +161,23 @@ fn combat_fixture_items(
         metadata["bullets"].as_object_mut().unwrap().clear();
         metadata["body"][0]["armor_area"] = json!(0);
     }
+    (raw, metadata)
+}
+
+fn finish_combat_fixture(
+    items: item_catalog::ItemCatalog,
+    metadata: &Value,
+) -> Arc<item_catalog::ItemCatalog> {
+    let armory = retail_armory::RetailArmory::from_json(&json!({
+        "schema_version":1,"application_id":20231,"source_sha256":{"synthetic":"a".repeat(64)},
+        "items":[
+            {"wire_id":2,"name":"synthetic_rifle","authored_ref":"FactionItemList0:2","available_bit":2,"factions":[0,1,2],"primary_ammo":9},
+            {"wire_id":3,"name":"synthetic_armor","authored_ref":"FactionItemList0:3","available_bit":3,"factions":[0,1,2],"primary_ammo":null}
+        ],
+        "factions":(0..3).map(|faction|json!({"faction":faction,"available_item_bits":[2,3],"skill_ids":[],
+            "loadouts":(0..5).map(|_|json!({"update_id":1,"items":vec![None::<u16>;22]})).collect::<Vec<_>>()
+        })).collect::<Vec<_>>()
+    }).to_string()).unwrap();
     let combat = retail_combat::RetailCombatCatalog::from_json(&metadata.to_string()).unwrap();
     Arc::new(items.with_retail_armory(armory).with_retail_combat(combat))
 }
@@ -777,4 +816,190 @@ fn saved_armor_edit_does_not_remove_current_life_damage_authority() {
         CharacterLife::Incapacitated { generation: 4, .. }
     ));
     assert_eq!(kills(&engine).len(), 1);
+}
+
+#[derive(Clone, Copy, Debug)]
+enum MachineGunAttachment {
+    Compatible,
+    Incompatible,
+    Replacement,
+    WrongType,
+    Unbound,
+    MismatchedSource,
+    MissingReplacement,
+}
+
+fn machine_gun_hit_fixture(
+    slot: Option<usize>,
+    attachment: MachineGunAttachment,
+) -> Engine<Vec<u8>> {
+    use sha2::{Digest, Sha256};
+
+    let (mut raw, mut metadata) = combat_fixture_documents(false, 0.0, 0.0, None, false, false);
+    let host = &mut raw["definitions"]["weapons"]["synthetic_rifle"]["parameters"];
+    host["id"] = json!("synthetic_rifle");
+    host["category"] = json!("kWepCategoryMachineGun");
+    host["attachment_list"] = match attachment {
+        MachineGunAttachment::Incompatible => json!({}),
+        _ => json!({"WeaponAttachment0":{"WeaponAttachment":{"name":"synthetic_bipod"}}}),
+    };
+    raw["items"]["FactionItemList0:7"] = json!({
+        "authored_ref":"FactionItemList0:7","faction_list":"FactionItemList0","local_ordinal":7,
+        "wire_item_id":null,"name":"synthetic_bipod","item_type":"kAttachmentItem",
+        "definition":{"group":"attachments","name":"synthetic_bipod"}
+    });
+    raw["definitions"]["attachments"]["synthetic_bipod"]["parameters"] = json!({
+        "id":"synthetic_bipod",
+        "attachment_type":if matches!(attachment, MachineGunAttachment::WrongType) {
+            "kAttachTypeScope"
+        } else {
+            "kAttachTypeBipod"
+        },
+        "weapon_name":if matches!(attachment, MachineGunAttachment::Replacement) {
+            "synthetic_replacement"
+        } else {
+            ""
+        }
+    });
+    if matches!(attachment, MachineGunAttachment::MissingReplacement) {
+        raw["definitions"]["attachments"]["synthetic_bipod"]["parameters"]
+            .as_object_mut()
+            .unwrap()
+            .remove("weapon_name");
+    }
+    let bytes = serde_json::to_vec(&raw).unwrap();
+    metadata["provenance"]["catalog_sha256"] = json!(if matches!(
+        attachment,
+        MachineGunAttachment::MismatchedSource
+    ) {
+        "0".repeat(64)
+    } else {
+        format!("{:x}", Sha256::digest(&bytes))
+    });
+    let items = if matches!(attachment, MachineGunAttachment::Unbound) {
+        item_catalog::ItemCatalog::from_value_for_application(raw, synthetic_blast_rules(), 20231)
+            .unwrap()
+    } else {
+        let path = std::env::temp_dir().join(format!(
+            "mag-synthetic-bipod-{}-{:?}-{slot:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir(&path).unwrap();
+        let rules = json!({
+            "schema_version":1,"applications":[20230,20231],"character_damage": {"armor_rating_reduction":0.0,"armor_prevention_reduction":0.0,"hit_location":3,"damage_type":10}
+        });
+        std::fs::write(path.join("blast.json"), rules.to_string()).unwrap();
+        std::fs::write(path.join("items.json"), &bytes).unwrap();
+        let items = item_catalog::ItemCatalog::load_for_application(
+            path.join("items.json"),
+            path.join("blast.json"),
+            20231,
+        );
+        std::fs::remove_dir_all(&path).unwrap();
+        items.unwrap()
+    };
+
+    let mut engine = fixture();
+    engine.item_catalog = finish_combat_fixture(items, &metadata);
+    if let Some(slot) = slot {
+        engine
+            .active
+            .as_mut()
+            .unwrap()
+            .spawned_loadout
+            .as_mut()
+            .unwrap()
+            .inventories[0]
+            .slots[slot] = Some(7);
+    }
+    engine
+        .peers
+        .get_mut("synthetic-reservation-0000")
+        .unwrap()
+        .life = CharacterLife::Alive {
+        generation: 4,
+        health_quarter_points: 400,
+    };
+    engine
+}
+
+#[test]
+fn native_machine_gun_hit_with_compatible_bipod_uses_host_ammo() {
+    let mut unmodified = machine_gun_hit_fixture(None, MachineGunAttachment::Compatible);
+    let mut attached = machine_gun_hit_fixture(Some(17), MachineGunAttachment::Compatible);
+    for engine in [&mut unmodified, &mut attached] {
+        hit(engine, 55, 1000).unwrap();
+        assert!(matches!(
+            victim(engine).life,
+            CharacterLife::Alive {
+                health_quarter_points: 240,
+                ..
+            }
+        ));
+        assert_eq!(victim(engine).last_damage.last_location_and_type, 0x13);
+        assert!(kills(engine).is_empty());
+    }
+}
+
+#[test]
+fn native_machine_gun_hit_rejects_unqualified_attachments() {
+    use MachineGunAttachment::*;
+    for (slot, attachment) in [
+        (16, Compatible),
+        (17, Incompatible),
+        (17, Replacement),
+        (17, WrongType),
+        (17, Unbound),
+        (17, MismatchedSource),
+        (17, MissingReplacement),
+    ] {
+        let mut engine = machine_gun_hit_fixture(Some(slot), attachment);
+        hit(&mut engine, 55, 1000).unwrap();
+        assert!(
+            matches!(
+                victim(&engine).life,
+                CharacterLife::Alive {
+                    health_quarter_points: 400,
+                    ..
+                }
+            ),
+            "{slot} {attachment:?}"
+        );
+        assert!(
+            std::str::from_utf8(&engine.writer)
+                .unwrap()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .any(|entry| entry["gameplay_denial"] == "unsupported_bullet_attachment"),
+            "{slot} {attachment:?}"
+        );
+    }
+}
+
+#[test]
+fn native_machine_gun_hit_does_not_admit_a_bipod_for_a_mounted_actor() {
+    let mut engine = machine_gun_hit_fixture(Some(17), MachineGunAttachment::Compatible);
+    let seat = domination_helo::PassengerSeat {
+        object_index: 0,
+        seat: 0,
+    };
+    let active = engine.active.as_mut().unwrap();
+    active.helo_seat = Some(seat);
+    active.owner_fields.state = Some(seat.character_state());
+    hit(&mut engine, 55, 1000).unwrap();
+    assert!(matches!(
+        victim(&engine).life,
+        CharacterLife::Alive {
+            health_quarter_points: 400,
+            ..
+        }
+    ));
+    assert!(
+        std::str::from_utf8(&engine.writer)
+            .unwrap()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .any(|entry| entry["gameplay_denial"] == "unsupported_bullet_attachment")
+    );
 }
