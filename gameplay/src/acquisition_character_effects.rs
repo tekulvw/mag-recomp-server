@@ -1081,8 +1081,22 @@ impl<W: Write> Engine<W> {
                 let state = native
                     .get_mut(&target.character_id)
                     .ok_or("acquisition_character_native_state_missing")?;
-                let plan =
+                let mut plan =
                     engine.plan_acquisition_character_effect(target, request, *state, now)?;
+                if let Some(damage) = plan.damage {
+                    plan.audit["damage_source_index"] = json!(i32::from(source.item as i16));
+                    if plan.expected.health > 0 && damage.health_quarter_points == 0 {
+                        plan.notice = Some(engine.plan_rocket_death_notice(
+                            source,
+                            target.character_id as u16,
+                            damage.last_location_and_type & 0x0f,
+                        )?);
+                        plan.audit["death_notice"] = plan
+                            .notice
+                            .as_ref()
+                            .map_or(Value::Null, |notice| notice.audit());
+                    }
+                }
                 let assist = plan
                     .damage
                     .filter(|damage| damage.health_quarter_points < plan.expected.health)
