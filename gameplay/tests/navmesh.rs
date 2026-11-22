@@ -94,6 +94,7 @@ fn reference_cli_bakes_full_grid_without_physics_authority() {
         world_sha256: manifest.world_sha256,
         geometry_sha256: manifest.geometry_sha256,
         profile: manifest.profile,
+        movement_profile_sha256: manifest.movement_profile_sha256,
         bounds: manifest.bounds,
         upstream_commit: manifest.upstream_commit,
         bake_config: manifest.bake_config,

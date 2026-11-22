@@ -655,6 +655,12 @@ pub(crate) fn human_in_actor_grid(a: &Active, now: Duration) -> bool {
 }
 
 impl<W: Write> Engine<W> {
+    pub(super) fn bot_movement_body(&self) -> bot_physics::Body {
+        self.navmesh_world
+            .as_ref()
+            .map_or_else(bot_physics::Body::default, |mesh| mesh.body())
+    }
+
     pub fn with_bot_population(
         mut self,
         mut config: BotPopulation,
@@ -722,6 +728,16 @@ impl<W: Write> Engine<W> {
                 crate::bot_firearms::validate_weapon_recoil(&self.item_catalog, &kit)?;
             }
         }
+        if let Some(mesh) = &self.navmesh_world
+            && mesh.artifact().movement_profile_sha256.is_some()
+        {
+            mesh.validate_coverage(
+                self.collision_world
+                    .as_ref()
+                    .ok_or("bot_navmesh_geometry_unavailable")?,
+            )
+            .map_err(|e| e.0)?;
+        }
         let regional_static = config
             .regional_collision
             .as_ref()
@@ -743,7 +759,7 @@ impl<W: Write> Engine<W> {
             self.map_name(),
         )
         .map_err(|e| e.code())?;
-        let body = bot_physics::Body::default();
+        let body = self.bot_movement_body();
         if config.slots.iter().any(|s| s.squad.is_some())
             && config.slots.iter().any(|s| s.squad.is_none())
         {
@@ -1125,6 +1141,7 @@ impl<W: Write> Engine<W> {
         self.bot_registry
             .reservations
             .retain(|_, (_, until)| *until > now);
+        let body = self.bot_movement_body();
         let mut actors = self.actor_grid(now)?;
         self.reconcile_bot_population(now, wall, &mut actors)?;
         // New recipients get one coherent creation+inventory+current-life snapshot per bot.
@@ -1251,9 +1268,7 @@ impl<W: Write> Engine<W> {
                     .ok_or("bot_generation_exhausted")?;
                 let terrain =
                     bot_physics::WorldTerrain::new(motion_world, &map).map_err(|e| e.code())?;
-                match terrain
-                    .start_motion(runtime.physical_position(), bot_physics::Body::default())
-                {
+                match terrain.start_motion(runtime.physical_position(), body) {
                     Ok(motion) => runtime.physics_motion = Some(motion),
                     Err(bot_physics::PhysicsError::RegionalBlocked) => continue,
                     Err(error) => return Err(error.code()),
@@ -1336,6 +1351,7 @@ impl<W: Write> Engine<W> {
                     self.wire_profile,
                     motion_world,
                     &map,
+                    body,
                     bot.health,
                     self.fall_damage_rules.as_ref(),
                     Some(crate::actor_collision::Query {
@@ -1450,6 +1466,7 @@ impl<W: Write> Engine<W> {
                         self.wire_profile,
                         motion_world,
                         &map,
+                        body,
                         bot.health,
                         self.fall_damage_rules.as_ref(),
                         crate::actor_collision::Query {
@@ -2425,6 +2442,7 @@ impl<W: Write> Engine<W> {
     }
     fn tick_legacy_bot(&mut self, now: Duration, wall: u64) -> Result<(), &'static str> {
         // Compatibility admin target: identity/life gates remain unchanged, only the clock moves.
+        let body = self.bot_movement_body();
         let map = self.map_name().to_owned();
         let mut actors = self.actor_grid(now)?;
         let mut packets = Vec::new();
@@ -2446,6 +2464,7 @@ impl<W: Write> Engine<W> {
                 self.wire_profile,
                 self.collision_world.as_ref(),
                 &map,
+                body,
                 actor.dummy_health.unwrap_or(0),
                 self.fall_damage_rules.as_ref(),
                 Some(crate::actor_collision::Query {
@@ -2492,6 +2511,7 @@ impl<W: Write> Engine<W> {
         wall: u64,
         actors: &mut crate::actor_collision::ActorGrid,
     ) -> Result<(), &'static str> {
+        let body = self.bot_movement_body();
         let humans: Vec<_> = self
             .active
             .iter()
@@ -2699,7 +2719,7 @@ impl<W: Write> Engine<W> {
                 self.map_name(),
             )
             .map_err(|e| e.code())?;
-            match terrain.start_motion(runtime.physical_position(), bot_physics::Body::default()) {
+            match terrain.start_motion(runtime.physical_position(), body) {
                 Ok(motion) => runtime.physics_motion = Some(motion),
                 Err(bot_physics::PhysicsError::RegionalBlocked) => break,
                 Err(error) => return Err(error.code()),
@@ -2905,6 +2925,160 @@ pub(crate) mod identity_tests {
             .unwrap();
         engine
     }
+
+    #[test]
+    fn profiled_bot_population_settles_and_rests_on_the_selected_slope() {
+        use crate::navmesh::{BakeInput, Bounds, MovementProfile, NavMesh};
+        use sha2::{Digest, Sha256};
+        let vertices = [[0., 0., 0.], [10., 11., 0.], [10., 11., 10.], [0., 0., 10.]];
+        let triangles = [[0u32, 2, 1], [0, 3, 2]];
+        let min = [-1., -3., -1.];
+        let max = [11., 15., 11.];
+        let raw = serde_json::to_vec(&json!({
+            "format":"mag_collision_world","schema_version":1,"coordinate_space":"world",
+            "metadata":{"map_name":"synthetic_arena","build":"synthetic","coverage":"provisional",
+                "provenance":["synthetic incline"],"unknowns":[],"physics_regions":[
+                    {"min":min,"max":max,"ground_verified":true,"obstacles_verified":true,
+                     "provenance":["synthetic bounded incline"]}]},
+            "instances":[{"id":"ramp","vertices_xyz":vertices,"triangles":triangles}]
+        }))
+        .unwrap();
+        let world = collision::CollisionWorld::from_bytes(&raw, Default::default()).unwrap();
+        let mut hash = Sha256::new();
+        hash.update(b"MAG-NAV-GEOMETRY-v1\0");
+        hash.update(4u32.to_le_bytes());
+        hash.update(2u32.to_le_bytes());
+        for x in vertices.into_iter().flatten() {
+            hash.update((x as f32).to_le_bytes());
+        }
+        for index in triangles.into_iter().flatten() {
+            hash.update(index.to_le_bytes());
+        }
+        let input = BakeInput {
+            format: "mag_navmesh_bake_input_v1".into(),
+            map_name: "synthetic_arena".into(),
+            world_sha256: world.source_sha256().to_owned(),
+            geometry_sha256: format!("{:x}", hash.finalize()),
+            bounds: Bounds { min, max },
+            physics_regions: world.metadata().physics_regions.clone(),
+            vertices: vertices.map(|p| p.map(|x| x as f32)).to_vec(),
+            triangles: triangles.to_vec(),
+        };
+        let profile = MovementProfile::synthetic(54.);
+        let artifact = crate::navmesh::bake_with_movement_profile(input, &profile).unwrap();
+        let slope_mesh = NavMesh::load_with_movement_profile(
+            artifact,
+            world.source_sha256(),
+            "synthetic_arena",
+            &profile,
+        )
+        .unwrap();
+        let mut other_raw = raw;
+        other_raw.push(b' ');
+        let other_world =
+            collision::CollisionWorld::from_bytes(&other_raw, Default::default()).unwrap();
+        assert_eq!(
+            slope_mesh.validate_coverage(&other_world).unwrap_err().0,
+            "navmesh_source_mismatch"
+        );
+        let mut e = engine("Synthetic Slope");
+        let mut config = e.bot_registry.config.take().unwrap();
+        config.slots[0].position = replication::CharacterPosition {
+            x: 2.,
+            y: 3.2,
+            z: 2.,
+        };
+        config.slots[1].position = replication::CharacterPosition {
+            x: 6.,
+            y: 7.6,
+            z: 5.,
+        };
+        let mut e = e
+            .with_collision_world(world)
+            .with_navmesh_world(slope_mesh)
+            .with_bot_population(config, 2)
+            .unwrap_or_else(|reason| panic!("{reason}"));
+        e.reconcile_bot_population(Duration::ZERO, 1, &mut Default::default())
+            .unwrap();
+        assert_eq!(e.bot_registry.bots.len(), 2);
+        let reserve = e.handle(
+            Request::Reserve {
+                v: BRIDGE_VERSION,
+                request_id: "synthetic-slope-reserve".into(),
+                reservation_id: "synthetic-slope-profile-recipient".into(),
+                world_id: 1,
+                player_id: 0,
+                account_id: 1,
+                session_key: "aaaaaaaaaaaaaaaa".into(),
+                access_key: "bbbbbbbbbbbbbbbb".into(),
+                character: serde_json::from_value(json!({"name":"Synthetic Slope Observer",
+                    "faction":2,"head":0,"voice":0,"universe_id":26,"character_id":1}))
+                .unwrap(),
+            },
+            Duration::ZERO,
+            1,
+        );
+        assert!(reserve.ok, "{:?}", reserve.error);
+        crate::spawn_progression::ready(e.active.as_mut().unwrap());
+        let now = Duration::from_millis(250);
+        e.tick_bots(now, 1).unwrap();
+        let (&id, bot) = e.bot_registry.bots.iter_mut().next().unwrap();
+        let idle = bot.target.runtime.unwrap();
+        assert_eq!(idle.last_update, now);
+        assert!(idle.physics_motion.unwrap().grounded);
+        let mesh = e.navmesh_world.clone().unwrap();
+        bot.target
+            .begin_registry_move(
+                mesh,
+                "synthetic_arena",
+                BotMove {
+                    mode: BotMoveMode::Navmesh,
+                    destination: replication::CharacterPosition {
+                        x: idle.position.x + 1.0,
+                        y: idle.position.y + 1.1,
+                        z: idle.position.z,
+                    },
+                    duration_ms: 4000,
+                    update_ms: 100,
+                    yaw: None,
+                    sprint: false,
+                },
+                now,
+                400,
+                None,
+            )
+            .unwrap();
+        let walked_at = Duration::from_millis(750);
+        e.tick_bots(walked_at, 2).unwrap();
+        let walked = e.bot_registry.bots[&id].target.runtime.unwrap();
+        assert!(
+            walked.position.x - idle.position.x > 0.2,
+            "idle {:?}, followed {:?}",
+            idle.position,
+            walked.position
+        );
+        assert!(walked.physics_motion.unwrap().grounded);
+
+        e.commit_bot_damage(
+            id,
+            walked.generation,
+            replication::CharacterDamage {
+                health_quarter_points: 0,
+                ..initial_damage()
+            },
+            walked_at,
+        )
+        .unwrap();
+        let respawn_at = Duration::from_secs(120);
+        e.tick_bots(respawn_at, 3).unwrap();
+        let respawned = e.bot_registry.bots[&id].target.runtime.unwrap();
+        assert_eq!(respawned.generation, walked.generation + 1);
+        e.tick_bots(respawn_at + now, 3).unwrap();
+        let rested = e.bot_registry.bots[&id].target.runtime.unwrap();
+        assert!(rested.physics_motion.unwrap().grounded);
+        assert_eq!(rested.position, idle.position);
+    }
+
     #[test]
     fn external_identities_reach_real_allocation_audit_and_client_snapshots() {
         let mut a = engine("Synthetic First");

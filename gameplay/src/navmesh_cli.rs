@@ -1,6 +1,6 @@
 mod navmesh_spawn_exit_cli;
 use mag_gameplay::navmesh::{
-    self, Artifact, BakeInput, NavMesh, ReferenceManifest, ReferenceNavMesh,
+    self, Artifact, BakeInput, MovementProfile, NavMesh, ReferenceManifest, ReferenceNavMesh,
 };
 use serde_json::json;
 use std::{
@@ -56,6 +56,7 @@ fn read_reference_file(path: &Path, max: u64) -> io::Result<Vec<u8>> {
 
 fn open_reference(
     path: &Path,
+    rules: Option<&MovementProfile>,
 ) -> Result<(ReferenceManifest, ReferenceNavMesh), Box<dyn std::error::Error>> {
     if !fs::symlink_metadata(path)?.file_type().is_dir() {
         return Err("expected a reference bundle directory".into());
@@ -68,7 +69,16 @@ fn open_reference(
         return Err("invalid reference Detour size".into());
     }
     let data = read_reference_file(&path.join("detour.bin"), manifest.detour_bytes)?;
-    let mesh = ReferenceNavMesh::load(&manifest, data, &manifest.world_sha256, &manifest.map_name)?;
+    let mesh = match rules {
+        Some(rules) => ReferenceNavMesh::load_with_movement_profile(
+            &manifest,
+            data,
+            &manifest.world_sha256,
+            &manifest.map_name,
+            rules,
+        ),
+        None => ReferenceNavMesh::load(&manifest, data, &manifest.world_sha256, &manifest.map_name),
+    }?;
     Ok((manifest, mesh))
 }
 
@@ -88,11 +98,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(String::as_str)
             .ok_or_else(|| format!("missing {key}"))
     };
+    let movement_profile = || {
+        flags
+            .get("--movement-profile")
+            .map(MovementProfile::load)
+            .transpose()
+    };
     match command.as_str() {
         "bake-reference" => {
             if flags
                 .keys()
-                .any(|key| !["--input", "--output"].contains(&key.as_str()))
+                .any(|key| !["--input", "--output", "--movement-profile"].contains(&key.as_str()))
             {
                 return Err("unknown reference bake flag".into());
             }
@@ -103,7 +119,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let input: BakeInput =
                 serde_json::from_slice(&read(get("--input")?, 128 * 1024 * 1024)?)?;
             let began = Instant::now();
-            let (manifest, data) = navmesh::bake_reference(input)?;
+            let (manifest, data) = match movement_profile()?.as_ref() {
+                Some(rules) => navmesh::bake_reference_with_movement_profile(input, rules),
+                None => navmesh::bake_reference(input),
+            }?;
             fs::create_dir(output)?;
             fs::OpenOptions::new()
                 .write(true)
@@ -125,14 +144,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         "inspect-reference" | "query-reference" => {
             let allowed: &[&str] = if command == "inspect-reference" {
-                &["--mesh", "--output"]
+                &["--mesh", "--output", "--movement-profile"]
             } else {
-                &["--mesh", "--start", "--goal", "--goal-radius", "--output"]
+                &[
+                    "--mesh",
+                    "--start",
+                    "--goal",
+                    "--goal-radius",
+                    "--output",
+                    "--movement-profile",
+                ]
             };
             if flags.keys().any(|key| !allowed.contains(&key.as_str())) {
                 return Err("unknown reference inspection/query flag".into());
             }
-            let (manifest, mesh) = open_reference(Path::new(get("--mesh")?))?;
+            let (manifest, mesh) =
+                open_reference(Path::new(get("--mesh")?), movement_profile()?.as_ref())?;
             if command == "inspect-reference" {
                 let (tiles, max_polygons) = mesh.tile_stats()?;
                 let mut report = serde_json::to_value(manifest)?;
@@ -151,14 +178,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "bake" => {
             if flags
                 .keys()
-                .any(|k| !["--input", "--output"].contains(&k.as_str()))
+                .any(|k| !["--input", "--output", "--movement-profile"].contains(&k.as_str()))
             {
                 return Err("unknown bake flag".into());
             }
             let input: BakeInput =
                 serde_json::from_slice(&read(get("--input")?, 128 * 1024 * 1024)?)?;
             let began = Instant::now();
-            let artifact = navmesh::bake(input)?;
+            let artifact = match movement_profile()?.as_ref() {
+                Some(rules) => navmesh::bake_with_movement_profile(input, rules),
+                None => navmesh::bake(input),
+            }?;
             write(Some(&get("--output")?.to_string()), &artifact)?;
             eprintln!(
                 "{}",
@@ -244,6 +274,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "--goal",
                     "--goal-radius",
                     "--output",
+                    "--movement-profile",
                 ]
                 .contains(&key.as_str())
             }) {
@@ -255,7 +286,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 get("--collision-world")?,
                 Default::default(),
             )?;
-            let mesh = NavMesh::load(artifact, world.source_sha256(), &world.metadata().map_name)?;
+            let mesh = match movement_profile()?.as_ref() {
+                Some(rules) => NavMesh::load_with_movement_profile(
+                    artifact,
+                    world.source_sha256(),
+                    &world.metadata().map_name,
+                    rules,
+                ),
+                None => NavMesh::load(artifact, world.source_sha256(), &world.metadata().map_name),
+            }?;
             mesh.validate_coverage(&world)?;
             let mut goals =
                 mesh.goal_candidates(point(get("--goal")?)?, get("--goal-radius")?.parse()?)?;
@@ -289,6 +328,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "--repeat",
                     "--fall-damage-rules",
                     "--health",
+                    "--movement-profile",
                 ]
                 .contains(&k.as_str())
             }) {
@@ -299,7 +339,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 serde_json::from_slice(&read(get("--mesh")?, navmesh::MAX_ARTIFACT_JSON_BYTES)?)?;
             let world = artifact.world_sha256.clone();
             let map = artifact.map_name.clone();
-            let mesh = NavMesh::load(artifact, &world, &map)?;
+            let mesh = match movement_profile()?.as_ref() {
+                Some(rules) => NavMesh::load_with_movement_profile(artifact, &world, &map, rules),
+                None => NavMesh::load(artifact, &world, &map),
+            }?;
             let load_us = load_began.elapsed().as_micros();
             if command == "component" {
                 let start = point(get("--start")?)?;

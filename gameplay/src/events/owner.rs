@@ -1123,6 +1123,7 @@ fn plan_update_reply<W: Write>(
                 ctx.engine.wire_profile,
                 ctx.engine.collision_world.as_ref(),
                 ctx.engine.map_name(),
+                ctx.engine.bot_movement_body(),
                 active.dummy_health.unwrap_or(0),
                 ctx.engine.fall_damage_rules.as_ref(),
                 Some(crate::actor_collision::Query {

@@ -88,6 +88,21 @@ cargo run --manifest-path gameplay/Cargo.toml --bin mag-navmesh -- bake --input 
 
 The preparation tool preserves winding and all faces, rounds vertices to f32, computes a domain-separated geometry hash, and refuses invalid bounds, degenerate triangles or unverified coverage. Baking needs the Rust/C++ toolchain and vendored Recast/Detour described in the build instructions. It produces a local `.mag-nav` JSON artifact accepted by `--navmesh-world`; it does not need a running game or server. The runtime independently binds the navmesh to the collision-world hash. No retail geometry/navmesh is distributed.
 
+### Optional retail movement slope profile
+
+The supported application 20231 retail build provides an explicit movement slope profile. Project it from your own exact retail ELF and game archive; the tool verifies the ELF, archive and character-settings member hashes before emitting the external JSON:
+
+```sh
+python3 tools/navmesh/project-retail-movement-profile.py --elf RETAIL_ELF --game-archive GAME_PSARC --output MOVEMENT_JSON
+python3 tools/navmesh/project-retail-movement-profile.py --elf RETAIL_ELF --game-archive GAME_PSARC --output MOVEMENT_JSON --check
+```
+
+Pass `--movement-profile MOVEMENT_JSON` explicitly to `mag-navmesh bake`, `query`, `inspect`, or `component`. Reference `bake-reference`, `inspect-reference` and `query-reference` accept the same option. Use the same projected file for baking and loading. Profiled runtime artifacts use `mag_navmesh_world_v3`; profiled reference bundles use `mag_navmesh_reference_v2`. Their manifests bind the profile hash, and their binary containers have separate versions. Missing or different rules, a legacy artifact paired with the new rules, or a profiled artifact paired with legacy drop certificates are rejected.
+
+For a direct gameplay worker, add `--movement-profile /absolute/MOVEMENT_JSON` alongside `--application-id 20231`, `--collision-world` and `--navmesh-world`. A match-profile registry instead accepts a `movement_profile` path beside that profile's `navmesh_world`; registry paths follow its existing resolution rules. The selected runtime mesh supplies the bot body's slope policy throughout its physical lifecycle. This changes only the ascent/no-slide slope; the replacement runner retains its existing dimensions, step height, gravity and speed.
+
+Omitting the option preserves the existing 45-degree bakes and runtime behavior. The explicit profile does not qualify collision coverage or convert a reference bundle into a gameplay mesh. Runtime static coverage and current-body admission remain separate requirements. Movement profiles, collision worlds and generated navigation data remain external to the source distribution.
+
 ### Offline whole-map reference navigation
 
 Use an explicit reference bake to inspect routes through the emitted static geometry of a provisional world. The preparer preserves the original world hash, winding, and region metadata. It derives its bake envelope from the full f32 vertex inventory, with vertical padding for standing clearance.

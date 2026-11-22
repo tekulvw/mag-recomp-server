@@ -639,7 +639,7 @@ impl<W: Write> Engine<W> {
         {
             return false;
         }
-        let body = bot_physics::Body::default();
+        let body = self.bot_movement_body();
         let Ok(terrain) =
             bot_physics::WorldTerrain::new(self.collision_world.as_ref(), self.map_name())
         else {

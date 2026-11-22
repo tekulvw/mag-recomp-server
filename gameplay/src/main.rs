@@ -127,6 +127,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     let mut tick_budget_us = None;
     let mut collision_path: Option<PathBuf> = None;
     let mut navmesh_path: Option<PathBuf> = None;
+    let mut movement_profile_path: Option<PathBuf> = None;
     let mut bot_population_path: Option<PathBuf> = None;
     let mut bot_resupply_catalog_path: Option<PathBuf> = None;
     let mut bot_resupply_approach_policy_path: Option<PathBuf> = None;
@@ -260,6 +261,15 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                 navmesh_path = Some(
                     args.next()
                         .ok_or_else(|| io::Error::other("--navmesh-world requires a path"))?
+                        .into(),
+                );
+            }
+            "--movement-profile" => {
+                movement_profile_path = Some(
+                    args.next()
+                        .ok_or_else(|| {
+                            io::Error::other("--movement-profile requires an absolute path")
+                        })?
                         .into(),
                 );
             }
@@ -536,9 +546,36 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             }
             _ => {
                 return Err(io::Error::other(
-                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--match-profiles /absolute/MATCH_PROFILES.json] [--active-abilities /absolute/ACTIVE_ABILITIES.json] [--squad-orders /absolute/ORDERS.json] [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--dynamic-bodies /absolute/BODIES.json] [--static-partition /absolute/PARTITION.json] [--acquisition-gameplay /absolute/GAMEPLAY.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--firearm-assist-rules /absolute/ASSISTS.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--worker-id ID] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json] [--navmesh-world MESH.mag-nav] [--bot-fill-total N --bot-population POPULATION.json] [--bot-names /absolute/NAMES.json] [--bot-resupply-catalog /absolute/SUPPLY.json] [--bot-resupply-approach-policy /absolute/APPROACH.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS] [--log-segment-bytes BYTES [--log-retention-s SECONDS]]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
+                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--match-profiles /absolute/MATCH_PROFILES.json] [--active-abilities /absolute/ACTIVE_ABILITIES.json] [--squad-orders /absolute/ORDERS.json] [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--dynamic-bodies /absolute/BODIES.json] [--static-partition /absolute/PARTITION.json] [--acquisition-gameplay /absolute/GAMEPLAY.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--firearm-assist-rules /absolute/ASSISTS.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--worker-id ID] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json] [--navmesh-world MESH.mag-nav] [--movement-profile /absolute/MOVEMENT.json] [--bot-fill-total N --bot-population POPULATION.json] [--bot-names /absolute/NAMES.json] [--bot-resupply-catalog /absolute/SUPPLY.json] [--bot-resupply-approach-policy /absolute/APPROACH.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS] [--log-segment-bytes BYTES [--log-retention-s SECONDS]]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
                 ));
             }
+        }
+    }
+    if let Some(path) = &movement_profile_path {
+        if !path.is_absolute() {
+            return Err(io::Error::other(
+                "--movement-profile requires an absolute path",
+            ));
+        }
+        if application_id != Some(20231) {
+            return Err(io::Error::other(
+                "--movement-profile requires --application-id 20231",
+            ));
+        }
+        if match_profiles_path.is_some() {
+            return Err(io::Error::other(
+                "configure movement profiles inside each match profile",
+            ));
+        }
+        if navmesh_path.is_none() {
+            return Err(io::Error::other(
+                "--movement-profile requires --navmesh-world",
+            ));
+        }
+        if collision_query.is_some() {
+            return Err(io::Error::other(
+                "--movement-profile requires a gameplay worker",
+            ));
         }
     }
     if match_profiles_path.is_some() {
@@ -606,10 +643,19 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         }
         let artifact: mag_gameplay::navmesh::Artifact =
             serde_json::from_slice(&std::fs::read(path)?).map_err(io::Error::other)?;
-        let hash = mag_gameplay::navmesh::sha256(&std::fs::read(collision_path.as_ref().unwrap())?);
-        let mesh =
-            mag_gameplay::navmesh::NavMesh::load(artifact, &hash, &world.metadata().map_name)
-                .map_err(io::Error::other)?;
+        use mag_gameplay::navmesh::{MovementProfile, NavMesh};
+        let hash = world.source_sha256();
+        let map = &world.metadata().map_name;
+        let mesh = match movement_profile_path.as_ref() {
+            Some(path) => NavMesh::load_with_movement_profile(
+                artifact,
+                hash,
+                map,
+                &MovementProfile::load(path)?,
+            ),
+            None => NavMesh::load(artifact, hash, map),
+        }
+        .map_err(io::Error::other)?;
         mesh.validate_coverage(world).map_err(io::Error::other)?;
         Some(mesh)
     } else {
@@ -2596,6 +2642,32 @@ mod runtime_profile_tests {
                 {"index":16,"team":1,"platoon":0,"squad":0,"faction":1,"available":[0],"default_spawn":0}]}]}));
         files.write("profiles.json", &serde_json::json!({"format":"mag_match_profiles_v1","profiles":[{"profile_id":"synthetic-profile","spawn_catalog":files.0.join("profile-spawns.json")}]}));
         files.0.join("profiles.json")
+    }
+
+    #[test]
+    fn authored_movement_profile_requires_the_explicit_retail_runtime_mesh() {
+        let request = |flags: &[&str]| {
+            run(flags.iter().map(|s| (*s).to_owned()))
+                .unwrap_err()
+                .to_string()
+        };
+        assert_eq!(
+            request(&["--movement-profile", "movement.json"]),
+            "--movement-profile requires an absolute path"
+        );
+        assert_eq!(
+            request(&["--movement-profile", "/synthetic/movement.json"]),
+            "--movement-profile requires --application-id 20231"
+        );
+        assert_eq!(
+            request(&[
+                "--application-id",
+                "20231",
+                "--movement-profile",
+                "/synthetic/movement.json"
+            ]),
+            "--movement-profile requires --navmesh-world"
+        );
     }
 
     #[test]

@@ -485,6 +485,7 @@ fn supported(
     map: &str,
     raw: replication::CharacterPosition,
     policy: &ObjectivePolicy,
+    body: bot_physics::Body,
 ) -> Result<replication::CharacterPosition, &'static str> {
     supported_interval(
         world,
@@ -492,6 +493,7 @@ fn supported(
         raw,
         policy.ground_search_m,
         policy.ground_search_m,
+        body,
     )
 }
 fn supported_operator(
@@ -499,11 +501,12 @@ fn supported_operator(
     map: &str,
     raw: replication::CharacterPosition,
     range: crate::objective_range::ObjectiveRange<'_>,
+    body: bot_physics::Body,
 ) -> Result<replication::CharacterPosition, &'static str> {
     // Restrict support discovery to the trigger's own vertical span so a generic
     // upward ray cannot land on a roof above the action instead of its floor.
     let (up, down) = range.support_window(point(raw));
-    supported_interval(world, map, raw, up, down)
+    supported_interval(world, map, raw, up, down, body)
 }
 fn supported_interval(
     world: Option<&collision::CollisionWorld>,
@@ -511,6 +514,7 @@ fn supported_interval(
     raw: replication::CharacterPosition,
     up: f64,
     down: f64,
+    body: bot_physics::Body,
 ) -> Result<replication::CharacterPosition, &'static str> {
     let terrain = bot_physics::WorldTerrain::new(world, map).map_err(|e| e.code())?;
     let ground = terrain
@@ -522,7 +526,6 @@ fn supported_interval(
         ground.position[1] + 0.5,
         ground.position[2],
     ];
-    let body = bot_physics::Body::default();
     terrain
         .require_horizontal_coverage(p, p, body)
         .map_err(|e| e.code())?;
@@ -1279,10 +1282,11 @@ impl<W: Write> Engine<W> {
                 raw: [raw.x.to_bits(), raw.y.to_bits(), raw.z.to_bits()],
             };
             let map = self.map_name().to_owned();
+            let body = self.bot_movement_body();
             self.bot_registry
                 .director
                 .candidate_support(key, policy.cache_limit, || {
-                    supported(self.collision_world.as_ref(), &map, raw, policy)
+                    supported(self.collision_world.as_ref(), &map, raw, policy, body)
                 })
                 .0
         };
@@ -1596,6 +1600,7 @@ impl<W: Write> Engine<W> {
                     raw,
                     policy.ground_search_m,
                     policy.ground_search_m,
+                    self.bot_movement_body(),
                 );
                 if self.bot_registry.director.staging_cache.len() >= policy.cache_limit {
                     self.bot_registry.director.staging_cache.pop_first();
@@ -1790,7 +1795,13 @@ impl<W: Write> Engine<W> {
             if let Some(g) = self.bot_registry.director.holding_cache.get(&key) {
                 *g
             } else {
-                let g = supported(self.collision_world.as_ref(), &map, raw, policy);
+                let g = supported(
+                    self.collision_world.as_ref(),
+                    &map,
+                    raw,
+                    policy,
+                    self.bot_movement_body(),
+                );
                 if self.bot_registry.director.holding_cache.len() >= policy.cache_limit {
                     self.bot_registry.director.holding_cache.pop_first();
                 }
@@ -2718,14 +2729,21 @@ impl<W: Write> Engine<W> {
             // Support is static for this exact full-coordinate key, including
             // recovery candidates. Retain it before the soft-slice guard so
             // one expensive preflight cannot restart forever on every tick.
+            let body = self.bot_movement_body();
             let (static_goal, cached) =
                 self.bot_registry
                     .director
                     .candidate_support(key, policy.cache_limit, || {
                         if !recovering && let Some((_, range)) = operator_rule {
-                            supported_operator(self.collision_world.as_ref(), &map, raw, range)
+                            supported_operator(
+                                self.collision_world.as_ref(),
+                                &map,
+                                raw,
+                                range,
+                                body,
+                            )
                         } else {
-                            supported(self.collision_world.as_ref(), &map, raw, &policy)
+                            supported(self.collision_world.as_ref(), &map, raw, &policy, body)
                         }
                     });
             cache_hits += usize::from(cached);

@@ -9,6 +9,8 @@ pub struct ReferenceManifest {
     pub world_sha256: String,
     pub geometry_sha256: String,
     pub profile: Profile,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub movement_profile_sha256: Option<String>,
     pub bounds: Bounds,
     pub upstream_commit: String,
     pub bake_config: String,
@@ -17,13 +19,28 @@ pub struct ReferenceManifest {
 }
 
 pub fn bake_reference(input: BakeInput) -> Result<(ReferenceManifest, Vec<u8>), Error> {
-    let artifact = bake_artifact(input, true)?;
+    bake_scoped(input, None)
+}
+
+pub fn bake_reference_with_movement_profile(
+    input: BakeInput,
+    rules: &MovementProfile,
+) -> Result<(ReferenceManifest, Vec<u8>), Error> {
+    bake_scoped(input, Some(rules))
+}
+
+fn bake_scoped(
+    input: BakeInput,
+    rules: Option<&MovementProfile>,
+) -> Result<(ReferenceManifest, Vec<u8>), Error> {
+    let artifact = bake_artifact(input, true, rules)?;
     let manifest = ReferenceManifest {
         format: artifact.format,
         map_name: artifact.map_name,
         world_sha256: artifact.world_sha256,
         geometry_sha256: artifact.geometry_sha256,
         profile: artifact.profile,
+        movement_profile_sha256: artifact.movement_profile_sha256,
         bounds: artifact.bounds,
         upstream_commit: artifact.upstream_commit,
         bake_config: artifact.bake_config,
@@ -48,7 +65,31 @@ impl ReferenceNavMesh {
         world_sha256: &str,
         map_name: &str,
     ) -> Result<Self, Error> {
-        Self::load_with_node_limit(manifest, data, world_sha256, map_name, QUERY_NODE_LIMIT)
+        Self::load_with_node_limit(
+            manifest,
+            data,
+            world_sha256,
+            map_name,
+            QUERY_NODE_LIMIT,
+            None,
+        )
+    }
+
+    pub fn load_with_movement_profile(
+        manifest: &ReferenceManifest,
+        data: Vec<u8>,
+        world_sha256: &str,
+        map_name: &str,
+        rules: &MovementProfile,
+    ) -> Result<Self, Error> {
+        Self::load_with_node_limit(
+            manifest,
+            data,
+            world_sha256,
+            map_name,
+            QUERY_NODE_LIMIT,
+            Some(rules),
+        )
     }
 
     fn load_with_node_limit(
@@ -57,6 +98,7 @@ impl ReferenceNavMesh {
         world_sha256: &str,
         map_name: &str,
         node_limit: c_int,
+        rules: Option<&MovementProfile>,
     ) -> Result<Self, Error> {
         if manifest.detour_bytes != data.len() as u64
             || manifest.bounds.max[1] - manifest.bounds.min[1] > 409.55
@@ -74,6 +116,7 @@ impl ReferenceNavMesh {
                 world_sha256: manifest.world_sha256.clone(),
                 geometry_sha256: manifest.geometry_sha256.clone(),
                 profile: manifest.profile.clone(),
+                movement_profile_sha256: manifest.movement_profile_sha256.clone(),
                 bounds: manifest.bounds.clone(),
                 upstream_commit: manifest.upstream_commit.clone(),
                 bake_config: manifest.bake_config.clone(),
@@ -85,6 +128,7 @@ impl ReferenceNavMesh {
             map_name,
             true,
             node_limit,
+            rules,
         )
         .map(|mut mesh| {
             // Detour already owns checked copies of the tiles.
@@ -95,7 +139,12 @@ impl ReferenceNavMesh {
 
     pub fn route(&self, start: Point, goal: Point, goal_radius_m: f64) -> Result<Route, Error> {
         let mut route = self.0.route(start, goal, goal_radius_m)?;
-        route.format = "mag_navmesh_reference_route_v1".into();
+        route.format = if self.0.artifact.movement_profile_sha256.is_some() {
+            "mag_navmesh_reference_route_v2"
+        } else {
+            "mag_navmesh_reference_route_v1"
+        }
+        .into();
         Ok(route)
     }
 
@@ -183,6 +232,7 @@ mod tests {
             &manifest.world_sha256,
             &manifest.map_name,
             node_limit,
+            None,
         )
         .unwrap()
     }
