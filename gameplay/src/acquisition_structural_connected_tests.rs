@@ -76,6 +76,15 @@ pub(super) fn fixture_with_damage_and_area(
     area_radius: f32,
     area_damage: f32,
 ) -> crate::Engine<Vec<u8>> {
+    fixture_with_structural_team(damage, area_radius, area_damage, 1)
+}
+
+pub(super) fn fixture_with_structural_team(
+    damage: f32,
+    area_radius: f32,
+    area_damage: f32,
+    owner_team: u8,
+) -> crate::Engine<Vec<u8>> {
     let mut engine = crate::spawn_progression::tests::dynamic_bodies::acquisition_gameplay_tests::capture_fixture();
     let catalog = engine.objective_catalog.as_mut().unwrap();
     let object = catalog
@@ -90,7 +99,7 @@ pub(super) fn fixture_with_damage_and_area(
     });
     object.native_class = Some(NativeClass::Structural);
     object.demolition = Some(ObjectiveDemolitionRule {
-        owner_team: 1,
+        owner_team,
         arm_ms: 10,
         detonate_ms: 20,
         defuse_ms: 8,
@@ -104,7 +113,7 @@ pub(super) fn fixture_with_damage_and_area(
         trigger_volumes: boxes.to_vec(),
     });
     object.repair = Some(ObjectiveRepairRule {
-        owner_team: 1,
+        owner_team,
         can_repair: true,
         repair_ms: 1000,
         minimum_repair_ms: 1000,
@@ -338,7 +347,6 @@ fn repair(
 
 pub(crate) fn bind_repair_counter_squad(engine: &mut crate::Engine<Vec<u8>>, object: u16) -> u16 {
     let owner = engine.active.as_ref().unwrap();
-    assert_eq!(owner.team(), 1);
     let squad = owner.squad_catalog.clone();
     let game_info = crate::protocol::GameInfo {
         client_index: 0,

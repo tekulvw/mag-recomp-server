@@ -9,6 +9,7 @@ struct Candidate {
     modifier: f32,
     position: [f32; 3],
     last_attacker: u32,
+    bot_plant: Option<crate::objective_control::BotPlantSource>,
     before_hp: f32,
     after_hp: f32,
     percent: f32,
@@ -139,6 +140,7 @@ impl<W: Write> Engine<W> {
             modifier,
             position: frago::point(vehicle.pose.position),
             last_attacker: vehicle.last_attacker,
+            bot_plant: vehicle.bot_plant_source,
             before_hp: vehicle.health_hp(),
             after_hp,
             percent,
@@ -167,9 +169,16 @@ impl<W: Write> Engine<W> {
         };
         let actor = self.active.as_ref().ok_or("no_reservation")?;
         let increased = candidate.after_hp > candidate.before_hp;
-        let credit = if increased
-            && !self.attacker_is_friendly(candidate.last_attacker, event.world_id, actor.team())
-        {
+        let friendly = match candidate.bot_plant {
+            Some(source) if source.world == event.world_id && source.round == self.round_number => {
+                source.team == actor.team()
+            }
+            Some(_) => return Err("stale_bot_plant_ground_source"),
+            None => {
+                self.attacker_is_friendly(candidate.last_attacker, event.world_id, actor.team())
+            }
+        };
+        let credit = if increased && !friendly {
             Some(self.plan_repair_credit(actor, candidate.modifier, Some(candidate.position))?)
         } else {
             None

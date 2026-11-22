@@ -230,6 +230,7 @@ fn repair_completion_selects_only_supported_subtypes_and_previous_repairing() {
                 actor_generation: Some(1),
                 reward_actor: Some(player),
                 active_trigger_index: None,
+                bot_plant: None,
             };
             e.stage_native_objective_callbacks(entry, None, &[], frago::Frame::default())
                 .unwrap();
@@ -319,4 +320,53 @@ fn tagged_completion_credits_each_current_same_side_squad_leader() {
     assert!(actor(2).reward_statistics.is_empty());
     assert_eq!(actor(source).reward_statistics.get(&43), Some(&1));
     assert_eq!(effects.messages.len(), 6);
+}
+
+#[test]
+fn detached_bot_completion_credits_frozen_team_tag_but_no_personal_counters() {
+    use replication::ObjectiveState as S;
+    let mut e = fixture();
+    let player = e.active.as_ref().unwrap().reservation.player;
+    let mut delta = e
+        .objective_world
+        .as_ref()
+        .unwrap()
+        .snapshot(1, 130)
+        .objectives
+        .into_iter()
+        .find(|o| o.object_index == 120)
+        .unwrap();
+    delta.state_actor = replication::ObjectiveStateActor {
+        state: S::Completed,
+        actor_index: u16::MAX,
+        change_time_ms: 130,
+    };
+    let mut entry = objective_control::NativeEntry {
+        class: crate::objective_control::NativeClass::Structural,
+        previous: S::Activated,
+        delta,
+        actor_generation: None,
+        reward_actor: None,
+        active_trigger_index: Some(0),
+        bot_plant: Some(objective_control::BotPlantSource {
+            player,
+            allocation: 9,
+            life: 1,
+            team: 1,
+            world: 1,
+            round: e.round_number,
+        }),
+    };
+    let assignments = [tag(0, 0x0c80_0078)];
+    e.stage_native_objective_callbacks(entry, None, &assignments, frago::Frame::default())
+        .unwrap();
+    assert!(e.active.as_ref().unwrap().reward_statistics.is_empty());
+    entry.bot_plant.as_mut().unwrap().team = 0;
+    e.stage_native_objective_callbacks(entry, None, &assignments, frago::Frame::default())
+        .unwrap();
+    assert_eq!(
+        e.active.as_ref().unwrap().reward_statistics,
+        [(41, 1)].into_iter().collect()
+    );
+    assert!(e.pending_reward_batch().is_empty());
 }

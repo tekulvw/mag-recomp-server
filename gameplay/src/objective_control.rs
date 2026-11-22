@@ -59,12 +59,23 @@ impl InteractionOutcome {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BotPlantSource {
+    pub(crate) player: u16,
+    pub(crate) allocation: u32,
+    pub(crate) life: u32,
+    pub(crate) team: u8,
+    pub(crate) world: u32,
+    pub(crate) round: u64,
+}
+
 #[derive(Clone)]
 struct Operation {
     started_at: Duration,
     contact_arming: bool,
     recipient: Option<RewardRecipient>,
     capture_actor: Option<CaptureActorIdentity>,
+    bot_plant: Option<BotPlantSource>,
     player: u16,
     generation: u32,
     trigger_index: u8,
@@ -136,6 +147,7 @@ enum NativePending {
         trigger: u8,
         modifier: f32,
         recipient: Option<RewardRecipient>,
+        bot_plant: Option<BotPlantSource>,
     },
     Script(ObjectiveState),
     Precision(Option<crate::structure_damage::Source>),
@@ -156,6 +168,7 @@ pub struct NativeEntry {
     /// Qualified native stat-callback actor, independent of the wire actor.
     pub reward_actor: Option<u16>,
     pub active_trigger_index: Option<u8>,
+    pub(crate) bot_plant: Option<BotPlantSource>,
 }
 
 impl NativeEntry {
@@ -347,6 +360,7 @@ impl ObjectiveWorld {
                     actor_generation: None,
                     reward_actor: script_reward_actor(object, class, old, next, target),
                     active_trigger_index,
+                    bot_plant: None,
                 }
             });
             object.native = Some(mode);
@@ -362,6 +376,7 @@ impl ObjectiveWorld {
         } else {
             object.fuse.as_ref().map(|fuse| fuse.trigger_index)
         };
+        let prior_bot_fuse = object.fuse.as_ref().and_then(|fuse| fuse.bot_plant);
         let generation = tick_native(
             object,
             &mut mode,
@@ -404,6 +419,17 @@ impl ObjectiveWorld {
                 actor_generation: generation,
                 reward_actor,
                 active_trigger_index,
+                bot_plant: if precision {
+                    None
+                } else {
+                    match object.state.state_actor.state {
+                        ObjectiveState::Activated => {
+                            object.fuse.as_ref().and_then(|fuse| fuse.bot_plant)
+                        }
+                        ObjectiveState::Completed => prior_bot_fuse,
+                        _ => None,
+                    }
+                },
             });
         }
         Some(object.state)
@@ -620,6 +646,7 @@ impl ObjectiveWorld {
                 actor_generation: source.map(|actor| actor.generation),
                 reward_actor: precision_completion_actor(object, previous),
                 active_trigger_index: None,
+                bot_plant: None,
             };
             published = Some(entry.delta);
             prepare(entry, self)?;
@@ -676,6 +703,7 @@ impl ObjectiveWorld {
             actor_generation: None,
             reward_actor: None,
             active_trigger_index: None,
+            bot_plant: None,
         }))
     }
 
@@ -742,6 +770,7 @@ impl ObjectiveWorld {
             contact_arming: false,
             recipient: None,
             capture_actor: None,
+            bot_plant: None,
             player: actor.player,
             generation: actor.generation,
             trigger_index: trigger,
@@ -761,6 +790,7 @@ impl ObjectiveWorld {
             actor_generation: Some(actor.generation),
             reward_actor: None,
             active_trigger_index: Some(trigger),
+            bot_plant: None,
         });
         self.pristine = false;
         Ok(Some(delta))
@@ -802,6 +832,39 @@ impl ObjectiveWorld {
         object.reward_defender = Some(authority.actor.player);
         self.pristine = false;
         Ok(submission)
+    }
+
+    pub(crate) fn stage_native_bot_plant(
+        &mut self,
+        request: ObjectiveInteraction,
+        actor: ObjectiveActor,
+        source: BotPlantSource,
+        now: Duration,
+    ) -> bool {
+        let index = request.target_object_id as u16;
+        if self.native_class(index) != Some(NativeClass::Structural)
+            || request.kind != ObjectiveInteractionKind::Activate
+            || source.player != actor.player
+            || source.life != actor.generation
+            || source.team != actor.team
+            || self.interaction_owner(index).is_some()
+        {
+            return false;
+        }
+        let outcome = self.interact(request, actor, now);
+        if !outcome.accepted {
+            return false;
+        }
+        let Some(NativePending::Demolition { bot_plant, .. }) = self
+            .objects
+            .get_mut(&index)
+            .and_then(|object| object.native.as_mut())
+            .and_then(|mode| mode.pending.as_mut())
+        else {
+            return false;
+        };
+        *bot_plant = Some(source);
+        true
     }
 
     /// Snapshot the authenticated admission at action start, not at delayed completion.
@@ -892,6 +955,7 @@ impl ObjectiveWorld {
             contact_arming: false,
             recipient: None,
             capture_actor: None,
+            bot_plant: None,
             player: u16::MAX,
             generation: 0,
             trigger_index: 0,
@@ -1061,6 +1125,7 @@ impl ObjectiveWorld {
                     contact_arming: false,
                     recipient: None,
                     capture_actor: None,
+                    bot_plant: None,
                     player: actor.player,
                     generation: actor.generation,
                     trigger_index: request.trigger_index,
@@ -1313,7 +1378,11 @@ fn armed_state(object: &mut Objective, now: Duration) {
     object.state.state_actor = ObjectiveStateActor {
         state: ObjectiveState::Activated,
         change_time_ms: wire_time(now),
-        actor_index: fuse.player,
+        actor_index: if fuse.bot_plant.is_some() {
+            u16::MAX
+        } else {
+            fuse.player
+        },
     };
     object.state.expiration_time_ms = wire_time(fuse.deadline);
     object.state.deactivation_time_ms = 0;
@@ -1352,7 +1421,7 @@ fn new_structural_repair(
     repair::StructuralRepair::new(initial, rule?.into()).ok()
 }
 
-fn at_native_trigger(
+pub(crate) fn at_native_trigger(
     position: CharacterPosition,
     range: crate::objective_range::ObjectiveRange<'_>,
     index: u8,
@@ -1471,6 +1540,7 @@ fn stage_native_interaction(
                 trigger: request.trigger_index,
                 modifier,
                 recipient: None,
+                bot_plant: None,
             });
     }
     InteractionOutcome {
@@ -1664,6 +1734,7 @@ fn enter_secure(
             contact_arming: false,
             recipient: None,
             capture_actor: None,
+            bot_plant: None,
             player: entry.actor.player,
             generation: generation.expect("world actor generation"),
             trigger_index: request.trigger_index(),
@@ -1834,6 +1905,7 @@ fn tick_native(
             trigger,
             modifier,
             recipient,
+            bot_plant,
         }) => {
             let rule = object.demolition.clone().expect("native demolition rule");
             let request = ObjectiveInteraction {
@@ -1857,10 +1929,14 @@ fn tick_native(
             {
                 if let Some(operation) = object.operation.as_mut() {
                     operation.recipient = recipient;
+                    operation.bot_plant = bot_plant;
                 }
                 match (kind, object.state.state_actor.state) {
                     (ObjectiveInteractionKind::Activate, ObjectiveState::Activating) => {
-                        object.reward_attacker = Some(actor.player);
+                        object.reward_attacker = bot_plant.is_none().then_some(actor.player);
+                        if bot_plant.is_some() {
+                            object.state.state_actor.actor_index = u16::MAX;
+                        }
                         mode.active_trigger_index = Some(trigger);
                     }
                     (ObjectiveInteractionKind::Deactivate, ObjectiveState::Deactivating) => {
@@ -2058,6 +2134,7 @@ fn interact_demolition(
         contact_arming: request.kind == Activate,
         recipient: None,
         capture_actor: None,
+        bot_plant: None,
         player: actor.player,
         generation: actor.generation,
         trigger_index: request.trigger_index,
@@ -2104,7 +2181,11 @@ fn tick_demolition(
         object.state.state_actor = ObjectiveStateActor {
             state: ObjectiveState::Completed,
             change_time_ms: wire_time(now),
-            actor_index: fuse.player,
+            actor_index: if fuse.bot_plant.is_some() {
+                u16::MAX
+            } else {
+                fuse.player
+            },
         };
         // SetStateCompleted preserves the bomb expiration, clears defuse time,
         // and destroys the objective. It is not the A/B health100 completion.

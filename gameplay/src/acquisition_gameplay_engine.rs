@@ -441,10 +441,14 @@ impl<W: Write> Engine<W> {
         let mut repair_credit = None;
         let (op, reply, reason) = match input {
             StructuralInput::Interaction(request, actor, modifier) => {
-                let outcome = if structural.bot_owns_defuse(&world, index, actor.player) {
+                let outcome = if structural.bot_owns_hold(&world, index, actor.player) {
                     crate::objective_control::InteractionOutcome {
                         accepted: false,
-                        reason: "acquisition_bot_defuse_owned",
+                        reason: if world.state(index) == Some(ObjectiveState::Activating) {
+                            "acquisition_bot_plant_owned"
+                        } else {
+                            "acquisition_bot_defuse_owned"
+                        },
                         changed: None,
                         reply_trigger_index: u8::MAX,
                     }
@@ -645,7 +649,7 @@ impl<W: Write> Engine<W> {
             .filter_map(|d| {
                 let owner = world.interaction_owner(d.object_index)?;
                 if runtime.structural.as_ref().is_some_and(|structural| {
-                    structural.bot_owns_defuse(&world, d.object_index, owner.0)
+                    structural.bot_owns_hold(&world, d.object_index, owner.0)
                 }) {
                     return None;
                 }

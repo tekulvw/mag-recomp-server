@@ -36,6 +36,10 @@ fn destruction_scene(wall: bool) -> collision::CollisionWorld {
 }
 
 fn destruction_fixture(wall: bool) -> Engine<Vec<u8>> {
+    destruction_fixture_with_bot_origin(wall, false)
+}
+
+fn destruction_fixture_with_bot_origin(wall: bool, detached: bool) -> Engine<Vec<u8>> {
     let mut engine =
         ground_firearm_fixture(135., false).with_collision_world(destruction_scene(wall));
     let sha = engine
@@ -101,7 +105,22 @@ fn destruction_fixture(wall: bool) -> Engine<Vec<u8>> {
         player_tracking::PositionOrigin::ServerExit,
         3300,
     );
-    ground_hit(&mut engine, 3300).unwrap();
+    if detached {
+        let source = crate::objective_control::BotPlantSource {
+            player: 1,
+            allocation: 23,
+            life: 1,
+            team: 1,
+            world: 1,
+            round: engine.round_number,
+        };
+        let runtime = engine.ground_runtime.as_mut().unwrap();
+        runtime
+            .apply_blast_with_bot_origin(key, 135., u32::MAX, Some(source))
+            .unwrap();
+    } else {
+        ground_hit(&mut engine, 3300).unwrap();
+    }
     engine
         .tick_acquisition_objectives(Duration::from_millis(3300), 3)
         .unwrap();
@@ -307,4 +326,115 @@ fn acquisition_ground_effects_delivery_inert_timer_advances_without_objective_ch
     let v = engine.ground_runtime.as_ref().unwrap().get(4).unwrap();
     assert_eq!(v.state, 7);
     assert_eq!(v.body, ground::Body::Inactive);
+}
+
+#[test]
+fn detached_bot_origin_reaches_ground_critical_occupant_blast_and_fsp() {
+    let mut engine = destruction_fixture_with_bot_origin(false, true);
+    let before = engine.ground_runtime.as_ref().unwrap().get(4).unwrap();
+    // First 100 ms critical tick reduces 15 HP by 0.45 before projection.
+    assert_eq!(before.health_quarter_points, 58);
+    let origin = before.bot_plant_source.unwrap();
+    assert_eq!(origin.team, 1);
+
+    // Use the second existing synthetic Escort allocation and its own source
+    // spawn identity. Place it within the first vehicle's inner blast radius.
+    let runtime = engine.ground_runtime.as_mut().unwrap();
+    let second = runtime.get(5).unwrap();
+    let second_key = second.key;
+    let respawn = ground::QualifiedRespawn {
+        spawn_point_index: second.source_spawn_point_index,
+        spawn_point_token: second.source_spawn_point_token,
+        active: true,
+        pose: ground::Pose {
+            position: replication::CharacterPosition {
+                x: 997.,
+                y: 3.,
+                z: 1000.,
+            },
+            rotation: second.pose.rotation,
+        },
+    };
+    runtime
+        .respawn_existing(second_key, respawn, false)
+        .unwrap();
+    runtime.update(second_key, 0., 0).unwrap();
+
+    engine
+        .tick_acquisition_objectives(Duration::from_millis(7300), 4)
+        .unwrap();
+    let ground = engine.ground_runtime.as_ref().unwrap().get(4).unwrap();
+    assert_eq!(ground.state, 4);
+    assert_eq!(ground.bot_plant_source, Some(origin));
+    assert_eq!(ground.damage_wire().last_attacker, u32::MAX);
+    let second = engine.ground_runtime.as_ref().unwrap().get(5).unwrap();
+    assert_eq!(second.key, second_key);
+    let second_hp = second.health_quarter_points;
+    assert_eq!(second.bot_plant_source, Some(origin));
+    assert_eq!(second.damage_wire().last_attacker, u32::MAX);
+    let occupant = &engine.peers["synthetic-reservation-0000"];
+    assert!(!occupant.life.is_alive());
+    assert_eq!(occupant.last_damage.last_attacker, u32::MAX);
+    let nearby = engine.active.as_ref().unwrap();
+    assert!(nearby.life.damage_health().unwrap().1 < 400);
+    assert_eq!(nearby.last_damage.last_attacker, u32::MAX);
+    let record = engine
+        .writer
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+        .find(|row| row["op"] == "acquisition_objective_tick" && row["timestamp_ms"] == 7300)
+        .unwrap();
+    let effects = record["effects"].as_array().unwrap();
+    let chained: Vec<_> = effects
+        .iter()
+        .filter(|row| {
+            row["op"] == "acquisition_destruction_ground_blast"
+                && row["target"] == second_key.object_id()
+        })
+        .collect();
+    // This legacy destruction collector emits one dose for each overlapping
+    // represented root. Each root observes the same model-origin falloff.
+    assert_eq!(chained.len(), 2, "{chained:?}");
+    assert_ne!(chained[0]["root"], chained[1]["root"]);
+    assert!(chained.iter().all(|row| row["hp"] == 43.75));
+    assert_eq!(second_hp, 250); // 150 HP minus two positive 43.75 HP root doses.
+    assert!(effects.iter().any(|row| {
+        row["op"] == "acquisition_ground_forced_fsp_source"
+            && row["source_team"] == 1
+            && row["attacker"] == u32::MAX
+    }));
+}
+
+#[test]
+fn detached_ground_damage_origin_survives_repair_and_changes_only_on_applied_damage() {
+    let mut engine = ground_firearm_fixture(0., false);
+    let source = crate::objective_control::BotPlantSource {
+        player: 1,
+        allocation: 23,
+        life: 1,
+        team: 1,
+        world: 1,
+        round: engine.round_number,
+    };
+    let ground = engine.ground_runtime.as_mut().unwrap();
+    let key = ground.get(4).unwrap().key;
+    ground
+        .apply_blast_with_bot_origin(key, 50., u32::MAX, Some(source))
+        .unwrap();
+    assert_eq!(ground.get(4).unwrap().bot_plant_source, Some(source));
+    ground.heal_percent(key, 2.).unwrap();
+    assert_eq!(ground.get(4).unwrap().bot_plant_source, Some(source));
+    assert!(
+        ground
+            .apply_explosion_damage(key, 0., 0x0380_0001)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(ground.get(4).unwrap().bot_plant_source, Some(source));
+    ground.apply_explosion_damage(key, 1., 0x0380_0001).unwrap();
+    assert_eq!(ground.get(4).unwrap().bot_plant_source, None);
+    assert_eq!(
+        ground.get(4).unwrap().damage_wire().last_attacker,
+        0x0380_0001
+    );
 }

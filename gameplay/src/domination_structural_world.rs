@@ -167,6 +167,7 @@ pub enum DamageWork {
         attacker: u32,
         blast: InstantaneousBlast,
         observations: Vec<BlastObservation>,
+        bot_plant: Option<crate::objective_control::BotPlantSource>,
     },
 }
 
@@ -568,6 +569,7 @@ impl<W: Write> Engine<W> {
                 attacker,
                 blast,
                 observations,
+                bot_plant: None,
             });
         }
         let snapshot = self.dynamic_collision_snapshot(filter_rows[6])?;
@@ -690,6 +692,7 @@ impl<W: Write> Engine<W> {
             attacker,
             blast,
             observations,
+            bot_plant: None,
         })
     }
 
@@ -874,10 +877,12 @@ impl<W: Write> Engine<W> {
             ground_policy,
             ground_changes: BTreeSet::new(),
             helo_doses: Vec::new(),
+            bot_plant: None,
         };
         for operation in work {
             match operation {
                 DamageWork::Area(update) => {
+                    output.bot_plant = None;
                     self.stage_structural_area(*update, state, &mut output)?
                 }
                 DamageWork::Blast {
@@ -885,7 +890,9 @@ impl<W: Write> Engine<W> {
                     attacker,
                     blast,
                     observations,
+                    bot_plant,
                 } => {
+                    output.bot_plant = *bot_plant;
                     self.stage_structural_blast(
                         *source,
                         *attacker,
@@ -1098,6 +1105,11 @@ impl<W: Write> Engine<W> {
         observations: &[BlastObservation],
         output: &mut DamageOutput<'_>,
     ) -> Result<(), &'static str> {
+        if let Some(origin) = output.bot_plant
+            && (attacker != u32::MAX || origin.round != self.round_number || source.is_command())
+        {
+            return Err("invalid_bot_plant_blast_context");
+        }
         if observations.len() > 512 || blast.origins.len() > 2 {
             return Err("domination_structural_blast_observation_limit");
         }
@@ -1124,7 +1136,7 @@ impl<W: Write> Engine<W> {
                             index,
                             world,
                             attacker,
-                            source_team: None,
+                            source_team: output.bot_plant.map(|origin| origin.team),
                             damage: item_catalog::TargetDamageParameters {
                                 amount: blast.damage,
                                 armor_pierce: 0.,
@@ -1180,6 +1192,7 @@ struct DamageOutput<'a> {
     ground_policy: Option<&'a acquisition_ground_damage::Policy>,
     ground_changes: BTreeSet<u16>,
     helo_doses: Vec<crate::domination_helo_damage::RadialDose>,
+    bot_plant: Option<crate::objective_control::BotPlantSource>,
 }
 
 impl DamageOutput<'_> {
@@ -1193,7 +1206,13 @@ impl DamageOutput<'_> {
             .native
             .get_mut(&target.character_id)
             .ok_or("domination_structural_character_state_missing")?;
-        let plan = engine.plan_acquisition_character_effect(target, request, *state, self.now)?;
+        let plan = engine.plan_character_effect_with_bot_origin(
+            target,
+            request,
+            *state,
+            self.now,
+            self.bot_plant,
+        )?;
         self.audit.push(plan.audit().clone());
         self.messages
             .extend(engine.commit_acquisition_character_effect(plan, state)?);
@@ -1209,10 +1228,17 @@ impl DamageOutput<'_> {
         scale: f32,
     ) -> Result<(), &'static str> {
         let GroundBlastTarget { key, team, world } = target;
+        if self.bot_plant.is_some_and(|origin| origin.world != world) {
+            return Err("stale_bot_plant_ground_source");
+        }
         let creation = engine
             .current_ground_vehicle(key.index)
             .ok_or("domination_ground_blast_creation_missing")?;
-        let friendly = engine.character_team_in_world(attacker, world) == Some(team);
+        let friendly = self
+            .bot_plant
+            .map(|origin| origin.team)
+            .or_else(|| engine.character_team_in_world(attacker, world))
+            == Some(team);
         let amount = self
             .ground_policy
             .ok_or("domination_ground_damage_policy_required")?
@@ -1230,7 +1256,7 @@ impl DamageOutput<'_> {
             .ground_runtime
             .as_mut()
             .ok_or("domination_ground_blast_runtime_missing")?
-            .apply_explosion_damage(key, amount, attacker)?;
+            .apply_blast_with_bot_origin(key, amount, attacker, self.bot_plant)?;
         if !changes.is_empty() {
             self.ground_changes.insert(key.index);
             self.audit

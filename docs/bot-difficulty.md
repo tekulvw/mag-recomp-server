@@ -76,3 +76,21 @@ limits. The actual follower still checks collision, body occupancy, drop
 certificates, health and fall damage. Disconnected paths, unsupported endpoints,
 query-budget exhaustion and unknown coverage remain failures. No straight-line
 fallback is used, and this change does not establish new navigation coverage.
+
+## Source Acquisition charge interactions
+
+With `objective_policy.interactions_enabled`, a selected hostile bot can plant
+a source-backed Structural charge at its authored trigger, and a selected
+defender can defuse a contact-planted charge. The ordinary objective clock owns
+the hold and fuse. The bot must retain its current world, round, allocation,
+life, team, grounded body and operator task throughout the hold; leaving those
+conditions cancels it. Navigation and collision admission remain required.
+
+Once planted, the fuse retains the bot's original team even after it retires or
+its player slot is reused. Bot-origin damage uses an uncredited attacker marker
+and preserves that frozen relationship through delayed vehicle damage, occupant
+damage, chained blasts and repair-credit checks. A replacement human receives
+no personal credit for the bot's action. Tagged leader statistics still use the
+original team, and a human who defuses the charge earns their normal award.
+Synthetic checks establish these server transitions; native match presentation
+and original-map movement acceptance remain separate checks.
