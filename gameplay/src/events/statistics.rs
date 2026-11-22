@@ -39,13 +39,15 @@ pub(super) fn firearm_assists(plan: &mut EventPlan, assists: &firearm_assists::P
 pub(crate) fn plan_bot_firearm_assists<W: Write>(
     engine: &Engine<W>,
     assists: &firearm_assists::Plan,
+    victim_position: Option<[f32; 3]>,
 ) -> Result<CharacterEffectConsequences, &'static str> {
     let mut plan = EventPlan::default();
     firearm_assists(&mut plan, assists);
+    let rewards = assists.rewards(engine, victim_position, frago::Frame::default());
     stage_with_source(engine, &mut plan, true)?;
     Ok(CharacterEffectConsequences {
         statistics: plan.statistics,
-        rewards: Vec::new(),
+        rewards,
         messages: plan.messages,
         denial: None,
     })
@@ -121,7 +123,7 @@ fn died<W: Write>(
                 .filter(|value| *value > 0);
             if let Some(ordinal) = ordinal {
                 let frame = plan.frago_frame(engine);
-                let reward = engine.frago_kill_reward(
+                let reward = engine.frago_combat_reward(
                     recipient.human_killed(&victim.reservation, generation, ordinal),
                     killer,
                     engine.frago_character_position(victim, frame),
@@ -454,7 +456,7 @@ pub(crate) fn plan_character_effect_consequences<W: Write>(
         if killer.team() != bot.target.squad.team()
             && let Some(recipient) = progression::RewardRecipient::from_active(killer)
         {
-            let reward = engine.frago_kill_reward(
+            let reward = engine.frago_combat_reward(
                 recipient.bot_killed(victim_id, generation),
                 killer,
                 bot.target.runtime.map(|r| crate::frago::point(r.position)),

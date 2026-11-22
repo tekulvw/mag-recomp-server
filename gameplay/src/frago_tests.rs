@@ -600,12 +600,12 @@ fn accepted_ground_candidate_supplies_both_tagged_vehicle_and_mounted_killer_roo
             .human_killed(&victim.reservation, 4, 1);
         let context = e.frago_character_position(victim, frago::Frame::default());
         assert_eq!(
-            e.frago_kill_reward(reward.clone(), killer, context, frago::Frame::default())
+            e.frago_combat_reward(reward.clone(), killer, context, frago::Frame::default())
                 .frago,
             None
         );
         assert_eq!(
-            e.frago_kill_reward(
+            e.frago_combat_reward(
                 reward,
                 killer,
                 context,

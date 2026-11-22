@@ -151,6 +151,11 @@ pub(super) fn plan_pending_damage<W: Write>(
                     resolved.health_quarter_points == 0,
                 )
             {
+                let frame = plan.frago_frame(ctx.engine);
+                let victim_position = ctx.engine.frago_character_position(victim, frame);
+                plan.combat
+                    .new_rewards
+                    .extend(assists.rewards(ctx.engine, victim_position, frame));
                 statistics::firearm_assists(plan, &assists);
                 plan.combat.firearm_assists = Some(assists);
             }
@@ -260,7 +265,7 @@ pub(super) fn plan_pending_damage<W: Write>(
                 if active.team() != bot.team
                     && let Some(recipient) = progression::RewardRecipient::from_active(active)
                 {
-                    let reward = ctx.engine.frago_kill_reward(
+                    let reward = ctx.engine.frago_combat_reward(
                         recipient.bot_killed(bot.object_index, bot.generation),
                         active,
                         Some(crate::frago::point(bot.position)),

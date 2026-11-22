@@ -1067,13 +1067,27 @@ impl<W: Write> Engine<W> {
                     .as_ref()
                     .map(|assist| {
                         assist.check_before_record(engine)?;
-                        events::plan_bot_firearm_assists(engine, assist)
+                        let victim_position = if plan.expected.reservation.is_some() {
+                            engine.acquisition_character_position(target).ok()
+                        } else {
+                            engine
+                                .bot_registry
+                                .bots
+                                .get(&(target.character_id as u16))
+                                .and_then(|bot| bot.target.runtime)
+                                .map(|runtime| {
+                                    runtime.physical_position().map(|value| value as f32)
+                                })
+                        };
+                        events::plan_bot_firearm_assists(engine, assist, victim_position)
                     })
                     .transpose()?;
                 let mut effect_audit = plan.audit().clone();
                 messages.extend(engine.commit_acquisition_character_effect(plan, state)?);
                 if let (Some(assist), Some(statistic)) = (assist, statistic) {
                     effect_audit["assists"] = json!(assist.audit());
+                    statistic.validate(engine)?;
+                    effect_audit["assist_settlement"] = statistic.audit();
                     messages.extend(statistic.commit(engine));
                     assist.install(engine)?;
                 }
