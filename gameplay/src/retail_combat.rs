@@ -901,8 +901,8 @@ impl RetailBulletProfile {
             let Some(attachment) = inventory.slots[slot] else {
                 continue;
             };
-            // Native SimWeaponKit keeps host ammo for these compatible
-            // attachments when the replacement weapon is empty.
+            // The launcher initializes underbarrel row 17. Ordinary gear 0
+            // still selects host ammo, just as for non-replacement attachments.
             let kind = items.zip(weapon).and_then(|(items, weapon)| {
                 items.retail_firearm_attachment(gear, weapon, attachment)
             });
@@ -913,7 +913,11 @@ impl RetailBulletProfile {
                     | (
                         0,
                         17,
-                        Some(BulletAttachmentKind::Bipod | BulletAttachmentKind::ForwardGrip)
+                        Some(
+                            BulletAttachmentKind::Bipod
+                                | BulletAttachmentKind::ForwardGrip
+                                | BulletAttachmentKind::Launcher
+                        )
                     )
             ) {
                 return Err("unsupported_bullet_attachment");
