@@ -576,6 +576,11 @@ impl Registry {
         }
         for loaded in self.profiles.values() {
             if let Some(world) = &loaded.domination {
+                world.validate_human_static_resupply(
+                    &loaded.spawns,
+                    loaded.collision.as_ref(),
+                    items,
+                )?;
                 world.validate_frag_ground(
                     items,
                     loaded.collision.as_ref(),
@@ -710,6 +715,10 @@ impl Registry {
                 .acquisition
                 .as_ref()
                 .is_some_and(|setup| setup.has_human_static_resupply())
+                || profile
+                    .domination
+                    .as_ref()
+                    .is_some_and(|world| world.state.human_static_resupply.is_some())
         })
     }
 

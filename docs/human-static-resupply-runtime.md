@@ -1,9 +1,12 @@
-# Human grenade resupply on Panama
+# Human static grenade resupply
 
-Set `human_static_resupply` in a Panama Acquisition gameplay configuration
-to the owner-projected catalog for that exact attacking faction. Paths resolve
-relative to the gameplay configuration file. The same configuration field works
-through the direct `--acquisition-gameplay` option and through a match profile.
+Set `human_static_resupply` in the Acquisition gameplay configuration, or
+`core.human_static_resupply` in the Domination gameplay configuration, to the
+owner-projected catalog for the selected map and attacking faction. Paths
+resolve relative to the gameplay configuration file. The fields are accepted
+through direct Acquisition configuration and registered match profiles.
+The supported Acquisition maps are Alaska Subpen, Panama and VOZ. The
+supported Domination maps are Baku, Canal and Unalaska.
 Omitting the field disables human static resupply. Use offline
 `--validate-catalogs` startup to verify the resource binding. The readiness output
 reports `human_static_resupply_validated`.

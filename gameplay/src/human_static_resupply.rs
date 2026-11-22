@@ -5,7 +5,19 @@ use std::{collections::BTreeSet, path::Path};
 
 const MAX_BYTES: u64 = 65_536;
 const FAMILY_PREFIX: u32 = 0x2a80_0000;
+#[cfg(test)]
 const PANAMA: &str = "mag_panama_military_base_final";
+
+fn authored_provider_count(map: &str, mode: i8) -> Option<usize> {
+    match (map, mode) {
+        ("mag_alaska_subpen_final", 1) => Some(10),
+        ("mag_panama_military_base_final", 1) => Some(9),
+        ("mag_voz_final", 1) => Some(11),
+        ("mag_baku_final" | "mag_canal_final", 2) => Some(20),
+        ("mag_unalaska_final", 2) => Some(21),
+        _ => None,
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -138,13 +150,12 @@ impl Catalog {
         if catalog.schema_version != 1
             || catalog.format != "mag_retail_human_static_resupply"
             || catalog.application_id != 20231
-            || catalog.map != PANAMA
-            || catalog.mode != 1
+            || authored_provider_count(&catalog.map, catalog.mode) != Some(catalog.providers.len())
             || catalog.entity_family != 42
-            || ![0, 2].contains(&catalog.attacking_faction)
+            || catalog.attacking_faction > 2
             || source.id_scope != "retail_fresh_successful_compiled_load"
             || source.allocation_pool_capacity != 32
-            || source.clv_member != format!("/run/mag/ps3/levels/{PANAMA}/{PANAMA}.clv")
+            || source.clv_member != format!("/run/mag/ps3/levels/{0}/{0}.clv", catalog.map)
             || source.definition.offset == 0
             || source.definition.token == 0
             || ![
@@ -158,7 +169,6 @@ impl Catalog {
             ]
             .into_iter()
             .all(|v| digest(v))
-            || catalog.providers.len() != 9
         {
             return Err("invalid_static_resupply_catalog");
         }
@@ -282,10 +292,15 @@ fn inside(actor: &Active, provider: &Provider) -> bool {
 impl<W: Write> Engine<W> {
     fn static_resupply_catalog(&self) -> Option<&Catalog> {
         self.acquisition_gameplay
-            .as_ref()?
-            .setup
-            .human_static_resupply
-            .as_deref()
+            .as_ref()
+            .and_then(|world| world.setup.human_static_resupply.as_deref())
+            .or_else(|| {
+                self.domination_gameplay
+                    .as_ref()?
+                    .state
+                    .human_static_resupply
+                    .as_deref()
+            })
     }
 
     pub(super) fn plan_static_resupply(
@@ -438,16 +453,20 @@ mod tests {
     use std::sync::Arc;
 
     fn document() -> Value {
+        document_for(PANAMA, 1, 9)
+    }
+
+    fn document_for(map: &str, mode: i8, count: u32) -> Value {
         let hash = "a".repeat(64);
         json!({
             "schema_version":1,"format":"mag_retail_human_static_resupply",
-            "application_id":20231,"map":PANAMA,"mode":1,"entity_family":42,
+            "application_id":20231,"map":map,"mode":mode,"entity_family":42,
             "attacking_faction":0,"spawn_sha256":hash,"collision_sha256":hash,
             "source":{"retail_elf_sha256":hash,"level_archive_sha256":hash,
-                "clv_sha256":hash,"clv_member":format!("/run/mag/ps3/levels/{PANAMA}/{PANAMA}.clv"),
+                "clv_sha256":hash,"clv_member":format!("/run/mag/ps3/levels/{map}/{map}.clv"),
                 "id_scope":"retail_fresh_successful_compiled_load","allocation_pool_capacity":32,
                 "allocation_proof_sha256":hash,"definition":{"offset":32,"token":99,"sha256":hash}},
-            "providers":(0..9).map(|index| json!({
+            "providers":(0..count).map(|index| json!({
                 "packed_target":FAMILY_PREFIX | index,"low16":index,
                 "tick_rate_seconds":1.0,"percent_refresh_rate":7.0,
                 "box":{"center":[20.0,0.0,0.0],"axes":[[0.0,0.0,1.0],[0.0,1.0,0.0],[-1.0,0.0,0.0]],
@@ -622,6 +641,25 @@ mod tests {
     }
 
     #[test]
+    fn human_static_resupply_refused_start_does_not_install_a_timer() {
+        let mut engine = fixture();
+        engine.max_log = engine.written;
+        assert!(dispatch(&mut engine, &request(0, FAMILY_PREFIX), 200).is_err());
+        assert!(engine.active.as_ref().unwrap().static_resupply.is_empty());
+    }
+
+    #[test]
+    fn human_static_resupply_mount_cancels_before_a_due_pulse() {
+        let mut engine = fixture();
+        engine.active.as_mut().unwrap().grenade_remaining = 0;
+        dispatch(&mut engine, &request(0, FAMILY_PREFIX), 200).unwrap();
+        engine.active.as_mut().unwrap().mounted_seat = Some(1);
+        tick(&mut engine, 1200).unwrap();
+        assert_eq!(ammo(&engine), 0);
+        assert!(engine.active.as_ref().unwrap().static_resupply.is_empty());
+    }
+
+    #[test]
     fn human_static_resupply_late_update_consumes_only_one_interval() {
         let mut engine = fixture();
         engine.active.as_mut().unwrap().grenade_remaining = 0;
@@ -651,6 +689,22 @@ mod tests {
         tick(&mut engine, 2300).unwrap();
         assert_eq!(ammo(&engine), 0);
         assert!(engine.active.as_ref().unwrap().static_resupply.is_empty());
+    }
+
+    #[test]
+    fn human_static_resupply_catalog_checks_each_mode_map_inventory() {
+        for (map, mode, count) in [
+            ("mag_alaska_subpen_final", 1, 10),
+            (PANAMA, 1, 9),
+            ("mag_voz_final", 1, 11),
+            ("mag_baku_final", 2, 20),
+            ("mag_canal_final", 2, 20),
+            ("mag_unalaska_final", 2, 21),
+        ] {
+            assert!(parse(&document_for(map, mode, count)).is_ok());
+            assert!(parse(&document_for(map, 3 - mode, count)).is_err());
+            assert!(parse(&document_for(map, mode, count - 1)).is_err());
+        }
     }
 
     #[test]

@@ -78,6 +78,7 @@ pub(crate) fn repair_fixture() -> Engine<Vec<u8>> {
             helo_frag_damage_areas: None,
             frag_character_blast: false,
             frag_ground_areas: None,
+            human_static_resupply: None,
             projectile_contacts: None,
             helo: None,
             helo_collision: None,

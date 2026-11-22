@@ -37,6 +37,18 @@ pub(crate) struct World {
 }
 
 impl World {
+    pub(crate) fn validate_human_static_resupply(
+        &self,
+        spawns: &SpawnCatalog,
+        collision: Option<&crate::collision::CollisionWorld>,
+        items: &crate::item_catalog::ItemCatalog,
+    ) -> Result<(), &'static str> {
+        if let Some(catalog) = &self.state.human_static_resupply {
+            catalog.bind(spawns, collision, &self.state.objectives, items)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn has_frag_ground_areas(&self) -> bool {
         self.state.frag_ground_areas.is_some()
     }
@@ -248,6 +260,7 @@ pub(crate) struct State {
     pub(crate) hospital_rocket_helo_areas: Option<Arc<crate::hospital_rocket_helo::Catalog>>,
     pub(crate) helo_frag_damage_areas: Option<Arc<crate::hospital_rocket_helo::Catalog>>,
     pub(crate) frag_character_blast: bool,
+    pub(crate) human_static_resupply: Option<Arc<crate::human_static_resupply::Catalog>>,
     pub(crate) frag_ground_areas: Option<Arc<crate::acquisition_frag_ground::Catalog>>,
     pub(crate) projectile_contacts:
         Option<Arc<crate::domination_projectile_collision::ContactBindings>>,
