@@ -3,16 +3,22 @@ use crate::spawn_progression::dispatch;
 
 fn fixture() -> Engine<Vec<u8>> {
     let mut engine = tests::fixture();
-    let catalog = underbarrel_launchers::tests::synthetic_catalog();
+    engine.underbarrel_launchers =
+        Some(Arc::new(underbarrel_launchers::tests::synthetic_catalog()));
+    equip_launcher(&mut engine, 0);
+    engine
+}
+
+fn equip_launcher(engine: &mut Engine<Vec<u8>>, group: usize) -> underbarrel_launchers::Variant {
+    let catalog = engine.underbarrel_launchers.as_ref().unwrap();
     let actor = engine.active.as_mut().unwrap();
-    let v = catalog.variants()[usize::from(actor.reservation.character.faction)];
+    let v = catalog.variants()[3 * group + usize::from(actor.reservation.character.faction)];
     let kit = actor.spawned_loadout.as_mut().unwrap();
     let inventory =
         &mut kit.inventories[usize::from(actor.current_inventory_handle.unwrap().inventory_index)];
     inventory.slots[0] = Some(v.host_item_id);
     inventory.slots[17] = Some(v.attachment_item_id);
-    engine.underbarrel_launchers = Some(Arc::new(catalog));
-    engine
+    v
 }
 
 fn wire(engine: &Engine<Vec<u8>>, gear: u8, slot: u16, power: u32) -> Vec<u8> {
@@ -48,7 +54,136 @@ fn launch(engine: &mut Engine<Vec<u8>>, gear: u8, slot: u16, power: u32, now: u6
     assert!(state(engine).occupies(slot as u8));
 }
 fn rounds(engine: &Engine<Vec<u8>>) -> u16 {
-    state(engine).underbarrel_budget.unwrap().rounds.remaining()
+    let actor = engine.active.as_ref().unwrap();
+    let item = equipped_underbarrel(actor, engine.underbarrel_launchers.as_deref().unwrap())
+        .unwrap()
+        .attachment_item_id;
+    let CharacterLife::Alive { generation, .. } = actor.life else {
+        panic!("test owner alive")
+    };
+    underbarrel_rounds(state(engine), generation, item)
+}
+
+fn underbarrel_rounds(state: &State, generation: u32, item: u16) -> u16 {
+    let index = state.underbarrel_budget_index(generation, item).unwrap();
+    state.underbarrel_budgets[index].unwrap().rounds.remaining()
+}
+
+#[test]
+fn underbarrel_switch_back_preserves_refire_and_spent_rounds() {
+    let mut engine = fixture();
+    engine.underbarrel_launchers = Some(Arc::new(
+        underbarrel_launchers::tests::synthetic_upgraded_catalog(),
+    ));
+    launch(&mut engine, 17, 0, 511, 1000);
+    equip_launcher(&mut engine, 1);
+    launch(&mut engine, 17, 1, 511, 1100);
+    equip_launcher(&mut engine, 2);
+    launch(&mut engine, 17, 2, 511, 1200);
+    equip_launcher(&mut engine, 0);
+    let too_soon = wire(&engine, 17, 3, 511);
+    assert!(dispatch(&mut engine, &too_soon, 1499).unwrap().is_empty());
+    assert!(!state(&engine).occupies(3));
+    launch(&mut engine, 17, 3, 511, 1500);
+    assert_eq!(rounds(&engine), 1);
+
+    engine.active.as_mut().unwrap().infantry_rocket_state.slots[2] = None;
+    equip_launcher(&mut engine, 1);
+    let too_soon = wire(&engine, 17, 2, 511);
+    assert!(dispatch(&mut engine, &too_soon, 1849).unwrap().is_empty());
+    launch(&mut engine, 17, 2, 511, 1850);
+    assert_eq!(rounds(&engine), 1);
+
+    engine.active.as_mut().unwrap().infantry_rocket_state.slots[0] = None;
+    equip_launcher(&mut engine, 2);
+    let too_soon = wire(&engine, 17, 0, 511);
+    assert!(dispatch(&mut engine, &too_soon, 2199).unwrap().is_empty());
+    launch(&mut engine, 17, 0, 511, 2200);
+    assert_eq!(rounds(&engine), 1);
+}
+
+#[test]
+fn underbarrel_refill_targets_only_the_equipped_life_budget() {
+    let mut engine = fixture();
+    engine.underbarrel_launchers = Some(Arc::new(
+        underbarrel_launchers::tests::synthetic_upgraded_catalog(),
+    ));
+    let stock = equip_launcher(&mut engine, 0);
+    launch(&mut engine, 17, 0, 511, 1000);
+    let tier_two = equip_launcher(&mut engine, 1);
+    launch(&mut engine, 17, 1, 511, 1100);
+    let tier_four = equip_launcher(&mut engine, 2);
+    launch(&mut engine, 17, 2, 511, 1200);
+    let actor = engine.active.as_ref().unwrap();
+    let CharacterLife::Alive {
+        generation,
+        health_quarter_points,
+    } = actor.life
+    else {
+        panic!("test owner alive")
+    };
+    let catalog = engine.underbarrel_launchers.as_deref().unwrap();
+    let staged = State::refill_underbarrel_for(actor, catalog, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        underbarrel_rounds(&staged, generation, stock.attachment_item_id),
+        2
+    );
+    assert_eq!(
+        underbarrel_rounds(&staged, generation, tier_two.attachment_item_id),
+        2
+    );
+    assert_eq!(
+        underbarrel_rounds(&staged, generation, tier_four.attachment_item_id),
+        3
+    );
+    assert_eq!(rounds(&engine), 2);
+    engine.active.as_mut().unwrap().infantry_rocket_state = staged;
+    let too_soon = wire(&engine, 17, 3, 511);
+    assert!(dispatch(&mut engine, &too_soon, 2199).unwrap().is_empty());
+
+    engine.active.as_mut().unwrap().life = CharacterLife::Alive {
+        generation: generation + 1,
+        health_quarter_points,
+    };
+    launch(&mut engine, 17, 3, 511, 2200);
+    assert_eq!(rounds(&engine), 2);
+    engine.active.as_mut().unwrap().infantry_rocket_state.slots[0] = None;
+    equip_launcher(&mut engine, 0);
+    launch(&mut engine, 17, 0, 511, 2201);
+    assert_eq!(rounds(&engine), 2);
+    engine.active.as_mut().unwrap().infantry_rocket_state.slots[1] = None;
+    equip_launcher(&mut engine, 1);
+    launch(&mut engine, 17, 1, 511, 2202);
+    assert_eq!(rounds(&engine), 2);
+}
+
+#[test]
+fn underbarrel_third_budget_is_not_installed_on_record_failure() {
+    let mut engine = fixture();
+    engine.underbarrel_launchers = Some(Arc::new(
+        underbarrel_launchers::tests::synthetic_upgraded_catalog(),
+    ));
+    launch(&mut engine, 17, 0, 511, 1000);
+    equip_launcher(&mut engine, 1);
+    launch(&mut engine, 17, 1, 511, 1100);
+    equip_launcher(&mut engine, 2);
+    let bytes = wire(&engine, 17, 2, 511);
+    engine.max_log = engine.written;
+    assert_eq!(
+        dispatch(&mut engine, &bytes, 1200).err(),
+        Some("log_limit_reached")
+    );
+    assert!(!state(&engine).occupies(2));
+    assert_eq!(
+        state(&engine).underbarrel_budgets.iter().flatten().count(),
+        2
+    );
+    for group in [0, 1] {
+        equip_launcher(&mut engine, group);
+        assert_eq!(rounds(&engine), 2);
+    }
 }
 
 #[test]
@@ -57,7 +192,12 @@ fn underbarrel_ammo_is_independent_of_rockets_and_refills_merge_atomically() {
     // The native producer clamps power; higher ten-bit values are not normal fire.
     let oversized = wire(&engine, 17, 0, 700);
     assert!(dispatch(&mut engine, &oversized, 999).unwrap().is_empty());
-    assert!(state(&engine).underbarrel_budget.is_none());
+    assert!(
+        state(&engine)
+            .underbarrel_budgets
+            .iter()
+            .all(Option::is_none)
+    );
     launch(&mut engine, 17, 0, 511, 1000);
     assert_eq!(rounds(&engine), 2);
     let duplicate = wire(&engine, 17, 0, 511);
@@ -93,7 +233,10 @@ fn underbarrel_ammo_is_independent_of_rockets_and_refills_merge_atomically() {
     .unwrap()
     .unwrap();
     assert_eq!(combined.budget.unwrap().rounds.remaining(), 4);
-    assert_eq!(combined.underbarrel_budget.unwrap().rounds.remaining(), 3);
+    assert_eq!(
+        combined.underbarrel_budgets[0].unwrap().rounds.remaining(),
+        3
+    );
     assert_eq!(rounds(&engine), 0); // Candidate only; no mutation before record.
     assert_eq!(tests::rounds(&engine), 3);
 }
@@ -108,7 +251,12 @@ fn underbarrel_launch_rolls_back_on_record_failure_and_denies_wrong_equipment() 
         Some("log_limit_reached")
     );
     assert!(!state(&engine).occupies(0));
-    assert!(state(&engine).underbarrel_budget.is_none());
+    assert!(
+        state(&engine)
+            .underbarrel_budgets
+            .iter()
+            .all(Option::is_none)
+    );
     let mut engine = fixture();
     let actor = engine.active.as_mut().unwrap();
     let kit = actor.spawned_loadout.as_mut().unwrap();
@@ -117,7 +265,12 @@ fn underbarrel_launch_rolls_back_on_record_failure_and_denies_wrong_equipment() 
     let wrong = wire(&engine, 17, 0, 511);
     assert!(dispatch(&mut engine, &wrong, 1000).unwrap().is_empty());
     assert!(!state(&engine).occupies(0));
-    assert!(state(&engine).underbarrel_budget.is_none());
+    assert!(
+        state(&engine)
+            .underbarrel_budgets
+            .iter()
+            .all(Option::is_none)
+    );
 }
 
 #[test]
