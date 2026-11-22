@@ -124,21 +124,26 @@ class HumanStaticSupplyProjectorTests(unittest.TestCase):
             parse(CLV["Clv"](raw + struct.pack(">IIII", 7, 0x12004000, len(raw) * 2, SUPPLY_TOKEN) + body, {}))
 
     def test_refuses_profile_from_another_source_or_mode(self):
-        source = {"map": self.tool["MAP"], "level_archive_sha256": self.tool["LEVEL_SHA"],
-                  "level_clv_sha256": self.tool["CLV_SHA"], "native_elf_sha256": self.tool["RETAIL_SHA"]}
+        map_name = "mag_panama_military_base_final"
+        level = self.tool["MAPS"][map_name]
+        source = {"map": map_name, "level_archive_sha256": level.archive_sha,
+                  "level_clv_sha256": level.clv_sha, "native_elf_sha256": self.tool["RETAIL_SHA"]}
         spawn = {"format": "mag_spawn_catalog", "schema_version": 1,
-                 "active": {"map_name": self.tool["MAP"]},
+                  "active": {"map_name": map_name},
+                  "maps": [{"name": map_name, "owner_faction": 1}],
                  "match_profile": {"game_type": 1, "attacking_faction": 0}, "source": json.dumps(source)}
         world = {"format": "mag_collision_world", "schema_version": 1, "coordinate_space": "world",
-                 "metadata": {"map_name": self.tool["MAP"], "build": "retail-bcus98110-01.00",
-                              "provenance": ["Original CLV SHA256 " + self.tool["CLV_SHA"]]}}
+                 "metadata": {"map_name": map_name, "build": "retail-bcus98110-01.00",
+                              "provenance": ["Original CLV SHA256 " + level.clv_sha]}}
         encode = lambda value: json.dumps(value).encode()
         validate = self.tool["validate_profile"]
         result = validate(encode(spawn), encode(world))
         self.assertEqual(result["spawn_sha256"], hashlib.sha256(encode(spawn)).hexdigest())
         for candidate, path, value, error in (
-            ("spawn", ("match_profile", "game_type"), True, "Panama Acquisition"),
+            ("spawn", ("match_profile", "game_type"), True, "spawn catalog must select"),
+            ("spawn", ("active", "map_name"), "unknown_map", "unsupported static supply map"),
             ("spawn", ("source",), json.dumps(dict(source, level_clv_sha256="f" * 64)), "spawn catalog source"),
+            ("spawn", ("source",), json.dumps(dict(source, native_elf_sha256=None)), "Acquisition native ELF"),
             ("world", ("metadata", "provenance"), ["original source unknown"], "collision world source"),
         ):
             with self.subTest(path=path):
@@ -149,6 +154,41 @@ class HumanStaticSupplyProjectorTests(unittest.TestCase):
                 current[path[-1]] = value
                 with self.assertRaisesRegex(ValueError, error):
                     validate(encode(inputs["spawn"]), encode(inputs["world"]))
+
+    def test_domination_binds_native_spawn_witness_without_direct_elf_field(self):
+        map_name = "mag_baku_final"
+        clv_sha = "64add78c0f427360d58f82afa09eacf3abe743eb6bb5f57ae236a1c733f39e6f"
+        source = {"map": map_name, "level_clv_sha256": clv_sha,
+                  "level_archive_sha256": "e355622ac2b42c91d9aa22c0b46f80cbbc190dc61cc75c710157d08b4ba674e7",
+                  "native_spawn_bindings_sha256": "7ef4dd3e613b001dd27bdbfae4140e9b320ca9e6f2eab6ef1c68e64c7f989918"}
+        spawn = {"format": "mag_spawn_catalog", "schema_version": 1, "active": {"map_name": map_name},
+                 "match_profile": {"game_type": 2, "attacking_faction": 1},
+                 "maps": [{"name": map_name, "owner_faction": 2}], "source": json.dumps(source)}
+        world = {"format": "mag_collision_world", "schema_version": 1, "coordinate_space": "world",
+                 "metadata": {"map_name": map_name, "build": "retail-bcus98110-01.00",
+                              "provenance": ["Original CLV SHA256 " + clv_sha]}}
+        encode = lambda value: json.dumps(value).encode()
+        validate = self.tool["validate_profile"]
+        result = validate(encode(spawn), encode(world))
+        self.assertEqual((result["map"], result["mode"], result["attacking_faction"]), (map_name, 2, 1))
+        self.assertEqual(result["collision_sha256"], hashlib.sha256(encode(world)).hexdigest())
+        for variant in (
+            {**source, "native_spawn_bindings_sha256": "a" * 64},
+            {**source, "native_elf_sha256": "b" * 64},
+            {key: value for key, value in source.items() if key != "native_spawn_bindings_sha256"},
+        ):
+            with self.subTest(variant=variant):
+                invalid = {**spawn, "source": json.dumps(variant)}
+                with self.assertRaisesRegex(ValueError, "Domination native spawn witness"):
+                    validate(encode(invalid), encode(world))
+        for mode, attacker in ((1, 1), (2, 2), (2, True)):
+            with self.subTest(mode=mode, attacker=attacker):
+                invalid = {**spawn, "match_profile": {"game_type": mode, "attacking_faction": attacker}}
+                with self.assertRaisesRegex(ValueError, "spawn catalog must select"):
+                    validate(encode(invalid), encode(world))
+        invalid = {**spawn, "maps": [{"name": map_name, "owner_faction": 1}]}
+        with self.assertRaisesRegex(ValueError, "defending faction"):
+            validate(encode(invalid), encode(world))
 
     def test_new_output_is_exactly_checkable_and_cannot_overwrite(self):
         write = self.tool["write_output"]
