@@ -109,12 +109,47 @@ def prepare(world, world_sha256, bounds=None, *, reference=False):
     return value, report
 
 
+
+REGIONAL_COVERAGE = 'mag_bot_regional_walk_coverage_v1'
+REGIONAL_POL = 'represented_fixed_triangles_walk'
+REGIONAL_INPUT = 'mag_navmesh_regional_walk_input_v1'
+EVIDENCE_KEYS = {'level_archive_sha256', 'level_clv_sha256', 'assembly_sha256',
+                 'root_inventory_sha256', 'absence_sha256'}
+
+
+def sha_value(value):
+    return isinstance(value, str) and re.fullmatch('[0-9a-f]{64}', value) is not None
+
+
+def prepare_regional(world, digest, coverage, coverage_sha256):
+    require(isinstance(coverage, dict) and set(coverage) == {
+        'schema', 'policy', 'map_name', 'world_sha256', 'geometry_sha256', 'bounds', 'source',
+    } and coverage['schema'] == REGIONAL_COVERAGE and coverage['policy'] == REGIONAL_POL,
+        'invalid regional walking coverage')
+    require(coverage['world_sha256'] == digest
+            and coverage['map_name'] == world['metadata']['map_name'], 'regional walking world mismatch')
+    require(sha_value(coverage_sha256) and isinstance(coverage['source'], dict)
+            and set(coverage['source']) == EVIDENCE_KEYS
+            and all(map(sha_value, coverage['source'].values())), 'invalid regional walking evidence digests')
+    bounds = coverage['bounds']
+    require(bounds_valid(bounds) and set(bounds) == {'min', 'max'}
+            and all(bounds['max'][i] - bounds['min'][i] <= 128 for i in range(3)),
+            'invalid regional walking bounds')
+    geometry, report = prepare(world, digest, reference=True)
+    require(geometry['geometry_sha256'] == coverage['geometry_sha256'], 'regional walking geometry mismatch')
+    geometry.update(format=REGIONAL_INPUT, bounds=copy.deepcopy(bounds), physics_regions=[])
+    report.update(scope='regional_represented_fixed_triangles_walk', coverage_sha256=coverage_sha256)
+    report.pop('runtime_movement_authority', None)
+    return dict(schema=REGIONAL_INPUT, coverage_sha256=coverage_sha256, mesh=geometry), report
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--world', required=True, type=Path)
     parser.add_argument('--expected-world-sha256', required=True)
     parser.add_argument('--output', required=True, type=Path, help='New private output directory')
-    parser.add_argument('--reference', action='store_true',
+    scopes = parser.add_mutually_exclusive_group()
+    scopes.add_argument('--regional-walk-coverage', type=Path)
+    scopes.add_argument('--reference', action='store_true',
                         help='Prepare full geometry for offline reference baking without certifying movement')
     args = parser.parse_args()
     require(not args.output.exists(), 'refusing existing output directory')
@@ -122,12 +157,20 @@ def main():
     raw = args.world.read_bytes()
     digest = hashlib.sha256(raw).hexdigest()
     require(digest == args.expected_world_sha256, 'world source hash mismatch')
-    value, report = prepare(json.loads(raw), digest, reference=args.reference)
+    if args.regional_walk_coverage:
+        path = args.regional_walk_coverage
+        require(path.is_file() and path.stat().st_size <= 16 * 1024, 'regional walking coverage size')
+        cap = path.read_bytes()
+        value, report = prepare_regional(json.loads(raw), digest, json.loads(cap), hashlib.sha256(cap).hexdigest())
+        mesh = value['mesh']
+    else:
+        value, report = prepare(json.loads(raw), digest, reference=args.reference)
+        mesh = value
     encoded = (json.dumps(value, separators=(',', ':'), allow_nan=False)+'\n').encode()
     report.update(format='mag_navmesh_prep_manifest_v1', source_world=str(args.world.resolve()),
-                  world_sha256=digest, geometry_sha256=value['geometry_sha256'],
+                  world_sha256=digest, geometry_sha256=mesh['geometry_sha256'],
                   input_sha256=hashlib.sha256(encoded).hexdigest(), input_bytes=len(encoded),
-                  tool_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), bounds=value['bounds'])
+                  tool_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), bounds=mesh['bounds'])
     args.output.mkdir(parents=True)
     (args.output/'input.json').write_bytes(encoded)
     (args.output/'manifest.json').write_text(json.dumps(report, indent=2, allow_nan=False)+'\n')

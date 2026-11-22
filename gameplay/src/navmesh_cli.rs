@@ -105,6 +105,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .transpose()
     };
     match command.as_str() {
+        "bake-regional-walk" => {
+            if flags
+                .keys()
+                .any(|key| !["--input", "--output", "--coverage"].contains(&key.as_str()))
+            {
+                return Err("unknown regional walking bake flag".into());
+            }
+            let input = serde_json::from_slice(&read(get("--input")?, 128 * 1024 * 1024)?)?;
+            let coverage = navmesh::regional::Coverage::load(get("--coverage")?)?;
+            let artifact = navmesh::regional::bake(input, &coverage)?;
+            write(
+                Some(flags.get("--output").ok_or("missing --output")?),
+                &artifact,
+            )?;
+        }
+        "query-regional-walk" => {
+            if flags.keys().any(|key| {
+                ![
+                    "--mesh",
+                    "--collision-world",
+                    "--coverage",
+                    "--start",
+                    "--goal",
+                    "--goal-radius",
+                    "--output",
+                ]
+                .contains(&key.as_str())
+            }) {
+                return Err("unknown regional walking query flag".into());
+            }
+            let artifact =
+                serde_json::from_slice(&read(get("--mesh")?, navmesh::MAX_ARTIFACT_JSON_BYTES)?)?;
+            let world = mag_gameplay::collision::CollisionWorld::load(
+                get("--collision-world")?,
+                Default::default(),
+            )?;
+            let coverage = navmesh::regional::Coverage::load(get("--coverage")?)?;
+            let mesh = navmesh::regional::load(artifact, &world, coverage)?;
+            let route = mesh.route(
+                point(get("--start")?)?,
+                point(get("--goal")?)?,
+                get("--goal-radius")?.parse()?,
+            )?;
+            write(flags.get("--output"), &route)?;
+        }
         "bake-reference" => {
             if flags
                 .keys()

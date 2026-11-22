@@ -122,6 +122,7 @@ impl Motion {
 pub(crate) struct RegionalGuard {
     region: crate::actor_collision::Bounds,
     obstacles: Vec<crate::actor_collision::Bounds>,
+    walking_coverage: bool,
 }
 impl RegionalGuard {
     pub(crate) fn new(
@@ -131,7 +132,13 @@ impl RegionalGuard {
         Self {
             region,
             obstacles: obstacles.to_vec(),
+            walking_coverage: false,
         }
+    }
+
+    pub(crate) fn with_walking_coverage(mut self) -> Self {
+        self.walking_coverage = true;
+        self
     }
 
     fn check_bounds(&self, range: crate::actor_collision::Bounds) -> Result<(), PhysicsError> {
@@ -200,14 +207,26 @@ impl<'a> WorldTerrain<'a> {
             body.height + body.max_step + body.skin,
             body.radius,
         ];
-        let covered = self.world.metadata().physics_regions.iter().any(|r| {
-            r.ground_verified
-                && r.obstacles_verified
-                && (0..3).all(|i| {
-                    from[i].min(to[i]) - margin[i] >= r.min[i]
-                        && from[i].max(to[i]) + upper[i] <= r.max[i]
-                })
-        });
+        let contains = |min: [f64; 3], max: [f64; 3]| {
+            (0..3).all(|i| {
+                from[i].min(to[i]) - margin[i] >= min[i] && from[i].max(to[i]) + upper[i] <= max[i]
+            })
+        };
+        if let Some(guard) = self
+            .world
+            .bot_regional_guard()
+            .filter(|guard| guard.walking_coverage)
+        {
+            return contains(guard.region.min, guard.region.max)
+                .then_some(())
+                .ok_or(PhysicsError::CoverageUnknown);
+        }
+        let covered = self
+            .world
+            .metadata()
+            .physics_regions
+            .iter()
+            .any(|r| r.ground_verified && r.obstacles_verified && contains(r.min, r.max));
         if covered {
             Ok(())
         } else {
@@ -252,6 +271,13 @@ impl<'a> WorldTerrain<'a> {
             || (landing[0] - launch[0]).hypot(landing[2] - launch[2]) > 16.0
         {
             return Err(PhysicsError::InvalidQuery);
+        }
+        if self
+            .world
+            .bot_regional_guard()
+            .is_some_and(|guard| guard.walking_coverage)
+        {
+            return Err(PhysicsError::CoverageUnknown);
         }
         self.require_horizontal_coverage(launch, landing, b)?;
         let mut m = self.start_motion(launch, b)?;
