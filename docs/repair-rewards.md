@@ -71,7 +71,16 @@ verified, while the replacement's retained rejoin behavior is an explicit local
 policy. Server restart does not persist the in-memory match work counter.
 
 Leadership AutoRepair passes no credited callback and remains rewardless.
-Manual movable-Ground repair now has the [qualified live input path](manual-ground-repair.md). Full-repair,
+Manual repair also covers [movable Ground vehicles](manual-ground-repair.md)
+and current operational Domination Helos. Both use authenticated retail TCP
+repair requests with the equipped tool and shared manual cooldown. Helo repair
+requires a published non-dormant carrier on the actor's actual team, the
+source-bound hull profile, and positive health below its maximum. It stages the
+existing field 18 update for recipients with Helo creation and uses the
+carrier's current pose for FRAGO. In native retail, Helo uses the flat repair
+amount and the client acquires the target through its repair cast. Replacement
+admission has no independent range test. Critical or destroyed Helo recovery
+remains outside this path. Full-repair,
 subtype completion and leader tagged-objective counters are distinct zero-XP
 retail paths and are not manufactured by this work producer. Other objective
 FRAGO contexts and live-match/native presentation acceptance remain separate.

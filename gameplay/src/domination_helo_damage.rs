@@ -180,6 +180,36 @@ impl HullDamage {
             | (u8::from(hp == 0.0) << 3)
     }
 
+    pub(crate) fn health_hp(self) -> f32 {
+        self.hp
+    }
+
+    pub(crate) fn accepts_manual_repair(self) -> bool {
+        self.state == replication::VehicleState::Operational
+            && self.hp > 0.0
+            && self.wire.conditions & 12 == 0
+    }
+
+    pub(crate) fn heal_percent(
+        &mut self,
+        profile: HeloDamageProfile,
+        thresholds: structure_catalog::NativeStructureRules,
+        percent: f32,
+    ) -> Result<bool, &'static str> {
+        if !percent.is_finite() {
+            return Err("invalid_helo_heal_percent");
+        }
+        if !self.accepts_manual_repair() {
+            return Ok(false);
+        }
+        let max = profile.max_health;
+        let amount = ((percent / 100.0) * max).min(max - self.hp);
+        if amount < 0.0005 {
+            return Ok(false);
+        }
+        Ok(self.set_hp((self.hp + amount).min(max), max, thresholds))
+    }
+
     pub(crate) fn accepts_damage(self, flight: domination_helo::FlightState) -> bool {
         flight != domination_helo::FlightState::Dormant
             && self.state != replication::VehicleState::Destroyed
