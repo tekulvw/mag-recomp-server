@@ -20,6 +20,7 @@ pub const MAX_REFERENCE_BYTES: u64 = 192 * 1024 * 1024;
 const REFERENCE_INPUT: &str = "mag_navmesh_reference_bake_input_v1";
 const REFERENCE_FORMAT: &str = "mag_navmesh_reference_v1";
 const REFERENCE_CONFIG: &str = "reference-v1-tile512-border9-tiles512-polys8192-cs0.1-ch0.05-height37-climb7-radius6-slope45-contour0.5-edge120-region64-merge400-detail0.6-error0.05-nvp6-nodes16384";
+const QUERY_NODE_LIMIT: c_int = 16_384;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
@@ -226,6 +227,7 @@ unsafe extern "C" {
         min: *const f32,
         max: *const f32,
         reference_mode: c_int,
+        node_limit: c_int,
     ) -> *mut std::ffi::c_void;
     fn mag_nav_destroy(handle: *mut std::ffi::c_void);
     fn mag_nav_tile_stats(
@@ -430,13 +432,14 @@ pub struct NavMesh {
 }
 impl NavMesh {
     pub fn load(artifact: Artifact, world_sha256: &str, map_name: &str) -> Result<Self, Error> {
-        Self::load_artifact(artifact, world_sha256, map_name, false)
+        Self::load_artifact(artifact, world_sha256, map_name, false, QUERY_NODE_LIMIT)
     }
     fn load_artifact(
         artifact: Artifact,
         world_sha256: &str,
         map_name: &str,
         reference: bool,
+        node_limit: c_int,
     ) -> Result<Self, Error> {
         let format_matches = if reference {
             artifact.format == REFERENCE_FORMAT && artifact.bake_config == REFERENCE_CONFIG
@@ -475,6 +478,7 @@ impl NavMesh {
                 artifact.bounds.min.map(|v| v as f32).as_ptr(),
                 artifact.bounds.max.map(|v| v as f32).as_ptr(),
                 c_int::from(reference),
+                node_limit,
             )
         };
         if handle.is_null() {

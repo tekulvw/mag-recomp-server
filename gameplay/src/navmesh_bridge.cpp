@@ -15,6 +15,8 @@ struct MagNav {
     dtNavMesh* mesh;
     dtNavMeshQuery* query;
     std::map<dtPolyRef,int> component;
+    bool reference;
+    bool component_partition_separates_links;
     ~MagNav() { dtFreeNavMeshQuery(query); dtFreeNavMesh(mesh); }
 };
 struct BakeObjects {
@@ -195,13 +197,14 @@ int mag_nav_bake(const float* verts,int nv,const int* tris,int nt,const float* m
     *output=static_cast<unsigned char*>(dtAlloc(bytes.size(),DT_ALLOC_PERM));if(!*output)return 3;
     std::memcpy(*output,bytes.data(),bytes.size());*size=bytes.size();return 0;
 }
-MagNav* mag_nav_load(const unsigned char* data,int size,const float* min,const float* max,int reference_mode) {
+MagNav* mag_nav_load(const unsigned char* data,int size,const float* min,const float* max,
+                    int reference_mode,int node_limit) {
     const bool reference = reference_mode != 0;
     // Detour needs at least ten salt bits in a 32-bit reference.
     const int tile_cap = reference ? 512 : 256;
     const int poly_cap = reference ? 8192 : 16384;
     const size_t byte_cap = reference ? ReferenceByteCap : RuntimeByteCap;
-    if(size<4 || static_cast<size_t>(size)>byte_cap)return nullptr;
+    if(size<4 || static_cast<size_t>(size)>byte_cap || node_limit<1 || node_limit>16384)return nullptr;
     uint32_t magic;std::memcpy(&magic,data,4);const bool tiled=magic==BUNDLE_MAGIC;
     if (reference && !tiled) return nullptr;
     std::vector<std::pair<const unsigned char*,int>> tiles;
@@ -231,7 +234,7 @@ MagNav* mag_nav_load(const unsigned char* data,int size,const float* min,const f
         dtMeshHeader h;std::memcpy(&h,data,sizeof(h));for(int k=0;k<3;++k)if(std::fabs(h.bmin[k]-min[k])>.002f || std::fabs(h.bmax[k]-(max[k]+(k==1?1.85f:0.f)))>.002f)return nullptr;
         tiles.push_back({data,size});
     }
-    MagNav* h=new(std::nothrow) MagNav{dtAllocNavMesh(),dtAllocNavMeshQuery()};
+    MagNav* h=new(std::nothrow) MagNav{dtAllocNavMesh(),dtAllocNavMeshQuery(),{},reference,true};
     if(!h || !h->mesh || !h->query){delete h;return nullptr;}
     if(tiled){dtNavMeshParams p{};rcVcopy(p.orig,min);p.tileWidth=p.tileHeight=bundle.width;p.maxTiles=tile_cap;p.maxPolys=poly_cap;if(dtStatusFailed(h->mesh->init(&p))){delete h;return nullptr;}}
     for(const auto& tile:tiles){unsigned char* copy=static_cast<unsigned char*>(dtAlloc(tile.second,DT_ALLOC_PERM));if(!copy){delete h;return nullptr;}std::memcpy(copy,tile.first,tile.second);
@@ -239,7 +242,7 @@ MagNav* mag_nav_load(const unsigned char* data,int size,const float* min,const f
         if(dtStatusFailed(result)){dtFree(copy);delete h;return nullptr;}
     }
     // Preserve the original runtime pool; legacy metadata incorrectly said 8192.
-    if(dtStatusFailed(h->query->init(h->mesh,16384))){delete h;return nullptr;}
+    if(dtStatusFailed(h->query->init(h->mesh,node_limit))){delete h;return nullptr;}
     // Tile insertion and polygon iteration are deterministic, yielding stable labels.
     int label=0;
     for(int t=0;t<h->mesh->getMaxTiles();++t){const dtMeshTile* tile=static_cast<const dtNavMesh*>(h->mesh)->getTile(t);if(!tile->header)continue;
@@ -247,7 +250,19 @@ MagNav* mag_nav_load(const unsigned char* data,int size,const float* min,const f
         for(int i=0;i<tile->header->polyCount;++i){const dtPolyRef ref=base|i;if(h->component.count(ref))continue;
             std::vector<dtPolyRef> stack(1,ref);h->component[ref]=label;
             while(!stack.empty()){const dtPolyRef current=stack.back();stack.pop_back();const dtMeshTile* ct;const dtPoly* cp;if(dtStatusFailed(h->mesh->getTileAndPolyByRef(current,&ct,&cp))){delete h;return nullptr;}
-                for(unsigned int link=cp->firstLink;link!=DT_NULL_LINK;link=ct->links[link].next){const dtPolyRef next=ct->links[link].ref;if(next && !h->component.count(next)){h->component[next]=label;stack.push_back(next);}}
+                for(unsigned int link=cp->firstLink;link!=DT_NULL_LINK;link=ct->links[link].next) {
+                    const dtPolyRef next=ct->links[link].ref;
+                    if (!next) continue;
+                    const auto known = h->component.find(next);
+                    if (known == h->component.end()) {
+                        h->component.emplace(next, label);
+                        stack.push_back(next);
+                    } else if (known->second != label) {
+                        // A directed edge into an earlier label means labels
+                        // alone cannot prove the two endpoints disconnected.
+                        h->component_partition_separates_links = false;
+                    }
+                }
             }++label;
         }
     }return h;
@@ -263,13 +278,50 @@ void mag_nav_tile_stats(const MagNav* h, int* occupied, int* max_polygons) {
         *max_polygons = std::max(*max_polygons, header->polyCount);
     }
 }
+static bool has_forward_link(const dtNavMesh* mesh, dtPolyRef from, dtPolyRef to) {
+    const dtMeshTile* tile;
+    const dtPoly* poly;
+    mesh->getTileAndPolyByRefUnsafe(from, &tile, &poly);
+    for (unsigned link = poly->firstLink; link != DT_NULL_LINK; link = tile->links[link].next) {
+        if (tile->links[link].ref == to) return true;
+    }
+    return false;
+}
+
+static bool reverse_reference_route(MagNav* h, const dtQueryFilter& filter,
+    dtPolyRef start, dtPolyRef goal, const float* projected_start, const float* projected_goal,
+    float* points, int* point_count, unsigned long long* refs, int* ref_count) {
+    dtPolyRef reverse[1024];
+    int count = 0;
+    const dtStatus search = h->query->findPath(goal, start, projected_goal, projected_start,
+                                              &filter, reverse, &count, 1024);
+    if (dtStatusFailed(search) || dtStatusDetail(search, DT_OUT_OF_NODES | DT_PARTIAL_RESULT | DT_BUFFER_TOO_SMALL)
+        || count == 0 || reverse[0] != goal || reverse[count - 1] != start) return false;
+    std::reverse(reverse, reverse + count);
+    for (int i = 1; i < count; ++i) {
+        if (!has_forward_link(h->mesh, reverse[i-1], reverse[i])) return false;
+    }
+
+    unsigned char flags[1024];
+    dtPolyRef pointrefs[1024];
+    int trial_points = 0;
+    const dtStatus straight = h->query->findStraightPath(projected_start, projected_goal, reverse,
+        count, points, flags, pointrefs, &trial_points, 1024, 0);
+    if (dtStatusFailed(straight) || dtStatusDetail(straight, DT_BUFFER_TOO_SMALL | DT_PARTIAL_RESULT)
+        || trial_points == 0 || !(flags[trial_points - 1] & DT_STRAIGHTPATH_END)) return false;
+    *point_count = trial_points;
+    *ref_count = count;
+    for (int i = 0; i < count; ++i) refs[i] = static_cast<unsigned long long>(reverse[i]);
+    return true;
+}
+
 // status:0 complete,1 partial,2 disconnected,3 out of nodes,4 invalid start,5 invalid goal,6 query failure.
 int mag_nav_route(MagNav* h,const float* start,const float* goal,float radius,float* projected_start,float* projected_goal,
                   float* points,int* point_count,unsigned long long* refs,int* ref_count) {
     *point_count=0;*ref_count=0;
     dtQueryFilter filter; filter.setIncludeFlags(1);filter.setExcludeFlags(0);
     const float se[3]={.75f,2.f,.75f}, ge[3]={radius,8.f,radius};
-    dtPolyRef sr=0,gr=0;
+    dtPolyRef sr=0;
     if(dtStatusFailed(h->query->findNearestPoly(start,se,&filter,&sr,projected_start)) || !sr) return 4;
     const float sdx=projected_start[0]-start[0], sdz=projected_start[2]-start[2];
     if(sdx*sdx+sdz*sdz>.15f*.15f) return 4;
@@ -286,21 +338,22 @@ int mag_nav_route(MagNav* h,const float* start,const float* goal,float radius,fl
     }
     std::sort(goals.begin(),goals.end(),[](const Candidate& a,const Candidate& b){return a.reachable!=b.reachable ? a.reachable>b.reachable : a.distance==b.distance ? a.ref<b.ref : a.distance<b.distance;});
     if(goals.empty()) return 5;
-    dtPolyRef path[1024];int count=0;dtStatus status=DT_FAILURE;
-    // Prefer the nearest complete reachable standing point; alternatives avoid
-    // reporting a roof/island as the whole objective's connectivity result.
-    const int attempts=1;
-    for(int i=0;i<attempts;++i) {
-        dtPolyRef trial[1024];int trial_count=0;
-        dtStatus trial_status=h->query->findPath(sr,goals[i].ref,projected_start,goals[i].p,&filter,trial,&trial_count,1024);
-        if(dtStatusFailed(trial_status))return 6;
-        if(i==0 || (trial_count>0 && trial[trial_count-1]==goals[i].ref && !dtStatusDetail(trial_status,DT_PARTIAL_RESULT|DT_OUT_OF_NODES|DT_BUFFER_TOO_SMALL))) {
-            status=trial_status;count=trial_count;std::memcpy(path,trial,count*sizeof(dtPolyRef));gr=goals[i].ref;rcVcopy(projected_goal,goals[i].p);
-        }
-        if(trial_count>0 && trial[trial_count-1]==goals[i].ref && !dtStatusDetail(trial_status,DT_PARTIAL_RESULT|DT_OUT_OF_NODES|DT_BUFFER_TOO_SMALL))break;
-    }
+    const Candidate& selected = goals[0];
+    const dtPolyRef gr = selected.ref;
+    rcVcopy(projected_goal, selected.p);
+    if (h->reference && h->component_partition_separates_links && !selected.reachable
+        && !dtStatusDetail(candidate_status, DT_BUFFER_TOO_SMALL)) return 2;
+
+    dtPolyRef path[1024];
+    int count = 0;
+    const dtStatus status = h->query->findPath(sr, gr, projected_start, projected_goal,
+                                               &filter, path, &count, 1024);
     if(dtStatusFailed(status)) return 6;
-    if(!count) return 2;
+    if(!count) return h->reference ? 1 : 2;
+    if (h->reference && selected.reachable && dtStatusDetail(status, DT_OUT_OF_NODES)
+        && dtStatusDetail(status, DT_PARTIAL_RESULT)
+        && reverse_reference_route(h, filter, sr, gr, projected_start, projected_goal,
+                                   points, point_count, refs, ref_count)) return 0;
     float endpoint[3];rcVcopy(endpoint,projected_goal);
     const bool partial=path[count-1]!=gr || dtStatusDetail(status,DT_PARTIAL_RESULT) || dtStatusDetail(status,DT_BUFFER_TOO_SMALL);
     if(partial && dtStatusFailed(h->query->closestPointOnPoly(path[count-1],projected_goal,endpoint,nullptr))) return 6;
@@ -310,7 +363,7 @@ int mag_nav_route(MagNav* h,const float* start,const float* goal,float radius,fl
     *ref_count=count;for(int i=0;i<count;++i) refs[i]=static_cast<unsigned long long>(path[i]);
     if(dtStatusDetail(status,DT_OUT_OF_NODES)) return 3;
     if(dtStatusDetail(straight,DT_BUFFER_TOO_SMALL)) return 1;
-    if(partial) return count==1 ? 2 : 1;
+    if(partial) return !h->reference && count==1 ? 2 : 1;
     return 0;
 }
 int mag_nav_component_id(MagNav* h,const float* position) {
