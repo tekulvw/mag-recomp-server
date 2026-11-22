@@ -144,6 +144,9 @@ impl Registry {
     pub fn load(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref();
         absolute(path)?;
+        let directory = path
+            .parent()
+            .ok_or_else(|| io::Error::other("match_profiles_manifest_directory_missing"))?;
         let mut bytes = Vec::new();
         std::fs::File::open(path)?
             .take(MAX_MANIFEST + 1)
@@ -160,30 +163,30 @@ impl Registry {
         }
         let mut profiles = BTreeMap::new();
         let mut collision_cache: BTreeMap<PathBuf, collision::CollisionWorld> = BTreeMap::new();
-        for source in manifest.profiles {
+        for mut source in manifest.profiles {
             if !identifier(&source.profile_id, 1) || profiles.contains_key(&source.profile_id) {
                 return Err(io::Error::other("invalid_or_duplicate_match_profile_id"));
             }
             for path in [
-                Some(&source.spawn_catalog),
-                source.objective_catalog.as_ref(),
-                source.active_abilities.as_ref(),
-                source.collision_world.as_ref(),
-                source.navmesh_world.as_ref(),
-                source.movement_profile.as_ref(),
-                source.ground_vehicles.as_ref(),
-                source.character_damage_rules.as_ref(),
-                source.acquisition_gameplay.as_ref(),
-                source.domination_round.as_ref(),
-                source.domination_gameplay.as_ref(),
-                source.bunker_placement.as_ref(),
-                source.bunker_structure.as_ref(),
-                source.bunker_allocation.as_ref(),
+                Some(&mut source.spawn_catalog),
+                source.objective_catalog.as_mut(),
+                source.active_abilities.as_mut(),
+                source.collision_world.as_mut(),
+                source.navmesh_world.as_mut(),
+                source.movement_profile.as_mut(),
+                source.ground_vehicles.as_mut(),
+                source.character_damage_rules.as_mut(),
+                source.acquisition_gameplay.as_mut(),
+                source.domination_round.as_mut(),
+                source.domination_gameplay.as_mut(),
+                source.bunker_placement.as_mut(),
+                source.bunker_structure.as_mut(),
+                source.bunker_allocation.as_mut(),
             ]
             .into_iter()
             .flatten()
             {
-                absolute(path)?;
+                crate::resources::resolve_manifest_path(directory, path)?;
             }
             let mut spawns = spawn_catalog::SpawnCatalog::load(&source.spawn_catalog)?;
             if source.acquisition_gameplay.is_some() && source.domination_gameplay.is_some() {
@@ -2640,6 +2643,42 @@ mod tests {
             reserve(&mut engine).error.as_deref(),
             Some("match_profile_not_selected")
         );
+    }
+
+    #[test]
+    fn portable_registry_uses_moved_manifest_directory_for_relative_paths() {
+        let files = Files::new();
+        let original = files.0.join("prepared");
+        let moved = files.0.join("installed");
+        std::fs::create_dir_all(original.join("catalogs")).unwrap();
+        std::fs::rename(files.spawns(0, 0, 1), original.join("catalogs/spawns.json")).unwrap();
+        let save = |directory: &Path, spawn: &str| {
+            let path = directory.join("profiles.json");
+            std::fs::write(
+                &path,
+                json!({"format":"mag_match_profiles_v1","profiles":[
+                {"profile_id":"invented","spawn_catalog":spawn}]})
+                .to_string(),
+            )
+            .unwrap();
+            path
+        };
+        save(&original, "catalogs/spawns.json");
+        std::fs::rename(&original, &moved).unwrap();
+        let loaded = Registry::load(moved.join("profiles.json")).unwrap();
+        assert_eq!(loaded.summaries()[0].profile_id, "invented");
+
+        std::fs::copy(
+            moved.join("catalogs/spawns.json"),
+            files.0.join("outside.json"),
+        )
+        .unwrap();
+        for rejected in ["../outside.json", "", "catalogs/missing.json"] {
+            assert!(
+                Registry::load(save(&moved, rejected)).is_err(),
+                "{rejected:?}"
+            );
+        }
     }
 
     #[test]

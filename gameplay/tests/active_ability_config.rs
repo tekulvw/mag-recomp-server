@@ -62,7 +62,7 @@ fn active_ability_setup_requires_an_explicit_absolute_manifest_path() {
 }
 
 #[test]
-fn an_absolute_manifest_cannot_supply_a_relative_rules_path() {
+fn an_absolute_manifest_cannot_supply_a_parent_relative_rules_path() {
     use std::{
         fs,
         time::{SystemTime, UNIX_EPOCH},
@@ -81,7 +81,7 @@ fn an_absolute_manifest_cannot_supply_a_relative_rules_path() {
         &path,
         serde_json::to_vec(&serde_json::json!({
             "format": "mag_active_abilities_v1",
-            "rules": "relative-rules.json",
+            "rules": "../relative-rules.json",
             "effects": "/example/effects.json",
             "map_bindings": "/example/objectives.json",
             "static_ray_receipt": "/example/scene.json"

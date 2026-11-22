@@ -33,3 +33,30 @@ fn enabled_gameplay_configuration_requires_damage_and_arrival_resources() {
         );
     }
 }
+
+#[test]
+fn portable_acquisition_paths_require_a_declaring_file() {
+    let dir = std::env::temp_dir().join(format!("mag-portable-acquisition-{}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("gameplay.json");
+    let mut config = configuration();
+    config["controller_path"] = json!("resources/controller.json");
+    config["arrival_static"]["path"] = json!("resources/arrival.json");
+    std::fs::write(&path, config.to_string()).unwrap();
+    let loaded = Configuration::load(&path);
+    assert!(Configuration::from_json(&config.to_string()).is_err());
+    for rejected in ["", "../controller.json"] {
+        config["controller_path"] = json!(rejected);
+        std::fs::write(&path, config.to_string()).unwrap();
+        assert!(Configuration::load(&path).is_err());
+    }
+    config["controller_path"] = json!("resources/controller.json");
+    config["arrival_static"]["path"] = json!("../arrival.json");
+    std::fs::write(&path, config.to_string()).unwrap();
+    assert!(Configuration::load(&path).is_err());
+    std::fs::remove_dir_all(dir).unwrap();
+    match loaded {
+        Ok(_) => (),
+        Err(error) => panic!("portable configuration rejected: {error}"),
+    }
+}

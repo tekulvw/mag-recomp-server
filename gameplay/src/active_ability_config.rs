@@ -372,9 +372,20 @@ struct Loaded {
 }
 
 fn load_verified(path: &Path) -> io::Result<Loaded> {
-    let manifest: Manifest = read(path)?;
+    let mut manifest: Manifest = read(path)?;
     if manifest.format != "mag_active_abilities_v1" {
         return Err(invalid("invalid_active_ability_manifest"));
+    }
+    let directory = path
+        .parent()
+        .ok_or_else(|| invalid("active_ability_manifest_directory_missing"))?;
+    for child in [
+        &mut manifest.rules,
+        &mut manifest.effects,
+        &mut manifest.map_bindings,
+        &mut manifest.static_ray_receipt,
+    ] {
+        crate::resources::resolve_manifest_path(directory, child)?;
     }
     let rules: Rules = read(&manifest.rules)?;
     rules.validate().map_err(invalid)?;
@@ -564,6 +575,33 @@ fn validate_damage_trigger_bindings(rules: &[Rule], objectives: &[Objective]) ->
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn portable_ability_manifest_reaches_relative_child_file() {
+        let dir = std::env::temp_dir().join(format!("mag-portable-ability-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("resources")).unwrap();
+        std::fs::write(dir.join("resources/rules.json"), b"not a JSON document").unwrap();
+        let path = dir.join("manifest.json");
+        let mut manifest = json!({"format":"mag_active_abilities_v1", "rules":"resources/rules.json",
+            "effects":"resources/effects.json", "map_bindings":"resources/bindings.json",
+            "static_ray_receipt":"resources/scene.json"});
+        std::fs::write(&path, manifest.to_string()).unwrap();
+        let reached = load(&path).err().unwrap().kind();
+        manifest["rules"] = json!("resources/missing.json");
+        std::fs::write(&path, manifest.to_string()).unwrap();
+        let missing = load(&path).err().unwrap().kind();
+        for rejected in ["", "../rules.json"] {
+            manifest["rules"] = json!(rejected);
+            std::fs::write(&path, manifest.to_string()).unwrap();
+            assert_eq!(
+                load(&path).err().unwrap().kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(reached, io::ErrorKind::InvalidData);
+        assert_eq!(missing, io::ErrorKind::NotFound);
+    }
 
     #[test]
     fn static_ray_receipt_checks_optional_native_material_inventory() {

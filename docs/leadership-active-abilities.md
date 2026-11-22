@@ -107,7 +107,7 @@ To use a different absolute manifest path, pass `--active-abilities` on a fixed
 Acquisition worker or set `active_abilities` on the applicable formation profile.
 See [worker profiles](worker-match-profiles.md).
 
-An ability manifest has this shape, with all paths absolute:
+An ability manifest can use absolute paths or paths relative to its own directory.
 
 ```json
 {
