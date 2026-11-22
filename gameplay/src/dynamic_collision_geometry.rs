@@ -283,11 +283,22 @@ pub(crate) fn sweep(
     } = settings;
     let delta = sub(target, ap.translation);
     let radius = a.radius() + b.radius();
+    // Leave room inside the unchanged contact tolerance for the next
+    // certified distance bracket, rather than stepping onto its outer edge.
+    let advance_distance = radius + tolerance * 0.5;
+    let distance_limits = QueryLimits {
+        boundary_epsilon: if tolerance > 0. {
+            limits.boundary_epsilon.min(tolerance * 0.25)
+        } else {
+            limits.boundary_epsilon
+        },
+        ..limits
+    };
     let mut fraction = 0.;
     for _ in 0..limits.max_iterations {
         let mut pose = ap;
         pose.translation = add(ap.translation, scale(delta, fraction));
-        let d = distance(a, pose, b, bp, limits, budget)?;
+        let d = distance(a, pose, b, bp, distance_limits, budget)?;
         let (signed, normal) = if let Some(normal) = d.normal {
             (d.upper - radius, normal)
         } else {
@@ -305,21 +316,127 @@ pub(crate) fn sweep(
         if signed <= tolerance {
             return Ok(Some((fraction, normal)));
         }
-        if projected >= 0. {
-            return Ok(None);
+        if projected >= 0. || fraction == 1. {
+            return if d.lower - radius > tolerance {
+                Ok(None)
+            } else {
+                Err("world_cast_distance_unresolved")
+            };
         }
-        let step = (d.lower - radius - tolerance) / -projected;
-        if step < 0. {
+        let step = (d.lower - advance_distance) / -projected;
+        if step <= 0. {
             return Err("world_cast_distance_unresolved");
         }
-        let next = fraction + step;
-        if next > 1. {
-            return Ok(None);
-        }
-        if next <= fraction || step <= limits.boundary_epsilon {
-            return Ok(Some((fraction, normal)));
+        // A step beyond the segment must still sample its endpoint: it can
+        // lie inside the contact tolerance but outside the advancement target.
+        let next = (fraction + step).min(1.);
+        if next <= fraction {
+            return Err("world_cast_distance_unresolved");
         }
         fraction = next;
     }
     Err("world_cast_iteration_limit")
+}
+
+#[cfg(test)]
+mod sweep_precision_tests {
+    use super::*;
+
+    #[test]
+    fn shared_world_sweep_certifies_a_triangle_contact_at_the_distance_boundary() {
+        let sphere = Geometry::Sphere { radius: 0.125 };
+        let wall = Geometry::Triangle {
+            vertices: [[0., 0., 3.], [2.5, 0., 3.], [1.25, 6., 3.]],
+            radius: 0.,
+        };
+        let limits = QueryLimits::default();
+        let mut budget = limits.max_support_points;
+        let hit = sweep(
+            &sphere,
+            Pose::at([1.25, 2.5, 0.125]),
+            [1.25, 2.5, 3.125],
+            &wall,
+            Pose::at([0.; 3]),
+            SweepLimits {
+                tolerance: 1e-8,
+                extra: 0.,
+                query: limits,
+            },
+            &mut budget,
+        )
+        .expect("the certified distance bracket must converge to the wall contact")
+        .expect("the sphere crosses the interior of the triangle");
+        assert!((hit.0 - 11. / 12.).abs() < 1e-7, "{hit:?}");
+        assert!(hit.1[2] < -0.999999);
+    }
+
+    #[test]
+    fn shared_world_sweep_samples_endpoint_without_widening_contact_tolerance() {
+        let sphere = Geometry::Sphere { radius: 0.125 };
+        let wall = Geometry::Triangle {
+            vertices: [[0., 0., 3.], [2.5, 0., 3.], [1.25, 6., 3.]],
+            radius: 0.,
+        };
+        for (gap, contact) in [(0., true), (0.75e-8, true), (2e-8, false)] {
+            let limits = QueryLimits::default();
+            let mut budget = limits.max_support_points;
+            let result = sweep(
+                &sphere,
+                Pose::at([1.25, 2.5, 0.125]),
+                [1.25, 2.5, 2.875 - gap],
+                &wall,
+                Pose::at([0.; 3]),
+                SweepLimits {
+                    tolerance: 1e-8,
+                    extra: 0.,
+                    query: limits,
+                },
+                &mut budget,
+            )
+            .unwrap();
+            assert_eq!(result.is_some(), contact, "endpoint gap {gap}: {result:?}");
+        }
+    }
+
+    #[test]
+    fn shared_world_sweep_preserves_separating_contact_and_work_refusal() {
+        let sphere = Geometry::Sphere { radius: 0.125 };
+        let wall = Geometry::Triangle {
+            vertices: [[0., 0., 3.], [2.5, 0., 3.], [1.25, 6., 3.]],
+            radius: 0.,
+        };
+        let limits = QueryLimits::default();
+        let settings = || SweepLimits {
+            tolerance: 1e-8,
+            extra: 0.,
+            query: limits,
+        };
+        let mut budget = limits.max_support_points;
+        assert!(
+            sweep(
+                &sphere,
+                Pose::at([1.25, 2.5, 2.875]),
+                [1.25, 2.5, 2.5],
+                &wall,
+                Pose::at([0.; 3]),
+                settings(),
+                &mut budget
+            )
+            .unwrap()
+            .is_none()
+        );
+        let mut budget = 1;
+        assert_eq!(
+            sweep(
+                &sphere,
+                Pose::at([1.25, 2.5, 0.125]),
+                [1.25, 2.5, 3.125],
+                &wall,
+                Pose::at([0.; 3]),
+                settings(),
+                &mut budget
+            ),
+            Err("dynamic_collision_work_limit")
+        );
+    }
 }
