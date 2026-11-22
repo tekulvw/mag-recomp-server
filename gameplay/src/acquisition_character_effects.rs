@@ -783,6 +783,7 @@ actor_effect_state! {
     published_wave_deadline: Option<Duration>,
 }
 struct EffectState {
+    gas_cooldowns: crate::active_ability_gas_world::GasCooldowns,
     assists: firearm_assists::State,
     team_waves: [Option<TeamWaveClock>; 2],
     objective_world: Option<objective_control::ObjectiveWorld>,
@@ -796,6 +797,7 @@ impl EffectState {
     fn capture<W: Write>(engine: &Engine<W>) -> Self {
         Self {
             assists: engine.firearm_assists.clone(),
+            gas_cooldowns: engine.gas_cooldowns.clone(),
             objective_world: engine.objective_world.clone(),
             active_abilities: engine.active_abilities.clone(),
             team_waves: engine.team_waves,
@@ -821,6 +823,7 @@ impl EffectState {
     }
     fn install<W: Write>(mut self, engine: &mut Engine<W>) {
         engine.firearm_assists = self.assists;
+        engine.gas_cooldowns = self.gas_cooldowns;
         engine.active_abilities = self.active_abilities;
         engine.team_waves = self.team_waves;
         engine.objective_world = self.objective_world;

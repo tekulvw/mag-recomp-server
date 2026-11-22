@@ -155,6 +155,7 @@ pub mod domination_helo;
 mod domination_helo_damage;
 mod domination_helo_engine;
 mod domination_projectile_collision;
+pub mod gas_grenades;
 mod ground_seats;
 mod ground_turrets;
 pub mod ground_vehicles;
@@ -1257,6 +1258,8 @@ pub struct Engine<W: Write> {
     infantry_rockets: Option<std::sync::Arc<infantry_rockets::Catalog>>,
     underbarrel_launchers: Option<std::sync::Arc<underbarrel_launchers::Catalog>>,
     smoke_grenades: Option<std::sync::Arc<smoke_grenades::Catalog>>,
+    gas_cooldowns: active_ability_gas_world::GasCooldowns,
+    gas_grenades: Option<std::sync::Arc<gas_grenades::Catalog>>,
     hospital_rocket_ground: Option<std::sync::Arc<hospital_rocket_ground::Catalog>>,
     frag_character_blast: bool,
     projectile_contacts: Option<std::sync::Arc<domination_projectile_collision::ContactBindings>>,

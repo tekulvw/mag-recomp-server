@@ -912,6 +912,7 @@ impl<W: Write> Engine<W> {
                             runtime.gas.register(
                                 volume,
                                 crate::active_ability_gas_world::GasSource {
+                                    allocation: None,
                                     attacker,
                                     world: running.world,
                                     team: u8::from(running.platoon >= 4),

@@ -456,6 +456,7 @@ impl<W: Write> Engine<W> {
         self.projectile_contacts = setup.projectile_contacts.clone();
         self.infantry_rockets = None;
         self.smoke_grenades = None;
+        self.gas_grenades = None;
         self.underbarrel_launchers = None;
         self.acquisition_gameplay = Some(Runtime::from_setup(Arc::new(setup)));
         Ok(self)

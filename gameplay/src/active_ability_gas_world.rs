@@ -12,8 +12,9 @@ use std::{
     time::Duration,
 };
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct GasSource {
+    pub allocation: Option<u64>,
     pub attacker: u32,
     pub world: u32,
     pub team: u8,
@@ -24,39 +25,56 @@ const GAS_INTERVAL: Duration = Duration::from_millis(500);
 const MAX_GAS_VOLUMES: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Pulse {
+pub(crate) enum Pulse {
     Waiting,
     Damage,
     Expired,
 }
 
-#[derive(Clone)]
-struct PulseTiming {
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PulseTiming {
     expires: Duration,
+    damage_at: Duration,
+    interval: Duration,
     last_update: Duration,
     accumulated: Duration,
 }
 
 impl PulseTiming {
     fn new(now: Duration, duration_ms: u32) -> Self {
+        Self::grenade(now, duration_ms, Duration::ZERO, GAS_INTERVAL)
+    }
+
+    pub(crate) fn grenade(
+        now: Duration,
+        duration_ms: u32,
+        warmup: Duration,
+        interval: Duration,
+    ) -> Self {
         Self {
             expires: now.saturating_add(Duration::from_millis(u64::from(duration_ms))),
+            damage_at: now.saturating_add(warmup),
+            interval,
             last_update: now,
             accumulated: Duration::ZERO,
         }
     }
 
-    fn advance(&mut self, now: Duration) -> Pulse {
+    pub(crate) fn advance(&mut self, now: Duration) -> Pulse {
         if now > self.expires {
             return Pulse::Expired;
         }
         self.accumulated += now.saturating_sub(self.last_update);
         self.last_update = self.last_update.max(now);
-        if self.accumulated < GAS_INTERVAL {
+        if self.accumulated < self.interval {
             return Pulse::Waiting;
         }
-        self.accumulated -= GAS_INTERVAL;
-        Pulse::Damage
+        self.accumulated -= self.interval;
+        if now < self.damage_at {
+            Pulse::Waiting
+        } else {
+            Pulse::Damage
+        }
     }
 }
 
@@ -70,15 +88,23 @@ struct Cloud {
 #[derive(Clone)]
 struct Cooldown {
     generation: u32,
-    reservation: Option<String>,
+    allocation: TargetAllocation,
     expires: Duration,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TargetAllocation {
+    Human(u64, String),
+    Bot(u32),
 }
 
 #[derive(Clone, Default)]
 pub(crate) struct GasWorld {
     clouds: VecDeque<Cloud>,
-    cooldowns: BTreeMap<(u32, u32), Cooldown>,
 }
+
+#[derive(Clone, Default)]
+pub(crate) struct GasCooldowns(BTreeMap<(u64, u32, u32), Cooldown>);
 
 impl GasWorld {
     pub(crate) fn register(
@@ -106,28 +132,44 @@ impl GasWorld {
         });
         Ok(())
     }
+}
 
-    fn cooling_down(&self, target: Target, reservation: Option<&str>, now: Duration) -> bool {
-        self.cooldowns
-            .get(&(target.world, target.character_id))
+impl GasCooldowns {
+    fn cooling_down(
+        &self,
+        round: u64,
+        target: Target,
+        allocation: &TargetAllocation,
+        now: Duration,
+    ) -> bool {
+        self.0
+            .get(&(round, target.world, target.character_id))
             .is_some_and(|cooldown| {
                 cooldown.generation == target.generation
-                    && cooldown.reservation.as_deref() == reservation
+                    && cooldown.allocation == *allocation
                     && now < cooldown.expires
             })
     }
 
-    fn mark_applied(&mut self, target: Target, reservation: Option<&str>, now: Duration) {
-        self.cooldowns.insert(
-            (target.world, target.character_id),
+    fn mark_applied(
+        &mut self,
+        round: u64,
+        target: Target,
+        allocation: TargetAllocation,
+        now: Duration,
+    ) {
+        self.0.insert(
+            (round, target.world, target.character_id),
             Cooldown {
                 generation: target.generation,
-                reservation: reservation.map(str::to_owned),
+                allocation,
                 expires: now.saturating_add(GAS_INTERVAL),
             },
         );
     }
+}
 
+impl GasWorld {
     /// Run the persistent SimDmgVolume hold before registering volumes from
     /// this update's new ability work. The outer candidate owns this copy.
     pub(crate) fn stage<W: Write>(
@@ -137,7 +179,6 @@ impl GasWorld {
         now: Duration,
         collision: BlastCollision<'_>,
     ) -> Result<(Vec<Value>, Vec<OutboundMessage>), &'static str> {
-        self.cooldowns.retain(|_, cooldown| now < cooldown.expires);
         let mut pulses = Vec::new();
         self.clouds
             .retain_mut(|cloud| match cloud.timing.advance(now) {
@@ -148,32 +189,71 @@ impl GasWorld {
                 Pulse::Waiting => true,
                 Pulse::Expired => false,
             });
+        engine.stage_gas_pulses(
+            pulses.into_iter().map(|(volume, source)| GasPulse {
+                origin: volume.origin,
+                falloff: volume.falloff,
+                raw_hp: volume.damage_per_second * 0.5,
+                source,
+                operation: "gas_bombardment_pulse",
+            }),
+            native,
+            now,
+            collision,
+        )
+    }
+}
+
+pub(crate) struct GasPulse {
+    pub origin: [f32; 3],
+    pub falloff: crate::active_ability_effects::BlastFalloff,
+    pub raw_hp: f32,
+    pub source: GasSource,
+    pub operation: &'static str,
+}
+
+impl<W: Write> Engine<W> {
+    pub(crate) fn stage_gas_pulses(
+        &mut self,
+        pulses: impl IntoIterator<Item = GasPulse>,
+        native: &mut BTreeMap<u32, NativeState>,
+        now: Duration,
+        collision: BlastCollision<'_>,
+    ) -> Result<(Vec<Value>, Vec<OutboundMessage>), &'static str> {
+        self.gas_cooldowns
+            .0
+            .retain(|_, cooldown| now < cooldown.expires);
         let mut audit = Vec::new();
         let mut messages = Vec::new();
-        for (volume, source) in pulses {
-            let source_is_present =
-                engine
-                    .active
-                    .iter()
-                    .chain(engine.peers.values())
-                    .any(|actor| {
-                        actor.reservation.world == source.world
-                            && (0x0380_0000 | u32::from(actor.reservation.player))
-                                == source.attacker
-                            && actor.reservation.id == source.reservation
-                    });
+        for GasPulse {
+            origin,
+            falloff,
+            raw_hp,
+            source,
+            operation,
+        } in pulses
+        {
+            let source_is_present = self.active.iter().chain(self.peers.values()).any(|actor| {
+                actor.reservation.world == source.world
+                    && (0x0380_0000 | u32::from(actor.reservation.player)) == source.attacker
+                    && actor.reservation.id == source.reservation
+                    && source
+                        .allocation
+                        .is_none_or(|allocation| actor.allocation_sequence == allocation)
+            });
             let attacker = if source_is_present {
                 source.attacker
             } else {
                 u32::MAX
             };
-            let observations = engine.collect_gas_pulse_characters(volume, collision)?;
+            let observations =
+                self.collect_gas_pulse_characters(origin, falloff, raw_hp, collision)?;
             audit.push(json!({
-                "op": "gas_bombardment_pulse", "world": source.world, "attacker": attacker,
-                "origin": volume.origin, "pairs": observations.len(),
+                "op": operation, "world": source.world, "attacker": attacker,
+                "origin": origin, "pairs": observations.len(),
             }));
-            let previous_team = engine.active_ability_damage_team;
-            engine.active_ability_damage_team =
+            let previous_team = self.active_ability_damage_team;
+            self.active_ability_damage_team =
                 (attacker != u32::MAX).then_some((attacker, source.world, source.team));
             let result = (|| {
                 for pair in observations {
@@ -183,31 +263,44 @@ impl GasWorld {
                     if target.world != source.world {
                         return Err("invalid_gas_volume_world");
                     }
-                    let reservation = engine
+                    let allocation = self
                         .active
                         .iter()
-                        .chain(engine.peers.values())
+                        .chain(self.peers.values())
                         .find(|actor| {
                             actor.reservation.world == target.world
                                 && actor.reservation.player == target.character_id as u16
                         })
-                        .map(|actor| actor.reservation.id.clone());
-                    if self.cooling_down(target, reservation.as_deref(), now) {
+                        .map(|actor| {
+                            TargetAllocation::Human(
+                                actor.allocation_sequence,
+                                actor.reservation.id.clone(),
+                            )
+                        })
+                        .or_else(|| {
+                            self.bot_registry
+                                .bots
+                                .get(&(target.character_id as u16))
+                                .map(|bot| TargetAllocation::Bot(bot.allocation_generation))
+                        })
+                        .ok_or("gas_volume_target_allocation_missing")?;
+                    if self
+                        .gas_cooldowns
+                        .cooling_down(self.round_number, target, &allocation, now)
+                    {
                         continue;
                     }
-                    let displacement: [f32; 3] = std::array::from_fn(|axis| {
-                        pair.sample_position[axis] - volume.origin[axis]
-                    });
+                    let displacement: [f32; 3] =
+                        std::array::from_fn(|axis| pair.sample_position[axis] - origin[axis]);
                     let [x, y, z] = displacement;
-                    let scale =
-                        native_command_falloff(volume.falloff, ((x * x + y * y) + z * z).sqrt())?;
+                    let scale = native_command_falloff(falloff, ((x * x + y * y) + z * z).sqrt())?;
                     let state = native
                         .get_mut(&target.character_id)
                         .ok_or("gas_volume_native_state_missing")?;
-                    let plan = engine.plan_acquisition_character_effect(
+                    let plan = self.plan_acquisition_character_effect(
                         target,
                         Request::AirStrikeGas {
-                            raw_hp: (volume.damage_per_second * 0.5) * scale,
+                            raw_hp: raw_hp * scale,
                             from_direction: displacement,
                             attacker,
                         },
@@ -216,14 +309,15 @@ impl GasWorld {
                     )?;
                     let applied = plan.outcome() == Outcome::Applied;
                     audit.push(plan.audit().clone());
-                    messages.extend(engine.commit_acquisition_character_effect(plan, state)?);
+                    messages.extend(self.commit_acquisition_character_effect(plan, state)?);
                     if applied {
-                        self.mark_applied(target, reservation.as_deref(), now);
+                        self.gas_cooldowns
+                            .mark_applied(self.round_number, target, allocation, now);
                     }
                 }
                 Ok(())
             })();
-            engine.active_ability_damage_team = previous_team;
+            self.active_ability_damage_team = previous_team;
             result?;
         }
         Ok((audit, messages))
