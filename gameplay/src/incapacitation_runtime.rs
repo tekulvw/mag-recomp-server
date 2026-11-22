@@ -162,6 +162,7 @@ impl Active {
         {
             return Err("stale_revive_patient");
         }
+        self.flash_yaw = None;
         self.life = CharacterLife::Alive {
             generation,
             health_quarter_points: damage.health_quarter_points,

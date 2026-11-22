@@ -49,6 +49,7 @@ pub struct Configuration {
     infantry_rockets: Option<PathBuf>,
     smoke_grenades: Option<PathBuf>,
     gas_grenades: Option<PathBuf>,
+    flash_grenades: Option<PathBuf>,
     underbarrel_launchers: Option<PathBuf>,
     vehicle_reinforcement_intervals_ms: [u32; 2],
     structural: Option<crate::acquisition_structural::Files>,
@@ -208,6 +209,14 @@ impl Configuration {
             if source.as_os_str().is_empty() {
                 return Err(io::Error::other(
                     "empty_acquisition_gas_grenade_source_path",
+                ));
+            }
+            *source = directory.join(&*source);
+        }
+        if let Some(source) = &mut result.flash_grenades {
+            if source.as_os_str().is_empty() {
+                return Err(io::Error::other(
+                    "empty_acquisition_flash_grenade_source_path",
                 ));
             }
             *source = directory.join(&*source);
@@ -395,6 +404,22 @@ impl Configuration {
                     .read_to_end(&mut raw)?;
                 if raw.len() > 1 << 20 {
                     return Err(io::Error::other("invalid_gas_grenade_rules"));
+                }
+                Ok(raw)
+            })
+            .transpose()
+    }
+
+    pub fn flash_grenade_source(&self) -> io::Result<Option<Vec<u8>>> {
+        self.flash_grenades
+            .as_ref()
+            .map(|path| {
+                let mut raw = Vec::new();
+                File::open(path)?
+                    .take((1 << 20) + 1)
+                    .read_to_end(&mut raw)?;
+                if raw.len() > 1 << 20 {
+                    return Err(io::Error::other("invalid_flash_grenade_rules"));
                 }
                 Ok(raw)
             })

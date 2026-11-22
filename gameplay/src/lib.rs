@@ -155,6 +155,9 @@ pub mod domination_helo;
 mod domination_helo_damage;
 mod domination_helo_engine;
 mod domination_projectile_collision;
+pub mod flash_grenades;
+#[cfg(test)]
+mod flash_runtime_tests;
 pub mod gas_grenades;
 mod ground_seats;
 mod ground_turrets;
@@ -1132,6 +1135,7 @@ struct Active {
     projectile_cleanup: [Option<ProjectileCleanup>; projectile::MAX_PROJECTILE_SLOTS],
     projectile_publications: Vec<ProjectilePublication>,
     grenade_remaining: u8,
+    flash_yaw: Option<flash_grenades::YawWitness>,
     static_resupply: Vec<human_static_resupply::Session>,
     observed_primary: Option<replication::InventoryItem>,
     observed_secondary: Option<replication::InventoryItem>,
@@ -1260,6 +1264,7 @@ pub struct Engine<W: Write> {
     smoke_grenades: Option<std::sync::Arc<smoke_grenades::Catalog>>,
     gas_cooldowns: active_ability_gas_world::GasCooldowns,
     gas_grenades: Option<std::sync::Arc<gas_grenades::Catalog>>,
+    flash_grenades: Option<std::sync::Arc<flash_grenades::Catalog>>,
     hospital_rocket_ground: Option<std::sync::Arc<hospital_rocket_ground::Catalog>>,
     frag_character_blast: bool,
     projectile_contacts: Option<std::sync::Arc<domination_projectile_collision::ContactBindings>>,

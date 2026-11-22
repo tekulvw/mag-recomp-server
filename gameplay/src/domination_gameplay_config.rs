@@ -59,6 +59,7 @@ struct Core {
     infantry_rockets: Option<PathBuf>,
     smoke_grenades: Option<PathBuf>,
     gas_grenades: Option<PathBuf>,
+    flash_grenades: Option<PathBuf>,
     underbarrel_launchers: Option<PathBuf>,
     ground_turrets: Option<PathBuf>,
     initial_filters: PathBuf,
@@ -325,6 +326,10 @@ impl Configuration {
                     "empty_domination_gas_grenade_source_path",
                 ),
                 (
+                    &mut core.flash_grenades,
+                    "empty_domination_flash_grenade_source_path",
+                ),
+                (
                     &mut core.underbarrel_launchers,
                     "empty_domination_underbarrel_launcher_source_path",
                 ),
@@ -498,6 +503,14 @@ impl Configuration {
         self.core
             .as_ref()
             .and_then(|core| core.gas_grenades.as_ref())
+            .map(|path| read(path, 1024 * 1024))
+            .transpose()
+    }
+
+    pub(crate) fn flash_grenade_source(&self) -> io::Result<Option<Vec<u8>>> {
+        self.core
+            .as_ref()
+            .and_then(|core| core.flash_grenades.as_ref())
             .map(|path| read(path, 1024 * 1024))
             .transpose()
     }
@@ -1145,6 +1158,13 @@ impl<W: Write> Engine<W> {
             })
             .transpose()
             .map_err(io::Error::other)?;
+        let flash_grenades = config
+            .flash_grenade_source()?
+            .map(|source| {
+                crate::flash_grenades::Catalog::from_bytes(&source, &self.item_catalog, &native_elf)
+            })
+            .transpose()
+            .map_err(io::Error::other)?;
         let underbarrel_launchers = config
             .underbarrel_launcher_source()?
             .map(|source| {
@@ -1255,9 +1275,15 @@ impl<W: Write> Engine<W> {
                 .map_err(io::Error::other)?;
         }
         self.gas_grenades = None;
+        self.flash_grenades = None;
         if let Some(catalog) = gas_grenades {
             self = self
                 .with_gas_grenades(Arc::new(catalog))
+                .map_err(io::Error::other)?;
+        }
+        if let Some(catalog) = flash_grenades {
+            self = self
+                .with_flash_grenades(Arc::new(catalog))
                 .map_err(io::Error::other)?;
         }
         self.underbarrel_launchers = None;

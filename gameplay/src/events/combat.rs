@@ -608,6 +608,23 @@ pub(super) fn fire_grenade<W: Write>(
                             .remember_creation(flight_generation, creation)?;
                         plan.outgoing = Some(packet.clone());
                         plan.replication.projectile_delta = Some(packet);
+                        if ctx.engine.flash_grenades.as_ref().is_some_and(|c| {
+                            c.variant(
+                                active.reservation.character.faction,
+                                grenade_item.unwrap_or(0),
+                            )
+                            .is_some()
+                        }) {
+                            flights.set_flash_source(
+                                slot,
+                                flight_generation,
+                                crate::flash_grenades::LaunchSource::from_actor(
+                                    active,
+                                    ctx.engine.round_number,
+                                    generation,
+                                ),
+                            )?;
+                        }
                         if gas {
                             flights.set_poison_source(
                                 slot,
