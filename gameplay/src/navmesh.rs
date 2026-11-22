@@ -6,6 +6,9 @@ use std::{ffi::c_int, sync::Mutex, time::Instant};
 #[path = "navmesh_drops.rs"]
 mod drops;
 pub use drops::{DropLink, WaypointKind};
+#[path = "navmesh_reference.rs"]
+mod reference;
+pub use reference::{ReferenceManifest, ReferenceNavMesh, bake_reference};
 pub type Point = [f64; 3];
 pub const UPSTREAM_COMMIT: &str = "6dc1667f580357e8a2154c28b7867bea7e8ad3a7";
 pub const LEGACY_BAKE_CONFIG: &str = "single-v1-cs0.1-ch0.05-height37-climb7-radius6-slope45-contour0.5-edge120-region64-merge400-detail0.6-error0.05-nvp6-nodes8192";
@@ -13,6 +16,10 @@ pub const BAKE_CONFIG: &str = "tiled-v2-tile512-border9-cs0.1-ch0.05-height37-cl
 pub const MAX_ARTIFACT_BYTES: u64 = 32 * 1024 * 1024;
 // JSON Vec<u8> uses up to four characters per byte, plus bounded metadata.
 pub const MAX_ARTIFACT_JSON_BYTES: u64 = MAX_ARTIFACT_BYTES * 4 + 1024 * 1024;
+pub const MAX_REFERENCE_BYTES: u64 = 192 * 1024 * 1024;
+const REFERENCE_INPUT: &str = "mag_navmesh_reference_bake_input_v1";
+const REFERENCE_FORMAT: &str = "mag_navmesh_reference_v1";
+const REFERENCE_CONFIG: &str = "reference-v1-tile512-border9-tiles512-polys8192-cs0.1-ch0.05-height37-climb7-radius6-slope45-contour0.5-edge120-region64-merge400-detail0.6-error0.05-nvp6-nodes16384";
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
@@ -210,6 +217,7 @@ unsafe extern "C" {
         max: *const f32,
         out: *mut *mut u8,
         size: *mut c_int,
+        reference_mode: c_int,
     ) -> c_int;
     fn mag_nav_free_bytes(data: *mut u8);
     fn mag_nav_load(
@@ -217,8 +225,14 @@ unsafe extern "C" {
         size: c_int,
         min: *const f32,
         max: *const f32,
+        reference_mode: c_int,
     ) -> *mut std::ffi::c_void;
     fn mag_nav_destroy(handle: *mut std::ffi::c_void);
+    fn mag_nav_tile_stats(
+        handle: *const std::ffi::c_void,
+        occupied: *mut c_int,
+        max_polygons: *mut c_int,
+    );
     fn mag_nav_route(
         handle: *mut std::ffi::c_void,
         start: *const f32,
@@ -258,7 +272,15 @@ unsafe extern "C" {
     ) -> c_int;
 }
 pub fn bake(input: BakeInput) -> Result<Artifact, Error> {
-    if input.format != "mag_navmesh_bake_input_v1"
+    bake_artifact(input, false)
+}
+fn bake_artifact(input: BakeInput, reference: bool) -> Result<Artifact, Error> {
+    let expected_format = if reference {
+        REFERENCE_INPUT
+    } else {
+        "mag_navmesh_bake_input_v1"
+    };
+    if input.format != expected_format
         || input.map_name.is_empty()
         || input.map_name.len() > 128
         || !valid_sha(&input.world_sha256)
@@ -269,18 +291,31 @@ pub fn bake(input: BakeInput) -> Result<Artifact, Error> {
     {
         return err("navmesh_invalid_input");
     }
-    if !input.physics_regions.iter().any(|r| {
-        r.ground_verified
-            && r.obstacles_verified
-            && !r.provenance.is_empty()
-            && (0..3).all(|i| {
-                r.min[i].is_finite()
-                    && r.max[i].is_finite()
-                    && r.min[i] <= input.bounds.min[i]
-                    && r.max[i] >= input.bounds.max[i]
-            })
-    }) {
+    if !reference
+        && !input.physics_regions.iter().any(|r| {
+            r.ground_verified
+                && r.obstacles_verified
+                && !r.provenance.is_empty()
+                && (0..3).all(|i| {
+                    r.min[i].is_finite()
+                        && r.max[i].is_finite()
+                        && r.min[i] <= input.bounds.min[i]
+                        && r.max[i] >= input.bounds.max[i]
+                })
+        })
+    {
         return err("navmesh_geometry_coverage_unknown");
+    }
+    if reference
+        && (input.bounds.max[1] - input.bounds.min[1] > 409.55
+            || input.vertices.iter().any(|point| {
+                (0..3).any(|axis| {
+                    let value = f64::from(point[axis]);
+                    value < input.bounds.min[axis] || value > input.bounds.max[axis]
+                })
+            }))
+    {
+        return err("navmesh_reference_envelope_invalid");
     }
     if input
         .vertices
@@ -330,12 +365,26 @@ pub fn bake(input: BakeInput) -> Result<Artifact, Error> {
             max.as_ptr(),
             &mut data,
             &mut size,
+            c_int::from(reference),
         )
     };
     if result != 0 {
+        if reference {
+            return err(match result {
+                1 => "navmesh_reference_grid_limit",
+                5 => "navmesh_reference_tile_polygon_limit",
+                6 => "navmesh_reference_size_limit",
+                _ => "navmesh_reference_bake_failed",
+            });
+        }
         return err("navmesh_bake_failed");
     }
-    if data.is_null() || size <= 0 || size as u64 > MAX_ARTIFACT_BYTES {
+    let byte_limit = if reference {
+        MAX_REFERENCE_BYTES
+    } else {
+        MAX_ARTIFACT_BYTES
+    };
+    if data.is_null() || size <= 0 || size as u64 > byte_limit {
         if !data.is_null() {
             unsafe { mag_nav_free_bytes(data) }
         }
@@ -344,14 +393,24 @@ pub fn bake(input: BakeInput) -> Result<Artifact, Error> {
     let bytes = unsafe { std::slice::from_raw_parts(data, size as usize).to_vec() };
     unsafe { mag_nav_free_bytes(data) };
     Ok(Artifact {
-        format: "mag_navmesh_world_v2".into(),
+        format: if reference {
+            REFERENCE_FORMAT
+        } else {
+            "mag_navmesh_world_v2"
+        }
+        .into(),
         map_name: input.map_name,
         world_sha256: input.world_sha256,
         geometry_sha256: input.geometry_sha256,
         profile: Profile::default(),
         bounds: input.bounds,
         upstream_commit: UPSTREAM_COMMIT.into(),
-        bake_config: BAKE_CONFIG.into(),
+        bake_config: if reference {
+            REFERENCE_CONFIG
+        } else {
+            BAKE_CONFIG
+        }
+        .into(),
         detour_sha256: sha256(&bytes),
         detour_data: bytes,
         drop_links: Vec::new(),
@@ -371,9 +430,23 @@ pub struct NavMesh {
 }
 impl NavMesh {
     pub fn load(artifact: Artifact, world_sha256: &str, map_name: &str) -> Result<Self, Error> {
-        if !((artifact.format == "mag_navmesh_world_v1"
-            && artifact.bake_config == LEGACY_BAKE_CONFIG)
-            || (artifact.format == "mag_navmesh_world_v2" && artifact.bake_config == BAKE_CONFIG))
+        Self::load_artifact(artifact, world_sha256, map_name, false)
+    }
+    fn load_artifact(
+        artifact: Artifact,
+        world_sha256: &str,
+        map_name: &str,
+        reference: bool,
+    ) -> Result<Self, Error> {
+        let format_matches = if reference {
+            artifact.format == REFERENCE_FORMAT && artifact.bake_config == REFERENCE_CONFIG
+        } else {
+            (artifact.format == "mag_navmesh_world_v1"
+                && artifact.bake_config == LEGACY_BAKE_CONFIG)
+                || (artifact.format == "mag_navmesh_world_v2"
+                    && artifact.bake_config == BAKE_CONFIG)
+        };
+        if !format_matches
             || artifact.upstream_commit != UPSTREAM_COMMIT
             || artifact.profile != Profile::default()
             || !valid_bounds(&artifact.bounds)
@@ -384,8 +457,13 @@ impl NavMesh {
         {
             return err("navmesh_identity_mismatch");
         }
+        let byte_limit = if reference {
+            MAX_REFERENCE_BYTES
+        } else {
+            MAX_ARTIFACT_BYTES
+        };
         if artifact.detour_data.len() < 100
-            || artifact.detour_data.len() > MAX_ARTIFACT_BYTES as usize
+            || artifact.detour_data.len() > byte_limit as usize
             || artifact.detour_sha256 != sha256(&artifact.detour_data)
         {
             return err("navmesh_binary_hash_mismatch");
@@ -396,6 +474,7 @@ impl NavMesh {
                 artifact.detour_data.len() as c_int,
                 artifact.bounds.min.map(|v| v as f32).as_ptr(),
                 artifact.bounds.max.map(|v| v as f32).as_ptr(),
+                c_int::from(reference),
             )
         };
         if handle.is_null() {

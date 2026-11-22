@@ -59,10 +59,45 @@ static bool valid_blob(const unsigned char* data, int size, bool tiled=false) {
     }
     return true;
 }
+static constexpr float TileWidth = 51.2f;
+static constexpr float TileBorder = 9 * .1f;
+static constexpr size_t RuntimeByteCap = 32u * 1024u * 1024u;
+static constexpr size_t ReferenceByteCap = 192u * 1024u * 1024u;
+struct BoundsXZ {
+    float min_x, min_z, max_x, max_z;
+};
+static BoundsXZ tile_bounds(const float* min, int x, int z) {
+    return {min[0] + x * TileWidth - TileBorder, min[2] + z * TileWidth - TileBorder,
+            min[0] + (x + 1) * TileWidth + TileBorder, min[2] + (z + 1) * TileWidth + TileBorder};
+}
+static std::vector<BoundsXZ> triangle_bounds(const float* verts, const int* tris, int count) {
+    std::vector<BoundsXZ> bounds;
+    bounds.reserve(count);
+    for (int i = 0; i < count; ++i) {
+        const float* a = verts + 3 * tris[3*i];
+        const float* b = verts + 3 * tris[3*i + 1];
+        const float* c = verts + 3 * tris[3*i + 2];
+        bounds.push_back({std::min({a[0], b[0], c[0]}), std::min({a[2], b[2], c[2]}),
+                          std::max({a[0], b[0], c[0]}), std::max({a[2], b[2], c[2]})});
+    }
+    return bounds;
+}
+static void select_tile_faces(const std::vector<BoundsXZ>& bounds, const int* tris,
+                              BoundsXZ tile, std::vector<int>& selected) {
+    selected.clear();
+    for (size_t i = 0; i < bounds.size(); ++i) {
+        const BoundsXZ& face = bounds[i];
+        if (face.min_x <= tile.max_x && face.max_x >= tile.min_x
+            && face.min_z <= tile.max_z && face.max_z >= tile.min_z) {
+            selected.insert(selected.end(), tris + 3*i, tris + 3*i + 3);
+        }
+    }
+}
 extern "C" {
 // 0 success, 1 invalid/config, 2 bake failure, 3 allocation failure.
 static int bake_tile(const float* verts, int nv, const int* tris, int nt,
-                 const float* min, const float* max, unsigned char** output, int* size, int tx, int ty) {
+                 const float* min, const float* max, unsigned char** output, int* size,
+                 int tx, int ty, int max_polys) {
     *output = nullptr; *size = 0;
     if (!verts || !tris || nv < 3 || nt < 1) return 1;
     rcContext ctx;
@@ -74,8 +109,9 @@ static int bake_tile(const float* verts, int nv, const int* tris, int nt,
     cfg.maxVertsPerPoly=6; cfg.detailSampleDist=.6f; cfg.detailSampleMaxError=.05f;
     rcVcopy(cfg.bmin,min); rcVcopy(cfg.bmax,max);
     cfg.tileSize=512; cfg.borderSize=cfg.walkableRadius+3;
-    cfg.bmin[0]=min[0]+tx*51.2f-cfg.borderSize*cfg.cs; cfg.bmin[2]=min[2]+ty*51.2f-cfg.borderSize*cfg.cs;
-    cfg.bmax[0]=min[0]+(tx+1)*51.2f+cfg.borderSize*cfg.cs; cfg.bmax[2]=min[2]+(ty+1)*51.2f+cfg.borderSize*cfg.cs;
+    const BoundsXZ tile = tile_bounds(min, tx, ty);
+    cfg.bmin[0]=tile.min_x; cfg.bmin[2]=tile.min_z;
+    cfg.bmax[0]=tile.max_x; cfg.bmax[2]=tile.max_z;
     cfg.width=cfg.height=cfg.tileSize+2*cfg.borderSize;
     if (cfg.width<1 || cfg.height<1 || static_cast<long long>(cfg.width)*cfg.height > 16000000) return 1;
     BakeObjects b;
@@ -110,7 +146,7 @@ static int bake_tile(const float* verts, int nv, const int* tris, int nt,
     b.poly=rcAllocPolyMesh(); if (!b.poly) return 3;
     if (!rcBuildPolyMesh(&ctx,*b.contours,cfg.maxVertsPerPoly,*b.poly)) return 2;
     if (b.poly->npolys==0) return 4;
-    if(b.poly->npolys>16384) return 2;
+    if(b.poly->npolys>max_polys) return 5;
     b.detail=rcAllocPolyMeshDetail(); if (!b.detail) return 3;
     if (!rcBuildPolyMeshDetail(&ctx,*b.poly,*b.chf,cfg.detailSampleDist,cfg.detailSampleMaxError,*b.detail)) return 2;
     for(int i=0;i<b.poly->npolys;++i) { b.poly->flags[i]=1; b.poly->areas[i]=0; }
@@ -128,17 +164,30 @@ void mag_nav_free_bytes(unsigned char* data) { dtFree(data); }
 // Bundle is explicitly bounded and contains only serialized Detour tile bytes.
 struct BundleHeader { uint32_t magic, version, count; float min[3], max[3], width; };
 static const uint32_t BUNDLE_MAGIC=0x324e474d;
-int mag_nav_bake(const float* verts,int nv,const int* tris,int nt,const float* min,const float* max,unsigned char** output,int* size) {
+int mag_nav_bake(const float* verts,int nv,const int* tris,int nt,const float* min,const float* max,
+                 unsigned char** output,int* size,int reference_mode) {
     *output=nullptr;*size=0;
-    const int nx=static_cast<int>(std::ceil((max[0]-min[0])/51.2f)), nz=static_cast<int>(std::ceil((max[2]-min[2])/51.2f));
-    if(nx<1 || nz<1 || nx*nz>256)return 1;
-    BundleHeader header{};header.magic=BUNDLE_MAGIC;header.version=1;header.width=51.2f;rcVcopy(header.min,min);rcVcopy(header.max,max);
+    const bool reference = reference_mode != 0;
+    const int tile_cap = reference ? 512 : 256;
+    const int poly_cap = reference ? 8192 : 16384;
+    const size_t byte_cap = reference ? ReferenceByteCap : RuntimeByteCap;
+    const int nx=static_cast<int>(std::ceil((max[0]-min[0])/TileWidth)), nz=static_cast<int>(std::ceil((max[2]-min[2])/TileWidth));
+    if(nx<1 || nz<1 || nx*nz>tile_cap)return 1;
+    BundleHeader header{};header.magic=BUNDLE_MAGIC;header.version=reference ? 2 : 1;header.width=TileWidth;rcVcopy(header.min,min);rcVcopy(header.max,max);
+    const auto bounds = reference ? triangle_bounds(verts, tris, nt) : std::vector<BoundsXZ>{};
+    std::vector<int> selected;
     std::vector<unsigned char> bytes(sizeof(header));
     for(int z=0;z<nz;++z)for(int x=0;x<nx;++x){
-        unsigned char* tile=nullptr;int n=0;const int result=bake_tile(verts,nv,tris,nt,min,max,&tile,&n,x,z);
+        if (reference) {
+            select_tile_faces(bounds, tris, tile_bounds(min, x, z), selected);
+            if (selected.empty()) continue;
+        }
+        unsigned char* tile=nullptr;int n=0;
+        const int result=bake_tile(verts,nv,reference ? selected.data() : tris,
+            reference ? static_cast<int>(selected.size()/3) : nt,min,max,&tile,&n,x,z,poly_cap);
         if(result==4)continue;
         if(result!=0){dtFree(tile);return result;}
-        if(n<=0 || bytes.size()+4u+n>32u*1024u*1024u){dtFree(tile);return 1;}
+        if(n<=0 || bytes.size()+4u+n>byte_cap){dtFree(tile);return 6;}
         uint32_t length=n;const size_t off=bytes.size();bytes.resize(off+4u+n);std::memcpy(bytes.data()+off,&length,4);std::memcpy(bytes.data()+off+4,tile,n);dtFree(tile);++header.count;
     }
     if(!header.count)return 2;
@@ -146,22 +195,31 @@ int mag_nav_bake(const float* verts,int nv,const int* tris,int nt,const float* m
     *output=static_cast<unsigned char*>(dtAlloc(bytes.size(),DT_ALLOC_PERM));if(!*output)return 3;
     std::memcpy(*output,bytes.data(),bytes.size());*size=bytes.size();return 0;
 }
-MagNav* mag_nav_load(const unsigned char* data,int size,const float* min,const float* max) {
-    if(size<4 || size>32*1024*1024)return nullptr;
+MagNav* mag_nav_load(const unsigned char* data,int size,const float* min,const float* max,int reference_mode) {
+    const bool reference = reference_mode != 0;
+    // Detour needs at least ten salt bits in a 32-bit reference.
+    const int tile_cap = reference ? 512 : 256;
+    const int poly_cap = reference ? 8192 : 16384;
+    const size_t byte_cap = reference ? ReferenceByteCap : RuntimeByteCap;
+    if(size<4 || static_cast<size_t>(size)>byte_cap)return nullptr;
     uint32_t magic;std::memcpy(&magic,data,4);const bool tiled=magic==BUNDLE_MAGIC;
+    if (reference && !tiled) return nullptr;
     std::vector<std::pair<const unsigned char*,int>> tiles;
     BundleHeader bundle{};
     if(tiled){
         if(size<static_cast<int>(sizeof(bundle)))return nullptr;
         std::memcpy(&bundle,data,sizeof(bundle));
-        if(bundle.version!=1 || bundle.count<1 || bundle.count>256 || bundle.width!=51.2f)return nullptr;
+        if(bundle.version!=(reference ? 2u : 1u) || bundle.count<1 || bundle.count>static_cast<unsigned>(tile_cap) || bundle.width!=TileWidth)return nullptr;
         for(int k=0;k<3;++k)if(!std::isfinite(bundle.min[k]) || !std::isfinite(bundle.max[k]) || std::fabs(bundle.min[k]-min[k])>.001f || std::fabs(bundle.max[k]-max[k])>.001f)return nullptr;
+        const double grid_x = std::ceil((max[0]-min[0])/bundle.width);
+        const double grid_z = std::ceil((max[2]-min[2])/bundle.width);
+        if (reference && (grid_x < 1 || grid_z < 1 || grid_x*grid_z > tile_cap)) return nullptr;
         size_t off=sizeof(bundle);std::map<std::pair<int,int>,bool> coordinates;
         for(uint32_t i=0;i<bundle.count;++i){
             if(off+4>static_cast<size_t>(size))return nullptr;uint32_t n;std::memcpy(&n,data+off,4);off+=4;
-            if(n>static_cast<size_t>(size)-off || n>32u*1024u*1024u || !valid_blob(data+off,n,true))return nullptr;
+            if(n>static_cast<size_t>(size)-off || n>byte_cap || !valid_blob(data+off,n,true))return nullptr;
             dtMeshHeader h;std::memcpy(&h,data+off,sizeof(h));
-            if(h.x<0 || h.y<0 || h.layer!=0 || h.polyCount>16384 || h.x>=std::ceil((max[0]-min[0])/bundle.width) || h.y>=std::ceil((max[2]-min[2])/bundle.width) || coordinates.count({h.x,h.y}))return nullptr;
+            if(h.x<0 || h.y<0 || h.layer!=0 || h.polyCount>poly_cap || h.x>=grid_x || h.y>=grid_z || coordinates.count({h.x,h.y}))return nullptr;
             coordinates[{h.x,h.y}]=true;
             const float expected[3]={min[0]+h.x*bundle.width,min[1],min[2]+h.y*bundle.width};
             for(int k=0;k<3;++k)if(std::fabs(h.bmin[k]-expected[k])>.002f || std::fabs(h.bmax[k]-(k==1?max[k]+1.85f:expected[k]+bundle.width))>.002f)return nullptr;
@@ -175,7 +233,7 @@ MagNav* mag_nav_load(const unsigned char* data,int size,const float* min,const f
     }
     MagNav* h=new(std::nothrow) MagNav{dtAllocNavMesh(),dtAllocNavMeshQuery()};
     if(!h || !h->mesh || !h->query){delete h;return nullptr;}
-    if(tiled){dtNavMeshParams p{};rcVcopy(p.orig,min);p.tileWidth=p.tileHeight=bundle.width;p.maxTiles=256;p.maxPolys=16384;if(dtStatusFailed(h->mesh->init(&p))){delete h;return nullptr;}}
+    if(tiled){dtNavMeshParams p{};rcVcopy(p.orig,min);p.tileWidth=p.tileHeight=bundle.width;p.maxTiles=tile_cap;p.maxPolys=poly_cap;if(dtStatusFailed(h->mesh->init(&p))){delete h;return nullptr;}}
     for(const auto& tile:tiles){unsigned char* copy=static_cast<unsigned char*>(dtAlloc(tile.second,DT_ALLOC_PERM));if(!copy){delete h;return nullptr;}std::memcpy(copy,tile.first,tile.second);
         dtStatus result=tiled?h->mesh->addTile(copy,tile.second,DT_TILE_FREE_DATA,0,nullptr):h->mesh->init(copy,tile.second,DT_TILE_FREE_DATA);
         if(dtStatusFailed(result)){dtFree(copy);delete h;return nullptr;}
@@ -195,6 +253,16 @@ MagNav* mag_nav_load(const unsigned char* data,int size,const float* min,const f
     }return h;
 }
 void mag_nav_destroy(MagNav* h) { delete h; }
+void mag_nav_tile_stats(const MagNav* h, int* occupied, int* max_polygons) {
+    *occupied = *max_polygons = 0;
+    const dtNavMesh* mesh = h->mesh;
+    for (int i = 0; i < mesh->getMaxTiles(); ++i) {
+        const dtMeshHeader* header = mesh->getTile(i)->header;
+        if (!header) continue;
+        ++*occupied;
+        *max_polygons = std::max(*max_polygons, header->polyCount);
+    }
+}
 // status:0 complete,1 partial,2 disconnected,3 out of nodes,4 invalid start,5 invalid goal,6 query failure.
 int mag_nav_route(MagNav* h,const float* start,const float* goal,float radius,float* projected_start,float* projected_goal,
                   float* points,int* point_count,unsigned long long* refs,int* ref_count) {
