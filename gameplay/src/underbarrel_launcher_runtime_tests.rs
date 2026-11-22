@@ -5,15 +5,14 @@ fn fixture() -> Engine<Vec<u8>> {
     let mut engine = tests::fixture();
     engine.underbarrel_launchers =
         Some(Arc::new(underbarrel_launchers::tests::synthetic_catalog()));
-    equip_launcher(&mut engine, false);
+    equip_launcher(&mut engine, 0);
     engine
 }
 
-fn equip_launcher(engine: &mut Engine<Vec<u8>>, upgraded: bool) -> underbarrel_launchers::Variant {
+fn equip_launcher(engine: &mut Engine<Vec<u8>>, group: usize) -> underbarrel_launchers::Variant {
     let catalog = engine.underbarrel_launchers.as_ref().unwrap();
     let actor = engine.active.as_mut().unwrap();
-    let offset = if upgraded { 3 } else { 0 };
-    let v = catalog.variants()[offset + usize::from(actor.reservation.character.faction)];
+    let v = catalog.variants()[3 * group + usize::from(actor.reservation.character.faction)];
     let kit = actor.spawned_loadout.as_mut().unwrap();
     let inventory =
         &mut kit.inventories[usize::from(actor.current_inventory_handle.unwrap().inventory_index)];
@@ -77,18 +76,29 @@ fn underbarrel_switch_back_preserves_refire_and_spent_rounds() {
         underbarrel_launchers::tests::synthetic_upgraded_catalog(),
     ));
     launch(&mut engine, 17, 0, 511, 1000);
-    equip_launcher(&mut engine, true);
+    equip_launcher(&mut engine, 1);
     launch(&mut engine, 17, 1, 511, 1100);
-    equip_launcher(&mut engine, false);
-    let too_soon = wire(&engine, 17, 2, 511);
-    assert!(dispatch(&mut engine, &too_soon, 1499).unwrap().is_empty());
-    assert!(!state(&engine).occupies(2));
-    launch(&mut engine, 17, 2, 511, 1500);
-    assert_eq!(rounds(&engine), 1);
-    equip_launcher(&mut engine, true);
+    equip_launcher(&mut engine, 2);
+    launch(&mut engine, 17, 2, 511, 1200);
+    equip_launcher(&mut engine, 0);
     let too_soon = wire(&engine, 17, 3, 511);
+    assert!(dispatch(&mut engine, &too_soon, 1499).unwrap().is_empty());
+    assert!(!state(&engine).occupies(3));
+    launch(&mut engine, 17, 3, 511, 1500);
+    assert_eq!(rounds(&engine), 1);
+
+    engine.active.as_mut().unwrap().infantry_rocket_state.slots[2] = None;
+    equip_launcher(&mut engine, 1);
+    let too_soon = wire(&engine, 17, 2, 511);
     assert!(dispatch(&mut engine, &too_soon, 1849).unwrap().is_empty());
-    launch(&mut engine, 17, 3, 511, 1850);
+    launch(&mut engine, 17, 2, 511, 1850);
+    assert_eq!(rounds(&engine), 1);
+
+    engine.active.as_mut().unwrap().infantry_rocket_state.slots[0] = None;
+    equip_launcher(&mut engine, 2);
+    let too_soon = wire(&engine, 17, 0, 511);
+    assert!(dispatch(&mut engine, &too_soon, 2199).unwrap().is_empty());
+    launch(&mut engine, 17, 0, 511, 2200);
     assert_eq!(rounds(&engine), 1);
 }
 
@@ -98,10 +108,12 @@ fn underbarrel_refill_targets_only_the_equipped_life_budget() {
     engine.underbarrel_launchers = Some(Arc::new(
         underbarrel_launchers::tests::synthetic_upgraded_catalog(),
     ));
-    let stock = equip_launcher(&mut engine, false);
+    let stock = equip_launcher(&mut engine, 0);
     launch(&mut engine, 17, 0, 511, 1000);
-    let upgraded = equip_launcher(&mut engine, true);
+    let tier_two = equip_launcher(&mut engine, 1);
     launch(&mut engine, 17, 1, 511, 1100);
+    let tier_four = equip_launcher(&mut engine, 2);
+    launch(&mut engine, 17, 2, 511, 1200);
     let actor = engine.active.as_ref().unwrap();
     let CharacterLife::Alive {
         generation,
@@ -119,23 +131,59 @@ fn underbarrel_refill_targets_only_the_equipped_life_budget() {
         2
     );
     assert_eq!(
-        underbarrel_rounds(&staged, generation, upgraded.attachment_item_id),
+        underbarrel_rounds(&staged, generation, tier_two.attachment_item_id),
+        2
+    );
+    assert_eq!(
+        underbarrel_rounds(&staged, generation, tier_four.attachment_item_id),
         3
     );
     assert_eq!(rounds(&engine), 2);
     engine.active.as_mut().unwrap().infantry_rocket_state = staged;
-    let too_soon = wire(&engine, 17, 2, 511);
-    assert!(dispatch(&mut engine, &too_soon, 1849).unwrap().is_empty());
+    let too_soon = wire(&engine, 17, 3, 511);
+    assert!(dispatch(&mut engine, &too_soon, 2199).unwrap().is_empty());
 
     engine.active.as_mut().unwrap().life = CharacterLife::Alive {
         generation: generation + 1,
         health_quarter_points,
     };
-    launch(&mut engine, 17, 2, 511, 1850);
+    launch(&mut engine, 17, 3, 511, 2200);
     assert_eq!(rounds(&engine), 2);
-    equip_launcher(&mut engine, false);
-    launch(&mut engine, 17, 3, 511, 1851);
+    engine.active.as_mut().unwrap().infantry_rocket_state.slots[0] = None;
+    equip_launcher(&mut engine, 0);
+    launch(&mut engine, 17, 0, 511, 2201);
     assert_eq!(rounds(&engine), 2);
+    engine.active.as_mut().unwrap().infantry_rocket_state.slots[1] = None;
+    equip_launcher(&mut engine, 1);
+    launch(&mut engine, 17, 1, 511, 2202);
+    assert_eq!(rounds(&engine), 2);
+}
+
+#[test]
+fn underbarrel_third_budget_is_not_installed_on_record_failure() {
+    let mut engine = fixture();
+    engine.underbarrel_launchers = Some(Arc::new(
+        underbarrel_launchers::tests::synthetic_upgraded_catalog(),
+    ));
+    launch(&mut engine, 17, 0, 511, 1000);
+    equip_launcher(&mut engine, 1);
+    launch(&mut engine, 17, 1, 511, 1100);
+    equip_launcher(&mut engine, 2);
+    let bytes = wire(&engine, 17, 2, 511);
+    engine.max_log = engine.written;
+    assert_eq!(
+        dispatch(&mut engine, &bytes, 1200).err(),
+        Some("log_limit_reached")
+    );
+    assert!(!state(&engine).occupies(2));
+    assert_eq!(
+        state(&engine).underbarrel_budgets.iter().flatten().count(),
+        2
+    );
+    for group in [0, 1] {
+        equip_launcher(&mut engine, group);
+        assert_eq!(rounds(&engine), 2);
+    }
 }
 
 #[test]

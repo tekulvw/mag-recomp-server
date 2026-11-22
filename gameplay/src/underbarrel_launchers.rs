@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const ATTACHMENT_SLOT: usize = 17;
-pub(crate) const MAX_VARIANTS_PER_FACTION: usize = 2;
+pub(crate) const MAX_VARIANTS_PER_FACTION: usize = 3;
 const FACTION_COUNT: usize = 3;
 const APPLICATION: u32 = 20231;
 const ELF: &str = "0089f0d6d17e48533ce7ff8d943dddd03487b925e7b04a1a055bfb907568694c";
@@ -169,7 +169,8 @@ impl Catalog {
             serde_json::from_slice(raw).map_err(|_| "invalid_underbarrel_launcher_rules")?;
         let expected = match doc.schema.as_str() {
             "mag_retail_underbarrel_launchers_v1" => FACTION_COUNT,
-            "mag_retail_underbarrel_launchers_v2" => FACTION_COUNT * MAX_VARIANTS_PER_FACTION,
+            "mag_retail_underbarrel_launchers_v2" => FACTION_COUNT * 2,
+            "mag_retail_underbarrel_launchers_v3" => FACTION_COUNT * MAX_VARIANTS_PER_FACTION,
             _ => return Err("underbarrel_launcher_source_mismatch"),
         };
         if doc.variants.len() != expected {
@@ -190,7 +191,10 @@ impl Catalog {
             let stock = index < FACTION_COUNT;
             if usize::from(variant.faction) != faction
                 || !variant.matches(items, &doc.ammo.name, stock)
-                || (!stock && variant.reuses_either_item(doc.variants[faction]))
+                || doc.variants[faction..index]
+                    .iter()
+                    .step_by(FACTION_COUNT)
+                    .any(|prior| variant.reuses_either_item(*prior))
             {
                 return Err("underbarrel_launcher_role_mismatch");
             }
@@ -261,9 +265,9 @@ impl Variant {
             .saturating_mul(self.initial_magazine_count)
     }
 
-    fn reuses_either_item(self, stock: Self) -> bool {
-        self.host_item_id == stock.host_item_id
-            || self.attachment_item_id == stock.attachment_item_id
+    fn reuses_either_item(self, prior: Self) -> bool {
+        self.host_item_id == prior.host_item_id
+            || self.attachment_item_id == prior.attachment_item_id
     }
 
     fn matches(self, items: &ItemCatalog, ammo_name: &str, stock: bool) -> bool {
@@ -432,13 +436,15 @@ pub(crate) mod tests {
 
     pub(crate) fn synthetic_upgraded_catalog() -> Catalog {
         let mut catalog = synthetic_catalog();
-        let mut upgraded = catalog.variants.clone();
-        for variant in &mut upgraded {
-            variant.host_item_id += 10;
-            variant.attachment_item_id += 10;
-            variant.refire_seconds = 0.75;
+        let stock = catalog.variants.clone();
+        for (offset, refire_seconds) in [(10, 0.75), (20, 1.0)] {
+            catalog.variants.extend(stock.iter().map(|variant| Variant {
+                host_item_id: variant.host_item_id + offset,
+                attachment_item_id: variant.attachment_item_id + offset,
+                refire_seconds,
+                ..*variant
+            }));
         }
-        catalog.variants.extend(upgraded);
         catalog
     }
 
@@ -516,10 +522,9 @@ pub(crate) mod tests {
         }}});
         let mut bullets = serde_json::Map::new();
         let mut variants = Vec::new();
-        for upgrade in [false, true] {
+        for ordinal in [10, 20, 30] {
             for faction in 0..3 {
                 let namespace = format!("FactionItemList{}", faction + 1);
-                let ordinal = if upgrade { 20 } else { 10 };
                 let host_id = (faction + 1) * 1024 + ordinal + 50;
                 let host_ref = format!("{namespace}:{ordinal}");
                 let launcher_ref = format!("{namespace}:{}", ordinal + 1);
@@ -561,6 +566,14 @@ pub(crate) mod tests {
                     "refire_seconds":0.5,"reload_seconds":2}));
             }
         }
+        // Keep the alternate pairing valid in the raw item list so each
+        // duplicate check depends on the launcher catalog's identity rule.
+        for (host, other) in [(3, 6), (6, 3)] {
+            let host = format!("synthetic_host_{}", variants[host]["host_item_id"]);
+            let other = format!("synthetic_launcher_{}", variants[other]["host_item_id"]);
+            items["definitions"]["weapons"][host]["parameters"]["attachment_list"]["alternate"] =
+                json!({"WeaponAttachment":{"name":other}});
+        }
         let item_bytes = serde_json::to_vec(&items).unwrap();
         let source = format!("{:x}", Sha256::digest(&item_bytes));
         let marker = "a".repeat(64);
@@ -592,7 +605,7 @@ pub(crate) mod tests {
             )
         };
         let full_items = bind_items(&combat);
-        let absent_host_id = variants[5]["host_item_id"].as_u64().unwrap().to_string();
+        let absent_host_id = variants[8]["host_item_id"].as_u64().unwrap().to_string();
         combat["bullets"]
             .as_object_mut()
             .unwrap()
@@ -610,9 +623,12 @@ pub(crate) mod tests {
         };
         assert_eq!(load(&rules, &full_items).unwrap().variants().len(), 3);
         rules["schema"] = json!("mag_retail_underbarrel_launchers_v2");
+        rules["variants"] = json!(&variants[..6]);
+        assert_eq!(load(&rules, &incomplete_items).unwrap().variants().len(), 6);
+        rules["schema"] = json!("mag_retail_underbarrel_launchers_v3");
         rules["variants"] = json!(variants);
         let loaded = load(&rules, &full_items).unwrap();
-        assert_eq!(loaded.variants().len(), 6);
+        assert_eq!(loaded.variants().len(), 9);
         for variant in loaded.variants() {
             assert_eq!(
                 loaded.variant(
@@ -644,10 +660,19 @@ pub(crate) mod tests {
 
         let mut wrong_attachment = variants[5].clone();
         wrong_attachment["attachment_item_id"] = variants[2]["attachment_item_id"].clone();
+        let mut reused_host = variants[6].clone();
+        reused_host["host_item_id"] = variants[3]["host_item_id"].clone();
+        let mut reused_attachment = variants[6].clone();
+        reused_attachment["attachment_item_id"] = variants[3]["attachment_item_id"].clone();
         for (index, bad) in [
             (3, variants[0].clone()),
             (4, variants[5].clone()),
             (5, wrong_attachment),
+            (6, variants[3].clone()),
+            (7, variants[1].clone()),
+            (8, variants[7].clone()),
+            (6, reused_host),
+            (6, reused_attachment),
         ] {
             let mut altered = rules.clone();
             altered["variants"][index] = bad;

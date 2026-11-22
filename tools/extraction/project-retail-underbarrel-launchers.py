@@ -94,12 +94,12 @@ def native_witness(elf):
 
 
 def upgraded_host(namespace, original, grant, weapons):
-    require(grant['Available'] is True, 'original tier-two rifle unlock unavailable')
+    require(grant['Available'] is True, 'original rifle unlock unavailable')
     names = {entry['element'] for entry in grant['Equipment'].values()}
     matches = [(ordinal, row['id']) for ordinal, row in original.items()
                if row.get('item_type') == 'kWeapon' and row.get('id') in names
                and weapons.get(row['id'], {}).get('category') == 'kWepCategoryAssaultRifle']
-    require(len(matches) == 1, 'expected one original tier-two rifle grant per faction')
+    require(len(matches) == 1, 'expected one original rifle grant per faction')
     ordinal, name = matches[0]
     return namespace + ':' + ordinal.removeprefix('ItemListData'), name
 
@@ -116,7 +116,11 @@ def inventory_bit(inventory, purchases, faction, item, ref, name):
 
 
 def project(catalog_raw, bindings_raw, bootstrap_raw, purchases_raw, armory_raw, member, native,
-            *, include_tier2_hosts=False):
+            *, include_tier2_hosts=False, include_all_unlocked_hosts=False):
+    require(not (include_tier2_hosts and include_all_unlocked_hosts), 'choose one host selection')
+    host_skill_keys = ('MagCharacterSkill1',) if include_tier2_hosts else ()
+    if include_all_unlocked_hosts:
+        host_skill_keys = ('MagCharacterSkill1', 'MagCharacterSkill26')
     require(sha(bootstrap_raw) == SOURCE['COMBAT']['BOOTSTRAP_SHA256'], 'unreviewed retail bootstrap')
     catalog, ids, members = SOURCE['require_item_binding'](catalog_raw, bindings_raw, member)
     bootstrap, purchases, armory = map(parse, (bootstrap_raw, purchases_raw, armory_raw))
@@ -134,11 +138,12 @@ def project(catalog_raw, bindings_raw, bootstrap_raw, purchases_raw, armory_raw,
     require(purchases['schema_version'] == 2 and purchases['application_id'] == 20231
             and skill == purchases['table']['Skills'][skill_key]['MagCharacterSkill'],
             'original launcher skill differs')
-    host_skill_key = 'MagCharacterSkill1'
-    if include_tier2_hosts:
+    host_skills = {}
+    for host_skill_key in host_skill_keys:
         host_skill = skills['Skills'][host_skill_key]['MagCharacterSkill']
         require(host_skill == purchases['table']['Skills'][host_skill_key]['MagCharacterSkill'],
-                'original tier-two rifle skill differs')
+                f'original rifle skill differs for {host_skill_key}')
+        host_skills[host_skill_key] = host_skill
     members[BASE['SCRIPT_ROOT'] + skills_file] = sha(member(BASE['SCRIPT_ROOT'] + skills_file))
     tables = {
         group: BASE['indexed_definitions'](BASE['authored_table'](member, file, kind + 'Table'), kind)
@@ -154,16 +159,16 @@ def project(catalog_raw, bindings_raw, bootstrap_raw, purchases_raw, armory_raw,
     refs = {wire: ref for ref, wire in ids.items()}
     inventory = {row['wire_id']: row for row in armory['items']}
     variants, witnesses, ammo_names = [], [], set()
-    roles = [(False, faction, color) for faction, color in enumerate(('Green', 'Black', 'Red'))]
-    if include_tier2_hosts:
-        roles += [(True, faction, color) for _, faction, color in roles]
-    for upgraded, faction, color in roles:
+    factions = ('Green', 'Black', 'Red')
+    roles = [(host_skill_key, faction, color) for host_skill_key in (None, *host_skill_keys)
+             for faction, color in enumerate(factions)]
+    for host_skill_key, faction, color in roles:
         namespace = f'FactionItemList{faction + 1}'
         original = source_lists[namespace]['items']
-        if upgraded:
-            host_ref, host_name = upgraded_host(namespace, original, host_skill[color], tables['weapons'])
+        if host_skill_key is not None:
+            grant = host_skills[host_skill_key][color]
+            host_ref, host_name = upgraded_host(namespace, original, grant, tables['weapons'])
             host_id = ids[host_ref]
-            require(host_id != variants[faction]['host_item_id'], 'tier-two rifle must differ from stock')
             host_bit = inventory_bit(inventory, purchases, faction, host_id, host_ref, host_name)
         else:
             host_id = stock[faction]['items'][0]
@@ -191,15 +196,16 @@ def project(catalog_raw, bindings_raw, bootstrap_raw, purchases_raw, armory_raw,
         require(skill[color]['Available'] is True
                 and name in {entry['element'] for entry in skill[color]['Equipment'].values()},
                 'original launcher unlock binding differs')
-        if upgraded:
-            require(item != variants[faction]['attachment_item_id'], 'tier-two launcher must differ from stock')
+        require(all(host_id != prior['host_item_id'] and item != prior['attachment_item_id']
+                    for prior in variants[faction::len(factions)]),
+                'rifle and launcher must each be distinct within the faction')
         variants.append({'faction': faction, 'host_item_id': host_id, 'attachment_item_id': item,
                          **project_weapon(host, attachment, weapon)})
         witness = {'host_ref': host_ref, 'attachment_ref': ref, 'available_bit': bit,
                    'host_definition_sha256': sha(encode(host)),
                    'attachment_definition_sha256': sha(encode(attachment)),
                    'launcher_definition_sha256': sha(encode(weapon))}
-        if upgraded:
+        if host_skill_key is not None:
             witness.update(host_skill=host_skill_key, host_available_bit=host_bit)
         witnesses.append(witness)
         ammo_names.add(weapon['ammo_name'])
@@ -210,7 +216,7 @@ def project(catalog_raw, bindings_raw, bootstrap_raw, purchases_raw, armory_raw,
     tokens, aliases = ROCKETS['project_tokens'](member(ROCKETS['TOKEN_OVERRIDE']), [name])
     require(tokens[name] == catalog['definitions']['projectile_ammo'][name]['native_token_u32'],
             'original launcher ammo token differs')
-    version = 2 if include_tier2_hosts else 1
+    version = 1 + len(host_skill_keys)
     rules = {
         'schema': f'mag_retail_underbarrel_launchers_v{version}', 'application_id': 20231, 'attachment_slot': 17,
         'source': {'retail_elf_sha256': SOURCE['RETAIL_ELF_SHA256'],
@@ -232,7 +238,9 @@ def main():
     for name in (*input_names, 'output', 'proof-output'):
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--check', action='store_true')
-    parser.add_argument('--include-tier2-hosts', action='store_true')
+    hosts = parser.add_mutually_exclusive_group()
+    hosts.add_argument('--include-tier2-hosts', action='store_true')
+    hosts.add_argument('--include-all-unlocked-hosts', action='store_true')
     args = parser.parse_args()
     inputs = [getattr(args, name.replace('-', '_')) for name in input_names]
     try:
@@ -243,12 +251,15 @@ def main():
         game = SOURCE['NATIVE']['Psarc'](raw)
         rules, proof = project(*(path.read_bytes() for path in inputs[2:]),
                                lambda name: SOURCE['archive_member'](game, name), native_witness(elf),
-                               include_tier2_hosts=args.include_tier2_hosts)
+                               include_tier2_hosts=args.include_tier2_hosts,
+                               include_all_unlocked_hosts=args.include_all_unlocked_hosts)
         SOURCE['write_outputs'](inputs, [(args.output, encode(rules)), (args.proof_output, encode(proof))],
                                 check=args.check)
     except (KeyError, ValueError, TypeError, OSError) as exc:
         parser.error(str(exc))
-    if args.include_tier2_hosts:
+    if args.include_all_unlocked_hosts:
+        print('Verified nine original stock and unlocked rifle underbarrel launchers')
+    elif args.include_tier2_hosts:
         print('Verified six original stock and tier-two rifle underbarrel launchers')
     else:
         print('Verified three original stock rifle underbarrel launchers')

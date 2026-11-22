@@ -23,4 +23,11 @@ all six launchers share the same ammo definition. Use the same switch with
 `--check` for these outputs. The worker also needs ordinary firearm projections
 for the three tier-two hosts before it can load the six-pair catalog.
 
+Use `--include-all-unlocked-hosts` to generate
+`mag_retail_underbarrel_launchers_v3`. It also includes each faction's
+tier-four assault rifle and compatible launcher. The nine-pair catalog
+requires ordinary firearm projections for all nine hosts. Choose one selector
+when generating or checking a catalog. With no selector, the tool produces
+the three-pair version-one files.
+
 The shared ammo record preserves authored collision, weapon strategy, physical, timing and damage fields. In particular, the impact damage and detonation timer fields are authored values. Their presence alone does not define runtime contact, bounce, damage or timeout semantics. This tool performs offline extraction and adds no gameplay admission.

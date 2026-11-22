@@ -1,10 +1,11 @@
 # Rifle underbarrel launchers
 
 The optional retail path accepts the three stock-rifle launcher pairs in the
-version-one catalog. The opt-in version-two catalog also covers the three
-tier-two rifle pairs. Its worker configuration requires ordinary firearm
-projections for those hosts. Both catalogs are generated from owner-supplied
-retail inputs by `tools/extraction/project-retail-underbarrel-launchers.py`.
+version-one catalog. Version two adds the three tier-two rifle pairs, and
+version three adds the three tier-four rifle pairs. Worker configuration
+requires ordinary firearm projections for the included hosts. Generate the
+catalogs from owner-supplied retail inputs with
+`tools/extraction/project-retail-underbarrel-launchers.py`.
 Keep the generated rules outside the public source.
 Set `underbarrel_launchers` in Acquisition configuration, or
 `core.underbarrel_launchers` in Domination configuration, to that file.
