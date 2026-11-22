@@ -609,7 +609,17 @@ fn partial_drain_keeps_later_damage_ordered_after_the_original_heal_leaves_the_f
         .collect();
     let first = e.drain_shared(budget, 3).unwrap();
     assert_eq!(first.len(), 32);
-    assert_eq!(e.active.as_ref().unwrap().pending_shared.len(), 1);
+    // The committed inherited tier joins the FIFO after the existing heal and
+    // damage frames. Only one of the two remaining packets carries health.
+    let pending = &e.active.as_ref().unwrap().pending_shared;
+    assert_eq!(pending.len(), 2);
+    assert_eq!(
+        pending
+            .iter()
+            .filter(|wire| damage_field(wire, e.wire_profile).is_some())
+            .count(),
+        1
+    );
     queue_damage(&mut e, 2);
     assert!(dispatch_update(&mut e, 4850).is_empty());
     assert_eq!(hp(&e), 200);

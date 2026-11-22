@@ -1265,6 +1265,7 @@ pub struct Engine<W: Write> {
     infantry_rockets: Option<std::sync::Arc<infantry_rockets::Catalog>>,
     guided_launchers: Option<std::sync::Arc<guided_launchers::Catalog>>,
     guided_warnings: guided_launcher_warnings::Ledger,
+    inherited_leadership: inherited_leadership::State,
     underbarrel_launchers: Option<std::sync::Arc<underbarrel_launchers::Catalog>>,
     smoke_grenades: Option<std::sync::Arc<smoke_grenades::Catalog>>,
     gas_cooldowns: active_ability_gas_world::GasCooldowns,
@@ -2315,3 +2316,5 @@ mod script_objective_reward_tests;
 
 #[cfg(test)]
 mod objective_action_timing_event_tests;
+
+mod inherited_leadership;

@@ -331,7 +331,7 @@ impl LeadershipPlan {
     }
 }
 impl Active {
-    fn leadership_scope(&self) -> (u32, u32, u16) {
+    pub(crate) fn leadership_scope(&self) -> (u32, u32, u16) {
         let generation = match self.life {
             CharacterLife::Alive { generation, .. }
             | CharacterLife::Incapacitated { generation, .. }
@@ -343,6 +343,11 @@ impl Active {
             generation,
             self.squad_catalog.squad_index(),
         )
+    }
+    pub(crate) fn committed_inherited_leadership(&self) -> u8 {
+        self.leadership
+            .filter(|cache| cache.scope == self.leadership_scope())
+            .map_or(0, |cache| cache.state.level())
     }
     fn leadership_participant(&self, role: HeldLeadershipRole) -> Option<PassiveParticipant> {
         let position = self.tracking.sample?.position;

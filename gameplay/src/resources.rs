@@ -238,6 +238,7 @@ impl<W: Write> Engine<W> {
             infantry_rockets: None,
             guided_launchers: None,
             guided_warnings: Default::default(),
+            inherited_leadership: Default::default(),
             smoke_grenades: None,
             gas_cooldowns: Default::default(),
             gas_grenades: None,
