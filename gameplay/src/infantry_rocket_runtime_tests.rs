@@ -70,6 +70,209 @@ pub(crate) fn launch(engine: &mut Engine<Vec<u8>>, slot: u16, power: u32, now: u
     assert!(state(engine).occupies(slot as u8));
 }
 
+pub(super) fn lethal_target(engine: &mut Engine<Vec<u8>>) {
+    let victim = engine.peers.get_mut("synthetic-rocket-target").unwrap();
+    victim.life = CharacterLife::Alive {
+        generation: 4,
+        health_quarter_points: 4,
+    };
+    victim.last_damage.health_quarter_points = 4;
+}
+
+pub(super) fn assert_rocket_death(engine: &Engine<Vec<u8>>, expected: &[u8]) {
+    let victim = &engine.peers["synthetic-rocket-target"];
+    assert_eq!(victim.last_damage.health_quarter_points, 0);
+    let notices: Vec<_> = victim
+        .pending_notifications
+        .iter()
+        .filter_map(|publication| match publication {
+            match_flow::Publication::Application(wire) if wire.starts_with(&[1, 255]) => {
+                Some(wire.as_slice())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(notices, [expected]);
+}
+
+#[test]
+fn rocket_death_stock_contact_keeps_launch_item_after_shooter_death() {
+    let mut engine = fixture();
+    lethal_target(&mut engine);
+    launch(&mut engine, 3, 64, 1000);
+    assert_eq!(flight(&engine, 3).source.item, 1089);
+    let actor = engine.active.as_mut().unwrap();
+    actor.life = CharacterLife::AwaitingRespawn { generation: 4 };
+    actor.spawned_loadout.as_mut().unwrap().inventories[0].slots[3] = None;
+    engine
+        .tick_infantry_rockets(Duration::from_millis(1500), 1)
+        .unwrap();
+    // Independent 01ff literal: attacker0, defender1, Weapon2, index1089, flags0.
+    assert_rocket_death(&engine, &[1, 255, 0, 0, 0, 1, 2, 0, 0, 4, 65, 0]);
+    engine
+        .tick_infantry_rockets(Duration::from_millis(1501), 1)
+        .unwrap();
+    assert_rocket_death(&engine, &[1, 255, 0, 0, 0, 1, 2, 0, 0, 4, 65, 0]);
+}
+
+#[test]
+fn rocket_death_record_refusal_preserves_health_notice_and_flight() {
+    let mut engine = fixture();
+    lethal_target(&mut engine);
+    launch(&mut engine, 3, 64, 1000);
+    let queue = engine.peers["synthetic-rocket-target"]
+        .pending_shared
+        .clone();
+    let limit = engine.max_log;
+    engine.max_log = engine.written;
+    assert_eq!(
+        engine
+            .tick_infantry_rockets(Duration::from_millis(1500), 1)
+            .err(),
+        Some("log_limit_reached")
+    );
+    let victim = &engine.peers["synthetic-rocket-target"];
+    assert_eq!(victim.last_damage.health_quarter_points, 4);
+    assert_eq!(victim.pending_shared, queue);
+    assert!(victim.pending_notifications.is_empty());
+    assert!(state(&engine).slots[3].as_ref().unwrap().cleanup.is_none());
+    engine.max_log = limit;
+    assert_eq!(
+        engine
+            .tick_infantry_rockets(Duration::from_millis(1501), 1)
+            .err(),
+        Some("recorder_unavailable")
+    );
+    assert_eq!(
+        engine.peers["synthetic-rocket-target"]
+            .last_damage
+            .health_quarter_points,
+        4
+    );
+    assert!(
+        engine.peers["synthetic-rocket-target"]
+            .pending_notifications
+            .is_empty()
+    );
+}
+
+#[test]
+fn rocket_death_full_notice_fifo_defers_entire_terminal_then_health_precedes_notice() {
+    let mut engine = fixture();
+    lethal_target(&mut engine);
+    launch(&mut engine, 3, 64, 1000);
+    let victim = engine.peers.get_mut("synthetic-rocket-target").unwrap();
+    for _ in 0..128 {
+        victim
+            .pending_notifications
+            .push_back(match_flow::Publication::Application(vec![9]));
+    }
+    engine
+        .tick_infantry_rockets(Duration::from_millis(1500), 1)
+        .unwrap();
+    assert_eq!(
+        engine.peers["synthetic-rocket-target"]
+            .last_damage
+            .health_quarter_points,
+        4
+    );
+    assert_eq!(
+        engine.peers["synthetic-rocket-target"]
+            .pending_notifications
+            .len(),
+        128
+    );
+    assert!(audit(&engine, "infantry_rocket_terminal").is_empty());
+    assert!(state(&engine).slots[3].as_ref().unwrap().cleanup.is_none());
+    engine
+        .peers
+        .get_mut("synthetic-rocket-target")
+        .unwrap()
+        .pending_notifications
+        .clear();
+    engine
+        .tick_infantry_rockets(Duration::from_millis(1501), 1)
+        .unwrap();
+    assert_rocket_death(&engine, &[1, 255, 0, 0, 0, 1, 2, 0, 0, 4, 65, 0]);
+    let terminal = audit(&engine, "infantry_rocket_terminal");
+    let health = terminal[0]["effects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|effect| effect["character_id"] == 0x0380_0001u32)
+        .unwrap()["damage_publication_hex"]
+        .as_str()
+        .unwrap();
+    // Pending reliable health prevents the application FIFO from overtaking it.
+    assert!(
+        engine
+            .drain_notifications(Vec::new(), 1)
+            .unwrap()
+            .is_empty()
+    );
+    let mut messages = engine.drain_shared(Vec::new(), 1).unwrap();
+    messages.extend(engine.drain_shared(Vec::new(), 1).unwrap());
+    let victim: Vec<_> = messages
+        .iter()
+        .filter(|m| m.reservation_id == "synthetic-rocket-target")
+        .collect();
+    // The drain rewrites the sequence/NAK header, retaining the damage body.
+    let hp = victim
+        .iter()
+        .position(|m| m.payload_hex.get(20..) == health.get(20..))
+        .unwrap();
+    let notice = victim
+        .iter()
+        .position(|m| m.payload_hex == "01ff00000001020000044100")
+        .unwrap();
+    assert!(hp < notice);
+    assert_eq!(
+        victim
+            .iter()
+            .filter(|m| m.payload_hex == "01ff00000001020000044100")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn rocket_death_replaced_allocation_never_inherits_notice() {
+    let mut engine = fixture();
+    lethal_target(&mut engine);
+    launch(&mut engine, 3, 64, 1000);
+    engine.active.as_mut().unwrap().allocation_sequence += 1;
+    engine
+        .tick_infantry_rockets(Duration::from_millis(1500), 1)
+        .unwrap();
+    assert_eq!(
+        engine.peers["synthetic-rocket-target"]
+            .last_damage
+            .health_quarter_points,
+        4
+    );
+    assert!(
+        engine.peers["synthetic-rocket-target"]
+            .pending_notifications
+            .is_empty()
+    );
+    assert!(audit(&engine, "infantry_rocket_terminal").is_empty());
+    assert_eq!(
+        audit(&engine, "infantry_rocket_retired")[0]["reason"],
+        "stale_infantry_rocket_source"
+    );
+}
+
+#[test]
+fn rocket_death_constructor_preserves_signed_native_equipment_index() {
+    let mut engine = fixture();
+    launch(&mut engine, 3, 64, 1000);
+    let mut source = flight(&engine, 3).source.clone();
+    // Synthetic signed16 boundary, independent of the current low-valued items.
+    source.item = 0x8001;
+    let notice = engine.plan_rocket_death_notice(&source, 1, 1).unwrap();
+    assert_eq!(notice.audit()["payload_hex"], "01ff0000000102ffff800100");
+}
+
 #[test]
 fn infantry_rocket_authenticated_launch_retries_budget_refill_and_refire() {
     let mut engine = fixture();

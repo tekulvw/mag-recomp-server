@@ -9,6 +9,33 @@ fn fixture() -> Engine<Vec<u8>> {
     engine
 }
 
+#[test]
+fn rocket_death_underbarrel_uses_stock_and_upgraded_attachment_not_host() {
+    for (group, index) in [(0, 102), (2, 122)] {
+        let mut engine = fixture();
+        engine.underbarrel_launchers = Some(Arc::new(
+            underbarrel_launchers::tests::synthetic_upgraded_catalog(),
+        ));
+        equip_launcher(&mut engine, group);
+        tests::lethal_target(&mut engine);
+        launch(&mut engine, 17, 3, 511, 1000);
+        let flight = state(&engine).slots[3].as_ref().unwrap().flight.clone();
+        assert_eq!(flight.source.item, index);
+        equip_launcher(&mut engine, 1);
+        engine
+            .finish_infantry_rocket(
+                &flight,
+                [1.25, 2.5, 1.25],
+                "contact",
+                None,
+                Duration::from_millis(1500),
+                1,
+            )
+            .unwrap();
+        tests::assert_rocket_death(&engine, &[1, 255, 0, 0, 0, 1, 2, 0, 0, 0, index as u8, 0]);
+    }
+}
+
 fn equip_launcher(engine: &mut Engine<Vec<u8>>, group: usize) -> underbarrel_launchers::Variant {
     let catalog = engine.underbarrel_launchers.as_ref().unwrap();
     let actor = engine.active.as_mut().unwrap();

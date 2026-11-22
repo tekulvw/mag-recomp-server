@@ -372,6 +372,31 @@ impl<W: Write> Engine<W> {
         .map(Some)
     }
 
+    /// A queued projectile keeps the admitted launch equipment, even after an
+    /// equipment change, death or respawn of the same owning allocation.
+    pub(crate) fn plan_rocket_death_notice(
+        &self,
+        source: &hospital_rocket_runtime::LaunchSource,
+        victim: u16,
+        location: u8,
+    ) -> Result<CharacterEffectNotice, &'static str> {
+        if self.wire_profile.application_id() != 20231 {
+            return Err("unsupported_rocket_death_profile");
+        }
+        let attacker = self.hospital_rocket_blast_attacker(source)?;
+        // Retail 7dcad0/7dcae0 selects signed16 globalEqIdx; projectile+74
+        // retains it, then 108b97c..108b9d8 supplies Weapon2/index to damage.
+        self.character_effect_notice(CharacterEffectNoticeRequest {
+            world: source.world,
+            victim,
+            attacker,
+            source_type: 2,
+            source_index: i32::from(source.item as i16),
+            location,
+            mounted: protocol::VictimWasMounted::NoAssociatedVehicle,
+        })
+    }
+
     pub(crate) fn plan_character_effect_notice(
         &self,
         request: CharacterEffectNoticeRequest,

@@ -49,6 +49,33 @@ fn fixture() -> Engine<Vec<u8>> {
     )));
     engine
 }
+
+#[test]
+fn rocket_death_guided_and_dumb_keep_the_guided_launch_item() {
+    for target in [u32::MAX, 0x0180_0000] {
+        let mut engine = fixture();
+        tests::lethal_target(&mut engine);
+        let request = wire(&engine, 3, target);
+        assert!(!dispatch(&mut engine, &request, 1000).unwrap().is_empty());
+        let flight = engine.active.as_ref().unwrap().infantry_rocket_state.slots[3]
+            .as_ref()
+            .unwrap()
+            .flight
+            .clone();
+        assert_eq!(flight.source.item, 1099);
+        engine
+            .finish_infantry_rocket(
+                &flight,
+                [1.25, 2.5, 1.25],
+                "contact",
+                None,
+                Duration::from_millis(1500),
+                1,
+            )
+            .unwrap();
+        tests::assert_rocket_death(&engine, &[1, 255, 0, 0, 0, 1, 2, 0, 0, 4, 75, 0]);
+    }
+}
 fn wire(engine: &Engine<Vec<u8>>, slot: u16, target: u32) -> Vec<u8> {
     let player = engine.active.as_ref().unwrap().reservation.player;
     let mut bits = replication::BitWriter::with_profile(engine.wire_profile);
