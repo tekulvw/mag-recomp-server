@@ -819,7 +819,7 @@ fn saved_armor_edit_does_not_remove_current_life_damage_authority() {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum MachineGunAttachment {
+enum PrimaryAttachment {
     Compatible,
     Incompatible,
     Replacement,
@@ -829,40 +829,51 @@ enum MachineGunAttachment {
     MissingReplacement,
 }
 
-fn machine_gun_hit_fixture(
+fn machine_gun_hit_fixture(slot: Option<usize>, attachment: PrimaryAttachment) -> Engine<Vec<u8>> {
+    primary_attachment_hit_fixture(
+        slot,
+        attachment,
+        "kWepCategoryMachineGun",
+        "kAttachTypeBipod",
+    )
+}
+
+fn primary_attachment_hit_fixture(
     slot: Option<usize>,
-    attachment: MachineGunAttachment,
+    attachment: PrimaryAttachment,
+    category: &str,
+    kind: &str,
 ) -> Engine<Vec<u8>> {
     use sha2::{Digest, Sha256};
 
     let (mut raw, mut metadata) = combat_fixture_documents(false, 0.0, 0.0, None, false, false);
     let host = &mut raw["definitions"]["weapons"]["synthetic_rifle"]["parameters"];
     host["id"] = json!("synthetic_rifle");
-    host["category"] = json!("kWepCategoryMachineGun");
+    host["category"] = json!(category);
     host["attachment_list"] = match attachment {
-        MachineGunAttachment::Incompatible => json!({}),
-        _ => json!({"WeaponAttachment0":{"WeaponAttachment":{"name":"synthetic_bipod"}}}),
+        PrimaryAttachment::Incompatible => json!({}),
+        _ => json!({"WeaponAttachment0":{"WeaponAttachment":{"name":"synthetic_attachment"}}}),
     };
     raw["items"]["FactionItemList0:7"] = json!({
         "authored_ref":"FactionItemList0:7","faction_list":"FactionItemList0","local_ordinal":7,
-        "wire_item_id":null,"name":"synthetic_bipod","item_type":"kAttachmentItem",
-        "definition":{"group":"attachments","name":"synthetic_bipod"}
+        "wire_item_id":null,"name":"synthetic_attachment","item_type":"kAttachmentItem",
+        "definition":{"group":"attachments","name":"synthetic_attachment"}
     });
-    raw["definitions"]["attachments"]["synthetic_bipod"]["parameters"] = json!({
-        "id":"synthetic_bipod",
-        "attachment_type":if matches!(attachment, MachineGunAttachment::WrongType) {
+    raw["definitions"]["attachments"]["synthetic_attachment"]["parameters"] = json!({
+        "id":"synthetic_attachment",
+        "attachment_type":if matches!(attachment, PrimaryAttachment::WrongType) {
             "kAttachTypeScope"
         } else {
-            "kAttachTypeBipod"
+            kind
         },
-        "weapon_name":if matches!(attachment, MachineGunAttachment::Replacement) {
+        "weapon_name":if matches!(attachment, PrimaryAttachment::Replacement) {
             "synthetic_replacement"
         } else {
             ""
         }
     });
-    if matches!(attachment, MachineGunAttachment::MissingReplacement) {
-        raw["definitions"]["attachments"]["synthetic_bipod"]["parameters"]
+    if matches!(attachment, PrimaryAttachment::MissingReplacement) {
+        raw["definitions"]["attachments"]["synthetic_attachment"]["parameters"]
             .as_object_mut()
             .unwrap()
             .remove("weapon_name");
@@ -870,18 +881,18 @@ fn machine_gun_hit_fixture(
     let bytes = serde_json::to_vec(&raw).unwrap();
     metadata["provenance"]["catalog_sha256"] = json!(if matches!(
         attachment,
-        MachineGunAttachment::MismatchedSource
+        PrimaryAttachment::MismatchedSource
     ) {
         "0".repeat(64)
     } else {
         format!("{:x}", Sha256::digest(&bytes))
     });
-    let items = if matches!(attachment, MachineGunAttachment::Unbound) {
+    let items = if matches!(attachment, PrimaryAttachment::Unbound) {
         item_catalog::ItemCatalog::from_value_for_application(raw, synthetic_blast_rules(), 20231)
             .unwrap()
     } else {
         let path = std::env::temp_dir().join(format!(
-            "mag-synthetic-bipod-{}-{:?}-{slot:?}",
+            "mag-synthetic-primary-attachment-{}-{:?}-{slot:?}",
             std::process::id(),
             std::thread::current().id()
         ));
@@ -926,8 +937,8 @@ fn machine_gun_hit_fixture(
 
 #[test]
 fn native_machine_gun_hit_with_compatible_bipod_uses_host_ammo() {
-    let mut unmodified = machine_gun_hit_fixture(None, MachineGunAttachment::Compatible);
-    let mut attached = machine_gun_hit_fixture(Some(17), MachineGunAttachment::Compatible);
+    let mut unmodified = machine_gun_hit_fixture(None, PrimaryAttachment::Compatible);
+    let mut attached = machine_gun_hit_fixture(Some(17), PrimaryAttachment::Compatible);
     for engine in [&mut unmodified, &mut attached] {
         hit(engine, 55, 1000).unwrap();
         assert!(matches!(
@@ -944,7 +955,7 @@ fn native_machine_gun_hit_with_compatible_bipod_uses_host_ammo() {
 
 #[test]
 fn native_machine_gun_hit_rejects_unqualified_attachments() {
-    use MachineGunAttachment::*;
+    use PrimaryAttachment::*;
     for (slot, attachment) in [
         (16, Compatible),
         (17, Incompatible),
@@ -979,7 +990,7 @@ fn native_machine_gun_hit_rejects_unqualified_attachments() {
 
 #[test]
 fn native_machine_gun_hit_does_not_admit_a_bipod_for_a_mounted_actor() {
-    let mut engine = machine_gun_hit_fixture(Some(17), MachineGunAttachment::Compatible);
+    let mut engine = machine_gun_hit_fixture(Some(17), PrimaryAttachment::Compatible);
     let seat = domination_helo::PassengerSeat {
         object_index: 0,
         seat: 0,
@@ -1002,4 +1013,71 @@ fn native_machine_gun_hit_does_not_admit_a_bipod_for_a_mounted_actor() {
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
             .any(|entry| entry["gameplay_denial"] == "unsupported_bullet_attachment")
     );
+}
+
+#[test]
+fn native_assault_rifle_hit_with_compatible_suppressor_uses_host_ammo() {
+    for slot in [None, Some(16)] {
+        let mut engine = primary_attachment_hit_fixture(
+            slot,
+            PrimaryAttachment::Compatible,
+            "kWepCategoryAssaultRifle",
+            "kAttachTypeSuppressor",
+        );
+        hit(&mut engine, 55, 1000).unwrap();
+        assert_eq!(
+            victim(&engine).life.damage_health(),
+            Some((4, 240)),
+            "{slot:?}"
+        );
+        assert_eq!(victim(&engine).last_damage.last_location_and_type, 0x13);
+        assert!(kills(&engine).is_empty());
+    }
+}
+
+#[test]
+fn native_assault_rifle_hit_preserves_unqualified_firepoint_denials() {
+    use PrimaryAttachment::*;
+    for (slot, attachment, category, mounted) in [
+        (15, Compatible, "kWepCategoryAssaultRifle", false),
+        (17, Compatible, "kWepCategoryAssaultRifle", false),
+        (16, Compatible, "kWepCategoryMachineGun", false),
+        (16, Compatible, "kWepCategoryAssaultRifle", true),
+        (16, Incompatible, "kWepCategoryAssaultRifle", false),
+        (16, Replacement, "kWepCategoryAssaultRifle", false),
+        (16, WrongType, "kWepCategoryAssaultRifle", false),
+        (16, Unbound, "kWepCategoryAssaultRifle", false),
+        (16, MismatchedSource, "kWepCategoryAssaultRifle", false),
+        (16, MissingReplacement, "kWepCategoryAssaultRifle", false),
+    ] {
+        let mut engine = primary_attachment_hit_fixture(
+            Some(slot),
+            attachment,
+            category,
+            "kAttachTypeSuppressor",
+        );
+        if mounted {
+            let seat = domination_helo::PassengerSeat {
+                object_index: 0,
+                seat: 0,
+            };
+            let active = engine.active.as_mut().unwrap();
+            active.helo_seat = Some(seat);
+            active.owner_fields.state = Some(seat.character_state());
+        }
+        hit(&mut engine, 55, 1000).unwrap();
+        assert_eq!(
+            victim(&engine).life.damage_health(),
+            Some((4, 400)),
+            "{slot} {attachment:?} {category} mounted={mounted}"
+        );
+        assert!(
+            std::str::from_utf8(&engine.writer)
+                .unwrap()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .any(|entry| entry["gameplay_denial"] == "unsupported_bullet_attachment"),
+            "{slot} {attachment:?} {category} mounted={mounted}"
+        );
+    }
 }

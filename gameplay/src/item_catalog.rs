@@ -31,10 +31,11 @@ pub struct BulletParameters {
     pub magazine_capacity: u8,
     pub initial_magazine_count: u8,
 }
-/// Native bipods with no replacement WeaponData preserve the host bullet profile.
+/// Qualified attachments with no replacement WeaponData preserve the host bullet profile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BulletAttachmentKind {
     Bipod,
+    Suppressor,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BodyParameters {
@@ -809,7 +810,7 @@ impl ItemCatalog {
             .get("parameters")
             .ok_or("missing_weapon_reticule_parameters")
     }
-    pub(crate) fn retail_primary_bipod(
+    pub(crate) fn retail_primary_attachment(
         &self,
         weapon_id: u16,
         attachment_id: u16,
@@ -823,7 +824,6 @@ impl ItemCatalog {
         if combat.provenance()["catalog_sha256"].as_str() != Some(source_sha256)
             || self.retail_authored_ref(weapon_id) != Some(bullet.authored_ref.as_str())
             || weapon["id"].as_str() != Some(bullet.name.as_str())
-            || weapon["category"].as_str() != Some("kWepCategoryMachineGun")
             || attachment["item_type"].as_str() != Some("kAttachmentItem")
             || attachment["definition"]["group"].as_str() != Some("attachments")
             || attachment["definition"]["name"].as_str() != Some(name)
@@ -835,11 +835,22 @@ impl ItemCatalog {
             .as_object()?
             .values()
             .any(|row| row["WeaponAttachment"]["name"].as_str() == Some(name));
-        (compatible
-            && parameters["id"].as_str() == Some(name)
-            && parameters["attachment_type"].as_str() == Some("kAttachTypeBipod")
-            && parameters["weapon_name"].as_str() == Some(""))
-        .then_some(BulletAttachmentKind::Bipod)
+        if !compatible
+            || parameters["id"].as_str() != Some(name)
+            || parameters["weapon_name"].as_str() != Some("")
+        {
+            return None;
+        }
+        match (
+            weapon["category"].as_str()?,
+            parameters["attachment_type"].as_str()?,
+        ) {
+            ("kWepCategoryAssaultRifle", "kAttachTypeSuppressor") => {
+                Some(BulletAttachmentKind::Suppressor)
+            }
+            ("kWepCategoryMachineGun", "kAttachTypeBipod") => Some(BulletAttachmentKind::Bipod),
+            _ => None,
+        }
     }
     pub fn character_blast_rules(&self) -> crate::blast_rules::CharacterBlastRules {
         self.character_blast_rules
