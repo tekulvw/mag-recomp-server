@@ -162,6 +162,9 @@ pub mod gas_grenades;
 mod ground_seats;
 mod ground_turrets;
 pub mod ground_vehicles;
+pub mod guided_launcher_motion;
+mod guided_launcher_warnings;
+pub mod guided_launchers;
 mod headless_sim;
 pub mod healing;
 mod helo_redeploy;
@@ -1260,6 +1263,8 @@ pub struct Engine<W: Write> {
     domination_gameplay: Option<domination_gameplay_provider::World>,
     hospital_rockets: Option<std::sync::Arc<hospital_rockets::Catalog>>,
     infantry_rockets: Option<std::sync::Arc<infantry_rockets::Catalog>>,
+    guided_launchers: Option<std::sync::Arc<guided_launchers::Catalog>>,
+    guided_warnings: guided_launcher_warnings::Ledger,
     underbarrel_launchers: Option<std::sync::Arc<underbarrel_launchers::Catalog>>,
     smoke_grenades: Option<std::sync::Arc<smoke_grenades::Catalog>>,
     gas_cooldowns: active_ability_gas_world::GasCooldowns,

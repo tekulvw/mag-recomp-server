@@ -57,6 +57,7 @@ struct Core {
     human_static_resupply: Option<PathBuf>,
     projectile_contacts: Option<PathBuf>,
     infantry_rockets: Option<PathBuf>,
+    guided_launchers: Option<PathBuf>,
     smoke_grenades: Option<PathBuf>,
     gas_grenades: Option<PathBuf>,
     flash_grenades: Option<PathBuf>,
@@ -318,6 +319,10 @@ impl Configuration {
                     "empty_domination_infantry_rocket_source_path",
                 ),
                 (
+                    &mut core.guided_launchers,
+                    "empty_domination_guided_launcher_source_path",
+                ),
+                (
                     &mut core.smoke_grenades,
                     "empty_domination_smoke_grenade_source_path",
                 ),
@@ -487,6 +492,14 @@ impl Configuration {
         self.core
             .as_ref()
             .and_then(|core| core.infantry_rockets.as_ref())
+            .map(|path| read(path, 1024 * 1024))
+            .transpose()
+    }
+
+    pub(crate) fn guided_launcher_source(&self) -> io::Result<Option<Vec<u8>>> {
+        self.core
+            .as_ref()
+            .and_then(|core| core.guided_launchers.as_ref())
             .map(|path| read(path, 1024 * 1024))
             .transpose()
     }
@@ -1191,6 +1204,18 @@ impl<W: Write> Engine<W> {
                 .map_err(io::Error::other)
             })
             .transpose()?;
+        let guided_launchers = config
+            .guided_launcher_source()?
+            .map(|source| {
+                validate_infantry_rocket_support(&world).map_err(io::Error::other)?;
+                crate::guided_launchers::Catalog::from_bytes(
+                    &source,
+                    &self.item_catalog,
+                    &native_elf,
+                )
+                .map_err(io::Error::other)
+            })
+            .transpose()?;
         let hospital_source = config.hospital_turret_source()?;
         let hospital_rockets = config
             .hospital_rocket_source()?
@@ -1290,6 +1315,12 @@ impl<W: Write> Engine<W> {
         if let Some(catalog) = underbarrel_launchers {
             self = self
                 .with_underbarrel_launchers(Arc::new(catalog))
+                .map_err(io::Error::other)?;
+        }
+        self.guided_launchers = None;
+        if let Some(catalog) = guided_launchers {
+            self = self
+                .with_guided_launchers(catalog)
                 .map_err(io::Error::other)?;
         }
         if let Some(catalog) = infantry_rockets {

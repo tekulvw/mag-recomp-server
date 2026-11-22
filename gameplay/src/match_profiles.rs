@@ -71,7 +71,9 @@ struct Loaded {
     hospital_rocket_source: Option<Arc<[u8]>>,
     hospital_rockets: Option<Arc<crate::hospital_rockets::Catalog>>,
     infantry_rocket_source: Option<Arc<[u8]>>,
+    guided_launcher_source: Option<Arc<[u8]>>,
     infantry_rockets: Option<Arc<crate::infantry_rockets::Catalog>>,
+    guided_launchers: Option<Arc<crate::guided_launchers::Catalog>>,
     smoke_grenade_source: Option<Arc<[u8]>>,
     gas_grenade_source: Option<Arc<[u8]>>,
     flash_grenade_source: Option<Arc<[u8]>>,
@@ -336,6 +338,7 @@ impl Registry {
                 acquisition,
                 acquisition_ground_turrets,
                 acquisition_rocket_source,
+                acquisition_guided_source,
                 acquisition_smoke_source,
                 acquisition_gas_source,
                 acquisition_flash_source,
@@ -376,6 +379,7 @@ impl Registry {
                     Some(Arc::new(setup)),
                     config.ground_turret_source()?.map(Arc::from),
                     config.infantry_rocket_source()?.map(Arc::from),
+                    config.guided_launcher_source()?.map(Arc::from),
                     config.smoke_grenade_source()?.map(Arc::from),
                     config.gas_grenade_source()?.map(Arc::from),
                     config.flash_grenade_source()?.map(Arc::from),
@@ -392,7 +396,7 @@ impl Registry {
                         "acquisition_gameplay_configuration_required"
                     }));
                 }
-                (None, None, None, None, None, None, None)
+                (None, None, None, None, None, None, None, None)
             };
             let damage = source
                 .character_damage_rules
@@ -415,6 +419,7 @@ impl Registry {
                 ground_turret_source,
                 hospital_rocket_source,
                 infantry_rocket_source,
+                guided_launcher_source,
                 smoke_grenade_source,
                 gas_grenade_source,
                 flash_grenade_source,
@@ -462,6 +467,7 @@ impl Registry {
                     ground_turret_source,
                     rocket_source,
                     config.infantry_rocket_source()?.map(Arc::from),
+                    config.guided_launcher_source()?.map(Arc::from),
                     config.smoke_grenade_source()?.map(Arc::from),
                     config.gas_grenade_source()?.map(Arc::from),
                     config.flash_grenade_source()?.map(Arc::from),
@@ -474,6 +480,7 @@ impl Registry {
                     acquisition_ground_turrets,
                     None,
                     acquisition_rocket_source,
+                    acquisition_guided_source,
                     acquisition_smoke_source,
                     acquisition_gas_source,
                     acquisition_flash_source,
@@ -542,7 +549,9 @@ impl Registry {
                     hospital_rocket_source,
                     hospital_rockets: None,
                     infantry_rocket_source,
+                    guided_launcher_source,
                     infantry_rockets: None,
+                    guided_launchers: None,
                     smoke_grenade_source,
                     gas_grenade_source,
                     flash_grenade_source,
@@ -782,6 +791,51 @@ impl Registry {
         self.profiles
             .values()
             .any(|profile| profile.infantry_rockets.is_some())
+    }
+
+    pub fn bind_guided_launchers(
+        &mut self,
+        items: &item_catalog::ItemCatalog,
+    ) -> Result<(), &'static str> {
+        for profile in self.profiles.values_mut() {
+            let Some(source) = profile.guided_launcher_source.as_ref() else {
+                continue;
+            };
+            match (
+                profile.summary.game_type,
+                &profile.acquisition,
+                &profile.domination,
+            ) {
+                (1, Some(setup), None) => {
+                    acquisition_gameplay_config::validate_infantry_rocket_support(setup)?
+                }
+                (2, None, Some(world)) => {
+                    domination_gameplay_config::validate_infantry_rocket_support(world)?
+                }
+                _ => return Err("guided_launcher_mode_required"),
+            }
+            if profile.damage.is_none() || profile.collision.is_none() || profile.vehicles.is_none()
+            {
+                return Err("guided_launcher_world_resources_required");
+            }
+            let objectives = profile
+                .objectives
+                .as_ref()
+                .ok_or("guided_launcher_objectives_required")?;
+            let catalog = crate::guided_launchers::Catalog::from_bytes(
+                source,
+                items,
+                &objectives.source().source_image_sha256,
+            )?;
+            profile.guided_launchers = Some(Arc::new(catalog));
+        }
+        Ok(())
+    }
+
+    pub fn has_guided_launchers(&self) -> bool {
+        self.profiles
+            .values()
+            .any(|profile| profile.guided_launchers.is_some())
     }
 
     /// Bind source-qualified hospital weapons before advertising profile readiness.
@@ -1186,11 +1240,15 @@ impl<W: Write> Engine<W> {
         registry.bind_hospital_turrets(&self.item_catalog)?;
         registry.bind_ground_turrets(&self.item_catalog)?;
         registry.bind_infantry_rockets(&self.item_catalog)?;
+        registry.bind_guided_launchers(&self.item_catalog)?;
         registry.bind_smoke_grenades(&self.item_catalog)?;
         registry.bind_gas_grenades(&self.item_catalog)?;
         registry.bind_flash_grenades(&self.item_catalog)?;
         registry.bind_underbarrel_launchers(&self.item_catalog)?;
         if self.dynamic_body_resources.is_none() {
+            if registry.has_guided_launchers() {
+                return Err("guided_launchers_require_dynamic_bodies");
+            }
             if registry.has_flash_grenades() {
                 return Err("flash_grenades_require_dynamic_bodies");
             }
@@ -1221,6 +1279,8 @@ impl<W: Write> Engine<W> {
             self.active_abilities = None;
             self.hospital_rockets = None;
             self.infantry_rockets = None;
+            self.guided_launchers = None;
+            self.guided_warnings = Default::default();
             self.smoke_grenades = None;
             self.gas_grenades = None;
             self.flash_grenades = None;
@@ -1348,6 +1408,8 @@ impl<W: Write> Engine<W> {
         };
         self.hospital_rockets = loaded.hospital_rockets;
         self.infantry_rockets = loaded.infantry_rockets;
+        self.guided_launchers = loaded.guided_launchers;
+        self.guided_warnings = Default::default();
         self.smoke_grenades = loaded.smoke_grenades;
         self.gas_grenades = loaded.gas_grenades;
         self.flash_grenades = loaded.flash_grenades;
@@ -2104,7 +2166,9 @@ mod tests {
                 hospital_rocket_source: None,
                 hospital_rockets: None,
                 infantry_rocket_source: None,
+                guided_launcher_source: None,
                 infantry_rockets: None,
+                guided_launchers: None,
                 smoke_grenade_source: None,
                 gas_grenade_source: None,
                 flash_grenade_source: None,

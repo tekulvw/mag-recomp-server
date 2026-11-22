@@ -18,6 +18,7 @@ const REQUEST_BYTES: usize = 57;
 pub(crate) struct State {
     slots: [Option<Box<Slot>>; projectile::MAX_PROJECTILE_SLOTS],
     budget: Option<LifeBudget>,
+    guided_budget: Option<LifeBudget>,
     underbarrel_budgets: [Option<LifeBudget>; underbarrel_launchers::MAX_VARIANTS_PER_FACTION],
 }
 
@@ -44,6 +45,7 @@ struct Flight {
     origin: [f64; 3],
     motion: FlightMotion,
     last_published: Duration,
+    guided_target: Option<crate::guided_launcher_warnings::Target>,
 }
 
 /// Both launchers share wire slots and atomic terminal publication. Equipment,
@@ -51,6 +53,7 @@ struct Flight {
 #[derive(Clone, Copy, Debug)]
 enum Variant {
     Rocket(RocketVariant),
+    Guided(crate::guided_launchers::Variant),
     Underbarrel {
         weapon: underbarrel_launchers::Variant,
         ammo: underbarrel_launchers::Authored,
@@ -61,6 +64,7 @@ enum Variant {
 impl Variant {
     fn item(self) -> u16 {
         match self {
+            Self::Guided(v) => Self::Rocket(v.base()).item(),
             Self::Rocket(v) => v.item_id,
             Self::Underbarrel { weapon, .. } => weapon.attachment_item_id,
         }
@@ -70,6 +74,7 @@ impl Variant {
     }
     fn weapon(self) -> infantry_rockets::Weapon {
         match self {
+            Self::Guided(v) => Self::Rocket(v.base()).weapon(),
             Self::Rocket(v) => v.weapon,
             Self::Underbarrel { weapon, .. } => infantry_rockets::Weapon {
                 magazine_size: weapon.magazine_capacity,
@@ -81,30 +86,35 @@ impl Variant {
     }
     fn token(self) -> u32 {
         match self {
+            Self::Guided(v) => Self::Rocket(v.base()).token(),
             Self::Rocket(v) => v.ammo_token,
             Self::Underbarrel { token, .. } => token,
         }
     }
     fn spine(self) -> [f64; 3] {
         match self {
+            Self::Guided(v) => Self::Rocket(v.base()).spine(),
             Self::Rocket(v) => v.flight.capsule_spine_local_xyz,
             Self::Underbarrel { ammo, .. } => ammo.capsule_height,
         }
     }
     fn radius(self) -> f64 {
         match self {
+            Self::Guided(v) => Self::Rocket(v.base()).radius(),
             Self::Rocket(v) => v.flight.radius_m,
             Self::Underbarrel { ammo, .. } => ammo.radius,
         }
     }
     fn speed(self) -> f32 {
         match self {
+            Self::Guided(v) => Self::Rocket(v.base()).speed(),
             Self::Rocket(v) => v.flight.speed_mps,
             Self::Underbarrel { ammo, .. } => ammo.launch_velocity,
         }
     }
     fn blast(self) -> hospital_rockets::Blast {
         match self {
+            Self::Guided(v) => Self::Rocket(v.base()).blast(),
             Self::Rocket(v) => hospital_rockets::Blast {
                 character_hp: v.blast.character_hp,
                 vehicle_hp: v.blast.vehicle_hp,
@@ -126,6 +136,7 @@ impl Variant {
     }
     fn vehicle_damage(self) -> item_catalog::TargetDamageParameters {
         match self {
+            Self::Guided(v) => Self::Rocket(v.base()).vehicle_damage(),
             Self::Rocket(v) => item_catalog::TargetDamageParameters {
                 amount: v.blast.vehicle_hp,
                 armor_pierce: 0.,
@@ -143,18 +154,21 @@ impl Variant {
 #[derive(Clone, Debug, PartialEq)]
 enum FlightMotion {
     Rocket(Motion),
+    Guided(crate::guided_launcher_motion::Motion),
     Ballistic(ballistic_projectile_motion::Motion<projectile_scene::OwnedObstacleId>),
 }
 impl FlightMotion {
     fn position(&self) -> [f64; 3] {
         match self {
             Self::Rocket(m) => m.position(),
+            Self::Guided(m) => m.position(),
             Self::Ballistic(m) => m.position(),
         }
     }
     fn advanced_at_ms(&self) -> u64 {
         match self {
             Self::Rocket(m) => m.advanced_at_ms(),
+            Self::Guided(m) => m.advanced_at_ms(),
             Self::Ballistic(m) => m.advanced_at_ms(),
         }
     }
@@ -196,6 +210,61 @@ fn equipped_underbarrel<'a>(
 }
 
 impl State {
+    pub(crate) fn guided_targets<'a>(
+        &'a self,
+        actor: &'a Active,
+        round: u64,
+    ) -> impl Iterator<Item = &'a crate::guided_launcher_warnings::Target> {
+        self.slots
+            .iter()
+            .flatten()
+            .filter(move |s| {
+                s.cleanup.is_none()
+                    && s.flight.source.allocation_sequence == actor.allocation_sequence
+                    && s.flight.source.reservation == actor.reservation.id
+                    && s.flight.source.world == actor.reservation.world
+                    && s.flight.source.player == actor.reservation.player
+                    && s.flight.source.round == round
+                    && s.flight.source.match_id == actor.reward_match_id
+                    && s.flight.source.character_id == actor.reservation.character.character_id
+                    && s.flight.source.team == actor.team()
+            })
+            .filter_map(|s| s.flight.guided_target.as_ref())
+    }
+    pub(crate) fn can_resupply_guided(
+        actor: &Active,
+        catalog: &crate::guided_launchers::Catalog,
+    ) -> bool {
+        crate::guided_launchers::owns_skill(actor)
+            && crate::guided_launchers::equipped(actor, catalog).is_some()
+    }
+    pub(crate) fn refill_guided_for(
+        actor: &Active,
+        catalog: &crate::guided_launchers::Catalog,
+        staged: Option<Self>,
+    ) -> Result<Option<Self>, &'static str> {
+        let CharacterLife::Alive { generation, .. } = actor.life else {
+            return Ok(staged);
+        };
+        let Some(v) = crate::guided_launchers::equipped(actor, catalog) else {
+            return Ok(staged);
+        };
+        let current = staged.as_ref().unwrap_or(&actor.infantry_rocket_state);
+        let Some(budget) = current
+            .guided_budget
+            .filter(|b| b.life == generation && b.item == v.item_id)
+        else {
+            return Ok(staged);
+        };
+        let rounds = budget.rounds.refilled();
+        if rounds == budget.rounds {
+            return Ok(staged);
+        }
+        let mut next = staged.unwrap_or_else(|| actor.infantry_rocket_state.clone());
+        next.guided_budget = Some(LifeBudget { rounds, ..budget });
+        Ok(Some(next))
+    }
+
     pub(crate) fn occupies(&self, slot: u8) -> bool {
         self.slots
             .get(usize::from(slot))
@@ -214,6 +283,9 @@ impl State {
             .map(|slot| {
                 let mut creation = slot.flight.creation;
                 creation.position = wire_position(slot.flight.motion.position());
+                if let FlightMotion::Guided(motion) = &slot.flight.motion {
+                    creation.rotation_xyzw = heading_quaternion(motion.heading());
+                }
                 creation.encode_with_profile(header(creation.slot, 1, timestamp), profile)
             })
             .collect()
@@ -317,15 +389,28 @@ impl<W: Write> Engine<W> {
         modifiers: &skill_catalog::OwnedModifiers,
     ) -> Result<LaunchDisposition, &'static str> {
         let variant = match request.ammo_index {
-            infantry_rockets::GEAR_SLOT => Variant::Rocket(
-                *equipped(
-                    actor,
-                    self.infantry_rockets
-                        .as_deref()
-                        .ok_or("infantry_rocket_rules_required")?,
-                )
-                .ok_or("infantry_rocket_weapon_unqualified")?,
-            ),
+            infantry_rockets::GEAR_SLOT => {
+                if let Some(v) = self
+                    .guided_launchers
+                    .as_deref()
+                    .and_then(|c| crate::guided_launchers::equipped(actor, c))
+                {
+                    if !crate::guided_launchers::owns_skill(actor) {
+                        return Err("guided_launcher_requires_owned_skill25");
+                    }
+                    Variant::Guided(*v)
+                } else {
+                    Variant::Rocket(
+                        *equipped(
+                            actor,
+                            self.infantry_rockets
+                                .as_deref()
+                                .ok_or("infantry_rocket_rules_required")?,
+                        )
+                        .ok_or("infantry_rocket_weapon_unqualified")?,
+                    )
+                }
+            }
             17 => {
                 let catalog = self
                     .underbarrel_launchers
@@ -413,7 +498,48 @@ impl<W: Write> Engine<W> {
             rotation[axis][2] * f64::from(speed) + f64::from(request.initial_velocity[axis])
         });
         let maximum_speed = velocity.into_iter().fold(0.0_f64, f64::hypot) * (1.0 + 1e-12);
+        let target = if matches!(variant, Variant::Guided(_)) && request.target_id != u32::MAX {
+            Some(self.guided_target(actor.reservation.world, request.target_id)?)
+        } else {
+            None
+        };
         let motion = match variant {
+            Variant::Guided(v) => {
+                let anchor = target
+                    .as_ref()
+                    .map(|t| {
+                        self.guided_anchor(t)
+                            .ok_or("guided_target_anchor_unavailable")
+                    })
+                    .transpose()?;
+                let range = if target.is_some() {
+                    self.guided_launchers
+                        .as_ref()
+                        .ok_or("guided_launcher_rules_required")?
+                        .guidance
+                        .guided_max_range_m
+                } else {
+                    v.steering.dumb_max_range_m
+                };
+                let seed = (actor.allocation_sequence as u32).wrapping_mul(0x9e37_79b9)
+                    ^ (self.round_number as u32).rotate_left(11)
+                    ^ (now.as_millis() as u32).rotate_left(17)
+                    ^ u32::from(player)
+                    ^ u32::from(slot);
+                FlightMotion::Guided(crate::guided_launcher_motion::Motion::launch(
+                    origin,
+                    velocity,
+                    [rotation[0][2], rotation[1][2], rotation[2][2]],
+                    millis(now)?,
+                    v.steering,
+                    v.flight.speed_mps,
+                    range,
+                    authored_millis(v.flight.lifetime_seconds)?,
+                    authored_millis(v.flight.armed_time_seconds)?,
+                    anchor,
+                    seed,
+                )?)
+            }
             Variant::Rocket(v) => FlightMotion::Rocket(Motion::launch(
                 origin,
                 velocity,
@@ -460,6 +586,7 @@ impl<W: Write> Engine<W> {
         };
         let current_budget = match underbarrel_index {
             Some(index) => state.underbarrel_budgets[index],
+            None if matches!(variant, Variant::Guided(_)) => state.guided_budget,
             None => state.budget,
         };
         let rounds = match current_budget {
@@ -497,7 +624,8 @@ impl<W: Write> Engine<W> {
         )?;
         let audit = json!({"type":"infantry_rocket_launch","source":source,"allocation_sequence":actor.allocation_sequence,"slot":slot,
             "origin":origin,"velocity":velocity,"gear":request.ammo_index,
-            "motion_authority":if variant.is_underbarrel() { "server_bounded_ballistic" } else { "server_straight" },
+            "motion_authority":if variant.is_underbarrel() { "server_bounded_ballistic" } else if matches!(variant,Variant::Guided(_)){"server_guided_or_unlocked_dumb"}else { "server_straight" },
+            "launch_target":request.target_id,
             "rounds_remaining":rounds.remaining()});
         let mut state = state.clone();
         let budget = Some(LifeBudget {
@@ -507,6 +635,8 @@ impl<W: Write> Engine<W> {
         });
         if let Some(index) = underbarrel_index {
             state.underbarrel_budgets[index] = budget;
+        } else if matches!(variant, Variant::Guided(_)) {
+            state.guided_budget = budget;
         } else {
             state.budget = budget;
         }
@@ -520,6 +650,7 @@ impl<W: Write> Engine<W> {
                 origin,
                 motion,
                 last_published: now,
+                guided_target: target,
             },
             cleanup: None,
         }));
@@ -634,7 +765,10 @@ impl Flight {
                 fields: projectile::ProjectileOwnerFields {
                     state,
                     position: Some(wire_position(position)),
-                    rotation_xyzw: None,
+                    rotation_xyzw: match &self.motion {
+                        FlightMotion::Guided(m) => Some(heading_quaternion(m.heading())),
+                        _ => None,
+                    },
                 },
             },
         }
@@ -645,9 +779,54 @@ impl Flight {
         &self,
         now_ms: u64,
         associated_character: Option<TargetKey>,
+        target_anchor: Option<[f64; 3]>,
         mut query: impl FnMut(CapsuleSweep) -> Result<Option<OwnedContact>, &'static str>,
     ) -> Result<Step, &'static str> {
         let spine = self.variant.spine();
+        if let FlightMotion::Guided(motion) = &self.motion {
+            use crate::guided_launcher_motion::{Advance as GuidedAdvance, Terminal as Reason};
+            return Ok(
+                match motion.advance(
+                    now_ms,
+                    || target_anchor,
+                    |start, end, heading| {
+                        query(CapsuleSweep {
+                            start,
+                            end,
+                            radius: self.variant.radius(),
+                            associated_character,
+                            spine: [spine.map(|v| -0.5 * v), spine.map(|v| 0.5 * v)],
+                            rotation: rigid_rotation(heading_quaternion(heading))?,
+                        })
+                        .map(|hit| {
+                            hit.map(|hit| Contact {
+                                fraction: hit.fraction,
+                                obstacle: hit,
+                            })
+                        })
+                    },
+                )? {
+                    GuidedAdvance::Flying(next) => Step::Move(FlightMotion::Guided(next)),
+                    GuidedAdvance::Terminal { position, reason } => match reason {
+                        Reason::Prearm => Step::Retire("guided_rocket_prearm_contact_unqualified"),
+                        Reason::Contact(contact) => Step::Explode {
+                            position: contact.center,
+                            reason: "contact",
+                            contact: Some(contact),
+                        },
+                        Reason::Age | Reason::Range => Step::Explode {
+                            position,
+                            reason: if matches!(reason, Reason::Age) {
+                                "age"
+                            } else {
+                                "range"
+                            },
+                            contact: None,
+                        },
+                    },
+                },
+            );
+        }
         if let FlightMotion::Ballistic(motion) = &self.motion {
             let advance = motion.advance(now_ms, |start, end| {
                 query(CapsuleSweep {
@@ -760,7 +939,10 @@ impl<W: Write> Engine<W> {
         now: Duration,
         wall: u64,
     ) -> Result<Vec<OutboundMessage>, &'static str> {
-        if self.infantry_rockets.is_none() && self.underbarrel_launchers.is_none() {
+        if self.infantry_rockets.is_none()
+            && self.underbarrel_launchers.is_none()
+            && self.guided_launchers.is_none()
+        {
             return Ok(Vec::new());
         }
         let mut flights = Vec::new();
@@ -826,6 +1008,7 @@ impl<W: Write> Engine<W> {
                         )?;
                         continue;
                     }
+                    flight.motion = next.clone();
                     let packet = (now.saturating_sub(flight.last_published) >= POSITION_INTERVAL
                         && self.infantry_publications_fit(flight.source.world, 1))
                     .then(|| flight.delta(next.position(), None, now, self.wire_profile))
@@ -910,7 +1093,15 @@ impl<W: Write> Engine<W> {
                         && body.target.key.id == u64::from(attacker))
                     .then_some(body.target.key)
                 });
-                flight.step(now_ms, associated, |query| scene.query(query, &mut budget))
+                flight.step(
+                    now_ms,
+                    associated,
+                    flight
+                        .guided_target
+                        .as_ref()
+                        .and_then(|t| self.guided_anchor(t)),
+                    |query| scene.query(query, &mut budget),
+                )
             })
             .collect())
     }
@@ -974,7 +1165,10 @@ impl<W: Write> Engine<W> {
         now: Duration,
         wall: u64,
     ) -> Result<(), &'static str> {
-        if !self.infantry_publications_fit(flight.source.world, 1) {
+        if !self.infantry_publications_fit(
+            flight.source.world,
+            1 + usize::from(self.guided_launchers.is_some()),
+        ) {
             return Ok(());
         }
         let packet =
@@ -1002,7 +1196,8 @@ impl<W: Write> Engine<W> {
         wall: u64,
     ) -> Result<Vec<OutboundMessage>, &'static str> {
         let world = flight.source.world;
-        if !self.infantry_publications_fit(world, 1) {
+        if !self.infantry_publications_fit(world, 1 + usize::from(self.guided_launchers.is_some()))
+        {
             return Ok(Vec::new());
         }
         let packet = flight.delta(position, Some(2), now, self.wire_profile)?;
@@ -1044,7 +1239,8 @@ impl<W: Write> Engine<W> {
                     let hospital_participant =
                         hospital && events::hospital_blast_damage_recipient(actor, world);
                     (base || hospital_participant).then_some(
-                        usize::from(base) * (1 + ground)
+                        usize::from(base)
+                            * (1 + ground + usize::from(self.guided_launchers.is_some()))
                             + usize::from(helo_participant) * helo
                             + usize::from(hospital_participant),
                     )
@@ -1242,6 +1438,12 @@ impl<W: Write> Engine<W> {
                     v.blast,
                     now,
                 )?,
+                Variant::Guided(v) => self.prepare_infantry_rocket_acquisition_ground(
+                    &flight.source,
+                    position,
+                    v.blast,
+                    now,
+                )?,
                 Variant::Underbarrel { .. } => self.prepare_underbarrel_acquisition_ground(
                     &flight.source,
                     position,
@@ -1273,3 +1475,21 @@ pub(crate) mod tests;
 #[cfg(test)]
 #[path = "underbarrel_launcher_runtime_tests.rs"]
 mod underbarrel_tests;
+
+fn heading_quaternion(heading: [f64; 3]) -> [f32; 4] {
+    if heading[2] < -0.999_999_9 {
+        return [0., 1., 0., 0.];
+    }
+    let w = ((1. + heading[2]) * 0.5).sqrt();
+    let scale = 2. * w;
+    [
+        (-heading[1] / scale) as f32,
+        (heading[0] / scale) as f32,
+        0.,
+        w as f32,
+    ]
+}
+
+#[cfg(test)]
+#[path = "guided_launcher_runtime_tests.rs"]
+pub(crate) mod guided_tests;

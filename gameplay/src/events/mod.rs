@@ -67,6 +67,7 @@ struct PlanningContext<'a, W: Write> {
 #[derive(Default)]
 struct EventPlan {
     session: SessionChanges,
+    guided_warnings: Option<crate::guided_launcher_warnings::Candidate>,
     objective_world: Option<objective_control::ObjectiveWorld>,
     ground_runtime: Option<acquisition_ground_runtime::Runtime>,
     helo_runtime: Option<domination_helo::FleetRuntime>,
@@ -380,6 +381,19 @@ fn plan_message<W: Write>(
             json!({"type":"protocol_info","protocol":info.protocol,"build":info.build,
             "accepted":info.protocol == protocol::ProtocolInfo::RETAIL_PROTOCOL}),
         ),
+        Ok(protocol::GameMessage::RocketLockState(report)) => {
+            if !ctx.accepted_client_route {
+                plan.gameplay_denial = Some("rocket_lock_requires_native_client_route");
+            } else {
+                match ctx.engine.plan_guided_lock(ctx.active, report, ctx.now) {
+                    Ok(candidate) => plan.guided_warnings = Some(candidate),
+                    Err(code) => plan.gameplay_denial = Some(code),
+                }
+            }
+            Ok(
+                json!({"type":"rocket_lock_state","target":report.target,"state":report.state,"accepted":plan.guided_warnings.is_some()}),
+            )
+        }
         Ok(protocol::GameMessage::Unknown { message_type, .. }) => {
             Ok(json!({"type":"unknown","message_type":message_type}))
         }
@@ -604,6 +618,60 @@ impl<W: Write> Engine<W> {
                 payload_hex: protocol::encode_hex(&score.encode_with_profile(self.wire_profile)?),
             });
         }
+        if self.guided_launchers.is_some() {
+            let mut invalidated = plan
+                .combat
+                .peer_lives
+                .iter()
+                .filter(|(_, life)| !life.is_alive())
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
+            if plan.combat.new_life.is_some_and(|life| !life.is_alive())
+                || plan.session.new_ground_seat.is_some()
+                || plan.session.new_helo_seat.is_some()
+                || plan.session.new_mounted_seat.is_some()
+                || plan.session.spawn_pose.is_some()
+            {
+                invalidated.push(active.reservation.id.clone());
+            }
+            if plan.guided_warnings.is_none()
+                && (plan.combat.infantry_rocket_launch.is_some() || !invalidated.is_empty())
+            {
+                let state = plan
+                    .combat
+                    .infantry_rocket_launch
+                    .as_ref()
+                    .map(|launch| (active.reservation.id.as_str(), &launch.state));
+                plan.guided_warnings =
+                    Some(self.prepare_guided_warnings(None, state, &invalidated, now)?);
+            }
+            if let Some(candidate) = &plan.guided_warnings {
+                let extra = plan
+                    .ground_gunner_revocations
+                    .iter()
+                    .map(|(_, _, packets)| packets.len())
+                    .sum::<usize>()
+                    + usize::from(plan.ground_damage_relay.is_some())
+                    + usize::from(plan.ground_dynamics_relay.is_some())
+                    + usize::from(
+                        plan.hospital_blast
+                            .as_ref()
+                            .is_some_and(|c| c.packet.is_some()),
+                    )
+                    + usize::from(plan.hospital_redeploy_ownership.is_some())
+                    + plan.replication.domination_sequence_batches.len()
+                    + plan.combat.projectile_publications.len()
+                    + usize::from(plan.replication.projectile_delta.is_some())
+                    + usize::from(plan.replication.seat_transition.is_some())
+                    + plan.hospital_aim_packets.len()
+                    + plan.ground_turret_packets.len()
+                    + plan.helo_damage_relay.len()
+                    + usize::from(plan.replication.ordered_health.is_some())
+                    + usize::from(plan.replication.spawn_delta.is_some())
+                    + usize::from(plan.replication.damage_delta.is_some());
+                self.check_guided_warning_capacity(candidate, extra)?;
+            }
+        }
         // Capture outgoing bytes with the triggering request before returning them
         // or committing the claim. A recording failure never releases replies.
         // The result is already final; grace-period damage does not create new rewards.
@@ -657,6 +725,7 @@ impl<W: Write> Engine<W> {
                 "hospital_redeploy_ownership": plan.hospital_redeploy_ownership.as_ref().map(|packet| protocol::encode_hex(packet)),
                 "hospital_late_join": plan.hospital_late_join.iter().map(|packet| protocol::encode_hex(packet)).collect::<Vec<_>>(),
                 "messages": plan.messages,
+                "guided_warnings":plan.guided_warnings.as_ref().map(|c|c.audit()),
                 "rewards": plan.combat.new_rewards,
                 "rejection": plan.rejection,
                 "gameplay_denial": gameplay_denial,
@@ -1500,6 +1569,9 @@ impl<W: Write> Engine<W> {
         }
         if let Some(notice) = plan.combat.self_kill_notice {
             notice.commit(self);
+        }
+        if let Some(candidate) = plan.guided_warnings {
+            self.commit_guided_warnings(candidate);
         }
         Ok(plan.messages)
     }

@@ -347,6 +347,10 @@ impl<W: Write> Engine<W> {
                 .as_deref()
                 .is_some_and(|catalog| infantry_rocket_runtime::State::can_resupply(actor, catalog))
             && !self
+                .guided_launchers
+                .as_deref()
+                .is_some_and(|c| infantry_rocket_runtime::State::can_resupply_guided(actor, c))
+            && !self
                 .underbarrel_launchers
                 .as_deref()
                 .is_some_and(|catalog| {
@@ -408,6 +412,10 @@ impl<W: Write> Engine<W> {
                 .infantry_rockets
                 .as_deref()
                 .filter(|catalog| infantry_rocket_runtime::State::can_resupply(actor, catalog));
+            let guided = self
+                .guided_launchers
+                .as_deref()
+                .filter(|c| infantry_rocket_runtime::State::can_resupply_guided(actor, c));
             let underbarrel = self.underbarrel_launchers.as_deref().filter(|catalog| {
                 infantry_rocket_runtime::State::can_resupply_underbarrel(actor, catalog)
             });
@@ -432,6 +440,7 @@ impl<W: Write> Engine<W> {
                     && frag.is_none()
                     && launcher.is_none()
                     && underbarrel.is_none()
+                    && guided.is_none()
                 {
                     changed = true;
                     audit.push(json!({"reservation":actor.reservation.id,"provider":session.target,"operation":"cancel"}));
@@ -468,6 +477,13 @@ impl<W: Write> Engine<W> {
                     && let Some(catalog) = launcher
                 {
                     launcher_state = infantry_rocket_runtime::State::refill_for(actor, catalog)?;
+                }
+                if let Some(catalog) = guided {
+                    launcher_state = infantry_rocket_runtime::State::refill_guided_for(
+                        actor,
+                        catalog,
+                        launcher_state,
+                    )?;
                 }
                 if let Some(catalog) = underbarrel {
                     launcher_state = infantry_rocket_runtime::State::refill_underbarrel_for(

@@ -455,6 +455,8 @@ impl<W: Write> Engine<W> {
         self.frag_character_blast = setup.frag_character_blast;
         self.projectile_contacts = setup.projectile_contacts.clone();
         self.infantry_rockets = None;
+        self.guided_launchers = None;
+        self.guided_warnings = Default::default();
         self.smoke_grenades = None;
         self.gas_grenades = None;
         self.flash_grenades = None;

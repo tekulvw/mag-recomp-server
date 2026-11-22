@@ -280,7 +280,7 @@ fn underbarrel_native_capsule_uses_gravity_and_preserves_prearm_contact() {
     let mut flight = state(&engine).slots[3].as_ref().unwrap().flight.clone();
     let origin = flight.motion.position();
     let Step::Move(motion) = flight
-        .step(1100, None, |shape| {
+        .step(1100, None, None, |shape| {
             assert_eq!(shape.radius, flight.variant.radius());
             Ok(None)
         })
@@ -292,7 +292,7 @@ fn underbarrel_native_capsule_uses_gravity_and_preserves_prearm_contact() {
     assert!(motion.position()[2] > origin[2]);
     flight.motion = motion;
     let Step::Move(motion) = flight
-        .step(1150, None, |shape| {
+        .step(1150, None, None, |shape| {
             Ok(Some(OwnedContact {
                 obstacle: projectile_scene::OwnedObstacleId::Static {
                     instance: "wall".into(),
@@ -311,7 +311,7 @@ fn underbarrel_native_capsule_uses_gravity_and_preserves_prearm_contact() {
     assert!(
         matches!(
             flight
-                .step(1200, None, |shape| Ok(Some(OwnedContact {
+                .step(1200, None, None, |shape| Ok(Some(OwnedContact {
                     obstacle: projectile_scene::OwnedObstacleId::Static {
                         instance: "wall".into(),
                         triangle: 1

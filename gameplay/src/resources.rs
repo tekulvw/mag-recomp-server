@@ -236,6 +236,8 @@ impl<W: Write> Engine<W> {
             domination_gameplay: None,
             hospital_rockets: None,
             infantry_rockets: None,
+            guided_launchers: None,
+            guided_warnings: Default::default(),
             smoke_grenades: None,
             gas_cooldowns: Default::default(),
             gas_grenades: None,
@@ -348,6 +350,15 @@ impl<W: Write> Engine<W> {
     ) -> Result<Self, &'static str> {
         self.validate_infantry_projectile_support()?;
         self.infantry_rockets = Some(Arc::new(catalog));
+        Ok(self)
+    }
+
+    pub fn with_guided_launchers(
+        mut self,
+        catalog: crate::guided_launchers::Catalog,
+    ) -> Result<Self, &'static str> {
+        self.validate_infantry_projectile_support()?;
+        self.guided_launchers = Some(Arc::new(catalog));
         Ok(self)
     }
 
