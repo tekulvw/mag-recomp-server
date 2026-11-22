@@ -3,7 +3,7 @@ use crate::{
     domination_helo_damage::HullDamage,
     domination_structural_world::hospital_rocket_helo_damage::tests::install_helo_fixture,
     events::EventInput,
-    ground_turrets::tests::{equip_synthetic_ground_turret, opt_in},
+    ground_turrets::tests::{equip_synthetic_ground_turret, opt_in, opt_in_primary},
     hospital_turrets::tests::{enable_synthetic_hospital_turrets, equip_synthetic_hospital_turret},
     human_kill_reward_tests::{combat_items_for_ground_test, native_hit},
     manual_ground_repair_domination_tests,
@@ -616,4 +616,196 @@ fn acquisition_escort_primary_does_not_enter_domination_helo_damage() {
         last_record(&engine)["gameplay_denial"],
         "ground_escort_primary_requires_supported_target"
     );
+}
+
+const NOTICE_VICTIM: &str = "synthetic-mounted-notice-target";
+
+fn mounted_notice_fixture(item: u16) -> Engine<Vec<u8>> {
+    let mut engine = match item {
+        4 => domination(true),
+        5 => domination(false),
+        6 => {
+            let mut engine = ground_firearm_fixture(50., true);
+            engine.item_catalog = Arc::new(
+                Arc::try_unwrap(combat_items_for_ground_test(50.))
+                    .unwrap()
+                    .with_retail_combat(combat_catalog()),
+            );
+            let faction = engine
+                .current_ground_vehicle(ESCORT as u16)
+                .unwrap()
+                .faction;
+            let batch = engine.ground_vehicles.as_ref().unwrap().batch_count();
+            let actor = engine.active.as_mut().unwrap();
+            actor.reservation.character.faction = faction;
+            actor.ground_vehicle_batch = batch;
+            opt_in_primary(&mut engine, ESCORT as u16, item);
+            equip_synthetic_ground_turret(&mut engine, ESCORT as u16);
+            engine
+        }
+        _ => panic!("unsupported synthetic notice role"),
+    };
+    let mut donor = human_kill_reward_tests::fixture();
+    engine.incapacitation_rules = donor.incapacitation_rules.take();
+    let mut victim = donor.peers.remove("synthetic-reservation-0000").unwrap();
+    let actor = engine.active.as_mut().unwrap();
+    actor.reservation.character.account_id = Some("synthetic-mounted-notice-account".into());
+    actor.reservation.character.character_id = Some(10);
+    victim.reservation.player = 2;
+    victim.reservation.id = NOTICE_VICTIM.into();
+    victim.reservation.world = actor.reservation.world;
+    victim.squad_catalog = Arc::new(
+        engine
+            .spawn_catalog
+            .as_ref()
+            .unwrap()
+            .for_squad(u16::from(1 - actor.team()) * 16)
+            .unwrap(),
+    );
+    victim.life = CharacterLife::Alive {
+        generation: 4,
+        health_quarter_points: 20,
+    };
+    engine.peers.insert(NOTICE_VICTIM.into(), victim);
+    engine
+}
+
+fn death_notice_bytes(actor: &Active) -> Vec<&[u8]> {
+    actor
+        .pending_notifications
+        .iter()
+        .filter_map(|publication| match publication {
+            match_flow::Publication::Application(packet) if packet.starts_with(&[1, 255]) => {
+                Some(packet.as_slice())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn mounted_primary_death_notifies_both_squads_once_using_the_held_weapon() {
+    for item in [4, 5, 6] {
+        let mut engine = mounted_notice_fixture(item);
+        let actor = engine.active.as_ref().unwrap();
+        let attacker = actor.reservation.player.to_be_bytes();
+        let hit = native_hit(0x0380_0002, 190);
+        let notice = [
+            1,
+            255,
+            attacker[0],
+            attacker[1],
+            0,
+            2,
+            2,
+            0,
+            0,
+            0,
+            item as u8,
+            0x80,
+        ];
+        dispatch_hit(&mut engine, &hit, Transport::Tcp, 3300).unwrap();
+        let record = last_record(&engine);
+        assert_eq!(
+            record["gameplay_denial"],
+            Value::Null,
+            "item {item}: {record}"
+        );
+        assert_eq!(record["decoded"]["weapon_item"], item, "{record}");
+        assert!(record["bot_firearm_kd"].is_null());
+        assert!(record["firearm_assists"].is_null());
+        assert!(matches!(
+            engine.peers[NOTICE_VICTIM].life,
+            CharacterLife::Incapacitated { generation: 4, .. }
+        ));
+        assert_eq!(
+            death_notice_bytes(engine.active.as_ref().unwrap()),
+            vec![notice.as_slice()],
+            "item {item}"
+        );
+        assert_eq!(
+            death_notice_bytes(&engine.peers[NOTICE_VICTIM]),
+            vec![notice.as_slice()]
+        );
+        assert_eq!(
+            engine.active.as_ref().unwrap().reward_statistics.get(&10),
+            Some(&1)
+        );
+        assert_eq!(
+            engine.peers[NOTICE_VICTIM].reward_statistics.get(&12),
+            Some(&1)
+        );
+        let kills = |engine: &Engine<Vec<u8>>| {
+            engine
+                .pending_reward_batch()
+                .into_iter()
+                .filter(|reward| reward.kind == progression::RewardKind::EnemyKilled)
+                .count()
+        };
+        assert_eq!(kills(&engine), 1);
+        dispatch_hit(&mut engine, &hit, Transport::Udp, 3301).unwrap();
+        assert_eq!(kills(&engine), 1);
+        assert_eq!(death_notice_bytes(&engine.peers[NOTICE_VICTIM]).len(), 1);
+        assert_eq!(
+            engine.peers[NOTICE_VICTIM].reward_statistics.get(&12),
+            Some(&1)
+        );
+    }
+}
+
+#[test]
+fn mounted_primary_death_refused_record_keeps_the_target_alive_and_notices_empty() {
+    let mut engine = mounted_notice_fixture(5);
+    let rewards = engine.pending_reward_batch();
+    let writer = engine.writer.clone();
+    engine.max_log = engine.written;
+    assert!(matches!(
+        dispatch_hit(
+            &mut engine,
+            &native_hit(0x0380_0002, 191),
+            Transport::Tcp,
+            3300
+        ),
+        Err("log_limit_reached")
+    ));
+    assert_eq!(engine.writer, writer);
+    assert!(matches!(
+        engine.peers[NOTICE_VICTIM].life,
+        CharacterLife::Alive {
+            generation: 4,
+            health_quarter_points: 20
+        }
+    ));
+    assert_eq!(engine.pending_reward_batch(), rewards);
+    assert!(death_notice_bytes(engine.active.as_ref().unwrap()).is_empty());
+    assert!(death_notice_bytes(&engine.peers[NOTICE_VICTIM]).is_empty());
+}
+
+#[test]
+fn mounted_primary_death_requires_the_current_gunner_grant() {
+    let mut engine = mounted_notice_fixture(5);
+    engine.active.as_mut().unwrap().life = CharacterLife::Alive {
+        generation: 2,
+        health_quarter_points: 400,
+    };
+    dispatch_hit(
+        &mut engine,
+        &native_hit(0x0380_0002, 192),
+        Transport::Tcp,
+        3300,
+    )
+    .unwrap();
+    assert_eq!(
+        last_record(&engine)["gameplay_denial"],
+        "ground_turret_requires_living_exclusive_gunner"
+    );
+    assert!(matches!(
+        engine.peers[NOTICE_VICTIM].life,
+        CharacterLife::Alive {
+            generation: 4,
+            health_quarter_points: 20
+        }
+    ));
+    assert!(death_notice_bytes(engine.active.as_ref().unwrap()).is_empty());
+    assert!(death_notice_bytes(&engine.peers[NOTICE_VICTIM]).is_empty());
 }

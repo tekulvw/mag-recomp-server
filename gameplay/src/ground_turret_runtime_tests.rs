@@ -8,6 +8,10 @@ use crate::{
 };
 
 pub(crate) fn opt_in<W: Write>(engine: &mut Engine<W>, index: u16) {
+    opt_in_primary(engine, index, 5);
+}
+
+pub(crate) fn opt_in_primary<W: Write>(engine: &mut Engine<W>, index: u16, primary: u16) {
     let kind = match engine.match_profile().game_type {
         1 => PolicyKind::Escort,
         _ => PolicyKind::Apc,
@@ -17,7 +21,7 @@ pub(crate) fn opt_in<W: Write>(engine: &mut Engine<W>, index: u16) {
         index,
         Policy {
             kind,
-            primary: 5,
+            primary,
             local_position_xyz: [1., 2., 3.],
         },
     )]));

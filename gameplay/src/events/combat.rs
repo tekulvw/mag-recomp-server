@@ -100,7 +100,7 @@ pub(super) fn hit<W: Write>(
     // the wire has no attacker or unique shot ID. Repeated bytes can be shots.
     let mut profile_item = None;
     let mut ordinary_retail_firearm = false;
-    let mut ordinary_retail_weapon = None;
+    let mut death_weapon = None;
     let mut damage_kind = None;
     let mut damage_calculation = None;
     let mut applied = None;
@@ -170,18 +170,19 @@ pub(super) fn hit<W: Write>(
             let profile = ctx.engine.bullet_profile(active, &request)?;
             ordinary_retail_firearm =
                 matches!(profile, CharacterHitProfile::Retail(_)) && !active.is_mounted();
-            ordinary_retail_weapon = if !active.is_mounted() {
-                match profile {
-                    CharacterHitProfile::Retail(_) => {
-                        Some(death_notifications::Weapon::Firearm(profile.item_id()))
-                    }
-                    CharacterHitProfile::Melee(_) => {
-                        Some(death_notifications::Weapon::Melee(profile.item_id()))
-                    }
-                    _ => None,
+            death_weapon = match profile {
+                CharacterHitProfile::Retail(_) if ordinary_retail_firearm => {
+                    Some(death_notifications::Weapon::Firearm(profile.item_id()))
                 }
-            } else {
-                None
+                CharacterHitProfile::Melee(_) if !active.is_mounted() => {
+                    Some(death_notifications::Weapon::Melee(profile.item_id()))
+                }
+                CharacterHitProfile::HospitalPrimary(bullet)
+                | CharacterHitProfile::GroundApcPrimary(bullet)
+                | CharacterHitProfile::GroundEscortPrimary(bullet) => {
+                    Some(death_notifications::Weapon::MountedPrimary(bullet))
+                }
+                _ => None,
             };
             profile_item = Some(profile.item_id());
             damage_kind = Some(profile.kind());
@@ -329,7 +330,7 @@ pub(super) fn hit<W: Write>(
                         }
                     }
                 }
-                if let Some(weapon) = ordinary_retail_weapon
+                if let Some(weapon) = death_weapon
                     && (peer_target.is_some() || registry_target.is_some())
                     && let Some(notification) = ctx.engine.plan_weapon_death(
                         active.reservation.world,
