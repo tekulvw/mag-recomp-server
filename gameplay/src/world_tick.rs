@@ -34,8 +34,8 @@ impl<W: Write> Engine<W> {
             self.queue_active_ability_state(now, wall)?;
             messages.extend(self.tick_hospital_rockets(now, wall)?);
             messages.extend(self.tick_match_clock(now, wall)?);
-            self.tick_human_static_resupply(now, wall)?;
             self.queue_projectile_publications(now)?;
+            self.tick_human_static_resupply(now, wall)?;
             let messages = self.drain_shared(messages, wall)?;
             self.tick_results_cohorts(now, wall, messages)
         })();

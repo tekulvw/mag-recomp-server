@@ -1,4 +1,4 @@
-//! Explicit retail static supply bindings for ordinary human grenade refill.
+//! Explicit retail static supply sessions for ordinary human healing and grenade refill.
 use super::*;
 use serde::Deserialize;
 use std::{collections::BTreeSet, path::Path};
@@ -330,7 +330,9 @@ impl<W: Write> Engine<W> {
             return Err("static_resupply_round_inactive");
         }
         let generation = living_generation(actor).ok_or("static_resupply_character_ineligible")?;
-        if equipped_frag(actor, &self.item_catalog).is_none() {
+        if provider.percent_refresh_rate == 0.0
+            && equipped_frag(actor, &self.item_catalog).is_none()
+        {
             return Err("static_resupply_ordinary_frag_required");
         }
         if !inside(actor, provider) {
@@ -374,6 +376,7 @@ impl<W: Write> Engine<W> {
             self.match_started && self.match_terminal.is_none() && self.round_combat_allowed(now);
         let leadership = self.plan_leadership(now)?;
         let mut planned = Vec::new();
+        let mut updates = Vec::new();
         let mut audit = Vec::new();
         for actor in self.active.iter().chain(self.peers.values()) {
             if actor.static_resupply.is_empty() {
@@ -381,6 +384,8 @@ impl<W: Write> Engine<W> {
             }
             let generation = living_generation(actor);
             let frag = equipped_frag(actor, &self.item_catalog);
+            let modifiers = leadership.modifiers(actor);
+            let mut health_update = None;
             let mut sessions = Vec::with_capacity(actor.static_resupply.len());
             let mut remaining = actor.grenade_remaining;
             let mut changed = false;
@@ -395,11 +400,11 @@ impl<W: Write> Engine<W> {
                     audit.push(json!({"reservation":actor.reservation.id,"provider":session.target,"operation":"cancel"}));
                     continue;
                 };
-                let Some((item, cap)) = frag else {
+                if provider.percent_refresh_rate == 0.0 && frag.is_none() {
                     changed = true;
                     audit.push(json!({"reservation":actor.reservation.id,"provider":session.target,"operation":"cancel"}));
                     continue;
-                };
+                }
                 let elapsed = session.elapsed + now.saturating_sub(session.updated).as_secs_f32();
                 if elapsed < session.interval || now <= session.updated {
                     sessions.push(*session);
@@ -409,29 +414,75 @@ impl<W: Write> Engine<W> {
                 next.elapsed = elapsed - session.interval;
                 next.interval = interval(
                     provider.tick_rate_seconds,
-                    leadership.modifiers(actor).value("kCharModResupplyRate"),
+                    modifiers.value("kCharModResupplyRate"),
                 )?;
                 next.updated = now;
+                let before = health_update.unwrap_or(actor.last_damage);
+                let heal = if provider.percent_refresh_rate > 0.0 {
+                    modifiers.max_health_quarter_points()?;
+                    static_supply_heal::apply(
+                        before,
+                        modifiers.max_health_hp(),
+                        provider.percent_refresh_rate,
+                    )
+                } else {
+                    None
+                };
+                if let Some(model) = heal {
+                    health_update = Some(model);
+                }
+                let after = frag.map_or(remaining, |(_, cap)| cap);
                 audit.push(json!({"reservation":actor.reservation.id,"provider":session.target,"operation":"pulse",
                     "world":actor.reservation.world,"round":session.round,"generation":session.generation,
-                    "item":item,"before":remaining,"after":cap,"interval_seconds":next.interval}));
-                remaining = cap;
+                    "item":frag.map(|(item, _)| item),"before":remaining,"after":after,"interval_seconds":next.interval,
+                    "health_before":before.health_quarter_points,
+                    "health_after":heal.map(|model| model.health_quarter_points)}));
+                remaining = after;
                 sessions.push(next);
                 changed = true;
             }
             if changed {
-                planned.push((actor.reservation.id.clone(), sessions, remaining));
+                if let Some(damage) = health_update {
+                    let packet = replication::CharacterDamageUpdate {
+                        sequence: 2,
+                        timestamp_ms: now.as_millis() as u32,
+                        object_index: actor.reservation.player,
+                        damage,
+                        forced_state: None,
+                    }
+                    .encode_with_profile(self.wire_profile)?;
+                    updates.push(packet);
+                }
+                planned.push((
+                    actor.reservation.id.clone(),
+                    sessions,
+                    remaining,
+                    health_update.zip(generation),
+                ));
             }
         }
         if planned.is_empty() {
             return Ok(());
         }
+        // Shared FIFO capacity excludes separately reserved Hospital bootstrap
+        // frames. Deferral still lets the scheduler drain that FIFO this tick.
+        if !updates.is_empty()
+            && self.active.iter().chain(self.peers.values()).any(|actor| {
+                actor.initial_objects.is_some()
+                    && (actor.replication_backlogged
+                        || actor.ordinary_shared_len().saturating_add(updates.len())
+                            > multiplayer::MAX_SHARED_QUEUE)
+            })
+        {
+            return Ok(());
+        }
         self.record(
             json!({"op":"human_static_resupply_tick","timestamp_ms":now.as_millis() as u64,
-            "recipients":audit}),
+            "recipients":audit,"health_updates":updates.iter()
+                .map(|packet| protocol::encode_hex(packet)).collect::<Vec<_>>()}),
             wall,
         )?;
-        for (reservation, sessions, remaining) in planned {
+        for (reservation, sessions, remaining, health) in planned {
             if let Some(actor) = self
                 .active
                 .as_mut()
@@ -440,6 +491,24 @@ impl<W: Write> Engine<W> {
             {
                 actor.static_resupply = sessions;
                 actor.grenade_remaining = remaining;
+                if let Some((damage, generation)) = health {
+                    actor.last_damage = damage;
+                    actor.life = CharacterLife::Alive {
+                        generation,
+                        health_quarter_points: damage.health_quarter_points,
+                    };
+                }
+            }
+        }
+        for actor in self
+            .active
+            .iter_mut()
+            .chain(self.peers.values_mut())
+            .filter(|actor| actor.initial_objects.is_some())
+        {
+            for packet in &updates {
+                actor.queue_shared(packet.clone());
+                actor.ordered_health_pending = true;
             }
         }
         Ok(())
@@ -503,6 +572,7 @@ mod tests {
             generation: 4,
             health_quarter_points: 400,
         };
+        source.last_damage.health_quarter_points = 400;
         set_position(&mut engine, 20.0);
         engine
     }
@@ -791,5 +861,176 @@ mod tests {
         let mut invalid = document();
         invalid["source"]["unexpected"] = json!(true);
         assert!(parse(&invalid).is_err());
+    }
+    fn wounded(engine: &mut Engine<Vec<u8>>, hp: u16) {
+        let actor = engine.active.as_mut().unwrap();
+        actor.life = CharacterLife::Alive {
+            generation: 4,
+            health_quarter_points: hp,
+        };
+        actor.last_damage = replication::CharacterDamage {
+            health_quarter_points: hp,
+            last_location_and_type: 0x23,
+            conditions: 4,
+            last_attacker: 0x0380_0007,
+            last_source_object: 0x0680_0002,
+            last_user_data: 123,
+        };
+        actor.grenade_remaining = 0;
+    }
+
+    fn configure_health_rate(engine: &mut Engine<Vec<u8>>, rate: f32) {
+        let mut catalog = document();
+        for provider in catalog["providers"].as_array_mut().unwrap() {
+            provider["percent_refresh_rate"] = json!(rate);
+        }
+        Arc::get_mut(&mut engine.acquisition_gameplay.as_mut().unwrap().setup)
+            .unwrap()
+            .human_static_resupply = Some(Arc::new(parse(&catalog).unwrap()));
+    }
+
+    fn health(engine: &Engine<Vec<u8>>) -> u16 {
+        engine
+            .active
+            .as_ref()
+            .unwrap()
+            .last_damage
+            .health_quarter_points
+    }
+
+    #[test]
+    fn human_static_resupply_health_without_frag_and_exact_timer() {
+        let mut engine = fixture();
+        configure_health_rate(&mut engine, 10.);
+        wounded(&mut engine, 250);
+        let actor = engine.active.as_mut().unwrap();
+        actor.spawned_loadout.as_mut().unwrap().inventories[0].slots[4] = None;
+        let skills = skill_catalog::SkillCatalog::from_value(json!({
+            "schema_version":2,"application_id":20231,"table":{"Skills":{"MagCharacterSkill0":{"MagCharacterSkill":{
+            "Default":{"Modifier":"kCharModHealth","ModifierValue":0.2},"Green":{"Available":true}}}}}
+        })).unwrap();
+        actor.modifiers = skills.resolve(0, &[1, 0, 0, 0, 0]).unwrap();
+        dispatch(&mut engine, &request(0, FAMILY_PREFIX), 200).unwrap();
+        tick(&mut engine, 1199).unwrap();
+        assert_eq!(health(&engine), 250);
+        let before_frames = engine.active.as_ref().unwrap().ordinary_shared_len();
+        tick(&mut engine, 1200).unwrap();
+        assert_eq!(health(&engine), 298);
+        let actor = engine.active.as_ref().unwrap();
+        let model = actor.last_damage;
+        assert_eq!(
+            (
+                model.last_location_and_type,
+                model.conditions,
+                model.last_attacker,
+                model.last_source_object,
+                model.last_user_data
+            ),
+            (0x63, 4, 0x0380_0007, 0x0680_0002, 123)
+        );
+        assert!(matches!(
+            actor.life,
+            CharacterLife::Alive {
+                generation: 4,
+                health_quarter_points: 298
+            }
+        ));
+        assert_eq!(actor.ordinary_shared_len(), before_frames + 1);
+        assert!(actor.ordered_health_pending);
+        assert!(actor.reward_statistics.is_empty());
+        assert!(engine.pending_rewards.is_empty());
+        assert_eq!(ammo(&engine), 0);
+        dispatch(&mut engine, &request(1, FAMILY_PREFIX), 1250).unwrap();
+        tick(&mut engine, 2200).unwrap();
+        assert_eq!(health(&engine), 298);
+    }
+
+    #[test]
+    fn human_static_resupply_health_combines_pulses_into_one_frame_and_caps() {
+        let mut engine = fixture();
+        configure_health_rate(&mut engine, 10.);
+        wounded(&mut engine, 250);
+        for target in [FAMILY_PREFIX, FAMILY_PREFIX | 1] {
+            dispatch(&mut engine, &request(0, target), 200).unwrap();
+        }
+        let baseline = engine.active.as_ref().unwrap().ordinary_shared_len();
+        tick(&mut engine, 1200).unwrap();
+        assert_eq!(health(&engine), 330);
+        assert_eq!(ammo(&engine), 1);
+        assert_eq!(
+            engine.active.as_ref().unwrap().ordinary_shared_len(),
+            baseline + 1
+        );
+        wounded(&mut engine, 396);
+        tick(&mut engine, 2200).unwrap();
+        assert_eq!(health(&engine), 400);
+        assert_eq!(
+            engine.active.as_ref().unwrap().ordinary_shared_len(),
+            baseline + 2
+        );
+        tick(&mut engine, 3200).unwrap();
+        assert_eq!(
+            engine.active.as_ref().unwrap().ordinary_shared_len(),
+            baseline + 2
+        );
+    }
+
+    #[test]
+    fn human_static_resupply_health_defers_without_consuming_due_pulse() {
+        let mut engine = fixture();
+        configure_health_rate(&mut engine, 10.);
+        wounded(&mut engine, 250);
+        dispatch(&mut engine, &request(0, FAMILY_PREFIX), 200).unwrap();
+        engine.enable_world_ticks();
+        let batches = engine.ground_vehicles.as_ref().unwrap().batch_count();
+        engine.active.as_mut().unwrap().ground_vehicle_batch = batches;
+        let prime = engine.tick_world(Duration::from_millis(250), 1, "prime".into());
+        assert!(prime.ok, "{:?}", prime.error);
+        let filler = replication::CharacterDamageUpdate {
+            sequence: 2,
+            timestamp_ms: 1000,
+            object_index: engine.active.as_ref().unwrap().reservation.player,
+            damage: engine.active.as_ref().unwrap().last_damage,
+            forced_state: None,
+        }
+        .encode_with_profile(engine.wire_profile)
+        .unwrap();
+        // Current valid model packets occupy the ordinary FIFO; the reserved
+        // Hospital bootstrap at its tail does not consume ordinary capacity.
+        let actor = engine.active.as_mut().unwrap();
+        actor
+            .pending_shared
+            .resize(multiplayer::MAX_SHARED_QUEUE, filler.clone());
+        actor.queue_hospital_bootstrap(vec![filler]);
+        let due = engine.tick_world(Duration::from_millis(1200), 1, "due".into());
+        assert!(due.ok, "{:?}", due.error);
+        assert!(!due.messages.is_empty(), "queue must still drain");
+        assert_eq!(health(&engine), 250);
+        assert_eq!(ammo(&engine), 0);
+        let actor = engine.active.as_ref().unwrap();
+        assert!(!actor.replication_backlogged);
+        assert_eq!(actor.static_resupply[0].updated, Duration::from_millis(200));
+        assert!(actor.ordinary_shared_len() < multiplayer::MAX_SHARED_QUEUE);
+        let retry = engine.tick_world(Duration::from_millis(1250), 1, "retry".into());
+        assert!(retry.ok, "{:?}", retry.error);
+        assert_eq!(health(&engine), 290);
+        assert_eq!(ammo(&engine), 1);
+    }
+
+    #[test]
+    fn human_static_resupply_health_recorder_failure_preserves_candidate_state() {
+        let mut engine = fixture();
+        configure_health_rate(&mut engine, 10.);
+        wounded(&mut engine, 250);
+        dispatch(&mut engine, &request(0, FAMILY_PREFIX), 200).unwrap();
+        let baseline = engine.active.as_ref().unwrap().ordinary_shared_len();
+        engine.max_log = engine.written;
+        assert_eq!(tick(&mut engine, 1200).unwrap_err(), "log_limit_reached");
+        let actor = engine.active.as_ref().unwrap();
+        assert_eq!(actor.static_resupply[0].updated, Duration::from_millis(200));
+        assert_eq!(actor.ordinary_shared_len(), baseline);
+        assert!(!actor.ordered_health_pending);
+        assert_eq!(health(&engine), 250);
+        assert_eq!(ammo(&engine), 0);
     }
 }

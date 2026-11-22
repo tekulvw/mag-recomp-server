@@ -105,6 +105,7 @@ mod squad_order_engine;
 mod squad_order_engine_tests;
 pub mod squad_orders;
 pub mod static_collision_partition;
+mod static_supply_heal;
 pub mod strategic_abilities;
 mod strategic_engine;
 #[cfg(test)]
