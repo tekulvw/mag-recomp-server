@@ -847,9 +847,9 @@ impl RetailBulletProfile {
         kit: &crate::replication::CharacterLoadout,
         equipped: crate::replication::InventoryItem,
         gear: u8,
-        magazine: u8,
+        fire_mode: u8,
     ) -> Result<Self, &'static str> {
-        Self::resolve_equipped(catalog, kit, equipped, gear, magazine, None)
+        Self::resolve_equipped(catalog, kit, equipped, gear, fire_mode, None)
     }
 
     pub(crate) fn from_equipped_with_items(
@@ -857,7 +857,7 @@ impl RetailBulletProfile {
         kit: &crate::replication::CharacterLoadout,
         equipped: crate::replication::InventoryItem,
         gear: u8,
-        magazine: u8,
+        fire_mode: u8,
         on_foot: bool,
     ) -> Result<Self, &'static str> {
         Self::resolve_equipped(
@@ -865,7 +865,7 @@ impl RetailBulletProfile {
             kit,
             equipped,
             gear,
-            magazine,
+            fire_mode,
             on_foot.then_some(items),
         )
     }
@@ -875,7 +875,7 @@ impl RetailBulletProfile {
         kit: &crate::replication::CharacterLoadout,
         equipped: crate::replication::InventoryItem,
         gear: u8,
-        magazine: u8,
+        fire_mode: u8,
         items: Option<&ItemCatalog>,
     ) -> Result<Self, &'static str> {
         if equipped.inventory_update_id != kit.handle.update_id {
@@ -884,7 +884,7 @@ impl RetailBulletProfile {
         if equipped.gear_slot != gear {
             return Err("hit_gear_not_equipped");
         }
-        if equipped.ammo_pool != 0 || magazine != equipped.ammo_pool {
+        if equipped.ammo_pool != 0 || (fire_mode != 0 && items.is_none()) {
             return Err("unsupported_bullet_magazine");
         }
         let attachments: &[usize] = match gear {
@@ -897,6 +897,14 @@ impl RetailBulletProfile {
             .get(usize::from(kit.handle.inventory_index))
             .ok_or("unsupported_inventory_index")?;
         let weapon = inventory.slots[usize::from(gear)];
+        if fire_mode != 0
+            && !items
+                .zip(weapon)
+                .and_then(|(items, weapon)| items.retail_firearm_mode_count(weapon))
+                .is_some_and(|count| usize::from(fire_mode) < count)
+        {
+            return Err("unsupported_retail_bullet_fire_mode");
+        }
         for &slot in attachments {
             let Some(attachment) = inventory.slots[slot] else {
                 continue;

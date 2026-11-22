@@ -812,6 +812,23 @@ impl ItemCatalog {
             .get("parameters")
             .ok_or("missing_weapon_reticule_parameters")
     }
+    /// Ordinary retail Hit encodes the active FireMode row index separately
+    /// from the equipment report's ammo-pool index.
+    pub(crate) fn retail_firearm_mode_count(&self, weapon_id: u16) -> Option<usize> {
+        let source_sha256 = self.retail_item_source_sha256.as_deref()?;
+        let combat = self.retail_combat().ok()?;
+        let bullet = combat.bullet_metadata(weapon_id)?;
+        let weapon = self.weapon_parameters(weapon_id).ok()?;
+        if combat.provenance()["catalog_sha256"].as_str() != Some(source_sha256)
+            || self.retail_authored_ref(weapon_id) != Some(bullet.authored_ref.as_str())
+            || weapon["id"].as_str() != Some(bullet.name.as_str())
+            || weapon["ammo_name"].as_str() != Some(bullet.ammo.name.as_str())
+        {
+            return None;
+        }
+        ordinary_fire_mode_count(&weapon["fire_mode"]["fire_modes"])
+    }
+
     pub(crate) fn retail_firearm_attachment(
         &self,
         gear: u8,
@@ -1029,6 +1046,52 @@ pub fn bundled() -> Result<&'static Arc<ItemCatalog>, &'static str> {
         })
         .as_ref()
         .map_err(|_| "item_catalog_unavailable")
+}
+
+fn ordinary_fire_mode_count(source: &Value) -> Option<usize> {
+    let modes = source.as_object()?;
+    if !(1..=4).contains(&modes.len()) {
+        return None;
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for index in 0..modes.len() {
+        let kind = modes.get(&format!("FireModeTypeClass{index}"))?["FireModeTypeClass"]
+            ["fire_mode_value"]
+            .as_str()?;
+        if !matches!(kind, "kSemiAuto" | "kDual" | "kTriple" | "kAuto") || !seen.insert(kind) {
+            return None;
+        }
+    }
+    Some(modes.len())
+}
+
+#[cfg(test)]
+mod fire_mode_tests {
+    use super::ordinary_fire_mode_count;
+    use serde_json::{Value, json};
+
+    #[test]
+    fn retail_firearm_modes_require_contiguous_distinct_ordinary_rows() {
+        let row = |kind| json!({"FireModeTypeClass": {"fire_mode_value": kind}});
+        assert_eq!(
+            ordinary_fire_mode_count(&json!({
+                "FireModeTypeClass0": row("kTriple"),
+                "FireModeTypeClass1": row("kAuto")
+            })),
+            Some(2)
+        );
+        for data in [
+            Value::Null,
+            json!({}),
+            json!({"FireModeTypeClass1": row("kAuto")}),
+            json!({"FireModeTypeClass0": row("kAuto"), "FireModeTypeClass2": row("kDual")}),
+            json!({"FireModeTypeClass0": row("kAuto"), "FireModeTypeClass1": row("kAuto")}),
+            json!({"FireModeTypeClass0": row("kAuto"), "FireModeTypeClass1": row("kAttachmentMode")}),
+            json!({"FireModeTypeClass0": row("kDetonate")}),
+        ] {
+            assert_eq!(ordinary_fire_mode_count(&data), None, "{data}");
+        }
+    }
 }
 
 #[cfg(test)]

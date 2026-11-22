@@ -460,9 +460,11 @@ pub(super) fn hit<W: Write>(
         "hit_authority":"client_reported",
         "collision_audit":collision_audit(ctx.engine.collision_world.as_ref(), ctx.engine.map_name(), request.hit_origin, request.hit_dest),
         "ammo_authority":"observed_only_no_fire_event"});
-    if indexed_hospital || ground_gunner {
+    if active.wire_profile.application_id() == 20231 {
         let audit = audit.as_object_mut().unwrap();
-        audit.remove("magazine");
+        if indexed_hospital || ground_gunner {
+            audit.remove("magazine");
+        }
         audit.insert("fire_mode".into(), json!(request.fire_mode));
     }
     Ok(audit)
