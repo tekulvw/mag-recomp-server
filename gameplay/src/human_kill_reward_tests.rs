@@ -456,7 +456,7 @@ fn queue_grenade(
         target_reservation_id: Some(format!("synthetic-reservation-{target:04}")),
         id: format!("synthetic-grenade-{now_ms}"),
         generation,
-        falling: false,
+        source: PendingDamageSource::Other,
         damage: damage::ResolvedDamage {
             amount_hp: amount,
             kind: damage::DamageKind::Explosive,

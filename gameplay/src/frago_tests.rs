@@ -499,7 +499,7 @@ fn queued_grenade_uses_the_accepted_owner_position_at_the_kill_in_both_direction
             target_reservation_id: Some("synthetic-reservation-0000".into()),
             id: "synthetic-moved-grenade".into(),
             generation: 4,
-            falling: false,
+            source: PendingDamageSource::Other,
             damage: damage::ResolvedDamage {
                 amount_hp: 40.,
                 kind: damage::DamageKind::Explosive,

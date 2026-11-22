@@ -21,8 +21,35 @@ pub(super) fn plan_pending_damage<W: Write>(
             && b.generation == pending.generation
             && b.health_quarter_points > 0
     });
-    let victim = if pending.target_character_id
-        == (0x03800000 | u32::from(active.reservation.player))
+    let qualified_frag = matches!(
+        pending.source,
+        PendingDamageSource::OrdinaryRetailFrag { .. }
+    );
+    let scope_current = match pending.source {
+        PendingDamageSource::OrdinaryRetailFrag {
+            world,
+            round,
+            bot_allocation_generation,
+        } => {
+            world == active.reservation.world
+                && round == ctx.engine.round_number
+                && match (bot_allocation_generation, &pending.target_reservation_id) {
+                    (Some(allocation), None) => registry_target.is_some_and(|target| {
+                        let bot = &ctx.engine.bot_registry.bots[&target.object_index];
+                        bot.allocation_generation == allocation
+                            && bot.target.runtime.is_some_and(|runtime| {
+                                !matches!(runtime.phase, development_target::BotPhase::Dead)
+                            })
+                    }),
+                    (None, Some(_)) => true,
+                    _ => false,
+                }
+        }
+        PendingDamageSource::Falling | PendingDamageSource::Other => true,
+    };
+    let victim = if !scope_current {
+        None
+    } else if pending.target_character_id == (0x03800000 | u32::from(active.reservation.player))
         && pending.target_reservation_id.as_deref() == Some(active.reservation.id.as_str())
     {
         match active.life.damage_health() {
@@ -86,7 +113,7 @@ pub(super) fn plan_pending_damage<W: Write>(
         None
     };
     if let Some((generation, health_quarter_points, position)) = victim {
-        let mut resolved = if pending.falling {
+        let mut resolved = if pending.source == PendingDamageSource::Falling {
             pending.damage.apply_falling(health_quarter_points)?
         } else {
             pending.damage.apply(health_quarter_points)?
@@ -185,6 +212,19 @@ pub(super) fn plan_pending_damage<W: Write>(
                     .push((peer.reservation.id.clone(), life));
             }
         } else if let Some(bot) = registry_target {
+            if qualified_frag && lethal && ctx.engine.match_terminal.is_none() {
+                plan.combat.bot_firearm_kd = Some(bot_firearm_kd::Plan::prepare(
+                    ctx.engine,
+                    active.reservation.world,
+                    None,
+                    Some(bot_firearm_kd::Life {
+                        index: bot.object_index,
+                        generation: bot.generation,
+                        team: bot.team,
+                        health: health_quarter_points,
+                    }),
+                )?);
+            }
             plan.combat
                 .bot_damage
                 .push((bot.object_index, bot.generation, resolved));

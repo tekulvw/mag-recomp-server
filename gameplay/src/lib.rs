@@ -992,6 +992,17 @@ impl CharacterLife {
         }
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingDamageSource {
+    Falling,
+    Other,
+    OrdinaryRetailFrag {
+        world: u32,
+        round: u64,
+        bot_allocation_generation: Option<u32>,
+    },
+}
+
 #[derive(Clone)]
 struct PendingDamage {
     target_character_id: u32,
@@ -999,7 +1010,7 @@ struct PendingDamage {
     id: String,
     generation: u32,
     damage: damage::ResolvedDamage,
-    falling: bool,
+    source: PendingDamageSource,
 }
 enum CharacterHitProfile {
     OnFoot(ballistics::BallisticProfile),
@@ -2060,7 +2071,7 @@ impl<W: Write> Engine<W> {
                     .damage_commands
                     .insert(damage_id.clone(), (generation, damage));
                 active.pending_damage = Some(PendingDamage {
-                    falling: false,
+                    source: PendingDamageSource::Other,
                     target_character_id: (0x03800000 | u32::from(active.reservation.player)),
                     target_reservation_id: Some(active.reservation.id.clone()),
                     id: damage_id,

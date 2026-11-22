@@ -57,7 +57,7 @@ fn queue(engine: &mut Engine<Vec<u8>>, target: u16, generation: u32, attacker: u
             target_reservation_id: None,
             id: "synthetic-grenade-flight-3".into(),
             generation,
-            falling: false,
+            source: PendingDamageSource::Other,
             damage: damage::ResolvedDamage {
                 amount_hp: 137.,
                 kind: damage::DamageKind::Explosive,
@@ -68,6 +68,30 @@ fn queue(engine: &mut Engine<Vec<u8>>, target: u16, generation: u32, attacker: u
                 user_data: 0,
             },
         });
+}
+
+fn queue_ordinary_frag(engine: &mut Engine<Vec<u8>>, target: u16) {
+    let bot = &engine.bot_registry.bots[&target];
+    let generation = bot.target.runtime.unwrap().generation;
+    let allocation = bot.allocation_generation;
+    let actor = engine.active.as_ref().unwrap();
+    let attacker = 0x0380_0000 | u32::from(actor.reservation.player);
+    let world = actor.reservation.world;
+    let round = engine.round_number;
+    engine.frag_character_blast = true;
+    queue(engine, target, generation, attacker);
+    engine
+        .active
+        .as_mut()
+        .unwrap()
+        .grenade_damage
+        .back_mut()
+        .unwrap()
+        .source = PendingDamageSource::OrdinaryRetailFrag {
+        world,
+        round,
+        bot_allocation_generation: Some(allocation),
+    };
 }
 fn update(engine: &mut Engine<Vec<u8>>, now_ms: u64) -> Result<Vec<OutboundMessage>, &'static str> {
     let sequence = engine.active.as_ref().unwrap().latest_owner_sequence + 1;
@@ -1814,6 +1838,7 @@ fn hostile_queued_grenade_records_the_real_human_kill_reward_once_per_bot_life()
     queue(&mut engine, target, generation, 0x0380_0000);
     update(&mut engine, 1000).unwrap();
     assert_eq!(engine.bot_registry.bots[&target].health, 0);
+    assert_eq!(engine.bot_registry.bots[&target].firearm_kd.deaths, 0);
     let source = engine.active.as_ref().unwrap();
     assert_eq!(source.reward_statistics.get(&10), Some(&1));
     assert!(source.grenade_damage.is_empty());
@@ -1872,6 +1897,192 @@ fn hostile_queued_grenade_records_the_real_human_kill_reward_once_per_bot_life()
         engine.active.as_ref().unwrap().reward_statistics.get(&10),
         Some(&2)
     );
+}
+
+#[test]
+fn ordinary_frag_death_counts_registry_victim_once_and_preserves_launcher_credit() {
+    let (mut engine, target) = fixture();
+    let queue_filler = replication::ObjectUpdate {
+        header: replication::UpdateHeader {
+            sequence: 1,
+            nak_sequence: 0,
+            client_index: 0,
+            object_type_mask: 0,
+            timestamp_ms: 0,
+        },
+        wire: &[],
+    }
+    .encode_empty_with_profile(engine.wire_profile)
+    .unwrap();
+    for _ in 0..40 {
+        engine
+            .active
+            .as_mut()
+            .unwrap()
+            .queue_shared(queue_filler.clone());
+    }
+    engine.tick_bots(Duration::from_millis(950), 1).unwrap();
+    queue_ordinary_frag(&mut engine, target);
+    update(&mut engine, 1000).unwrap();
+    let bot = &engine.bot_registry.bots[&target];
+    assert_eq!(bot.health, 0);
+    assert_eq!(
+        bot.firearm_kd,
+        crate::bot_firearm_kd::Totals {
+            deaths: 1,
+            ..Default::default()
+        }
+    );
+    let source = engine.active.as_ref().unwrap();
+    assert_eq!(source.reward_statistics.get(&10), Some(&1));
+    assert!(source.pending_notifications.is_empty());
+    let rewards = engine.pending_reward_batch();
+    assert_eq!(rewards.len(), 1);
+    assert_eq!(rewards[0].kind, progression::RewardKind::EnemyKilled);
+
+    // The absolute stat cannot overtake even a backlogged creation snapshot.
+    let first = engine.drain_shared(Vec::new(), 1).unwrap();
+    assert_eq!(first.len(), 32);
+    assert!(
+        first
+            .iter()
+            .all(|message| !message.payload_hex.starts_with("0204"))
+    );
+    let second = engine.drain_shared(Vec::new(), 1).unwrap();
+    let row = format!("0204{target:04x}020a000c01");
+    assert!(
+        second
+            .iter()
+            .position(|message| message.payload_hex == row)
+            .is_some_and(|at| at >= 9)
+    );
+
+    queue_ordinary_frag(&mut engine, target);
+    update(&mut engine, 1001).unwrap();
+    let bot = &engine.bot_registry.bots[&target];
+    assert_eq!(bot.firearm_kd.deaths, 1);
+    assert_eq!(engine.pending_reward_batch(), rewards);
+
+    let allocation = bot.allocation_generation;
+    let generation = bot.target.runtime.unwrap().generation;
+    engine.team_waves[usize::from(bot.target.squad.team())] = Some(TeamWaveClock {
+        first_deadline: Duration::from_millis(1050),
+        period: Duration::from_secs(10),
+    });
+    engine.tick_bots(Duration::from_millis(1100), 1).unwrap();
+    let bot = &engine.bot_registry.bots[&target];
+    assert_eq!(bot.health, 400);
+    assert_eq!(bot.target.runtime.unwrap().generation, generation + 1);
+    assert_eq!(bot.allocation_generation, allocation);
+    assert_eq!(bot.firearm_kd.deaths, 1);
+}
+
+#[test]
+fn ordinary_frag_death_counts_a_friendly_victim_from_an_accountless_launcher() {
+    let (mut engine, target) = fixture();
+    let source = engine.active.as_mut().unwrap();
+    source.reservation.character.account_id = None;
+    let team = source.team();
+    engine
+        .bot_registry
+        .bots
+        .get_mut(&target)
+        .unwrap()
+        .target
+        .squad = replication::SquadAddress::from_index(u16::from(team) * 16).unwrap();
+    queue_ordinary_frag(&mut engine, target);
+    update(&mut engine, 1000).unwrap();
+    assert_eq!(engine.bot_registry.bots[&target].firearm_kd.deaths, 1);
+    let source = engine.active.as_ref().unwrap();
+    assert_eq!(source.reward_statistics.get(&14), Some(&1));
+    assert!(!source.reward_statistics.contains_key(&10));
+    assert!(engine.pending_reward_batch().is_empty());
+}
+
+#[test]
+fn ordinary_frag_death_refuses_stale_scope_allocation_or_life_before_damage() {
+    for stale in ["world", "round", "allocation", "life"] {
+        let (mut engine, target) = fixture();
+        queue_ordinary_frag(&mut engine, target);
+        let pending = engine
+            .active
+            .as_mut()
+            .unwrap()
+            .grenade_damage
+            .front_mut()
+            .unwrap();
+        let PendingDamageSource::OrdinaryRetailFrag {
+            world,
+            round,
+            bot_allocation_generation,
+        } = &mut pending.source
+        else {
+            unreachable!()
+        };
+        match stale {
+            "world" => *world += 1,
+            "round" => *round += 1,
+            "allocation" => *bot_allocation_generation.as_mut().unwrap() += 1,
+            "life" => pending.generation += 1,
+            _ => unreachable!(),
+        }
+        update(&mut engine, 1000).unwrap();
+        assert_eq!(engine.bot_registry.bots[&target].health, 400, "{stale}");
+        assert_eq!(
+            engine.bot_registry.bots[&target].firearm_kd.deaths, 0,
+            "{stale}"
+        );
+        assert!(engine.active.as_ref().unwrap().grenade_damage.is_empty());
+        assert!(engine.pending_reward_batch().is_empty());
+    }
+}
+
+#[test]
+fn ordinary_frag_death_keeps_counters_on_nonlethal_and_recorder_refusal() {
+    let (mut engine, target) = fixture();
+    queue_ordinary_frag(&mut engine, target);
+    engine
+        .active
+        .as_mut()
+        .unwrap()
+        .grenade_damage
+        .front_mut()
+        .unwrap()
+        .damage
+        .amount_hp = 10.;
+    update(&mut engine, 1000).unwrap();
+    assert_eq!(engine.bot_registry.bots[&target].health, 360);
+    assert_eq!(engine.bot_registry.bots[&target].firearm_kd.deaths, 0);
+
+    queue_ordinary_frag(&mut engine, target);
+    engine.max_log = engine.written;
+    assert_eq!(update(&mut engine, 1001).err(), Some("log_limit_reached"));
+    assert_eq!(engine.bot_registry.bots[&target].health, 360);
+    assert_eq!(engine.bot_registry.bots[&target].firearm_kd.deaths, 0);
+    assert_eq!(engine.active.as_ref().unwrap().grenade_damage.len(), 1);
+    assert!(engine.pending_reward_batch().is_empty());
+}
+
+#[test]
+fn ordinary_frag_death_leaves_already_terminal_counter_frozen_during_damage_grace() {
+    let (mut engine, target) = fixture();
+    queue_ordinary_frag(&mut engine, target);
+    engine.match_terminal = Some(crate::match_flow::MatchTerminal {
+        world_id: 1,
+        match_id: "synthetic-ended-match".into(),
+        reason: "objectives".into(),
+        reservation_ids: vec![engine.active.as_ref().unwrap().reservation.id.clone()],
+    });
+    engine.round.outcome = Some(crate::match_flow::Outcome {
+        winner: 0,
+        major: false,
+        deadline: Duration::from_secs(2),
+        finalized: false,
+    });
+    update(&mut engine, 1000).unwrap();
+    assert_eq!(engine.bot_registry.bots[&target].health, 0);
+    assert_eq!(engine.bot_registry.bots[&target].firearm_kd.deaths, 0);
+    assert!(engine.pending_reward_batch().is_empty());
 }
 #[test]
 fn friendly_queued_grenade_preserves_friendly_kill_statistics_without_enemy_xp() {
@@ -1967,7 +2178,7 @@ fn a_grenade_already_queued_before_shooter_death_still_rewards_its_real_launcher
         target_reservation_id: Some(owner.reservation.id.clone()),
         id: "synthetic-owner-death".into(),
         generation: 4,
-        falling: false,
+        source: PendingDamageSource::Other,
         damage: damage::ResolvedDamage {
             amount_hp: 137.,
             kind: damage::DamageKind::Bullet,

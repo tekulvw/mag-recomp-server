@@ -60,7 +60,7 @@ pub(super) fn plan_report<W: Write>(
             target_reservation_id: Some(active.reservation.id.clone()),
             id: format!("fall-{}-{}", generation, header.sequence),
             generation,
-            falling: true,
+            source: PendingDamageSource::Falling,
             damage: damage::ResolvedDamage {
                 amount_hp,
                 kind: damage::DamageKind::ExternalKinetic,

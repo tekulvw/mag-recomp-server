@@ -750,7 +750,7 @@ fn plan_grenade_blasts<W: Write>(
                 if check.amount_hp > 0.0 {
                     if grenade_queue.len() < queue_limit {
                         grenade_queue.push_back(PendingDamage {
-                            falling: false,
+                            source: PendingDamageSource::Other,
                             target_character_id: check.character_id,
                             target_reservation_id: if check.character_id
                                 == (0x03800000 | u32::from(active.reservation.player))

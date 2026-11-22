@@ -180,7 +180,7 @@ fn queued_falling_damage_keeps_its_landing_modifier_snapshot() {
         target_reservation_id: Some(actor.reservation.id.clone()),
         id: "synthetic-prior-hit".into(),
         generation: 1,
-        falling: false,
+        source: PendingDamageSource::Other,
         damage: damage::ResolvedDamage {
             amount_hp: 1.,
             kind: damage::DamageKind::Bullet,

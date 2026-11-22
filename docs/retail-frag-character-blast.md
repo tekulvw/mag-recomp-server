@@ -56,6 +56,23 @@ and records its capacity denial. The owner event records before installing
 terminal, position, queue or damage changes. Configured source handling takes precedence over the
 legacy development route, so a terminal cannot apply both paths.
 
+Each qualified ordinary-frag dose carries private server-side provenance:
+world, round and, for a registry bot, its exact allocation as well as the target
+life. This is produced by the admitted blast path, not a client flag. Queue
+drain rejects a stale scope or replacement allocation before applying its
+health change. Generic explosive damage and the development-radius path do not
+acquire this provenance.
+
+A registered bot's first positive-health-to-zero qualified frag collapse adds
+one to its existing absolute Deaths statistic, native stat12. Victim accounting
+has independent eligibility from the thrower's team or reward account. The
+existing event record precedes health and counter installation, and the shared
+creation-fenced statistics drain publishes the current allocation's row. A
+same-allocation respawn keeps its totals; replacement allocation starts fresh.
+Admitted postterminal damage grace leaves the frozen round counters unchanged.
+Existing thrower rewards, assists, death notices and final results retain their
+previous scope.
+
 Blocked-ray native fallback, exposed mounted targets, native projectile physics
 and presentation-specific weapon indices require separate qualification.
 Synthetic checks and scripted original-data Engine replays establish source

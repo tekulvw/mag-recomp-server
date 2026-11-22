@@ -558,7 +558,7 @@ fn queue_damage(e: &mut Engine<Vec<u8>>, ordinal: u32) {
         target_reservation_id: Some(a.reservation.id.clone()),
         id: format!("synthetic-ordered-damage-{ordinal}"),
         generation: 1,
-        falling: true,
+        source: PendingDamageSource::Falling,
         damage: damage::ResolvedDamage {
             amount_hp: 10.,
             kind: damage::DamageKind::ExternalKinetic,
