@@ -901,13 +901,17 @@ impl RetailBulletProfile {
             let Some(attachment) = inventory.slots[slot] else {
                 continue;
             };
-            // Native SimWeaponKit keeps the host's ammo for a compatible
-            // primary-underbarrel bipod with an empty replacement weapon.
-            if slot != 17
-                || items
-                    .zip(weapon)
-                    .and_then(|(items, weapon)| items.retail_primary_bipod(weapon, attachment))
-                    != Some(BulletAttachmentKind::Bipod)
+            // Native SimWeaponKit keeps host ammo for these compatible
+            // primary attachments when the replacement weapon is empty.
+            let required = match slot {
+                16 => BulletAttachmentKind::Suppressor,
+                17 => BulletAttachmentKind::Bipod,
+                _ => return Err("unsupported_bullet_attachment"),
+            };
+            if items
+                .zip(weapon)
+                .and_then(|(items, weapon)| items.retail_primary_attachment(weapon, attachment))
+                != Some(required)
             {
                 return Err("unsupported_bullet_attachment");
             }
