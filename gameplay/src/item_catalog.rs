@@ -883,6 +883,13 @@ impl ItemCatalog {
                 Some(BulletAttachmentKind::ForwardGrip)
             }
             (0, "kWepCategoryMachineGun", "kAttachTypeBipod") => Some(BulletAttachmentKind::Bipod),
+            (0, "kWepCategorySniperRifle", "kAttachTypeBipod")
+                if weapon["required_underbarrel_attachment"].as_str() == Some(name)
+                    && parameters["character_attachment_type"].as_str()
+                        == Some("kCharAttachTypePrimary") =>
+            {
+                Some(BulletAttachmentKind::Bipod)
+            }
             _ => None,
         }
     }

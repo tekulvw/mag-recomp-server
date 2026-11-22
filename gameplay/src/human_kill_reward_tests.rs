@@ -832,6 +832,8 @@ enum PrimaryAttachment {
     WrongLauncherCategory,
     WrongLauncherAmmo,
     MismatchedHostAmmo,
+    OtherRequiredBipod,
+    WrongBipodRole,
 }
 
 fn machine_gun_hit_fixture(slot: Option<usize>, attachment: PrimaryAttachment) -> Engine<Vec<u8>> {
@@ -882,6 +884,21 @@ fn attachment_hit_fixture(
             "FireModeTypeClass2": {"FireModeTypeClass": {"fire_mode_value": "kAuto"}},
         }
     });
+    if category == "kWepCategorySniperRifle" {
+        host["fire_mode"]["fire_modes"]
+            .as_object_mut()
+            .unwrap()
+            .retain(|key, _| key == "FireModeTypeClass0");
+        host["required_sight_attachment"] = json!("synthetic_attachment_0");
+        host["required_underbarrel_attachment"] = json!(if matches!(
+            attachment,
+            PrimaryAttachment::OtherRequiredBipod
+        ) {
+            "different_required_bipod"
+        } else {
+            "synthetic_attachment_1"
+        });
+    }
     host["attachment_list"] = json!({});
     for (ordinal, &(_, kind)) in attachments.iter().enumerate() {
         let name = format!("synthetic_attachment_{ordinal}");
@@ -911,6 +928,14 @@ fn attachment_hit_fixture(
                 ""
             }
         });
+        if kind == "kAttachTypeBipod" && category == "kWepCategorySniperRifle" {
+            parameters["character_attachment_type"] =
+                json!(if matches!(attachment, PrimaryAttachment::WrongBipodRole) {
+                    "kCharAttachTypeBackup"
+                } else {
+                    "kCharAttachTypePrimary"
+                });
+        }
         if kind == "kAttachTypeLauncher" {
             parameters["character_attachment_type"] = json!("kCharAttachTypePrimary");
             parameters["weapon_name"] = json!(if matches!(
@@ -1077,6 +1102,68 @@ fn native_retail_firearm_mode_index_requires_matching_current_source_and_pool() 
                 .filter_map(|line| serde_json::from_str::<Value>(line).ok())
                 .any(|entry| entry["gameplay_denial"] == denied),
             "mode={mode} pool={pool} source={attachment:?}"
+        );
+    }
+}
+
+fn sniper_bipod_fixture(slot: usize, attachment: PrimaryAttachment) -> Engine<Vec<u8>> {
+    attachment_hit_fixture(
+        &[(14, "kAttachTypeSight"), (slot, "kAttachTypeBipod")],
+        attachment,
+        "kWepCategorySniperRifle",
+    )
+}
+
+#[test]
+fn native_heavy_sniper_hit_with_required_bipod_uses_host_ammo() {
+    let mut engine = sniper_bipod_fixture(17, PrimaryAttachment::Compatible);
+    let mut packet = native_hit(0x0380_0000, 55);
+    packet[3] = 1;
+    dispatch(&mut engine, &packet, 900).unwrap();
+    assert_eq!(victim(&engine).life.damage_health(), Some((4, 400)));
+    assert!(
+        String::from_utf8_lossy(&engine.writer).contains("unsupported_retail_bullet_fire_mode")
+    );
+
+    hit(&mut engine, 56, 1000).unwrap();
+    assert_eq!(
+        victim(&engine).life.damage_health(),
+        Some((4, 240)),
+        "{}",
+        String::from_utf8_lossy(&engine.writer)
+    );
+    assert_eq!(victim(&engine).last_damage.last_location_and_type, 0x13);
+}
+
+#[test]
+fn native_heavy_sniper_hit_rejects_unqualified_bipods() {
+    use PrimaryAttachment::*;
+    for (slot, attachment, mounted) in [
+        (16, Compatible, false),
+        (17, OtherRequiredBipod, false),
+        (17, WrongBipodRole, false),
+        (17, Incompatible, false),
+        (17, Unbound, false),
+        (17, MismatchedSource, false),
+        (17, Replacement, false),
+        (17, WrongType, false),
+        (17, Compatible, true),
+    ] {
+        let mut engine = sniper_bipod_fixture(slot, attachment);
+        if mounted {
+            let seat = domination_helo::PassengerSeat {
+                object_index: 0,
+                seat: 0,
+            };
+            let active = engine.active.as_mut().unwrap();
+            active.helo_seat = Some(seat);
+            active.owner_fields.state = Some(seat.character_state());
+        }
+        hit(&mut engine, 55, 1000).unwrap();
+        assert_eq!(victim(&engine).life.damage_health(), Some((4, 400)));
+        assert!(
+            String::from_utf8_lossy(&engine.writer).contains("unsupported_bullet_attachment"),
+            "slot={slot} attachment={attachment:?} mounted={mounted}"
         );
     }
 }
