@@ -104,6 +104,8 @@ The output is a new directory containing `manifest.json` and `detour.bin`. Inspe
 
 The reference bundle is an offline route-planning artifact. It describes the baked static geometry and its represented transforms. Gameplay movement and certified drops require the separate runtime mesh and a verified physics region. Dynamic obstacles, moving bodies, and objective sequences require their own current-state checks.
 
+A reference query reports a disconnected goal when the full goal search finds no candidate in the start component and no loaded edge can cross the component labels. For a selected goal in the same component, the existing 16,384-node search can try the same endpoints in reverse once if the initial search runs out of nodes. The retry must reach both endpoints and produce a valid forward corridor. A query can still return a partial corridor or exhaust its search budget.
+
 ## Prototype projections
 
 ```sh
