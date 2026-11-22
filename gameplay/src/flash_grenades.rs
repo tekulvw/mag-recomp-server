@@ -395,6 +395,13 @@ mod tests {
     }
 }
 
+/// One qualified current victim in this immutable owner-event candidate.
+/// Only the enclosing event may merge these; ordinary projectile effects stay distinct.
+pub(crate) struct BlindDelivery {
+    pub(crate) message: crate::OutboundMessage,
+    pub(crate) duration: f32,
+}
+
 impl<W: std::io::Write> crate::Engine<W> {
     pub fn with_flash_grenades(
         mut self,
@@ -433,7 +440,7 @@ impl<W: std::io::Write> crate::Engine<W> {
         pose: crate::domination_structural_world::OnFootBlastPose,
         ground: Option<&crate::acquisition_ground_runtime::Runtime>,
         self_yaw: Option<YawWitness>,
-    ) -> Result<(Vec<crate::OutboundMessage>, Vec<Value>), &'static str> {
+    ) -> Result<(Vec<BlindDelivery>, Vec<Value>), &'static str> {
         use crate::{
             dynamic_collision::{Geometry, Pose, geometry},
             dynamic_collision_runtime::OwnerCollisionView,
@@ -547,12 +554,15 @@ impl<W: std::io::Write> crate::Engine<W> {
             match duration {
                 Ok(duration) if duration > 0. => {
                     let wire = encode_blinded(duration, self.wire_profile)?;
-                    messages.push(crate::OutboundMessage {
-                        reservation_id: actor.reservation.id.clone(),
-                        world_id: world,
-                        player_id: actor.reservation.player,
-                        plugin_id: 1,
-                        payload_hex: crate::protocol::encode_hex(&wire),
+                    messages.push(BlindDelivery {
+                        duration,
+                        message: crate::OutboundMessage {
+                            reservation_id: actor.reservation.id.clone(),
+                            world_id: world,
+                            player_id: actor.reservation.player,
+                            plugin_id: 1,
+                            payload_hex: crate::protocol::encode_hex(&wire),
+                        },
                     });
                     audit.push(serde_json::json!({
                         "character_id": target.character_id, "generation": target.generation,

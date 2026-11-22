@@ -450,3 +450,297 @@ fn flash_reported_mounted_state_cannot_seed_on_foot_facing() {
     assert!(blind(&messages).is_empty());
     assert!(e.active.as_ref().unwrap().flash_yaw.is_none());
 }
+
+fn three_terminal_frame(engine: &Engine<Vec<u8>>, sequence: u32) -> Vec<u8> {
+    three_terminal_frame_at(
+        engine,
+        sequence,
+        [replication::CharacterPosition { y: 2.5, ..POS }; 3],
+        0,
+    )
+}
+fn three_terminal_frame_at(
+    engine: &Engine<Vec<u8>>,
+    sequence: u32,
+    positions: [replication::CharacterPosition; 3],
+    yaw: u16,
+) -> Vec<u8> {
+    let mut bits = replication::BitWriter::with_profile(engine.wire_profile);
+    replication::UpdateHeader {
+        sequence,
+        nak_sequence: 0,
+        client_index: 0,
+        object_type_mask: 8 | (1 << 16) | (1 << 17) | (1 << 18),
+        timestamp_ms: sequence,
+    }
+    .encode(&mut bits)
+    .unwrap();
+    let player = engine.active.as_ref().unwrap().reservation.player;
+    bits.write(1, 1).unwrap();
+    bits.write(player.into(), 16).unwrap();
+    for field in 0..22 {
+        bits.write(u32::from(field == 7), 1).unwrap();
+        if field == 7 {
+            bits.write(yaw.into(), 10).unwrap();
+        }
+    }
+    bits.write(0, 1).unwrap();
+    for position in positions {
+        bits.write(1, 1).unwrap();
+        bits.write(player.into(), 16).unwrap();
+        projectile::ProjectileOwnerFields {
+            state: Some(4),
+            position: Some(position),
+            rotation_xyzw: None,
+        }
+        .encode_fields(&mut bits)
+        .unwrap();
+        bits.write(0, 1).unwrap();
+    }
+    bits.finish()
+}
+
+#[test]
+fn flash_three_due_native_terminals_with_43_humans_fit_atomic_reply_budget() {
+    let mut engine = crowd_fixture(43);
+    for slot in 0..3 {
+        launch(&mut engine, slot, 1000 + u64::from(slot));
+    }
+    engine
+        .queue_projectile_publications(Duration::from_millis(1003))
+        .unwrap();
+    engine.drain_shared(Vec::new(), 1).unwrap();
+    let wire = three_terminal_frame(&engine, 1200);
+    let messages = dispatch(&mut engine, &wire, 1200).unwrap();
+    assert!((0..3).all(|slot| {
+        engine
+            .active
+            .as_ref()
+            .unwrap()
+            .projectiles
+            .get(slot)
+            .unwrap()
+            .completed
+    }));
+    assert_eq!(blind(&messages).len(), 43);
+    let source = engine.active.as_ref().unwrap();
+    let peer_terminals = source
+        .projectile_publications
+        .iter()
+        .filter_map(|p| {
+            let update =
+                replication::ObjectUpdate::decode_with_profile(&p.wire, engine.wire_profile)
+                    .ok()?;
+            let reports =
+                projectile::decode_projectile_updates_with_profile(&update, engine.wire_profile)
+                    .ok()?;
+            reports
+                .iter()
+                .find(|r| r.fields.state == Some(2))
+                .map(|r| (r.slot, p.include_owner))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(peer_terminals, [(0, false), (1, false), (2, false)]);
+    assert!(
+        engine.drain_shared(messages, 1).is_ok(),
+        "a legitimate three-use event must not fail delivery after recording its terminal state"
+    );
+}
+
+fn crowd_fixture(players: u16) -> Engine<Vec<u8>> {
+    let mut engine = fixture();
+    engine.maximum_players = 64;
+    let source = engine.active.take().unwrap();
+    for player in 2..players {
+        let template = &engine.peers[PEER];
+        let candidate = Reservation {
+            id: format!("synthetic-flash-{player}"),
+            world: template.reservation.world,
+            player,
+            account: u32::from(player) + 100,
+            session_key: format!("synthetic-session-{player}"),
+            access_key: format!("synthetic-access-{player}"),
+            character: template.reservation.character.clone(),
+        };
+        let prepared = admission::PreparedAdmission {
+            candidate,
+            modifiers: template.modifiers,
+            squad_catalog: source.squad_catalog.as_ref().clone(),
+            shared_spawn: source.squad_spawn,
+            round_number: engine.round_number,
+        };
+        // Reuse the normal actor constructor; no repeated catalog/mesh parsing.
+        engine.install_reserved(prepared, Duration::ZERO);
+        let mut extra = engine.active.take().unwrap();
+        spawn_progression::ready(&mut extra);
+        extra.life = CharacterLife::Alive {
+            generation: 4,
+            health_quarter_points: 400,
+        };
+        extra.owner_fields.state = Some(replication::CharacterState {
+            state: 1,
+            stance: 0,
+            user_data: [0; 3],
+        });
+        extra.tracking.server_position(
+            replication::CharacterPosition { x: 2., ..POS },
+            player_tracking::PositionOrigin::ServerSpawn,
+            1,
+        );
+        extra.ground_vehicle_batch = source.ground_vehicle_batch;
+        engine.peers.insert(extra.reservation.id.clone(), extra);
+    }
+    engine.active = Some(source);
+    for actor in engine.peers.values_mut() {
+        actor.flash_yaw = Some(flash_grenades::YawWitness {
+            allocation: actor.allocation_sequence,
+            generation: 4,
+            yaw: 768,
+        });
+    }
+    engine
+}
+
+#[test]
+fn flash_mixed_direct_batch_overflow_refuses_before_record_or_any_terminal_commit() {
+    // Deliberately lower only the prepared test roster's reply tier to force
+    // count pressure through the real final preflight. This is synthetic denial
+    // pressure, not an admission claim for an eight-player match with 43 actors.
+    let mut engine = crowd_fixture(43);
+    engine.maximum_players = 8;
+    for slot in 0..3 {
+        launch(&mut engine, slot, 1000 + u64::from(slot));
+    }
+    engine
+        .queue_projectile_publications(Duration::from_millis(1003))
+        .unwrap();
+    engine.drain_shared(Vec::new(), 1).unwrap();
+    // A legitimate initial objective-control catch-up accompanies the Flash batch.
+    engine.active.as_mut().unwrap().objective_delta = None;
+    let wire = three_terminal_frame(&engine, 1200);
+    let source = engine.active.as_ref().unwrap();
+    let before = (
+        engine.written,
+        source.latest_owner_sequence,
+        source.grenade_remaining,
+        source.outbound_sequence,
+        source.replication_history.len(),
+        source.projectile_publications.len(),
+        source.last_clock_points,
+    );
+    assert_eq!(
+        dispatch(&mut engine, &wire, 1200).unwrap_err(),
+        "shared_reply_budget_exceeded"
+    );
+    let source = engine.active.as_ref().unwrap();
+    assert_eq!(
+        (
+            engine.written,
+            source.latest_owner_sequence,
+            source.grenade_remaining,
+            source.outbound_sequence,
+            source.replication_history.len(),
+            source.projectile_publications.len(),
+            source.last_clock_points
+        ),
+        before
+    );
+    assert!(source.flash_yaw.is_none());
+    assert!(
+        (0..3).all(|slot| !source.projectiles.get(slot).unwrap().completed
+            && source.projectile_cleanup[usize::from(slot)].is_none())
+    );
+    assert!(!engine.failed);
+    // The same candidate can retry under the normal supported 64-player tier.
+    // Verify objective catch-up remains distinct from Flash.
+    engine.maximum_players = 64;
+    let messages = dispatch(&mut engine, &wire, 1200).unwrap();
+    assert_eq!(blind(&messages).len(), 43);
+    assert!(messages.iter().any(|m| {
+        replication::ObjectUpdate::decode_with_profile(
+            &protocol::decode_hex(&m.payload_hex),
+            engine.wire_profile,
+        )
+        .is_ok()
+    }));
+    assert!(engine.active.as_ref().unwrap().objective_delta.is_some());
+    assert!((0..3).all(|slot| {
+        engine
+            .active
+            .as_ref()
+            .unwrap()
+            .projectiles
+            .get(slot)
+            .unwrap()
+            .completed
+    }));
+}
+
+#[test]
+fn flash_direct_reply_preflight_and_shared_delivery_use_identical_byte_count_limits() {
+    let mut engine = fixture();
+    engine.maximum_players = 64;
+    let actor = engine.active.as_ref().unwrap();
+    let message = |bytes| OutboundMessage {
+        reservation_id: actor.reservation.id.clone(),
+        world_id: actor.reservation.world,
+        player_id: actor.reservation.player,
+        plugin_id: 1,
+        payload_hex: "00".repeat(bytes),
+    };
+    assert_eq!(engine.reply_budget(&[message(24_000)]), Ok((128, 24_000)));
+    assert_eq!(
+        engine.reply_budget(&(0..128).map(|_| message(1)).collect::<Vec<_>>()),
+        Ok((128, 128))
+    );
+    assert_eq!(
+        engine.reply_budget(&(0..129).map(|_| message(1)).collect::<Vec<_>>()),
+        Err("shared_reply_budget_exceeded")
+    );
+    assert_eq!(
+        engine.reply_budget(&[message(24_000), message(1)]),
+        Err("shared_reply_budget_exceeded")
+    );
+    let oversized = vec![message(24_001)];
+    assert_eq!(
+        engine.reply_budget(&oversized),
+        Err("shared_reply_budget_exceeded")
+    );
+    assert_eq!(
+        engine.drain_shared(oversized, 1).unwrap_err(),
+        "shared_reply_budget_exceeded"
+    );
+}
+
+#[test]
+fn flash_event_local_max_keeps_strongest_not_last_duration_and_all_terminal_audits() {
+    let mut engine = fixture();
+    for slot in 0..3 {
+        launch(&mut engine, slot, 1000 + u64::from(slot));
+    }
+    let positions = [2.5, 0.5, 3.5].map(|x| replication::CharacterPosition { x, y: 2.5, ..POS });
+    let wire = three_terminal_frame_at(&engine, 1200, positions, 256);
+    let messages = dispatch(&mut engine, &wire, 1200).unwrap();
+    let own = &engine.active.as_ref().unwrap().reservation.id;
+    let selected = blind(&messages)
+        .into_iter()
+        .filter(|m| &m.reservation_id == own)
+        .collect::<Vec<_>>();
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].payload_hex, "0200930000"); // max(9.5, .095, 9.0)
+    let event = String::from_utf8_lossy(&engine.writer)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .rfind(|v| v["op"] == "event")
+        .unwrap();
+    let own_character = 0x0380_0000 | u32::from(engine.active.as_ref().unwrap().reservation.player);
+    assert_eq!(
+        event["decoded"]["flash_terminals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|a| a["character_id"] == own_character)
+            .count(),
+        3
+    );
+}

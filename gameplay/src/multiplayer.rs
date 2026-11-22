@@ -1202,6 +1202,25 @@ impl<W: Write> Engine<W> {
         }
         Ok(())
     }
+    /// Validate the final direct replies before any owner-event record/commit.
+    /// Shared FIFO planning uses precisely the same admission rule below.
+    pub(super) fn reply_budget(
+        &self,
+        messages: &[OutboundMessage],
+    ) -> Result<(usize, usize), &'static str> {
+        let limit = if self.maximum_players > 8 { 128 } else { 32 };
+        let total = messages
+            .iter()
+            .try_fold(0usize, |total, message| {
+                total.checked_add(message.payload_hex.len() / 2)
+            })
+            .ok_or("shared_reply_budget_exceeded")?;
+        if messages.len() > limit || total > 24_000 {
+            return Err("shared_reply_budget_exceeded");
+        }
+        Ok((limit, total))
+    }
+
     pub(super) fn drain_shared(
         &mut self,
         mut messages: Vec<OutboundMessage>,
@@ -1211,15 +1230,8 @@ impl<W: Write> Engine<W> {
         // takes one packet per recipient so a busy low slot cannot starve peers.
         // Larger match admission explicitly opts into the expanded message count;
         // the aggregate raw-byte budget is the same for every match size.
-        let limit = if self.maximum_players > 8 { 128 } else { 32 };
+        let (limit, mut total) = self.reply_budget(&messages)?;
         let mut planned = Vec::new();
-        let mut total = messages
-            .iter()
-            .map(|m| m.payload_hex.len() / 2)
-            .sum::<usize>();
-        if messages.len() > limit || total > 24_000 {
-            return Err("shared_reply_budget_exceeded");
-        }
         // Shared character frames can already refer to an indexed hospital.
         // Its direct creation reply precedes the existing FIFO and bootstrap.
         let requires_hospital_creation = self.has_hospital_turrets();

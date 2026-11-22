@@ -17,6 +17,7 @@ pub(super) fn object_update<W: Write>(
         body_supported,
         accepted_stance,
     } = plan_owner_report(ctx, plan, &update)?;
+    let mut flash_recipients = std::collections::BTreeMap::new();
     for terminal in std::mem::take(&mut plan.combat.flash_pending) {
         match ctx.engine.plan_flash(
             active,
@@ -33,7 +34,29 @@ pub(super) fn object_update<W: Write>(
             },
         ) {
             Ok((messages, audit)) => {
-                plan.messages.extend(messages);
+                for delivery in messages {
+                    let message = &delivery.message;
+                    let recipient = (
+                        message.reservation_id.clone(),
+                        message.world_id,
+                        message.player_id,
+                    );
+                    // Bounded replacement policy: the native visual retains the
+                    // stronger duration. Merge only this same recorded event;
+                    // equal-pulse retrigger timing is not a parity claim.
+                    flash_recipients
+                        .entry(recipient)
+                        .and_modify(|current: &mut crate::flash_grenades::BlindDelivery| {
+                            if delivery.duration > current.duration {
+                                current
+                                    .message
+                                    .payload_hex
+                                    .clone_from(&delivery.message.payload_hex);
+                                current.duration = delivery.duration;
+                            }
+                        })
+                        .or_insert(delivery);
+                }
                 plan.audit.flash_terminals.extend(audit);
             }
             Err(code) => {
@@ -43,6 +66,11 @@ pub(super) fn object_update<W: Write>(
             }
         }
     }
+    plan.messages.extend(
+        flash_recipients
+            .into_values()
+            .map(|delivery| delivery.message),
+    );
     let mut grenade_queue = plan_grenade_blasts(ctx, plan, h, body_supported, accepted_stance)?;
     if let Some(fall) = plan.combat.queued_fall.take() {
         if grenade_queue.len() < 64 {

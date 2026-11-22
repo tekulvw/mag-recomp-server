@@ -58,7 +58,20 @@ and primitive Ground null-material handling are retained. Unknown bindings,
 materials and exhausted queries remain errors; they never become a fabricated
 weak pulse. Legacy damage and air-strike ray behavior is unchanged.
 
-Each positive supported duration produces one addressed reliable application
+Within one recorded owner event, qualified durations merge by current recipient
+using their maximum before delivery. The native client retains the stronger
+visual timer; this bounded replacement policy intentionally combines repeated
+fixed camera-shake/rumble restarts in the same event. It does not claim identical
+cosmetic restart counts or inter-packet timing. All terminal/victim audits and
+the three distinct peer Debris/audio triggers remain separate. Distinct owner
+events deliver independently.
+
+The final direct reply batch is checked against the same existing count and
+24,000-byte limits as shared delivery before evidence recording. An oversized
+mixed batch is denied before terminal, facing, ammunition or history state is
+committed, so it cannot fail its initial delivery budget after committing.
+
+Each selected positive duration produces one addressed reliable application
 message `0x0200` for the current victim's reservation/world/player. It contains
 active=true, sign=false, five whole-magnitude bits and ten fractional bits with
 native f32 truncation, MSB first. For example, 10 seconds encodes as

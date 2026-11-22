@@ -621,6 +621,10 @@ impl<W: Write> Engine<W> {
                 None
             }
         });
+        // This is the final direct batch, including the owner reply and clock.
+        // Deny atomically here; drain_shared must never discover an oversized
+        // direct batch after terminal, facing, ammo or history state committed.
+        self.reply_budget(&plan.messages)?;
         self.record(
             json!({
                 "op": "event",
