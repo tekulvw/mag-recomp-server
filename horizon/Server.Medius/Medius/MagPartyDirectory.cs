@@ -71,11 +71,16 @@ namespace Server.Medius
             Leave(member, _membership.GetValueOrDefault(member.AccountId));
         }
 
+        Party LeaderParty(Member member, uint partyId) =>
+            Owns(member) && _membership.TryGetValue(member.AccountId, out var party) &&
+            party.Id == partyId && ReferenceEquals(party.Members[0], member) ? party : null;
+
+        public bool IsCurrentLeader(Member member, uint partyId) => LeaderParty(member, partyId) != null;
+
         public IReadOnlyList<Member> GetLeaderMembers(Member member, uint partyId)
         {
-            if (!Owns(member) || !_membership.TryGetValue(member.AccountId, out var party) ||
-                party.Id != partyId || !ReferenceEquals(party.Members[0], member) || !party.Members.All(Owns)) return null;
-            return party.Members.ToArray();
+            var party = LeaderParty(member, partyId);
+            return party != null && party.Members.All(Owns) ? party.Members.ToArray() : null;
         }
 
         public bool SetQueueState(Member member, uint partyId, IReadOnlyList<Member> expected, sbyte status,

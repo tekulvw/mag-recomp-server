@@ -59,14 +59,24 @@ namespace Server.Medius
 
         public bool CancelPartyQueue(MagMlsSession session, uint partyId)
         {
+            (QueueEntry Entry, Slot Target) published;
             lock (_gate)
             {
+                if (_disposed || _parties == null || session == null || partyId == 0 ||
+                    !_partySessions.TryGetValue(session, out var leader) ||
+                    !_parties.IsCurrentLeader(leader, partyId)) return false;
                 var ticket = _humans.Snapshot().FirstOrDefault(row => row.Value.PartyId == partyId &&
                     ReferenceEquals(row.Value.Session, session));
-                if (ticket == null || ticket.Value.Party == null || !PartyTicketCurrent(ticket)) return false;
-                RemoveTicket(ticket);
-                return true;
+                if (ticket != null && PartyTicketCurrent(ticket))
+                {
+                    RemoveTicket(ticket);
+                    return true;
+                }
+                if (!_publishedParties.TryGetValue(partyId, out published) ||
+                    !ReferenceEquals(published.Entry.Session, session) ||
+                    !ReferenceEquals(published.Entry.Party[0], leader)) return false;
             }
+            return published.Target.Host.CancelPublishedParty(session, published.Entry.Request);
         }
 
         bool PartyTicketCurrent(MagPendingHumanQueue<QueueEntry>.Entry ticket)
@@ -132,7 +142,7 @@ namespace Server.Medius
                 lock (_gate)
                 {
                     if (_publishedParties.GetValueOrDefault(item.Key).Entry != entry ||
-                        (anyLive && entry.Party.All(member => member.Current()))) continue;
+                        (anyLive && entry.Party[0].Current())) continue;
                     _publishedParties.Remove(item.Key);
                     if (!_humans.Snapshot().Any(ticket => ticket.Value.PartyId == entry.PartyId))
                         _parties.SetQueueState(entry.Party[0], entry.PartyId, entry.Party, 1, -1);

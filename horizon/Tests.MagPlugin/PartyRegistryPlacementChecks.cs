@@ -14,6 +14,7 @@ internal static partial class LeadershipProgressionChecks
         {
             VerifyPartyRegistry(directory, true).GetAwaiter().GetResult();
             VerifyPartyRegistry(directory, false).GetAwaiter().GetResult();
+            VerifyPartyRegistry(directory, false, claimOne: true).GetAwaiter().GetResult();
             VerifyOpposingParties(directory, false).GetAwaiter().GetResult();
             VerifyOpposingParties(directory, true).GetAwaiter().GetResult();
             VerifyOpposingParties(directory, false, twoOnFirstSide: true).GetAwaiter().GetResult();
@@ -22,9 +23,9 @@ internal static partial class LeadershipProgressionChecks
         finally { Server.Medius.Program.Settings.MagApplicationId = previous; }
     });
 
-    static async Task VerifyPartyRegistry(string directory, bool cancel)
+    static async Task VerifyPartyRegistry(string directory, bool cancel, bool claimOne = false)
     {
-        var store = new LocalCharacterStore(Path.Combine(directory, $"party-{cancel}.json"));
+        var store = new LocalCharacterStore(Path.Combine(directory, $"party-{cancel}-{claimOne}.json"));
         foreach (var (account, faction) in new[] { ("alpha", (byte)0), ("bravo", (byte)0), ("charlie", (byte)1) })
             Check(store.CreateForAccount(new MagCreateCharacterRequest
                 { AccountName = account, Faction = faction, UniverseId = 26, NpId = new byte[36] }, account).Result
@@ -107,6 +108,27 @@ internal static partial class LeadershipProgressionChecks
                 Check(replies.All(reply => reply.WorldId == replies[0].WorldId) &&
                     replies.Select(reply => Convert.ToHexString(reply.AccessKey)).Distinct().Count() == 3 &&
                     worker.Reservations.Count == 1 && spare.Reservations.Count == 0, "Party split into solo reservations or reached another worker");
+
+                var slot = ((IEnumerable)typeof(MagWorldRegistry).GetField("_slots", HostInternals)!.GetValue(registry)!).Cast<object>().First();
+                var host = (LocalDmeHost)slot.GetType().GetField("Host")!.GetValue(slot)!;
+                Server.Dme.Models.ClientObject claimed = null;
+                if (claimOne)
+                {
+                    var owned = members[1]!.DeepClone().AsObject();
+                    owned["world_id"] = request["world_id"]!.DeepClone();
+                    claimed = ConnectFixture(host, owned);
+                }
+                Check(!registry.CancelPartyQueue(member, partyId), "A nonleader cancelled the published party");
+                Check(!registry.CancelPartyQueue(leader, partyId + 1), "A wrong party ID cancelled the published party");
+                Check(registry.CancelPartyQueue(leader, partyId), "Leader could not cancel a published party with unclaimed members");
+                var released = (claimOne ? members.Take(1) : members)
+                    .Select(m => m["reservation_id"]!.GetValue<string>()).ToHashSet(StringComparer.Ordinal);
+                await Until(() => worker.Requests.Count(r => r["op"]!.GetValue<string>() == "release") >= released.Count);
+                Check(worker.Requests.Where(r => r["op"]!.GetValue<string>() == "release")
+                    .Select(r => r["reservation_id"]!.GetValue<string>()).ToHashSet().SetEquals(released),
+                    "Published party cancel released a claimed or unrelated owner");
+                Check(registry.Worlds[0].ReservedPlayers == (claimOne ? 2 : 1) &&
+                    (!claimOne || registry.CanUse(claimed)), "Published cancellation removed an active party member or the solo owner");
             }
         }
         finally { hold.TrySetResult(); }

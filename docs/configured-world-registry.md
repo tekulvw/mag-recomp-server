@@ -49,8 +49,10 @@ lobbies continue to offer solo matchmaking.
 
 Private invites bind current authenticated accounts and their fixed selected
 characters. A party is same-faction and its leader is first in the roster.
-Only that current leader can queue or cancel the pending party entry. A
-leader leaving dissolves the party. An invite response carries no generation
+Only that current leader can queue or cancel the party entry. After
+publication, a cancel releases the original entry's still-unclaimed
+reservations and leaves claimed members in the match. A leader leaving
+dissolves the party. An invite response carries no generation
 on the wire, so a party never reissues an invitation to the same account.
 Expiry, departure and capacity are replacement policy. This scope does not
 emit the native decline-presentation event or support open parties and voice.

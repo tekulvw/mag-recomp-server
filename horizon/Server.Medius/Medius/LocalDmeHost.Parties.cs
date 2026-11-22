@@ -36,6 +36,32 @@ namespace Server.Medius
             }
         }
 
+        internal bool CancelPublishedParty(MagMlsSession leader, MagJoinGameRequest request)
+        {
+            if (request is not MagRetailJoinGameRequest { PartyId: > 0 }) return false;
+            Reservation[] pending;
+            lock (_gate)
+            {
+                pending = _reservations.Values.Where(owner => IsLiveCohort(owner) && owner.Accepted &&
+                    !owner.Claimed && !owner.Invalidated && OwnsQueueRequest(owner, leader, request)).ToArray();
+                foreach (var owner in pending)
+                {
+                    // Share the claim lock so a transport cannot take an owner
+                    // after cancellation selected it for ordinary release.
+                    owner.Invalidated = true;
+                    owner.ReleaseReason = "queued_party_cancelled";
+                }
+            }
+            if (pending.Length != 0) _ = ReleaseCancelledPartyAsync(pending);
+            return pending.Length != 0;
+        }
+
+        async Task ReleaseCancelledPartyAsync(Reservation[] owners)
+        {
+            try { await ReleaseReservationsAsync(owners); }
+            catch (Exception error) { Logger.Warn($"Published party cancellation cleanup: error={error.GetType().Name}"); }
+        }
+
         bool AdmittedPartyReply(GameplayBridgeResponse reply, string formation, string profile, string cohort,
             uint world, ulong epoch, IEnumerable<string> ids, string status, byte? team = null, bool emptyReleaseAllowed = false)
         {
@@ -113,6 +139,9 @@ namespace Server.Medius
                             admissionWorld.Manager.GetClientBySessionKey(client.SessionKey) != client) return false;
                         client.ApplicationId = _applicationId;
                         var prepared = PrepareReservation(session, party.Ticket.Value.Request, member.Notify, character, record, loadouts, client);
+                        // The native queue request belongs to the leader. Every
+                        // member still has its own authenticated DME reservation.
+                        prepared.Owner.QueueSession = party.Ticket.Value.Session;
                         party.Owners.Add(prepared.Owner);
                         var descriptor = PrepareJoinDescriptor(party.Ticket.Value.Request.TransactionId, client);
                         MagMessageCodec.SerializeForApplication(descriptor, _applicationId);
