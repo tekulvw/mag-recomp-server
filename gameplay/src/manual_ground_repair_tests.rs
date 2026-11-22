@@ -4,7 +4,17 @@ use super::*;
 pub(crate) const TARGET: u32 = 0x0100_0004;
 
 pub(crate) fn fixture() -> Engine<Vec<u8>> {
-    let mut e = spawn_progression::tests::dynamic_bodies::acquisition_gameplay_tests::ground_firearm_fixture(0.,true);
+    repair_fixture(false)
+}
+
+fn repair_fixture(include_defender: bool) -> Engine<Vec<u8>> {
+    let mut e = spawn_progression::tests::dynamic_bodies::acquisition_gameplay_tests::ground_firearm_fixture(0., !include_defender);
+    if include_defender {
+        acquisition_structural::connected_tests::select_tool_actor(
+            &mut e,
+            "synthetic-reservation-0000",
+        );
+    }
     structural_repair_authority::tests::equip_synthetic_repair_kit(&mut e);
     e.bunker_world = Some(structural_repair_authority::tests::synthetic_repair_bunker_world());
     let batch = e.ground_vehicles.as_ref().unwrap().batch_count();
@@ -532,4 +542,55 @@ fn acquisition_profile_tool_and_outer_bridge_deliver_the_recorded_health_update(
     assert_eq!(bits.read(8), Ok(0));
     assert_eq!(bits.read(16), Ok(508));
     assert!(e.active.as_ref().unwrap().pending_shared.is_empty());
+}
+
+#[test]
+fn manual_repair_uses_frozen_bot_team_instead_of_replacement_allegiance() {
+    for (source_team, replacement, earns_credit) in [(1, 0, true), (0, 1, false)] {
+        let mut e = repair_fixture(true);
+        let active = e.active.as_ref().unwrap();
+        assert_eq!(active.team(), 0);
+        let current = e
+            .active
+            .iter()
+            .chain(e.peers.values())
+            .find(|actor| actor.reservation.player == replacement)
+            .unwrap();
+        assert_eq!(current.team(), 1 - source_team);
+        let source = objective_control::BotPlantSource {
+            player: replacement,
+            allocation: 21,
+            life: 1,
+            team: source_team,
+            world: active.reservation.world,
+            round: e.round_number,
+        };
+        let ground = e.ground_runtime.as_mut().unwrap();
+        let key = ground.get(4).unwrap().key;
+        ground
+            .apply_blast_with_bot_origin(key, 1., u32::MAX, Some(source))
+            .unwrap();
+        let before = hp(&e);
+        repair(&mut e, TARGET, 4000, Transport::Tcp).unwrap();
+        assert_eq!(hp(&e), before + 68);
+        assert_eq!(
+            e.ground_runtime
+                .as_ref()
+                .unwrap()
+                .get(4)
+                .unwrap()
+                .bot_plant_source,
+            Some(source)
+        );
+        let active = e.active.as_ref().unwrap();
+        assert_eq!(
+            active.reward_statistics.get(&35).copied().unwrap_or(0),
+            i32::from(earns_credit)
+        );
+        let awards = e.pending_reward_batch();
+        assert_eq!(awards.len(), usize::from(earns_credit));
+        if earns_credit {
+            assert_eq!(awards[0].kind, progression::RewardKind::RepairUnits);
+        }
+    }
 }

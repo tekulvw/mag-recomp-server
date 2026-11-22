@@ -171,6 +171,12 @@ impl<W: Write> Engine<W> {
                 json!({"op":"acquisition_ground_effect","vehicle":key.object_id(),
                 "effect": format!("{:?}", event.effect)}),
             );
+            let bot_plant = self
+                .ground_runtime
+                .as_ref()
+                .and_then(|ground| ground.get(key.index))
+                .filter(|vehicle| vehicle.key == key)
+                .and_then(|vehicle| vehicle.bot_plant_source);
             match event.effect {
                 Effect::StateChanged(state) => {
                     let mask = output.changes.entry(key.index).or_default();
@@ -215,6 +221,7 @@ impl<W: Write> Engine<W> {
                                 last_attacker: attacker,
                                 vehicle_vector: [position.x, position.y, position.z],
                             },
+                            bot_plant,
                             output,
                         )?;
                     }
@@ -244,7 +251,21 @@ impl<W: Write> Engine<W> {
                         .ok_or("acquisition_ground_world_missing")?
                         .reservation
                         .world;
-                    let team = self.character_team_in_world(attacker, world).unwrap_or(0);
+                    let team = match bot_plant {
+                        Some(source)
+                            if source.world == world && source.round == self.round_number =>
+                        {
+                            source.team
+                        }
+                        Some(_) => return Err("stale_bot_plant_ground_source"),
+                        None => self.character_team_in_world(attacker, world).unwrap_or(0),
+                    };
+                    if bot_plant.is_some() {
+                        output
+                            .audit
+                            .push(json!({"op":"acquisition_ground_forced_fsp_source",
+                            "objective":objective,"source_team":team,"attacker":attacker}));
+                    }
                     forced_fsp.push((objective, attacker, team));
                 }
                 Effect::DismountOccupants => {
@@ -299,13 +320,16 @@ impl<W: Write> Engine<W> {
         &mut self,
         target: character::Target,
         request: character::Request,
+        bot_plant: Option<crate::objective_control::BotPlantSource>,
         output: &mut Effects<'_>,
     ) -> Result<(), &'static str> {
         let state = output
             .native
             .get_mut(&target.character_id)
             .ok_or("acquisition_character_native_state_missing")?;
-        let plan = self.plan_acquisition_character_effect(target, request, *state, output.now)?;
+        let plan = self.plan_character_effect_with_bot_origin(
+            target, request, *state, output.now, bot_plant,
+        )?;
         output.audit.push(plan.audit().clone());
         output
             .messages
@@ -330,7 +354,7 @@ impl<W: Write> Engine<W> {
             .filter(|vehicle| vehicle.key == key)
             .ok_or("stale_domination_ground_candidate")?;
         let position = source.pose.position;
-        let work = self.collect_domination_blast(
+        let mut work = self.collect_domination_blast(
             BlastSource::Ground {
                 body_id: key.object_id(),
             },
@@ -344,6 +368,9 @@ impl<W: Write> Engine<W> {
             },
             collision,
         )?;
+        if let crate::domination_structural_world::DamageWork::Blast { bot_plant, .. } = &mut work {
+            *bot_plant = source.bot_plant_source;
+        }
         let result = self.stage_domination_damage_with_ground(
             &mut AreaDamageState::default(),
             output.native,
@@ -392,6 +419,7 @@ impl<W: Write> Engine<W> {
             .filter(|vehicle| vehicle.key == key)
             .ok_or("stale_acquisition_ground_candidate")?;
         let attacker = source.last_attacker;
+        let bot_plant = source.bot_plant_source;
         let origin = [
             source.pose.position.x,
             source.pose.position.y,
@@ -406,7 +434,13 @@ impl<W: Write> Engine<W> {
         let limits = frame.limits;
         let mut budget = limits.max_support_points;
         let mut los_budget = 1_000_000;
-        let attacker_team = self.character_team_in_world(attacker, world);
+        let attacker_team = match bot_plant {
+            Some(source) if source.world == world && source.round == self.round_number => {
+                Some(source.team)
+            }
+            Some(_) => return Err("stale_bot_plant_ground_source"),
+            None => self.character_team_in_world(attacker, world),
+        };
         for body in snapshot.bodies() {
             if body.target.key.id == source_id
                 || frame.filter_row & (1 << body.layer) == 0
@@ -513,6 +547,7 @@ impl<W: Write> Engine<W> {
                             },
                             attacker,
                         },
+                        bot_plant,
                         output,
                     )?;
                 }
@@ -537,7 +572,7 @@ impl<W: Write> Engine<W> {
                         .ground_runtime
                         .as_mut()
                         .ok_or("ground_vehicle_runtime_required")?
-                        .apply_explosion_damage(ground_target, hp, attacker)?;
+                        .apply_blast_with_bot_origin(ground_target, hp, attacker, bot_plant)?;
                     if !changes.is_empty() {
                         *output.changes.entry(ground_target.index).or_default() |= 1 << 18;
                         output.audit.push(json!({"op":"acquisition_destruction_ground_blast","target":id,"hp":hp,"root":body.root}));

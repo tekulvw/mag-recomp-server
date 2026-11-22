@@ -574,9 +574,9 @@ impl Bindings {
     }
 }
 
-/// Identity of a native defuse that the source slot walk started for a bot.
+/// Identity of a native Structural contact hold started by the source slot walk.
 #[derive(Clone, Copy)]
-struct BotDefuse {
+struct BotStructuralHold {
     player: u16,
     allocation: u32,
     life: u32,
@@ -584,9 +584,10 @@ struct BotDefuse {
     world: u32,
     round: u64,
     trigger: u8,
+    planting: bool,
 }
 
-impl BotDefuse {
+impl BotStructuralHold {
     fn actor<W: Write>(self, engine: &Engine<W>, world: u32) -> Option<ObjectiveActor> {
         if self.world != world
             || self.round != engine.round_number
@@ -640,7 +641,7 @@ pub(crate) struct Runtime {
     area: AreaDamageState,
     queued: BTreeMap<u16, (ObjectiveState, u16)>,
     mission_start_staged: bool,
-    bot_defuses: BTreeMap<u16, BotDefuse>,
+    bot_holds: BTreeMap<u16, BotStructuralHold>,
 }
 
 impl Runtime {
@@ -662,7 +663,7 @@ impl Runtime {
             area: AreaDamageState::default(),
             queued: BTreeMap::new(),
             mission_start_staged: false,
-            bot_defuses: BTreeMap::new(),
+            bot_holds: BTreeMap::new(),
         }
     }
 
@@ -779,7 +780,12 @@ impl Runtime {
                             blast,
                             collision,
                         )
-                        .map(|work| vec![work])
+                        .map(|mut work| {
+                            if let DamageWork::Blast { bot_plant, .. } = &mut work {
+                                *bot_plant = entry.bot_plant;
+                            }
+                            vec![work]
+                        })
                 })?;
             }
         }
@@ -827,14 +833,14 @@ impl Runtime {
         Ok(())
     }
 
-    pub(crate) fn bot_owns_defuse(&self, world: &ObjectiveWorld, index: u16, player: u16) -> bool {
-        self.bot_defuses.get(&index).is_some_and(|hold| {
+    pub(crate) fn bot_owns_hold(&self, world: &ObjectiveWorld, index: u16, player: u16) -> bool {
+        self.bot_holds.get(&index).is_some_and(|hold| {
             hold.player == player
                 && world.interaction_owner(index) == Some((player, hold.life, hold.trigger))
         })
     }
 
-    fn stage_bot_defuse<W: Write>(
+    fn stage_bot_hold<W: Write>(
         &mut self,
         index: u16,
         world_id: u32,
@@ -862,7 +868,7 @@ impl Runtime {
                             .as_ref()
                             .is_some_and(|policy| policy.interactions_enabled)
                 });
-        if let Some(hold) = self.bot_defuses.get(&index).copied() {
+        if let Some(hold) = self.bot_holds.get(&index).copied() {
             if owner == Some((hold.player, hold.life, hold.trigger)) {
                 // An actor with a reused packed index cannot sustain this native hold.
                 actors.remove(&hold.player);
@@ -870,7 +876,7 @@ impl Runtime {
                     actors.insert(hold.player, actor);
                     let bot = &frame.engine.bot_registry.bots[&hold.player];
                     if !script_pending
-                        && live_fuse == Some(hold.trigger)
+                        && (hold.planting || live_fuse == Some(hold.trigger))
                         && (!enabled
                             || bot.task.recovering
                             || !bot.task.is_operator_for(index, hold.life))
@@ -882,7 +888,7 @@ impl Runtime {
                         );
                         if released.accepted {
                             frame.audit.push(
-                                json!({"op":"acquisition_bot_defuse_release","object":index,
+                                json!({"op":if hold.planting { "acquisition_bot_plant_release" } else { "acquisition_bot_defuse_release" },"object":index,
                                 "player":hold.player,"allocation":hold.allocation,"life":hold.life,
                                 "trigger":hold.trigger}),
                             );
@@ -891,12 +897,19 @@ impl Runtime {
                 }
                 return actors;
             }
-            self.bot_defuses.remove(&index);
+            self.bot_holds.remove(&index);
         }
-        let Some(trigger) = live_fuse.filter(|_| enabled && !script_pending && owner.is_none())
-        else {
+        if !enabled || script_pending || owner.is_some() {
             return actors;
-        };
+        }
+        let planting = live_fuse.is_none()
+            && matches!(
+                world.state(index),
+                Some(ObjectiveState::Deactivated | ObjectiveState::Repaired)
+            );
+        if live_fuse.is_none() && !planting {
+            return actors;
+        }
         let Some(rule) = frame
             .engine
             .objective_catalog
@@ -912,7 +925,7 @@ impl Runtime {
             return actors;
         };
         let owner_team = rule.owner_team;
-        if !rule.can_defuse {
+        if !planting && !rule.can_defuse {
             return actors;
         }
         let selected = frame
@@ -922,31 +935,58 @@ impl Runtime {
             .iter()
             .find_map(|(&player, bot)| {
                 let life = bot.target.runtime?.generation;
-                if bot.target.squad.team() != owner_team
+                let team = bot.target.squad.team();
+                if (team == owner_team) == planting
                     || bot.task.recovering
                     || !bot.task.is_operator_for(index, life)
                 {
                     return None;
                 }
-                let hold = BotDefuse {
+                let mut hold = BotStructuralHold {
                     player,
                     allocation: bot.allocation_generation,
                     life,
-                    team: owner_team,
+                    team,
                     world: world_id,
                     round: frame.engine.round_number,
-                    trigger,
+                    trigger: live_fuse.unwrap_or_default(),
+                    planting,
                 };
                 let actor = hold.actor(frame.engine, world_id)?;
-                let outcome = world.interact(
-                    hold.request(index, ObjectiveInteractionKind::Deactivate),
-                    actor,
-                    frame.now,
-                );
-                outcome.accepted.then_some((hold, actor))
+                let accepted = if planting {
+                    hold.trigger = (0..rule.trigger_count).find(|&trigger| {
+                        crate::objective_control::at_native_trigger(
+                            actor.position,
+                            rule.range(),
+                            trigger,
+                        )
+                    })?;
+                    world.stage_native_bot_plant(
+                        hold.request(index, ObjectiveInteractionKind::Activate),
+                        actor,
+                        crate::objective_control::BotPlantSource {
+                            player: hold.player,
+                            allocation: hold.allocation,
+                            life: hold.life,
+                            team: hold.team,
+                            world: hold.world,
+                            round: hold.round,
+                        },
+                        frame.now,
+                    )
+                } else {
+                    world
+                        .interact(
+                            hold.request(index, ObjectiveInteractionKind::Deactivate),
+                            actor,
+                            frame.now,
+                        )
+                        .accepted
+                };
+                accepted.then_some((hold, actor))
             });
         if let Some((hold, actor)) = selected {
-            self.bot_defuses.insert(index, hold);
+            self.bot_holds.insert(index, hold);
             actors.insert(hold.player, actor);
             let bot = frame
                 .engine
@@ -961,9 +1001,9 @@ impl Runtime {
             bot.task.role_goal = Some(actor.position);
             frame
                 .audit
-                .push(json!({"op":"acquisition_bot_defuse_started","object":index,
+                .push(json!({"op":if hold.planting { "acquisition_bot_plant_started" } else { "acquisition_bot_defuse_started" },"object":index,
                 "world":hold.world,"round":hold.round,"player":hold.player,
-                "allocation":hold.allocation,"life":hold.life,"trigger":trigger}));
+                "allocation":hold.allocation,"life":hold.life,"trigger":hold.trigger}));
         }
         actors
     }
@@ -1019,7 +1059,7 @@ impl Runtime {
                 // Earlier entries and area tails can kill or unseat a holder.
                 // Resolve the actor against the staged world at this slot.
                 let actors =
-                    self.stage_bot_defuse(index, world_id, world, frame, script_request.is_some());
+                    self.stage_bot_hold(index, world_id, world, frame, script_request.is_some());
                 let mut transitions = 0;
                 loop {
                     let delta = world.tick_native_object(index, frame.now, &actors);
@@ -1041,8 +1081,11 @@ impl Runtime {
                         return Err("native_objective_transition_limit");
                     }
                 }
-                if world.state(index) != Some(ObjectiveState::Deactivating) {
-                    self.bot_defuses.remove(&index);
+                if let Some(hold) = self.bot_holds.get(&index)
+                    && world.interaction_owner(index)
+                        != Some((hold.player, hold.life, hold.trigger))
+                {
+                    self.bot_holds.remove(&index);
                 }
             } else {
                 if let Some((state, actor)) = request

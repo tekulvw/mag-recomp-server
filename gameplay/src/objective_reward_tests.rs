@@ -675,6 +675,7 @@ fn activated_entry(e: &Engine<Vec<u8>>) -> objective_control::NativeEntry {
         actor_generation: Some(999),
         reward_actor: Some(delta.state_actor.actor_index),
         active_trigger_index: Some(1),
+        bot_plant: None,
     }
 }
 #[test]

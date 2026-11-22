@@ -110,7 +110,20 @@ impl<W: Write> Engine<W> {
             })
             .and_then(|o| o.reward.as_ref())
             .and_then(|r| repair_counter(entry, r.subtype));
-        let mut effects = if let Some(player) = entry.reward_actor {
+        let mut effects = if let Some(origin) = entry.bot_plant {
+            if origin.round != self.round_number || !self.accepts_subscription_world(origin.world) {
+                return Err("stale_bot_plant_objective_source");
+            }
+            self.stage_objective_counters_for_team(
+                origin.world,
+                origin.team,
+                None,
+                entry.delta.object_index,
+                &[],
+                tagged_callback(entry),
+                assignments,
+            )?
+        } else if let Some(player) = entry.reward_actor {
             self.stage_objective_counters(
                 player,
                 entry.delta.object_index,
@@ -153,9 +166,32 @@ impl<W: Write> Engine<W> {
         else {
             return Ok(Effects::default());
         };
+        self.stage_objective_counters_for_team(
+            world,
+            team,
+            Some(player),
+            object_index,
+            counters,
+            tagged,
+            assignments,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn stage_objective_counters_for_team(
+        &mut self,
+        world: u32,
+        team: u8,
+        player: Option<u16>,
+        object_index: u16,
+        counters: &[u8],
+        tagged: bool,
+        assignments: &[(u16, Assignment)],
+    ) -> Result<Effects, &'static str> {
+        let humans = || self.active.iter().chain(self.peers.values());
         let mut increments: BTreeMap<(String, u8), i32> = BTreeMap::new();
         if let Some(actor) = humans().find(|a| {
-            a.reservation.player == player
+            Some(a.reservation.player) == player
                 && a.reservation.world == world
                 && a.wire_profile.application_id() == 20231
         }) {

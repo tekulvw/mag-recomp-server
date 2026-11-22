@@ -49,6 +49,7 @@ fn entry(e: &Engine<Vec<u8>>, old: State, new: State) -> NativeEntry {
         actor_generation: Some(1),
         reward_actor: Some(player),
         active_trigger_index: Some(1),
+        bot_plant: None,
     }
 }
 pub(crate) fn callback(

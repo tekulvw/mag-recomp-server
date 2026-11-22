@@ -650,3 +650,252 @@ fn source_structural_bot_defuse_leaves_damage_activated_fuse_unchanged() {
     tick(&mut engine, 113).unwrap();
     assert_eq!(state(&engine), ObjectiveState::Activated);
 }
+
+#[test]
+fn registered_hostile_bot_plants_and_fuse_survives_retirement() {
+    let (mut engine, bot) =
+        register_structural_operator(connected_tests::fixture_with_structural_team(0., 0., 0., 0));
+    assert_eq!(state(&engine), ObjectiveState::Deactivated);
+    let rewards = engine.pending_reward_batch();
+    tick(&mut engine, 113).unwrap();
+    assert_eq!(state(&engine), ObjectiveState::Activating);
+    let owner = engine
+        .objective_world
+        .as_ref()
+        .unwrap()
+        .interaction_owner(INDEX)
+        .unwrap();
+    assert_eq!((owner.0, owner.2), (bot, 1));
+    tick(&mut engine, 123).unwrap();
+    assert_eq!(state(&engine), ObjectiveState::Activated);
+    engine.bot_registry.bots.remove(&bot);
+    tick(&mut engine, 143).unwrap();
+    assert_eq!(state(&engine), ObjectiveState::Completed);
+    assert_eq!(engine.pending_reward_batch(), rewards);
+}
+
+#[test]
+fn retired_planters_replacement_is_an_independent_friendly_victim() {
+    let (mut engine, bot) = register_structural_operator(
+        connected_tests::fixture_with_structural_team(20., 0., 0., 0),
+    );
+    tick(&mut engine, 113).unwrap();
+    tick(&mut engine, 123).unwrap();
+    let original_life = engine.bot_registry.bots[&bot]
+        .target
+        .runtime
+        .unwrap()
+        .generation;
+    engine.retire_bot_for_human(bot, clock(124), 1).unwrap();
+    connected_tests::defender_at(&mut engine, bot, clock(124));
+    engine.item_catalog = crate::human_kill_reward_tests::combat_items_for_ground_test(0.);
+    let mut engine = with_bot_plant_damage_rules(engine);
+    engine.collision_world = Some(static_scene());
+    let active = engine.active.as_mut().unwrap();
+    let defender = std::sync::Arc::new(
+        engine
+            .spawn_catalog
+            .as_ref()
+            .unwrap()
+            .for_squad(16)
+            .unwrap(),
+    );
+    crate::spawn_progression::tests::ready(active);
+    active.squad_catalog = defender;
+    active.life = CharacterLife::Alive {
+        generation: original_life,
+        health_quarter_points: 400,
+    };
+    active.tracking.server_position(
+        CharacterPosition {
+            x: 24.,
+            y: 3.,
+            z: 10.,
+        },
+        crate::player_tracking::PositionOrigin::ServerSpawn,
+        124,
+    );
+    let mut loadout = engine.peers["synthetic-reservation-0000"]
+        .spawned_loadout
+        .clone()
+        .unwrap();
+    loadout.inventories[1].slots[12] = Some(3);
+    active.spawned_loadout = Some(loadout);
+    active.reservation.character.account_id = Some("synthetic-plant-slot-replacement".into());
+    let rewards = engine.pending_reward_batch();
+    tick(&mut engine, 143).unwrap();
+    let active = engine.active.as_ref().unwrap();
+    assert_eq!(state(&engine), ObjectiveState::Completed);
+    assert_eq!(active.reservation.player, bot);
+    assert_eq!(active.team(), 1);
+    assert_eq!(active.last_damage.last_attacker, u32::MAX);
+    assert_eq!(active.life.damage_health().unwrap().1, 400 - 30);
+    assert_eq!(engine.pending_reward_batch(), rewards);
+}
+
+#[test]
+fn retasked_bot_planter_cancels_before_the_fuse_exists() {
+    let (mut engine, bot) =
+        register_structural_operator(connected_tests::fixture_with_structural_team(0., 0., 0., 0));
+    tick(&mut engine, 113).unwrap();
+    assert_eq!(state(&engine), ObjectiveState::Activating);
+    engine
+        .bot_registry
+        .bots
+        .get_mut(&bot)
+        .unwrap()
+        .task
+        .operator = false;
+    tick(&mut engine, 123).unwrap();
+    assert_eq!(state(&engine), ObjectiveState::Deactivated);
+    tick(&mut engine, 143).unwrap();
+    assert_eq!(state(&engine), ObjectiveState::Deactivated);
+}
+
+#[test]
+fn human_defuse_of_bot_charge_keeps_its_own_personal_award() {
+    let (mut engine, _) =
+        register_structural_operator(connected_tests::fixture_with_structural_team(0., 0., 0., 0));
+    let active = engine.active.as_mut().unwrap();
+    active.reservation.character.account_id = Some("synthetic-human-defuser".into());
+    connected_tests::bind_repair_counter_squad(&mut engine, INDEX);
+    tick(&mut engine, 113).unwrap();
+    tick(&mut engine, 123).unwrap();
+    assert_eq!(state(&engine), ObjectiveState::Activated);
+    let before = engine.pending_reward_batch();
+    engine.active.as_mut().unwrap().tracking.server_position(
+        CharacterPosition {
+            x: 20.,
+            y: 3.,
+            z: 10.,
+        },
+        crate::player_tracking::PositionOrigin::ServerSpawn,
+        124,
+    );
+    connected_tests::interact(&mut engine, ObjectiveInteractionKind::Deactivate, 1, 124).unwrap();
+    assert_eq!(state(&engine), ObjectiveState::Deactivating);
+    tick(&mut engine, 132).unwrap();
+    assert_eq!(state(&engine), ObjectiveState::Deactivated);
+    let awards = engine.pending_reward_batch();
+    assert_eq!(awards.len(), before.len() + 1);
+    assert!(awards.iter().any(|award| {
+        award.player_id == 0 && award.kind == crate::progression::RewardKind::ChargeDefused
+    }));
+}
+
+#[test]
+fn refused_bot_plant_start_keeps_body_task_and_world_unchanged() {
+    let (mut engine, bot) =
+        register_structural_operator(connected_tests::fixture_with_structural_team(0., 0., 0., 0));
+    let owner = engine.bot_registry.bots.get_mut(&bot).unwrap();
+    let goal = CharacterPosition {
+        x: 21.,
+        y: 3.,
+        z: 10.,
+    };
+    owner.task.goal = Some(goal);
+    owner.target.runtime.as_mut().unwrap().phase = crate::development_target::BotPhase::Moving;
+    let before_messages = engine.active.as_ref().unwrap().pending_shared.clone();
+    engine.max_log = engine.written;
+    assert_eq!(tick(&mut engine, 113).unwrap_err(), "log_limit_reached");
+    assert_eq!(state(&engine), ObjectiveState::Deactivated);
+    assert!(
+        engine
+            .objective_world
+            .as_ref()
+            .unwrap()
+            .interaction_owner(INDEX)
+            .is_none()
+    );
+    assert_eq!(
+        engine.active.as_ref().unwrap().pending_shared,
+        before_messages
+    );
+    let owner = &engine.bot_registry.bots[&bot];
+    assert_eq!(owner.task.goal, Some(goal));
+    assert!(matches!(
+        owner.target.runtime.unwrap().phase,
+        crate::development_target::BotPhase::Moving
+    ));
+}
+
+fn with_bot_plant_damage_rules(engine: Engine<Vec<u8>>) -> Engine<Vec<u8>> {
+    let sha = engine
+        .spawn_catalog
+        .as_ref()
+        .unwrap()
+        .source_sha256()
+        .unwrap()
+        .to_owned();
+    engine.with_character_damage_rules(
+        crate::character_damage_rules::Rules::from_json(&json!({
+            "schema_version":1,"application_id":20231,"map_name":"synthetic_arena","game_type":1,
+            "friendly_fire_multiplier":0.5,
+            "provenance":{"spawn_catalog_sha256":sha,"source":"synthetic"}
+        }).to_string()).unwrap(),
+    ).unwrap()
+}
+
+#[test]
+fn bot_plant_self_damage_requires_the_exact_allocation_and_life() {
+    let (engine, player) = register_structural_operator(
+        connected_tests::fixture_with_structural_team(20., 0., 0., 0),
+    );
+    let mut engine = with_bot_plant_damage_rules(engine);
+    engine.item_catalog = crate::human_kill_reward_tests::combat_items_for_ground_test(0.);
+    let bot = engine.bot_registry.bots.get_mut(&player).unwrap();
+    let inventory = usize::from(bot.target.loadout.handle.inventory_index);
+    bot.target.loadout.inventories[inventory].slots[12] = Some(3);
+    let generation = bot.target.runtime.unwrap().generation;
+    let source = crate::objective_control::BotPlantSource {
+        player,
+        allocation: bot.allocation_generation,
+        life: generation,
+        team: 1,
+        world: 1,
+        round: engine.round_number,
+    };
+    let target = crate::acquisition_character_effects::Target {
+        character_id: 0x0380_0000 | u32::from(player),
+        generation,
+        world: 1,
+    };
+    let request = crate::acquisition_character_effects::Request::StructuralExplosion {
+        raw_hp: 20.,
+        from_direction: [0., 1., 0.],
+        attacker: u32::MAX,
+        objective_id: TARGET,
+    };
+    let native = engine.owned_acquisition_characters()[&target.character_id];
+    for (origin, expected) in [
+        (source, 1.),
+        (
+            crate::objective_control::BotPlantSource {
+                allocation: source.allocation + 1,
+                ..source
+            },
+            0.5,
+        ),
+        (
+            crate::objective_control::BotPlantSource {
+                life: source.life + 1,
+                ..source
+            },
+            0.5,
+        ),
+    ] {
+        let plan = engine
+            .plan_character_effect_with_bot_origin(
+                target,
+                request,
+                native,
+                clock(123),
+                Some(origin),
+            )
+            .unwrap();
+        assert_eq!(
+            plan.audit()["calculation"]["incoming_damage_base"],
+            expected
+        );
+    }
+}

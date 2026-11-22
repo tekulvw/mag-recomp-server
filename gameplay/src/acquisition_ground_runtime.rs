@@ -149,6 +149,7 @@ pub struct Vehicle {
     damage_user_data: u32,
     damage_source_object: u32,
     pub last_attacker: u32,
+    pub(crate) bot_plant_source: Option<crate::objective_control::BotPlantSource>,
     pub damage_changed: bool,
     pub vaporize_on_death: bool,
     pub pending_death: bool,
@@ -221,6 +222,7 @@ impl Vehicle {
         user_data: u32,
     ) -> LifecycleEvent {
         self.last_attacker = attacker;
+        self.bot_plant_source = None;
         // Untyped damage retains its existing condition-suppression behavior.
         self.damage_conditions_resolved = location_and_type != 0;
         self.damage_location_and_type = location_and_type;
@@ -326,6 +328,7 @@ impl Runtime {
             damage_user_data: 0,
             damage_source_object: u32::MAX,
             last_attacker: u32::MAX,
+            bot_plant_source: None,
             damage_changed: false,
             vaporize_on_death: false,
             pending_death: false,
@@ -715,6 +718,28 @@ impl Runtime {
         self.apply_weapon_damage(key, amount_hp, attacker, 0xa0, 0)
     }
 
+    pub(crate) fn apply_blast_with_bot_origin(
+        &mut self,
+        key: Key,
+        amount_hp: f32,
+        attacker: u32,
+        origin: Option<crate::objective_control::BotPlantSource>,
+    ) -> Result<Vec<LifecycleEvent>, &'static str> {
+        if origin.is_some() && attacker != u32::MAX {
+            return Err("bot_plant_attacker_must_be_uncredited");
+        }
+        let events = self.apply_explosion_damage(key, amount_hp, attacker)?;
+        if let Some(source) = origin
+            && !events.is_empty()
+        {
+            self.vehicles
+                .get_mut(&key.index)
+                .expect("accepted blast vehicle")
+                .bot_plant_source = Some(source);
+        }
+        Ok(events)
+    }
+
     pub(crate) fn apply_classified_vehicle_blast_damage(
         &mut self,
         key: Key,
@@ -784,6 +809,7 @@ impl Runtime {
                 return Ok(vec![]);
             }
             let source = v.damage_source_object;
+            let bot_plant_source = v.bot_plant_source;
             let event = v.set_damage_health(
                 hp,
                 v.last_attacker,
@@ -791,6 +817,7 @@ impl Runtime {
                 v.damage_user_data,
             );
             v.damage_source_object = source;
+            v.bot_plant_source = bot_plant_source;
             Ok(vec![event])
         })
     }

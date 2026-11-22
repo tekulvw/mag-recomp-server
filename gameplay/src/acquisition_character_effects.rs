@@ -214,6 +214,22 @@ impl<W: Write> Engine<W> {
         native: NativeState,
         now: Duration,
     ) -> Result<Plan, &'static str> {
+        self.plan_character_effect_with_bot_origin(target, request, native, now, None)
+    }
+
+    pub(crate) fn plan_character_effect_with_bot_origin(
+        &self,
+        target: Target,
+        request: Request,
+        native: NativeState,
+        now: Duration,
+        bot_plant: Option<crate::objective_control::BotPlantSource>,
+    ) -> Result<Plan, &'static str> {
+        if bot_plant
+            .is_some_and(|origin| origin.world != target.world || origin.round != self.round_number)
+        {
+            return Err("stale_bot_plant_character_source");
+        }
         if self.wire_profile.application_id() != 20231 {
             return Err("unsupported_acquisition_character_profile");
         }
@@ -304,17 +320,21 @@ impl<W: Write> Engine<W> {
                 } else {
                     target.character_id
                 };
-                let same_team = self
-                    .character_team_in_world(selected, target.world)
+                let same_team = bot_plant
+                    .map(|origin| origin.team)
+                    .or_else(|| self.character_team_in_world(selected, target.world))
                     .zip(self.character_team_in_world(target.character_id, target.world))
                     .map(|(a, v)| a == v);
-                let damage = metadata::vehicle_death_occupant(
+                let mut damage = metadata::vehicle_death_occupant(
                     target.character_id,
                     last_attacker,
                     vehicle_vector,
                     same_team,
                     rules.friendly_fire_multiplier(),
                 )?;
+                if bot_plant.is_some() {
+                    damage.attacker = u32::MAX;
+                }
                 (
                     armor::RawCharacterDamage {
                         amount_hp: damage.amount_hp,
@@ -433,6 +453,9 @@ impl<W: Write> Engine<W> {
                 )
             }
         };
+        if bot_plant.is_some() && attacker != u32::MAX {
+            return Err("bot_plant_attacker_must_be_uncredited");
+        }
         // Mirror the native bool temporary scope on the owned state value. The
         // restored byte is canonical1 even when the original nonzero byte was2.
         let mut native_during = native;
@@ -509,11 +532,34 @@ impl<W: Write> Engine<W> {
                     .as_ref()
                     .ok_or("acquisition_character_damage_rules_missing")?;
             }
-            armor = armor.with_incoming_base(self.character_incoming_base(
-                attacker,
-                target.character_id,
-                target.world,
-            ))?;
+            let incoming_base = if let Some(origin) = bot_plant {
+                let exact_self = target.character_id == 0x0380_0000 | u32::from(origin.player)
+                    && target.generation == origin.life
+                    && self
+                        .bot_registry
+                        .bots
+                        .get(&origin.player)
+                        .is_some_and(|bot| bot.allocation_generation == origin.allocation)
+                    && !self
+                        .active
+                        .iter()
+                        .chain(self.peers.values())
+                        .any(|actor| actor.reservation.player == origin.player);
+                if !exact_self
+                    && self.character_team_in_world(target.character_id, target.world)
+                        == Some(origin.team)
+                {
+                    self.character_damage_rules
+                        .as_ref()
+                        .ok_or("acquisition_character_damage_rules_missing")?
+                        .friendly_fire_multiplier()
+                } else {
+                    1.
+                }
+            } else {
+                self.character_incoming_base(attacker, target.character_id, target.world)
+            };
+            armor = armor.with_incoming_base(incoming_base)?;
             let amount = armor.adjust_for_kind(raw, kind)?;
             audit["calculation"] = armor.calculation(raw, kind)?;
             plan.clear_healing = raw.amount_hp * armor.incoming_scale(kind) > 0.0;
