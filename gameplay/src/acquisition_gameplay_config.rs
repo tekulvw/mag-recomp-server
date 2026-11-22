@@ -46,6 +46,7 @@ pub struct Configuration {
     frag_ground_areas: Option<PathBuf>,
     human_static_resupply: Option<PathBuf>,
     projectile_contacts: Option<PathBuf>,
+    infantry_rockets: Option<PathBuf>,
     vehicle_reinforcement_intervals_ms: [u32; 2],
     structural: Option<crate::acquisition_structural::Files>,
 }
@@ -187,6 +188,14 @@ impl Configuration {
         if let Some(source) = &mut result.frag_ground_areas {
             *source = directory.join(&*source);
         }
+        if let Some(source) = &mut result.infantry_rockets {
+            if source.as_os_str().is_empty() {
+                return Err(io::Error::other(
+                    "empty_acquisition_infantry_rocket_source_path",
+                ));
+            }
+            *source = directory.join(&*source);
+        }
         if let Some(source) = &mut result.projectile_contacts {
             *source = directory.join(&*source);
         }
@@ -306,6 +315,22 @@ impl Configuration {
             )?);
         }
         Ok(())
+    }
+
+    pub fn infantry_rocket_source(&self) -> io::Result<Option<Vec<u8>>> {
+        self.infantry_rockets
+            .as_ref()
+            .map(|path| {
+                let mut raw = Vec::new();
+                File::open(path)?
+                    .take((1 << 20) + 1)
+                    .read_to_end(&mut raw)?;
+                if raw.len() > 1 << 20 {
+                    return Err(io::Error::other("invalid_infantry_rocket_rules"));
+                }
+                Ok(raw)
+            })
+            .transpose()
     }
 
     pub fn build(
@@ -654,4 +679,19 @@ impl Configuration {
             structural: None,
         })
     }
+}
+
+/// The source-qualified frag Ground provider supplies the same
+/// current Ground area geometry, including Escort, for the launcher.
+pub fn validate_infantry_rocket_support(setup: &Setup) -> Result<(), &'static str> {
+    if !setup.has_projectile_contacts() {
+        return Err("infantry_rocket_contact_bindings_required");
+    }
+    if setup.structural.is_none() {
+        return Err("infantry_rocket_acquisition_structural_required");
+    }
+    if !setup.has_frag_ground_areas() || setup.ground_damage.is_none() {
+        return Err("infantry_rocket_acquisition_ground_required");
+    }
+    Ok(())
 }

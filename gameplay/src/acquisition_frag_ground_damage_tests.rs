@@ -1,10 +1,11 @@
 //! Authenticated ordinary frag against a normally captured synthetic Escort.
 use super::*;
+use crate::{hospital_rocket_runtime::LaunchSource, infantry_rockets::Blast};
 use std::sync::Arc;
 
 const ESCORT: u16 = 4;
 
-fn fixture(friendly: bool) -> Engine<Vec<u8>> {
+fn ground_blast_fixture(friendly: bool) -> Engine<Vec<u8>> {
     let mut engine = ground_firearm_fixture(0., friendly);
     let structural = crate::acquisition_structural::connected_tests::fixture()
         .acquisition_gameplay
@@ -63,6 +64,12 @@ fn fixture(friendly: bool) -> Engine<Vec<u8>> {
         crate::player_tracking::PositionOrigin::ServerSpawn,
         3200,
     );
+    engine
+}
+
+fn fixture(friendly: bool) -> Engine<Vec<u8>> {
+    let mut engine = ground_blast_fixture(friendly);
+    let actor = engine.active.as_mut().unwrap();
     let mut kit = actor.spawned_loadout.take().unwrap();
     kit.inventories[0].slots[4] = Some(4);
     actor.spawned_loadout = Some(kit);
@@ -71,6 +78,120 @@ fn fixture(friendly: bool) -> Engine<Vec<u8>> {
     assert!(!dispatch(&mut engine, &launch, 3300).unwrap().is_empty());
     assert!(engine.active.as_ref().unwrap().projectiles.get(3).is_some());
     engine
+}
+
+fn rocket_source(engine: &Engine<Vec<u8>>) -> LaunchSource {
+    let actor = engine.active.as_ref().unwrap();
+    LaunchSource {
+        reservation: actor.reservation.id.clone(),
+        world: actor.reservation.world,
+        round: engine.round_number,
+        match_id: actor.reward_match_id.clone(),
+        character_id: actor.reservation.character.character_id,
+        player: actor.reservation.player,
+        life_generation: actor.life.damage_health().unwrap().0,
+        team: actor.team(),
+        item: 400,
+        projectile_id: 0x1380_0000 | u32::from(actor.reservation.player),
+    }
+}
+
+const ROCKET_BLAST: Blast = Blast {
+    half_radius_m: 4.,
+    outer_radius_m: 6.,
+    material_penetration: 1.7,
+    character_hp: 1.,
+    vehicle_hp: 200.,
+};
+
+fn rocket_origin(engine: &Engine<Vec<u8>>) -> [f64; 3] {
+    let position = engine.current_ground_vehicle(ESCORT).unwrap().position;
+    [
+        f64::from(position.x),
+        f64::from(position.y),
+        f64::from(position.z) + 2.,
+    ]
+}
+
+#[test]
+fn acquisition_infantry_rocket_prepares_classified_escort_damage_without_installing() {
+    for (friendly, expected_health) in [(false, 390), (true, 502)] {
+        let mut engine = ground_blast_fixture(friendly);
+        let source = rocket_source(&engine);
+        let actor = engine.active.as_mut().unwrap();
+        actor.life = CharacterLife::AwaitingRespawn {
+            generation: source.life_generation,
+        };
+        let before = engine.ground_runtime.clone();
+        let queued = actor.pending_shared.len();
+        let log_bytes = engine.written;
+        let result = engine
+            .prepare_infantry_rocket_acquisition_ground(
+                &source,
+                rocket_origin(&engine),
+                ROCKET_BLAST,
+                Duration::from_millis(3400),
+            )
+            .unwrap();
+        let after = result.after.unwrap();
+        let damage = after.get(ESCORT).unwrap().damage_wire();
+        // 200 vehicle HP × .75 falloff, optional .5 FF, subtract 10,
+        // then × .5 area × .75 coverage. The 1 HP Character channel is separate.
+        assert_eq!(damage.health_quarter_points, expected_health);
+        assert_eq!(damage.last_location_and_type, 0xa6);
+        assert_eq!(damage.last_user_data, 128 | 512);
+        assert_eq!(damage.last_source_object, u32::MAX);
+        assert_eq!(damage.last_attacker, 0x0380_0000 | u32::from(source.player));
+        let packet = result.packet.unwrap();
+        let profile = engine.wire_profile;
+        let update = replication::ObjectUpdate::decode_with_profile(&packet, profile).unwrap();
+        assert_eq!(update.header.object_type_mask, 1 << 1);
+        let mut bits = replication::BitReader::with_profile(&packet, profile);
+        bits.position = 16 + 32 + 32 + 16 + profile.object_type_bits() + 32;
+        assert_eq!(bits.read(1), Ok(1));
+        assert_eq!(bits.read(16), Ok(u32::from(ESCORT)));
+        assert_eq!(bits.read(19), Ok(1)); // Field 18 only.
+        assert_eq!(bits.read(8), Ok(0xa6));
+        assert_eq!(bits.read(16).unwrap() & 0xfff, u32::from(expected_health));
+        assert_eq!(bits.read(32), Ok(0x0380_0000 | u32::from(source.player)));
+        assert_eq!(bits.read(32), Ok(u32::MAX));
+        assert_eq!(bits.read(32), Ok(128 | 512));
+        assert_eq!(bits.read(12), Ok(0)); // Remaining fields and object list end.
+        assert_eq!(result.audit.len(), 1); // Both source roots belong to the same Escort.
+        assert_eq!(result.audit[0]["projectile_id"], source.projectile_id);
+        assert_eq!(result.audit[0]["friendly"], friendly);
+        assert!(result.audit[0].get("slot").is_none());
+        assert!(engine.ground_runtime == before);
+        assert_eq!(engine.written, log_bytes);
+        assert_eq!(engine.active.as_ref().unwrap().pending_shared.len(), queued);
+    }
+}
+
+#[test]
+fn acquisition_infantry_rocket_respects_material_cover_and_source_round() {
+    let mut engine = ground_blast_fixture(false);
+    let source = rocket_source(&engine);
+    let origin = rocket_origin(&engine);
+    let now = Duration::from_millis(3400);
+    engine.collision_world = Some(scene(&engine, origin[2] as f32 - 1., Some(255)));
+    let covered = engine
+        .prepare_infantry_rocket_acquisition_ground(&source, origin, ROCKET_BLAST, now)
+        .unwrap();
+    assert!(covered.after.is_none());
+    assert!(covered.packet.is_none());
+    assert!(covered.audit.is_empty());
+
+    let previous_round = LaunchSource {
+        round: source.round.wrapping_add(1),
+        ..source
+    };
+    assert_eq!(
+        engine
+            .prepare_infantry_rocket_acquisition_ground(&previous_round, origin, ROCKET_BLAST, now)
+            .err(),
+        Some("stale_hospital_rocket_character_source")
+    );
+    assert_eq!(vehicle_damage(&engine).health_quarter_points, 600);
 }
 
 fn scene(engine: &Engine<Vec<u8>>, z: f32, material: Option<u8>) -> collision::CollisionWorld {

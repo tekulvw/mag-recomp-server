@@ -233,6 +233,7 @@ impl<W: Write> Engine<W> {
             next_heal_allowed: Duration::ZERO,
             projectiles: projectile::ProjectileFlights::default(),
             hospital_rocket_flights: Default::default(),
+            infantry_rocket_state: Default::default(),
             projectile_replicas: projectile_replication::ProjectileReplicas::with_profile(
                 self.wire_profile,
             ),

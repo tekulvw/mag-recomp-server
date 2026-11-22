@@ -332,6 +332,10 @@ impl<W: Write> Engine<W> {
         let generation = living_generation(actor).ok_or("static_resupply_character_ineligible")?;
         if provider.percent_refresh_rate == 0.0
             && equipped_frag(actor, &self.item_catalog).is_none()
+            && !self
+                .infantry_rockets
+                .as_deref()
+                .is_some_and(|catalog| infantry_rocket_runtime::State::can_resupply(actor, catalog))
         {
             return Err("static_resupply_ordinary_frag_required");
         }
@@ -384,6 +388,11 @@ impl<W: Write> Engine<W> {
             }
             let generation = living_generation(actor);
             let frag = equipped_frag(actor, &self.item_catalog);
+            let launcher = self
+                .infantry_rockets
+                .as_deref()
+                .filter(|catalog| infantry_rocket_runtime::State::can_resupply(actor, catalog));
+            let mut launcher_state = None;
             let modifiers = leadership.modifiers(actor);
             let mut health_update = None;
             let mut sessions = Vec::with_capacity(actor.static_resupply.len());
@@ -400,7 +409,7 @@ impl<W: Write> Engine<W> {
                     audit.push(json!({"reservation":actor.reservation.id,"provider":session.target,"operation":"cancel"}));
                     continue;
                 };
-                if provider.percent_refresh_rate == 0.0 && frag.is_none() {
+                if provider.percent_refresh_rate == 0.0 && frag.is_none() && launcher.is_none() {
                     changed = true;
                     audit.push(json!({"reservation":actor.reservation.id,"provider":session.target,"operation":"cancel"}));
                     continue;
@@ -432,11 +441,17 @@ impl<W: Write> Engine<W> {
                     health_update = Some(model);
                 }
                 let after = frag.map_or(remaining, |(_, cap)| cap);
+                if launcher_state.is_none()
+                    && let Some(catalog) = launcher
+                {
+                    launcher_state = infantry_rocket_runtime::State::refill_for(actor, catalog)?;
+                }
                 audit.push(json!({"reservation":actor.reservation.id,"provider":session.target,"operation":"pulse",
                     "world":actor.reservation.world,"round":session.round,"generation":session.generation,
                     "item":frag.map(|(item, _)| item),"before":remaining,"after":after,"interval_seconds":next.interval,
                     "health_before":before.health_quarter_points,
-                    "health_after":heal.map(|model| model.health_quarter_points)}));
+                    "health_after":heal.map(|model| model.health_quarter_points),
+                    "infantry_rocket_refilled":launcher_state.is_some()}));
                 remaining = after;
                 sessions.push(next);
                 changed = true;
@@ -458,6 +473,7 @@ impl<W: Write> Engine<W> {
                     sessions,
                     remaining,
                     health_update.zip(generation),
+                    launcher_state,
                 ));
             }
         }
@@ -482,7 +498,7 @@ impl<W: Write> Engine<W> {
                 .map(|packet| protocol::encode_hex(packet)).collect::<Vec<_>>()}),
             wall,
         )?;
-        for (reservation, sessions, remaining, health) in planned {
+        for (reservation, sessions, remaining, health, launcher_state) in planned {
             if let Some(actor) = self
                 .active
                 .as_mut()
@@ -491,6 +507,9 @@ impl<W: Write> Engine<W> {
             {
                 actor.static_resupply = sessions;
                 actor.grenade_remaining = remaining;
+                if let Some(state) = launcher_state {
+                    actor.infantry_rocket_state = state;
+                }
                 if let Some((damage, generation)) = health {
                     actor.last_damage = damage;
                     actor.life = CharacterLife::Alive {
@@ -1032,5 +1051,59 @@ mod tests {
         assert!(!actor.ordered_health_pending);
         assert_eq!(health(&engine), 250);
         assert_eq!(ammo(&engine), 0);
+    }
+    #[test]
+    fn human_static_resupply_refills_spent_launcher_with_record_and_stop() {
+        use crate::infantry_rocket_runtime::tests as rockets;
+        for refuse_record in [false, true] {
+            let mut engine = rockets::fixture();
+            let mut document = document_for("mag_baku_final", 2, 20);
+            for provider in document["providers"].as_array_mut().unwrap() {
+                provider["percent_refresh_rate"] = json!(0.0);
+            }
+            engine
+                .domination_gameplay
+                .as_mut()
+                .unwrap()
+                .state
+                .human_static_resupply = Some(Arc::new(parse(&document).unwrap()));
+            let actor = engine.active.as_mut().unwrap();
+            let kit = actor.spawned_loadout.as_mut().unwrap();
+            kit.inventories[usize::from(kit.handle.inventory_index)].slots[4] = None;
+            set_position(&mut engine, 20.0);
+            rockets::launch(&mut engine, 0, 64, 1000);
+            assert_eq!(rockets::rounds(&engine), 3);
+            dispatch(&mut engine, &request(0, FAMILY_PREFIX), 1100).unwrap();
+            assert_eq!(engine.active.as_ref().unwrap().static_resupply.len(), 1);
+            tick(&mut engine, 2099).unwrap();
+            assert_eq!(rockets::rounds(&engine), 3);
+            let written = engine.written;
+            if refuse_record {
+                engine.max_log = written;
+                assert_eq!(tick(&mut engine, 2100).unwrap_err(), "log_limit_reached");
+                assert_eq!(rockets::rounds(&engine), 3);
+                assert_eq!(engine.written, written);
+                assert_eq!(
+                    engine.active.as_ref().unwrap().static_resupply[0].updated,
+                    Duration::from_millis(1100)
+                );
+            } else {
+                tick(&mut engine, 2100).unwrap();
+                assert_eq!(rockets::rounds(&engine), 4);
+                assert!(
+                    engine
+                        .active
+                        .as_ref()
+                        .unwrap()
+                        .infantry_rocket_state
+                        .occupies(0)
+                );
+                rockets::launch(&mut engine, 1, 65, 2200);
+                assert_eq!(rockets::rounds(&engine), 3);
+                dispatch(&mut engine, &request(1, FAMILY_PREFIX), 2300).unwrap();
+                tick(&mut engine, 3100).unwrap();
+                assert_eq!(rockets::rounds(&engine), 3);
+            }
+        }
     }
 }
