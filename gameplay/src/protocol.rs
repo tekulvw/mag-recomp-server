@@ -459,6 +459,7 @@ impl ChangePlayerSquadResult {
 }
 #[derive(Clone)]
 pub enum GameMessage<'a> {
+    StaticResupply(StaticResupply),
     ClaimReservation(ClaimReservation<'a>),
     /// Retail NetMessageProtocolInfo: the client's reply to the server's handshake.
     ProtocolInfo(ProtocolInfo),
@@ -528,6 +529,18 @@ impl<'a> Reader<'a> {
         self.take(len)
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StaticResupply {
+    pub phase: StaticResupplyPhase,
+    pub target: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StaticResupplyPhase {
+    Start,
+    Stop,
+}
+
 impl<'a> GameMessage<'a> {
     pub fn decode(bytes: &'a [u8]) -> Result<Self, &'static str> {
         Self::decode_with_profile(bytes, crate::wire_profile::WireProfile::prototype())
@@ -543,6 +556,16 @@ impl<'a> GameMessage<'a> {
             let build = r.u32()?;
             r.finish()?;
             return Ok(Self::ProtocolInfo(ProtocolInfo { protocol, build }));
+        }
+        if profile.application_id() == 20231 && wire_type == 0x020b {
+            let phase = match r.take(1)?[0] {
+                0 => StaticResupplyPhase::Start,
+                1 => StaticResupplyPhase::Stop,
+                _ => return Err("invalid_static_resupply_phase"),
+            };
+            let target = r.u32()?;
+            r.finish()?;
+            return Ok(Self::StaticResupply(StaticResupply { phase, target }));
         }
         let Some(message_type) = profile.prototype_message_type(wire_type) else {
             return Ok(Self::Unknown {
@@ -960,5 +983,41 @@ mod squad_order_wire_tests {
         assert!(decode(&waypoint, profile).is_err());
         assert!(decode(&[0x02, 0x06, 0xff, 0xff, 0xff], profile).is_err());
         assert!(decode(&[0x02, 0x06, 0xff, 0xff, 0xff, 0xff, 0], profile).is_err());
+    }
+}
+
+#[cfg(test)]
+mod human_static_resupply_wire_tests {
+    use super::*;
+
+    #[test]
+    fn retail_resupply_enforces_the_phase_and_exact_payload_width() {
+        let profile = crate::wire_profile::WireProfileCatalog::embedded()
+            .profile(20231)
+            .unwrap();
+        let mut packet = [0x02, 0x0b, 0, 0x2a, 0x80, 0x12, 0x34];
+        for phase in 0..=1 {
+            packet[2] = phase;
+            let GameMessage::StaticResupply(request) =
+                GameMessage::decode_with_profile(&packet, profile).unwrap()
+            else {
+                panic!("expected typed static resupply");
+            };
+            assert_eq!(request.target, 0x2a80_1234);
+            assert_eq!(
+                request.phase,
+                if phase == 0 {
+                    StaticResupplyPhase::Start
+                } else {
+                    StaticResupplyPhase::Stop
+                }
+            );
+        }
+        packet[2] = 2;
+        assert!(GameMessage::decode_with_profile(&packet, profile).is_err());
+        packet[2] = 0;
+        assert!(GameMessage::decode_with_profile(&packet[..6], profile).is_err());
+        let trailing = [&packet[..], &[0]].concat();
+        assert!(GameMessage::decode_with_profile(&trailing, profile).is_err());
     }
 }

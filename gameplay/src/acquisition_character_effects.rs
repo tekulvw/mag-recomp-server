@@ -761,6 +761,7 @@ actor_effect_state! {
     fall_tracker: fall_damage::Tracker,
     revive_state_pending: bool,
     pending_damage: Option<PendingDamage>,
+    static_resupply: Vec<crate::human_static_resupply::Session>,
     last_damage: replication::CharacterDamage,
     healing: Option<progression::HealingSession>,
     reward_statistics: std::collections::BTreeMap<u8, i32>,

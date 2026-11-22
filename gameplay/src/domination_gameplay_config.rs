@@ -54,6 +54,7 @@ struct Core {
     #[serde(default)]
     frag_character_blast: bool,
     frag_ground_areas: Option<PathBuf>,
+    human_static_resupply: Option<PathBuf>,
     projectile_contacts: Option<PathBuf>,
     ground_turrets: Option<PathBuf>,
     initial_filters: PathBuf,
@@ -273,6 +274,14 @@ impl Configuration {
                     return Err(io::Error::other("empty_domination_gameplay_core_path"));
                 }
                 *input = directory.join(&*input);
+            }
+            if let Some(path) = &mut core.human_static_resupply {
+                if path.as_os_str().is_empty() {
+                    return Err(io::Error::other(
+                        "empty_domination_human_static_resupply_path",
+                    ));
+                }
+                *path = directory.join(&*path);
             }
             if let Some(path) = &mut core.hospital_turrets {
                 if path.as_os_str().is_empty() {
@@ -913,6 +922,11 @@ impl Configuration {
                 Ok::<_, io::Error>(Arc::new(rules))
             })
             .transpose()?;
+        let human_static_resupply = core
+            .human_static_resupply
+            .as_ref()
+            .map(|path| crate::human_static_resupply::Catalog::load(path).map(Arc::new))
+            .transpose()?;
         let frag_ground_areas = core
             .frag_ground_areas
             .as_ref()
@@ -952,6 +966,7 @@ impl Configuration {
                 helo_frag_damage_areas,
                 frag_character_blast: core.frag_character_blast,
                 frag_ground_areas,
+                human_static_resupply,
                 projectile_contacts,
                 helo,
                 helo_collision,
@@ -1019,6 +1034,13 @@ impl<W: Write> Engine<W> {
             .ok_or_else(|| io::Error::other("domination_gameplay_requires_ground_catalog"))?;
         let native_elf = objectives.source().source_image_sha256.clone();
         let world = config.build_for(objectives, spawns, bunkers, ground)?;
+        world
+            .validate_human_static_resupply(
+                spawns,
+                self.collision_world.as_ref(),
+                &self.item_catalog,
+            )
+            .map_err(io::Error::other)?;
         world
             .validate_frag_ground(
                 &self.item_catalog,

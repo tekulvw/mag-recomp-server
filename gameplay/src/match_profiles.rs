@@ -576,6 +576,11 @@ impl Registry {
         }
         for loaded in self.profiles.values() {
             if let Some(world) = &loaded.domination {
+                world.validate_human_static_resupply(
+                    &loaded.spawns,
+                    loaded.collision.as_ref(),
+                    items,
+                )?;
                 world.validate_frag_ground(
                     items,
                     loaded.collision.as_ref(),
@@ -593,6 +598,15 @@ impl Registry {
                 )?;
             }
             if let Some(setup) = &loaded.acquisition {
+                setup.validate_human_static_resupply(
+                    &loaded.spawns,
+                    loaded.collision.as_ref(),
+                    loaded
+                        .objectives
+                        .as_ref()
+                        .ok_or("acquisition_objectives_required")?,
+                    items,
+                )?;
                 setup.validate_frag_character_blast(items, loaded.collision.as_ref())?;
                 if setup.has_frag_ground_areas() {
                     setup.validate_frag_ground(
@@ -693,6 +707,19 @@ impl Registry {
         self.profiles
             .values()
             .any(|profile| profile.hospital_rockets.is_some())
+    }
+
+    pub fn has_human_static_resupply(&self) -> bool {
+        self.profiles.values().any(|profile| {
+            profile
+                .acquisition
+                .as_ref()
+                .is_some_and(|setup| setup.has_human_static_resupply())
+                || profile
+                    .domination
+                    .as_ref()
+                    .is_some_and(|world| world.state.human_static_resupply.is_some())
+        })
     }
 
     pub fn has_frag_ground_areas(&self) -> bool {

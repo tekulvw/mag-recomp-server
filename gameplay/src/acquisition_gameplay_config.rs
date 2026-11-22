@@ -44,6 +44,7 @@ pub struct Configuration {
     #[serde(default)]
     frag_character_blast: bool,
     frag_ground_areas: Option<PathBuf>,
+    human_static_resupply: Option<PathBuf>,
     vehicle_reinforcement_intervals_ms: [u32; 2],
     structural: Option<crate::acquisition_structural::Files>,
 }
@@ -185,6 +186,9 @@ impl Configuration {
         if let Some(source) = &mut result.frag_ground_areas {
             *source = directory.join(&*source);
         }
+        if let Some(source) = &mut result.human_static_resupply {
+            *source = directory.join(&*source);
+        }
         Ok(result)
     }
 
@@ -321,6 +325,11 @@ impl Configuration {
             setup.frag_ground_areas = Some(std::sync::Arc::new(
                 crate::acquisition_frag_ground::Catalog::from_bytes(&raw)
                     .map_err(io::Error::other)?,
+            ));
+        }
+        if let Some(path) = &self.human_static_resupply {
+            setup.human_static_resupply = Some(std::sync::Arc::new(
+                crate::human_static_resupply::Catalog::load(path)?,
             ));
         }
         setup
@@ -607,6 +616,7 @@ impl Configuration {
             ground_damage: self.ground_damage.clone(),
             frag_character_blast: self.frag_character_blast,
             frag_ground_areas: None,
+            human_static_resupply: None,
             vehicle_reinforcement_intervals_ms: self.vehicle_reinforcement_intervals_ms,
             structural: None,
         })

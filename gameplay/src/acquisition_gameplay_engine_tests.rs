@@ -399,6 +399,7 @@ fn acquisition_setup_fixture(
             ground_damage,
             frag_character_blast: false,
             frag_ground_areas: None,
+            human_static_resupply: None,
         },
     )
 }
