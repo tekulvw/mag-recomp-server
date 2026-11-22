@@ -972,11 +972,11 @@ impl<W: Write> Engine<W> {
                             )?);
                         }
                     }
-                    death_notification = self.plan_firearm_death(
+                    death_notification = self.plan_weapon_death(
                         world,
                         id,
                         target.life.id,
-                        profile.item_id(),
+                        death_notifications::Weapon::Firearm(profile.item_id()),
                         0,
                         damage,
                     )?;
@@ -1044,7 +1044,7 @@ impl<W: Write> Engine<W> {
             let damage_packet = if let Some((target, damage, human_life, packet)) = pending_damage {
                 if let Some(reservation) = &target.life.reservation {
                     if let Some(plan) = death_notification.take() {
-                        self.commit_firearm_death(plan, damage, now)?;
+                        self.commit_weapon_death(plan, damage, now)?;
                     } else {
                         let victim = self
                             .active
@@ -1064,7 +1064,7 @@ impl<W: Write> Engine<W> {
                         victim.life = life;
                     }
                 } else if let Some(plan) = death_notification.take() {
-                    self.commit_firearm_death(plan, damage, now)?;
+                    self.commit_weapon_death(plan, damage, now)?;
                 } else {
                     self.commit_bot_damage(target.life.id, target.life.generation, damage, now)?;
                 }

@@ -96,6 +96,7 @@ pub(super) fn hit<W: Write>(
     // the wire has no attacker or unique shot ID. Repeated bytes can be shots.
     let mut profile_item = None;
     let mut ordinary_retail_firearm = false;
+    let mut ordinary_retail_weapon = None;
     let mut damage_kind = None;
     let mut damage_calculation = None;
     let mut applied = None;
@@ -165,6 +166,19 @@ pub(super) fn hit<W: Write>(
             let profile = ctx.engine.bullet_profile(active, &request)?;
             ordinary_retail_firearm =
                 matches!(profile, CharacterHitProfile::Retail(_)) && !active.is_mounted();
+            ordinary_retail_weapon = if !active.is_mounted() {
+                match profile {
+                    CharacterHitProfile::Retail(_) => {
+                        Some(death_notifications::Weapon::Firearm(profile.item_id()))
+                    }
+                    CharacterHitProfile::Melee(_) => {
+                        Some(death_notifications::Weapon::Melee(profile.item_id()))
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
             profile_item = Some(profile.item_id());
             damage_kind = Some(profile.kind());
             let distance = request
@@ -304,13 +318,13 @@ pub(super) fn hit<W: Write>(
                         }
                     }
                 }
-                if ordinary_retail_firearm
+                if let Some(weapon) = ordinary_retail_weapon
                     && (peer_target.is_some() || registry_target.is_some())
-                    && let Some(notification) = ctx.engine.plan_firearm_death(
+                    && let Some(notification) = ctx.engine.plan_weapon_death(
                         active.reservation.world,
                         active.reservation.player,
                         request.defender as u16,
-                        profile_item.unwrap(),
+                        weapon,
                         request.hit_location,
                         damage,
                     )?

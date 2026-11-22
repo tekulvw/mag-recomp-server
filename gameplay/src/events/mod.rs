@@ -777,7 +777,7 @@ impl<W: Write> Engine<W> {
                     .position(|p| p.victim_matches(peer.reservation.player, generation, Some(&id)))
             });
             if let Some(index) = notification {
-                self.commit_firearm_death(
+                self.commit_weapon_death(
                     plan.combat.death_notifications.remove(index),
                     damage,
                     now,
@@ -793,7 +793,7 @@ impl<W: Write> Engine<W> {
                 .iter()
                 .position(|p| p.victim_matches(id, generation, None))
             {
-                self.commit_firearm_death(
+                self.commit_weapon_death(
                     plan.combat.death_notifications.remove(index),
                     damage,
                     now,

@@ -1,8 +1,7 @@
-//! Transactional ordinary on-foot retail firearm death notifications.
+//! Transactional on-foot retail firearm and knife death notifications.
 use super::*;
 
-// TODO: grenade/fall/kill-self, source type11, incapacitation and vehicle
-// deaths need their own original metadata/lifecycle authority before admission.
+// Other damage sources and mounted deaths use their own qualified planners.
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Participant {
@@ -25,14 +24,36 @@ pub(super) struct Plan {
     location: u8,
 }
 
-fn firearm_source(global_equipment_index: u16) -> (u8, i32) {
+/// Selected from the admitted hit profile, never guessed from the equipment ID.
+#[derive(Clone, Copy)]
+pub(super) enum Weapon {
+    Firearm(u16),
+    Melee(u16),
+}
+impl Weapon {
+    fn validate(self, catalog: &retail_combat::RetailCombatCatalog) -> Result<u16, &'static str> {
+        match self {
+            Self::Firearm(item) => catalog
+                .bullet_for_damage(item)
+                .map(|_| item)
+                .map_err(|_| "unsupported_death_firearm"),
+            Self::Melee(item) => catalog
+                .melee_for_damage(item)
+                .map(|_| item)
+                .map_err(|_| "unsupported_death_melee"),
+        }
+    }
+}
+
+fn weapon_source(global_equipment_index: u16) -> (u8, i32) {
     // Retail HandleMessageHit 0x7def44..0x7def64: Weapon(2), followed
     // by sign-extended SimInventoryItem::globalEqIdx (int16 at +0x90).
     // DEV DIE0x04e08492 places SimWeaponKit::m_inventory at +4;
     // DIE0x04e04d48 names its SimInventoryItem vector, and DIE0x04e047ca
     // names globalEqIdx. Retail uses that +4 base, 0xa0 stride and +0x90.
     // See evidence/retail-bullet-native-20261026.json for the retail hit block.
-    // These are independent of damage kind, source object and client userdata.
+    // The retail Swipe branch rejoins at 0x7def1c before these stores. These
+    // are independent of damage kind, source object and client userdata.
     (2, i32::from(global_equipment_index as i16))
 }
 fn head_flag(
@@ -61,7 +82,7 @@ impl Plan {
             && self.victim.reservation.as_deref() == reservation
     }
     pub(super) fn audit(&self) -> Value {
-        let (source_type, source_index) = firearm_source(self.item);
+        let (source_type, source_index) = weapon_source(self.item);
         json!({"attacker":self.attacker.id,"attacker_generation":self.attacker.generation,
             "attacker_reservation":self.attacker.reservation,"defender":self.victim.id,
             "defender_generation":self.victim.generation,"defender_reservation":self.victim.reservation,
@@ -119,12 +140,12 @@ impl<W: Write> Engine<W> {
         })
     }
 
-    pub(super) fn plan_firearm_death(
+    pub(super) fn plan_weapon_death(
         &self,
         world: u32,
         attacker: u16,
         victim: u16,
-        item: u16,
+        weapon: Weapon,
         location: u8,
         damage: replication::CharacterDamage,
     ) -> Result<Option<Plan>, &'static str> {
@@ -141,10 +162,8 @@ impl<W: Write> Engine<W> {
             return Ok(None);
         };
         let catalog = self.item_catalog.retail_combat()?;
-        catalog
-            .bullet_for_damage(item)
-            .map_err(|_| "unsupported_death_firearm")?;
-        let (damage_source_type, damage_source_index) = firearm_source(item);
+        let item = weapon.validate(catalog)?;
+        let (damage_source_type, damage_source_index) = weapon_source(item);
         let wire = protocol::RetailDeathNotification {
             attacker: Some(attacker.id),
             defender: victim.id,
@@ -167,7 +186,7 @@ impl<W: Write> Engine<W> {
 
     /// Caller must record Plan::audit before invoking this method. Existing
     /// human/bot terminal guards are the authority for exactly-once publication.
-    pub(super) fn commit_firearm_death(
+    pub(super) fn commit_weapon_death(
         &mut self,
         plan: Plan,
         damage: replication::CharacterDamage,

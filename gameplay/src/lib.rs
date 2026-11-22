@@ -89,6 +89,8 @@ mod incapacitation_tests;
 pub mod leadership_passives;
 pub mod leadership_progression;
 pub mod leadership_runtime;
+#[cfg(test)]
+mod melee_death_tests;
 pub mod navmesh;
 #[cfg(test)]
 mod platoon_ability_engine_tests;
