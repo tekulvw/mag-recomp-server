@@ -1782,6 +1782,39 @@ impl HeloCollisionAssets {
 }
 
 impl SequenceCollisionState {
+    pub(crate) fn bot_regional_bounds(
+        &self,
+        budget: &mut usize,
+    ) -> Result<Vec<crate::actor_collision::Bounds>, &'static str> {
+        use crate::actor_collision::Bounds;
+        self.projectile_surfaces(budget)?
+            .into_iter()
+            .map(|(_, surface)| {
+                surface.pose.validate()?;
+                let local = surface
+                    .mesh
+                    .stats()
+                    .bounds
+                    .ok_or("bot_regional_sequence_bounds_missing")?;
+                let center = std::array::from_fn(|i| (local.min[i] + local.max[i]) * 0.5);
+                let half: [f64; 3] = std::array::from_fn(|i| (local.max[i] - local.min[i]) * 0.5);
+                let offset = crate::dynamic_collision::geometry::rotate(surface.pose, center);
+                let extent: [f64; 3] = surface
+                    .pose
+                    .rotation
+                    .map(|r| (0..3).map(|i| r[i].abs() * half[i]).sum());
+                Ok(Bounds {
+                    min: std::array::from_fn(|i| {
+                        surface.pose.translation[i] + offset[i] - extent[i]
+                    }),
+                    max: std::array::from_fn(|i| {
+                        surface.pose.translation[i] + offset[i] + extent[i]
+                    }),
+                })
+            })
+            .collect()
+    }
+
     pub(crate) fn projectile_surfaces(
         &self,
         budget: &mut usize,

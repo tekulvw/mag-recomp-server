@@ -87,6 +87,17 @@ impl<W: Write> Engine<W> {
         if self.failed || self.match_profile().game_type != 1 {
             return Err("acquisition_respawn_unavailable");
         }
+        if self.bot_registry.regional_collision_enabled() {
+            let creation = self
+                .ground_vehicles
+                .as_ref()
+                .and_then(|catalog| catalog.vehicle(source.index))
+                .ok_or("bot_regional_spawn_chassis_unavailable")?;
+            if point.pose.position != creation.position || point.pose.rotation != creation.rotation
+            {
+                return Err("bot_regional_respawn_pose_mismatch");
+            }
+        }
         let before = self
             .ground_runtime
             .as_ref()

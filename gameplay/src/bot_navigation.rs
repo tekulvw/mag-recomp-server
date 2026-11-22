@@ -51,6 +51,7 @@ fn physics_error(error: crate::bot_physics::PhysicsError) -> QueryError {
         }
         PhysicsError::InvalidQuery => QueryError::Invalid,
         PhysicsError::QueryFailed => QueryError::Failed,
+        PhysicsError::RegionalBlocked => QueryError::Unavailable,
     }
 }
 impl<'a> WorldNavigation<'a> {

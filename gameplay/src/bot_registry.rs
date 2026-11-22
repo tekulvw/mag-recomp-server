@@ -19,6 +19,8 @@ pub struct BotSlot {
     #[serde(default)]
     pub sprint: bool,
 }
+pub use crate::bot_regional_collision::RegionalCollision;
+
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BotPopulation {
@@ -33,6 +35,8 @@ pub struct BotPopulation {
     pub firearms: crate::bot_firearms::Policy,
     #[serde(default)]
     pub healing: crate::bot_healing::Policy,
+    #[serde(default)]
+    pub regional_collision: Option<RegionalCollision>,
 }
 impl BotPopulation {
     pub fn load(path: impl AsRef<std::path::Path>) -> Result<Self, &'static str> {
@@ -51,6 +55,9 @@ impl BotPopulation {
         Ok(config)
     }
     fn validate(&self) -> Result<(), &'static str> {
+        if let Some(scope) = &self.regional_collision {
+            scope.validate()?;
+        }
         if self.format != "mag_bot_population_v1"
             || self.map_name.is_empty()
             || self.slots.len() > 256
@@ -99,6 +106,7 @@ pub(crate) struct BotRegistry {
     reservations: BTreeMap<u16, (crate::actor_collision::Bounds, Duration)>,
     last_wait_receipt: Option<Duration>,
     collision_evidence: Option<String>,
+    regional_unavailable: Option<&'static str>,
     pub(super) director: crate::bot_objectives::Director,
     drop_queues: BTreeMap<u32, PassageQueue>,
     /// Last physical clearance per passage; with convoys several services
@@ -465,6 +473,12 @@ impl BotRegistry {
             .filter(move |(_, b)| b.target.squad.squad_index() == squad)
             .map(|(&id, _)| id)
     }
+    pub(crate) fn regional_collision_enabled(&self) -> bool {
+        self.config
+            .as_ref()
+            .is_some_and(|config| config.regional_collision.is_some())
+    }
+
     pub(crate) fn enabled(&self) -> bool {
         self.config.is_some()
     }
@@ -629,6 +643,17 @@ impl WorldBot {
         )
     }
 }
+pub(crate) fn human_in_actor_grid(a: &Active, now: Duration) -> bool {
+    a.ready_for_updates
+        && a.entered_game
+        && a.initial_objects.is_some()
+        && a.spawn_delta.is_some()
+        && a.life.is_alive()
+        && !a.is_mounted()
+        && a.tracking.sample.is_some()
+        && now.saturating_sub(a.last_event) < IDLE_TIMEOUT
+}
+
 impl<W: Write> Engine<W> {
     pub fn with_bot_population(
         mut self,
@@ -697,9 +722,27 @@ impl<W: Write> Engine<W> {
                 crate::bot_firearms::validate_weapon_recoil(&self.item_catalog, &kit)?;
             }
         }
-        let terrain =
-            bot_physics::WorldTerrain::new(self.collision_world.as_ref(), self.map_name())
-                .map_err(|e| e.code())?;
+        let regional_static = config
+            .regional_collision
+            .as_ref()
+            .map(|scope| {
+                let world = scope.static_world(&self)?;
+                scope.validate_spawn_clearance(&self)?;
+                if let Some(mesh) = &self.navmesh_world {
+                    scope.validate_navmesh(mesh.artifact())?;
+                }
+                self.acquisition_gameplay
+                    .as_ref()
+                    .ok_or("bot_regional_structural_unavailable")?
+                    .bot_regional_structural_bounds(&scope.structural_clv_sha256, &mut 262_144)?;
+                Ok(scope.guarded_world(world, &[]))
+            })
+            .transpose()?;
+        let terrain = bot_physics::WorldTerrain::new(
+            regional_static.as_ref().or(self.collision_world.as_ref()),
+            self.map_name(),
+        )
+        .map_err(|e| e.code())?;
         let body = bot_physics::Body::default();
         if config.slots.iter().any(|s| s.squad.is_some())
             && config.slots.iter().any(|s| s.squad.is_none())
@@ -805,15 +848,12 @@ impl<W: Write> Engine<W> {
         use crate::actor_collision::{ActorGrid, Bounds};
         let mut grid = ActorGrid::default();
         let body = bot_physics::Body::default();
-        for a in self.active.iter().chain(self.peers.values()).filter(|a| {
-            a.ready_for_updates
-                && a.entered_game
-                && a.initial_objects.is_some()
-                && a.spawn_delta.is_some()
-                && a.life.is_alive()
-                && !a.is_mounted()
-                && now.saturating_sub(a.last_event) < IDLE_TIMEOUT
-        }) {
+        for a in self
+            .active
+            .iter()
+            .chain(self.peers.values())
+            .filter(|a| human_in_actor_grid(a, now))
+        {
             if let Some(sample) = a.tracking.sample {
                 grid.insert(
                     a.reservation.player,
@@ -1142,8 +1182,41 @@ impl<W: Write> Engine<W> {
         let mut packets = Vec::new();
         let mut receipts = Vec::new();
         let map = self.map_name().to_string();
+        let regional = self
+            .bot_registry
+            .config
+            .as_ref()
+            .unwrap()
+            .regional_collision
+            .clone();
         let respawn_delays = self.match_profile().spawn_wave_ms;
-        for (&id, bot) in &mut self.bot_registry.bots {
+        let ids: Vec<_> = self.bot_registry.bots.keys().copied().collect();
+        for id in ids {
+            // Capture after previous candidates have updated Character state.
+            let guarded_world = match regional
+                .as_ref()
+                .map(|scope| scope.capture(self, now, Some(id)))
+                .transpose()
+            {
+                Ok(world) => {
+                    self.bot_registry.regional_unavailable = None;
+                    world
+                }
+                Err(reason) => {
+                    for bot in self.bot_registry.bots.values_mut() {
+                        bot.target.hold_regional_step(now);
+                    }
+                    if self.bot_registry.regional_unavailable != Some(reason) {
+                        receipts.push(
+                            json!({"op":"bot_regional_collision_unavailable","reason":reason}),
+                        );
+                        self.bot_registry.regional_unavailable = Some(reason);
+                    }
+                    break;
+                }
+            };
+            let motion_world = guarded_world.as_ref().or(self.collision_world.as_ref());
+            let bot = self.bot_registry.bots.get_mut(&id).unwrap();
             let runtime = bot.target.runtime.unwrap();
             if bot.health == 0 {
                 let team = usize::from(bot.target.squad.team());
@@ -1172,19 +1245,21 @@ impl<W: Write> Engine<W> {
                     }
                     continue;
                 }
-                bot.respawn_wait = None;
                 let mut runtime = BotRuntime::spawned(now, bot.target.position);
                 runtime.generation = self.bot_registry.generations[&id]
                     .checked_add(1)
                     .ok_or("bot_generation_exhausted")?;
+                let terrain =
+                    bot_physics::WorldTerrain::new(motion_world, &map).map_err(|e| e.code())?;
+                match terrain
+                    .start_motion(runtime.physical_position(), bot_physics::Body::default())
+                {
+                    Ok(motion) => runtime.physics_motion = Some(motion),
+                    Err(bot_physics::PhysicsError::RegionalBlocked) => continue,
+                    Err(error) => return Err(error.code()),
+                }
+                bot.respawn_wait = None;
                 self.bot_registry.generations.insert(id, runtime.generation);
-                let terrain = bot_physics::WorldTerrain::new(self.collision_world.as_ref(), &map)
-                    .map_err(|e| e.code())?;
-                runtime.physics_motion = Some(
-                    terrain
-                        .start_motion(runtime.physical_position(), bot_physics::Body::default())
-                        .map_err(|e| e.code())?,
-                );
                 runtime.phase = BotPhase::Complete;
                 bot.target.runtime = Some(runtime);
                 bot.due_respawn_wave = None;
@@ -1255,11 +1330,11 @@ impl<W: Write> Engine<W> {
             if bot.resupply.is_none()
                 && matches!(bot.target.runtime.unwrap().phase, BotPhase::Relocating)
             {
-                if let Some(mut step) = bot.target.movement_step_with_drop_admission(
+                let movement = bot.target.movement_step_with_drop_admission(
                     1,
                     now,
                     self.wire_profile,
-                    self.collision_world.as_ref(),
+                    motion_world,
                     &map,
                     bot.health,
                     self.fall_damage_rules.as_ref(),
@@ -1283,7 +1358,15 @@ impl<W: Write> Engine<W> {
                     } else {
                         DropAdmission::Unrestricted
                     },
-                )? {
+                );
+                let movement = match movement {
+                    Err(reason) if reason == bot_physics::PhysicsError::RegionalBlocked.code() => {
+                        bot.target.hold_regional_step(now);
+                        None
+                    }
+                    result => result?,
+                };
+                if let Some(mut step) = movement {
                     step.receipt["movement_purpose"] =
                         json!(match step.receipt["navigation"]["planner"].as_str() {
                             Some("physics_validated_aborted_drop_egress") => "aborted_drop_egress",
@@ -1365,7 +1448,7 @@ impl<W: Write> Engine<W> {
                     let result = bot.target.idle_registry_step(
                         now,
                         self.wire_profile,
-                        self.collision_world.as_ref(),
+                        motion_world,
                         &map,
                         bot.health,
                         self.fall_damage_rules.as_ref(),
@@ -1418,7 +1501,15 @@ impl<W: Write> Engine<W> {
                         )
                         .unwrap();
                     }
-                    result
+                    match result {
+                        Err(reason)
+                            if reason == bot_physics::PhysicsError::RegionalBlocked.code() =>
+                        {
+                            bot.target.hold_regional_step(now);
+                            Ok(None)
+                        }
+                        result => result,
+                    }
                 }?
             {
                 bot.target.runtime = Some(step.runtime);
@@ -2594,14 +2685,25 @@ impl<W: Write> Engine<W> {
             let mut runtime = BotRuntime::spawned(now, slot.position);
             runtime.generation = generation;
             runtime.phase = BotPhase::Complete;
-            let terrain =
-                bot_physics::WorldTerrain::new(self.collision_world.as_ref(), self.map_name())
-                    .map_err(|e| e.code())?;
-            runtime.physics_motion = Some(
-                terrain
-                    .start_motion(runtime.physical_position(), bot_physics::Body::default())
-                    .map_err(|e| e.code())?,
-            );
+            let guarded_world = match config
+                .regional_collision
+                .as_ref()
+                .map(|scope| scope.capture(self, now, None))
+                .transpose()
+            {
+                Ok(world) => world,
+                Err(_) => break,
+            };
+            let terrain = bot_physics::WorldTerrain::new(
+                guarded_world.as_ref().or(self.collision_world.as_ref()),
+                self.map_name(),
+            )
+            .map_err(|e| e.code())?;
+            match terrain.start_motion(runtime.physical_position(), bot_physics::Body::default()) {
+                Ok(motion) => runtime.physics_motion = Some(motion),
+                Err(bot_physics::PhysicsError::RegionalBlocked) => break,
+                Err(error) => return Err(error.code()),
+            }
             let used_names: BTreeSet<_> = self
                 .bot_registry
                 .bots
@@ -2728,6 +2830,7 @@ impl<W: Write> Engine<W> {
         self.bot_registry.passage_last_clear.clear();
         self.bot_registry.delay_book = Default::default();
         self.bot_registry.collision_evidence = None;
+        self.bot_registry.regional_unavailable = None;
         self.bot_registry.firearm_cursor = 0;
     }
 }

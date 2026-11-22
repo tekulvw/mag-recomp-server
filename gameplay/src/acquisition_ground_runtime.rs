@@ -265,6 +265,20 @@ impl Runtime {
         runtime.configure_turrets(catalog);
         Ok(runtime)
     }
+    #[cfg(test)]
+    pub(crate) fn regional_hulk_fixture(catalog: &ground_vehicles::Catalog, index: u16) -> Self {
+        let mut runtime = Self::default();
+        for creation in catalog.creations() {
+            let source = if creation.index == index {
+                Some(7)
+            } else {
+                catalog.source_spawn_type(creation)
+            };
+            runtime.insert_creation(creation, source).unwrap();
+        }
+        runtime
+    }
+
     /// Explicit bindings are useful for a source adapter or synthetic fixtures;
     /// this constructor does not qualify arbitrary caller data as native proof.
     pub fn from_creation(

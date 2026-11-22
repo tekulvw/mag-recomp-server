@@ -233,6 +233,17 @@ impl Runtime {
             vehicle_waves: None,
         }
     }
+    pub(crate) fn bot_regional_structural_bounds(
+        &self,
+        clv_sha256: &str,
+        budget: &mut usize,
+    ) -> Result<Vec<crate::actor_collision::Bounds>, &'static str> {
+        self.structural
+            .as_ref()
+            .ok_or("bot_regional_structural_unavailable")?
+            .bot_regional_bounds(clv_sha256, budget)
+    }
+
     pub(crate) fn current_structural_sequences(&self) -> Vec<replication::ObjectiveSequenceDelta> {
         self.structural
             .as_ref()

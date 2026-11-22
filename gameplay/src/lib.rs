@@ -49,6 +49,7 @@ pub mod bot_names;
 pub mod bot_navigation;
 mod bot_objectives;
 pub mod bot_physics;
+mod bot_regional_collision;
 pub mod bot_registry;
 pub mod bot_resupply;
 pub mod bot_resupply_approach_policy;

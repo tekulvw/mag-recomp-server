@@ -16,6 +16,7 @@ pub enum PhysicsError {
     QueryFailed,
     InvalidQuery,
     CoverageUnknown,
+    RegionalBlocked,
 }
 impl PhysicsError {
     pub fn code(self) -> &'static str {
@@ -24,6 +25,7 @@ impl PhysicsError {
             Self::MapMismatch => "bot_physics_map_mismatch",
             Self::QueryFailed => "bot_physics_query_failed_or_budget",
             Self::InvalidQuery => "bot_physics_invalid_query",
+            Self::RegionalBlocked => "bot_regional_collision_blocked",
             Self::CoverageUnknown => "bot_physics_geometry_coverage_unknown",
         }
     }
@@ -116,6 +118,42 @@ impl Motion {
         }
     }
 }
+#[derive(Clone, Debug)]
+pub(crate) struct RegionalGuard {
+    region: crate::actor_collision::Bounds,
+    obstacles: Vec<crate::actor_collision::Bounds>,
+}
+impl RegionalGuard {
+    pub(crate) fn new(
+        region: crate::actor_collision::Bounds,
+        obstacles: &[crate::actor_collision::Bounds],
+    ) -> Self {
+        Self {
+            region,
+            obstacles: obstacles.to_vec(),
+        }
+    }
+
+    fn check_bounds(&self, range: crate::actor_collision::Bounds) -> Result<(), PhysicsError> {
+        if (0..3).any(|i| range.min[i] < self.region.min[i] || range.max[i] > self.region.max[i]) {
+            return Err(PhysicsError::RegionalBlocked);
+        }
+        if self
+            .obstacles
+            .iter()
+            .any(|body| (0..3).all(|i| range.min[i] <= body.max[i] && body.min[i] <= range.max[i]))
+        {
+            return Err(PhysicsError::RegionalBlocked);
+        }
+        Ok(())
+    }
+
+    fn check(&self, from: Point, to: Point, body: Body) -> Result<(), PhysicsError> {
+        use crate::actor_collision::Bounds;
+        self.check_bounds(Bounds::body(from, body).union(Bounds::body(to, body)))
+    }
+}
+
 pub struct WorldTerrain<'a> {
     world: &'a CollisionWorld,
     actors: Option<crate::actor_collision::Query<'a>>,
@@ -306,6 +344,12 @@ impl<'a> WorldTerrain<'a> {
         }
         let start = [position[0], position[1] + up, position[2]];
         let end = [position[0], position[1] - down, position[2]];
+        if let Some(guard) = self.world.bot_regional_guard() {
+            guard.check_bounds(crate::actor_collision::Bounds {
+                min: end,
+                max: start,
+            })?;
+        }
         let hit = self
             .world
             .raycast_segment_bounded(start, end, budget)
@@ -325,6 +369,9 @@ impl<'a> WorldTerrain<'a> {
         body: Body,
         budget: &mut usize,
     ) -> Result<Option<RayHit>, PhysicsError> {
+        if let Some(guard) = self.world.bot_regional_guard() {
+            guard.check(from, to, body)?;
+        }
         let center = |p: Point| [p[0], p[1] + body.height * 0.5, p[2]];
         let mut nearest = self
             .world
@@ -700,4 +747,32 @@ fn length(a: Point) -> f64 {
 fn stop_before(a: Point, b: Point, f: f64, skin: f64) -> Point {
     let d = sub(b, a);
     add(a, scale(d, (f - skin / length(d).max(skin)).max(0.0)))
+}
+
+#[cfg(test)]
+mod regional_guard_tests {
+    use super::*;
+    use crate::actor_collision::Bounds;
+
+    #[test]
+    fn regional_guard_blocks_a_swept_intruder_and_permits_a_cleared_path() {
+        let region = Bounds {
+            min: [-2., -2., -2.],
+            max: [8., 8., 8.],
+        };
+        let obstacle = Bounds {
+            min: [2., 2., -1.],
+            max: [3., 3., 1.],
+        };
+        let body = Body::default();
+        let guard = RegionalGuard::new(region, &[obstacle]);
+        assert!(guard.check([0., 0., 0.], [0., 0., 0.], body).is_ok());
+        assert!(guard.check([0., 0.4, 0.], [4., 0.4, 0.], body).is_err());
+        assert!(
+            RegionalGuard::new(region, &[])
+                .check([0., 0.4, 0.], [4., 0.4, 0.], body)
+                .is_ok()
+        );
+        assert!(guard.check([0., 0., 0.], [8., 0., 0.], body).is_err());
+    }
 }

@@ -232,6 +232,7 @@ pub(crate) struct MaterialRayHit {
 #[derive(Clone, Debug)]
 pub struct CollisionWorld {
     source_sha256: String,
+    bot_regional_guard: Option<std::sync::Arc<crate::bot_physics::RegionalGuard>>,
     metadata: WorldMetadata,
     // Geometry is immutable after BVH construction. Preloaded profiles share
     // these buffers instead of duplicating map geometry on each selection.
@@ -658,6 +659,7 @@ impl CollisionWorld {
         let source_sha256 = format!("{:x}", sha2::Sha256::digest(bytes));
         Ok(Self {
             source_sha256,
+            bot_regional_guard: None,
             metadata,
             instance_ids: instance_ids.into(),
             static_properties: static_properties.into(),
@@ -681,6 +683,15 @@ impl CollisionWorld {
         Ok(())
     }
 
+    /// Share immutable geometry with a bot-only guard; disk metadata stays unchanged.
+    pub(crate) fn with_bot_regional_guard(&self, guard: crate::bot_physics::RegionalGuard) -> Self {
+        let mut world = self.clone();
+        world.bot_regional_guard = Some(std::sync::Arc::new(guard));
+        world
+    }
+    pub(crate) fn bot_regional_guard(&self) -> Option<&crate::bot_physics::RegionalGuard> {
+        self.bot_regional_guard.as_deref()
+    }
     /// Fingerprint of the validated disk input, cached once at load.
     pub fn source_sha256(&self) -> &str {
         &self.source_sha256
