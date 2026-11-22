@@ -811,8 +811,9 @@ impl ItemCatalog {
             .get("parameters")
             .ok_or("missing_weapon_reticule_parameters")
     }
-    pub(crate) fn retail_primary_attachment(
+    pub(crate) fn retail_firearm_attachment(
         &self,
+        gear: u8,
         weapon_id: u16,
         attachment_id: u16,
     ) -> Option<BulletAttachmentKind> {
@@ -843,16 +844,18 @@ impl ItemCatalog {
             return None;
         }
         match (
+            gear,
             weapon["category"].as_str()?,
             parameters["attachment_type"].as_str()?,
         ) {
-            ("kWepCategoryAssaultRifle", "kAttachTypeSuppressor") => {
+            (0, "kWepCategoryAssaultRifle", "kAttachTypeSuppressor")
+            | (1, "kWepCategorySideArm", "kAttachTypeSuppressor") => {
                 Some(BulletAttachmentKind::Suppressor)
             }
-            ("kWepCategoryAssaultRifle", "kAttachTypeForwardGrip") => {
+            (0, "kWepCategoryAssaultRifle", "kAttachTypeForwardGrip") => {
                 Some(BulletAttachmentKind::ForwardGrip)
             }
-            ("kWepCategoryMachineGun", "kAttachTypeBipod") => Some(BulletAttachmentKind::Bipod),
+            (0, "kWepCategoryMachineGun", "kAttachTypeBipod") => Some(BulletAttachmentKind::Bipod),
             _ => None,
         }
     }

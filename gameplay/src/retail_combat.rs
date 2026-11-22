@@ -902,14 +902,16 @@ impl RetailBulletProfile {
                 continue;
             };
             // Native SimWeaponKit keeps host ammo for these compatible
-            // primary attachments when the replacement weapon is empty.
-            let kind = items
-                .zip(weapon)
-                .and_then(|(items, weapon)| items.retail_primary_attachment(weapon, attachment));
+            // attachments when the replacement weapon is empty.
+            let kind = items.zip(weapon).and_then(|(items, weapon)| {
+                items.retail_firearm_attachment(gear, weapon, attachment)
+            });
             if !matches!(
-                (slot, kind),
-                (16, Some(BulletAttachmentKind::Suppressor))
+                (gear, slot, kind),
+                (0, 16, Some(BulletAttachmentKind::Suppressor))
+                    | (1, 20, Some(BulletAttachmentKind::Suppressor))
                     | (
+                        0,
                         17,
                         Some(BulletAttachmentKind::Bipod | BulletAttachmentKind::ForwardGrip)
                     )
