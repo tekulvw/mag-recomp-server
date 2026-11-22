@@ -1582,3 +1582,146 @@ fn native_rifle_hit_keeps_unqualified_underbarrel_launchers_denied() {
         );
     }
 }
+
+#[test]
+fn reconnect_without_progression_restores_only_the_same_characters_round_statistics() {
+    let mut engine = fixture();
+    let original_id = engine.active.as_ref().unwrap().reservation.id.clone();
+    let account = engine.active.as_ref().unwrap().reservation.account;
+    let original_character = {
+        let actor = engine.active.as_mut().unwrap();
+        actor.reservation.character.loadout_account_id =
+            actor.reservation.character.account_id.take();
+        assert!(actor.reservation.character.progression.is_none());
+        actor.reservation.character.clone()
+    };
+
+    hit(&mut engine, 10, 1_000).unwrap();
+    assert_eq!(
+        engine.active.as_ref().unwrap().reward_statistics.get(&10),
+        Some(&1)
+    );
+    assert_eq!(victim(&engine).reward_statistics.get(&12), Some(&1));
+    assert!(engine.pending_reward_batch().is_empty());
+    // Represent counters already earned by this character earlier in the round.
+    engine
+        .active
+        .as_mut()
+        .unwrap()
+        .reward_statistics
+        .extend([(11, 2), (12, 3), (24, 4)]);
+    let round = engine.reward_match_id.clone();
+
+    let release = |engine: &mut Engine<Vec<u8>>, id: &str, time| {
+        engine.handle(
+            Request::Release {
+                v: BRIDGE_VERSION,
+                request_id: format!("release-{id}"),
+                reservation_id: id.into(),
+            },
+            Duration::from_millis(time),
+            1,
+        )
+    };
+    let reserve = |engine: &mut Engine<Vec<u8>>, id: &str, player, account, character, time| {
+        let reply = engine.handle(
+            Request::Reserve {
+                v: BRIDGE_VERSION,
+                request_id: format!("reserve-{id}"),
+                reservation_id: id.into(),
+                world_id: 1,
+                player_id: player,
+                account_id: account,
+                session_key: "aaaaaaaaaaaaaaaa".into(),
+                access_key: "bbbbbbbbbbbbbbbb".into(),
+                character,
+            },
+            Duration::from_millis(time),
+            1,
+        );
+        assert!(reply.ok, "{:?}", reply.error);
+    };
+    assert!(release(&mut engine, &original_id, 1_101).ok);
+
+    let mut different_character = original_character.clone();
+    different_character.character_id = Some(17);
+    let replacement_id = "synthetic-other-character";
+    reserve(
+        &mut engine,
+        replacement_id,
+        1,
+        17,
+        different_character,
+        1_200,
+    );
+    assert!(engine.active.as_ref().unwrap().reward_statistics.is_empty());
+
+    let returning_id = "synthetic-same-character";
+    reserve(
+        &mut engine,
+        returning_id,
+        2,
+        account,
+        original_character.clone(),
+        1_300,
+    );
+    assert_eq!(engine.reward_match_id, round);
+    let actor = engine.active.as_mut().unwrap();
+    assert_eq!(actor.reservation.id, returning_id);
+    assert!(progression::RewardRecipient::from_active(actor).is_none());
+    assert_eq!(actor.match_experience, 0);
+    actor.claimed = Some(Claimed {
+        wire: Vec::new(),
+        np_identity: [0; 36],
+        game_info: protocol::GameInfo {
+            client_index: actor.reservation.player,
+            level_name: "synthetic_arena".into(),
+            start_time_ms: 0,
+            attacking_faction: 1,
+            defending_faction: 1,
+            maximum_points: [100; 2],
+            current_points: [100; 2],
+            game_type: 0,
+        },
+    });
+    let mut ready = engine
+        .wire_profile
+        .wire_message_type(5)
+        .to_be_bytes()
+        .to_vec();
+    ready.push(0x80);
+    let messages = dispatch(&mut engine, &ready, 1_400).unwrap();
+    assert!(
+        messages.iter().any(|message| {
+            message.reservation_id == returning_id
+                && message.payload_hex == "02040002040a010b020c031804"
+        }),
+        "{messages:?}"
+    );
+
+    assert!(release(&mut engine, returning_id, 1_500).ok);
+    assert!(release(&mut engine, replacement_id, 1_501).ok);
+    assert!(release(&mut engine, "synthetic-reservation-0000", 1_502).ok);
+    assert!(engine.round_participants.is_empty());
+    reserve(
+        &mut engine,
+        "synthetic-new-round",
+        1,
+        account,
+        original_character,
+        1_600,
+    );
+    assert_ne!(engine.reward_match_id, round);
+    assert!(engine.active.as_ref().unwrap().reward_statistics.is_empty());
+    assert!(engine.pending_reward_batch().is_empty());
+    let actor = engine.active.as_mut().unwrap();
+    actor.reward_statistics.insert(10, 1);
+    engine.max_log = engine.written;
+    let reply = release(&mut engine, "synthetic-new-round", 1_601);
+    assert_eq!(reply.error.as_deref(), Some("log_limit_reached"));
+    assert_eq!(
+        engine.active.as_ref().unwrap().reward_statistics.get(&10),
+        Some(&1)
+    );
+    assert!(engine.round_participants.is_empty());
+}

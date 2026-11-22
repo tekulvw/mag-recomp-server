@@ -290,11 +290,15 @@ pub(crate) struct RoundParticipation {
     pub repair_credit: crate::repair_rewards::State,
 }
 pub(crate) fn participant_key(reservation: &crate::Reservation) -> Option<ParticipantKey> {
-    Some((
-        reservation.world,
-        reservation.character.account_id.clone()?,
-        reservation.character.character_id?,
-    ))
+    let character = &reservation.character;
+    // The bridge supplies the same authenticated account for loadout ownership
+    // even when progression is unavailable. That identity is sufficient for
+    // round history without enabling rewards.
+    let account = character
+        .account_id
+        .as_ref()
+        .or(character.loadout_account_id.as_ref())?;
+    Some((reservation.world, account.clone(), character.character_id?))
 }
 impl RoundParticipation {
     fn settle(
