@@ -64,14 +64,19 @@ penetration, team, armor and body calculation, with recorded health/lifecycle
 publication. The current source APC armor absorbs these mounted primaries;
 operational type7 bodies can take damage. Their player seats remain unavailable.
 
-Ground Hit accepts authenticated TCP or UDP framing as replacement compatibility
-policy, including existing on-foot shooters. The retail reliable small-message
+An initialized Domination APC gunner can also hit an operational Helo and
+publish its damage after Helo creation. The current authored APCs and Helos
+both belong to team 0, so these hits apply the configured friendly-fire
+multiplier before armor.
+
+Ground and Helo Hit accept authenticated TCP or UDP framing as replacement
+compatibility policy, including on-foot shooters. The retail reliable small-message
 dispatch is verified; its final platform socket selection remains unresolved.
 Owner aim and motion reports keep their existing UDP route. The hit wire has no
 unique shot/grant identifier; current role checks do not claim to classify
 arbitrary unseen hit replays.
 
-Type7 gunner seats, secondary rockets, Helo and Objective targets require separate
+Type7 gunner seats, secondary rockets and Objective targets require separate
 support. Reference seat transforms do not establish live model animation or
 muzzle placement. Native controls, first-report timing, visuals and presentation
 still require live-match review before a human cuts a release.
