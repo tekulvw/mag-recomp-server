@@ -177,6 +177,7 @@ impl<W: Write> Engine<W> {
         Self {
             match_profiles: None,
             selected_match: None,
+            party_reservations: Default::default(),
             retired_formations: Default::default(),
             retired_loadout_selections: Default::default(),
             wire_profile: resources.initial_wire_profile,

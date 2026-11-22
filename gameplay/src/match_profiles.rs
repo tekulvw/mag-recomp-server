@@ -18,6 +18,10 @@ pub struct Summary {
     pub defending_faction: u8,
     pub maximum_players: usize,
     pub team_capacity: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub squad_capacity: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub squad_counts: Option<[usize; 2]>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -27,6 +31,8 @@ pub struct SelectedMatch {
     pub game_type: i8,
     pub attacking_faction: u8,
     pub defending_faction: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_epoch: Option<u64>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -532,6 +538,8 @@ impl Registry {
                 defending_faction: policy.defending_faction,
                 maximum_players: policy.team_capacity * 2,
                 team_capacity: policy.team_capacity,
+                squad_capacity: None,
+                squad_counts: None,
             };
             profiles.insert(
                 source.profile_id,
@@ -1206,6 +1214,30 @@ impl Registry {
             .any(|profile| profile.acquisition.is_some())
     }
 
+    pub(crate) fn party_summaries(&self) -> Vec<Summary> {
+        self.profiles
+            .values()
+            .map(|loaded| {
+                let mut summary = loaded.summary.clone();
+                let policy = loaded.spawns.match_profile();
+                let counts = [0, 1].map(|team| {
+                    loaded
+                        .spawns
+                        .map_pool()
+                        .squads
+                        .iter()
+                        .filter(|squad| squad.team == team)
+                        .count()
+                });
+                if policy.auto_assign_teams && counts.iter().all(|count| *count > 0) {
+                    summary.squad_capacity = Some(policy.squad_capacity.min(policy.team_capacity));
+                    summary.squad_counts = Some(counts);
+                }
+                summary
+            })
+            .collect()
+    }
+
     pub fn summaries(&self) -> Vec<Summary> {
         self.profiles.values().map(|p| p.summary.clone()).collect()
     }
@@ -1374,6 +1406,15 @@ impl<W: Write> Engine<W> {
             game_type: loaded.summary.game_type,
             attacking_faction: loaded.summary.attacking_faction,
             defending_faction: loaded.summary.defending_faction,
+            admission_epoch: if self.party_reservations.enabled() {
+                Some(
+                    self.round_number
+                        .checked_add(1)
+                        .ok_or("round_number_exhausted")?,
+                )
+            } else {
+                None
+            },
         };
         let world = loaded
             .objectives
@@ -1480,6 +1521,7 @@ impl<W: Write> Engine<W> {
         self.minimum_players_per_team = [1; 2];
         self.maximum_players = loaded.summary.maximum_players;
         self.match_started = self.starts_without_quorum();
+        self.party_reservations.clear();
         self.selected_match = Some(selected);
         Ok(Vec::new())
     }
@@ -1548,6 +1590,393 @@ mod tests {
         base_engine(files, writer, maximum_log)
             .with_match_profiles(files.registry())
             .unwrap()
+    }
+
+    fn party_wire() -> Value {
+        let members = [0, 1].map(|index| {
+            json!({
+                "reservation_id": format!("synthetic-party-member-{index}"),
+                "player_id": index, "account_id": index + 1,
+                "session_key": "aaaaaaaaaaaaaaaa", "access_key": "bbbbbbbbbbbbbbbb",
+                "character": {"name": format!("Synthetic Player {index}"), "faction": 0,
+                    "head": 0, "voice": 0, "universe_id": 26}
+            })
+        });
+        json!({
+            "v": BRIDGE_VERSION, "op": "reserve_party", "request_id": "party-reserve",
+            "formation_id": "party-formation", "profile_id": "party-profile",
+            "cohort_id": "cohort-a", "world_id": 7, "admission_epoch": 1,
+            "members": members
+        })
+    }
+
+    #[test]
+    fn party_bridge_accepts_bounded_group_request() {
+        let candidate = serde_json::to_vec(&party_wire()).unwrap();
+        parse_request(&candidate).expect("the worker understands the group reservation");
+    }
+
+    fn party_worker(files: &Files, enable: bool) -> Engine<Vec<u8>> {
+        let path = files.spawns(0, 0, 1);
+        let mut spawn: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        spawn["match_profile"]["team_capacity"] = json!(4);
+        spawn["match_profile"]["squad_capacity"] = json!(2);
+        let squads = spawn["maps"][0]["squads"].as_array_mut().unwrap();
+        for index in [0, 1] {
+            let mut second = squads[index].clone();
+            second["index"] = json!(index * 16 + 1);
+            second["squad"] = json!(1);
+            squads.push(second);
+        }
+        let manifest = files.write("party-profiles.json", json!({
+            "format":"mag_match_profiles_v1",
+            "profiles":[{"profile_id":"party-profile","spawn_catalog":files.write("party-spawn.json",spawn)}]
+        }));
+        let mut engine = base_engine(files, Vec::new(), 100_000)
+            .with_match_profiles(Registry::load(&manifest).unwrap())
+            .unwrap();
+        if enable {
+            engine.configure_party_reservations().unwrap();
+        }
+        let selected = select(&mut engine, "party-formation", "party-profile");
+        assert!(selected.ok, "{:?}", selected.error);
+        assert_eq!(
+            selected.selected_match.unwrap().admission_epoch,
+            enable.then_some(1)
+        );
+        engine
+    }
+
+    fn party_order(engine: &mut Engine<Vec<u8>>, value: &Value) -> Response {
+        let request = parse_request(&serde_json::to_vec(value).unwrap()).unwrap();
+        engine.handle(request, Duration::from_millis(10), 1)
+    }
+
+    fn opposing_party_wire() -> Value {
+        let mut reply = party_wire();
+        reply["cohort_id"] = json!("cohort-b");
+        for (offset, row) in reply["members"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .enumerate()
+        {
+            row["reservation_id"] = json!(format!("synthetic-opponent-{offset}"));
+            row["player_id"] = json!(offset + 2);
+            row["account_id"] = json!(offset + 3);
+            row["character"]["faction"] = json!(1);
+        }
+        reply
+    }
+
+    fn party_release_wire(value: &Value) -> Value {
+        let mut release = value.clone();
+        release.as_object_mut().unwrap().remove("members");
+        release["op"] = json!("release_party");
+        release["request_id"] = json!("party-rollback");
+        release
+    }
+
+    #[test]
+    fn party_bridge_is_opt_in_and_reports_exact_selected_epoch() {
+        let files = Files::new();
+        for enable in [false, true] {
+            let mut engine = party_worker(&files, enable);
+            let hello =
+                serde_json::to_value(engine.describe_worker("hello".into(), false)).unwrap();
+            assert_eq!(
+                hello["capabilities"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("party_reservation_v1")),
+                enable
+            );
+            assert_eq!(
+                hello["match_profiles"][0]["squad_capacity"],
+                if enable { json!(2) } else { Value::Null }
+            );
+            assert_eq!(
+                hello["match_profiles"][0]["squad_counts"],
+                if enable { json!([2, 2]) } else { Value::Null }
+            );
+            let selected = select(&mut engine, "party-formation", "party-profile");
+            assert!(selected.ok);
+            assert_eq!(
+                selected.selected_match.unwrap().admission_epoch,
+                enable.then_some(1)
+            );
+            let response = party_order(&mut engine, &party_wire());
+            assert_eq!(response.ok, enable);
+            if !enable {
+                assert_eq!(
+                    response.error.as_deref(),
+                    Some("party_reservations_disabled")
+                );
+                assert!(
+                    !serde_json::to_value(response)
+                        .unwrap()
+                        .as_object()
+                        .unwrap()
+                        .contains_key("party_reservation")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn party_bridge_reserves_two_opposing_parties_before_any_claim() {
+        let files = Files::new();
+        let mut engine = party_worker(&files, true);
+        let mut attacking = party_wire();
+        attacking["members"].as_array_mut().unwrap().reverse();
+        let defending = opposing_party_wire();
+        let start = engine.sequence;
+        let first = party_order(&mut engine, &attacking);
+        assert!(first.ok, "{:?}", first.error);
+        let first = first.party_reservation.unwrap();
+        assert_eq!(first.status, party_reservation::Status::Reserved);
+        assert_eq!(
+            first.reservation_ids,
+            ["synthetic-party-member-1", "synthetic-party-member-0"]
+        );
+        assert_eq!(
+            (first.team, first.squad, first.admission_epoch),
+            (Some(0), Some(0), 1)
+        );
+        assert_eq!(engine.sequence, start + 1);
+        assert_eq!(engine.round_number, 1);
+
+        let second = party_order(&mut engine, &defending);
+        assert!(second.ok, "{:?}", second.error);
+        let second = second.party_reservation.unwrap();
+        assert_eq!(
+            (second.team, second.squad, second.admission_epoch),
+            (Some(1), Some(16), 1)
+        );
+        assert_eq!(engine.sequence, start + 2);
+        assert_eq!(engine.round_number, 1);
+        assert_eq!(engine.peers.len(), 4);
+        for (ids, squad) in [(&first.reservation_ids, 0), (&second.reservation_ids, 16)] {
+            for id in ids {
+                assert_eq!(engine.peers[id].squad_catalog.squad_index(), squad);
+                assert!(engine.peers[id].claimed.is_none());
+            }
+        }
+        assert!(!String::from_utf8_lossy(&engine.writer).contains("aaaaaaaaaaaaaaaa"));
+        attacking["request_id"] = json!("retry");
+        assert_eq!(
+            party_order(&mut engine, &attacking).party_reservation,
+            Some(first)
+        );
+        assert_eq!(engine.sequence, start + 2);
+    }
+
+    #[test]
+    fn party_bridge_later_denial_and_refused_record_never_install_partial_members() {
+        let files = Files::new();
+        let mut engine = party_worker(&files, true);
+        let first = party_order(&mut engine, &party_wire())
+            .party_reservation
+            .unwrap();
+        let snapshot = engine.writer.clone();
+        let mut second = opposing_party_wire();
+        second["members"][1]["account_id"] = json!(1);
+        let denied = party_order(&mut engine, &second);
+        assert_eq!(denied.error.as_deref(), Some("party_member_conflict"));
+        assert_eq!(engine.writer, snapshot);
+        assert_eq!(
+            engine.peers.keys().cloned().collect::<Vec<_>>(),
+            first.reservation_ids
+        );
+        let mut divergent = party_wire();
+        divergent["members"][0]["access_key"] = json!("cccccccccccccccc");
+        assert_eq!(
+            party_order(&mut engine, &divergent).error.as_deref(),
+            Some("party_cohort_conflict")
+        );
+        engine.max_log = engine.written;
+        let response = party_order(&mut engine, &opposing_party_wire());
+        assert_eq!(response.error.as_deref(), Some("log_limit_reached"));
+        assert_eq!(engine.writer, snapshot);
+        assert_eq!(engine.peers.len(), 2);
+        assert_eq!(engine.round_number, 1);
+    }
+
+    #[test]
+    fn party_bridge_rollback_and_preemptive_tombstones_fence_empty_rounds() {
+        let files = Files::new();
+        let mut engine = party_worker(&files, true);
+        let attacking = party_wire();
+        let defending = opposing_party_wire();
+        let early = party_order(&mut engine, &party_release_wire(&defending))
+            .party_reservation
+            .unwrap();
+        assert_eq!(early.status, party_reservation::Status::Released);
+        assert!(early.reservation_ids.is_empty());
+        assert_eq!(
+            party_order(&mut engine, &defending).error.as_deref(),
+            Some("party_cohort_released")
+        );
+        let accepted = party_order(&mut engine, &attacking)
+            .party_reservation
+            .unwrap();
+        let release = party_release_wire(&attacking);
+        let removed = party_order(&mut engine, &release)
+            .party_reservation
+            .unwrap();
+        assert_eq!(removed.status, party_reservation::Status::Released);
+        assert_eq!(removed.reservation_ids, accepted.reservation_ids);
+        assert_eq!((removed.team, removed.squad), (None, None));
+        assert!(engine.peers.is_empty() && engine.active.is_none());
+        assert!(engine.selected_match.is_none());
+        let observed_sequence = engine.sequence;
+        assert_eq!(
+            party_order(&mut engine, &release).party_reservation,
+            Some(removed)
+        );
+        assert_eq!(engine.sequence, observed_sequence);
+        assert_eq!(
+            party_order(&mut engine, &attacking).error.as_deref(),
+            Some("party_cohort_released")
+        );
+        let mut fresh_group = opposing_party_wire();
+        fresh_group["cohort_id"] = json!("new-cohort");
+        assert_eq!(
+            party_order(&mut engine, &fresh_group).error.as_deref(),
+            Some("party_formation_stale")
+        );
+        let new = select(&mut engine, "next-formation", "party-profile");
+        assert_eq!(new.selected_match.unwrap().admission_epoch, Some(2));
+        assert_eq!(
+            party_order(&mut engine, &release).error.as_deref(),
+            Some("party_formation_stale")
+        );
+    }
+
+    #[test]
+    fn party_bridge_can_roll_back_two_accepted_cohorts_with_exact_retries() {
+        let files = Files::new();
+        for refuse_record in [false, true] {
+            let mut engine = party_worker(&files, true);
+            let a = party_wire();
+            let b = opposing_party_wire();
+            let first = party_order(&mut engine, &a).party_reservation.unwrap();
+            let second = party_order(&mut engine, &b).party_reservation.unwrap();
+            let mut alien = b.clone();
+            alien["world_id"] = json!(8);
+            assert_eq!(
+                party_order(&mut engine, &alien).error.as_deref(),
+                Some("party_world_conflict")
+            );
+            let a_release = party_release_wire(&a);
+            let b_release = party_release_wire(&b);
+            if refuse_record {
+                let snapshot = engine.writer.clone();
+                engine.max_log = engine.written;
+                assert_eq!(
+                    party_order(&mut engine, &b_release).error.as_deref(),
+                    Some("log_limit_reached")
+                );
+                assert_eq!(engine.peers.len(), 4);
+                assert_eq!(engine.writer, snapshot);
+                continue;
+            }
+            let b_removed = party_order(&mut engine, &b_release)
+                .party_reservation
+                .unwrap();
+            assert_eq!(b_removed.reservation_ids, second.reservation_ids);
+            assert_eq!(
+                engine.peers.keys().cloned().collect::<Vec<_>>(),
+                first.reservation_ids
+            );
+            let a_removed = party_order(&mut engine, &a_release)
+                .party_reservation
+                .unwrap();
+            assert!(engine.peers.is_empty());
+            let sequence = engine.sequence;
+            assert_eq!(
+                party_order(&mut engine, &a_release).party_reservation,
+                Some(a_removed)
+            );
+            assert_eq!(
+                party_order(&mut engine, &b_release).party_reservation,
+                Some(b_removed)
+            );
+            assert_eq!(engine.sequence, sequence);
+        }
+    }
+
+    #[test]
+    fn party_bridge_real_claim_closes_new_admission_and_protects_whole_group() {
+        let files = Files::new();
+        let mut engine = party_worker(&files, true);
+        let attacking = party_wire();
+        let accepted = party_order(&mut engine, &attacking)
+            .party_reservation
+            .unwrap();
+        let mut claim = engine
+            .wire_profile
+            .wire_message_type(3)
+            .to_be_bytes()
+            .to_vec();
+        claim.extend([1; 36]);
+        claim.extend([0; 12]); // Empty clan/keys, and the four-byte address.
+        let event = json!({
+            "v": BRIDGE_VERSION, "op":"event","request_id":"claim-group-player",
+            "reservation_id":accepted.reservation_ids[0], "world_id":7, "player_id":0,
+            "transport":"tcp","direction":"client_to_server","rt_type":61,"plugin_id":1,
+            "payload_hex":protocol::encode_hex(&claim)
+        });
+        let claimed = party_order(&mut engine, &event);
+        assert!(claimed.ok, "{:?}", claimed.error);
+        assert!(!claimed.messages.is_empty());
+        let before = engine.sequence;
+        assert_eq!(
+            party_order(&mut engine, &opposing_party_wire())
+                .error
+                .as_deref(),
+            Some("party_requires_preclaim_formation")
+        );
+        assert_eq!(
+            party_order(&mut engine, &party_release_wire(&attacking))
+                .error
+                .as_deref(),
+            Some("party_already_claimed")
+        );
+        assert_eq!(
+            party_order(&mut engine, &attacking).party_reservation,
+            Some(accepted)
+        );
+        assert_eq!(engine.sequence, before);
+        assert_eq!(engine.active.iter().count() + engine.peers.len(), 2);
+    }
+
+    #[test]
+    fn party_bridge_requires_one_squad_even_when_the_side_has_room() {
+        let files = Files::new();
+        let mut engine = party_worker(&files, true);
+        let mut attacking = party_wire();
+        for row in attacking["members"].as_array_mut().unwrap() {
+            let mut solo = row.clone();
+            solo["op"] = json!("reserve");
+            solo["v"] = json!(BRIDGE_VERSION);
+            solo["world_id"] = json!(7);
+            solo["request_id"] = json!("solo-before-party");
+            let reserved = party_order(&mut engine, &solo);
+            assert!(reserved.ok, "{:?}", reserved.error);
+            row["reservation_id"] = json!(format!("synthetic-new-member-{}", row["player_id"]));
+            row["player_id"] = json!(row["player_id"].as_u64().unwrap() + 2);
+            row["account_id"] = json!(row["account_id"].as_u64().unwrap() + 2);
+        }
+        assert_eq!(engine.squad_reservation_count(0), 1);
+        assert_eq!(engine.squad_reservation_count(1), 1);
+        let before = engine.sequence;
+        assert_eq!(
+            party_order(&mut engine, &attacking).error.as_deref(),
+            Some("match_full")
+        );
+        assert_eq!(engine.sequence, before);
+        assert_eq!(engine.active.iter().count() + engine.peers.len(), 2);
     }
 
     fn leadership_catalog() -> leadership_passives::LeadershipCatalog {
@@ -2182,6 +2611,8 @@ mod tests {
                     attacking_faction: policy.attacking_faction,
                     defending_faction: policy.defending_faction,
                     team_capacity: policy.team_capacity,
+                    squad_capacity: None,
+                    squad_counts: None,
                     maximum_players: policy.team_capacity * 2,
                 },
                 spawns,

@@ -40,6 +40,14 @@ impl<W: Write> Engine<W> {
         &self,
         faction: u8,
     ) -> Result<spawn_catalog::SpawnCatalog, &'static str> {
+        self.allocate_squad_for(faction, 1)
+    }
+
+    pub(super) fn allocate_squad_for(
+        &self,
+        faction: u8,
+        members: usize,
+    ) -> Result<spawn_catalog::SpawnCatalog, &'static str> {
         let catalog = self
             .spawn_catalog
             .as_ref()
@@ -70,7 +78,7 @@ impl<W: Write> Engine<W> {
                 .chain(self.active.iter())
                 .filter(|a| a.team() == team)
                 .count();
-            if count < policy.team_capacity {
+            if count + members <= policy.team_capacity {
                 teams.push((count, u16::from(team) != preferred_team, team));
             }
         }
@@ -82,7 +90,7 @@ impl<W: Write> Engine<W> {
                 .iter()
                 .filter(|b| b.team == team)
                 .map(|b| (self.squad_reservation_count(b.index), b.index))
-                .filter(|(count, _)| *count < policy.squad_capacity)
+                .filter(|(count, _)| count + members <= policy.squad_capacity)
                 .min()
             {
                 return catalog.for_squad(binding.1);
