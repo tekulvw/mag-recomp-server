@@ -1117,3 +1117,6 @@ fn native_acquisition_squad_spawn_uses_generic_creation_and_supported_points() {
 
 #[path = "match_cohort_tests.rs"]
 mod match_cohorts;
+
+#[path = "domination_control_bootstrap_tests.rs"]
+mod domination_control_bootstrap;

@@ -211,6 +211,7 @@ struct ReplicationChanges {
     projectile_delta: Option<Vec<u8>>,
     dummy_delta: Option<Vec<u8>>,
     objective_delta: Option<Vec<u8>>,
+    objective_control_tail: Vec<Vec<u8>>,
     domination_sequence_batches: Vec<Vec<u8>>,
     objective_assignment: Option<Vec<u8>>,
     objective_clear: Option<Vec<u8>>,
@@ -563,6 +564,18 @@ impl<W: Write> Engine<W> {
                     payload_hex: protocol::encode_hex(&payload),
                 });
             }
+            plan.messages.extend(
+                plan.replication
+                    .objective_control_tail
+                    .iter()
+                    .map(|packet| OutboundMessage {
+                        reservation_id: event.reservation_id.clone(),
+                        world_id: event.world_id,
+                        player_id: event.player_id,
+                        plugin_id: 1,
+                        payload_hex: protocol::encode_hex(packet),
+                    }),
+            );
             decoded
         } else {
             json!({"type":"opaque_transport_payload"})
@@ -910,6 +923,9 @@ impl<W: Write> Engine<W> {
         // replies consume no replication sequence; commit follows record+flush.
         if let Some(packet) = plan.replication.history_packet() {
             active.remember(packet.clone())?;
+        }
+        for packet in plan.replication.objective_control_tail {
+            active.remember(packet)?;
         }
         if let Some(tracker) = plan.session.fall_tracker {
             active.fall_tracker = tracker;
