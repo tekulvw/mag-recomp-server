@@ -31,11 +31,12 @@ pub struct BulletParameters {
     pub magazine_capacity: u8,
     pub initial_magazine_count: u8,
 }
-/// Qualified attachments with no replacement WeaponData preserve the host bullet profile.
+/// Qualified attachments that preserve the host bullet profile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BulletAttachmentKind {
     Bipod,
     ForwardGrip,
+    Launcher,
     Suppressor,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -837,17 +838,26 @@ impl ItemCatalog {
             .as_object()?
             .values()
             .any(|row| row["WeaponAttachment"]["name"].as_str() == Some(name));
-        if !compatible
-            || parameters["id"].as_str() != Some(name)
-            || parameters["weapon_name"].as_str() != Some("")
-        {
+        if !compatible || parameters["id"].as_str() != Some(name) {
             return None;
         }
-        match (
+        let replacement = parameters["weapon_name"].as_str()?;
+        let role = (
             gear,
             weapon["category"].as_str()?,
             parameters["attachment_type"].as_str()?,
-        ) {
+        );
+        if role == (0, "kWepCategoryAssaultRifle", "kAttachTypeLauncher") {
+            return (replacement == name
+                && parameters["character_attachment_type"].as_str()
+                    == Some("kCharAttachTypePrimary")
+                && self.separate_underbarrel_launcher(weapon, replacement))
+            .then_some(BulletAttachmentKind::Launcher);
+        }
+        if !replacement.is_empty() {
+            return None;
+        }
+        match role {
             (0, "kWepCategoryAssaultRifle", "kAttachTypeSuppressor")
             | (1, "kWepCategorySideArm", "kAttachTypeSuppressor") => {
                 Some(BulletAttachmentKind::Suppressor)
@@ -858,6 +868,32 @@ impl ItemCatalog {
             (0, "kWepCategoryMachineGun", "kAttachTypeBipod") => Some(BulletAttachmentKind::Bipod),
             _ => None,
         }
+    }
+    fn separate_underbarrel_launcher(&self, host: &Value, name: &str) -> bool {
+        let launcher = &self.raw["definitions"]["weapons"][name]["parameters"];
+        let Some(ammo_name) = launcher["ammo_name"].as_str() else {
+            return false;
+        };
+        let ammo = &self.raw["definitions"]["projectile_ammo"][ammo_name]["parameters"];
+        !name.is_empty()
+            && host["id"].as_str() != Some(name)
+            && host["ammo_name"]
+                .as_str()
+                .is_some_and(|host_ammo| host_ammo != ammo_name)
+            && launcher["id"].as_str() == Some(name)
+            && launcher["category"].as_str() == Some("kWepCategoryGrenadeLauncher")
+            && launcher["infinite_ammo"].as_bool() == Some(false)
+            && launcher["magazine_capacity"]
+                .as_u64()
+                .is_some_and(|count| count > 0)
+            && launcher["initial_magazine_count"]
+                .as_u64()
+                .is_some_and(|count| count > 0)
+            && ammo["id"].as_str() == Some(ammo_name)
+            && ammo["collisionType"].as_str() == Some("kWepProjCollisionShapeCapsule")
+            && ammo["propulsion_strategy"].as_str() == Some("kWepPropulsionStrategyThrown")
+            && ammo["detonation_strategy"].as_str() == Some("kWepDetonationStrategyImpact")
+            && ammo["explosion_strategy"].as_str() == Some("kWepExplosionStrategyDebris")
     }
     pub fn character_blast_rules(&self) -> crate::blast_rules::CharacterBlastRules {
         self.character_blast_rules

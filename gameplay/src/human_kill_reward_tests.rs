@@ -827,6 +827,10 @@ enum PrimaryAttachment {
     Unbound,
     MismatchedSource,
     MissingReplacement,
+    MissingLauncherWeapon,
+    HostAsLauncherWeapon,
+    WrongLauncherCategory,
+    WrongLauncherAmmo,
 }
 
 fn machine_gun_hit_fixture(slot: Option<usize>, attachment: PrimaryAttachment) -> Engine<Vec<u8>> {
@@ -861,6 +865,7 @@ fn attachment_hit_fixture(
     let (mut raw, mut metadata) = combat_fixture_documents(false, 0.0, 0.0, None, false, false);
     let host = &mut raw["definitions"]["weapons"]["synthetic_rifle"]["parameters"];
     host["id"] = json!("synthetic_rifle");
+    host["ammo_name"] = json!("synthetic_hitscan");
     host["category"] = json!(category);
     host["attachment_list"] = json!({});
     for (ordinal, &(_, kind)) in attachments.iter().enumerate() {
@@ -891,8 +896,47 @@ fn attachment_hit_fixture(
                 ""
             }
         });
+        if kind == "kAttachTypeLauncher" {
+            parameters["character_attachment_type"] = json!("kCharAttachTypePrimary");
+            parameters["weapon_name"] = json!(if matches!(
+                attachment,
+                PrimaryAttachment::HostAsLauncherWeapon
+            ) {
+                "synthetic_rifle"
+            } else {
+                &name
+            });
+            if !matches!(attachment, PrimaryAttachment::MissingLauncherWeapon) {
+                raw["definitions"]["weapons"][&name]["parameters"] = json!({
+                    "id":name,
+                    "category":if matches!(attachment, PrimaryAttachment::WrongLauncherCategory) {
+                        "kWepCategoryAssaultRifle"
+                    } else {
+                        "kWepCategoryGrenadeLauncher"
+                    },
+                    "ammo_name":if matches!(attachment, PrimaryAttachment::WrongLauncherAmmo) {
+                        "synthetic_missing_projectile"
+                    } else {
+                        "synthetic_impact_grenade"
+                    },
+                    "magazine_capacity":1,
+                    "initial_magazine_count":3,
+                    "infinite_ammo":false
+                });
+            }
+            raw["definitions"]["projectile_ammo"]["synthetic_impact_grenade"]["parameters"] = json!({
+                "id":"synthetic_impact_grenade",
+                "collisionType":"kWepProjCollisionShapeCapsule",
+                "propulsion_strategy":"kWepPropulsionStrategyThrown",
+                "detonation_strategy":"kWepDetonationStrategyImpact",
+                "explosion_strategy":"kWepExplosionStrategyDebris"
+            });
+        }
         if matches!(attachment, PrimaryAttachment::MissingReplacement) {
-            parameters.as_object_mut().unwrap().remove("weapon_name");
+            raw["definitions"]["attachments"][&name]["parameters"]
+                .as_object_mut()
+                .unwrap()
+                .remove("weapon_name");
         }
     }
     let bytes = serde_json::to_vec(&raw).unwrap();
@@ -1217,6 +1261,77 @@ fn native_sidearm_hit_keeps_unqualified_attachments_denied() {
                 .filter_map(|line| serde_json::from_str::<Value>(line).ok())
                 .any(|entry| entry["gameplay_denial"] == "unsupported_bullet_attachment"),
             "gear={gear} slot={slot} host={category} {attachment:?} mounted={mounted}",
+        );
+    }
+}
+
+#[test]
+fn native_rifle_hit_keeps_host_ammo_with_separate_underbarrel_launcher() {
+    for attachments in [
+        vec![],
+        vec![(17, "kAttachTypeLauncher")],
+        vec![(16, "kAttachTypeSuppressor"), (17, "kAttachTypeLauncher")],
+    ] {
+        let mut engine = attachment_hit_fixture(
+            &attachments,
+            PrimaryAttachment::Compatible,
+            "kWepCategoryAssaultRifle",
+        );
+        hit(&mut engine, 55, 1000).unwrap();
+        assert_eq!(
+            victim(&engine).life.damage_health(),
+            Some((4, 240)),
+            "{attachments:?}"
+        );
+    }
+}
+
+#[test]
+fn native_rifle_hit_keeps_unqualified_underbarrel_launchers_denied() {
+    use PrimaryAttachment::*;
+    for (slot, category, attachment, mounted) in [
+        (17, "kWepCategoryAssaultRifle", MissingLauncherWeapon, false),
+        (17, "kWepCategoryAssaultRifle", HostAsLauncherWeapon, false),
+        (17, "kWepCategoryAssaultRifle", WrongLauncherCategory, false),
+        (17, "kWepCategoryAssaultRifle", WrongLauncherAmmo, false),
+        (17, "kWepCategoryAssaultRifle", MissingReplacement, false),
+        (17, "kWepCategoryAssaultRifle", Incompatible, false),
+        (17, "kWepCategoryAssaultRifle", WrongType, false),
+        (17, "kWepCategoryAssaultRifle", Unbound, false),
+        (17, "kWepCategoryAssaultRifle", MismatchedSource, false),
+        (17, "kWepCategoryAssaultRifle", Compatible, true),
+        (16, "kWepCategoryAssaultRifle", Compatible, false),
+        (17, "kWepCategoryMachineGun", Compatible, false),
+        (20, "kWepCategorySideArm", Compatible, false),
+    ] {
+        let mut engine =
+            attachment_hit_fixture(&[(slot, "kAttachTypeLauncher")], attachment, category);
+        if mounted {
+            let seat = domination_helo::PassengerSeat {
+                object_index: 0,
+                seat: 0,
+            };
+            let active = engine.active.as_mut().unwrap();
+            active.helo_seat = Some(seat);
+            active.owner_fields.state = Some(seat.character_state());
+        }
+        if slot == 20 {
+            equip_synthetic_sidearm(&mut engine);
+            secondary_hit(&mut engine).unwrap();
+        } else {
+            hit(&mut engine, 55, 1000).unwrap();
+        }
+        assert_eq!(
+            victim(&engine).life.damage_health(),
+            Some((4, 400)),
+            "slot={slot} host={category} {attachment:?} mounted={mounted}",
+        );
+        assert!(
+            std::str::from_utf8(&engine.writer)
+                .unwrap()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .any(|entry| entry["gameplay_denial"] == "unsupported_bullet_attachment")
         );
     }
 }
