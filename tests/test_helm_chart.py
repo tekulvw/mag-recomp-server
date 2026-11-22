@@ -176,6 +176,15 @@ class ChartTests(unittest.TestCase):
             for name in ('MAG_TRAINING_COMPLETION_CATALOG', 'MAG_PROGRESSION_CATALOG', 'MAG_SKILL_CATALOG', 'MAG_LOADOUT_DEFAULTS'):
                 self.assertNotIn(name, env)
 
+    def test_acquisition_mode_reaches_both_medius_roles(self):
+        docs = render({'runtime': {'gameType': 1}})
+        config = next(d['data'] for d in docs if d['kind'] == 'ConfigMap'
+                      and 'main.json' in d.get('data', {}))
+        for role in ('main', 'maps'):
+            self.assertEqual(json.loads(config[role + '.json'])['MagGameType'], 1)
+        for invalid in (-1, 4, '1'):
+            render({'runtime': {'gameType': invalid}}, ok=False)
+
     def test_explicit_legacy_profile_with_old_images(self):
         for tag in ('0.1.0', '0.1.1'):
             docs = render({'runtime': {'applicationId': 20230, 'protocolVersion': 1725, 'gameType': 2},
