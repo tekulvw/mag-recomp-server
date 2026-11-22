@@ -37,6 +37,8 @@ pub struct BotPopulation {
     pub healing: crate::bot_healing::Policy,
     #[serde(default)]
     pub regional_collision: Option<RegionalCollision>,
+    #[serde(default)]
+    pub regional_team: Option<u8>,
 }
 impl BotPopulation {
     pub fn load(path: impl AsRef<std::path::Path>) -> Result<Self, &'static str> {
@@ -64,6 +66,16 @@ impl BotPopulation {
             || self.slots.is_empty()
         {
             return Err("invalid_bot_population");
+        }
+        if let Some(team) = self.regional_team {
+            if team > 1 || self.regional_collision.is_none() {
+                return Err("bot_population_regional_team_requires_collision_scope");
+            }
+            if self.slots.iter().any(|slot| {
+                slot.team != team || slot.squad.is_none() || slot.source_spawn.is_none()
+            }) {
+                return Err("bot_population_regional_team_requires_source_slots");
+            }
         }
         self.firearms.validate()?;
         self.healing.validate()?;
@@ -643,6 +655,27 @@ impl WorldBot {
         )
     }
 }
+fn regional_slot_source_active(catalog: &spawn_catalog::SpawnCatalog, slot: &BotSlot) -> bool {
+    let (Some(squad), Some(source)) = (slot.squad, slot.source_spawn) else {
+        return false;
+    };
+    catalog
+        .selected_squad(squad)
+        .is_some_and(|s| s.team == slot.team)
+        && catalog
+            .available_for_squad(squad)
+            .is_some_and(|points| points.contains(&source))
+        && catalog.point_active(source)
+        && catalog.point(source).is_some_and(|point| {
+            matches!(
+                point.kind,
+                spawn_catalog::SpawnKind::Insertion
+                    | spawn_catalog::SpawnKind::Alternate
+                    | spawn_catalog::SpawnKind::OnFoot
+            )
+        })
+}
+
 pub(crate) fn human_in_actor_grid(a: &Active, now: Duration) -> bool {
     a.ready_for_updates
         && a.entered_game
@@ -697,9 +730,11 @@ impl<W: Write> Engine<W> {
         {
             return Err("bot_population_full_match_spawn_binding_required");
         }
-        for team in 0..2 {
-            if config.slots.iter().filter(|s| s.team == team).count() < total.div_ceil(2) {
-                return Err("bot_population_insufficient_slots");
+        if config.regional_team.is_none() {
+            for team in 0..2 {
+                if config.slots.iter().filter(|s| s.team == team).count() < total.div_ceil(2) {
+                    return Err("bot_population_insufficient_slots");
+                }
             }
         }
         if let Some(mesh) = &self.navmesh_world
@@ -765,7 +800,8 @@ impl<W: Write> Engine<W> {
         {
             return Err("bot_population_mixed_spawn_binding");
         }
-        if config.slots.iter().all(|s| s.squad.is_some())
+        if config.regional_team.is_none()
+            && config.slots.iter().all(|s| s.squad.is_some())
             && total == self.match_profile().team_capacity * 2
         {
             for squad in &self
@@ -810,7 +846,21 @@ impl<W: Write> Engine<W> {
                             )
                     })
                     .ok_or("bot_spawn_binding_inactive")?;
-                if (slot.position.x - anchor.position.x).hypot(slot.position.z - anchor.position.z)
+                if config.regional_team.is_some() {
+                    if !regional_slot_source_active(catalog, slot)
+                        || slot.position != anchor.position
+                    {
+                        return Err("bot_population_regional_spawn_source_mismatch");
+                    }
+                    let scope = config.regional_collision.as_ref().unwrap();
+                    if slot
+                        .goal
+                        .is_some_and(|goal| !scope.contains_body(point(goal), body))
+                    {
+                        return Err("bot_population_regional_goal_outside");
+                    }
+                } else if (slot.position.x - anchor.position.x)
+                    .hypot(slot.position.z - anchor.position.z)
                     > 8.
                 {
                     return Err("bot_spawn_binding_offset_limit");
@@ -1236,6 +1286,14 @@ impl<W: Write> Engine<W> {
             let bot = self.bot_registry.bots.get_mut(&id).unwrap();
             let runtime = bot.target.runtime.unwrap();
             if bot.health == 0 {
+                let config = self.bot_registry.config.as_ref().unwrap();
+                if config.regional_team.is_some()
+                    && self.spawn_catalog.as_ref().is_none_or(|catalog| {
+                        !regional_slot_source_active(catalog, &config.slots[bot.slot])
+                    })
+                {
+                    continue;
+                }
                 let team = usize::from(bot.target.squad.team());
                 // Once a dead life reaches its wave, retain that deadline
                 // through an occupied spawn and the team's clock rollover.
@@ -2524,7 +2582,18 @@ impl<W: Write> Engine<W> {
                 )
             })
             .collect();
-        let desired = self.bot_registry.total.saturating_sub(humans.len());
+        let config = self.bot_registry.config.as_ref().unwrap().clone();
+        let mut desired = self.bot_registry.total.saturating_sub(humans.len());
+        if let Some(team) = config.regional_team {
+            let team_humans = humans.iter().filter(|human| human.1 == team).count();
+            desired = desired
+                .min(
+                    self.match_profile()
+                        .team_capacity
+                        .saturating_sub(team_humans),
+                )
+                .min(config.slots.len());
+        }
         let human_ids: BTreeSet<_> = humans.iter().map(|h| h.0).collect();
         let collisions: Vec<_> = self
             .bot_registry
@@ -2560,29 +2629,31 @@ impl<W: Write> Engine<W> {
         }
         // A forced ID replacement may remove the other side's bot. Retire an
         // overfull-side bot, then refill the underfull side; never evict humans.
-        for team in 0..2 {
-            loop {
-                let count = humans.iter().filter(|h| h.1 == team).count()
-                    + self
+        if config.regional_team.is_none() {
+            for team in 0..2 {
+                loop {
+                    let count = humans.iter().filter(|h| h.1 == team).count()
+                        + self
+                            .bot_registry
+                            .bots
+                            .values()
+                            .filter(|b| b.target.squad.team() == team)
+                            .count();
+                    if count <= self.bot_registry.total.div_ceil(2) {
+                        break;
+                    }
+                    let Some(id) = self
                         .bot_registry
                         .bots
-                        .values()
-                        .filter(|b| b.target.squad.team() == team)
-                        .count();
-                if count <= self.bot_registry.total.div_ceil(2) {
-                    break;
+                        .iter()
+                        .rev()
+                        .find(|(_, b)| b.target.squad.team() == team)
+                        .map(|(&id, _)| id)
+                    else {
+                        break;
+                    };
+                    self.retire_bot_for_human(id, now, wall)?;
                 }
-                let Some(id) = self
-                    .bot_registry
-                    .bots
-                    .iter()
-                    .rev()
-                    .find(|(_, b)| b.target.squad.team() == team)
-                    .map(|(&id, _)| id)
-                else {
-                    break;
-                };
-                self.retire_bot_for_human(id, now, wall)?;
             }
         }
         // Human reservations own squad space before their initial snapshot is
@@ -2607,7 +2678,6 @@ impl<W: Write> Engine<W> {
                 self.retire_bot_for_human(id, now, wall)?;
             }
         }
-        let config = self.bot_registry.config.as_ref().unwrap().clone();
         while self.bot_registry.bots.len() < desired {
             let counts = |team| {
                 humans.iter().filter(|h| h.1 == team).count()
@@ -2618,12 +2688,15 @@ impl<W: Write> Engine<W> {
                         .filter(|b| b.target.squad.team() == team)
                         .count()
             };
-            let team = if counts(0) <= counts(1) { 0 } else { 1 };
+            let team = config
+                .regional_team
+                .unwrap_or_else(|| if counts(0) <= counts(1) { 0 } else { 1 });
             let used: BTreeSet<_> = self.bot_registry.bots.values().map(|b| b.slot).collect();
-            let mut squads: Vec<_> = self
+            let catalog = self
                 .spawn_catalog
                 .as_ref()
-                .ok_or("spawn_catalog_unavailable")?
+                .ok_or("spawn_catalog_unavailable")?;
+            let mut squads: Vec<_> = catalog
                 .map_pool()
                 .squads
                 .iter()
@@ -2647,6 +2720,8 @@ impl<W: Write> Engine<W> {
                         s.team == team
                             && s.squad.is_none_or(|bound| bound == squad)
                             && !used.contains(i)
+                            && (config.regional_team.is_none()
+                                || regional_slot_source_active(catalog, s))
                             && !actors
                                 .occupied(u16::MAX, point(s.position), bot_physics::Body::default())
                                 .unwrap_or(true)
@@ -2905,15 +2980,13 @@ pub(crate) mod identity_tests {
             "metadata":{"map_name":"synthetic_arena","build":"synthetic","coverage":"provisional","provenance":["Synthetic identity test floor"],"unknowns":["Not a game map"],
             "physics_regions":[{"min":[-10.,-5.,-10.],"max":[10.,8.,10.],"ground_verified":true,"obstacles_verified":true,"provenance":["Synthetic floor"]}]},
             "instances":[{"id":"floor","vertices_xyz":[[-10.,0.,-10.],[10.,0.,-10.],[10.,0.,10.],[-10.,0.,10.]],"triangles":[[0,2,1],[0,3,2]]}]});
-        let path = std::env::temp_dir().join(format!(
-            "mag-synthetic-identity-floor-{}-{prefix}.json",
-            std::process::id()
-        ));
-        std::fs::write(&path, serde_json::to_vec(&world).unwrap()).unwrap();
         engine = engine.with_collision_world(
-            collision::CollisionWorld::load(&path, collision::CollisionLimits::default()).unwrap(),
+            collision::CollisionWorld::from_bytes(
+                &serde_json::to_vec(&world).unwrap(),
+                collision::CollisionLimits::default(),
+            )
+            .unwrap(),
         );
-        std::fs::remove_file(path).unwrap();
         let config:BotPopulation=serde_json::from_value(json!({"format":"mag_bot_population_v1","map_name":"synthetic_arena","firearms":{"enabled":false},"slots":[
             {"team":0,"position":{"x":2.,"y":0.,"z":2.}}, {"team":1,"position":{"x":6.,"y":0.,"z":2.}}]})).unwrap();
         engine.with_bot_population(config, 2).unwrap()
@@ -3413,5 +3486,248 @@ impl BotRegistry {
             ),
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod regional_team_tests {
+    use super::*;
+
+    fn configured_slot() -> Value {
+        json!({
+            "format":"mag_bot_population_v1","map_name":"synthetic_arena","regional_team":0,
+            "firearms":{"enabled":false},
+            "regional_collision":{
+                "world_sha256":"a".repeat(64),"spawn_sha256":"b".repeat(64),
+                "ground_sha256":"c".repeat(64),"dynamic_catalog_sha256":"d".repeat(64),
+                "structural_clv_sha256":"e".repeat(64),"min":[0.,0.,0.],"max":[8.,8.,8.]
+            },
+            "slots":[{"team":0,"squad":0,"source_spawn":0,"position":{"x":2.,"y":1.,"z":2.}}]
+        })
+    }
+
+    #[test]
+    fn regional_team_population_accepts_one_explicit_source_slot() {
+        let config: BotPopulation = serde_json::from_value(configured_slot())
+            .expect("one team opts in alongside a concrete regional guard");
+        assert_eq!(config.validate(), Ok(()));
+    }
+    fn fixture() -> (Engine<Vec<u8>>, Value) {
+        let mut engine = crate::acquisition_structural::connected_tests::fixture();
+        let identity = identity_tests::engine("Regional Source");
+        engine.item_catalog = identity.item_catalog;
+        engine.bot_names = identity.bot_names;
+        let bounds = ([96., 0., 96.], [105., 9., 105.]);
+        let world = json!({
+            "format":"mag_collision_world","schema_version":1,"coordinate_space":"world",
+            "metadata":{"map_name":"synthetic_arena","build":"synthetic","coverage":"provisional",
+                "provenance":["Synthetic source allocation"],"unknowns":["Synthetic only"],
+                "physics_regions":[{"min":bounds.0,"max":bounds.1,"ground_verified":true,
+                    "obstacles_verified":true,"provenance":["Synthetic floor"]}]},
+            "instances":[{"id":"floor","vertices_xyz":[[96.,2.,96.],[105.,2.,96.],[105.,2.,105.],[96.,2.,105.]],
+                "triangles":[[0,2,1],[0,3,2]]}]
+        });
+        let collision = collision::CollisionWorld::from_bytes(
+            &serde_json::to_vec(&world).unwrap(),
+            Default::default(),
+        )
+        .unwrap();
+        let mut config = configured_slot();
+        let slot = &mut config["slots"][0];
+        slot["position"] = json!(
+            engine
+                .spawn_catalog
+                .as_ref()
+                .unwrap()
+                .point(0)
+                .unwrap()
+                .position
+        );
+        config["regional_collision"] = json!({
+            "world_sha256":collision.source_sha256(),
+            "spawn_sha256":engine.spawn_catalog.as_ref().unwrap().source_sha256().unwrap(),
+            "ground_sha256":engine.ground_vehicles.as_ref().unwrap().raw_sha256(),
+            "dynamic_catalog_sha256":engine.dynamic_body_resources.as_ref().unwrap().catalog.fingerprint(),
+            "structural_clv_sha256":"a".repeat(64),
+            "min":bounds.0,"max":bounds.1
+        });
+        engine.collision_world = Some(collision);
+        engine.active.as_mut().unwrap().owner_fields.state = Some(replication::CharacterState {
+            state: 1,
+            stance: 0,
+            user_data: [0; 3],
+        });
+        (engine, config)
+    }
+
+    fn reserve_human(engine: &mut Engine<Vec<u8>>, player: u16, faction: u8) {
+        let response = engine.handle(
+            Request::Reserve {
+                v: BRIDGE_VERSION,
+                request_id: format!("synthetic-reserve-{player}"),
+                reservation_id: format!("synthetic-regional-reservation-{player}"),
+                world_id: 1,
+                player_id: player,
+                account_id: u32::from(player) + 1,
+                session_key: "aaaaaaaaaaaaaaaa".into(),
+                access_key: "bbbbbbbbbbbbbbbb".into(),
+                character: serde_json::from_value(json!({
+                    "name":format!("Synthetic {player}"), "faction":faction,"head":0,"voice":0,
+                    "universe_id":26,"character_id":u32::from(player)+1
+                }))
+                .unwrap(),
+            },
+            Duration::ZERO,
+            1,
+        );
+        assert!(response.ok, "{:?}", response.error);
+    }
+
+    #[test]
+    fn regional_team_uses_source_slot_without_moving_human_and_refills_after_index_collision() {
+        let (engine, config) = fixture();
+        let mut engine = engine
+            .with_bot_population(serde_json::from_value(config).unwrap(), 2)
+            .unwrap();
+        let original = engine.active.as_ref().unwrap();
+        let (faction, squad) = (
+            original.reservation.character.faction,
+            original.squad_catalog.squad_index(),
+        );
+        let mut grid = engine.actor_grid(Duration::ZERO).unwrap();
+        engine
+            .reconcile_bot_population(Duration::ZERO, 1, &mut grid)
+            .unwrap();
+        assert_eq!(engine.bot_registry.bots.len(), 1);
+        let (&id, bot) = engine.bot_registry.bots.first_key_value().unwrap();
+        assert_eq!(bot.target.squad.squad_index(), 0);
+        let point = bot.target.runtime.unwrap().physical_position();
+        assert_eq!([point[0], point[2]], [100., 100.]);
+
+        let actor = engine.active.as_mut().unwrap();
+        actor.reservation.player = id;
+        // The normal admission reservation takes precedence over a live bot ID.
+        engine
+            .reconcile_bot_population(Duration::from_millis(500), 1, &mut Default::default())
+            .unwrap();
+        assert_eq!(engine.bot_registry.bots.len(), 1);
+        assert!(!engine.bot_registry.bots.contains_key(&id));
+        let actor = engine.active.as_ref().unwrap();
+        assert_eq!(actor.reservation.player, id);
+        assert_eq!(actor.reservation.character.faction, faction);
+        assert_eq!(actor.squad_catalog.squad_index(), squad);
+
+        let defending = engine.match_profile().defending_faction;
+        reserve_human(&mut engine, 1, defending);
+        engine
+            .reconcile_bot_population(Duration::from_secs(1), 1, &mut Default::default())
+            .unwrap();
+        assert!(
+            engine.bot_registry.bots.is_empty(),
+            "both human reservations take the two fill seats"
+        );
+    }
+
+    #[test]
+    fn regional_team_does_not_substitute_another_squad_when_its_bound_squad_is_full() {
+        let (mut engine, config) = fixture();
+        engine.bot_names = Default::default();
+        let capacity = engine.match_profile().squad_capacity;
+        let mut engine = engine
+            .with_bot_population(serde_json::from_value(config).unwrap(), capacity + 1)
+            .unwrap();
+        engine
+            .reconcile_bot_population(Duration::ZERO, 1, &mut Default::default())
+            .unwrap();
+        assert_eq!(engine.bot_registry.bots.len(), 1);
+        let attack = engine.match_profile().attacking_faction;
+        let crowded_squad = engine.spawn_catalog.as_ref().unwrap().for_squad(0).unwrap();
+        for player in 1..capacity as u16 {
+            reserve_human(&mut engine, player, attack);
+            // Start from a legitimate same-team populated reservation roster,
+            // independent of the separate admission owner's balancing policy.
+            let actor = engine
+                .active
+                .iter_mut()
+                .chain(engine.peers.values_mut())
+                .find(|actor| actor.reservation.player == player)
+                .unwrap();
+            actor.squad_catalog = std::sync::Arc::new(crowded_squad.clone());
+        }
+        assert_eq!(engine.squad_reservation_count(0), capacity);
+        engine
+            .reconcile_bot_population(Duration::from_millis(250), 1, &mut Default::default())
+            .unwrap();
+        assert_eq!(engine.squad_reservation_count(0), capacity);
+        assert!(
+            engine.bot_registry.bots.is_empty(),
+            "the full bound squad has priority over bot fill"
+        );
+    }
+
+    #[test]
+    fn regional_team_rejects_scope_and_source_mismatches() {
+        let (engine, config) = fixture();
+        let mut balanced = config.clone();
+        balanced.as_object_mut().unwrap().remove("regional_team");
+        assert_eq!(
+            engine
+                .with_bot_population(serde_json::from_value(balanced).unwrap(), 2)
+                .err(),
+            Some("bot_population_insufficient_slots")
+        );
+        for (field, value, error) in [
+            (
+                "regional_team",
+                json!(2),
+                "bot_population_regional_team_requires_collision_scope",
+            ),
+            (
+                "regional_collision",
+                Value::Null,
+                "bot_population_regional_team_requires_collision_scope",
+            ),
+            (
+                "slots",
+                json!([{"team":1,"squad":16,"source_spawn":8,"position":{"x":2.,"y":1.,"z":2.}}]),
+                "bot_population_regional_team_requires_source_slots",
+            ),
+            (
+                "slots",
+                json!([{"team":0,"position":{"x":2.,"y":1.,"z":2.}}]),
+                "bot_population_regional_team_requires_source_slots",
+            ),
+        ] {
+            let mut candidate = config.clone();
+            candidate[field] = value;
+            let parsed: BotPopulation = serde_json::from_value(candidate).unwrap();
+            assert_eq!(parsed.validate(), Err(error));
+        }
+        for (field, value, expected) in [
+            (
+                "source_spawn",
+                json!(8),
+                "bot_spawn_binding_not_authored_for_squad",
+            ),
+            (
+                "position",
+                json!({"x":101.,"y":3.,"z":100.}),
+                "bot_population_regional_spawn_source_mismatch",
+            ),
+            (
+                "goal",
+                json!({"x":106.,"y":3.,"z":100.}),
+                "bot_population_regional_goal_outside",
+            ),
+        ] {
+            let (engine, mut candidate) = fixture();
+            candidate["slots"][0][field] = value;
+            assert_eq!(
+                engine
+                    .with_bot_population(serde_json::from_value(candidate).unwrap(), 2)
+                    .err(),
+                Some(expected)
+            );
+        }
     }
 }

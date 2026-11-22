@@ -35,6 +35,27 @@ Useful evidence receipts: `bot_population_spawn` / `bot_respawn` (life starts),
 `reason`), `bot_drop_delay_sample` (per-passage phase timestamps) and
 `bot_planning_slice`.
 
+## Single-team regional bot allocation
+
+A direct Acquisition worker with an existing source-qualified
+`regional_collision` policy may also set `regional_team` to the native team
+index `0` or `1` in its bot population file. Every slot must name that team,
+its authored squad and an active insertion, alternate or on-foot spawn available
+to that squad. Use the exact authored position. The server settles the body
+inside the guarded region and checks that any fixed goal is also inside.
+
+`--bot-fill-total` still counts human reservations and bots together. For
+example, a fill total of two with one human reservation and one valid regional
+slot permits one bot. The bot limit also respects the selected team's physical
+capacity, existing squad capacity and the supplied regional slots. The
+allocator waits for unavailable slots and does not substitute the other team.
+Human reservations retain their ordinary admission, faction and priority.
+
+Omit `regional_team` to keep balanced population behavior. This option does
+not supply static movement coverage, create a navmesh or admit an offline
+reference artifact. Regional movement still requires its qualified world and,
+for route following, a matching bounded runtime navmesh.
+
 ## Related diagnostics
 
 - `cargo run --release --example exit_floor WORLD MESH SPAWNS.jsonl` prints the
