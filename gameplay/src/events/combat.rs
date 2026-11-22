@@ -51,7 +51,12 @@ pub(super) fn hit<W: Write>(
         return Ok(json!({"type":"bullet_hit","target_id":request.defender}));
     }
     if request.defender >> 24 == 2 && domination {
-        let result = if ctx.accepted_owner_route {
+        let accepted_route = if indexed_hospital {
+            ctx.accepted_client_route
+        } else {
+            ctx.accepted_owner_route
+        };
+        let result = if accepted_route {
             ctx.engine
                 .prepare_domination_helo_hit(ctx.active, &request, ctx.now)
         } else {
@@ -61,6 +66,7 @@ pub(super) fn hit<W: Write>(
             Ok(hit) => {
                 plan.helo_runtime = Some(hit.fleet);
                 plan.helo_damage_relay.extend(hit.packet);
+                plan.helo_damage_requires_creation = indexed_hospital;
                 hit.audit
             }
             Err(code) => {

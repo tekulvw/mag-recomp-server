@@ -79,9 +79,13 @@ occupied hospitals retain independent indices and authority.
 
 The source qualification covers retail field widths, authored primary and
 secondary definitions, the named gunner seat fallback and the hulk's last yaw.
-Primary hitscan supports characters and the scoped Domination Ground targets.
-Secondary rockets, heat simulation, Helo/Objective targets and native live-match
-presentation require their own qualification and acceptance. The independent
+Primary hitscan supports Characters, the scoped Domination Ground targets and
+operational Helos. A current Hospital gunner can hit a Helo with an authenticated
+TCP or UDP Hit, and the resulting damage update follows that recipient's Helo
+creation. The on-foot Helo Hit keeps its existing UDP route.
+Heat simulation, Objective targets and native live-match presentation require
+their own qualification and acceptance. See [Hospital secondary rockets](hospital-secondary-rockets.md)
+for the separate projectile path. The independent
 APC gunner route is described in [Domination APC gunners](domination-apc-gunners.md).
 The secondary definition remains present because native local weapon creation
 and replicated equipment definition are separate paths.
