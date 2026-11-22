@@ -1374,6 +1374,7 @@ pub struct Engine<W: Write> {
     bunker_world: Option<structures::BunkerWorld>,
     bunker_exit_policy: Option<vehicle_exit::BunkerExitPolicy>,
     pending_bunker_damage: std::collections::VecDeque<(u16, f32, String)>,
+    // Receipt-time cooldown retained for prototype structure repairs.
     next_repair: std::collections::BTreeMap<String, Duration>,
     item_catalog: std::sync::Arc<item_catalog::ItemCatalog>,
     skill_catalog: Option<skill_catalog::SkillCatalog>,

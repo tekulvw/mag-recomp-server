@@ -11,7 +11,6 @@ struct Candidate {
     packet: Option<Vec<u8>>,
     leadership: leadership_runtime::LeadershipPlan,
     credit: Option<repair_rewards::Plan>,
-    cooldown: Duration,
     health_before: f32,
     percent: f32,
     position: [f32; 3],
@@ -57,13 +56,6 @@ impl<W: Write> Engine<W> {
             .ok_or("helo_repair_tool_source_required")?;
         let tool = structures.repair_tool_profile();
         let (_, leadership) = self.plan_structural_repair_authority(Some(tool), now)?;
-        if self
-            .next_repair
-            .get(&actor.reservation.id)
-            .is_some_and(|&due| now < due)
-        {
-            return Err("repair_cooldown");
-        }
 
         let state = &world.state;
         let index = request.target_object_id as u16;
@@ -104,11 +96,6 @@ impl<W: Write> Engine<W> {
         }
         let amount = tool.amount.mul_add(modifier, tool.amount);
         let percent = (amount * 100.0_f32) / profile.max_health.max(1.0);
-        let interval = Duration::try_from_secs_f32(tool.cooldown_seconds)
-            .map_err(|_| "invalid_vehicle_repair_cooldown")?;
-        let cooldown = now
-            .checked_add(interval)
-            .ok_or("repair_cooldown_overflow")?;
 
         let mut damage = carrier.damage;
         let changed = damage.heal_percent(profile, structures.damage_catalog().rules(), percent)?;
@@ -129,7 +116,6 @@ impl<W: Write> Engine<W> {
             packet,
             leadership,
             credit,
-            cooldown,
             health_before,
             percent,
             position,
@@ -161,7 +147,6 @@ impl<W: Write> Engine<W> {
         audit["percent"] = json!(candidate.percent);
         audit["position"] = json!(candidate.position);
         audit["leadership_changes"] = json!(candidate.leadership.audit());
-        audit["cooldown_deadline_ms"] = json!(candidate.cooldown.as_millis());
         audit["credit"] = candidate
             .credit
             .as_ref()
@@ -178,8 +163,6 @@ impl<W: Write> Engine<W> {
             .as_mut()
             .unwrap();
         fleet.carriers[usize::from(candidate.index)].damage = candidate.damage;
-        self.next_repair
-            .insert(event.reservation_id.clone(), candidate.cooldown);
         self.commit_leadership(candidate.leadership);
         self.active.as_mut().unwrap().last_event = now;
         let messages = candidate

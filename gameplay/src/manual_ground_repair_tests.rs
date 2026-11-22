@@ -72,7 +72,7 @@ fn hp(e: &Engine<Vec<u8>>) -> u16 {
 }
 
 #[test]
-fn manual_escort_repair_restores_hp_and_publishes_work_once() {
+fn manual_escort_applies_each_delivered_native_repair_and_credits_work() {
     let mut e = fixture();
     let before = e.ground_runtime.as_ref().unwrap().get(4).unwrap().clone();
     let messages = repair(&mut e, TARGET, 4000, Transport::Tcp).unwrap();
@@ -94,11 +94,10 @@ fn manual_escort_repair_restores_hp_and_publishes_work_once() {
         progression::RewardKind::RepairUnits
     );
     assert_eq!(e.active.as_ref().unwrap().pending_shared.len(), 1);
-    repair(&mut e, TARGET, 4001, Transport::Tcp).unwrap();
-    assert_eq!(hp(&e), 508);
-    assert_eq!(e.pending_reward_batch().len(), 1);
-    repair(&mut e, TARGET, 5250, Transport::Tcp).unwrap();
+    let next_messages = repair(&mut e, TARGET, 4001, Transport::Tcp).unwrap();
     assert_eq!(hp(&e), 576);
+    assert_eq!(next_messages.len(), 1);
+    assert_eq!(next_messages[0].payload_hex, "02040000012302");
     assert_eq!(e.pending_reward_batch().len(), 2);
 }
 
@@ -330,7 +329,7 @@ fn current_repaired_vehicle_pose_supplies_frago_context_and_missing_xp_opt_in_ke
 }
 
 #[test]
-fn recorder_failure_leaves_hp_credit_cooldown_and_queue_unchanged_then_retry_is_once() {
+fn recorder_failure_leaves_hp_credit_and_queue_unchanged_then_retry_is_once() {
     let mut e = fixture();
     let before = e.ground_runtime.clone();
     let max = e.max_log;
@@ -355,7 +354,7 @@ fn recorder_failure_leaves_hp_credit_cooldown_and_queue_unchanged_then_retry_is_
 }
 
 #[test]
-fn full_reward_outbox_prevents_hp_or_cooldown_commit() {
+fn full_reward_outbox_prevents_hp_or_credit_commit() {
     let mut e = fixture();
     let before = e.ground_runtime.clone();
     let recipient = progression::RewardRecipient::from_active(e.active.as_ref().unwrap()).unwrap();
@@ -647,21 +646,8 @@ fn acquisition_apc_native_repair_does_not_require_crew_and_preserves_current_bod
         Some(&1)
     );
     assert_eq!(e.pending_reward_batch()[0].units, 1);
-    assert_eq!(
-        e.next_repair[&e.active.as_ref().unwrap().reservation.id],
-        Duration::from_millis(4500)
-    );
-    repair(&mut e, 0x0100_0000, 4499, Transport::Tcp).unwrap();
-    assert_eq!(
-        e.ground_runtime
-            .as_ref()
-            .unwrap()
-            .get(0)
-            .unwrap()
-            .health_quarter_points,
-        452
-    );
-    repair(&mut e, 0x0100_0000, 4500, Transport::Tcp).unwrap();
+    // Distinct native uses may reach the worker less than 500 ms apart.
+    let next_messages = repair(&mut e, 0x0100_0000, 4499, Transport::Tcp).unwrap();
     assert_eq!(
         e.ground_runtime
             .as_ref()
@@ -671,6 +657,14 @@ fn acquisition_apc_native_repair_does_not_require_crew_and_preserves_current_bod
             .health_quarter_points,
         464
     );
+    assert_eq!(next_messages.len(), 1);
+    assert_eq!(
+        e.active.as_ref().unwrap().reward_statistics.get(&35),
+        Some(&2)
+    );
+    let rewards = e.pending_reward_batch();
+    assert_eq!(rewards.len(), 2);
+    assert_ne!(rewards[0].reward_id, rewards[1].reward_id);
 }
 
 #[test]
@@ -787,7 +781,6 @@ fn acquisition_apc_repair_record_and_reward_refusal_are_atomic_then_retry_once()
         e.failed = false;
         e.pending_rewards.clear();
         e.reward_order.clear();
-        repair(&mut e, 0x0100_0000, 4000, Transport::Tcp).unwrap();
         repair(&mut e, 0x0100_0000, 4000, Transport::Tcp).unwrap();
         assert_eq!(
             e.ground_runtime

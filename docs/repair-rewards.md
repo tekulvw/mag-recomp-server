@@ -23,9 +23,11 @@ current actual team, healing succeeds but work/stat35/XP credit is suppressed.
 An unresolved or opposing-team attacker does not suppress credit; saved faction
 alone does not determine that relationship. A missing repaired-object position
 omits that FRAGO position without suppressing base credit. The existing current
-actor position may still qualify. Equipped-tool, life, owner and cooldown guards
-remain on the existing manual route. One effective leadership snapshot supplies
-both the repair amount and raw work modifier.
+actor position may still qualify. Equipped-tool, life and owner guards qualify
+the manual route. One effective leadership snapshot supplies both the repair
+amount and raw work modifier. A positive Hospital repair time uses the
+modifier-adjusted authored tool interval to calculate the HP delivered by one
+request.
 
 ## Negotiation and settlement
 
@@ -72,9 +74,13 @@ policy. Server restart does not persist the in-memory match work counter.
 
 Leadership AutoRepair passes no credited callback and remains rewardless.
 Manual repair also covers [movable Ground vehicles](manual-ground-repair.md)
-and current operational Domination Helos. Both use authenticated retail TCP
-repair requests with the equipped tool and shared manual cooldown. Helo repair
-requires a published non-dormant carrier on the actor's actual team, the
+and current operational Domination Helos. Ground, Helo and indexed Hospital
+apply each qualified retail TCP repair request with the equipped tool. The
+retail client owns the interval between uses, and each packet carries a target.
+Bridge receipt timing can compress that interval. Prototype structure repair
+retains its server cooldown.
+
+Helo repair requires a published non-dormant carrier on the actor's actual team, the
 source-bound hull profile, and positive health below its maximum. It stages the
 existing field 18 update for recipients with Helo creation and uses the
 carrier's current pose for FRAGO. In native retail, Helo uses the flat repair

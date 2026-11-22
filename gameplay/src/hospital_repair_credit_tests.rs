@@ -246,10 +246,10 @@ fn failed_record_preserves_health_carry_and_publications_then_retry_credits_once
     assert_eq!(repair_stat(&engine), 1);
     assert_eq!(engine.pending_reward_batch()[0].units, 1);
     assert_eq!(engine.active.as_ref().unwrap().pending_shared.len(), 1);
-    assert!(repair(&mut engine, 1).unwrap().is_empty());
-    assert_eq!(engine.pending_reward_batch().len(), 1);
-
-    assert_eq!(repair(&mut engine, 2).unwrap().len(), 1);
+    // Two distinct deliveries can share the server's processing timestamp.
+    assert_eq!(repair(&mut engine, 1).unwrap().len(), 1);
+    assert_eq!(hospital(&engine).health.hp(), 160.375);
+    assert_eq!(engine.active.as_ref().unwrap().pending_shared.len(), 2);
     let rewards = engine.pending_reward_batch();
     assert_eq!(rewards.len(), 2);
     assert_eq!(rewards[1].units, 2);

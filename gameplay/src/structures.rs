@@ -1484,12 +1484,15 @@ impl<W: Write> Engine<W> {
                 {
                     return Err("retail_hospital_not_operational");
                 }
-                if now
-                    < self
-                        .next_repair
-                        .get(&active.reservation.id)
-                        .copied()
-                        .unwrap_or_default()
+                // The retail tool keeps its cadence on the client. Bridge
+                // processing times do not measure the spacing of those uses.
+                if !retail_hospital_repair
+                    && now
+                        < self
+                            .next_repair
+                            .get(&active.reservation.id)
+                            .copied()
+                            .unwrap_or_default()
                 {
                     return Err("repair_cooldown");
                 }
@@ -1678,7 +1681,7 @@ impl<W: Write> Engine<W> {
                     .unwrap()
                     .bunkers
                     .insert(index, next);
-                if repair {
+                if repair && !retail_hospital_repair {
                     self.next_repair.insert(
                         id.clone(),
                         now + Duration::from_secs_f32(
