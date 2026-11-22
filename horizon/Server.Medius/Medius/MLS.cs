@@ -34,6 +34,17 @@ namespace Server.Medius
 
         }
 
+        static void RouteRetailQueueCancellation(IMagGameplayLobby lobby, MagMlsSession session,
+            RT.Models.MAG.MagRetailCancelJoinRequest cancel)
+        {
+            if (cancel.PartyId != 0)
+            {
+                _logger.Warn($"MAG retail cancel ignored: reason=party_cancel_unsupported transaction={cancel.TransactionId} partyId={cancel.PartyId}");
+                return;
+            }
+            lobby.CancelQueuedJoin(session);
+        }
+
         public ClientObject ReserveClient(MediusSessionBeginRequest request)
         {
             var client = new ClientObject();
@@ -231,8 +242,8 @@ namespace Server.Medius
                         {
                             if (gameplay is RT.Models.MAG.MagServerStatusRequest status)
                             { Queue(RT.Models.MAG.MagMessageCodec.ToPluginMessageForApplication(Program.GameplayLobby.Status(status.TransactionId), data.ApplicationId), clientChannel); break; }
-                            if (gameplay is RT.Models.MAG.MagRetailCancelJoinRequest)
-                            { Program.GameplayLobby.CancelQueuedJoin(data.MagMlsSession); break; }
+                            if (gameplay is RT.Models.MAG.MagRetailCancelJoinRequest cancel)
+                            { RouteRetailQueueCancellation(Program.GameplayLobby, data.MagMlsSession, cancel); break; }
                             if (gameplay is RT.Models.MAG.MagJoinGameRequest queuedJoin && Program.GameplayLobby.UsesFactionMatchmaking)
                             {
                                 var queuedSession=data.MagMlsSession;var queuedCharacter=queuedSession.CharacterId;var queuedApplication=data.ApplicationId;
