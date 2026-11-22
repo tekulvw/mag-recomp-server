@@ -194,6 +194,7 @@ pub mod objective_catalog;
 pub mod objective_control;
 pub mod objective_range;
 pub mod owner_update;
+pub mod party_reservation;
 pub mod player_tracking;
 pub mod progression;
 mod progression_refresh;
@@ -414,6 +415,25 @@ pub enum Request {
         access_key: String,
         character: Character,
     },
+    ReserveParty {
+        v: u8,
+        request_id: String,
+        formation_id: String,
+        profile_id: String,
+        cohort_id: String,
+        world_id: u32,
+        admission_epoch: u64,
+        members: Vec<party_reservation::Member>,
+    },
+    ReleaseParty {
+        v: u8,
+        request_id: String,
+        formation_id: String,
+        profile_id: String,
+        cohort_id: String,
+        world_id: u32,
+        admission_epoch: u64,
+    },
     Event {
         v: u8,
         request_id: String,
@@ -560,6 +580,8 @@ impl Request {
             | Self::ConfigureMatch { v, request_id, .. }
             | Self::SelectMatchProfile { v, request_id, .. }
             | Self::Reserve { v, request_id, .. }
+            | Self::ReserveParty { v, request_id, .. }
+            | Self::ReleaseParty { v, request_id, .. }
             | Self::Event { v, request_id, .. }
             | Self::RefreshProgression { v, request_id, .. }
             | Self::ProgressionCommitted { v, request_id, .. }
@@ -608,6 +630,8 @@ pub struct Response {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_match: Option<match_profiles::SelectedMatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub party_reservation: Option<party_reservation::Reply>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_identity: Option<worker_identity::WorkerIdentity>,
 }
 impl Response {
@@ -624,6 +648,7 @@ impl Response {
             match_terminal: None,
             match_profiles: Vec::new(),
             selected_match: None,
+            party_reservation: None,
             worker_identity: None,
         }
     }
@@ -659,6 +684,68 @@ pub fn parse_request(line: &[u8]) -> Result<Request, ParseError> {
         request_id: recover_request_id(line),
         code,
     })
+}
+
+fn validate_reservation_fields(
+    reservation_id: &str,
+    account_id: u32,
+    session_key: &str,
+    access_key: &str,
+    character: &Character,
+) -> Result<(), &'static str> {
+    if !identifier(reservation_id, 16) {
+        return Err("invalid_reservation_id");
+    }
+    if account_id == 0 {
+        return Err("invalid_account_id");
+    }
+    if !credential(session_key) || !credential(access_key) {
+        return Err("invalid_credentials");
+    }
+    if character.name.is_empty()
+        || character.name.len() > 32
+        || !character
+            .name
+            .bytes()
+            .all(|b| b.is_ascii_graphic() || b == b' ')
+    {
+        return Err("invalid_character_name");
+    }
+    if character.account_id.is_some() != character.progression.is_some() {
+        return Err("incomplete_progression_identity");
+    }
+    if let Some(account) = &character.account_id
+        && (account.is_empty()
+            || account.len() > 32
+            || !account
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            || character.character_id.is_none_or(|id| id == 0))
+    {
+        return Err("invalid_progression_identity");
+    }
+    if let Some(account) = &character.loadout_account_id {
+        if account.is_empty()
+            || account.len() > 32
+            || !account
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            || character.character_id.is_none_or(|id| id == 0)
+        {
+            return Err("invalid_loadout_persistence_identity");
+        }
+        if character
+            .account_id
+            .as_ref()
+            .is_some_and(|xp| xp != account)
+        {
+            return Err("loadout_account_identity_mismatch");
+        }
+    }
+    if let Some(state) = character.progression {
+        state.validate()?
+    }
+    Ok(())
 }
 
 fn recover_request_id(line: &[u8]) -> String {
@@ -730,58 +817,48 @@ impl Request {
                 character,
                 ..
             } => {
-                if !identifier(reservation_id, 16) {
-                    return Err("invalid_reservation_id");
+                validate_reservation_fields(
+                    reservation_id,
+                    *account_id,
+                    session_key,
+                    access_key,
+                    character,
+                )?;
+            }
+            Request::ReserveParty {
+                formation_id,
+                profile_id,
+                cohort_id,
+                admission_epoch,
+                members,
+                ..
+            } => {
+                party_reservation::validate_scope(
+                    formation_id,
+                    profile_id,
+                    cohort_id,
+                    *admission_epoch,
+                )?;
+                if members.is_empty() || members.len() > MAX_MATCH_PLAYERS {
+                    return Err("invalid_party_member_count");
                 }
-                if *account_id == 0 {
-                    return Err("invalid_account_id");
+                for member in members {
+                    member.validate()?;
                 }
-                if !credential(session_key) || !credential(access_key) {
-                    return Err("invalid_credentials");
-                }
-                if character.name.is_empty()
-                    || character.name.len() > 32
-                    || !character
-                        .name
-                        .bytes()
-                        .all(|b| b.is_ascii_graphic() || b == b' ')
-                {
-                    return Err("invalid_character_name");
-                }
-                if character.account_id.is_some() != character.progression.is_some() {
-                    return Err("incomplete_progression_identity");
-                }
-                if let Some(account) = &character.account_id
-                    && (account.is_empty()
-                        || account.len() > 32
-                        || !account
-                            .bytes()
-                            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-                        || character.character_id.is_none_or(|id| id == 0))
-                {
-                    return Err("invalid_progression_identity");
-                }
-                if let Some(account) = &character.loadout_account_id {
-                    if account.is_empty()
-                        || account.len() > 32
-                        || !account
-                            .bytes()
-                            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-                        || character.character_id.is_none_or(|id| id == 0)
-                    {
-                        return Err("invalid_loadout_persistence_identity");
-                    }
-                    if character
-                        .account_id
-                        .as_ref()
-                        .is_some_and(|xp| xp != account)
-                    {
-                        return Err("loadout_account_identity_mismatch");
-                    }
-                }
-                if let Some(state) = character.progression {
-                    state.validate()?
-                }
+            }
+            Request::ReleaseParty {
+                formation_id,
+                profile_id,
+                cohort_id,
+                admission_epoch,
+                ..
+            } => {
+                party_reservation::validate_scope(
+                    formation_id,
+                    profile_id,
+                    cohort_id,
+                    *admission_epoch,
+                )?;
             }
             Request::Event {
                 reservation_id,
@@ -1221,6 +1298,7 @@ pub struct Engine<W: Write> {
     writer: W,
     match_profiles: Option<match_profiles::Registry>,
     selected_match: Option<match_profiles::SelectedMatch>,
+    party_reservations: party_reservation::State,
     retired_formations: std::collections::BTreeSet<String>,
     retired_loadout_selections:
         std::collections::BTreeMap<String, loadout_selection::CommittedLoadoutSelection>,
@@ -1667,6 +1745,15 @@ impl<W: Write> Engine<W> {
                 code,
             );
         }
+        if let Some(result) = self.handle_party_request(&request, now, wall_secs) {
+            return match result {
+                Ok(reply) => Response {
+                    party_reservation: Some(reply),
+                    ..Response::success(request_id)
+                },
+                Err(code) => Response::error(request_id, code),
+            };
+        }
         // Public validation above guarantees bounded, valid hex. Own the bytes
         // here so every wrapper and planner can borrow one complete decode.
         let bytes = match &request {
@@ -1763,7 +1850,12 @@ impl<W: Write> Engine<W> {
             .as_ref()
             .map_or_else(Vec::new, |registry| {
                 capabilities.push(match_profiles::CAPABILITY.into());
-                registry.summaries()
+                if self.party_reservations.enabled() {
+                    capabilities.push(party_reservation::CAPABILITY.into());
+                    registry.party_summaries()
+                } else {
+                    registry.summaries()
+                }
             });
         Response {
             capabilities,
@@ -1855,6 +1947,9 @@ impl<W: Write> Engine<W> {
             }
         }
         match request {
+            Request::ReserveParty { .. } | Request::ReleaseParty { .. } => {
+                Err("party_reservation_requires_bridge_handler")
+            }
             Request::SelectMatchProfile {
                 formation_id,
                 profile_id,

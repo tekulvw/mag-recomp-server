@@ -127,7 +127,7 @@ the preloaded setup, while a repeated identical selection preserves it.
 ## Bridge contract
 
 A successful `hello` advertises capability `match_profiles_v1` and a
-`match_profiles` array. Rows contain exactly:
+`match_profiles` array. Standard rows contain:
 
 ```json
 {
@@ -171,6 +171,34 @@ The coordinator then configures the selected match's human minimum/capacity with
 `configure_match`, including at least one human per selected faction, and admits
 the cohort. Late joins use the existing selected formation and its two sides.
 The worker never changes a saved character's faction.
+
+## Group reservation opt-in
+
+A retail profile worker started with `--party-reservations` advertises
+`party_reservation_v1`. Its eligible profile rows add `squad_capacity` and
+`squad_counts`, the two authored squad counts in attacker/defender order.
+The coordinator still checks the team's human limit and the whole roster's
+fit in one actual squad. The selected-match acknowledgment includes the
+prospective `admission_epoch`. Use the value returned by the worker on both
+group requests. An identical selection retry preserves the epoch.
+
+The v2 `reserve_party` request carries `formation_id`, `profile_id`,
+`admission_epoch`, `world_id`, `cohort_id` and ordered `members`. Each member
+has the same reservation ID, player ID, account ID, session key, access key
+and character fields as an individual `reserve`. The worker validates the
+entire cohort before recording once and installing any members. Success
+returns `party_reservation` with the same binding fields, `status: "reserved"`,
+the selected `team` and `squad`, and the original ordered `reservation_ids`.
+An exact retry can use a new correlation request ID.
+
+Complete each formation's group reservations before making any members
+claimable or sending their descriptors. A new group cannot enter after any
+current member claims. An exact `release_party` for the same binding rolls back
+an entirely unclaimed cohort. It may also fence a never-admitted exact cohort
+with an empty ID list. Success has `status: "released"` and the ordered IDs
+when applicable. It omits team and squad. The worker retains this
+acknowledgment through empty-world cleanup until the next selection commits.
+Use ordinary release for individual departures after publication.
 
 ## Selection lifetime and durability
 

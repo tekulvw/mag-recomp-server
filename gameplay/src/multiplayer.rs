@@ -498,6 +498,8 @@ impl<W: Write> Engine<W> {
         let id = match &request {
             Request::Hello { .. }
             | Request::SelectMatchProfile { .. }
+            | Request::ReserveParty { .. }
+            | Request::ReleaseParty { .. }
             | Request::ConfigureMatch { .. }
             | Request::ProgressionCommitted { .. }
             | Request::RefreshProgression { .. }
