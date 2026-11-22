@@ -64,12 +64,114 @@ impl PartialOrd for ObstacleId<'_> {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct SphereSweep {
     pub start: Point,
     pub end: Point,
     pub radius: f64,
     /// The current physical Character key corresponding to the launch association.
     pub associated_character: Option<TargetKey>,
+}
+
+/// Sweeps an oriented capsule while translating its reference origin.
+/// The local spine endpoints share one fixed orientation throughout the query.
+#[derive(Clone, Copy)]
+pub struct CapsuleSweep {
+    pub start: Point,
+    pub end: Point,
+    /// The two capsule core endpoints in the launch shape's local frame.
+    pub spine: [Point; 2],
+    pub radius: f64,
+    /// Fixed row-major rigid basis, as in [Pose].
+    pub rotation: [[f64; 3]; 3],
+    pub associated_character: Option<TargetKey>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Sweep {
+    Sphere(SphereSweep),
+    Capsule(CapsuleSweep),
+}
+
+impl From<SphereSweep> for Sweep {
+    fn from(sweep: SphereSweep) -> Self {
+        Self::Sphere(sweep)
+    }
+}
+impl From<CapsuleSweep> for Sweep {
+    fn from(sweep: CapsuleSweep) -> Self {
+        Self::Capsule(sweep)
+    }
+}
+
+struct SweepGeometry {
+    shape: Geometry,
+    start: Pose,
+    end: Point,
+    associated_character: Option<TargetKey>,
+}
+
+impl Sweep {
+    fn geometry(self) -> Result<SweepGeometry, &'static str> {
+        let (start, end, shape, associated_character) = match self {
+            Self::Sphere(query) => (
+                Pose::at(query.start),
+                query.end,
+                Geometry::Sphere {
+                    radius: query.radius,
+                },
+                query.associated_character,
+            ),
+            Self::Capsule(query) => (
+                Pose {
+                    translation: query.start,
+                    rotation: query.rotation,
+                },
+                query.end,
+                Geometry::Capsule {
+                    a: query.spine[0],
+                    b: query.spine[1],
+                    radius: query.radius,
+                },
+                query.associated_character,
+            ),
+        };
+        if start.translation == end
+            || start.validate().is_err()
+            || Pose::at(end).validate().is_err()
+            || shape.validate().is_err()
+            || associated_character.is_some_and(invalid_target_key)
+        {
+            return Err("projectile_contact_invalid_segment");
+        }
+        Ok(SweepGeometry {
+            shape,
+            start,
+            end,
+            associated_character,
+        })
+    }
+
+    pub(crate) fn discovery_envelope(self, epsilon: f64) -> Result<SphereSweep, &'static str> {
+        match self {
+            Self::Sphere(query) => Ok(query),
+            Self::Capsule(query) => {
+                let geometry = self.geometry()?;
+                // Both transformed endpoints bound every spine point, even
+                // when the local spine is offset from the reference origin.
+                let extent = query
+                    .spine
+                    .map(|point| geometry::rotate(geometry.start, point))
+                    .map(|point| geometry::dot(point, point).sqrt());
+                Ok(SphereSweep {
+                    start: query.start,
+                    end: query.end,
+                    radius: extent[0].max(extent[1]) + query.radius + epsilon,
+                    associated_character: query.associated_character,
+                })
+            }
+        }
+    }
 }
 
 pub struct TriangleObstacle<'a> {
@@ -90,9 +192,9 @@ pub struct ConvexObstacle<'a> {
 pub struct Contact<'a> {
     pub obstacle: ObstacleId<'a>,
     pub fraction: f64,
-    /// Position of the sphere centre on the swept segment.
+    /// Position of the projectile reference origin on the swept segment.
     pub center: Point,
-    /// Obstacle-to-sphere normal, absent when the convex cores already intersect.
+    /// Obstacle-to-projectile normal, absent when the convex cores already intersect.
     pub normal: Option<Point>,
 }
 
@@ -102,6 +204,30 @@ pub struct Contact<'a> {
 /// fraction tie picks the lowest obstacle ID in static, sequence, dynamic order.
 pub fn sweep_sphere<'a>(
     query: SphereSweep,
+    coverage: Coverage,
+    triangles: &[TriangleObstacle<'a>],
+    convex: &[ConvexObstacle<'a>],
+    limits: QueryLimits,
+    budget: &mut usize,
+) -> Result<Option<Contact<'a>>, &'static str> {
+    sweep(query.into(), coverage, triangles, convex, limits, budget)
+}
+
+/// Compare an oriented capsule against the same qualified scene and limits as
+/// [sweep_sphere]. Only the reference origin translates during the sweep.
+pub fn sweep_capsule<'a>(
+    query: CapsuleSweep,
+    coverage: Coverage,
+    triangles: &[TriangleObstacle<'a>],
+    convex: &[ConvexObstacle<'a>],
+    limits: QueryLimits,
+    budget: &mut usize,
+) -> Result<Option<Contact<'a>>, &'static str> {
+    sweep(query.into(), coverage, triangles, convex, limits, budget)
+}
+
+pub(crate) fn sweep<'a>(
+    query: Sweep,
     coverage: Coverage,
     triangles: &[TriangleObstacle<'a>],
     convex: &[ConvexObstacle<'a>],
@@ -121,22 +247,16 @@ pub fn sweep_sphere<'a>(
     {
         return Err("projectile_contact_invalid_limits");
     }
-    let start = Pose::at(query.start);
-    let sphere = Geometry::Sphere {
-        radius: query.radius,
-    };
-    if query.start == query.end
-        || start.validate().is_err()
-        || Pose::at(query.end).validate().is_err()
-        || sphere.validate().is_err()
-        || query.associated_character.is_some_and(invalid_target_key)
-    {
-        return Err("projectile_contact_invalid_segment");
-    }
+    let SweepGeometry {
+        shape,
+        start,
+        end,
+        associated_character,
+    } = query.geometry()?;
     let mut collector = Collector {
         start,
-        end: query.end,
-        sphere,
+        end,
+        projectile: shape,
         limits,
         budget,
         seen: BTreeSet::new(),
@@ -163,7 +283,7 @@ pub fn sweep_sphere<'a>(
             return Err("projectile_contact_invalid_root");
         }
         let ignore = obstacle.target.kind == TargetKind::Character
-            && query.associated_character == Some(obstacle.target.key);
+            && associated_character == Some(obstacle.target.key);
         collector.consider(
             ObstacleId::Dynamic {
                 key: obstacle.target.key,
@@ -208,7 +328,7 @@ fn validate_triangle(obstacle: &TriangleObstacle<'_>) -> Result<(), &'static str
 struct Collector<'a, 'b> {
     start: Pose,
     end: Point,
-    sphere: Geometry,
+    projectile: Geometry,
     limits: QueryLimits,
     budget: &'b mut usize,
     seen: BTreeSet<ObstacleId<'a>>,
@@ -270,7 +390,7 @@ impl<'a> Collector<'a, '_> {
         pose: Pose,
     ) -> Result<Option<(f64, Option<Point>)>, &'static str> {
         let epsilon = self.limits.boundary_epsilon;
-        let radius = self.sphere.radius() + shape.radius();
+        let radius = self.projectile.radius() + shape.radius();
         let contact_distance = radius + epsilon;
         // Keep the accepted contact tolerance fixed. Split its error budget so
         // a conservative step lands inside it even if the next core-distance
@@ -285,8 +405,11 @@ impl<'a> Collector<'a, '_> {
         for _ in 0..self.limits.max_iterations {
             let position = geometry::add(self.start.translation, delta.map(|axis| axis * fraction));
             let distance = geometry::distance(
-                &self.sphere,
-                Pose::at(position),
+                &self.projectile,
+                Pose {
+                    translation: position,
+                    ..self.start
+                },
                 shape,
                 pose,
                 distance_limits,
@@ -379,6 +502,93 @@ mod tests {
 
     fn close(actual: f64, expected: f64) {
         assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
+    }
+
+    fn capsule() -> CapsuleSweep {
+        CapsuleSweep {
+            start: [0.; 3],
+            end: [10., 0., 0.],
+            spine: [[0., 0., -1.], [0., 0., 1.]],
+            radius: 0.1,
+            rotation: [[0., 0., 1.], [0., 1., 0.], [-1., 0., 0.]],
+            associated_character: None,
+        }
+    }
+
+    fn cast_capsule<'a>(
+        query: CapsuleSweep,
+        triangles: &[TriangleObstacle<'a>],
+        convex: &[ConvexObstacle<'a>],
+    ) -> Result<Option<Contact<'a>>, &'static str> {
+        let limits = QueryLimits::default();
+        let mut budget = limits.max_support_points;
+        sweep_capsule(
+            query,
+            Coverage::CompleteCurrent,
+            triangles,
+            convex,
+            limits,
+            &mut budget,
+        )
+    }
+
+    #[test]
+    fn projectile_capsule_uses_rotated_forward_extension_against_a_thin_triangle() {
+        let triangles = [face("plane")];
+        let plane_x = triangles[0].vertices[0][0];
+        let hit = cast_capsule(capsule(), &triangles, &[]).unwrap().unwrap();
+        close(hit.center[0], plane_x - 1.1);
+        assert_eq!(hit.normal, Some([-1., 0., 0.]));
+        let mut sideways = capsule();
+        sideways.rotation = Pose::at([0.; 3]).rotation;
+        let hit = cast_capsule(sideways, &triangles, &[]).unwrap().unwrap();
+        close(hit.center[0], plane_x - 0.1);
+    }
+
+    #[test]
+    fn projectile_capsule_zero_spine_matches_the_existing_sphere_contact() {
+        let triangles = [face("plane")];
+        let convex = [body("victim", [2., 0., 0.], TargetKind::Character)];
+        let sphere = query();
+        for associated_character in [None, Some(CHARACTER)] {
+            let capsule = CapsuleSweep {
+                start: sphere.start,
+                end: sphere.end,
+                radius: sphere.radius,
+                spine: [[0.; 3]; 2],
+                associated_character,
+                ..capsule()
+            };
+            assert_eq!(
+                cast_capsule(capsule, &triangles, &convex).unwrap(),
+                cast(
+                    SphereSweep {
+                        associated_character,
+                        ..sphere
+                    },
+                    Coverage::CompleteCurrent,
+                    &triangles,
+                    &convex,
+                )
+                .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn projectile_capsule_rejects_invalid_rotation_and_endpoints() {
+        let mut reflected = capsule();
+        reflected.rotation[2][0] *= -1.;
+        assert_eq!(
+            cast_capsule(reflected, &[], &[]),
+            Err("projectile_contact_invalid_segment")
+        );
+        let mut nonfinite = capsule();
+        nonfinite.spine[1][2] = f64::NAN;
+        assert_eq!(
+            cast_capsule(nonfinite, &[], &[]),
+            Err("projectile_contact_invalid_segment")
+        );
     }
 
     #[test]
