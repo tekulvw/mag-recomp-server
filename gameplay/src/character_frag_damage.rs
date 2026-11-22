@@ -1,6 +1,7 @@
 //! Record-bound ordinary retail frag damage from the owner event's accepted pose.
 use crate::{
-    Active, CharacterLife, Engine, PendingDamage, acquisition_character_effects, armor,
+    Active, CharacterLife, Engine, PendingDamage, PendingDamageSource,
+    acquisition_character_effects, armor,
     blast_visibility::MAX_BLAST_TARGETS,
     damage,
     domination_structural_world::{CharacterBlastShape, OnFootBlastPose},
@@ -87,7 +88,7 @@ impl<W: Write> Engine<W> {
                         && (0x0380_0000 | u32::from(actor.reservation.player))
                             == target.character_id
                 });
-                let (reservation, armor) = if let Some(actor) = actor {
+                let (reservation, bot_allocation_generation, armor) = if let Some(actor) = actor {
                     if !actor.ready_for_updates
                         || !actor.entered_game
                         || actor.initial_objects.is_none()
@@ -102,14 +103,22 @@ impl<W: Write> Engine<W> {
                     } else {
                         armor
                     };
-                    (Some(actor.reservation.id.clone()), armor)
+                    (Some(actor.reservation.id.clone()), None, armor)
                 } else {
-                    let kit = self
-                        .registry_bot_loadout(target.character_id as u16)
+                    let bot = self
+                        .bot_registry
+                        .bots
+                        .get(&(target.character_id as u16))
+                        .filter(|bot| {
+                            bot.target.runtime.is_some_and(|runtime| {
+                                runtime.generation == target.generation && bot.health > 0
+                            })
+                        })
                         .ok_or("missing_target_loadout")?;
                     (
                         None,
-                        armor::ArmorProfile::from_retail_loadout(kit, catalog)?,
+                        Some(bot.allocation_generation),
+                        armor::ArmorProfile::from_retail_loadout(&bot.target.loadout, catalog)?,
                     )
                 };
                 let raw = armor::native_character_blast_damage(
@@ -145,7 +154,11 @@ impl<W: Write> Engine<W> {
                         source_object_id,
                         user_data,
                     },
-                    falling: false,
+                    source: PendingDamageSource::OrdinaryRetailFrag {
+                        world,
+                        round: self.round_number,
+                        bot_allocation_generation,
+                    },
                 });
                 plan.audit.push(json!({
                     "slot": terminal.slot, "generation": terminal.generation,
@@ -527,6 +540,18 @@ mod tests {
         assert_eq!(queued.damage.user_data, 128 << 20); // Positive X, exponent 7.
         assert_eq!(queued.damage.source_object_id, 0x1380_0000);
         assert_eq!(queued.damage.location, 3);
+        assert_eq!(
+            queued.target_reservation_id.as_deref(),
+            Some("synthetic-rocket-target")
+        );
+        assert_eq!(
+            queued.source,
+            PendingDamageSource::OrdinaryRetailFrag {
+                world: actor.reservation.world,
+                round: engine.round_number,
+                bot_allocation_generation: None,
+            },
+        );
         assert!(queued.damage.kinetic_response);
 
         let drain = update(&engine, 1101, false, false);
@@ -664,7 +689,7 @@ mod tests {
                 source_object_id: 0x1280_0000,
                 user_data: 0,
             },
-            falling: false,
+            source: PendingDamageSource::Other,
         };
         queue.resize(4 * MAX_BLAST_TARGETS, existing);
         let terminal = update(&engine, 1100, false, true);

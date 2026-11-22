@@ -400,7 +400,7 @@ fn dispatch_pending_damage(engine: &mut Engine<Vec<u8>>, amount_hp: f32, now_ms:
             source_object_id: 0x0680_0001,
             user_data: now_ms as u32,
         },
-        falling: false,
+        source: PendingDamageSource::Other,
     });
     let header = replication::UpdateHeader {
         sequence: source.latest_owner_sequence + 1,
