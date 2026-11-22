@@ -306,7 +306,7 @@ fn domination_repair_respects_actual_target_team_and_friendly_damage_credit_poli
 }
 
 #[test]
-fn domination_ground_repair_record_failure_preserves_hp_cooldown_and_publications() {
+fn domination_ground_repair_record_failure_preserves_hp_and_publications() {
     let mut engine = fixture(1, 0);
     damage(&mut engine, APC, u32::MAX);
     let ground_before = engine.ground_runtime.clone();
@@ -332,15 +332,10 @@ fn domination_ground_repair_record_failure_preserves_hp_cooldown_and_publication
             .len(),
         1
     );
-    assert!(
-        repair(&mut engine, APC, 3249, Transport::Tcp)
-            .unwrap_or_default()
-            .is_empty()
-    );
     assert_eq!(vehicle(&engine, APC).health_quarter_points, 508);
     assert_eq!(engine.pending_reward_batch().len(), 1);
     assert_eq!(
-        repair(&mut engine, APC, 3250, Transport::Tcp)
+        repair(&mut engine, APC, 3249, Transport::Tcp)
             .unwrap()
             .len(),
         1

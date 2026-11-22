@@ -20,8 +20,12 @@ uses actual team and damaged HP. The native server target virtual itself is
 constant true; no server-side center-distance, mount-point radius or replacement
 raycast is invented. The client supplies its selected target.
 
-One recorded transaction stages HP, effective leadership, the shared manual-tool
-cooldown, optional repair work/stat35/XP receipt and field18 health publication.
+One recorded transaction stages HP, effective leadership, optional repair
+work/stat35/XP receipt and field18 health publication. The original client
+enforces the authored repair tool interval before sending a target-only
+request. The ordinary retail vehicle receiver handles each qualified request
+independently. Ground admits each qualified request even when processing two
+reliable TCP deliveries closer together than the client interval.
 The recorded candidate retains generation, source spawn/type, kit/modifier and
 prior attacker provenance. Recorder or outbox failure leaves those states
 unchanged. A positive float HP change can count even when its quarter-HP network
@@ -44,8 +48,9 @@ fences, modifier work and atomic retry, all three Domination APC faction binding
 Motor Pool repair, current target-only
 FRAGO, sender/plugin/route/state/tool guards, actual team independent of faction,
 float/sub-quarter repair, effective modifier and work carry, full-outbox and
-recorder rollback, cooldown and once-only retry. Exact retail evidence remains
-private and reproducible; original files and populated catalogs stay external.
+recorder rollback, closely spaced deliveries and repair credit. Exact retail
+evidence remains private and reproducible. Original files and populated
+catalogs stay external.
 
 The native exceptional client 11-second and server post-stuck 12-second timestamp
 paths are separate from ordinary tool cooldown and are outside this consumer.

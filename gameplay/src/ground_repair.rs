@@ -5,7 +5,6 @@ struct Candidate {
     ground: acquisition_ground_runtime::Runtime,
     packet: Option<Vec<u8>>,
     leadership: leadership_runtime::LeadershipPlan,
-    cooldown: Duration,
     modifier: f32,
     position: [f32; 3],
     last_attacker: u32,
@@ -58,15 +57,6 @@ impl<W: Write> Engine<W> {
             })
             .ok_or("ground_repair_tool_source_required")?;
         let (_, leadership) = self.plan_structural_repair_authority(Some(tool), now)?;
-        if now
-            < self
-                .next_repair
-                .get(&actor.reservation.id)
-                .copied()
-                .unwrap_or_default()
-        {
-            return Err("repair_cooldown");
-        }
         let index = request.target_object_id as u16;
         let catalog = self
             .ground_vehicles
@@ -114,11 +104,6 @@ impl<W: Write> Engine<W> {
         if !percent.is_finite() {
             return Err("invalid_vehicle_repair_amount");
         }
-        let interval = Duration::try_from_secs_f32(tool.cooldown_seconds)
-            .map_err(|_| "invalid_vehicle_repair_cooldown")?;
-        let cooldown = now
-            .checked_add(interval)
-            .ok_or("repair_cooldown_overflow")?;
         let mut ground = before.clone();
         let effects = ground.heal_percent(vehicle.key, percent)?;
         let after_hp = ground.get(index).expect("owned Ground clone").health_hp();
@@ -136,7 +121,6 @@ impl<W: Write> Engine<W> {
             ground,
             packet,
             leadership,
-            cooldown,
             modifier,
             position: frago::point(vehicle.pose.position),
             last_attacker: vehicle.last_attacker,
@@ -189,7 +173,6 @@ impl<W: Write> Engine<W> {
         audit["source"] = candidate.source;
         audit["health_increased"] = json!(increased);
         audit["leadership_changes"] = json!(candidate.leadership.audit());
-        audit["cooldown_deadline_ms"] = json!(candidate.cooldown.as_millis());
         audit["credit"] = credit
             .as_ref()
             .map_or(Value::Null, repair_rewards::Plan::audit);
@@ -197,8 +180,6 @@ impl<W: Write> Engine<W> {
         self.record(audit, wall)?;
         // All candidate validation and serialization precede the durable record.
         self.ground_runtime = Some(candidate.ground);
-        self.next_repair
-            .insert(event.reservation_id.clone(), candidate.cooldown);
         self.commit_leadership(candidate.leadership);
         self.active
             .as_mut()

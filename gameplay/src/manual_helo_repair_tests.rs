@@ -82,7 +82,7 @@ fn damage_helo(engine: &mut Engine<Vec<u8>>, hp: f32, attacker: u32) {
 }
 
 #[test]
-fn operational_helo_repair_uses_native_event_and_records_health_and_credit_once() {
+fn operational_helo_applies_each_delivered_native_repair_and_credits_work() {
     let mut engine = helo_repair_fixture(0);
     damage_helo(&mut engine, 80., u32::MAX);
     let mut expected_wire = repair_hull(&engine).wire;
@@ -114,13 +114,15 @@ fn operational_helo_repair_uses_native_event_and_records_health_and_credit_once(
     assert_eq!(rewards.len(), 1);
     assert_eq!(rewards[0].frago, Some(true));
 
-    assert!(
-        repair(&mut engine, HELO, 3249, Transport::Tcp)
-            .unwrap()
-            .is_empty()
-    );
-    assert_eq!(repair_hull(&engine).wire.health_quarter_points, 388);
-    assert_eq!(engine.pending_reward_batch().len(), 1);
+    // A second native request can arrive in the same bridge scheduling slice.
+    let next_messages = repair(&mut engine, HELO, 2000, Transport::Tcp).unwrap();
+    assert_eq!(repair_hull(&engine).wire.health_quarter_points, 400);
+    assert_eq!(next_messages.len(), 1);
+    assert_eq!(next_messages[0].payload_hex, "02040000012302");
+    assert_eq!(engine.active.as_ref().unwrap().pending_shared.len(), 2);
+    let rewards = engine.pending_reward_batch();
+    assert_eq!(rewards.len(), 2);
+    assert_ne!(rewards[0].reward_id, rewards[1].reward_id);
 }
 
 #[test]
@@ -158,7 +160,7 @@ fn operational_helo_repair_preserves_float_work_and_suppresses_friendly_attacker
 }
 
 #[test]
-fn operational_helo_repair_rejected_record_preserves_damage_cooldown_and_queues() {
+fn operational_helo_repair_rejected_record_preserves_damage_and_queues() {
     let mut engine = helo_repair_fixture(0);
     damage_helo(&mut engine, 80., u32::MAX);
     let before = helo_wire_update(&engine);
