@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    Direction, Transport,
+    CharacterLife, Direction, Transport,
     acquisition_gameplay_engine::{StructuralInput, objective_actors},
     events::EventInput,
     protocol::{ObjectiveInteraction, ObjectiveInteractionKind, encode_hex},
@@ -294,4 +294,359 @@ fn startup_is_staged_before_later_native_script_requests() {
         }
     }
     assert_eq!(state(&engine), ObjectiveState::Completed);
+}
+
+fn registered_structural_operator() -> (Engine<Vec<u8>>, u16) {
+    let mut engine = connected_tests::fixture();
+    start_arm(&mut engine);
+    register_structural_operator(engine)
+}
+
+fn register_structural_operator(mut engine: Engine<Vec<u8>>) -> (Engine<Vec<u8>>, u16) {
+    engine.maximum_players = engine.admission_capacity();
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let identities =
+        crate::bot_registry::identity_tests::engine(&format!("Structural Operator {id}"));
+    engine.item_catalog = identities.item_catalog;
+    engine.bot_names = identities.bot_names;
+    let human = engine.active.as_mut().unwrap();
+    human.tracking.server_position(
+        CharacterPosition {
+            x: 5.,
+            y: 3.,
+            z: 5.,
+        },
+        crate::player_tracking::PositionOrigin::ServerSpawn,
+        111,
+    );
+    assert_eq!(human.team(), 0);
+    let scene = json!({
+        "format":"mag_collision_world","schema_version":1,"coordinate_space":"world",
+        "metadata":{"map_name":"synthetic_arena","build":"synthetic","coverage":"provisional",
+            "provenance":["synthetic"],"unknowns":[],
+            "physics_regions":[{"min":[-2.,-2.,-2.],"max":[32.,12.,32.],
+                "ground_verified":true,"obstacles_verified":true,"provenance":["invented floor"]}]},
+        "instances":[{"id":"floor","vertices_xyz":[[0.,3.,0.],[30.,3.,0.],[30.,3.,30.],[0.,3.,30.]],
+            "triangles":[[0,2,1],[0,3,2]]}]
+    });
+    engine.collision_world = Some(
+        crate::collision::CollisionWorld::from_bytes(
+            &serde_json::to_vec(&scene).unwrap(),
+            Default::default(),
+        )
+        .unwrap(),
+    );
+    let population = serde_json::from_value(json!({
+        "format":"mag_bot_population_v1","map_name":"synthetic_arena","firearms":{"enabled":false},
+        "slots":[{"team":0,"position":{"x":10.,"y":3.5,"z":20.}},
+            {"team":1,"position":{"x":20.,"y":3.5,"z":10.}}]
+    }))
+    .unwrap();
+    let mut engine = engine.with_bot_population(population, 2).unwrap();
+    engine.tick_bots(clock(112), 1).unwrap();
+    let (&id, bot) = engine.bot_registry.bots.iter().next().unwrap();
+    assert_eq!(bot.target.squad.team(), 1);
+    let terrain =
+        crate::bot_physics::WorldTerrain::new(engine.collision_world.as_ref(), engine.map_name())
+            .unwrap();
+    let motion = terrain
+        .advance(
+            bot.target.runtime.unwrap().physics_motion.unwrap(),
+            [0.; 3],
+            1.,
+            Default::default(),
+        )
+        .unwrap();
+    assert!(motion.grounded && !motion.blocked);
+    let bot = engine.bot_registry.bots.get_mut(&id).unwrap();
+    let runtime = bot.target.runtime.as_mut().unwrap();
+    runtime.physics_motion = Some(motion);
+    bot.task.operator = true;
+    bot.task.objective = Some(INDEX);
+    // This fixture isolates source action admission after normal operator selection.
+    bot.task.set_life_for_test(runtime.generation);
+    let config = engine.bot_registry.config.as_mut().unwrap();
+    config.autonomous = true;
+    config
+        .objective_policy
+        .as_mut()
+        .unwrap()
+        .interactions_enabled = true;
+    (engine, id)
+}
+
+#[test]
+fn registered_bot_defuses_at_the_human_charge_trigger() {
+    let (mut engine, bot) = registered_structural_operator();
+    assert_eq!(state(&engine), ObjectiveState::Activated);
+    let rewards_before = engine.pending_reward_batch();
+    tick(&mut engine, 113).unwrap();
+    assert_eq!(state(&engine), ObjectiveState::Deactivating);
+    let owner = engine
+        .objective_world
+        .as_ref()
+        .unwrap()
+        .interaction_owner(INDEX)
+        .unwrap();
+    assert_eq!(owner.0, bot);
+    assert_eq!(owner.2, 1);
+    tick(&mut engine, 121).unwrap();
+    assert_eq!(state(&engine), ObjectiveState::Deactivated);
+    tick(&mut engine, 130).unwrap();
+    assert_eq!(state(&engine), ObjectiveState::Deactivated);
+    assert_eq!(engine.pending_reward_batch(), rewards_before);
+}
+
+#[test]
+fn registered_bot_source_structural_start_is_record_first() {
+    let (mut engine, bot) = registered_structural_operator();
+    let before = engine.active.as_ref().unwrap().pending_shared.clone();
+    let prior_goal = CharacterPosition {
+        x: 21.,
+        y: 3.,
+        z: 10.,
+    };
+    let target = engine.bot_registry.bots.get_mut(&bot).unwrap();
+    target.task.goal = Some(prior_goal);
+    target.target.runtime.as_mut().unwrap().phase = crate::development_target::BotPhase::Moving;
+    engine.max_log = engine.written;
+    assert_eq!(tick(&mut engine, 113).unwrap_err(), "log_limit_reached");
+    assert_eq!(state(&engine), ObjectiveState::Activated);
+    assert!(
+        engine
+            .objective_world
+            .as_ref()
+            .unwrap()
+            .interaction_owner(INDEX)
+            .is_none()
+    );
+    assert_eq!(engine.active.as_ref().unwrap().pending_shared, before);
+    let bot = &engine.bot_registry.bots[&bot];
+    assert_eq!(bot.task.goal, Some(prior_goal));
+    assert!(matches!(
+        bot.target.runtime.unwrap().phase,
+        crate::development_target::BotPhase::Moving
+    ));
+}
+
+#[test]
+fn retasked_registered_bot_releases_source_structural_hold() {
+    let (mut engine, bot) = registered_structural_operator();
+    tick(&mut engine, 113).unwrap();
+    assert_eq!(state(&engine), ObjectiveState::Deactivating);
+    engine
+        .bot_registry
+        .bots
+        .get_mut(&bot)
+        .unwrap()
+        .task
+        .operator = false;
+    tick(&mut engine, 114).unwrap();
+    assert_eq!(state(&engine), ObjectiveState::Activated);
+    let record = last_record(&engine);
+    assert_eq!(record["op"], "acquisition_objective_tick");
+    assert!(record["objective_snapshot"].is_string());
+    assert!(record["effects"].as_array().unwrap().iter().any(|effect| {
+        effect["op"] == "acquisition_structural_entry"
+            && effect["object"] == INDEX
+            && effect["state"] == ObjectiveState::Activated as u8
+    }));
+    assert!(
+        engine
+            .objective_world
+            .as_ref()
+            .unwrap()
+            .interaction_owner(INDEX)
+            .is_none()
+    );
+    tick(&mut engine, 130).unwrap();
+    assert_eq!(state(&engine), ObjectiveState::Completed);
+}
+
+#[test]
+fn registered_bot_defuse_does_not_survive_slot_reallocation() {
+    let (mut engine, bot) = registered_structural_operator();
+    tick(&mut engine, 113).unwrap();
+    assert_eq!(state(&engine), ObjectiveState::Deactivating);
+    // Simulate slot reuse with an identical life counter and feet.
+    engine
+        .bot_registry
+        .bots
+        .get_mut(&bot)
+        .unwrap()
+        .allocation_generation += 1;
+    tick(&mut engine, 121).unwrap();
+    assert_eq!(state(&engine), ObjectiveState::Activated);
+    assert!(
+        engine
+            .objective_world
+            .as_ref()
+            .unwrap()
+            .interaction_owner(INDEX)
+            .is_none()
+    );
+}
+
+#[test]
+fn defender_bot_cannot_defuse_from_the_other_authored_box() {
+    let (mut engine, bot) = registered_structural_operator();
+    let runtime = engine
+        .bot_registry
+        .bots
+        .get_mut(&bot)
+        .unwrap()
+        .target
+        .runtime
+        .as_mut()
+        .unwrap();
+    runtime.position.x = 10.;
+    runtime.physics_motion.as_mut().unwrap().position[0] = 10.;
+    tick(&mut engine, 113).unwrap();
+    assert_eq!(state(&engine), ObjectiveState::Activated);
+    assert!(
+        engine
+            .objective_world
+            .as_ref()
+            .unwrap()
+            .interaction_owner(INDEX)
+            .is_none()
+    );
+}
+
+#[test]
+fn replacement_human_must_start_its_own_source_defuse() {
+    let (mut engine, slot) = registered_structural_operator();
+    tick(&mut engine, 113).unwrap();
+    assert_eq!(state(&engine), ObjectiveState::Deactivating);
+    let original_life = engine.bot_registry.bots[&slot]
+        .target
+        .runtime
+        .unwrap()
+        .generation;
+    engine.retire_bot_for_human(slot, clock(114), 1).unwrap();
+    connected_tests::defender_at(&mut engine, slot, clock(114));
+    let defender = std::sync::Arc::new(
+        engine
+            .spawn_catalog
+            .as_ref()
+            .unwrap()
+            .for_squad(16)
+            .unwrap(),
+    );
+    let actor = engine.active.as_mut().unwrap();
+    assert_eq!(actor.reservation.player, slot);
+    crate::spawn_progression::tests::ready(actor);
+    actor.squad_catalog = defender;
+    actor.life = CharacterLife::Alive {
+        generation: original_life,
+        health_quarter_points: 400,
+    };
+    actor.tracking.server_position(
+        CharacterPosition {
+            x: 20.,
+            y: 3.,
+            z: 10.,
+        },
+        crate::player_tracking::PositionOrigin::ServerSpawn,
+        114,
+    );
+    assert_eq!(actor.team(), 1);
+    actor.reservation.character.account_id = Some("synthetic-replacement-account".into());
+    connected_tests::bind_repair_counter_squad(&mut engine, INDEX);
+    let attempt =
+        connected_tests::interact(&mut engine, ObjectiveInteractionKind::Deactivate, 1, 114)
+            .unwrap();
+    assert!(attempt.iter().any(|m| {
+        ObjectiveInteraction::decode(&crate::protocol::decode_hex(&m.payload_hex))
+            .is_ok_and(|packet| packet.kind == ObjectiveInteractionKind::Nak)
+    }));
+    let rewards_before = engine.pending_reward_batch();
+    let cancelled = tick(&mut engine, 115).unwrap();
+    assert!(!cancelled.iter().any(|m| {
+        ObjectiveInteraction::decode(&crate::protocol::decode_hex(&m.payload_hex))
+            .is_ok_and(|packet| packet.kind == ObjectiveInteractionKind::ActivatingOnExit)
+    }));
+    assert_eq!(state(&engine), ObjectiveState::Activated);
+    assert_eq!(engine.pending_reward_batch(), rewards_before);
+    let fresh =
+        connected_tests::interact(&mut engine, ObjectiveInteractionKind::Deactivate, 1, 116)
+            .unwrap();
+    assert!(fresh.iter().any(|m| {
+        ObjectiveInteraction::decode(&crate::protocol::decode_hex(&m.payload_hex))
+            .is_ok_and(|packet| packet.kind == ObjectiveInteractionKind::Ack)
+    }));
+    assert_eq!(state(&engine), ObjectiveState::Deactivating);
+    tick(&mut engine, 123).unwrap();
+    assert_eq!(state(&engine), ObjectiveState::Deactivating);
+    tick(&mut engine, 124).unwrap();
+    assert_eq!(state(&engine), ObjectiveState::Deactivated);
+    let awards = engine.pending_reward_batch();
+    assert_eq!(awards.len(), rewards_before.len() + 1);
+    assert!(awards.iter().any(|award| {
+        award.player_id == slot && award.kind == crate::progression::RewardKind::ChargeDefused
+    }));
+}
+
+#[test]
+fn source_structural_defuse_cancels_when_bound_bot_stops_qualifying() {
+    for condition in ["life", "health", "airborne", "disabled", "round", "world"] {
+        let (mut engine, bot) = registered_structural_operator();
+        tick(&mut engine, 113).unwrap();
+        assert_eq!(state(&engine), ObjectiveState::Deactivating, "{condition}");
+        let bot = engine.bot_registry.bots.get_mut(&bot).unwrap();
+        let runtime = bot.target.runtime.as_mut().unwrap();
+        match condition {
+            "life" => runtime.generation += 1,
+            "health" => bot.health = 0,
+            "airborne" => runtime.physics_motion.as_mut().unwrap().grounded = false,
+            "disabled" => {
+                engine.bot_registry.config.as_mut().unwrap().autonomous = false;
+            }
+            "round" => engine.round_number += 1,
+            "world" => engine.active.as_mut().unwrap().reservation.world += 1,
+            _ => unreachable!(),
+        }
+        tick(&mut engine, 121).unwrap();
+        assert_eq!(state(&engine), ObjectiveState::Activated, "{condition}");
+    }
+}
+
+#[test]
+fn source_structural_defuse_cannot_delay_the_human_fuse() {
+    let (mut engine, _) = registered_structural_operator();
+    tick(&mut engine, 130).unwrap();
+    assert_eq!(state(&engine), ObjectiveState::Completed);
+    let record = last_record(&engine);
+    let effects = record["effects"].as_array().unwrap();
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| effect["op"] == "acquisition_bot_defuse_started")
+    );
+}
+
+#[test]
+fn source_structural_bot_defuse_leaves_damage_activated_fuse_unchanged() {
+    let mut engine = connected_tests::fixture();
+    engine
+        .objective_world
+        .as_mut()
+        .unwrap()
+        .activate_destroyed_trigger(
+            INDEX,
+            1,
+            crate::structure_damage::Source {
+                player: 0,
+                generation: 1,
+            },
+            clock(100),
+            0.,
+        )
+        .unwrap();
+    tick(&mut engine, 110).unwrap();
+    assert_eq!(state(&engine), ObjectiveState::Activated);
+    let (mut engine, _) = register_structural_operator(engine);
+    tick(&mut engine, 113).unwrap();
+    assert_eq!(state(&engine), ObjectiveState::Activated);
 }

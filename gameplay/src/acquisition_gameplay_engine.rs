@@ -430,8 +430,16 @@ impl<W: Write> Engine<W> {
         let mut repair_credit = None;
         let (op, reply, reason) = match input {
             StructuralInput::Interaction(request, actor, modifier) => {
-                let outcome =
-                    world.interact_with_demolition_modifier(request, actor, now, modifier);
+                let outcome = if structural.bot_owns_defuse(&world, index, actor.player) {
+                    crate::objective_control::InteractionOutcome {
+                        accepted: false,
+                        reason: "acquisition_bot_defuse_owned",
+                        changed: None,
+                        reply_trigger_index: u8::MAX,
+                    }
+                } else {
+                    world.interact_with_demolition_modifier(request, actor, now, modifier)
+                };
                 if outcome.accepted {
                     if let Some(active) = &self.active {
                         world.attribute_operation(index, active);
@@ -624,9 +632,13 @@ impl<W: Write> Engine<W> {
             .objectives
             .iter()
             .filter_map(|d| {
-                world
-                    .interaction_owner(d.object_index)
-                    .map(|owner| (d.object_index, (d.state_actor.state, owner)))
+                let owner = world.interaction_owner(d.object_index)?;
+                if runtime.structural.as_ref().is_some_and(|structural| {
+                    structural.bot_owns_defuse(&world, d.object_index, owner.0)
+                }) {
+                    return None;
+                }
+                Some((d.object_index, (d.state_actor.state, owner)))
             })
             .collect();
         let mut changed: BTreeMap<u16, ObjectiveControlDelta> = BTreeMap::new();

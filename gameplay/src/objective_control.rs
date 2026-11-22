@@ -62,6 +62,7 @@ impl InteractionOutcome {
 #[derive(Clone)]
 struct Operation {
     started_at: Duration,
+    contact_arming: bool,
     recipient: Option<RewardRecipient>,
     capture_actor: Option<CaptureActorIdentity>,
     player: u16,
@@ -738,6 +739,7 @@ impl ObjectiveWorld {
         object.fuse = None;
         object.operation = Some(Operation {
             started_at: now,
+            contact_arming: false,
             recipient: None,
             capture_actor: None,
             player: actor.player,
@@ -887,6 +889,7 @@ impl ObjectiveWorld {
         }
         object.fuse = Some(Operation {
             started_at: now,
+            contact_arming: false,
             recipient: None,
             capture_actor: None,
             player: u16::MAX,
@@ -897,6 +900,25 @@ impl ObjectiveWorld {
         armed_state(object, now);
         self.pristine = false;
         Ok(object.state)
+    }
+
+    pub(crate) fn native_structural_live_contact_fuse_trigger(
+        &self,
+        index: u16,
+        now: Duration,
+    ) -> Option<u8> {
+        let object = self.objects.get(&index)?;
+        let mode = object.native.as_ref()?;
+        let fuse = object.fuse.as_ref()?;
+        (mode.class == NativeClass::Structural
+            && mode.pending.is_none()
+            && matches!(
+                object.state.state_actor.state,
+                ObjectiveState::Activated | ObjectiveState::Deactivating
+            )
+            && fuse.contact_arming
+            && now < fuse.deadline)
+            .then_some(fuse.trigger_index)
     }
 
     pub fn interaction_owner(&self, object_index: u16) -> Option<(u16, u32, u8)> {
@@ -1036,6 +1058,7 @@ impl ObjectiveWorld {
                 let deadline = now.saturating_add(Duration::from_millis(duration.into()));
                 object.operation = Some(Operation {
                     started_at: now,
+                    contact_arming: false,
                     recipient: None,
                     capture_actor: None,
                     player: actor.player,
@@ -1638,6 +1661,7 @@ fn enter_secure(
     ) {
         Some(Operation {
             started_at: now,
+            contact_arming: false,
             recipient: None,
             capture_actor: None,
             player: entry.actor.player,
@@ -2031,6 +2055,7 @@ fn interact_demolition(
     let deadline = now.saturating_add(Duration::from_millis(duration.into()));
     object.operation = Some(Operation {
         started_at: now,
+        contact_arming: request.kind == Activate,
         recipient: None,
         capture_actor: None,
         player: actor.player,

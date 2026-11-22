@@ -241,7 +241,7 @@ fn event(
     );
     engine.handle_event(input, &decoded, Duration::from_millis(now), 1)
 }
-fn interact(
+pub(super) fn interact(
     engine: &mut crate::Engine<Vec<u8>>,
     kind: Kind,
     trigger: u8,
@@ -271,6 +271,10 @@ fn tick(engine: &mut crate::Engine<Vec<u8>>, now: u64) {
 }
 
 fn defender(engine: &mut crate::Engine<Vec<u8>>) {
+    defender_at(engine, 1, Duration::ZERO);
+}
+
+pub(super) fn defender_at(engine: &mut crate::Engine<Vec<u8>>, slot: u16, now: Duration) {
     // Admission needs a real synthetic primary weapon. The repair fixture
     // deliberately uses the same item slot for an equipped active tool.
     let tools = Arc::clone(&engine.item_catalog);
@@ -285,20 +289,20 @@ fn defender(engine: &mut crate::Engine<Vec<u8>>) {
     let response = engine.handle(
         crate::Request::Reserve {
             v: crate::BRIDGE_VERSION,
-            request_id: "synthetic-structural-defender".into(),
-            reservation_id: "synthetic-reservation-0001".into(),
+            request_id: format!("synthetic-structural-defender-{slot}"),
+            reservation_id: format!("synthetic-reservation-{slot:04}"),
             world_id: 1,
-            player_id: 1,
-            account_id: 2,
+            player_id: slot,
+            account_id: u32::from(slot) + 1,
             session_key: "aaaaaaaaaaaaaaaa".into(),
             access_key: "bbbbbbbbbbbbbbbb".into(),
             character: serde_json::from_value(
                 json!({"name":"Synthetic Defender","faction":faction,
-            "head":0,"voice":0,"universe_id":26,"character_id":2,"loadouts":saved}),
+            "head":0,"voice":0,"universe_id":26,"character_id":u32::from(slot) + 1,"loadouts":saved}),
             )
             .unwrap(),
         },
-        Duration::ZERO,
+        now,
         1,
     );
     engine.item_catalog = tools;

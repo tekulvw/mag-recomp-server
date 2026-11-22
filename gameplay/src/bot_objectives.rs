@@ -338,6 +338,14 @@ pub(super) struct Task {
     candidate_attempts: usize,
 }
 impl Task {
+    pub(crate) fn is_operator_for(&self, index: u16, generation: u32) -> bool {
+        self.operator && self.objective == Some(index) && self.generation == generation
+    }
+    #[cfg(test)]
+    pub(crate) fn set_life_for_test(&mut self, generation: u32) {
+        self.generation = generation;
+    }
+
     /// Keep the tactical destination, but never reuse the pre-supply corridor.
     pub(super) fn resume_after_supply(&mut self, now: Duration) {
         self.finish_segment(now);
@@ -415,7 +423,7 @@ pub(super) fn operator_action(
             .then_some((Activate, r.range()))
     }
 }
-fn operator_safe(bot: &crate::bot_registry::WorldBot) -> bool {
+pub(crate) fn operator_safe(bot: &crate::bot_registry::WorldBot) -> bool {
     let r = bot.target.runtime.unwrap();
     bot.health > 0
         && !bot.has_supply_action()
