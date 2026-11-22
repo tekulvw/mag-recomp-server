@@ -1131,3 +1131,92 @@ fn native_assault_rifle_hit_keeps_host_ammo_with_forward_grip() {
 fn native_assault_rifle_hit_rejects_unqualified_forward_grips() {
     assert_unqualified_assault_attachments_denied("kAttachTypeForwardGrip", 17, 16);
 }
+
+fn equip_synthetic_sidearm(engine: &mut Engine<Vec<u8>>) {
+    let actor = engine.active.as_mut().unwrap();
+    let inventory = &mut actor.spawned_loadout.as_mut().unwrap().inventories[0];
+    inventory.slots[1] = inventory.slots[0];
+    actor.primary_equipped = false;
+    actor.observed_secondary = Some(replication::InventoryItem {
+        gear_slot: 1,
+        ..actor.observed_primary.unwrap()
+    });
+}
+
+fn secondary_hit(engine: &mut Engine<Vec<u8>>) -> Result<Vec<OutboundMessage>, &'static str> {
+    let mut wire = native_hit(0x0380_0000, 55);
+    wire[2] = 1;
+    dispatch(engine, &wire, 1000)
+}
+
+#[test]
+fn native_sidearm_hit_with_compatible_suppressor_uses_host_ammo() {
+    for slot in [None, Some(20)] {
+        let mut engine = primary_attachment_hit_fixture(
+            slot,
+            PrimaryAttachment::Compatible,
+            "kWepCategorySideArm",
+            "kAttachTypeSuppressor",
+        );
+        equip_synthetic_sidearm(&mut engine);
+        secondary_hit(&mut engine).unwrap();
+        assert_eq!(
+            victim(&engine).life.damage_health(),
+            Some((4, 240)),
+            "{slot:?}"
+        );
+        assert_eq!(victim(&engine).last_damage.last_location_and_type, 0x13);
+    }
+}
+
+#[test]
+fn native_sidearm_hit_keeps_unqualified_attachments_denied() {
+    use PrimaryAttachment::*;
+    for (gear, slot, category, attachment, mounted) in [
+        (0, 16, "kWepCategorySideArm", Compatible, false),
+        (1, 20, "kWepCategoryAssaultRifle", Compatible, false),
+        (1, 19, "kWepCategorySideArm", Compatible, false),
+        (1, 20, "kWepCategorySideArm", Compatible, true),
+        (1, 20, "kWepCategorySideArm", Incompatible, false),
+        (1, 20, "kWepCategorySideArm", Replacement, false),
+        (1, 20, "kWepCategorySideArm", MissingReplacement, false),
+        (1, 20, "kWepCategorySideArm", WrongType, false),
+        (1, 20, "kWepCategorySideArm", Unbound, false),
+        (1, 20, "kWepCategorySideArm", MismatchedSource, false),
+    ] {
+        let mut engine = primary_attachment_hit_fixture(
+            Some(slot),
+            attachment,
+            category,
+            "kAttachTypeSuppressor",
+        );
+        if mounted {
+            let seat = domination_helo::PassengerSeat {
+                object_index: 0,
+                seat: 0,
+            };
+            let active = engine.active.as_mut().unwrap();
+            active.helo_seat = Some(seat);
+            active.owner_fields.state = Some(seat.character_state());
+        }
+        if gear == 1 {
+            equip_synthetic_sidearm(&mut engine);
+            secondary_hit(&mut engine).unwrap();
+        } else {
+            hit(&mut engine, 55, 1000).unwrap();
+        }
+        assert_eq!(
+            victim(&engine).life.damage_health(),
+            Some((4, 400)),
+            "gear={gear} slot={slot} host={category} {attachment:?} mounted={mounted}",
+        );
+        assert!(
+            std::str::from_utf8(&engine.writer)
+                .unwrap()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .any(|entry| entry["gameplay_denial"] == "unsupported_bullet_attachment"),
+            "gear={gear} slot={slot} host={category} {attachment:?} mounted={mounted}",
+        );
+    }
+}
