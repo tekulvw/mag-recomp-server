@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Reports{% endblock %}
+{% block content %}
+{% include "admin_nav.html" %}
+<h1>Reports</h1>
+<p>Performance and error reports that launchers send, with their logs.{% if enabled %} Kept {{ retention_days }} days.{% else %} <strong>Reports are turned off on this server</strong> (<code>PORTAL_REPORTS</code>); launchers get 503 and existing logs cannot be read here.{% endif %} Only admins can download logs.</p>
+<h2>Last 14 days</h2>
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Day (UTC)</th>{% for t in triggers %}<th>{{ t }}</th>{% endfor %}{% for p in platforms %}<th>{{ p }}</th>{% endfor %}<th>Total</th></tr></thead>
+  <tbody>
+  {% for d in days %}
+  <tr><td>{{ d.day }}</td>{% for n in d.by_trigger %}<td>{{ n }}</td>{% endfor %}{% for n in d.by_platform %}<td>{{ n }}</td>{% endfor %}<td><strong>{{ d.total }}</strong></td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<h2>Recent reports</h2>
+<form method="get" action="/admin/reports" class="row">
+  <input name="account" value="{{ account }}" maxlength="32" placeholder="Player name">
+  <select name="trigger" aria-label="Trigger">
+    <option value="">Any trigger</option>
+    {% for t in triggers %}<option value="{{ t }}"{% if trigger == **t %} selected{% endif %}>{{ t }}</option>{% endfor %}
+  </select>
+  <select name="platform" aria-label="Platform">
+    <option value="">Any platform</option>
+    {% for p in platforms %}<option value="{{ p }}"{% if platform == **p %} selected{% endif %}>{{ p }}</option>{% endfor %}
+  </select>
+  <button>Filter</button>
+</form>
+{% if rows.is_empty() %}<p class="quiet">No reports match.</p>{% else %}
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Received</th><th>Player</th><th>Trigger</th><th>Platform</th><th>Version</th><th>Logs</th><th></th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+  <tr><td>{{ r.received }}</td><td><a href="/admin/users/{{ r.account_id }}">{% if r.player.is_empty() %}account {{ r.account_id }}{% else %}{{ r.player }}{% endif %}</a></td><td>{{ r.trigger }}</td><td>{{ r.platform }}</td><td>{{ r.version }}</td><td>{{ r.logs }}</td><td><a href="/admin/reports/{{ r.id }}">Details</a></td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="quiet">The newest 100 matching reports.</p>
+{% endif %}
+{% endblock %}

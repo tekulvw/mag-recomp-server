@@ -4,7 +4,8 @@ The player accounts website for a MAG replacement server (magtest.online). Playe
 in with Google, claim a player name and link their launcher. The launcher trades its
 device token for short-lived **game tickets**, which the game server verifies with the
 portal's public key. See the [design](../docs/superpowers/specs/2026-11-22-portal-design.md)
-and the [ticket format](../docs/portal-ticket.md).
+and the [ticket format](../docs/portal-ticket.md). Launchers also send performance and error
+reports with their logs: see [launcher reports](../docs/portal-reports.md).
 
 The site is server-rendered HTML with no JavaScript. It stores accounts in PostgreSQL and
 never passes Google tokens on to the game or the game server.
@@ -64,6 +65,13 @@ holds ticket test vectors for other verifiers; regenerate them with
 | `PORTAL_GAME_ADMIN_URL` | no | Origin of the game server's internal admin API, such as `http://mag-medius-admin.mag.svc:10490` (http or https). Set it with `PORTAL_GAME_ADMIN_SECRET_FILE`, or neither; without them the admin panel's Game server section shows "not configured". |
 | `PORTAL_GAME_ADMIN_SECRET_FILE` | with the URL | File holding the admin API's shared HMAC secret, at least 32 bytes (surrounding whitespace is trimmed). Never logged. |
 | `PORTAL_OPERATOR_CONTACT` | no | Contact text shown on the privacy page. |
+| `PORTAL_REPORTS` | no | `on` (default) takes launcher reports and needs a report store; `off` answers `503 reports_disabled`. See [launcher reports](../docs/portal-reports.md). |
+| `PORTAL_REPORT_STORE` | with reports on | Where report logs go: `s3` (production) or `dir` (tests and development). |
+| `PORTAL_REPORT_S3_ENDPOINT`, `PORTAL_REPORT_S3_BUCKET` | for `s3` | The S3-compatible endpoint origin and the private bucket (path-style addressing). The bucket is checked at start. |
+| `PORTAL_REPORT_S3_REGION` | no | Signing region (default `us-east-1`). |
+| `PORTAL_REPORT_S3_ACCESS_KEY_FILE`, `PORTAL_REPORT_S3_SECRET_KEY_FILE` | for `s3` | Files holding the bucket's access key ID and secret key. Never logged. |
+| `PORTAL_REPORT_DIR` | for `dir` | Existing, writable folder for report logs. |
+| `PORTAL_REPORT_RETENTION_DAYS` | no | Days reports (rows and logs) are kept (default 30); purged hourly. |
 | `PORTAL_LISTEN` | no | Listen address (default `0.0.0.0:8080`). Serve it behind a TLS-terminating proxy. |
 | `RUST_LOG` | no | Log filter (default `info`). |
 
@@ -112,6 +120,11 @@ keep working. The response's `audience` says which one the ticket is for:
 `400 invalid_request` that the body was not that JSON object.
 `403 banned` (with `reason`) and `409 no_player_name` are shown to the player.
 
+**Send a report** — `POST /api/v1/reports` with `Authorization: Bearer mgd_…`: a performance or
+error report with gzip'd logs. [Launcher reports](../docs/portal-reports.md) has the body, limits and
+responses (`201` stored, `200` already stored, `400 invalid_report`, `409 report_id_conflict`,
+`413 too_large`, `429 rate_limited` with `Retry-After`, `503 reports_disabled`).
+
 **Verifying keys** — `GET /api/v1/ticket-keys` returns `{"keys":[{"id":1,"alg":"ES256","spki":"<base64 DER>"}]}`.
 
 ## Admin panel
@@ -122,8 +135,8 @@ email someone signs in with, so a role can be granted before the first sign-in.
 | Role | Can |
 | --- | --- |
 | Owner (`PORTAL_OWNER_EMAILS`) | Everything below, and grant or remove admins. |
-| Admin | Grant or remove moderators; reserve, release and assign names; delete accounts; set game character levels; everything a moderator can. |
-| Moderator | Search and view accounts; ban and unban; unlink launchers; view game server characters. |
+| Admin | Grant or remove moderators; reserve, release and assign names; delete accounts; set game character levels; download launcher report logs; everything a moderator can. |
+| Moderator | Search and view accounts; ban and unban; unlink launchers; view game server characters; view launcher reports and their metrics. |
 
 Staff act only on accounts and roles ranked below their own: nobody can change a peer, a
 superior or themselves. Every change goes to an audit log shown on the admin overview.
@@ -153,8 +166,9 @@ Run `mag-portal admin <command>` with `DATABASE_URL` set (in Kubernetes, `kubect
 | `service-account mint-token <name> --label <text>` | Mint a launcher token. Only the token goes to stdout, once; store it. |
 | `service-account list` | Service accounts and their tokens (IDs, labels, use; never the tokens). |
 | `service-account revoke-token <name> <device-id>` | Revoke one token. |
+| `reports list`, `show`, `log`, `stats`, `delete` | Launcher reports; see [launcher reports](../docs/portal-reports.md#operator-commands). `log` and `delete` need the report store settings. |
 
-The `service-account` commands write the audit log as `operator (command line)`.
+The `service-account` commands, `reports log` and `reports delete` write the audit log as `operator (command line)`.
 
 Banned accounts cannot delete themselves (that would shed the ban); delete them on request with SQL. Deleting an account (from its account page) keeps its name reserved, because the game server
 keeps characters under the name. To move existing players over, reserve every name that has

@@ -4,8 +4,12 @@ use anyhow::bail;
 use clap::Subcommand;
 use sqlx::PgPool;
 
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
+
 use crate::db::{self, AssignOutcome, ReserveOutcome, ServiceCreateOutcome};
-use crate::staff;
+use crate::report_store::{ReportStore, StoreArgs};
+use crate::{reports, staff};
 
 #[derive(Debug, Subcommand)]
 pub enum AdminCommand {
@@ -40,6 +44,46 @@ pub enum AdminCommand {
     /// Service accounts: player identities for automation, with tokens minted here.
     #[command(subcommand)]
     ServiceAccount(ServiceCommand),
+    /// Launcher performance and error reports.
+    #[command(subcommand)]
+    Reports(ReportsCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ReportsCommand {
+    /// Recent reports, newest first.
+    List {
+        /// Only this player's reports.
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(reports::TRIGGERS))]
+        trigger: Option<String>,
+        #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(reports::PLATFORMS))]
+        platform: Option<String>,
+        /// Only reports received at or after this RFC 3339 time.
+        #[arg(long, conflicts_with = "days", value_parser = parse_rfc3339)]
+        since: Option<OffsetDateTime>,
+        /// Only reports from the last N days.
+        #[arg(long, value_parser = clap::value_parser!(i64).range(1..=3650))]
+        days: Option<i64>,
+        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(i64).range(1..=10_000))]
+        limit: i64,
+    },
+    /// A report's metadata and its client, session and metrics JSON.
+    Show { report_id: String },
+    /// Write one of a report's logs, decompressed, to stdout.
+    Log { report_id: String, name: String },
+    /// Reports per UTC day, trigger and platform.
+    Stats {
+        #[arg(long, default_value_t = 14, value_parser = clap::value_parser!(i64).range(1..=3650))]
+        days: i64,
+    },
+    /// Delete a report and its logs.
+    Delete { report_id: String },
+}
+
+fn parse_rfc3339(value: &str) -> Result<OffsetDateTime, String> {
+    OffsetDateTime::parse(value, &Rfc3339).map_err(|e| format!("not an RFC 3339 time: {e}"))
 }
 
 #[derive(Debug, Subcommand)]
@@ -76,7 +120,7 @@ fn describe(a: &db::Account) -> String {
     .to_owned()
 }
 
-pub async fn run(pool: &PgPool, command: AdminCommand) -> anyhow::Result<()> {
+pub async fn run(pool: &PgPool, store: &StoreArgs, command: AdminCommand) -> anyhow::Result<()> {
     match command {
         AdminCommand::Show { name } => match db::account_by_name(pool, &name).await? {
             Some(a) => println!("{}", describe(&a)),
@@ -134,6 +178,15 @@ pub async fn run(pool: &PgPool, command: AdminCommand) -> anyhow::Result<()> {
         AdminCommand::ServiceAccount(command) => {
             let mut out = std::io::stdout();
             run_service(pool, command, &mut out).await?;
+        }
+        AdminCommand::Reports(command) => {
+            // Only reading and deleting logs needs the store.
+            let store = match command {
+                ReportsCommand::Log { .. } | ReportsCommand::Delete { .. } => Some(store.open()?),
+                _ => None,
+            };
+            let mut out = std::io::stdout().lock();
+            run_reports(pool, store.as_deref(), command, &mut out).await?;
         }
     }
     Ok(())
@@ -243,6 +296,148 @@ pub async fn run_service(
             )
             .await?;
             writeln!(out, "revoked token {device_id} of {name}")?;
+        }
+    }
+    Ok(())
+}
+
+fn rfc3339(t: OffsetDateTime) -> String {
+    t.format(&Rfc3339).unwrap_or_default()
+}
+
+fn needs_store(store: Option<&dyn ReportStore>) -> anyhow::Result<&dyn ReportStore> {
+    store.ok_or_else(|| {
+        anyhow::anyhow!("set PORTAL_REPORT_STORE and its settings to reach report logs")
+    })
+}
+
+/// The JSON a report stored, indented for reading.
+fn pretty(json: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(json)
+        .and_then(|v| serde_json::to_string_pretty(&v))
+        .unwrap_or_else(|_| json.to_owned())
+}
+
+async fn report(pool: &PgPool, id: &str) -> anyhow::Result<reports::ReportDetail> {
+    match reports::detail(pool, id).await? {
+        Some(r) => Ok(r),
+        None => bail!("no report {id}"),
+    }
+}
+
+/// Runs a reports command, writing what it reports to `out`. `store` is needed by `log` and
+/// `delete`; reading a log and deleting a report go to the audit log.
+pub async fn run_reports(
+    pool: &PgPool,
+    store: Option<&dyn ReportStore>,
+    command: ReportsCommand,
+    out: &mut impl std::io::Write,
+) -> anyhow::Result<()> {
+    match command {
+        ReportsCommand::List {
+            account,
+            trigger,
+            platform,
+            since,
+            days,
+            limit,
+        } => {
+            let since =
+                since.or_else(|| days.map(|d| OffsetDateTime::now_utc() - time::Duration::days(d)));
+            let filter = reports::Filter {
+                account,
+                trigger,
+                platform,
+                since,
+            };
+            for r in reports::list(pool, &filter, limit).await? {
+                writeln!(
+                    out,
+                    "{}\t{}\t{} ({})\t{}\t{}\t{}\t{} logs, {} bytes",
+                    r.id,
+                    rfc3339(r.received_at),
+                    r.player_name.as_deref().unwrap_or("-"),
+                    r.account_id,
+                    r.trigger,
+                    r.platform,
+                    r.client_version,
+                    r.log_names.len(),
+                    r.log_bytes
+                )?;
+            }
+        }
+        ReportsCommand::Show { report_id } => {
+            let d = report(pool, &report_id).await?;
+            let r = &d.row;
+            writeln!(out, "report {}", r.id)?;
+            writeln!(out, "received {}", rfc3339(r.received_at))?;
+            writeln!(
+                out,
+                "account {} ({}, {})",
+                r.account_id,
+                r.player_name.as_deref().unwrap_or("no name"),
+                r.account_kind
+            )?;
+            writeln!(out, "trigger {}", r.trigger)?;
+            writeln!(out, "platform {} version {}", r.platform, r.client_version)?;
+            writeln!(
+                out,
+                "logs {} ({} bytes compressed)",
+                if r.log_names.is_empty() {
+                    "none".to_owned()
+                } else {
+                    r.log_names.join(", ")
+                },
+                r.log_bytes
+            )?;
+            writeln!(out, "client {}", pretty(&d.client))?;
+            for (label, json) in [("session", &d.session), ("metrics", &d.metrics)] {
+                match json {
+                    Some(j) => writeln!(out, "{label} {}", pretty(j))?,
+                    None => writeln!(out, "{label} none")?,
+                }
+            }
+        }
+        ReportsCommand::Log { report_id, name } => {
+            let store = needs_store(store)?;
+            let d = report(pool, &report_id).await?;
+            let Some(gz) = reports::log(store, &d.row, &name).await? else {
+                bail!("report {report_id} has no log {name}");
+            };
+            let text = reports::decompress(&gz, reports::MAX_DECOMPRESSED)?;
+            staff::log_operator(
+                pool,
+                "read report log",
+                &format!("report {}", d.row.id),
+                &name,
+            )
+            .await?;
+            out.write_all(&text)?;
+        }
+        ReportsCommand::Stats { days } => {
+            writeln!(out, "day\ttrigger\tplatform\tcount")?;
+            for c in reports::stats(pool, days).await? {
+                writeln!(out, "{}\t{}\t{}\t{}", c.day, c.trigger, c.platform, c.count)?;
+            }
+        }
+        ReportsCommand::Delete { report_id } => {
+            let store = needs_store(store)?;
+            let d = report(pool, &report_id).await?;
+            if !reports::delete(pool, store, &d.row.id).await? {
+                bail!("no report {report_id}");
+            }
+            staff::log_operator(
+                pool,
+                "delete report",
+                &format!("report {}", d.row.id),
+                &format!(
+                    "account {} ({})",
+                    d.row.account_id,
+                    d.row.player_name.as_deref().unwrap_or("no name")
+                ),
+            )
+            .await?;
+            writeln!(out, "deleted report {}", d.row.id)?;
         }
     }
     Ok(())

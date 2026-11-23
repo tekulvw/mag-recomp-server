@@ -38,12 +38,16 @@ pub struct AppState {
     pub tickets: TicketIssuer,
     pub settings: Settings,
     pub limits: Limits,
+    /// Launcher reports (`PORTAL_REPORTS`); `None` answers `503 reports_disabled`.
+    pub reports: Option<Arc<crate::reports::Reports>>,
 }
 
-/// Limits on the unauthenticated requests that create database rows.
+/// Per-address limits on the requests that create rows or carry large bodies.
 pub struct Limits {
     pub link_start: RateLimiter,
     pub sign_in: RateLimiter,
+    /// Report uploads, before the per-account allowance.
+    pub reports: RateLimiter,
 }
 
 impl Default for Limits {
@@ -52,6 +56,7 @@ impl Default for Limits {
         Self {
             link_start: RateLimiter::new(10, minute),
             sign_in: RateLimiter::new(30, minute),
+            reports: RateLimiter::new(60, minute),
         }
     }
 }
@@ -108,6 +113,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/device/token", post(api_device_token))
         .route("/api/v1/ticket", post(api_ticket))
         .route("/api/v1/ticket-keys", get(api_ticket_keys))
+        .route(
+            "/api/v1/reports",
+            post(api_report).layer(axum::extract::DefaultBodyLimit::max(
+                crate::reports::MAX_BODY,
+            )),
+        )
         .merge(crate::admin_web::routes())
         .layer(axum::middleware::map_response(security_headers))
         .with_state(state)
@@ -171,6 +182,7 @@ struct HomePage {
 struct PrivacyPage {
     nav_csrf: Option<String>,
     contact: Option<String>,
+    report_days: i64,
 }
 
 #[derive(Template)]
@@ -371,6 +383,7 @@ async fn privacy(State(state): Shared, headers: HeaderMap) -> PageResult {
         PrivacyPage {
             nav_csrf,
             contact: state.settings.operator_contact.clone(),
+            report_days: state.reports.as_ref().map_or(30, |r| r.retention_days),
         },
     ))
 }
@@ -673,6 +686,14 @@ async fn delete_account(
             "The confirmation did not match, so nothing was deleted.",
             Some(("/account", "Back to your account")),
         ));
+    }
+    if let Some(reports) = &state.reports {
+        crate::reports::delete_account_logs(
+            &state.pool,
+            reports.store.as_ref(),
+            session.account.id,
+        )
+        .await;
     }
     db::delete_account(&state.pool, session.account.id).await?;
     tracing::info!(account = session.account.id, "account deleted");
@@ -1110,6 +1131,88 @@ async fn api_ticket(
         "audience": audience,
     }))
     .into_response())
+}
+
+async fn api_report(
+    State(state): Shared,
+    ClientIp(ip): ClientIp,
+    headers: HeaderMap,
+    body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
+) -> Result<Response, AppError> {
+    use crate::reports::{self, SubmitOutcome};
+    let body = match body {
+        Ok(b) => b,
+        Err(e) if e.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+            return Ok(api_error(StatusCode::PAYLOAD_TOO_LARGE, "too_large"));
+        }
+        Err(_) => {
+            return Ok(invalid_report("the body could not be read"));
+        }
+    };
+    let Some(service) = state.reports.clone() else {
+        return Ok(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "reports_disabled",
+        ));
+    };
+    if !state.limits.reports.allow(ip) {
+        return Ok((
+            StatusCode::TOO_MANY_REQUESTS,
+            [(header::RETRY_AFTER, "60")],
+            Json(json!({ "error": "rate_limited" })),
+        )
+            .into_response());
+    }
+    let account = match bearer(&headers) {
+        Some(token) => db::device_account(&state.pool, token).await?,
+        None => None,
+    };
+    let Some(account) = account else {
+        return Ok(api_error(StatusCode::UNAUTHORIZED, "invalid_token"));
+    };
+    if account.is_banned() {
+        return Ok(api_error(StatusCode::FORBIDDEN, "banned"));
+    }
+    let report = match reports::parse(&body) {
+        Ok(r) => r,
+        Err(reports::Invalid(detail)) => return Ok(invalid_report(&detail)),
+    };
+    let id = report.id.clone();
+    let received = |status: StatusCode, at: OffsetDateTime| {
+        let at = at
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default();
+        (status, Json(json!({ "report_id": id, "received_at": at }))).into_response()
+    };
+    let outcome = match reports::submit(&state.pool, &service, &account, report).await {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            tracing::error!(error = %e, report = %id, "report not stored");
+            return Ok(api_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error"));
+        }
+    };
+    Ok(match outcome {
+        SubmitOutcome::Created(at) => {
+            tracing::info!(account = account.id, report = %id, "report received");
+            received(StatusCode::CREATED, at)
+        }
+        SubmitOutcome::Duplicate(at) => received(StatusCode::OK, at),
+        SubmitOutcome::Conflict => api_error(StatusCode::CONFLICT, "report_id_conflict"),
+        SubmitOutcome::RateLimited(seconds) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(header::RETRY_AFTER, seconds.to_string())],
+            Json(json!({ "error": "rate_limited" })),
+        )
+            .into_response(),
+    })
+}
+
+fn invalid_report(detail: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({ "error": "invalid_report", "detail": detail })),
+    )
+        .into_response()
 }
 
 async fn api_ticket_keys(State(state): Shared) -> Response {

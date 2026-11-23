@@ -12,6 +12,8 @@ pub mod game_admin;
 pub mod names;
 pub mod oidc;
 pub mod ratelimit;
+pub mod report_store;
+pub mod reports;
 pub mod staff;
 pub mod ticket;
 pub mod tokens;

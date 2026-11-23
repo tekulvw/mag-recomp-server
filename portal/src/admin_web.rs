@@ -1,5 +1,6 @@
 //! The staff admin panel under `/admin`: users, reserved names, staff roles, an audit log and
-//! the game server's characters (`game`).
+//! the game server's characters (`game`), service accounts (`service`) and launcher reports
+//! (`reports`).
 //!
 //! Everyone else gets 404 for every admin path. Staff act only on accounts and roles ranked
 //! below their own (see `staff::outranks`); every change is written to the audit log.
@@ -31,6 +32,7 @@ const MAX_REASON: usize = 200;
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .merge(service::routes())
+        .merge(reports::routes())
         .route("/admin", get(dashboard))
         .route("/admin/users", get(users))
         .route("/admin/users/{id}", get(user_page))
@@ -571,6 +573,9 @@ async fn user_delete(
             Some((&format!("/admin/users/{id}"), "Back")),
         ));
     }
+    if let Some(reports) = &state.reports {
+        crate::reports::delete_account_logs(&state.pool, reports.store.as_ref(), id).await;
+    }
     db::delete_account(&state.pool, id).await?;
     staff::log(
         &state.pool,
@@ -832,5 +837,6 @@ async fn staff_remove(
     Ok(Redirect::to("/admin/staff").into_response())
 }
 
-// Service accounts; after `guard!`, which it uses.
+// Service accounts and launcher reports; after `guard!`, which they use.
+mod reports;
 mod service;
