@@ -162,6 +162,7 @@ pub(crate) type PageResult = Result<Response, AppError>;
 #[template(path = "home.html")]
 struct HomePage {
     nav_csrf: Option<String>,
+    player_name: Option<String>,
 }
 
 #[derive(Template)]
@@ -350,10 +351,14 @@ pub(crate) async fn require_session(
 // ---- Public pages ----
 
 async fn home(State(state): Shared, headers: HeaderMap) -> PageResult {
-    if current_session(&state, &headers).await?.is_some() {
-        return Ok(Redirect::to("/account").into_response());
-    }
-    Ok(page(StatusCode::OK, HomePage { nav_csrf: None }))
+    let session = current_session(&state, &headers).await?;
+    Ok(page(
+        StatusCode::OK,
+        HomePage {
+            player_name: session.as_ref().and_then(|s| s.account.player_name.clone()),
+            nav_csrf: session.map(|s| s.csrf_token),
+        },
+    ))
 }
 
 async fn privacy(State(state): Shared, headers: HeaderMap) -> PageResult {

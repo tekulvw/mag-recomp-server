@@ -14,13 +14,16 @@
     <a href="/account">Account</a>
     <form method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="link">Sign out</button></form>
   </nav>
+  {% else %}
+  <nav><a href="/auth/google">Sign in</a></nav>
   {% endif %}
 </header>
 <main>
 {% block content %}{% endblock %}
 </main>
 <footer>
-  A community test server for MAG. Not affiliated with Sony Interactive Entertainment or Zipper Interactive.
+  A community server for <a href="https://github.com/tekulvw/mag-recomp">mag-recomp</a>, an unofficial fan project.
+  Not affiliated with or endorsed by Sony Interactive Entertainment or Zipper Interactive.
   <a href="/privacy">Privacy</a>
 </footer>
 </body>
