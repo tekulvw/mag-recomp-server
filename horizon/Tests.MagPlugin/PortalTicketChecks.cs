@@ -259,8 +259,10 @@ internal static class PortalTicketChecks
         byte[] Ticket(byte seed, long expires) => Sign(key, Unsigned(1, now, expires, 5, Nonce(seed), "game.example.test", "Delta"));
         var policy = new MagPortalTicketPolicy(settings, () => At(now));
         var ticket = Ticket(1, now + 600);
-        Check(Send(policy, ticket).Accepted, "First use rejected");
-        Check(Send(policy, ticket).Reason == MagPortalTicketReason.Replayed, "Replay accepted");
+        // The game reuses one ticket for several sign-ins: three uses per service, never a fourth.
+        for (int use = 1; use <= MagPortalNonceCache.MaximumUses; use++)
+            Check(Send(policy, ticket).Accepted, "Use " + use + " rejected");
+        Check(Send(policy, ticket).Reason == MagPortalTicketReason.Replayed, "Fourth use accepted");
         Check(Send(policy, Ticket(1, now + 300)).Reason == MagPortalTicketReason.Replayed, "Nonce reuse in a new ticket accepted");
         Check(Send(new MagPortalTicketPolicy(settings, () => At(now)), ticket).Accepted, "Nonces leaked between independent caches");
 
@@ -272,11 +274,49 @@ internal static class PortalTicketChecks
         var later = Ticket(42, now + 600);
         Check(Send(small, later).Accepted && small.Nonces.Count == 1, "Expired nonce not purged");
 
-        // Thread-safe: one of many concurrent uses of a nonce wins.
+        // Thread-safe: exactly the use limit of many concurrent uses of a nonce wins.
         var cache = new MagPortalNonceCache();
         int accepted = 0;
-        Parallel.For(0, 64, _ => { if (cache.TryAccept(Nonce(90), now + 600, now) == MagPortalTicketReason.Accepted) Interlocked.Increment(ref accepted); });
-        Check(accepted == 1, "Concurrent nonce use accepted " + accepted + " times");
+        Parallel.For(0, 64, _ => { if (cache.TryUse(Nonce(90), now + 600, now) == MagPortalTicketReason.Accepted) Interlocked.Increment(ref accepted); });
+        Check(accepted == MagPortalNonceCache.MaximumUses, "Concurrent nonce use accepted " + accepted + " times");
+    }
+
+    sealed class Owner : IMagPortalSession
+    {
+        public bool Live = true;
+        public bool IsPortalSessionLive(DateTime now) => Live;
+    }
+
+    /// <summary>A ticket never opens a second live session for its account on one service.</summary>
+    public static void LiveSessions()
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        const long now = 1_900_000_000;
+        var settings = Settings("game.example.test", (1, key.ExportSubjectPublicKeyInfo()));
+        byte[] Ticket(byte seed, string name) => Sign(key, Unsigned(1, now, now + 600, 5, Nonce(seed), "game.example.test", name));
+        var policy = new MagPortalTicketPolicy(settings, () => At(now));
+        var sessionNow = At(now);
+        MagPortalAuthentication Use(byte[] ticket, Owner owner) =>
+            policy.Authenticate(new MagPortalTicketAssembly(), Chunk(ticket, ticket.Length, true), owner, sessionNow);
+
+        var ticket = Ticket(1, "Foxtrot");
+        var first = new Owner();
+        Check(Use(ticket, first).Accepted, "First session rejected");
+        var second = new Owner();
+        Check(Use(ticket, second).Reason == MagPortalTicketReason.AccountSignedIn, "Second live session for the account opened");
+        Check(Use(Ticket(2, "Foxtrot"), second).Reason == MagPortalTicketReason.AccountSignedIn, "A different ticket opened a second live session");
+        Check(Use(Ticket(3, "Golf"), second).Accepted, "Another account refused while the first is signed in");
+        Check(Use(ticket, first).Accepted, "The holding session could not sign in again");
+
+        // Ending (released on disconnect) or going idle frees the account; refusals spent no uses.
+        policy.Sessions.Release(first);
+        var third = new Owner();
+        Check(Use(ticket, third).Accepted, "Account not freed after its session ended");
+        third.Live = false;
+        var fourth = new Owner();
+        Check(Use(ticket, fourth).Reason == MagPortalTicketReason.Replayed, "Fourth use of the ticket accepted");
+        Check(Use(Ticket(4, "Foxtrot"), fourth).Accepted, "Idle session kept its account");
+        Check(Use(Ticket(5, "Foxtrot"), new Owner()).Reason == MagPortalTicketReason.AccountSignedIn, "Refused claim released the holder");
     }
 
     public static void Configuration()
@@ -389,9 +429,13 @@ internal static class PortalTicketChecks
                 Check(Succeeded(Wire(e => mas.HandleMany(true, app, e, clock), Chunk(ticket[60..], ticket.Length, true, retail), app), app) &&
                     mas.State == MagMasSession.SessionState.LocalDevelopmentAuthenticated && mas.AuthenticatedAccount == "echo_ranger-07" &&
                     mas.PortalAccountId == 1234 && mas.PortalTicketStatus == "accepted", "Required mode ticket sign-in");
-                var replay = Mas(false, policy);
-                Check(Wire(e => replay.HandleMany(true, app, e, clock), Chunk(ticket, ticket.Length, true, retail), app).Count == 0 &&
-                    replay.PortalTicketStatus == "replayed" && replay.AuthenticatedAccount == null, "Replayed ticket signed in on a second session");
+                var second = Mas(false, policy);
+                Check(Wire(e => second.HandleMany(true, app, e, clock), Chunk(ticket, ticket.Length, true, retail), app).Count == 0 &&
+                    second.PortalTicketStatus == "account_signed_in" && second.AuthenticatedAccount == null, "Ticket opened a second live MAS session");
+                mas.EndPortalSession();
+                Check(Succeeded(Wire(e => second.HandleMany(true, app, e, clock), Chunk(ticket, ticket.Length, true, retail), app), app) &&
+                    second.AuthenticatedAccount == "echo_ranger-07", "Account not freed after the first MAS session ended");
+                second.EndPortalSession();
 
                 // Without development auth the portal still opens the account stack: character creation works,
                 // and the NP ID's online ID must match the ticket's name ignoring case.
@@ -415,8 +459,19 @@ internal static class PortalTicketChecks
                     var mismatch = created.CharacterStore.CreateForAccount(new MagCreateCharacterRequest { AccountName = "Other", Faction = 1, HeadId = 2, VoiceId = 3, UniverseId = 26, NpId = npId },
                         created.AuthenticatedAccount);
                     Check(mismatch.Reason == "np-id-account-mismatch", "NP ID for another name accepted: " + mismatch.Reason);
+                    created.EndPortalSession();
                 }
                 finally { Directory.Delete(store, true); }
+
+                // An idle session past its timeout no longer holds the account.
+                var holder = Mas(false, policy);
+                holder.PortalLiveTimeoutSeconds = 30;
+                var held = Ticket();
+                Check(Succeeded(Wire(e => holder.HandleMany(true, app, e, clock), Chunk(held, held.Length, true, retail), app), app), "Holder sign-in");
+                clock = clock.AddSeconds(31);
+                var successor = Mas(false, policy);
+                Check(Succeeded(Wire(e => successor.HandleMany(true, app, e, clock), Chunk(held, held.Length, true, retail), app), app),
+                    "Idle MAS session kept its account");
 
                 // MAPS: same policy, its own state machine.
                 var maps = new MagMapsSession { DevelopmentAuthEnabled = true, PortalTickets = new MagPortalTicketPolicy(settings, () => clock) };

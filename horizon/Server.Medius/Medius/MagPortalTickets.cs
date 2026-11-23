@@ -17,7 +17,7 @@ namespace Server.Medius
     public enum MagPortalTicketReason
     {
         Accepted, Pending, Malformed, UnknownKey, BadSignature, BadLifetime, NotYetValid, Expired,
-        WrongAudience, BadIdentity, Replayed, ReplayCacheFull, BadChunk, BadHeader, TooManyAttempts
+        WrongAudience, BadIdentity, Replayed, ReplayCacheFull, BadChunk, BadHeader, TooManyAttempts, AccountSignedIn
     }
 
     public static class MagPortalTicketReasons
@@ -40,6 +40,7 @@ namespace Server.Medius
             MagPortalTicketReason.BadChunk => "bad_chunk",
             MagPortalTicketReason.BadHeader => "bad_header",
             MagPortalTicketReason.TooManyAttempts => "too_many_attempts",
+            MagPortalTicketReason.AccountSignedIn => "account_signed_in",
             _ => "unknown"
         };
     }
@@ -136,7 +137,7 @@ namespace Server.Medius
         public string PlayerName { get; internal set; }
     }
 
-    /// <summary>Stateless checks 1 to 5 of docs/portal-ticket.md. Nonce reuse is checked by the caller.</summary>
+    /// <summary>Stateless checks 1 to 5 of docs/portal-ticket.md. Nonce use is checked by the caller.</summary>
     public sealed class MagPortalTicketVerifier
     {
         public const int SignatureBytes = 64;
@@ -214,14 +215,17 @@ namespace Server.Medius
     }
 
     /// <summary>
-    /// Accepted nonces, each kept until its ticket expires. Process-local and thread-safe; the
-    /// deployment runs one Medius process per service, so each service accepts a nonce once.
-    /// When full of unexpired nonces it refuses new tickets rather than forgetting old ones.
+    /// Uses of accepted nonces, each kept until its ticket expires. The game reuses one ticket for
+    /// several sign-ins (MAPS, MAS, statistics), so a nonce may be used <see cref="MaximumUses"/>
+    /// times. Process-local and thread-safe; MAPS and MAS run as separate processes, so the limit
+    /// applies per service. When full of unexpired nonces it refuses new tickets rather than
+    /// forgetting old ones.
     /// </summary>
     public sealed class MagPortalNonceCache
     {
+        public const int MaximumUses = 3;
         private readonly object _gate = new object();
-        private readonly Dictionary<(ulong, ulong), long> _expiry = new Dictionary<(ulong, ulong), long>();
+        private readonly Dictionary<(ulong, ulong), (long Expiry, int Uses)> _entries = new Dictionary<(ulong, ulong), (long, int)>();
         private readonly int _capacity;
 
         public MagPortalNonceCache(int capacity = 65536)
@@ -230,23 +234,67 @@ namespace Server.Medius
             _capacity = capacity;
         }
 
-        public int Count { get { lock (_gate) return _expiry.Count; } }
+        public int Count { get { lock (_gate) return _entries.Count; } }
 
-        public MagPortalTicketReason TryAccept(byte[] nonce, long expiresAt, long nowUnixSeconds)
+        /// <summary>Spends one use of the nonce; Replayed once it has been used <see cref="MaximumUses"/> times.</summary>
+        public MagPortalTicketReason TryUse(byte[] nonce, long expiresAt, long nowUnixSeconds)
         {
             if (nonce == null || nonce.Length != 16) throw new ArgumentException("A nonce is 16 bytes.", nameof(nonce));
             var key = (BitConverter.ToUInt64(nonce, 0), BitConverter.ToUInt64(nonce, 8));
             lock (_gate)
             {
-                if (_expiry.TryGetValue(key, out long kept) && kept > nowUnixSeconds) return MagPortalTicketReason.Replayed;
-                if (_expiry.Count >= _capacity)
+                if (_entries.TryGetValue(key, out var kept) && kept.Expiry > nowUnixSeconds)
                 {
-                    foreach (var stale in _expiry.Where(kv => kv.Value <= nowUnixSeconds).Select(kv => kv.Key).ToArray()) _expiry.Remove(stale);
-                    if (_expiry.Count >= _capacity) return MagPortalTicketReason.ReplayCacheFull;
+                    if (kept.Uses >= MaximumUses) return MagPortalTicketReason.Replayed;
+                    _entries[key] = (Math.Max(kept.Expiry, expiresAt), kept.Uses + 1);
+                    return MagPortalTicketReason.Accepted;
                 }
-                _expiry[key] = expiresAt;
+                if (_entries.Count >= _capacity)
+                {
+                    foreach (var stale in _entries.Where(kv => kv.Value.Expiry <= nowUnixSeconds).Select(kv => kv.Key).ToArray()) _entries.Remove(stale);
+                    if (_entries.Count >= _capacity) return MagPortalTicketReason.ReplayCacheFull;
+                }
+                _entries[key] = (expiresAt, 1);
                 return MagPortalTicketReason.Accepted;
             }
+        }
+    }
+
+    /// <summary>A MAPS or MAS session that can hold a portal account.</summary>
+    public interface IMagPortalSession
+    {
+        /// <summary>True while the session is connected, signed in and not idle past its timeout at <paramref name="now"/>.</summary>
+        bool IsPortalSessionLive(DateTime now);
+    }
+
+    /// <summary>
+    /// Which session holds each ticket-authenticated account on this service. A ticket never opens
+    /// a second live session for an account; a session that ended or went idle frees the account.
+    /// </summary>
+    public sealed class MagPortalLiveSessions
+    {
+        private readonly object _gate = new object();
+        private readonly Dictionary<string, IMagPortalSession> _owners = new Dictionary<string, IMagPortalSession>(StringComparer.Ordinal);
+
+        public int Count { get { lock (_gate) return _owners.Count; } }
+
+        public bool TryClaim(string account, IMagPortalSession owner, DateTime now)
+        {
+            lock (_gate)
+            {
+                if (_owners.TryGetValue(account, out var current) && !ReferenceEquals(current, owner) && current.IsPortalSessionLive(now)) return false;
+                if (_owners.Count >= 4096)
+                    foreach (var stale in _owners.Where(kv => !kv.Value.IsPortalSessionLive(now)).Select(kv => kv.Key).ToArray()) _owners.Remove(stale);
+                _owners[account] = owner;
+                return true;
+            }
+        }
+
+        public void Release(IMagPortalSession owner)
+        {
+            if (owner == null) return;
+            lock (_gate)
+                foreach (var key in _owners.Where(kv => ReferenceEquals(kv.Value, owner)).Select(kv => kv.Key).ToArray()) _owners.Remove(key);
         }
     }
 
@@ -307,6 +355,7 @@ namespace Server.Medius
 
         public MagPortalTicketSettings Settings { get; }
         public MagPortalNonceCache Nonces { get; }
+        public MagPortalLiveSessions Sessions { get; } = new MagPortalLiveSessions();
 
         public MagPortalTicketPolicy(MagPortalTicketSettings settings, Func<DateTime> clock = null, MagPortalNonceCache nonces = null)
         {
@@ -324,7 +373,13 @@ namespace Server.Medius
         /// <summary>The application's NP authenticate message ID; used to keep its payload out of logs.</summary>
         public static bool IsTicketMessage(int applicationId, int messageId) => messageId == (applicationId == 20231 ? 0x0034 : 0x0031);
 
-        public MagPortalAuthentication Authenticate(MagPortalTicketAssembly assembly, MagNpAuthenticateRequest request)
+        /// <summary>
+        /// Verifies a chunk. On a complete valid ticket, <paramref name="owner"/> (when given) claims the
+        /// account unless another live session on this service holds it, then one nonce use is spent.
+        /// <paramref name="sessionNow"/> is the sessions' activity clock, used for liveness only.
+        /// </summary>
+        public MagPortalAuthentication Authenticate(MagPortalTicketAssembly assembly, MagNpAuthenticateRequest request,
+            IMagPortalSession owner = null, DateTime sessionNow = default)
         {
             if (assembly.Failures >= MaximumFailuresPerSession) return Fail(assembly, MagPortalTicketReason.TooManyAttempts, false);
             // The plain development payload and the portal ticket share this header rule.
@@ -334,9 +389,17 @@ namespace Server.Medius
             if (reason != MagPortalTicketReason.Accepted) return Fail(assembly, reason, true);
             long now = UnixSeconds(_clock());
             reason = _verifier.Verify(bytes, now, out var ticket);
-            if (reason == MagPortalTicketReason.Accepted) reason = Nonces.TryAccept(ticket.Nonce, ticket.ExpiresAt, now);
             if (reason != MagPortalTicketReason.Accepted) return Fail(assembly, reason, true);
-            return new MagPortalAuthentication { Reason = reason, Account = ticket.PlayerName.ToLowerInvariant(), AccountId = ticket.AccountId };
+            string account = ticket.PlayerName.ToLowerInvariant();
+            // Claim first so a refused second session spends none of the ticket's uses.
+            if (owner != null && !Sessions.TryClaim(account, owner, sessionNow)) return Fail(assembly, MagPortalTicketReason.AccountSignedIn, true);
+            reason = Nonces.TryUse(ticket.Nonce, ticket.ExpiresAt, now);
+            if (reason != MagPortalTicketReason.Accepted)
+            {
+                if (owner != null) Sessions.Release(owner);
+                return Fail(assembly, reason, true);
+            }
+            return new MagPortalAuthentication { Reason = reason, Account = account, AccountId = ticket.AccountId };
         }
 
         private static MagPortalAuthentication Fail(MagPortalTicketAssembly assembly, MagPortalTicketReason reason, bool count)

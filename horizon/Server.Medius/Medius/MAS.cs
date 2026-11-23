@@ -161,6 +161,7 @@ namespace Server.Medius
                             data.MagMasSession.LoginRegistry = Program.MagLoginTickets;
                             data.MagMasSession.CharacterStore = Program.CreateCharacterStore();
                             data.MagMasSession.PortalTickets = Program.PortalTickets;
+                            data.MagMasSession.PortalLiveTimeoutSeconds = Program.GetAppSettingsOrDefault(data.ApplicationId).ClientTimeoutSeconds;
                             replies = data.MagMasSession.HandleMany(true, data.ApplicationId, plugin, Utils.GetHighPrecisionUtcTime());
                             sessionState = data.MagMasSession.State + "/" + data.MagMasSession.StorageStatus;
                             if (Program.PortalTickets != null) sessionState += "/ticket=" + data.MagMasSession.PortalTicketStatus;
@@ -171,6 +172,7 @@ namespace Server.Medius
                             data.MagMapsSession.CharacterStorageEnabled = Program.Settings.EnableMagCharacterStorage;
                             data.MagMapsSession.CharacterStore = Program.CreateCharacterStore();
                             data.MagMapsSession.PortalTickets = Program.PortalTickets;
+                            data.MagMapsSession.PortalLiveTimeoutSeconds = Program.GetAppSettingsOrDefault(data.ApplicationId).ClientTimeoutSeconds;
                             replies = data.MagMapsSession.HandleMany(true, data.ApplicationId, plugin, Utils.GetHighPrecisionUtcTime());
                             sessionState = data.MagMapsSession.State + "/" + data.MagMapsSession.StorageStatus;
                             if (Program.PortalTickets != null) sessionState += "/ticket=" + data.MagMapsSession.PortalTicketStatus;

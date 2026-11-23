@@ -7,7 +7,7 @@ using RT.Models.MAG;
 namespace Server.Medius
 {
     /// <summary>Isolated local MAS protocol session; no Medius account or PSN ticket validation.</summary>
-    public sealed class MagMasSession
+    public sealed class MagMasSession : IMagPortalSession
     {
         public enum SessionState { AwaitingHello, ProtocolInfoSent, ProtocolAcknowledged, LocalDevelopmentAuthenticated, CharacterCreated, AccountLoginSent, CharacterDataSent }
         public SessionState State { get; private set; } = SessionState.AwaitingHello;
@@ -26,6 +26,17 @@ namespace Server.Medius
         public uint PortalAccountId { get; private set; }
         public string PortalTicketStatus { get; private set; } = "inactive";
         private readonly MagPortalTicketAssembly _portalTicket = new MagPortalTicketAssembly();
+        /// <summary>Idle limit for portal account liveness; MAS.cs sets the application's client timeout.</summary>
+        public int PortalLiveTimeoutSeconds { get; set; } = 30;
+        private bool _portalSessionEnded;
+        public bool IsPortalSessionLive(DateTime now) =>
+            !_portalSessionEnded && !IsExpired(now, PortalLiveTimeoutSeconds);
+        /// <summary>The connection closed: free its portal account for the next sign-in.</summary>
+        public void EndPortalSession()
+        {
+            _portalSessionEnded = true;
+            PortalTickets?.Sessions.Release(this);
+        }
         // Portal tickets replace the development identity check, not the local account stack behind it.
         private bool AccountAuthEnabled => DevelopmentAuthEnabled || PortalTickets != null;
         private uint _selectedCharacterId;
@@ -61,7 +72,7 @@ namespace Server.Medius
                     break;
                 case MagNpAuthenticateRequest request when PortalTickets != null && State == SessionState.ProtocolAcknowledged:
                     {
-                        var outcome = PortalTickets.Authenticate(_portalTicket, request);
+                        var outcome = PortalTickets.Authenticate(_portalTicket, request, this, now);
                         PortalTicketStatus = outcome.Reason.Code();
                         ObserveActivity(now);
                         if (!outcome.Accepted) return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();

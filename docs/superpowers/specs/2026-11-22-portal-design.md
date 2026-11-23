@@ -25,7 +25,7 @@ browser ──Google sign-in──▶ portal (magtest.online) ◀── launcher
 1. A player signs in to **magtest.online** with Google and claims one player name.
 2. The launcher links once with a short code (device flow) and stores a device token.
 3. Before each launch the launcher trades the device token for a **game ticket**: a ~150-byte
-   binary record of account ID, player name, audience, expiry and a single-use nonce, signed
+   binary record of account ID, player name, audience, expiry and a reuse-limited nonce, signed
    by the portal (ECDSA P-256). See [portal-ticket.md](../../portal-ticket.md).
 4. The runtime's local NP ticket hands those bytes to the game, which sends them in its own
    NP authenticate message. Medius checks the signature with the portal's public key, and the
@@ -39,7 +39,7 @@ Medius never calls the portal during login, so login keeps working while the web
    CLI (ban, reserve names), ticket format spec with shared test vectors.
 2. **Game check:** confirm the game forwards a ~150-byte ticket unchanged (no PSN parsing).
    The ticket format may change if it does not.
-3. **Medius:** verify tickets, enforce single use, replace the development identity policy
+3. **Medius:** verify tickets, limit reuse (3 uses per service, one live session per account), replace the development identity policy
    behind a server switch (development login stays for local and training runs).
 4. **Launcher:** device link UI and ticket fetch on macOS, Windows and Linux.
 5. **Deployment:** homelab manifests (CNPG database, HTTPRoute, secrets), Google OAuth client.
@@ -75,7 +75,8 @@ Medius never calls the portal during login, so login keeps working while the web
 ## Security notes
 
 - The game connection is not encrypted, so a ticket can be copied off the network. Short
-  lifetime plus single-use nonces (phase 3) bound replay to one sign-in within minutes.
+  lifetime plus nonce use limits (phase 3: 3 uses per service, never a second live session for
+  the account) bound replay to a few sign-ins within minutes; the game itself reuses one ticket.
 - The audience field names the game server, so a ticket for one server is useless on another
   that trusts the same portal key.
 - Device codes expire after 10 minutes and poll no faster than every 5 seconds.

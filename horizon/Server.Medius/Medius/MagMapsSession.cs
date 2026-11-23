@@ -8,7 +8,7 @@ using RT.Models.MAG;
 namespace Server.Medius
 {
     /// <summary>Local development MAPS session; no Medius account or PSN ticket validation.</summary>
-    public sealed class MagMapsSession
+    public sealed class MagMapsSession : IMagPortalSession
     {
         public enum SessionState { AwaitingHello, HelloSent, WaitingForAuthentication, LocalDevelopmentAuthenticated, ContentSent, CharacterListSent, WaitingForUniverse }
         public SessionState State { get; private set; } = SessionState.AwaitingHello;
@@ -24,6 +24,17 @@ namespace Server.Medius
         public uint PortalAccountId { get; private set; }
         public string PortalTicketStatus { get; private set; } = "inactive";
         private readonly MagPortalTicketAssembly _portalTicket = new MagPortalTicketAssembly();
+        /// <summary>Idle limit for portal account liveness; MAS.cs sets the application's client timeout.</summary>
+        public int PortalLiveTimeoutSeconds { get; set; } = 30;
+        private bool _portalSessionEnded;
+        public bool IsPortalSessionLive(DateTime now) =>
+            !_portalSessionEnded && !IsExpired(now, PortalLiveTimeoutSeconds);
+        /// <summary>The connection closed: free its portal account for the next sign-in.</summary>
+        public void EndPortalSession()
+        {
+            _portalSessionEnded = true;
+            PortalTickets?.Sessions.Release(this);
+        }
         // Portal tickets replace the development identity check, not the local account stack behind it.
         private bool AccountAuthEnabled => DevelopmentAuthEnabled || PortalTickets != null;
         private uint _selectedCharacterId;
@@ -131,7 +142,7 @@ namespace Server.Medius
 
         private bool PortalAuthenticate(MagNpAuthenticateRequest request, DateTime now)
         {
-            var outcome = PortalTickets.Authenticate(_portalTicket, request);
+            var outcome = PortalTickets.Authenticate(_portalTicket, request, this, now);
             PortalTicketStatus = outcome.Reason.Code();
             ObserveActivity(now);
             if (!outcome.Accepted) return false;

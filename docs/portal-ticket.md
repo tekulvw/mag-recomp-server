@@ -16,7 +16,7 @@ All integers are unsigned and big-endian. `A` is the audience length and `N` the
 | 6 | 8 | issued at | Unix seconds |
 | 14 | 8 | expires at | Unix seconds, greater than issued at |
 | 22 | 4 | account ID | portal account ID, never 0 |
-| 26 | 16 | nonce | random; single use |
+| 26 | 16 | nonce | random; limits reuse (rule 6) |
 | 42 | 1 | `A` | 1 to 63 |
 | 43 | `A` | audience | the game server's host name, lowercase ASCII letters, digits, `.` and `-` |
 | 43+`A` | 1 | `N` | 3 to 15 |
@@ -38,7 +38,11 @@ saying which check failed to the client:
    lifetime (`expires at − issued at`) is at most 3600 seconds.
 4. The audience equals the verifier's own configured host name.
 5. The account ID is not 0 and the name follows the rule above.
-6. The nonce has not been accepted before. Remember accepted nonces until their ticket expires.
+6. The nonce has been accepted fewer times than the verifier's reuse limit, and remembered until
+   its ticket expires. The game reuses one ticket for several sign-ins (MAPS, MAS and statistics
+   login), so a verifier may allow a ticket a small, fixed number of uses instead of one. Medius
+   allows 3 per service and never lets a ticket open a second live session for an account that is
+   already signed in there.
 
 The player name keeps the case the player chose. Servers that key accounts by lowercase name
 lowercase it after verification.
@@ -86,10 +90,19 @@ What Medius does with a ticket:
 - It applies the six rules above. A session gets three failed attempts; after that its NP
   authenticate messages are ignored until it reconnects. A rejected ticket gets no reply, as a
   rejected development name does.
-- Accepted nonces are kept in memory until their ticket expires, at most 65536 at a time; when
-  that many live nonces are held, new tickets are refused rather than old nonces forgotten. Each
-  Medius process has its own cache, and MAPS and MAS run in separate processes, so each service
-  accepts a ticket once. A restart forgets the cache; the short ticket lifetime bounds that window.
+- Reuse: the game sends one ticket to MAPS (retail message 0x0034) and the same cached bytes to
+  MAS and the statistics login, so strict single use would lock players out. Each Medius process
+  counts the uses of every nonce and accepts a ticket at most 3 times within its lifetime
+  (`ticket=replayed` after that). MAPS and MAS run as separate processes, so the count is per
+  service. Nonces are kept in memory until their ticket expires, at most 65536 at a time; when
+  that many live nonces are held, new tickets are refused rather than old nonces forgotten. A
+  restart forgets the counts; the short ticket lifetime bounds that window.
+- One live session per account: a ticket is refused (`ticket=account_signed_in`) while another
+  session on the same service holds its account, signed in, connected and not idle past the
+  application's client timeout. A disconnect, or that timeout, frees the account for the next
+  use. A refused attempt spends none of the ticket's uses. Medius tracks this itself: the MAG
+  plugin sessions do not create Medius `ClientObject` logins, so the stock "already logged in"
+  check cannot see them.
 - The session's account is the ticket's player name in lowercase, which is how local characters
   are keyed, so a player who claims their existing name keeps their characters. The portal
   account ID stays on the session (`PortalAccountId`) for later use. A character's NP ID must

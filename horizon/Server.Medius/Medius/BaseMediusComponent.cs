@@ -298,6 +298,9 @@ namespace Server.Medius
                 {
                     data.State = ClientState.DISCONNECTED;
                     data.ClientObject?.OnDisconnected();
+                    // Free any portal account these sessions held (no-op when tickets are off).
+                    data.MagMasSession.EndPortalSession();
+                    data.MagMapsSession.EndPortalSession();
                 }
                 
                 await OnDisconnected(channel);
