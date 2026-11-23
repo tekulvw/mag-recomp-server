@@ -12,7 +12,7 @@ internal static class AdminCliChecks
 {
     static void Check(bool value, string message) { if (!value) throw new Exception(message); }
 
-    static void Catalog(string path) => File.WriteAllText(path, JsonSerializer.Serialize(new {
+    internal static void Catalog(string path) => File.WriteAllText(path, JsonSerializer.Serialize(new {
         schema_version = 1, application_id = 20231,
         table = new {
             ExperienceRequiredScale = 1,

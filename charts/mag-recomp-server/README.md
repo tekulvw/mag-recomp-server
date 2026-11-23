@@ -125,6 +125,24 @@ portalTickets:
     "1": <base64 SPKI from /api/v1/ticket-keys>
 ```
 
+## Optional internal admin API
+
+`adminApi.enabled: true` starts the authenticated character-maintenance API (see [docs/admin-cli.md](../../docs/admin-cli.md#admin-api)) in the main `medius` container only; MAPS never gets it. Create a Secret yourself holding a random secret of at least 32 bytes under `adminApi.secretKey` (default `admin-api-secret`), give the calling portal the same value, and name the Secret in `adminApi.existingSecret`. The chart mounts it read-only, sets `MAG_ADMIN_API_LISTEN=0.0.0.0:<port>` and `MAG_ADMIN_API_SECRET_FILE`, and adds a ClusterIP Service `<release>-mag-recomp-server-admin-api` exposing only `adminApi.port` (default 10490). A NetworkPolicy admits that port only from pods in namespaces matching `adminApi.allowedNamespaceSelector`, which is required. Because the policy selects the medius pods, it also opens every other TCP and UDP port to all sources as two port ranges per protocol around the admin port, so player traffic is unchanged on clusters that enforce NetworkPolicy, including game ports added to the Service outside this chart. Those ranges use NetworkPolicy `endPort`, which needs Kubernetes 1.25 or later and a CNI that implements it (Calico and Cilium do); on a CNI without `endPort` support, do not enable the admin API. The secret is read at startup; bump `runtime.revision` after rotating it. Never route the Service through a Gateway, Ingress or LoadBalancer.
+
+```sh
+kubectl create secret generic mag-admin-api -n <namespace> \
+  --from-literal=admin-api-secret="$(openssl rand -hex 32)"
+```
+
+```yaml
+adminApi:
+  enabled: true
+  existingSecret: mag-admin-api
+  allowedNamespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: mag-portal
+```
+
 ## Optional forwarding DNS
 
 Set `dns.enabled: true`, `dns.answerIPv4` to the reachable server address, and `dns.hostnames` to the exact original game hostnames observed for the client build. Retained retail client evidence identifies `mag.ps3.online.scea.com` as the original MAPS hostname; the prototype uses numeric addresses and cannot be redirected by DNS alone. The default hostname list stays empty so enabling DNS always requires an explicit choice. The observed original retail settings use TCP 10073 and UDP 10072 for that bootstrap endpoint. The example below overrides only the retail MAPS hostname and maps its TCP bootstrap port to the chart MAPS listener. Supply a separately verified compatible retail runtime profile and matching private catalogs; this snippet does not select a protocol version:

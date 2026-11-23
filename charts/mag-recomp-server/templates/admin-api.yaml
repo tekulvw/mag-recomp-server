@@ -1,0 +1,62 @@
+{{- with .Values.adminApi }}
+{{- if .enabled }}
+{{- if not .existingSecret }}
+{{- fail "adminApi.enabled needs adminApi.existingSecret naming a Secret with the admin API secret" }}
+{{- end }}
+{{- $selector := .allowedNamespaceSelector | default dict }}
+{{- if and (empty $selector.matchLabels) (empty $selector.matchExpressions) }}
+{{- fail "adminApi.enabled needs a non-empty adminApi.allowedNamespaceSelector (matchLabels or matchExpressions)" }}
+{{- end }}
+{{- if has (int .port) (list 10073 10471 10472 10474 10475 10476 10477 10478) }}
+{{- fail "adminApi.port must not reuse a medius listener port" }}
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "mag.name" $ }}-admin-api
+  labels:
+    {{- include "mag.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: admin-api
+spec:
+  # Cluster-internal only; never route this Service through a Gateway, Ingress or LoadBalancer.
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/instance: {{ $.Release.Name }}
+    app.kubernetes.io/component: medius
+  ports:
+    - {name: admin-api, port: {{ int .port }}, targetPort: admin-api, protocol: TCP}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "mag.name" $ }}-admin-api
+  labels:
+    {{- include "mag.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: admin-api
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ $.Release.Name }}
+      app.kubernetes.io/component: medius
+  policyTypes: [Ingress]
+  ingress:
+    # Every port except the admin port stays open to all sources, whatever game ports the
+    # Service carries (including ports added outside this chart). Needs NetworkPolicy endPort
+    # support: Kubernetes 1.25 or later and a CNI that implements it.
+    {{- $port := int .port }}
+    - ports:
+        {{- range $protocol := list "TCP" "UDP" }}
+        {{- if gt $port 1 }}
+        - {protocol: {{ $protocol }}, port: 1, endPort: {{ sub $port 1 }}}
+        {{- end }}
+        {{- if lt $port 65535 }}
+        - {protocol: {{ $protocol }}, port: {{ add $port 1 }}, endPort: 65535}
+        {{- end }}
+        {{- end }}
+    # The admin port admits only pods in the selected namespaces.
+    - from:
+        - namespaceSelector: {{ toYaml $selector | nindent 12 }}
+      ports:
+        - {protocol: TCP, port: {{ $port }}}
+{{- end }}
+{{- end }}

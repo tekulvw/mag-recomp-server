@@ -85,6 +85,12 @@ verified portal game tickets; `MAG_PORTAL_TICKET_KEYS` and `MAG_PORTAL_TICKET_AU
 the verifying keys and this server's host name. It is `off` by default. See
 [docs/portal-ticket.md](../docs/portal-ticket.md#medius-verification-operators).
 
+## Internal admin API
+
+`MAG_ADMIN_API_LISTEN` with `MAG_ADMIN_API_SECRET_FILE` starts an authenticated, cluster-internal
+HTTP API for `mag-admin`'s character maintenance in the main Medius process. Both are unset by
+default. See [docs/admin-cli.md](../docs/admin-cli.md#admin-api).
+
 ## Licensing
 
 The upstream Horizon MIT license is retained in `LICENSE`. The vendored HighResolutionTimer license is retained in `HighResolutionTimer/LICENSE`. Package dependencies retain their respective licenses. These licenses cover the distributed code; they do not grant rights to game data or third-party runtime material.
