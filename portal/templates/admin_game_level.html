@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Set level · {{ account }}{% endblock %}
+{% block content %}
+{% include "admin_nav.html" %}
+<h1>Set level · {{ account }}</h1>
+{% if let Some(r) = refusal %}
+<div class="alert">
+  <p><strong>The game server refused the change</strong> ({{ r.code }}): {{ r.message }}</p>
+  <p>{{ r.advice }}</p>
+</div>
+{% else if let Some(e) = error %}
+<p class="alert">{{ e }} Nothing was changed.</p>
+{% else if let Some(c) = change %}
+{% if applied %}
+<p><strong>Level set.</strong> The character is now level {{ c.to_level }}.</p>
+{% else %}
+<p>The game server would make this change. Nothing has been saved yet.</p>
+{% endif %}
+<table>
+  <thead><tr><th></th><th>Before</th><th>After</th></tr></thead>
+  <tbody>
+  <tr><td>Level</td><td>{{ c.from_level }}</td><td>{{ c.to_level }}</td></tr>
+  <tr><td>XP</td><td>{{ c.experience_before }}</td><td>{{ c.experience_after }}</td></tr>
+  <tr><td>Skill points</td><td>{{ c.skill_points_before }}</td><td>{{ c.skill_points_after }}</td></tr>
+  </tbody>
+</table>
+{% if applied %}
+<dl>
+  <dt>Backup</dt><dd>{% if let Some(b) = c.backup %}{{ b }}{% else %}none{% endif %}</dd>
+</dl>
+{% else %}
+<form method="post" action="/admin/game/characters/{{ account|urlencode_strict }}/level/confirm" class="row">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="level" value="{{ level }}">
+  <button class="danger">Apply level {{ level }}</button>
+  <a href="/admin/game/characters/{{ account|urlencode_strict }}">Cancel</a>
+</form>
+{% endif %}
+{% endif %}
+<p><a href="/admin/game/characters/{{ account|urlencode_strict }}">Back to {{ account }}</a></p>
+{% endblock %}

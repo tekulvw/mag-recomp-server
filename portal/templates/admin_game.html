@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Game server{% endblock %}
+{% block content %}
+{% include "admin_nav.html" %}
+<h1>Game server</h1>
+{% if !configured %}
+<p class="alert">The game server admin API is not configured. Set <code>PORTAL_GAME_ADMIN_URL</code> and <code>PORTAL_GAME_ADMIN_SECRET_FILE</code> to view characters here.</p>
+{% else if let Some(e) = error %}
+<p class="alert">{{ e }}</p>
+{% else %}
+<p>Characters on the game server. Open one to see its details{% if is_admin %} or set its level{% endif %}.</p>
+{% if rows.is_empty() %}<p class="quiet">The game server has no characters.</p>{% else %}
+<table>
+  <thead><tr><th>Character</th><th>Level</th><th>XP</th><th>Skill points</th><th>Session</th><th>Portal account</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+  <tr>
+    <td><a href="/admin/game/characters/{{ r.account|urlencode_strict }}">{{ r.account }}</a></td>
+    <td>{{ r.level }}</td><td>{{ r.experience }}</td><td>{{ r.skill_points }}</td>
+    <td>{% if r.session == "online" %}<strong>online</strong>{% else %}{{ r.session }}{% endif %}</td>
+    <td>{% if let Some(id) = r.portal_id %}<a href="/admin/users/{{ id }}">account {{ id }}</a>{% else %}<span class="quiet">none</span>{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endif %}
+{% endblock %}

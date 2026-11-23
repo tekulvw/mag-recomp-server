@@ -8,6 +8,7 @@ pub mod admin;
 pub mod admin_web;
 pub mod config;
 pub mod db;
+pub mod game_admin;
 pub mod names;
 pub mod oidc;
 pub mod ratelimit;
