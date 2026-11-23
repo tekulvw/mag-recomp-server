@@ -10,6 +10,8 @@ pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 pub const DEVICE_TOKEN_PREFIX: &str = "mgd_";
 const SESSION_PREFIX: &str = "mgs_";
+/// `accounts.kind` and `accounts.provider` of service accounts.
+pub const SERVICE_KIND: &str = "service";
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Account {
@@ -21,11 +23,17 @@ pub struct Account {
     pub created_at: OffsetDateTime,
     pub banned_at: Option<OffsetDateTime>,
     pub ban_reason: Option<String>,
+    /// `person` (signs in with Google) or `service` (see `create_service_account`).
+    pub kind: String,
 }
 
 impl Account {
     pub fn is_banned(&self) -> bool {
         self.banned_at.is_some()
+    }
+
+    pub fn is_service(&self) -> bool {
+        self.kind == SERVICE_KIND
     }
 }
 
@@ -34,7 +42,7 @@ macro_rules! account_sql {
     ($head:literal, $tail:literal) => {
         concat!(
             $head,
-            " id, provider, subject, email, player_name, created_at, banned_at, ban_reason ",
+            " id, provider, subject, email, player_name, created_at, banned_at, ban_reason, kind ",
             $tail
         )
     };
@@ -264,11 +272,16 @@ pub async fn session(pool: &PgPool, cookie: &str) -> sqlx::Result<Option<Session
     let Some((account_id, csrf_token)) = row else {
         return Ok(None);
     };
-    Ok(account(pool, account_id).await?.map(|account| Session {
-        account,
-        csrf_token,
-        id_hash: hash,
-    }))
+    // Service accounts never sign in to the site; nothing creates such a session, and none
+    // would be honoured.
+    Ok(account(pool, account_id)
+        .await?
+        .filter(|a| !a.is_service())
+        .map(|account| Session {
+            account,
+            csrf_token,
+            id_hash: hash,
+        }))
 }
 
 pub async fn delete_session(pool: &PgPool, id_hash: &[u8; 32]) -> sqlx::Result<()> {
@@ -622,6 +635,127 @@ pub async fn reserved_names(pool: &PgPool) -> sqlx::Result<Vec<ReservedName>> {
     sqlx::query_as("SELECT name, reason, created_at FROM reserved_names ORDER BY name_key")
         .fetch_all(pool)
         .await
+}
+
+// ---- Service accounts ----
+
+/// The longest label a minted launcher token may carry, as for linked launchers.
+pub const MAX_SERVICE_LABEL_LEN: usize = 64;
+
+/// A label for a minted token: printable ASCII (spaces allowed), 1 to 64 characters once
+/// trimmed. `None` when it is empty, too long or holds anything else.
+pub fn service_token_label(raw: &str) -> Option<String> {
+    let label = raw.trim();
+    (!label.is_empty()
+        && label.len() <= MAX_SERVICE_LABEL_LEN
+        && label.bytes().all(|b| b == b' ' || b.is_ascii_graphic()))
+    .then(|| label.to_owned())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServiceCreateOutcome {
+    /// Created; `released` says whether a reservation of the name was given up for it.
+    Created {
+        account_id: i32,
+        name: String,
+        released: bool,
+    },
+    Invalid,
+    /// An account (person or service) already holds the name.
+    Taken,
+}
+
+/// Creates a service account holding `name`. The name must be valid and not held by any
+/// account; a reserved name is taken over, releasing its reservation in the same transaction
+/// under the name lock (the stored spelling of a reserved name is kept).
+pub async fn create_service_account(
+    pool: &PgPool,
+    name: &str,
+) -> sqlx::Result<ServiceCreateOutcome> {
+    if !names::valid_player_name(name) {
+        return Ok(ServiceCreateOutcome::Invalid);
+    }
+    let mut tx = pool.begin().await?;
+    lock_name(&mut tx, name).await?;
+    let held: Option<(i32,)> =
+        sqlx::query_as("SELECT id FROM accounts WHERE lower(player_name) = $1")
+            .bind(names::name_key(name))
+            .fetch_optional(&mut *tx)
+            .await?;
+    if held.is_some() {
+        return Ok(ServiceCreateOutcome::Taken);
+    }
+    let reserved: Option<(String,)> =
+        sqlx::query_as("DELETE FROM reserved_names WHERE name_key = $1 RETURNING name")
+            .bind(names::name_key(name))
+            .fetch_optional(&mut *tx)
+            .await?;
+    let released = reserved.is_some();
+    let stored = reserved.map_or_else(|| name.to_owned(), |(n,)| n);
+    // A random subject under its own provider: no Google identity can ever upsert into it.
+    let subject = format!("svc_{}", tokens::b64url(&tokens::random_bytes::<24>()));
+    let result = sqlx::query_as(
+        "INSERT INTO accounts (provider, subject, player_name, kind) VALUES ($1, $2, $3, $1)
+         RETURNING id",
+    )
+    .bind(SERVICE_KIND)
+    .bind(&subject)
+    .bind(&stored)
+    .fetch_one(&mut *tx)
+    .await;
+    let (account_id,): (i32,) = match result {
+        Ok(row) => row,
+        Err(e) if is_unique_violation(&e) => return Ok(ServiceCreateOutcome::Taken),
+        Err(e) => return Err(e),
+    };
+    tx.commit().await?;
+    Ok(ServiceCreateOutcome::Created {
+        account_id,
+        name: stored,
+        released,
+    })
+}
+
+pub async fn service_accounts(pool: &PgPool) -> sqlx::Result<Vec<Account>> {
+    sqlx::query_as(account_sql!(
+        "SELECT",
+        "FROM accounts WHERE kind = 'service' ORDER BY lower(player_name)"
+    ))
+    .fetch_all(pool)
+    .await
+}
+
+/// The service account holding `name`; `None` when nobody or a person holds it.
+pub async fn service_account_by_name(pool: &PgPool, name: &str) -> sqlx::Result<Option<Account>> {
+    Ok(account_by_name(pool, name)
+        .await?
+        .filter(Account::is_service))
+}
+
+pub struct MintedToken {
+    pub device_id: i32,
+    /// The `mgd_` token. Only its hash is stored; show it once.
+    pub token: String,
+}
+
+/// Mints a launcher token for a service account, stored hashed like every linked launcher.
+/// `None` when the account is not a service account.
+pub async fn mint_service_token(
+    pool: &PgPool,
+    account_id: i32,
+    label: &str,
+) -> sqlx::Result<Option<MintedToken>> {
+    let (token, hash) = tokens::new_secret(DEVICE_TOKEN_PREFIX);
+    let row: Option<(i32,)> = sqlx::query_as(
+        "INSERT INTO devices (account_id, token_hash, label)
+         SELECT id, $2, $3 FROM accounts WHERE id = $1 AND kind = 'service' RETURNING id",
+    )
+    .bind(account_id)
+    .bind(&hash[..])
+    .bind(label)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(device_id,)| MintedToken { device_id, token }))
 }
 
 /// Drops expired sign-in flows, sessions and link codes.

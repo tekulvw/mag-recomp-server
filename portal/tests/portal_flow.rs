@@ -29,6 +29,8 @@ use sqlx::PgPool;
 const CLIENT_ID: &str = "test-client";
 const ISSUER: &str = "https://issuer.example.test";
 const AUDIENCE: &str = "play.example.test";
+/// A second game server the portal also issues tickets for (`PORTAL_TICKET_EXTRA_AUDIENCES`).
+const EXTRA_AUDIENCE: &str = "test.example.test";
 
 #[derive(Default)]
 struct ProviderState {
@@ -164,7 +166,10 @@ async fn harness_with(pool: PgPool, game_admin: Option<GameAdmin>) -> Harness {
             },
             reqwest::Client::new(),
         ),
-        tickets: TicketIssuer::new(ticket_key, 3, AUDIENCE, 600).unwrap(),
+        tickets: TicketIssuer::new(ticket_key, 3, AUDIENCE, 600)
+            .unwrap()
+            .with_extra_audiences(&[EXTRA_AUDIENCE.to_owned()])
+            .unwrap(),
         settings,
         limits: web::Limits::default(),
     });
@@ -288,6 +293,21 @@ impl Harness {
             .send()
             .await
             .unwrap();
+        (r.status(), r.json().await.unwrap())
+    }
+
+    /// A ticket request with a raw body (`None`: no body at all).
+    async fn ticket_with(&self, device_token: &str, body: Option<&str>) -> (StatusCode, Value) {
+        let mut req = self
+            .http
+            .post(format!("{}/api/v1/ticket", self.base))
+            .bearer_auth(device_token);
+        if let Some(body) = body {
+            req = req
+                .header("content-type", "application/json")
+                .body(body.to_owned());
+        }
+        let r = req.send().await.unwrap();
         (r.status(), r.json().await.unwrap())
     }
 
@@ -1138,6 +1158,629 @@ async fn admin_panel_roles(pool: PgPool) {
         h.get("/admin", Some(&m)).await.status(),
         StatusCode::NOT_FOUND
     );
+}
+
+/// The ticket in a ticket response, verified against the published key for `audience`.
+async fn verify_issued(
+    h: &Harness,
+    issued: &Value,
+    audience: &str,
+) -> Result<ticket::TicketClaims, ticket::TicketError> {
+    let keys: Value = h
+        .get("/api/v1/ticket-keys", None)
+        .await
+        .json()
+        .await
+        .unwrap();
+    let spki = STANDARD
+        .decode(keys["keys"][0]["spki"].as_str().unwrap())
+        .unwrap();
+    let mut verifying = VerifyingKeys::default();
+    verifying.insert(
+        keys["keys"][0]["id"].as_u64().unwrap() as u8,
+        VerifyingKey::from_public_key_der(&spki).unwrap(),
+    );
+    let bytes = STANDARD.decode(issued["ticket"].as_str().unwrap()).unwrap();
+    let now = time::OffsetDateTime::now_utc().unix_timestamp() as u64;
+    ticket::verify(&bytes, &verifying, audience, now)
+}
+
+/// A service account with one minted token, made through the database functions.
+async fn service_with_token(pool: &PgPool, name: &str) -> (i32, String) {
+    let db::ServiceCreateOutcome::Created { account_id, .. } =
+        db::create_service_account(pool, name).await.unwrap()
+    else {
+        panic!("{name} not created");
+    };
+    let minted = db::mint_service_token(pool, account_id, "test")
+        .await
+        .unwrap()
+        .unwrap();
+    (account_id, minted.token)
+}
+
+#[sqlx::test]
+async fn tickets_for_each_game_server(pool: PgPool) {
+    let h = harness(pool).await;
+    let (id, token) = service_with_token(&h.pool, "PlayerLinux").await;
+
+    // No body, an empty body, or no audience field: the default audience, as before.
+    for body in [
+        None,
+        Some(""),
+        Some("{}"),
+        Some(r#"{"audience":null}"#),
+        Some(r#"{"audience":""}"#),
+    ] {
+        let (status, issued) = h.ticket_with(&token, body).await;
+        assert_eq!(status, StatusCode::OK, "{body:?}: {issued}");
+        assert_eq!(issued["audience"], AUDIENCE, "{body:?}");
+        let claims = verify_issued(&h, &issued, AUDIENCE).await.unwrap();
+        assert_eq!(claims.audience, AUDIENCE);
+        assert_eq!(claims.account_id, id as u32);
+        assert_eq!(claims.player_name, "PlayerLinux");
+    }
+
+    // A configured extra audience, in any case; the ticket verifies only there.
+    for requested in [EXTRA_AUDIENCE, "Test.Example.TEST"] {
+        let (status, issued) = h
+            .ticket_with(&token, Some(&json!({ "audience": requested }).to_string()))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{issued}");
+        assert_eq!(issued["audience"], EXTRA_AUDIENCE);
+        let claims = verify_issued(&h, &issued, EXTRA_AUDIENCE).await.unwrap();
+        assert_eq!(claims.audience, EXTRA_AUDIENCE);
+        assert_eq!(
+            verify_issued(&h, &issued, AUDIENCE).await,
+            Err(ticket::TicketError::WrongAudience)
+        );
+    }
+    let (status, issued) = h
+        .ticket_with(&token, Some(&json!({ "audience": AUDIENCE }).to_string()))
+        .await;
+    assert_eq!(
+        (status, issued["audience"].as_str()),
+        (StatusCode::OK, Some(AUDIENCE))
+    );
+
+    // Anything else is refused.
+    for unknown in ["other.example.test", "play.example.test.evil", "a b"] {
+        let (status, body) = h
+            .ticket_with(&token, Some(&json!({ "audience": unknown }).to_string()))
+            .await;
+        assert_eq!(
+            (status, body["error"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("unknown_audience")),
+            "{unknown}"
+        );
+    }
+    for bad in ["nope", "[]", r#"{"audience":7}"#] {
+        let (status, body) = h.ticket_with(&token, Some(bad)).await;
+        assert_eq!(
+            (status, body["error"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("invalid_request")),
+            "{bad}"
+        );
+    }
+    // Authentication still comes first.
+    let (status, body) = h
+        .ticket_with(
+            "mgd_made-up",
+            Some(&json!({ "audience": "other.example.test" }).to_string()),
+        )
+        .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::UNAUTHORIZED, Some("invalid_token"))
+    );
+}
+
+#[sqlx::test]
+async fn service_accounts_in_the_admin_panel(pool: PgPool) {
+    let h = harness(pool).await;
+    let o = h.sign_in("owner").await;
+    let csrf_o = h.csrf(&o).await;
+    for (email, role) in [
+        ("mod@example.test", "moderator"),
+        ("admin@example.test", "admin"),
+    ] {
+        let r = h
+            .post_form(
+                "/admin/staff/set",
+                &o,
+                &[("csrf", &csrf_o), ("email", email), ("role", role)],
+            )
+            .await;
+        assert_eq!(r.status(), StatusCode::SEE_OTHER, "{email}");
+    }
+    let a = h.sign_in("admin").await;
+    let csrf_a = h.csrf(&a).await;
+    let m = h.sign_in("mod").await;
+    let csrf_m = h.csrf(&m).await;
+    let u = h.sign_in("player").await;
+    let csrf_u = h.csrf(&u).await;
+    h.post_form("/claim", &u, &[("csrf", &csrf_u), ("name", "Alpha")])
+        .await;
+
+    // Players do not see the section at all.
+    assert_eq!(
+        h.get("/admin/service-accounts", Some(&u)).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    let r = h
+        .post_form(
+            "/admin/service-accounts/create",
+            &u,
+            &[("csrf", &csrf_u), ("name", "Zed")],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+
+    // A reserved test name is taken over, keeping its stored spelling.
+    h.post_form(
+        "/admin/names/reserve",
+        &a,
+        &[("csrf", &csrf_a), ("names", "PlayerLinux"), ("reason", "")],
+    )
+    .await;
+    let r = h
+        .post_form(
+            "/admin/service-accounts/create",
+            &a,
+            &[("csrf", "bad"), ("name", "playerlinux")],
+        )
+        .await;
+    assert_eq!(
+        r.status(),
+        StatusCode::FORBIDDEN,
+        "forms need the CSRF token"
+    );
+    let r = h
+        .post_form(
+            "/admin/service-accounts/create",
+            &m,
+            &[("csrf", &csrf_m), ("name", "playerlinux")],
+        )
+        .await;
+    assert_eq!(
+        r.status(),
+        StatusCode::FORBIDDEN,
+        "moderators cannot create"
+    );
+    assert_eq!(db::reserved_names(&h.pool).await.unwrap().len(), 1);
+    let r = h
+        .post_form(
+            "/admin/service-accounts/create",
+            &a,
+            &[("csrf", &csrf_a), ("name", "playerlinux")],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+    assert!(db::reserved_names(&h.pool).await.unwrap().is_empty());
+    let svc = db::account_by_name(&h.pool, "PLAYERLINUX")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(svc.is_service() && svc.provider == "service" && svc.email.is_none());
+    assert_eq!(svc.player_name.as_deref(), Some("PlayerLinux"));
+    assert!(svc.subject.len() > 20);
+
+    // Names a person holds, or another service account, or invalid names, are refused.
+    for (name, needle) in [
+        ("alpha", "already holds that name"),
+        ("PlayerLinux", "already holds that name"),
+        ("9bad", "starting with a letter"),
+    ] {
+        let r = h
+            .post_form(
+                "/admin/service-accounts/create",
+                &a,
+                &[("csrf", &csrf_a), ("name", name)],
+            )
+            .await;
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST, "{name}");
+        assert!(r.text().await.unwrap().contains(needle), "{name}");
+    }
+    let alpha = db::account_by_name(&h.pool, "Alpha")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!alpha.is_service());
+
+    // Minting: admins only; the token is shown once, uncached, and stored hashed.
+    let mint = format!("/admin/service-accounts/{}/mint", svc.id);
+    let r = h
+        .post_form(&mint, &m, &[("csrf", &csrf_m), ("label", "linux-ci")])
+        .await;
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    let r = h
+        .post_form(&mint, &a, &[("csrf", &csrf_a), ("label", " ")])
+        .await;
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    let r = h
+        .post_form(
+            &format!("/admin/service-accounts/{}/mint", alpha.id),
+            &a,
+            &[("csrf", &csrf_a), ("label", "x")],
+        )
+        .await;
+    assert_eq!(
+        r.status(),
+        StatusCode::NOT_FOUND,
+        "people get no minted tokens"
+    );
+    let r = h
+        .post_form(&mint, &a, &[("csrf", &csrf_a), ("label", "linux-ci")])
+        .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(r.headers()["cache-control"], "no-store");
+    let html = r.text().await.unwrap();
+    let marker = "value=\"mgd_";
+    let start = html.find(marker).unwrap() + "value=\"".len();
+    let token = html[start..start + html[start..].find('"').unwrap()].to_owned();
+    assert_eq!(token.len(), 4 + 43);
+    assert!(html.contains("never shown again"));
+    let devices = db::devices(&h.pool, svc.id).await.unwrap();
+    assert_eq!(devices.len(), 1);
+    assert_eq!(devices[0].label, "linux-ci");
+    let (hash,): (Vec<u8>,) = sqlx::query_as("SELECT token_hash FROM devices WHERE id = $1")
+        .bind(devices[0].id)
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(hash, Sha256::digest(token.as_bytes()).to_vec());
+
+    // The token gets tickets like any launcher's.
+    let (status, issued) = h.ticket(&token).await;
+    assert_eq!(status, StatusCode::OK, "{issued}");
+    assert_eq!(issued["player_name"], "PlayerLinux");
+    assert_eq!(issued["account_id"], svc.id);
+    verify_issued(&h, &issued, AUDIENCE).await.unwrap();
+
+    // Moderators see service accounts but cannot change them.
+    let list = h
+        .get("/admin/service-accounts", Some(&m))
+        .await
+        .text()
+        .await
+        .unwrap();
+    assert!(list.contains("PlayerLinux") && list.contains("linux-ci"));
+    assert!(!list.contains("Mint token") && !list.contains("Revoke"));
+    let user_page = h
+        .get(&format!("/admin/users/{}", svc.id), Some(&m))
+        .await
+        .text()
+        .await
+        .unwrap();
+    assert!(user_page.contains("Only admins can change service accounts."));
+    assert!(!user_page.contains("Ban account"));
+    let r = h
+        .post_form(
+            &format!("/admin/users/{}/ban", svc.id),
+            &m,
+            &[("csrf", &csrf_m), ("reason", "x")],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    let r = h
+        .post_form(
+            &format!("/admin/users/{}/devices/{}/revoke", svc.id, devices[0].id),
+            &m,
+            &[("csrf", &csrf_m)],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    let r = h
+        .post_form(
+            &format!(
+                "/admin/service-accounts/{}/devices/{}/revoke",
+                svc.id, devices[0].id
+            ),
+            &m,
+            &[("csrf", &csrf_m)],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    assert_eq!(h.ticket(&token).await.0, StatusCode::OK);
+    // Moderators still act on people.
+    let r = h
+        .post_form(
+            &format!("/admin/users/{}/ban", alpha.id),
+            &m,
+            &[("csrf", &csrf_m), ("reason", "x")],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+
+    // The users list marks service accounts.
+    let users = h
+        .get("/admin/users?q=player", Some(&a))
+        .await
+        .text()
+        .await
+        .unwrap();
+    assert!(users.contains("PlayerLinux") && users.contains("service account"));
+
+    // Bans apply to service accounts (admins can ban them).
+    let r = h
+        .post_form(
+            &format!("/admin/users/{}/ban", svc.id),
+            &a,
+            &[("csrf", &csrf_a), ("reason", "runaway bot")],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+    let (status, body) = h.ticket(&token).await;
+    assert_eq!(
+        (status, body["reason"].as_str()),
+        (StatusCode::FORBIDDEN, Some("runaway bot"))
+    );
+    h.post_form(
+        &format!("/admin/users/{}/unban", svc.id),
+        &a,
+        &[("csrf", &csrf_a)],
+    )
+    .await;
+    assert_eq!(h.ticket(&token).await.0, StatusCode::OK);
+
+    // The token appears on no page after the mint page.
+    for (path, session) in [
+        ("/admin/service-accounts", &a),
+        ("/admin/service-accounts", &o),
+        (&format!("/admin/users/{}", svc.id)[..], &a),
+        ("/admin/users", &a),
+        ("/admin", &o),
+        ("/admin/names", &a),
+        ("/account", &a),
+    ] {
+        let html = h.get(path, Some(session)).await.text().await.unwrap();
+        assert!(!html.contains(&token), "{path}");
+        assert!(!html.contains(&token[4..20]), "{path}");
+    }
+    let r = h.get(&mint, Some(&a)).await;
+    assert_eq!(r.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+    // Revoking stops the token.
+    let r = h
+        .post_form(
+            &format!(
+                "/admin/service-accounts/{}/devices/{}/revoke",
+                svc.id, devices[0].id
+            ),
+            &a,
+            &[("csrf", &csrf_a)],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+    assert_eq!(h.ticket(&token).await.0, StatusCode::UNAUTHORIZED);
+
+    // Deleting keeps the name reserved.
+    let delete = format!("/admin/service-accounts/{}/delete", svc.id);
+    let r = h
+        .post_form(
+            &delete,
+            &m,
+            &[("csrf", &csrf_m), ("confirm", "PlayerLinux")],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    let r = h
+        .post_form(&delete, &a, &[("csrf", &csrf_a), ("confirm", "nope")])
+        .await;
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    let r = h
+        .post_form(
+            &format!("/admin/service-accounts/{}/delete", alpha.id),
+            &a,
+            &[("csrf", &csrf_a), ("confirm", "Alpha")],
+        )
+        .await;
+    assert_eq!(
+        r.status(),
+        StatusCode::NOT_FOUND,
+        "people are not deleted here"
+    );
+    let r = h
+        .post_form(
+            &delete,
+            &a,
+            &[("csrf", &csrf_a), ("confirm", "playerlinux")],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+    assert!(db::account(&h.pool, svc.id).await.unwrap().is_none());
+    assert_eq!(
+        db::reserved_names(&h.pool).await.unwrap()[0].name,
+        "PlayerLinux"
+    );
+    assert!(db::account(&h.pool, alpha.id).await.unwrap().is_some());
+
+    // Every change is in the audit log.
+    let log = h.get("/admin", Some(&o)).await.text().await.unwrap();
+    for action in [
+        "create service account",
+        "mint service token",
+        "revoke service token",
+        "delete service account",
+    ] {
+        assert!(log.contains(&format!("<td>{action}</td>")), "{action}");
+    }
+    assert!(log.contains("took over the reserved name") && log.contains("linux-ci"));
+}
+
+#[sqlx::test]
+async fn service_accounts_never_sign_in(pool: PgPool) {
+    let h = harness(pool).await;
+    let (id, _) = service_with_token(&h.pool, "PlayerRetail").await;
+    let svc = db::account(&h.pool, id).await.unwrap().unwrap();
+
+    // A Google identity with the very same subject is a different, new person account.
+    let s = h.sign_in(&svc.subject).await;
+    let page = h.get("/account", Some(&s)).await.text().await.unwrap();
+    assert!(page.contains("choose one") && !page.contains("PlayerRetail"));
+    let person = db::session(&h.pool, &s).await.unwrap().unwrap().account;
+    assert_ne!(person.id, id);
+    assert!(!person.is_service());
+
+    // Even a session row for a service account is never honoured.
+    let forged = db::create_session(&h.pool, id, time::Duration::days(1))
+        .await
+        .unwrap();
+    assert!(
+        db::session(&h.pool, &forged.cookie)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    for path in ["/account", "/link", "/claim", "/admin"] {
+        let r = h.get(path, Some(&forged.cookie)).await;
+        assert_eq!(r.status(), StatusCode::SEE_OTHER, "{path}");
+        assert!(location(&r).starts_with("/auth/google"), "{path}");
+    }
+
+    // The schema keeps the two kinds apart.
+    for sql in [
+        "INSERT INTO accounts (provider, subject, kind, player_name, email)
+         VALUES ('service', 'x1', 'service', 'Svc1', 'a@example.test')",
+        "INSERT INTO accounts (provider, subject, kind) VALUES ('service', 'x2', 'service')",
+        "INSERT INTO accounts (provider, subject, player_name) VALUES ('service', 'x3', 'Svc3')",
+        "INSERT INTO accounts (provider, subject, kind, player_name)
+         VALUES ('google', 'x4', 'service', 'Svc4')",
+    ] {
+        assert!(sqlx::query(sql).execute(&h.pool).await.is_err(), "{sql}");
+    }
+}
+
+#[sqlx::test]
+async fn service_account_commands(pool: PgPool) {
+    use mag_portal::admin::{ServiceCommand, run_service};
+    let h = harness(pool).await;
+    async fn run(pool: &PgPool, command: ServiceCommand) -> anyhow::Result<String> {
+        let mut out = Vec::new();
+        run_service(pool, command, &mut out).await?;
+        Ok(String::from_utf8(out).unwrap())
+    }
+    assert_eq!(
+        db::reserve_name(&h.pool, "Player", "test identity")
+            .await
+            .unwrap(),
+        db::ReserveOutcome::Reserved
+    );
+    let u = h.sign_in("person").await;
+    let csrf = h.csrf(&u).await;
+    h.post_form("/claim", &u, &[("csrf", &csrf), ("name", "Kilo")])
+        .await;
+
+    let out = run(
+        &h.pool,
+        ServiceCommand::Create {
+            name: "player".into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        out.starts_with("created service account") && out.contains("(Player)"),
+        "{out}"
+    );
+    assert!(db::reserved_names(&h.pool).await.unwrap().is_empty());
+    for name in ["kilo", "Player", "1x"] {
+        assert!(
+            run(&h.pool, ServiceCommand::Create { name: name.into() })
+                .await
+                .is_err(),
+            "{name}"
+        );
+    }
+
+    let out = run(
+        &h.pool,
+        ServiceCommand::MintToken {
+            name: "PLAYER".into(),
+            label: "lab runner".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let token = out.trim().to_owned();
+    assert!(token.starts_with("mgd_") && !token.contains(char::is_whitespace));
+    for (name, label) in [("Kilo", "x"), ("Nobody", "x"), ("Player", "")] {
+        assert!(
+            run(
+                &h.pool,
+                ServiceCommand::MintToken {
+                    name: name.into(),
+                    label: label.into(),
+                },
+            )
+            .await
+            .is_err(),
+            "{name} {label:?}"
+        );
+    }
+    let (status, issued) = h.ticket(&token).await;
+    assert_eq!(
+        (status, issued["player_name"].as_str()),
+        (StatusCode::OK, Some("Player"))
+    );
+
+    let list = run(&h.pool, ServiceCommand::List).await.unwrap();
+    let svc = db::service_account_by_name(&h.pool, "player")
+        .await
+        .unwrap()
+        .unwrap();
+    let device = db::devices(&h.pool, svc.id).await.unwrap()[0].id;
+    assert!(
+        list.contains(&format!("Player\taccount {}", svc.id))
+            && list.contains(&format!("device {device}\tlab runner"))
+            && !list.contains(&token)
+            && !list.contains("Kilo"),
+        "{list}"
+    );
+
+    assert!(
+        run(
+            &h.pool,
+            ServiceCommand::RevokeToken {
+                name: "Player".into(),
+                device_id: device + 100,
+            },
+        )
+        .await
+        .is_err()
+    );
+    let out = run(
+        &h.pool,
+        ServiceCommand::RevokeToken {
+            name: "Player".into(),
+            device_id: device,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(out.contains("revoked"));
+    assert_eq!(h.ticket(&token).await.0, StatusCode::UNAUTHORIZED);
+
+    // The commands are audit-logged under the command-line operator, without the token.
+    let rows: Vec<(String, String, String)> =
+        sqlx::query_as("SELECT actor_email, action, detail FROM admin_log ORDER BY id")
+            .fetch_all(&h.pool)
+            .await
+            .unwrap();
+    let actions: Vec<&str> = rows.iter().map(|r| r.1.as_str()).collect();
+    assert_eq!(
+        actions,
+        [
+            "create service account",
+            "mint service token",
+            "revoke service token"
+        ]
+    );
+    assert!(
+        rows.iter()
+            .all(|r| r.0 == mag_portal::staff::OPERATOR_ACTOR)
+    );
+    assert!(rows.iter().all(|r| !r.2.contains(&token[4..])));
 }
 
 #[sqlx::test]

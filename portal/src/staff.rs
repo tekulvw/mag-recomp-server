@@ -158,6 +158,29 @@ pub async fn log(
     Ok(())
 }
 
+/// The actor recorded for `mag-portal admin` commands, which run without a site session.
+pub const OPERATOR_ACTOR: &str = "operator (command line)";
+
+/// An audit log entry for a change made with `mag-portal admin`.
+pub async fn log_operator(
+    pool: &PgPool,
+    action: &str,
+    target: &str,
+    detail: &str,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "INSERT INTO admin_log (actor_account, actor_email, action, target, detail)
+         VALUES (NULL, $1, $2, $3, $4)",
+    )
+    .bind(OPERATOR_ACTOR)
+    .bind(action)
+    .bind(target)
+    .bind(detail)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct LogRow {
     pub actor_email: String,
@@ -187,6 +210,7 @@ pub struct AccountSummary {
     pub created_at: OffsetDateTime,
     pub banned_at: Option<OffsetDateTime>,
     pub devices: i64,
+    pub kind: String,
 }
 
 /// `\`, `%` and `_` taken literally inside a LIKE pattern.
@@ -213,7 +237,7 @@ pub async fn search_accounts(
     let id: Option<i32> = q.parse().ok();
     sqlx::query_as(
         "SELECT a.id, a.email, a.player_name, a.created_at, a.banned_at,
-                (SELECT count(*) FROM devices d WHERE d.account_id = a.id) AS devices
+                (SELECT count(*) FROM devices d WHERE d.account_id = a.id) AS devices, a.kind
          FROM accounts a
          WHERE lower(coalesce(a.player_name, '')) LIKE $1 OR lower(coalesce(a.email, '')) LIKE $1
                OR a.id = $2

@@ -15,7 +15,7 @@
   <tr>
     <td><a href="/admin/users/{{ r.id }}">{{ r.id }}</a></td>
     <td>{% if r.name.is_empty() %}<span class="quiet">none</span>{% else %}{{ r.name }}{% endif %}</td>
-    <td>{{ r.email }}</td><td>{{ r.created }}</td><td>{{ r.devices }}</td>
+    <td>{% if r.service %}<span class="quiet">service account</span>{% else %}{{ r.email }}{% endif %}</td><td>{{ r.created }}</td><td>{{ r.devices }}</td>
     <td>{% if r.banned %}<strong>banned</strong>{% endif %}</td>
   </tr>
   {% endfor %}
