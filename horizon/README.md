@@ -44,9 +44,11 @@ The MAG adapter switches in `Server.Medius/Config/ServerSettings.cs` remain opt-
 | Retail skill catalog | `MAG_RETAIL_SKILL_CATALOG` |
 | Progression catalog | `MAG_PROGRESSION_CATALOG` |
 | Training-completion catalog | `MAG_TRAINING_COMPLETION_CATALOG` |
+| Optional starting level for new characters | `MAG_STARTING_LEVEL` |
+| Optional minimum level after completing Training | `MAG_TRAINING_LEVEL` |
 | Character store | `MagCharacterStorePath` |
 
-The prototype loader optionally reads `prototype-character-grants.json` beside the externally supplied loadout-defaults file. This file is not distributed here. The loaders in `Server.Medius/Medius/Mag*Catalog.cs` define the accepted schemas; no copied game catalog is needed to compile or run offline checks. Without the required runtime catalogs, content-dependent features cannot provide the corresponding items, grants, skills or progression. No replacement catalog is silently inserted. Deployment also needs the separately configured gameplay bridge and services appropriate to its selected feature set.
+The prototype loader optionally reads `prototype-character-grants.json` beside the externally supplied loadout-defaults file. This file is not distributed here. The loaders in `Server.Medius/Medius/Mag*Catalog.cs` define the accepted schemas; no copied game catalog is needed to compile or run offline checks. Without the required runtime catalogs, content-dependent features cannot provide the corresponding items, grants, skills or progression. No replacement catalog is silently inserted. `MAG_STARTING_LEVEL` starts new characters at that level, and `MAG_TRAINING_LEVEL` raises a character completing Training to at least that level after the Training XP bonus; both grant the level's XP threshold and every gained level's skill points, as if earned. `MAG_TRAINING_LEVEL` applies only to new Training completions (characters that completed Training earlier are unchanged) and never lowers a level or XP. Both require the progression catalog, `MAG_TRAINING_LEVEL` also the Training-completion catalog, and a level the catalogs define; otherwise startup fails naming the variable. Deployment also needs the separately configured gameplay bridge and services appropriate to its selected feature set.
 
 ## Keys and SCERT certificate templates
 

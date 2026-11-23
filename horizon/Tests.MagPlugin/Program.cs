@@ -57,6 +57,7 @@ Test("admin API signs requests like the portal vectors", AdminApiChecks.Vectors)
 Test("admin API authenticates requests and shares the mag-admin rules", AdminApiChecks.Run);
 Test("medius starts through Program.Main, not the admin CLI", MediusEntryPointChecks.Run);
 Test("operator starting level creates earned-equivalent characters", StartingLevelChecks.Run);
+Test("operator Training level raises new completions to an earned-equivalent minimum", TrainingLevelChecks.Run);
 Test("unsupported join requests name their rejection", JoinRejectionChecks.Run);
 Test("refused gameplay admission names its release reason", AdmissionFailureChecks.Run);
 Test("rejected gameplay release cannot hold admission forever", RejectedReleaseChecks.Run);

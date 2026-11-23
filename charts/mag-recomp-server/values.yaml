@@ -50,6 +50,13 @@ runtime:
   # as if they had earned it: the level's XP threshold and the skill points of
   # every gained level. Unset keeps the progression catalog's StartingLevel.
   startingLevel: null
+  # Optional minimum level reached on completing Training (MAG_TRAINING_LEVEL).
+  # After the Training XP bonus, a character below this level is raised to it as
+  # if earned (the level's XP threshold and every gained level's skill points);
+  # one at or above it keeps the bonus alone. Only new completions are affected,
+  # not characters that completed Training earlier. Requires the progression and
+  # Training-completion catalogs. Unset keeps the Training XP bonus alone.
+  trainingLevel: null
 accounts:
   existingClaim: ""
   size: 1Gi
