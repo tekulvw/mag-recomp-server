@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/tekulvw/mag-recomp-server/compare/portal-v0.2.0...portal-v0.3.0) (2026-11-23)
+
+
+### Features
+
+* **portal:** receive launcher performance and error reports ([#206](https://github.com/tekulvw/mag-recomp-server/issues/206)) ([781d262](https://github.com/tekulvw/mag-recomp-server/commit/781d262dbc734d6430f255f0c3138e59a65269ca))
+
 ## [0.2.0](https://github.com/tekulvw/mag-recomp-server/compare/portal-v0.1.0...portal-v0.2.0) (2026-11-23)
 
 

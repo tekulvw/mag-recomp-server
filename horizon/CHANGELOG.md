@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.6.0...medius-v0.7.0) (2026-11-23)
+
+
+### Features
+
+* **medius:** raise characters to an operator level on completing Training ([#205](https://github.com/tekulvw/mag-recomp-server/issues/205)) ([c6aa4bf](https://github.com/tekulvw/mag-recomp-server/commit/c6aa4bfbe93b7bbb64bbff7638bdd3a5a6b3d8d7))
+
 ## [0.6.0](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.5.0...medius-v0.6.0) (2026-11-23)
 
 
