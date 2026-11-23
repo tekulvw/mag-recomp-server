@@ -1214,3 +1214,29 @@ async fn fonts_and_page_policy(pool: PgPool) {
         );
     }
 }
+
+#[sqlx::test]
+async fn stylesheet_address_changes_with_its_content(pool: PgPool) {
+    let h = harness(pool).await;
+    let version = mag_portal::web::style_version();
+    let html = h.get("/", None).await.text().await.unwrap();
+    assert!(
+        html.contains(&format!("href=\"/style.css?v={version}\"")),
+        "{html}"
+    );
+    let r = h.get(&format!("/style.css?v={version}"), None).await;
+    assert_eq!(
+        r.headers()["cache-control"],
+        "public, max-age=31536000, immutable"
+    );
+    assert!(r.text().await.unwrap().contains("--accent"));
+    for stale in ["/style.css", "/style.css?v=old"] {
+        let r = h.get(stale, None).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(
+            r.headers()["cache-control"],
+            "public, max-age=300",
+            "{stale}"
+        );
+    }
+}

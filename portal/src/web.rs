@@ -399,13 +399,33 @@ async fn font(State(state): Shared, Path(name): Path<String>) -> Response {
     }
 }
 
-async fn stylesheet() -> Response {
+const STYLESHEET: &str = include_str!("../static/style.css");
+
+/// A short digest of the stylesheet. Pages link `/style.css?v=<this>`, so a new stylesheet has a
+/// new address that no browser or CDN (Cloudflare) has cached, and the old one can be cached long.
+pub fn style_version() -> &'static str {
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERSION.get_or_init(|| tokens::b64url(&tokens::sha256(STYLESHEET.as_bytes())[..9]))
+}
+
+#[derive(Deserialize)]
+struct StyleQuery {
+    v: Option<String>,
+}
+
+async fn stylesheet(Query(q): Query<StyleQuery>) -> Response {
+    // Only the current versioned address may be cached for good; anything else could be stale.
+    let cache = if q.v.as_deref() == Some(style_version()) {
+        "public, max-age=31536000, immutable"
+    } else {
+        "public, max-age=300"
+    };
     (
         [
             (header::CONTENT_TYPE, "text/css; charset=utf-8"),
-            (header::CACHE_CONTROL, "public, max-age=3600"),
+            (header::CACHE_CONTROL, cache),
         ],
-        include_str!("../static/style.css"),
+        STYLESHEET,
     )
         .into_response()
 }
