@@ -40,16 +40,23 @@ spec:
       app.kubernetes.io/component: medius
   policyTypes: [Ingress]
   ingress:
+    # Every port except the admin port stays open to all sources, whatever game ports the
+    # Service carries (including ports added outside this chart). Needs NetworkPolicy endPort
+    # support: Kubernetes 1.25 or later and a CNI that implements it.
+    {{- $port := int .port }}
+    - ports:
+        {{- range $protocol := list "TCP" "UDP" }}
+        {{- if gt $port 1 }}
+        - {protocol: {{ $protocol }}, port: 1, endPort: {{ sub $port 1 }}}
+        {{- end }}
+        {{- if lt $port 65535 }}
+        - {protocol: {{ $protocol }}, port: {{ add $port 1 }}, endPort: 65535}
+        {{- end }}
+        {{- end }}
     # The admin port admits only pods in the selected namespaces.
     - from:
         - namespaceSelector: {{ toYaml $selector | nindent 12 }}
       ports:
-        - {port: admin-api, protocol: TCP}
-    # Selecting these pods isolates them for ingress, so keep every game and lobby port open as before.
-    - ports:
-        {{- range $name := list "auth" "lobby" "proxy" "game-tcp" "maps-auth" "maps-lobby" "maps-proxy" }}
-        - {port: {{ $name }}, protocol: TCP}
-        {{- end }}
-        - {port: game-udp, protocol: UDP}
+        - {protocol: TCP, port: {{ $port }}}
 {{- end }}
 {{- end }}

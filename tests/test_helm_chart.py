@@ -139,6 +139,36 @@ class ChartTests(unittest.TestCase):
                         {'mode': 'required', 'audience': 'play.example.test', 'keys': {'1': key}, 'extra': True}):
             render({'portalTickets': invalid}, ok=False)
 
+    @staticmethod
+    def policy_allows(policy, port, protocol, namespace):
+        """Whether an ingress rule admits port/protocol; namespace 'mag-portal' matches the CI-style selector."""
+        for rule in policy['spec']['ingress']:
+            sources = rule.get('from')
+            if sources is not None and not any(
+                    s.get('namespaceSelector', {}).get('matchLabels', {}).get('kubernetes.io/metadata.name') == namespace
+                    for s in sources):
+                continue
+            for entry in rule['ports']:
+                if entry.get('protocol', 'TCP') == protocol and entry['port'] <= port <= entry.get('endPort', entry['port']):
+                    return True
+        return False
+
+    def assert_admin_policy(self, policy, admin_port, selector):
+        open_rules = [r for r in policy['spec']['ingress'] if 'from' not in r]
+        admin_rules = [r for r in policy['spec']['ingress'] if 'from' in r]
+        self.assertEqual(len(open_rules), 1)
+        self.assertEqual(admin_rules, [{'from': [{'namespaceSelector': selector}], 'ports': [{'protocol': 'TCP', 'port': admin_port}]}])
+        for entry in open_rules[0]['ports']:
+            self.assertIn(entry['protocol'], ('TCP', 'UDP'))
+            self.assertLessEqual(entry['port'], entry['endPort'])
+            self.assertFalse(entry['port'] <= admin_port <= entry['endPort'], 'admin port must not be open to every source')
+        for protocol in ('TCP', 'UDP'):
+            for number in (1, admin_port - 1, admin_port + 1, 65535, 10476):
+                if 1 <= number <= 65535 and number != admin_port:
+                    self.assertTrue(self.policy_allows(policy, number, protocol, 'elsewhere'), (number, protocol))
+        self.assertFalse(self.policy_allows(policy, admin_port, 'TCP', 'elsewhere'))
+        self.assertTrue(self.policy_allows(policy, admin_port, 'TCP', 'mag-portal'))
+
     def test_optional_admin_api(self):
         def medius(docs):
             deployment = next(d for d in docs if d['kind'] == 'Deployment' and d['metadata']['name'].endswith('-medius'))
@@ -180,14 +210,16 @@ class ChartTests(unittest.TestCase):
         policy = next(d for d in docs if d['kind'] == 'NetworkPolicy')
         self.assertEqual(policy['spec']['podSelector']['matchLabels']['app.kubernetes.io/component'], 'medius')
         self.assertEqual(policy['spec']['policyTypes'], ['Ingress'])
-        admin, game = policy['spec']['ingress']
-        self.assertEqual(admin['from'], [{'namespaceSelector': selector}])
-        self.assertEqual(admin['ports'], [{'port': 'admin-api', 'protocol': 'TCP'}])
-        self.assertNotIn('from', game, 'game and lobby ports stay open to every client')
-        open_ports = {p['port'] for p in game['ports']}
-        self.assertNotIn('admin-api', open_ports)
-        declared = {p['name'] for c in containers.values() for p in c['ports']} - {'admin-api'}
-        self.assertEqual(open_ports, declared)
+        self.assert_admin_policy(policy, 10490, selector)
+        # Ports outside the chart (for example extra UDP game ports added by kustomize) stay open too.
+        self.assertTrue(self.policy_allows(policy, 10476, 'UDP', 'game-namespace'))
+        declared = [(p['containerPort'], p['protocol']) for c in containers.values() for p in c['ports'] if p['name'] != 'admin-api']
+        self.assertTrue(declared)
+        for number, protocol in declared:
+            self.assertTrue(self.policy_allows(policy, number, protocol, 'game-namespace'), (number, protocol))
+        for edge in (1024, 1025, 65534, 65535):
+            edge_docs = render({'adminApi': {**enabled, 'port': edge}})
+            self.assert_admin_policy(next(d for d in edge_docs if d['kind'] == 'NetworkPolicy'), edge, selector)
 
         custom = render({'adminApi': {**enabled, 'port': 18080, 'secretKey': 'token',
                                       'allowedNamespaceSelector': {'matchExpressions': [{'key': 'team', 'operator': 'In', 'values': ['portal']}]}}})
