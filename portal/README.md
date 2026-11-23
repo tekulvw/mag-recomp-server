@@ -23,7 +23,7 @@ cargo test --locked
 ```
 
 `docker build --target check portal` runs the same checks with its own PostgreSQL inside the
-build, as CI does. `docker build portal` builds the image, which runs `mag-portal serve` by default,
+build; CI runs them natively with a cached dependency build. `docker build portal` builds the image, which runs `mag-portal serve` by default,
 listening on port 8080 as UID 10001. The build downloads the web fonts listed in `fonts.txt`
 (Chakra Petch, Inter and JetBrains Mono, all SIL Open Font License 1.1) and checks each against its
 SHA-256; their licenses go to `/usr/share/licenses/mag-recomp-server/fonts/`.

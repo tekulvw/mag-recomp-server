@@ -70,8 +70,31 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
-      - name: Format, lint and test the portal against a throwaway PostgreSQL
-        run: docker build --target check portal
+      # Natively, with the dependency build cached between runs: the Docker check stage compiled
+      # every dependency three times from scratch and exported a multi-GB image nothing used.
+      - uses: ./.github/actions/self-hosted-linux
+        with:
+          rust: 'true'
+          packages: postgresql
+      - run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: portal -> target
+      - name: Start a throwaway PostgreSQL
+        run: |
+          pg="$(ls -d /usr/lib/postgresql/*/bin | sort -V | tail -n1)"
+          data="$RUNNER_TEMP/portal-pg"
+          start="'$pg/initdb' -D '$data' -U portal --auth=trust >/dev/null && '$pg/pg_ctl' -D '$data' -w -l '$RUNNER_TEMP/portal-pg.log' -o '-k $RUNNER_TEMP -c listen_addresses=127.0.0.1 -p 55432' start"
+          if [ "$(id -u)" = 0 ]; then
+            # initdb refuses to run as root.
+            mkdir -p "$data" && chown postgres "$data" "$RUNNER_TEMP" && su postgres -c "$start"
+          else
+            sh -c "$start"
+          fi
+          echo "DATABASE_URL=postgres://portal@127.0.0.1:55432/postgres" >> "$GITHUB_ENV"
+      - run: cargo +1.99.0 fmt --manifest-path portal/Cargo.toml --all -- --check
+      - run: cargo +1.99.0 clippy --locked --manifest-path portal/Cargo.toml --all-targets -- -D warnings
+      - run: cargo +1.99.0 test --locked --manifest-path portal/Cargo.toml
   chart:
     runs-on: mag-recomp-server
     steps:
