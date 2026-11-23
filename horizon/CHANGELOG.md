@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.5.0...medius-v0.6.0) (2026-11-23)
+
+
+### Features
+
+* **medius:** add an internal admin API for character maintenance ([#202](https://github.com/tekulvw/mag-recomp-server/issues/202)) ([ef28e6f](https://github.com/tekulvw/mag-recomp-server/commit/ef28e6ff096985d9057bf10b4b4d420448312579))
+
 ## [0.5.0](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.4.0...medius-v0.5.0) (2026-11-23)
 
 
