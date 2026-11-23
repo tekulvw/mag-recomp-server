@@ -118,6 +118,20 @@ portalTickets:
   # Key ID (0-255) to base64 DER SubjectPublicKeyInfo, as served by the portal's
   # GET /api/v1/ticket-keys. Public keys, not secrets. Keep the old key while rotating.
   keys: {}
+# Optional internal admin API for character maintenance (docs/admin-cli.md, "Admin API"),
+# served by the main medius container only. It is cluster-internal: a ClusterIP Service and a
+# NetworkPolicy admit only pods in allowedNamespaceSelector namespaces. Never route it through a
+# Gateway, Ingress or LoadBalancer.
+adminApi:
+  enabled: false
+  port: 10490
+  # Existing Secret with the shared HMAC secret (at least 32 bytes) under secretKey; the
+  # calling portal must use the same value. Never put the secret in Helm values.
+  existingSecret: ""
+  secretKey: admin-api-secret
+  # Required when enabled: namespaces whose pods may call the API, for example
+  # {matchLabels: {kubernetes.io/metadata.name: mag-portal}}.
+  allowedNamespaceSelector: {}
 logs:
   sizeLimit: 2Gi
   # Optional gameplay event-log and tick-telemetry rotation (gameplay images that

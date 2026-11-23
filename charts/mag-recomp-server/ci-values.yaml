@@ -10,3 +10,10 @@ portalTickets:
   audience: auth.example.invalid
   keys:
     "1": MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEXvgof3Vza4+kYlYDHvNkzoWnOiYVUPKfTwLOxfsFFv2tfRNAngFLgL48OzLv2VMJ+iYgvwndYncrd9TFMMLxrw==
+# Renders the optional admin API Service, NetworkPolicy and environment; the Secret is not created.
+adminApi:
+  enabled: true
+  existingSecret: mag-admin-api
+  allowedNamespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: mag-portal

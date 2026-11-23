@@ -52,6 +52,9 @@ Test("pending human queue ownership and cancellation", PendingHumanQueueChecks.R
 Test("independent terminal cohort transport and requeue", LeadershipProgressionChecks.IndependentMatchCohortAdmission);
 Test("faction cohort formation while previous results are connected", LeadershipProgressionChecks.IndependentFactionCohortFormation);
 Test("mag-admin raises levels safely and honours live logins", AdminCliChecks.Run);
+Test("admin API is off by default and validates its configuration", AdminApiChecks.Settings);
+Test("admin API signs requests like the portal vectors", AdminApiChecks.Vectors);
+Test("admin API authenticates requests and shares the mag-admin rules", AdminApiChecks.Run);
 Test("medius starts through Program.Main, not the admin CLI", MediusEntryPointChecks.Run);
 Test("operator starting level creates earned-equivalent characters", StartingLevelChecks.Run);
 Test("unsupported join requests name their rejection", JoinRejectionChecks.Run);

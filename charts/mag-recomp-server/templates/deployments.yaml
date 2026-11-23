@@ -135,6 +135,10 @@ spec:
             - {name: MAG_PORTAL_TICKET_AUDIENCE, value: {{ $portal.audience | quote }}}
             - {name: MAG_PORTAL_TICKET_KEYS, value: {{ join "," $keys | quote }}}
             {{- end }}
+            {{- if and $main $root.Values.adminApi.enabled }}
+            - {name: MAG_ADMIN_API_LISTEN, value: {{ printf "0.0.0.0:%d" (int $root.Values.adminApi.port) | quote }}}
+            - {name: MAG_ADMIN_API_SECRET_FILE, value: /admin-api/secret}
+            {{- end }}
           ports:
             {{- if $main }}
             - {name: auth, containerPort: 10475, protocol: TCP}
@@ -142,6 +146,9 @@ spec:
             - {name: proxy, containerPort: 10477, protocol: TCP}
             - {name: game-tcp, containerPort: 10073, protocol: TCP}
             - {name: game-udp, containerPort: 10474, protocol: UDP}
+            {{- if $root.Values.adminApi.enabled }}
+            - {name: admin-api, containerPort: {{ int $root.Values.adminApi.port }}, protocol: TCP}
+            {{- end }}
             {{- else }}
             - {name: maps-auth, containerPort: 10471, protocol: TCP}
             - {name: maps-lobby, containerPort: 10472, protocol: TCP}
@@ -164,6 +171,9 @@ spec:
             - {name: runtime-secrets, mountPath: /runtime-secrets, readOnly: true}
             - {name: logs, mountPath: /logs}
             - {name: tmp, mountPath: /tmp}
+            {{- if and $main $root.Values.adminApi.enabled }}
+            - {name: admin-api-secret, mountPath: /admin-api, readOnly: true}
+            {{- end }}
         {{- end }}
         {{- else }}
         - name: gameplay
@@ -239,5 +249,13 @@ spec:
           secret:
             secretName: {{ $.Values.runtime.existingSecret }}
             defaultMode: 0440
+        {{- if $.Values.adminApi.enabled }}
+        - name: admin-api-secret
+          secret:
+            secretName: {{ $.Values.adminApi.existingSecret }}
+            items:
+              - {key: {{ $.Values.adminApi.secretKey | quote }}, path: secret}
+            defaultMode: 0440
+        {{- end }}
         {{- end }}
 {{- end }}

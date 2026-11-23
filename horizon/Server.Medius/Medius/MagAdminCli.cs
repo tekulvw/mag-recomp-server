@@ -61,8 +61,8 @@ a level is refused. Applied changes first copy the store to .maintenance-backups
                 Console.Error.WriteLine("mag-admin: configuration failed: " + e.Message);
                 return 2;
             }
-            string backups = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(storePath)), ".maintenance-backups");
-            string markers = Environment.GetEnvironmentVariable("MAG_ACTIVE_ACCOUNTS_DIR") ?? "/tmp";
+            string backups = MagAdminOperations.BackupDirectory(storePath);
+            string markers = MagAdminOperations.MarkerDirectory();
             return Run(rest.ToArray(), store, backups, markers, DateTime.UtcNow, Console.Out, Console.Error);
         }
 
@@ -95,61 +95,44 @@ a level is refused. Applied changes first copy the store to .maintenance-backups
             }
         }
 
-        private static string Online(IReadOnlyDictionary<string, DateTime> active, string account) =>
-            active == null ? "unknown" : active.ContainsKey(account) ? "online" : "offline";
-
         private static int List(LocalCharacterStore store, string markerDirectory, DateTime now, TextWriter output)
         {
-            var active = MagActiveAccounts.Read(markerDirectory, now);
             output.WriteLine($"{"ACCOUNT",-20} {"ID",4} {"NAME",-20} {"FACTION",7} {"LEVEL",5} {"XP",7} {"SKILLPTS",8}  SESSION");
-            foreach (var c in store.ReadAll().OrderBy(c => c.Id))
-            {
-                var r = c.ToRecord();
-                output.WriteLine($"{c.Account,-20} {c.Id,4} {c.Name,-20} {c.Faction,7} {r.Level,5} {r.Experience,7} {r.SkillPoints,8}  {Online(active, c.Account)}");
-            }
+            foreach (var c in MagAdminOperations.ListAccounts(store, markerDirectory, now))
+                output.WriteLine($"{c.Account,-20} {c.CharacterId,4} {c.Name,-20} {c.Faction,7} {c.Level,5} {c.Experience,7} {c.SkillPoints,8}  {c.Session}");
             return 0;
         }
 
         private static int Show(LocalCharacterStore store, string account, string markerDirectory, DateTime now, TextWriter output, TextWriter error)
         {
-            var c = store.ReadAll().SingleOrDefault(x => x.Account == account);
+            var c = MagAdminOperations.Show(store, account, markerDirectory, now);
             if (c == null) { error.WriteLine($"mag-admin: account {account} has no character"); return 1; }
-            var r = c.ToRecord();
-            var catalog = store.ProgressionCatalog;
             output.WriteLine($"account:      {c.Account}");
-            output.WriteLine($"character:    {c.Id} {c.Name} (faction {c.Faction})");
-            output.WriteLine($"level:        {r.Level}");
-            output.WriteLine($"experience:   {r.Experience}");
-            output.WriteLine($"skill points: {r.SkillPoints}");
-            if (catalog != null)
-                output.WriteLine(r.Level < catalog.MaximumLevel
-                    ? $"next level:   {r.Level + 1} at {catalog.ThresholdForLevel((byte)(r.Level + 1))} XP"
+            output.WriteLine($"character:    {c.CharacterId} {c.Name} (faction {c.Faction})");
+            output.WriteLine($"level:        {c.Level}");
+            output.WriteLine($"experience:   {c.Experience}");
+            output.WriteLine($"skill points: {c.SkillPoints}");
+            if (c.HasProgressionCatalog)
+                output.WriteLine(c.NextLevel != null
+                    ? $"next level:   {c.NextLevel} at {c.NextLevelExperience} XP"
                     : "next level:   maximum level reached");
-            output.WriteLine($"session:      {Online(MagActiveAccounts.Read(markerDirectory, now), c.Account)}");
+            output.WriteLine($"session:      {c.Session}");
             return 0;
         }
 
         private static int SetLevel(LocalCharacterStore store, string account, byte level, bool apply, string backupDirectory,
             string markerDirectory, DateTime now, TextWriter output, TextWriter error)
         {
-            var active = MagActiveAccounts.Read(markerDirectory, now);
-            if (apply && active == null)
+            var result = MagAdminOperations.SetLevel(store, account, level, apply, backupDirectory, markerDirectory, now);
+            // The CLI keeps reporting an unchanged level as a successful no-op.
+            if (result.Refusal != MagAdminRefusal.None && result.Refusal != MagAdminRefusal.SameLevel)
             {
-                error.WriteLine($"mag-admin: refused: no session marker in {markerDirectory}; cannot confirm {account} is logged out");
+                error.WriteLine($"mag-admin: refused: {result.Message}");
                 return 1;
             }
-            if (active != null && active.TryGetValue(account, out var until))
-            {
-                if (apply)
-                {
-                    error.WriteLine($"mag-admin: refused: {account} has a live login (lease until {until:O}); log it out and retry");
-                    return 1;
-                }
-                output.WriteLine($"warning: {account} is logged in; --apply will be refused until it logs out");
-            }
-            var change = store.RaiseLevelForAdmin(account, level, apply, backupDirectory);
-            if (change.Refusal) { error.WriteLine($"mag-admin: refused: {change.Reason}"); return 1; }
-            string verb = change.Applied ? "applied" : change.Reason == "unchanged" ? "unchanged" : "dry run (add --apply to write)";
+            if (result.OnlineWarning) output.WriteLine($"warning: {account} is logged in; --apply will be refused until it logs out");
+            var change = result.Change;
+            string verb = change.Applied ? "applied" : result.Refusal == MagAdminRefusal.SameLevel ? "unchanged" : "dry run (add --apply to write)";
             output.WriteLine($"{verb}: {change.Account} ({change.CharacterId} {change.Name})");
             output.WriteLine($"  level        {change.PreviousLevel} -> {change.Level}");
             output.WriteLine($"  experience   {change.PreviousExperience} -> {change.Experience}");

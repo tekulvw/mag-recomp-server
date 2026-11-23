@@ -257,6 +257,21 @@ namespace Server.Medius
             MagLoginTickets.PublishActiveAccountsTo(Path.Combine(directory, MagActiveAccounts.FilePrefix + role + ".json"), DateTime.UtcNow);
         }
 
+        /// <summary>Internal admin API (docs/admin-cli.md); off unless both MAG_ADMIN_API_* variables are set.</summary>
+        public static MagAdminApi AdminApi { get; private set; }
+
+        static void StartAdminApi()
+        {
+            var settings = MagAdminApiSettings.FromEnvironment();
+            if (settings == null) return;
+            MagAdminApiSettings.RequireMainRole(Settings);
+            string storePath = Settings.MagCharacterStorePath;
+            AdminApi = new MagAdminApi(settings.Listen, settings.Secret, CreateCharacterStore(),
+                MagAdminOperations.BackupDirectory(storePath), MagAdminOperations.MarkerDirectory(), () => DateTime.UtcNow, message => Logger.Info(message));
+            AdminApi.Start();
+            Logger.Info($"Admin API listening on {AdminApi.LocalEndPoint}.");
+        }
+
         static async Task StartServerAsync()
         {
             int waitMs = sleepMS;
@@ -265,6 +280,7 @@ namespace Server.Medius
             if (PortalTickets != null)
                 Logger.Info($"Portal tickets required: audience={PortalTickets.Settings.Audience} keys={string.Join(",", PortalTickets.Settings.Keys.Keys.OrderBy(id => id))}");
             PublishActiveAccounts();
+            StartAdminApi();
 
             string registryPath=Environment.GetEnvironmentVariable("MAG_WORLD_REGISTRY");
             if (registryPath!=null && Environment.GetEnvironmentVariable("MAG_LOCAL_DME")!="1")

@@ -139,6 +139,82 @@ class ChartTests(unittest.TestCase):
                         {'mode': 'required', 'audience': 'play.example.test', 'keys': {'1': key}, 'extra': True}):
             render({'portalTickets': invalid}, ok=False)
 
+    def test_optional_admin_api(self):
+        def medius(docs):
+            deployment = next(d for d in docs if d['kind'] == 'Deployment' and d['metadata']['name'].endswith('-medius'))
+            spec = deployment['spec']['template']['spec']
+            return {c['name']: c for c in spec['containers']}, spec['volumes']
+        names = ('MAG_ADMIN_API_LISTEN', 'MAG_ADMIN_API_SECRET_FILE')
+        docs = render()
+        containers, volumes = medius(docs)
+        for container in containers.values():
+            self.assertTrue(all(e['name'] not in names for e in container['env']))
+            self.assertNotIn('admin-api', [p['name'] for p in container['ports']])
+        self.assertNotIn('admin-api-secret', [v['name'] for v in volumes])
+        self.assertFalse(any(d['kind'] == 'NetworkPolicy' or d['metadata']['name'].endswith('-admin-api') for d in docs))
+
+        selector = {'matchLabels': {'kubernetes.io/metadata.name': 'mag-portal'}}
+        enabled = {'enabled': True, 'existingSecret': 'mag-admin-api', 'allowedNamespaceSelector': selector}
+        docs = render({'adminApi': enabled})
+        containers, volumes = medius(docs)
+        main, maps = containers['medius'], containers['maps']
+        env = {e['name']: e.get('value') for e in main['env']}
+        self.assertEqual(env['MAG_ADMIN_API_LISTEN'], '0.0.0.0:10490')
+        self.assertEqual(env['MAG_ADMIN_API_SECRET_FILE'], '/admin-api/secret')
+        self.assertIn({'name': 'admin-api', 'containerPort': 10490, 'protocol': 'TCP'}, main['ports'])
+        self.assertIn({'name': 'admin-api-secret', 'mountPath': '/admin-api', 'readOnly': True}, main['volumeMounts'])
+        self.assertTrue(all(e['name'] not in names for e in maps['env']), 'the admin API must never run in MAPS')
+        self.assertNotIn('admin-api', [p['name'] for p in maps['ports']])
+        self.assertNotIn('admin-api-secret', [m['name'] for m in maps['volumeMounts']])
+        secret = next(v for v in volumes if v['name'] == 'admin-api-secret')['secret']
+        self.assertEqual(secret['secretName'], 'mag-admin-api')
+        self.assertEqual(secret['items'], [{'key': 'admin-api-secret', 'path': 'secret'}])
+        self.assertFalse(any(d['kind'] == 'Secret' for d in docs))
+
+        service = next(d for d in docs if d['kind'] == 'Service' and d['metadata']['name'] == 'test-mag-recomp-server-admin-api')
+        self.assertEqual(service['spec']['type'], 'ClusterIP')
+        self.assertEqual(service['spec']['selector']['app.kubernetes.io/component'], 'medius')
+        self.assertEqual(service['spec']['ports'], [{'name': 'admin-api', 'port': 10490, 'targetPort': 'admin-api', 'protocol': 'TCP'}])
+        external = next(d for d in docs if d['kind'] == 'Service' and d['spec']['type'] == 'LoadBalancer')
+        self.assertNotIn(10490, [p['port'] for p in external['spec']['ports']])
+        policy = next(d for d in docs if d['kind'] == 'NetworkPolicy')
+        self.assertEqual(policy['spec']['podSelector']['matchLabels']['app.kubernetes.io/component'], 'medius')
+        self.assertEqual(policy['spec']['policyTypes'], ['Ingress'])
+        admin, game = policy['spec']['ingress']
+        self.assertEqual(admin['from'], [{'namespaceSelector': selector}])
+        self.assertEqual(admin['ports'], [{'port': 'admin-api', 'protocol': 'TCP'}])
+        self.assertNotIn('from', game, 'game and lobby ports stay open to every client')
+        open_ports = {p['port'] for p in game['ports']}
+        self.assertNotIn('admin-api', open_ports)
+        declared = {p['name'] for c in containers.values() for p in c['ports']} - {'admin-api'}
+        self.assertEqual(open_ports, declared)
+
+        custom = render({'adminApi': {**enabled, 'port': 18080, 'secretKey': 'token',
+                                      'allowedNamespaceSelector': {'matchExpressions': [{'key': 'team', 'operator': 'In', 'values': ['portal']}]}}})
+        containers, volumes = medius(custom)
+        self.assertEqual({e['name']: e.get('value') for e in containers['medius']['env']}['MAG_ADMIN_API_LISTEN'], '0.0.0.0:18080')
+        self.assertEqual(next(v for v in volumes if v['name'] == 'admin-api-secret')['secret']['items'][0]['key'], 'token')
+
+        for invalid in ({'enabled': True, 'existingSecret': 'mag-admin-api'},
+                        {**enabled, 'allowedNamespaceSelector': {}},
+                        {**enabled, 'allowedNamespaceSelector': {'matchLabels': {}}},
+                        {**enabled, 'existingSecret': ''},
+                        {**enabled, 'port': 10475},
+                        {**enabled, 'port': 80},
+                        {**enabled, 'secret': 'never-inline'}):
+            with self.subTest(invalid=invalid):
+                render({'adminApi': invalid}, ok=False)
+        # The template refuses an incomplete configuration even without the schema.
+        for invalid, message in (({**enabled, 'allowedNamespaceSelector': {}}, 'allowedNamespaceSelector'),
+                                 ({**enabled, 'existingSecret': ''}, 'existingSecret')):
+            values = {**BASE, 'adminApi': invalid}
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.json') as f:
+                json.dump(values, f); f.flush()
+                result = subprocess.run([HELM, 'template', 'test', str(CHART), '-f', f.name, '--skip-schema-validation'],
+                                        capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(message, result.stderr)
+
     def test_optional_starting_level(self):
         def medius_env(docs):
             return [{e['name']: e.get('value') for e in c.get('env', [])}
