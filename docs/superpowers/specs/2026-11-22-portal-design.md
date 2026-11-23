@@ -48,7 +48,7 @@ Medius never calls the portal during login, so login keeps working while the web
 
 - Goals: the three above; Google as the only identity provider at first; minimal personal
   data (Google subject ID, email for contact and operator lookup).
-- Non-goals: a web admin UI (CLI first), more identity providers yet (the identity table
+- Non-goals: more identity providers yet (the identity table
   keeps a provider column so Discord etc. can follow), name changes, account merging.
 - Anti-goals: shipping Google tokens to the game or Medius; Medius depending on the website
   being up; a freed name silently inheriting someone else's characters.
@@ -70,7 +70,7 @@ Medius never calls the portal during login, so login keeps working while the web
 | Ticket | Custom binary, ECDSA P-256 / SHA-256, r‖s signature, key ID for rotation, 10-minute default lifetime, 128-bit nonce | Small enough for the game's ticket slot; .NET verifies P1363 signatures natively. |
 | Bans | Portal refuses tickets to banned accounts; Medius-side ban list in phase 3 | Short ticket lifetime bounds the window. |
 | Sessions | Server-side, `__Host-` cookie, HttpOnly, Secure, SameSite=Lax, CSRF token on every form | Standard. |
-| Admin | `mag-portal admin …` subcommands against the database, run with `kubectl exec` | Same pattern as `mag-admin`. |
+| Admin | `/admin` panel for staff (owner from `PORTAL_OWNER_EMAILS`, admins and moderators granted by email, strict rank order, audit log), plus `mag-portal admin …` subcommands | The owner asked for a users panel to add admins and moderators; the CLI stays for bootstrap and scripts. |
 
 ## Security notes
 

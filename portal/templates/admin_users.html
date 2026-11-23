@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Users{% endblock %}
+{% block content %}
+{% include "admin_nav.html" %}
+<h1>Users</h1>
+<form method="get" action="/admin/users" class="row">
+  <input name="q" value="{{ q }}" placeholder="Name, email or account number" maxlength="100">
+  <button>Search</button>
+</form>
+{% if rows.is_empty() %}<p>No accounts match.</p>{% else %}
+<table>
+  <thead><tr><th>#</th><th>Name</th><th>Email</th><th>Joined</th><th>Launchers</th><th></th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+  <tr>
+    <td><a href="/admin/users/{{ r.id }}">{{ r.id }}</a></td>
+    <td>{% if r.name.is_empty() %}<span class="quiet">none</span>{% else %}{{ r.name }}{% endif %}</td>
+    <td>{{ r.email }}</td><td>{{ r.created }}</td><td>{{ r.devices }}</td>
+    <td>{% if r.banned %}<strong>banned</strong>{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+<p class="row">
+  {% if page > 0 %}<a href="/admin/users?q={{ q|urlencode }}&page={{ page - 1 }}">Previous</a>{% endif %}
+  {% if has_next %}<a href="/admin/users?q={{ q|urlencode }}&page={{ page + 1 }}">Next</a>{% endif %}
+</p>
+{% endblock %}

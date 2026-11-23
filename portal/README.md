@@ -55,6 +55,7 @@ holds ticket test vectors for other verifiers; regenerate them with
 | `PORTAL_TICKET_AUDIENCE` | yes | The game server's host name, such as `play.magtest.online`. Tickets are valid only there. |
 | `PORTAL_TICKET_KEY_ID` | no | Key ID written into tickets (default 1). Change it when rotating keys. |
 | `PORTAL_TICKET_LIFETIME_SECONDS` | no | Ticket lifetime, 60 to 3600 (default 600). |
+| `PORTAL_OWNER_EMAILS` | no | Comma-separated Google emails with the owner role in the admin panel. Owners cannot be changed from the site. |
 | `PORTAL_CLIENT_IP_HEADER` | no | Header the trusted proxy appends the client address to (`x-forwarded-for`); the last entry is used. Without it, rate limits use the connecting address, which behind a proxy is the proxy. |
 | `PORTAL_OPERATOR_CONTACT` | no | Contact text shown on the privacy page. |
 | `PORTAL_LISTEN` | no | Listen address (default `0.0.0.0:8080`). Serve it behind a TLS-terminating proxy. |
@@ -100,6 +101,20 @@ Show `user_code` and `verification_uri` (or open `verification_uri_complete` in 
 `403 banned` (with `reason`) and `409 no_player_name` are shown to the player.
 
 **Verifying keys** — `GET /api/v1/ticket-keys` returns `{"keys":[{"id":1,"alg":"ES256","spki":"<base64 DER>"}]}`.
+
+## Admin panel
+
+Staff use `https://<site>/admin`; everyone else gets 404 there. Roles follow the verified Google
+email someone signs in with, so a role can be granted before the first sign-in.
+
+| Role | Can |
+| --- | --- |
+| Owner (`PORTAL_OWNER_EMAILS`) | Everything below, and grant or remove admins. |
+| Admin | Grant or remove moderators; reserve, release and assign names; delete accounts; everything a moderator can. |
+| Moderator | Search and view accounts; ban and unban; unlink launchers. |
+
+Staff act only on accounts and roles ranked below their own: nobody can change a peer, a
+superior or themselves. Every change goes to an audit log shown on the admin overview.
 
 ## Operator commands
 

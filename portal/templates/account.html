@@ -2,6 +2,7 @@
 {% block title %}Your account{% endblock %}
 {% block content %}
 <h1>Your account</h1>
+{% if let Some(r) = staff_role %}<p>You are a site {{ r }}. <a class="button" href="/admin">Admin panel</a></p>{% endif %}
 {% if banned %}
 <p class="alert">This account is banned{% if let Some(reason) = ban_reason %}: {{ reason }}{% endif %}. It cannot sign in to the game server.</p>
 {% endif %}
