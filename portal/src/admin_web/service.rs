@@ -296,6 +296,9 @@ async fn delete(
             Some((LIST, "Back")),
         ));
     }
+    if let Some(reports) = &state.reports {
+        crate::reports::delete_account_logs(&state.pool, reports.store.as_ref(), id).await;
+    }
     db::delete_account(&state.pool, id).await?;
     staff::log(
         &state.pool,

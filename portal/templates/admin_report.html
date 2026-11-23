@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Report{% endblock %}
+{% block content %}
+{% include "admin_nav.html" %}
+<h1>Report</h1>
+<dl>
+  <dt>Report</dt><dd><code>{{ id }}</code></dd>
+  <dt>Received</dt><dd>{{ received }}</dd>
+  <dt>Account</dt><dd><a href="/admin/users/{{ account_id }}">{% if player.is_empty() %}account {{ account_id }}{% else %}{{ player }}{% endif %}</a> ({{ account_kind }})</dd>
+  <dt>Trigger</dt><dd>{{ trigger }}</dd>
+  <dt>Platform</dt><dd>{{ platform }}</dd>
+  <dt>Version</dt><dd>{{ version }}</dd>
+  <dt>Logs</dt><dd>{% if log_names.is_empty() %}none{% else %}{{ log_names.len() }} ({{ log_bytes }} bytes compressed){% endif %}</dd>
+</dl>
+{% if !log_names.is_empty() %}
+<h2>Logs</h2>
+<table>
+  <thead><tr><th>Name</th><th></th></tr></thead>
+  <tbody>
+  {% for n in log_names %}
+  <tr><td><code>{{ n }}</code></td><td>{% if is_admin %}<form method="post" action="/admin/reports/{{ id }}/logs/{{ n }}"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="link">Download</button></form>{% else %}<span class="quiet">admins only</span>{% endif %}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+<h2>Metrics</h2>
+{% if let Some(m) = metrics %}<pre class="json">{{ m }}</pre>{% else %}<p class="quiet">None sent.</p>{% endif %}
+<h2>Session</h2>
+{% if let Some(s) = session %}<pre class="json">{{ s }}</pre>{% else %}<p class="quiet">None sent.</p>{% endif %}
+<h2>Client</h2>
+<pre class="json">{{ client }}</pre>
+<p><a href="/admin/reports">All reports</a></p>
+{% endblock %}

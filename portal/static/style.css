@@ -115,6 +115,8 @@ table { width: 100%; border-collapse: collapse; font-size: 15px; }
 th { font: 12px var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line-strong); }
 td { padding: 10px 12px; border-bottom: 1px solid var(--line); color: var(--body); }
 td form { margin: 0; }
+.table-scroll { overflow-x: auto; }
+pre.json { margin: 0; padding: 16px; overflow-x: auto; max-height: 32rem; background: var(--panel); border: 1px solid var(--line); font: 13px/1.5 var(--mono); color: var(--fg); white-space: pre; }
 
 /* Link code */
 .code { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin: 0 0 20px; font: 600 36px var(--mono); letter-spacing: 0.16em; color: var(--fg); }

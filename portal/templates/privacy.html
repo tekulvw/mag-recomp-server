@@ -12,9 +12,11 @@
   <li>A sign-in cookie, for as long as you stay signed in (at most 30 days).</li>
 </ul>
 <p>We do not ask Google for your name, contacts or anything else, and we do not share your data or use it for advertising.</p>
+<h2>Performance and error reports</h2>
+<p>The MAG launcher sends a report when the game crashes, fails to start, stops, runs slowly or has audio trouble. A report holds the launcher and game version, your operating system and hardware details, frame-time and audio timing figures, and the launcher's and game's logs. It is tied to your account so staff can follow up, but we do not keep your IP address with it. Reports are kept for {{ report_days }} days, are visible only to site staff, and are used only to fix problems. Turn them off in MAG Settings.</p>
 <h2>The game server</h2>
 <p>When you play, the game server learns your account number and player name and keeps your characters and match records.</p>
 <h2>Deleting your account</h2>
-<p>Delete your account from your account page at any time (a banned account is deleted by the operator on request). That removes everything above except your player name, which stays reserved so nobody else can take over its characters.</p>
+<p>Delete your account from your account page at any time (a banned account is deleted by the operator on request). That removes everything above, including your reports, except your player name, which stays reserved so nobody else can take over its characters.</p>
 {% if let Some(c) = contact %}<h2>Contact</h2><p>{{ c }}</p>{% endif %}
 {% endblock %}

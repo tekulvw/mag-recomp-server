@@ -11,7 +11,8 @@ use sqlx::postgres::PgPoolOptions;
 use mag_portal::config::{self, Settings, TicketIssuer};
 use mag_portal::game_admin::GameAdmin;
 use mag_portal::oidc::{self, OidcClient, ProviderConfig};
-use mag_portal::{admin, db, web};
+use mag_portal::report_store::StoreArgs;
+use mag_portal::{admin, db, reports, web};
 
 #[derive(Parser)]
 #[command(
@@ -45,9 +46,18 @@ enum Command {
     Admin {
         #[command(flatten)]
         database: DatabaseArgs,
+        /// The report store, for `reports log` and `reports delete`.
+        #[command(flatten)]
+        store: Box<StoreArgs>,
         #[command(subcommand)]
         command: admin::AdminCommand,
     },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Switch {
+    On,
+    Off,
 }
 
 #[derive(Args)]
@@ -100,6 +110,15 @@ struct ServeArgs {
     ticket_extra_audiences: String,
     #[arg(long, env = "PORTAL_TICKET_LIFETIME_SECONDS", default_value_t = 600)]
     ticket_lifetime_seconds: u64,
+    /// Accept launcher reports (`on`) or answer 503 reports_disabled (`off`).
+    #[arg(long, env = "PORTAL_REPORTS", value_enum, default_value = "on")]
+    reports: Switch,
+    /// Days reports (rows and logs) are kept.
+    #[arg(long, env = "PORTAL_REPORT_RETENTION_DAYS", default_value_t = 30,
+          value_parser = clap::value_parser!(i64).range(1..=3650))]
+    report_retention_days: i64,
+    #[command(flatten)]
+    report_store: StoreArgs,
     /// Skip migrations at start (run `mag-portal migrate` separately).
     #[arg(long, env = "PORTAL_SKIP_MIGRATIONS")]
     skip_migrations: bool,
@@ -161,6 +180,31 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         },
         http,
     );
+    let report_service = match args.reports {
+        Switch::Off => {
+            tracing::info!("launcher reports off");
+            None
+        }
+        Switch::On => {
+            let store = args
+                .report_store
+                .open()
+                .context("launcher reports are on (PORTAL_REPORTS)")?;
+            store
+                .check()
+                .await
+                .context("launcher reports are on (PORTAL_REPORTS)")?;
+            tracing::info!(
+                store = store.describe(),
+                days = args.report_retention_days,
+                "launcher reports on"
+            );
+            Some(Arc::new(reports::Reports::new(
+                store,
+                args.report_retention_days,
+            )))
+        }
+    };
     let pool = connect(&args.database).await?;
     if !args.skip_migrations {
         db::MIGRATOR
@@ -180,12 +224,16 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
             }
         }
     });
+    if let Some(service) = &report_service {
+        reports::spawn_purge(pool.clone(), service.clone());
+    }
     let state = Arc::new(web::AppState {
         pool,
         oidc,
         tickets,
         settings,
         limits: web::Limits::default(),
+        reports: report_service,
     });
     let listener = tokio::net::TcpListener::bind(&args.listen)
         .await
@@ -229,9 +277,13 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", STANDARD.encode(config::public_key_der(&key)));
             Ok(())
         }
-        Command::Admin { database, command } => {
+        Command::Admin {
+            database,
+            store,
+            command,
+        } => {
             let pool = connect(&database).await?;
-            admin::run(&pool, command).await
+            admin::run(&pool, &store, command).await
         }
     }
 }

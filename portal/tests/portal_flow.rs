@@ -15,6 +15,7 @@ use mag_portal::config::{Settings, TicketIssuer};
 use mag_portal::db::{self, AssignOutcome, ClaimOutcome};
 use mag_portal::game_admin::GameAdmin;
 use mag_portal::oidc::{self, OidcClient, ProviderConfig};
+use mag_portal::reports::Reports;
 use mag_portal::ticket::{self, VerifyingKeys};
 use mag_portal::web::{self, AppState, FLOW_COOKIE, SESSION_COOKIE};
 use p256::ecdsa::{SigningKey, VerifyingKey};
@@ -115,6 +116,15 @@ async fn harness(pool: PgPool) -> Harness {
 }
 
 async fn harness_with(pool: PgPool, game_admin: Option<GameAdmin>) -> Harness {
+    harness_full(pool, game_admin, None, web::Limits::default()).await
+}
+
+async fn harness_full(
+    pool: PgPool,
+    game_admin: Option<GameAdmin>,
+    reports: Option<Arc<Reports>>,
+    limits: web::Limits,
+) -> Harness {
     let rsa_key = rsa::PrivateKey::new(&mut rand::rng(), 2048).unwrap();
     let der = rsa_key.to_pkcs1_der().unwrap();
     let jwks = json!({ "keys": [{
@@ -171,7 +181,8 @@ async fn harness_with(pool: PgPool, game_admin: Option<GameAdmin>) -> Harness {
             .with_extra_audiences(&[EXTRA_AUDIENCE.to_owned()])
             .unwrap(),
         settings,
-        limits: web::Limits::default(),
+        limits,
+        reports,
     });
     let addr = serve(web::router(state)).await;
     Harness {
@@ -2374,4 +2385,966 @@ async fn game_server_errors_are_shown(pool: PgPool) {
     let (status, page) = body(h.get("/admin/game", Some(&o)).await).await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert!(page.contains("Could not reach the game server"), "{page}");
+}
+
+// ---- Launcher reports ----
+
+mod report_support {
+    use super::*;
+    use mag_portal::report_store::{DirStore, ReportStore};
+    use std::io::Write;
+
+    pub fn temp_dir(what: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "portal-{what}-{}",
+            mag_portal::tokens::b64url(&mag_portal::tokens::random_bytes::<9>())
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    pub fn dir_reports(dir: &std::path::Path) -> Arc<Reports> {
+        Arc::new(Reports::new(Arc::new(DirStore::new(dir)), 30))
+    }
+
+    /// Report uploads without the per-address limit getting in the way.
+    pub fn roomy_limits() -> web::Limits {
+        web::Limits {
+            reports: mag_portal::ratelimit::RateLimiter::new(
+                100_000,
+                std::time::Duration::from_secs(60),
+            ),
+            ..web::Limits::default()
+        }
+    }
+
+    pub fn gzip(text: &[u8]) -> Vec<u8> {
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(text).unwrap();
+        enc.finish().unwrap()
+    }
+
+    pub fn new_id() -> String {
+        let mut b = mag_portal::tokens::random_bytes::<16>();
+        b[6] = (b[6] & 0x0f) | 0x40;
+        b[8] = (b[8] & 0x3f) | 0x80;
+        let hex = lower_hex(&b);
+        format!(
+            "{}-{}-{}-{}-{}",
+            &hex[..8],
+            &hex[8..12],
+            &hex[12..16],
+            &hex[16..20],
+            &hex[20..]
+        )
+    }
+
+    pub fn report(id: &str, logs: &[(&str, &[u8])]) -> Value {
+        let logs: serde_json::Map<String, Value> = logs
+            .iter()
+            .map(|(name, text)| {
+                (
+                    name.to_string(),
+                    json!({ "encoding": "gzip+base64", "data": STANDARD.encode(gzip(text)) }),
+                )
+            })
+            .collect();
+        json!({
+            "schema_version": 1,
+            "report_id": id,
+            "trigger": "slow_frames",
+            "client": { "version": "1.4.0", "platform": "linux", "gpu": "synthetic" },
+            "session": { "server": "play.example.test", "duration_s": 61 },
+            "metrics": { "frame_ms": { "p50": 16.6, "p99": 48.0 }, "hitches": 3 },
+            "logs": logs,
+        })
+    }
+
+    /// A person account holding `name`, with a launcher token.
+    pub async fn person_with_token(pool: &PgPool, subject: &str, name: &str) -> (i32, String) {
+        let a = db::upsert_identity(
+            pool,
+            "google",
+            subject,
+            Some(&format!("{subject}@example.test")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            db::claim_name(pool, a.id, name).await.unwrap(),
+            ClaimOutcome::Claimed
+        );
+        let (token, hash) = mag_portal::tokens::new_secret(db::DEVICE_TOKEN_PREFIX);
+        sqlx::query("INSERT INTO devices (account_id, token_hash, label) VALUES ($1, $2, 'test')")
+            .bind(a.id)
+            .bind(&hash[..])
+            .execute(pool)
+            .await
+            .unwrap();
+        (a.id, token)
+    }
+
+    impl Harness {
+        pub async fn send_report(&self, token: Option<&str>, body: Vec<u8>) -> reqwest::Response {
+            let mut req = self
+                .http
+                .post(format!("{}/api/v1/reports", self.base))
+                .header("content-type", "application/json")
+                .body(body);
+            if let Some(t) = token {
+                req = req.bearer_auth(t);
+            }
+            req.send().await.unwrap()
+        }
+
+        pub async fn report(&self, token: &str, body: &Value) -> (StatusCode, Value) {
+            let r = self
+                .send_report(Some(token), serde_json::to_vec(body).unwrap())
+                .await;
+            (r.status(), r.json().await.unwrap())
+        }
+    }
+
+    pub async fn run_cli(
+        pool: &PgPool,
+        store: Option<&dyn ReportStore>,
+        command: mag_portal::admin::ReportsCommand,
+    ) -> anyhow::Result<String> {
+        let mut out = Vec::new();
+        mag_portal::admin::run_reports(pool, store, command, &mut out).await?;
+        Ok(String::from_utf8(out).unwrap())
+    }
+}
+
+use report_support::*;
+
+#[sqlx::test]
+async fn reports_are_stored_once(pool: PgPool) {
+    let dir = temp_dir("reports");
+    let h = harness_full(pool, None, Some(dir_reports(&dir)), roomy_limits()).await;
+    let (_, token) = person_with_token(&h.pool, "rep-a", "Romeo").await;
+    let (_, other) = person_with_token(&h.pool, "rep-b", "Sierra").await;
+    let id = new_id();
+    let body = report(&id, &[("launcher.log", b"frame 1 slow\n")]);
+
+    let (status, first) = h.report(&token, &body).await;
+    assert_eq!(status, StatusCode::CREATED, "{first}");
+    assert_eq!(first["report_id"], id);
+    let at = first["received_at"].as_str().unwrap().to_owned();
+    // Resending is recognised and stores nothing new.
+    let (status, again) = h.report(&token, &body).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(again, first);
+    // Upper case IDs are the same report.
+    let (status, _) = h
+        .report(&token, &report(&id.to_ascii_uppercase(), &[]))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, conflict) = h.report(&other, &body).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(conflict["error"], "report_id_conflict");
+
+    let (count,): (i64,) = sqlx::query_as("SELECT count(*) FROM reports")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    let (names, bytes, ip_like): (Vec<String>, i64, i64) = sqlx::query_as(
+        "SELECT log_names, log_bytes,
+                (SELECT count(*) FROM information_schema.columns
+                 WHERE table_name = 'reports' AND (column_name LIKE '%ip%' OR column_name LIKE '%addr%'))
+         FROM reports",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(names, vec!["launcher.log"]);
+    assert_eq!(ip_like, 0, "no client address is kept");
+    // The log is stored compressed, as sent, under its date and report ID.
+    let path = dir.join(&at[..10]).join(&id).join("launcher.log.gz");
+    let stored = std::fs::read(&path).unwrap();
+    assert_eq!(stored.len() as i64, bytes);
+    assert_eq!(
+        mag_portal::reports::decompress(&stored, 1 << 20).unwrap(),
+        b"frame 1 slow\n"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[sqlx::test]
+async fn reports_refuse_bad_requests(pool: PgPool) {
+    let dir = temp_dir("reports");
+    let h = harness_full(pool, None, Some(dir_reports(&dir)), roomy_limits()).await;
+    let (id, token) = person_with_token(&h.pool, "rep-c", "Tango").await;
+
+    // No token, an unknown token, a revoked one.
+    let (_, revoked) = person_with_token(&h.pool, "rep-c2", "Tango2").await;
+    let revoked_account = db::account_by_name(&h.pool, "Tango2")
+        .await
+        .unwrap()
+        .unwrap();
+    let device = db::devices(&h.pool, revoked_account.id).await.unwrap()[0].id;
+    assert!(
+        db::revoke_device(&h.pool, revoked_account.id, device)
+            .await
+            .unwrap()
+    );
+    let body = serde_json::to_vec(&report(&new_id(), &[])).unwrap();
+    for t in [
+        None,
+        Some("mgd_nope"),
+        Some("other"),
+        Some(revoked.as_str()),
+    ] {
+        let r = h.send_report(t, body.clone()).await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(r.json::<Value>().await.unwrap()["error"], "invalid_token");
+    }
+
+    let cases: Vec<(&str, Value)> = vec![
+        ("trigger", {
+            let mut v = report(&new_id(), &[]);
+            v["trigger"] = json!("explosion");
+            v
+        }),
+        ("name", report(&new_id(), &[("Launcher.log", b"x")])),
+        ("not gzip", {
+            let mut v = report(&new_id(), &[("a.log", b"x")]);
+            v["logs"]["a.log"]["data"] = json!(STANDARD.encode(b"plain text"));
+            v
+        }),
+        (
+            "too many logs",
+            report(
+                &new_id(),
+                &(0..9)
+                    .map(|i| {
+                        (
+                            ["l0", "l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8"][i],
+                            &b"x"[..],
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+        ),
+        ("client size", {
+            let mut v = report(&new_id(), &[]);
+            v["client"]["pad"] = json!("x".repeat(17 << 10));
+            v
+        }),
+        ("metrics size", {
+            let mut v = report(&new_id(), &[]);
+            v["metrics"]["pad"] = json!("x".repeat(65 << 10));
+            v
+        }),
+        ("unknown field", {
+            let mut v = report(&new_id(), &[]);
+            v["extra"] = json!(true);
+            v
+        }),
+        ("metrics array", {
+            let mut v = report(&new_id(), &[]);
+            v["metrics"] = json!([1, 2]);
+            v
+        }),
+        ("platform", {
+            let mut v = report(&new_id(), &[]);
+            v["client"]["platform"] = json!("ps3");
+            v
+        }),
+        ("id", report("not-a-uuid", &[])),
+    ];
+    for (what, body) in cases {
+        let (status, v) = h.report(&token, &body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{what}: {v}");
+        assert_eq!(v["error"], "invalid_report", "{what}");
+        assert!(
+            v["detail"].as_str().is_some_and(|d| !d.is_empty()),
+            "{what}"
+        );
+    }
+    let r = h.send_report(Some(&token), b"{not json".to_vec()).await;
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+
+    // Over 4 MiB: 413 before anything else is looked at.
+    let r = h.send_report(Some(&token), vec![b' '; (4 << 20) + 1]).await;
+    assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(r.json::<Value>().await.unwrap()["error"], "too_large");
+
+    let (count,): (i64,) = sqlx::query_as("SELECT count(*) FROM reports")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    assert_eq!(
+        std::fs::read_dir(&dir).unwrap().count(),
+        0,
+        "nothing written"
+    );
+
+    // Banned accounts are refused.
+    staff_ban(&h.pool, id).await;
+    let (status, v) = h.report(&token, &report(&new_id(), &[])).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(v["error"], "banned");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+async fn staff_ban(pool: &PgPool, id: i32) {
+    assert!(
+        mag_portal::staff::set_ban_by_id(pool, id, Some("test"))
+            .await
+            .unwrap()
+    );
+}
+
+#[sqlx::test]
+async fn reports_have_daily_allowances(pool: PgPool) {
+    let dir = temp_dir("reports");
+    let h = harness_full(pool, None, Some(dir_reports(&dir)), roomy_limits()).await;
+    let (_, person) = person_with_token(&h.pool, "rep-d", "Uniform").await;
+    let (_, service) = service_with_token(&h.pool, "PlayerLinux").await;
+
+    let first = new_id();
+    for i in 0..20 {
+        let id = if i == 0 { first.clone() } else { new_id() };
+        let (status, v) = h.report(&person, &report(&id, &[])).await;
+        assert_eq!(status, StatusCode::CREATED, "{i}: {v}");
+    }
+    let r = h
+        .send_report(
+            Some(&person),
+            serde_json::to_vec(&report(&new_id(), &[])).unwrap(),
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+    let retry: u64 = r.headers()["retry-after"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((86_000..=86_400).contains(&retry), "{retry}");
+    assert_eq!(r.json::<Value>().await.unwrap()["error"], "rate_limited");
+    // A resend of a stored report still answers, and does not count.
+    assert_eq!(
+        h.report(&person, &report(&first, &[])).await.0,
+        StatusCode::OK
+    );
+    // Once the oldest report ages out of the window, another fits.
+    sqlx::query(
+        "UPDATE reports SET received_at = received_at - interval '25 hours' WHERE id = $1::uuid",
+    )
+    .bind(&first)
+    .execute(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        h.report(&person, &report(&new_id(), &[])).await.0,
+        StatusCode::CREATED
+    );
+
+    // Service accounts get 200 a day.
+    for i in 0..200 {
+        let (status, v) = h.report(&service, &report(&new_id(), &[])).await;
+        assert_eq!(status, StatusCode::CREATED, "{i}: {v}");
+    }
+    let r = h
+        .send_report(
+            Some(&service),
+            serde_json::to_vec(&report(&new_id(), &[])).unwrap(),
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(r.headers().contains_key("retry-after"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[sqlx::test]
+async fn reports_off_and_per_address_limit(pool: PgPool) {
+    // Off: 503 for everyone, before the token is looked at.
+    let h = harness(pool.clone()).await;
+    let (_, token) = person_with_token(&h.pool, "rep-e", "Victor").await;
+    let (status, v) = h.report(&token, &report(&new_id(), &[])).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(v["error"], "reports_disabled");
+
+    let dir = temp_dir("reports");
+    let limits = web::Limits {
+        reports: mag_portal::ratelimit::RateLimiter::new(2, std::time::Duration::from_secs(60)),
+        ..web::Limits::default()
+    };
+    let h = harness_full(pool, None, Some(dir_reports(&dir)), limits).await;
+    for _ in 0..2 {
+        assert_eq!(
+            h.report(&token, &report(&new_id(), &[])).await.0,
+            StatusCode::CREATED
+        );
+    }
+    let r = h
+        .send_report(
+            Some(&token),
+            serde_json::to_vec(&report(&new_id(), &[])).unwrap(),
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(r.headers()["retry-after"], "60");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Ages a folder past the sweep's grace period.
+fn age(path: &std::path::Path) {
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+    std::fs::File::open(path)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+}
+
+#[sqlx::test]
+async fn expired_reports_and_orphans_are_purged(pool: PgPool) {
+    use mag_portal::report_store::log_key;
+    let dir = temp_dir("reports");
+    let service = dir_reports(&dir);
+    let h = harness_full(pool, None, Some(service.clone()), roomy_limits()).await;
+    let (_, token) = person_with_token(&h.pool, "rep-f", "Whiskey").await;
+
+    // A fresh report stays.
+    let fresh = new_id();
+    let (status, v) = h
+        .report(&token, &report(&fresh, &[("a.log", b"fresh")]))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let today = v["received_at"].as_str().unwrap()[..10].to_owned();
+
+    // An expired report: a row and its log from 40 days ago.
+    let old = new_id();
+    let old_at = time::OffsetDateTime::now_utc() - time::Duration::days(40);
+    let old_key = log_key(old_at, &old, "a.log");
+    service.store.put(&old_key, gzip(b"old")).await.unwrap();
+    let (account,): (i32,) =
+        sqlx::query_as("SELECT id FROM accounts WHERE player_name = 'Whiskey'")
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+    sqlx::query(
+        "INSERT INTO reports (id, account_id, received_at, trigger, platform, client_version,
+                              client, log_names, log_bytes)
+         VALUES ($1::uuid, $2, $3, 'crash', 'macos', '1.0', '{}'::jsonb, '{a.log}', 3)",
+    )
+    .bind(&old)
+    .bind(account)
+    .bind(old_at)
+    .execute(&h.pool)
+    .await
+    .unwrap();
+
+    // Orphans: an old one today (a failed write), a new one today (maybe being written), and a
+    // whole day folder from long ago.
+    let stale = new_id();
+    service
+        .store
+        .put(&format!("{today}/{stale}/x.gz"), gzip(b"stale"))
+        .await
+        .unwrap();
+    age(&dir.join(&today).join(&stale));
+    let young = new_id();
+    service
+        .store
+        .put(&format!("{today}/{young}/x.gz"), gzip(b"young"))
+        .await
+        .unwrap();
+    service
+        .store
+        .put(&format!("2000-01-01/{}/x.gz", new_id()), gzip(b"ancient"))
+        .await
+        .unwrap();
+
+    let purged = mag_portal::reports::purge(&h.pool, &service).await.unwrap();
+    assert_eq!(purged.reports, 1);
+    assert_eq!(purged.orphans, 2);
+    let ids: Vec<(String,)> = sqlx::query_as("SELECT id::text FROM reports")
+        .fetch_all(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(ids, vec![(fresh.clone(),)]);
+    assert!(service.store.get(&old_key).await.unwrap().is_none());
+    assert!(!dir.join(&old_key).parent().unwrap().exists());
+    assert!(!dir.join(&today).join(&stale).exists());
+    assert!(dir.join(&today).join(&young).exists());
+    assert!(dir.join(&today).join(&fresh).join("a.log.gz").exists());
+    assert!(!dir.join("2000-01-01").exists());
+    // Deleting an account removes its reports' rows and logs.
+    let s = h.sign_in("rep-f").await;
+    let csrf = h.csrf(&s).await;
+    let r = h
+        .post_form(
+            "/account/delete",
+            &s,
+            &[("csrf", &csrf), ("confirm", "Whiskey")],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    assert!(!dir.join(&today).join(&fresh).exists());
+    let (count,): (i64,) = sqlx::query_as("SELECT count(*) FROM reports")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[sqlx::test]
+async fn report_commands(pool: PgPool) {
+    use mag_portal::admin::ReportsCommand;
+    use mag_portal::report_store::{DirStore, ReportStore};
+    let dir = temp_dir("reports");
+    let h = harness_full(pool, None, Some(dir_reports(&dir)), roomy_limits()).await;
+    let store = DirStore::new(&dir);
+    let store: Option<&dyn ReportStore> = Some(&store);
+    let (_, token) = person_with_token(&h.pool, "rep-g", "Xray").await;
+    let id = new_id();
+    let log_text = b"line one\nline two\n".repeat(1000);
+    assert_eq!(
+        h.report(&token, &report(&id, &[("launcher.log", &log_text)]))
+            .await
+            .0,
+        StatusCode::CREATED
+    );
+    let mut crash = report(&new_id(), &[]);
+    crash["trigger"] = json!("crash");
+    crash["client"]["platform"] = json!("windows");
+    assert_eq!(h.report(&token, &crash).await.0, StatusCode::CREATED);
+
+    let list = |account: Option<&str>, trigger: Option<&str>, platform: Option<&str>| {
+        ReportsCommand::List {
+            account: account.map(Into::into),
+            trigger: trigger.map(Into::into),
+            platform: platform.map(Into::into),
+            since: None,
+            days: Some(1),
+            limit: 50,
+        }
+    };
+    let out = run_cli(&h.pool, None, list(Some("xRAY"), None, None))
+        .await
+        .unwrap();
+    assert_eq!(out.lines().count(), 2, "{out}");
+    let out = run_cli(
+        &h.pool,
+        None,
+        list(None, Some("slow_frames"), Some("linux")),
+    )
+    .await
+    .unwrap();
+    assert!(
+        out.starts_with(&id) && out.contains("Xray") && out.contains("1 logs"),
+        "{out}"
+    );
+    assert_eq!(out.lines().count(), 1);
+    assert!(
+        run_cli(&h.pool, None, list(Some("nobody"), None, None))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let since = ReportsCommand::List {
+        account: None,
+        trigger: None,
+        platform: None,
+        since: Some(time::OffsetDateTime::now_utc() + time::Duration::hours(1)),
+        days: None,
+        limit: 50,
+    };
+    assert!(run_cli(&h.pool, None, since).await.unwrap().is_empty());
+
+    let out = run_cli(
+        &h.pool,
+        None,
+        ReportsCommand::Show {
+            report_id: id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        out.contains("trigger slow_frames") && out.contains("\"p99\": 48.0"),
+        "{out}"
+    );
+    assert!(out.contains("logs launcher.log"), "{out}");
+    assert!(
+        run_cli(
+            &h.pool,
+            None,
+            ReportsCommand::Show {
+                report_id: new_id()
+            }
+        )
+        .await
+        .is_err()
+    );
+
+    let log = |name: &str| ReportsCommand::Log {
+        report_id: id.clone(),
+        name: name.into(),
+    };
+    assert!(
+        run_cli(&h.pool, None, log("launcher.log")).await.is_err(),
+        "needs the store"
+    );
+    let out = run_cli(&h.pool, store, log("launcher.log")).await.unwrap();
+    assert_eq!(out.as_bytes(), &log_text[..]);
+    assert!(run_cli(&h.pool, store, log("other.log")).await.is_err());
+
+    let out = run_cli(&h.pool, None, ReportsCommand::Stats { days: 14 })
+        .await
+        .unwrap();
+    let today = mag_portal::report_store::day(time::OffsetDateTime::now_utc());
+    assert!(
+        out.contains(&format!("{today}\tcrash\twindows\t1")),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!("{today}\tslow_frames\tlinux\t1")),
+        "{out}"
+    );
+
+    let out = run_cli(
+        &h.pool,
+        store,
+        ReportsCommand::Delete {
+            report_id: id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(out.starts_with("deleted report"));
+    assert!(!dir.join(&today).join(&id).exists());
+    assert!(
+        run_cli(
+            &h.pool,
+            store,
+            ReportsCommand::Delete {
+                report_id: id.clone()
+            }
+        )
+        .await
+        .is_err()
+    );
+    let actions: Vec<(String, String)> =
+        sqlx::query_as("SELECT action, actor_email FROM admin_log ORDER BY id")
+            .fetch_all(&h.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        actions,
+        vec![
+            (
+                "read report log".into(),
+                mag_portal::staff::OPERATOR_ACTOR.into()
+            ),
+            (
+                "delete report".into(),
+                mag_portal::staff::OPERATOR_ACTOR.into()
+            ),
+        ]
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[sqlx::test]
+async fn reports_in_the_admin_panel(pool: PgPool) {
+    use mag_portal::staff::{self, Role};
+    let dir = temp_dir("reports");
+    let h = harness_full(pool, None, Some(dir_reports(&dir)), roomy_limits()).await;
+    let (_, token) = person_with_token(&h.pool, "rep-h", "Yankee").await;
+    let id = new_id();
+    assert_eq!(
+        h.report(&token, &report(&id, &[("launcher.log", b"<b>hello</b>\n")]))
+            .await
+            .0,
+        StatusCode::CREATED
+    );
+
+    let u = h.sign_in("nobody").await;
+    let m = h.sign_in("mod").await;
+    let a = h.sign_in("admin").await;
+    let granter = id_of(&h, "admin").await;
+    staff::set_staff(&h.pool, "mod@example.test", Role::Moderator, granter)
+        .await
+        .unwrap();
+    staff::set_staff(&h.pool, "admin@example.test", Role::Admin, granter)
+        .await
+        .unwrap();
+    let page = format!("/admin/reports/{id}");
+    let download = format!("/admin/reports/{id}/logs/launcher.log");
+
+    // Not staff: the pages do not exist.
+    for path in ["/admin/reports", page.as_str()] {
+        assert_eq!(h.get(path, Some(&u)).await.status(), StatusCode::NOT_FOUND);
+    }
+    let csrf_u = h.csrf(&u).await;
+    assert_eq!(
+        h.post_form(&download, &u, &[("csrf", &csrf_u)])
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+
+    // Moderators see counts, the list and the details, but cannot download logs.
+    let (status, list) = body(h.get("/admin/reports", Some(&m)).await).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(list.contains(&format!("href=\"/admin/reports/{id}\"")) && list.contains("Yankee"));
+    let (_, filtered) = body(h.get("/admin/reports?trigger=crash", Some(&m)).await).await;
+    assert!(!filtered.contains(&id) && filtered.contains("No reports match"));
+    let (_, filtered) = body(
+        h.get("/admin/reports?account=yankee&platform=linux", Some(&m))
+            .await,
+    )
+    .await;
+    assert!(filtered.contains(&id));
+    let (status, detail) = body(h.get(&page, Some(&m)).await).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        detail.contains("p99") && detail.contains("Yankee"),
+        "{detail}"
+    );
+    assert!(detail.contains("admins only") && !detail.contains(&download));
+    let csrf_m = h.csrf(&m).await;
+    assert_eq!(
+        h.post_form(&download, &m, &[("csrf", &csrf_m)])
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        h.get(&format!("/admin/reports/{}", new_id()), Some(&m))
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+
+    // Admins download the log as text, once the form's CSRF token checks out.
+    let (_, detail) = body(h.get(&page, Some(&a)).await).await;
+    assert!(detail.contains(&format!("action=\"{download}\"")));
+    let csrf_a = csrf_from(&detail);
+    assert_eq!(
+        h.post_form(&download, &a, &[("csrf", "bad")])
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let r = h.post_form(&download, &a, &[("csrf", &csrf_a)]).await;
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(r.headers()["content-type"], "text/plain; charset=utf-8");
+    assert_eq!(
+        r.headers()["content-disposition"],
+        format!("attachment; filename=\"report-{id}-launcher.log.txt\"").as_str()
+    );
+    assert_eq!(r.text().await.unwrap(), "<b>hello</b>\n");
+    let missing = format!("/admin/reports/{id}/logs/other.log");
+    assert_eq!(
+        h.post_form(&missing, &a, &[("csrf", &csrf_a)])
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let (action, target): (String, String) =
+        sqlx::query_as("SELECT action, target FROM admin_log ORDER BY id DESC LIMIT 1")
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+    assert_eq!(action, "download report log");
+    assert_eq!(target, format!("report {id}"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// ---- S3 report store against an in-process fake ----
+
+#[derive(Default)]
+struct FakeS3 {
+    objects: Mutex<HashMap<String, Vec<u8>>>,
+    /// Every request: method, path.
+    requests: Mutex<Vec<(String, String)>>,
+}
+
+const S3_ACCESS: &str = "AKIDSYNTHETIC";
+const S3_SECRET: &str = "synthetic-secret-never-printed";
+
+async fn fake_s3(
+    State(s3): State<Arc<FakeS3>>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let path = uri.path().to_owned();
+    s3.requests
+        .lock()
+        .unwrap()
+        .push((method.to_string(), path.clone()));
+    let query = uri.query().unwrap_or("");
+    let signed_query = query.contains("X-Amz-Algorithm=AWS4-HMAC-SHA256")
+        && query.contains(&format!("X-Amz-Credential={S3_ACCESS}%2F"))
+        && query.contains("X-Amz-Signature=");
+    let signed_header = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("AWS4-HMAC-SHA256"));
+    if !(signed_query || signed_header) {
+        return (axum::http::StatusCode::FORBIDDEN, "unsigned").into_response();
+    }
+    // Path style: /<bucket>[/<key>].
+    let Some(rest) = path.strip_prefix("/mag-validation") else {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
+    };
+    let key = rest.trim_start_matches('/').to_owned();
+    let mut objects = s3.objects.lock().unwrap();
+    match (method.as_str(), key.is_empty()) {
+        ("HEAD", true) => axum::http::StatusCode::OK.into_response(),
+        ("PUT", false) => {
+            if headers.get("content-type").and_then(|v| v.to_str().ok()) != Some("application/gzip")
+            {
+                return axum::http::StatusCode::BAD_REQUEST.into_response();
+            }
+            objects.insert(key, body.to_vec());
+            axum::http::StatusCode::OK.into_response()
+        }
+        ("GET", false) => match objects.get(&key) {
+            Some(data) => data.clone().into_response(),
+            None => axum::http::StatusCode::NOT_FOUND.into_response(),
+        },
+        ("DELETE", false) => {
+            objects.remove(&key);
+            axum::http::StatusCode::NO_CONTENT.into_response()
+        }
+        _ => axum::http::StatusCode::METHOD_NOT_ALLOWED.into_response(),
+    }
+}
+
+fn s3_args(
+    endpoint: &str,
+    bucket: &str,
+    dir: &std::path::Path,
+) -> mag_portal::report_store::StoreArgs {
+    let access = dir.join("access");
+    let secret = dir.join("secret");
+    std::fs::write(&access, format!("{S3_ACCESS}\n")).unwrap();
+    std::fs::write(&secret, S3_SECRET).unwrap();
+    mag_portal::report_store::StoreArgs {
+        report_store: Some(mag_portal::report_store::StoreKind::S3),
+        report_dir: None,
+        report_s3_endpoint: Some(endpoint.into()),
+        report_s3_bucket: Some(bucket.into()),
+        report_s3_region: "us-east-1".into(),
+        report_s3_access_key_file: Some(access),
+        report_s3_secret_key_file: Some(secret),
+    }
+}
+
+#[sqlx::test]
+async fn reports_in_an_s3_bucket(pool: PgPool) {
+    use mag_portal::admin::ReportsCommand;
+    let s3 = Arc::new(FakeS3::default());
+    let addr = serve(Router::new().fallback(fake_s3).with_state(s3.clone())).await;
+    let endpoint = format!("http://{addr}");
+    let keys = temp_dir("s3-keys");
+
+    let store = s3_args(&endpoint, "mag-validation", &keys).open().unwrap();
+    store.check().await.unwrap();
+    // A missing bucket fails the startup check without printing the keys.
+    let err = s3_args(&endpoint, "missing", &keys)
+        .open()
+        .unwrap()
+        .check()
+        .await
+        .unwrap_err();
+    let text = format!("{err:#}");
+    assert!(text.contains("does not exist"), "{text}");
+    assert!(
+        !text.contains(S3_SECRET) && !text.contains(S3_ACCESS),
+        "{text}"
+    );
+    // Settings that are missing are named.
+    let mut partial = s3_args(&endpoint, "mag-validation", &keys);
+    partial.report_s3_secret_key_file = None;
+    assert!(
+        format!("{:#}", partial.open().err().unwrap()).contains("PORTAL_REPORT_S3_SECRET_KEY_FILE")
+    );
+
+    let service = Arc::new(Reports::new(store.clone(), 30));
+    let h = harness_full(pool, None, Some(service), roomy_limits()).await;
+    let (_, token) = person_with_token(&h.pool, "rep-s3", "Zulu").await;
+    let id = new_id();
+    let (status, v) = h
+        .report(
+            &token,
+            &report(
+                &id,
+                &[("launcher.log", b"from s3\n"), ("audio.log", b"xrun\n")],
+            ),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{v}");
+    let day = &v["received_at"].as_str().unwrap()[..10];
+    let key = format!("reports/{day}/{id}/launcher.log.gz");
+    assert_eq!(
+        mag_portal::reports::decompress(&s3.objects.lock().unwrap()[&key], 1 << 20).unwrap(),
+        b"from s3\n"
+    );
+    assert_eq!(s3.objects.lock().unwrap().len(), 2);
+    assert!(
+        s3.requests
+            .lock()
+            .unwrap()
+            .contains(&("PUT".into(), format!("/mag-validation/{key}")))
+    );
+
+    let out = run_cli(
+        &h.pool,
+        Some(store.as_ref()),
+        ReportsCommand::Log {
+            report_id: id.clone(),
+            name: "launcher.log".into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(out, "from s3\n");
+    run_cli(
+        &h.pool,
+        Some(store.as_ref()),
+        ReportsCommand::Delete {
+            report_id: id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(s3.objects.lock().unwrap().is_empty());
+    assert!(
+        s3.requests
+            .lock()
+            .unwrap()
+            .contains(&("DELETE".into(), format!("/mag-validation/{key}")))
+    );
+
+    // When the upload fails, no row is written and the logs already uploaded are removed.
+    let broken = s3_args(&endpoint, "missing", &keys).open().unwrap();
+    let service = Reports::new(broken, 30);
+    let account = db::account_by_name(&h.pool, "Zulu").await.unwrap().unwrap();
+    let parsed = mag_portal::reports::parse(
+        &serde_json::to_vec(&report(&new_id(), &[("a.log", b"x")])).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        mag_portal::reports::submit(&h.pool, &service, &account, parsed)
+            .await
+            .is_err()
+    );
+    let (count,): (i64,) = sqlx::query_as("SELECT count(*) FROM reports")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    std::fs::remove_dir_all(&keys).unwrap();
 }
