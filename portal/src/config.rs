@@ -7,6 +7,7 @@ use p256::ecdsa::SigningKey;
 use p256::elliptic_curve::Generate;
 use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey, LineEnding};
 
+use crate::game_admin::GameAdmin;
 use crate::ticket::{self, TicketClaims, TicketError};
 use crate::tokens;
 
@@ -29,6 +30,9 @@ pub struct Settings {
     /// Lowercase Google emails that always have the owner role; set by the operator, never
     /// changeable from the site.
     pub owner_emails: Vec<String>,
+    /// The game server's admin API (`PORTAL_GAME_ADMIN_URL` and
+    /// `PORTAL_GAME_ADMIN_SECRET_FILE`); `None` leaves the Game server admin section off.
+    pub game_admin: Option<GameAdmin>,
 }
 
 impl Settings {
@@ -49,6 +53,7 @@ impl Settings {
             client_ip_header: None,
             font_dir: None,
             owner_emails: Vec::new(),
+            game_admin: None,
         })
     }
 }

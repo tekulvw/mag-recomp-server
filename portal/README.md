@@ -60,6 +60,8 @@ holds ticket test vectors for other verifiers; regenerate them with
 | `PORTAL_FONT_DIR` | no | Folder of the web fonts listed in `fonts.txt`, served at `/fonts/`. The image sets it; without it pages use system fonts. |
 | `PORTAL_OWNER_EMAILS` | no | Comma-separated Google emails with the owner role in the admin panel. Owners cannot be changed from the site. |
 | `PORTAL_CLIENT_IP_HEADER` | no | Header the trusted proxy appends the client address to (`x-forwarded-for`); the last entry is used. Without it, rate limits use the connecting address, which behind a proxy is the proxy. |
+| `PORTAL_GAME_ADMIN_URL` | no | Origin of the game server's internal admin API, such as `http://mag-medius-admin.mag.svc:10490` (http or https). Set it with `PORTAL_GAME_ADMIN_SECRET_FILE`, or neither; without them the admin panel's Game server section shows "not configured". |
+| `PORTAL_GAME_ADMIN_SECRET_FILE` | with the URL | File holding the admin API's shared HMAC secret, at least 32 bytes (surrounding whitespace is trimmed). Never logged. |
 | `PORTAL_OPERATOR_CONTACT` | no | Contact text shown on the privacy page. |
 | `PORTAL_LISTEN` | no | Listen address (default `0.0.0.0:8080`). Serve it behind a TLS-terminating proxy. |
 | `RUST_LOG` | no | Log filter (default `info`). |
@@ -113,11 +115,19 @@ email someone signs in with, so a role can be granted before the first sign-in.
 | Role | Can |
 | --- | --- |
 | Owner (`PORTAL_OWNER_EMAILS`) | Everything below, and grant or remove admins. |
-| Admin | Grant or remove moderators; reserve, release and assign names; delete accounts; everything a moderator can. |
-| Moderator | Search and view accounts; ban and unban; unlink launchers. |
+| Admin | Grant or remove moderators; reserve, release and assign names; delete accounts; set game character levels; everything a moderator can. |
+| Moderator | Search and view accounts; ban and unban; unlink launchers; view game server characters. |
 
 Staff act only on accounts and roles ranked below their own: nobody can change a peer, a
 superior or themselves. Every change goes to an audit log shown on the admin overview.
+
+The **Game server** section (`/admin/game`) lists the game server's characters with their level,
+XP, skill points and session, through the game server's internal admin API. Setting a level is
+two steps: a preview (a dry run on the game server) shows the change, and a separate confirmation
+applies it and writes the audit log. The game server refuses while the player is signed in. Each
+request is signed with HMAC-SHA256 over `METHOD\nPATH_AND_QUERY\nTIMESTAMP\nNONCE\nhex(SHA-256(body))`
+and names the staff member in `X-Mag-Admin-Actor`; `src/game_admin.rs` documents the scheme and
+holds a test vector.
 
 ## Operator commands
 

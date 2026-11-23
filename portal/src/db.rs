@@ -75,6 +75,18 @@ pub async fn account_by_name(pool: &PgPool, name: &str) -> sqlx::Result<Option<A
     .await
 }
 
+/// `(name key, account id)` for each account whose player name has one of these keys
+/// (lowercase names).
+pub async fn account_ids_by_name_keys(
+    pool: &PgPool,
+    keys: &[String],
+) -> sqlx::Result<Vec<(String, i32)>> {
+    sqlx::query_as("SELECT lower(player_name), id FROM accounts WHERE lower(player_name) = ANY($1)")
+        .bind(keys)
+        .fetch_all(pool)
+        .await
+}
+
 pub async fn accounts_by_email(pool: &PgPool, email: &str) -> sqlx::Result<Vec<Account>> {
     sqlx::query_as(account_sql!(
         "SELECT",

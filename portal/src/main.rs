@@ -9,6 +9,7 @@ use clap::{Args, Parser, Subcommand};
 use sqlx::postgres::PgPoolOptions;
 
 use mag_portal::config::{self, Settings, TicketIssuer};
+use mag_portal::game_admin::GameAdmin;
 use mag_portal::oidc::{self, OidcClient, ProviderConfig};
 use mag_portal::{admin, db, web};
 
@@ -74,6 +75,13 @@ struct ServeArgs {
     font_dir: Option<PathBuf>,
     #[arg(long, env = "PORTAL_OWNER_EMAILS", default_value = "")]
     owner_emails: String,
+    /// The game server's internal admin API origin, such as http://mag-medius-admin:10490.
+    /// Set with --game-admin-secret-file, or leave both unset.
+    #[arg(long, env = "PORTAL_GAME_ADMIN_URL")]
+    game_admin_url: Option<String>,
+    /// File holding the game admin API's shared secret (at least 32 bytes).
+    #[arg(long, env = "PORTAL_GAME_ADMIN_SECRET_FILE")]
+    game_admin_secret_file: Option<PathBuf>,
     #[arg(long, env = "PORTAL_OPERATOR_CONTACT")]
     operator_contact: Option<String>,
     #[arg(long, env = "PORTAL_GOOGLE_CLIENT_ID")]
@@ -118,6 +126,14 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         .client_ip_header
         .map(|h| h.trim().to_ascii_lowercase())
         .filter(|h| !h.is_empty());
+    settings.game_admin = GameAdmin::from_config(
+        args.game_admin_url.as_deref(),
+        args.game_admin_secret_file.as_deref(),
+    )?;
+    match &settings.game_admin {
+        Some(api) => tracing::info!(url = api.base_url(), "game server admin API configured"),
+        None => tracing::info!("game server admin API not configured"),
+    }
     let tickets = TicketIssuer::new(
         config::load_signing_key(&args.ticket_key_file)?,
         args.ticket_key_id,

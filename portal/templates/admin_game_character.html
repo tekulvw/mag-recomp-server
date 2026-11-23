@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Character {{ account }}{% endblock %}
+{% block content %}
+{% include "admin_nav.html" %}
+<h1>Character {{ account }}</h1>
+<p><a href="/admin/game">All characters</a>{% if let Some(id) = portal_id %} · <a href="/admin/users/{{ id }}">Portal account {{ id }}</a>{% endif %}</p>
+{% if !configured %}
+<p class="alert">The game server admin API is not configured. Set <code>PORTAL_GAME_ADMIN_URL</code> and <code>PORTAL_GAME_ADMIN_SECRET_FILE</code> to view characters here.</p>
+{% else if let Some(e) = error %}
+<p class="alert">{{ e }}</p>
+{% else if let Some(c) = character %}
+<dl>
+  <dt>Level</dt><dd>{{ c.level }}</dd>
+  <dt>XP</dt><dd>{{ c.experience }}</dd>
+  <dt>Next level at</dt><dd>{{ c.next_level }}</dd>
+  <dt>Skill points</dt><dd>{{ c.skill_points }}</dd>
+  <dt>Session</dt><dd>{% if c.session == "online" %}<strong>online</strong>{% else %}{{ c.session }}{% endif %}</dd>
+</dl>
+{% if is_admin %}
+<h2>Set level</h2>
+<p>Raises the character to a level, with the XP and skill points the game gives for it. The next step shows the change before anything is saved. The player must be signed out of the game.</p>
+<form method="post" action="/admin/game/characters/{{ account|urlencode_strict }}/level" class="stack">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>New level<input name="level" type="number" min="1" step="1" required></label>
+  <button>Preview change</button>
+</form>
+{% endif %}
+{% endif %}
+{% endblock %}

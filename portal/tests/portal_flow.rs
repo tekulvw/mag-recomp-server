@@ -13,6 +13,7 @@ use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use jsonwebtoken::{EncodingKey, Header};
 use mag_portal::config::{Settings, TicketIssuer};
 use mag_portal::db::{self, AssignOutcome, ClaimOutcome};
+use mag_portal::game_admin::GameAdmin;
 use mag_portal::oidc::{self, OidcClient, ProviderConfig};
 use mag_portal::ticket::{self, VerifyingKeys};
 use mag_portal::web::{self, AppState, FLOW_COOKIE, SESSION_COOKIE};
@@ -108,6 +109,10 @@ struct Harness {
 }
 
 async fn harness(pool: PgPool) -> Harness {
+    harness_with(pool, None).await
+}
+
+async fn harness_with(pool: PgPool, game_admin: Option<GameAdmin>) -> Harness {
     let rsa_key = rsa::PrivateKey::new(&mut rand::rng(), 2048).unwrap();
     let der = rsa_key.to_pkcs1_der().unwrap();
     let jwks = json!({ "keys": [{
@@ -142,6 +147,7 @@ async fn harness(pool: PgPool) -> Harness {
     )
     .unwrap();
     settings.font_dir = Some(fonts);
+    settings.game_admin = game_admin;
     let ticket_key = SigningKey::from_slice(&Sha256::digest(b"portal flow test key")).unwrap();
     let state = Arc::new(AppState {
         pool: pool.clone(),
@@ -1239,4 +1245,490 @@ async fn stylesheet_address_changes_with_its_content(pool: PgPool) {
             "{stale}"
         );
     }
+}
+
+// ---- Game server section, against a fake Medius admin API ----
+
+const GAME_SECRET: &[u8] = b"game-admin-test-secret-0123456789abcdef";
+
+#[derive(Clone, Copy)]
+struct FakeCharacter {
+    level: u32,
+    experience: i64,
+    skill_points: i64,
+    session: &'static str,
+}
+
+#[derive(Default)]
+struct MediusState {
+    characters: HashMap<String, FakeCharacter>,
+    nonces: std::collections::HashSet<String>,
+    actors: Vec<String>,
+    /// (account, level, apply) for each signed level request.
+    level_calls: Vec<(String, u32, bool)>,
+}
+
+struct FakeMedius {
+    secret: Vec<u8>,
+    state: Mutex<MediusState>,
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Checks the request's signature independently of the portal's code, then answers like the
+/// Medius admin API contract.
+async fn fake_medius(
+    State(m): State<Arc<FakeMedius>>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    use hmac::{KeyInit, Mac};
+    let reply = |status: StatusCode, value: Value| (status, Json(value)).into_response();
+    let unauthorized = || reply(StatusCode::UNAUTHORIZED, json!({"error": "unauthorized"}));
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    };
+    let (Some(ts), Some(nonce), Some(actor), Some(sig)) = (
+        header("x-mag-admin-timestamp"),
+        header("x-mag-admin-nonce"),
+        header("x-mag-admin-actor"),
+        header("x-mag-admin-signature"),
+    ) else {
+        return unauthorized();
+    };
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    if ts.parse::<i64>().map_or(true, |t| (now - t).abs() > 300)
+        || !(16..=64).contains(&nonce.len())
+        || !nonce
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return unauthorized();
+    }
+    let path = uri.path_and_query().unwrap().as_str().to_owned();
+    let signed = format!(
+        "{method}\n{path}\n{ts}\n{nonce}\n{}",
+        lower_hex(&Sha256::digest(&body))
+    );
+    let mut mac = hmac::Hmac::<Sha256>::new_from_slice(&m.secret).unwrap();
+    mac.update(signed.as_bytes());
+    if lower_hex(&mac.finalize().into_bytes()) != sig {
+        return unauthorized();
+    }
+    let mut st = m.state.lock().unwrap();
+    if !st.nonces.insert(nonce) {
+        return unauthorized();
+    }
+    st.actors.push(actor);
+    let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    match (method.as_str(), segments.as_slice()) {
+        ("GET", ["admin", "v1", "accounts"]) => {
+            let accounts: Vec<Value> = st
+                .characters
+                .iter()
+                .map(|(a, c)| {
+                    json!({"account": a, "level": c.level, "experience": c.experience,
+                           "skill_points": c.skill_points, "session": c.session})
+                })
+                .collect();
+            reply(StatusCode::OK, json!({ "accounts": accounts }))
+        }
+        ("GET", ["admin", "v1", "characters", "broken"]) => {
+            reply(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": "boom"}))
+        }
+        ("GET", ["admin", "v1", "characters", account]) => match st.characters.get(*account) {
+            Some(c) => reply(
+                StatusCode::OK,
+                json!({"account": account, "level": c.level, "experience": c.experience,
+                       "skill_points": c.skill_points,
+                       "next_level_experience": (c.level < 70).then(|| (c.level + 1) * 1000),
+                       "session": c.session}),
+            ),
+            None => reply(StatusCode::NOT_FOUND, json!({"error": "not_found"})),
+        },
+        ("POST", ["admin", "v1", "characters", account, "level"]) => {
+            let account = account.to_string();
+            let Ok(request) = serde_json::from_slice::<Value>(&body) else {
+                return reply(StatusCode::BAD_REQUEST, json!({"error": "invalid_request"}));
+            };
+            let (Some(level), Some(apply)) =
+                (request["level"].as_u64(), request["apply"].as_bool())
+            else {
+                return reply(StatusCode::BAD_REQUEST, json!({"error": "invalid_request"}));
+            };
+            let level = level as u32;
+            st.level_calls.push((account.clone(), level, apply));
+            let Some(c) = st.characters.get(&account).copied() else {
+                return reply(StatusCode::NOT_FOUND, json!({"error": "not_found"}));
+            };
+            let refuse = |code: &str, message: String| {
+                reply(
+                    StatusCode::CONFLICT,
+                    json!({"error": code, "message": message}),
+                )
+            };
+            if c.session == "online" {
+                return refuse("online", format!("{account} is online"));
+            }
+            if level < c.level {
+                return refuse("lower_level", "levels only go up".into());
+            }
+            if level == c.level {
+                return refuse("same_level", "already at that level".into());
+            }
+            if level > 70 {
+                return refuse("level_out_of_range", "levels go up to 70".into());
+            }
+            let after = FakeCharacter {
+                level,
+                experience: i64::from(level) * 1000,
+                skill_points: c.skill_points + i64::from(level - c.level) * 2,
+                session: c.session,
+            };
+            let backup = apply.then(|| format!("{account}-backup-1.json"));
+            if apply {
+                st.characters.insert(account.clone(), after);
+            }
+            reply(
+                StatusCode::OK,
+                json!({"applied": apply, "account": account, "from_level": c.level,
+                       "to_level": level, "experience_before": c.experience,
+                       "experience_after": after.experience,
+                       "skill_points_before": c.skill_points,
+                       "skill_points_after": after.skill_points, "backup": backup}),
+            )
+        }
+        _ => reply(StatusCode::NOT_FOUND, json!({"error": "not_found"})),
+    }
+}
+
+async fn fake_medius_server() -> (Arc<FakeMedius>, String) {
+    let mut state = MediusState::default();
+    for (account, level, session) in [
+        ("alpha", 5, "offline"),
+        ("bravo", 12, "online"),
+        ("charlie", 3, "unknown"),
+    ] {
+        state.characters.insert(
+            account.into(),
+            FakeCharacter {
+                level,
+                experience: i64::from(level) * 1000,
+                skill_points: 10,
+                session,
+            },
+        );
+    }
+    let medius = Arc::new(FakeMedius {
+        secret: GAME_SECRET.to_vec(),
+        state: Mutex::new(state),
+    });
+    let addr = serve(
+        Router::new()
+            .fallback(fake_medius)
+            .with_state(medius.clone()),
+    )
+    .await;
+    (medius, format!("http://{addr}"))
+}
+
+async fn body(r: reqwest::Response) -> (StatusCode, String) {
+    (r.status(), r.text().await.unwrap())
+}
+
+#[sqlx::test]
+async fn game_server_not_configured(pool: PgPool) {
+    let h = harness(pool).await;
+    let u = h.sign_in("player").await;
+    assert_eq!(
+        h.get("/admin/game", Some(&u)).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    let o = h.sign_in("owner").await;
+    let csrf_o = h.csrf(&o).await;
+    let (status, page) = body(h.get("/admin/game", Some(&o)).await).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(page.contains("not configured") && page.contains("href=\"/admin/game\""));
+    let (status, page) = body(h.get("/admin/game/characters/alpha", Some(&o)).await).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(page.contains("not configured") && !page.contains("Preview change"));
+    let r = h
+        .post_form(
+            "/admin/game/characters/alpha/level",
+            &o,
+            &[("csrf", &csrf_o), ("level", "20")],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let player = id_of(&h, "player").await;
+    let page = h
+        .get(&format!("/admin/users/{player}"), Some(&o))
+        .await
+        .text()
+        .await
+        .unwrap();
+    assert!(!page.contains("/admin/game/characters/"));
+}
+
+#[sqlx::test]
+async fn game_server_characters_and_levels(pool: PgPool) {
+    let (medius, url) = fake_medius_server().await;
+    let h = harness_with(
+        pool,
+        Some(GameAdmin::new(&url, GAME_SECRET.to_vec()).unwrap()),
+    )
+    .await;
+    let calls = || medius.state.lock().unwrap().level_calls.clone();
+    let level_of = |a: &str| medius.state.lock().unwrap().characters[a].level;
+
+    // A player named Alpha, who has no role: the section does not exist for them.
+    let u = h.sign_in("player").await;
+    let csrf_u = h.csrf(&u).await;
+    h.post_form("/claim", &u, &[("csrf", &csrf_u), ("name", "Alpha")])
+        .await;
+    let player = id_of(&h, "player").await;
+    for path in ["/admin/game", "/admin/game/characters/alpha"] {
+        assert_eq!(
+            h.get(path, Some(&u)).await.status(),
+            StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
+    let r = h
+        .post_form(
+            "/admin/game/characters/alpha/level/confirm",
+            &u,
+            &[("csrf", &csrf_u), ("level", "20")],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+
+    let o = h.sign_in("owner").await;
+    let csrf_o = h.csrf(&o).await;
+    let r = h
+        .post_form(
+            "/admin/staff/set",
+            &o,
+            &[
+                ("csrf", &csrf_o),
+                ("email", "mod@example.test"),
+                ("role", "moderator"),
+            ],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+
+    // Moderators see the list and characters, linked to portal accounts, but cannot set levels.
+    let m = h.sign_in("mod").await;
+    let csrf_m = h.csrf(&m).await;
+    let (status, page) = body(h.get("/admin/game", Some(&m)).await).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert!(page.contains("href=\"/admin/game\""));
+    assert!(page.contains("href=\"/admin/game/characters/alpha\""));
+    assert!(page.contains(&format!("href=\"/admin/users/{player}\"")));
+    assert!(page.contains("bravo") && page.contains("<strong>online</strong>"));
+    assert!(page.contains("charlie") && page.contains("unknown"));
+    assert!(
+        medius
+            .state
+            .lock()
+            .unwrap()
+            .actors
+            .contains(&"mod@example.test".to_owned())
+    );
+    let (status, page) = body(h.get("/admin/game/characters/alpha", Some(&m)).await).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(page.contains("5000") && page.contains("6000") && page.contains("offline"));
+    assert!(page.contains(&format!("href=\"/admin/users/{player}\"")));
+    assert!(!page.contains("Preview change"));
+    for path in [
+        "/admin/game/characters/alpha/level",
+        "/admin/game/characters/alpha/level/confirm",
+    ] {
+        let r = h
+            .post_form(path, &m, &[("csrf", &csrf_m), ("level", "20")])
+            .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN, "{path}");
+    }
+    assert!(calls().is_empty());
+
+    // The portal account page links to the character.
+    let page = h
+        .get(&format!("/admin/users/{player}"), Some(&o))
+        .await
+        .text()
+        .await
+        .unwrap();
+    assert!(page.contains("href=\"/admin/game/characters/alpha\""));
+
+    // Admins and above: the form needs the CSRF token.
+    let (_, page) = body(h.get("/admin/game/characters/alpha", Some(&o)).await).await;
+    assert!(page.contains("Preview change"));
+    for path in [
+        "/admin/game/characters/alpha/level",
+        "/admin/game/characters/alpha/level/confirm",
+    ] {
+        let r = h
+            .post_form(path, &o, &[("csrf", "bad"), ("level", "20")])
+            .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN, "{path}");
+    }
+    let r = h
+        .post_form(
+            "/admin/game/characters/alpha/level",
+            &o,
+            &[("csrf", &csrf_o), ("level", "twenty")],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    assert!(calls().is_empty());
+
+    // A dry run shows the plan and changes nothing.
+    let (status, page) = body(
+        h.post_form(
+            "/admin/game/characters/alpha/level",
+            &o,
+            &[("csrf", &csrf_o), ("level", "20")],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert!(page.contains("Nothing has been saved yet") && page.contains("Apply level 20"));
+    assert!(page.contains("<td>5</td><td>20</td>"));
+    assert!(page.contains("<td>5000</td><td>20000</td>"));
+    assert!(page.contains("<td>10</td><td>40</td>"));
+    assert!(page.contains("action=\"/admin/game/characters/alpha/level/confirm\""));
+    assert_eq!(level_of("alpha"), 5);
+    assert_eq!(calls(), vec![("alpha".to_owned(), 20, false)]);
+
+    // Confirming applies it and writes the audit log.
+    let (status, page) = body(
+        h.post_form(
+            "/admin/game/characters/alpha/level/confirm",
+            &o,
+            &[("csrf", &csrf_o), ("level", "20")],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert!(page.contains("Level set.") && page.contains("alpha-backup-1.json"));
+    assert_eq!(level_of("alpha"), 20);
+    assert_eq!(calls().last().unwrap(), &("alpha".to_owned(), 20, true));
+    assert_eq!(
+        medius.state.lock().unwrap().actors.last().unwrap(),
+        "owner@example.test"
+    );
+    let log = h.get("/admin", Some(&o)).await.text().await.unwrap();
+    assert!(log.contains("set level") && log.contains("5→20, backup alpha-backup-1.json"));
+    let (status, page) = body(h.get("/admin/game/characters/Alpha", Some(&o)).await).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(page.contains("20000"));
+
+    // Refusals are shown plainly, with what to do; nothing is logged.
+    let (status, page) = body(
+        h.post_form(
+            "/admin/game/characters/bravo/level",
+            &o,
+            &[("csrf", &csrf_o), ("level", "20")],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(page.contains("refused the change") && page.contains("bravo is online"));
+    assert!(page.contains("quit the game") && !page.contains("Apply level"));
+    let (status, page) = body(
+        h.post_form(
+            "/admin/game/characters/alpha/level",
+            &o,
+            &[("csrf", &csrf_o), ("level", "3")],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(page.contains("lower_level") && page.contains("only be raised"));
+    let log = h.get("/admin", Some(&o)).await.text().await.unwrap();
+    assert_eq!(log.matches("set level").count(), 1);
+
+    // Unknown characters, bad names and broken answers.
+    let (status, page) = body(h.get("/admin/game/characters/nobody", Some(&o)).await).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(page.contains("no character"));
+    let r = h
+        .post_form(
+            "/admin/game/characters/nobody/level",
+            &o,
+            &[("csrf", &csrf_o), ("level", "20")],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        h.get("/admin/game/characters/a%20b", Some(&o))
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let (status, page) = body(h.get("/admin/game/characters/broken", Some(&o)).await).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(page.contains("unexpected answer: HTTP 500"));
+}
+
+#[sqlx::test]
+async fn game_server_errors_are_shown(pool: PgPool) {
+    // The portal holds a different secret than the game server: every call gets 401.
+    let (medius, url) = fake_medius_server().await;
+    let h = harness_with(
+        pool.clone(),
+        Some(GameAdmin::new(&url, b"a-different-secret-0123456789abcdef".to_vec()).unwrap()),
+    )
+    .await;
+    let o = h.sign_in("owner").await;
+    let csrf_o = h.csrf(&o).await;
+    for path in ["/admin/game", "/admin/game/characters/alpha"] {
+        let (status, page) = body(h.get(path, Some(&o)).await).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{path}");
+        assert!(
+            page.contains("rejected the portal&#39;s admin credentials")
+                || page.contains("rejected the portal's admin credentials"),
+            "{page}"
+        );
+        assert!(!page.contains("a-different-secret"));
+    }
+    let (status, page) = body(
+        h.post_form(
+            "/admin/game/characters/alpha/level/confirm",
+            &o,
+            &[("csrf", &csrf_o), ("level", "20")],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(page.contains("admin credentials") && page.contains("Nothing was changed"));
+    assert!(medius.state.lock().unwrap().level_calls.is_empty());
+
+    // Nothing listening: the page says the game server cannot be reached.
+    let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let closed_url = format!("http://{}", closed.local_addr().unwrap());
+    drop(closed);
+    let h = harness_with(
+        pool,
+        Some(GameAdmin::new(&closed_url, GAME_SECRET.to_vec()).unwrap()),
+    )
+    .await;
+    let o = h.sign_in("owner").await;
+    let (status, page) = body(h.get("/admin/game", Some(&o)).await).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(page.contains("Could not reach the game server"), "{page}");
 }

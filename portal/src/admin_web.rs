@@ -1,4 +1,5 @@
-//! The staff admin panel under `/admin`: users, reserved names, staff roles and an audit log.
+//! The staff admin panel under `/admin`: users, reserved names, staff roles, an audit log and
+//! the game server's characters (`game`).
 //!
 //! Everyone else gets 404 for every admin path. Staff act only on accounts and roles ranked
 //! below their own (see `staff::outranks`); every change is written to the audit log.
@@ -46,6 +47,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/admin/staff", get(staff_page))
         .route("/admin/staff/set", post(staff_set))
         .route("/admin/staff/remove", post(staff_remove))
+        .merge(game::routes())
 }
 
 struct Staff {
@@ -183,6 +185,8 @@ macro_rules! guard {
         }
     };
 }
+
+mod game;
 
 // ---- Dashboard ----
 
@@ -345,6 +349,7 @@ struct UserPage {
     target_role: Option<&'static str>,
     can_act: bool,
     devices: Vec<DeviceView>,
+    game_href: Option<String>,
 }
 
 async fn user_page(State(state): Shared, headers: HeaderMap, Path(id): Path<i32>) -> PageResult {
@@ -398,6 +403,10 @@ async fn user_page(State(state): Shared, headers: HeaderMap, Path(id): Path<i32>
             target_role: target_role.map(Role::as_str),
             can_act: staff::outranks(actor.role, target_role),
             devices,
+            game_href: game::character_href(
+                state.settings.game_admin.as_ref(),
+                account.player_name.as_deref(),
+            ),
         },
     ))
 }
