@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Admin{% endblock %}
+{% block content %}
+{% include "admin_nav.html" %}
+<h1>Admin</h1>
+<dl>
+  <dt>Accounts</dt><dd>{{ accounts }} ({{ named }} with a name)</dd>
+  <dt>Banned</dt><dd>{{ banned }}</dd>
+  <dt>Linked launchers</dt><dd>{{ devices }}</dd>
+  <dt>Reserved names</dt><dd>{{ reserved }}</dd>
+</dl>
+<h2>Recent actions</h2>
+{% if log.is_empty() %}<p class="quiet">No staff actions yet.</p>{% else %}
+<table>
+  <thead><tr><th>When</th><th>Who</th><th>Action</th><th>Target</th><th>Detail</th></tr></thead>
+  <tbody>
+  {% for l in log %}<tr><td>{{ l.when }}</td><td>{{ l.actor }}</td><td>{{ l.action }}</td><td>{{ l.target }}</td><td>{{ l.detail }}</td></tr>{% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

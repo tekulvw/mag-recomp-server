@@ -86,7 +86,7 @@ impl FromRequestParts<Arc<AppState>> for ClientIp {
     }
 }
 
-type Shared = State<Arc<AppState>>;
+pub(crate) type Shared = State<Arc<AppState>>;
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
@@ -107,6 +107,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/device/token", post(api_device_token))
         .route("/api/v1/ticket", post(api_ticket))
         .route("/api/v1/ticket-keys", get(api_ticket_keys))
+        .merge(crate::admin_web::routes())
         .layer(axum::middleware::map_response(security_headers))
         .with_state(state)
 }
@@ -153,7 +154,7 @@ impl IntoResponse for AppError {
     }
 }
 
-type PageResult = Result<Response, AppError>;
+pub(crate) type PageResult = Result<Response, AppError>;
 
 // ---- Templates ----
 
@@ -196,6 +197,7 @@ struct AccountPage {
     ban_reason: Option<String>,
     banned: bool,
     devices: Vec<DeviceRow>,
+    staff_role: Option<&'static str>,
 }
 
 #[derive(Template)]
@@ -229,7 +231,7 @@ struct LinkConfirmPage {
     player_name: String,
 }
 
-fn page<T: Template>(status: StatusCode, template: T) -> Response {
+pub(crate) fn page<T: Template>(status: StatusCode, template: T) -> Response {
     match template.render() {
         Ok(html) => (status, Html(html)).into_response(),
         Err(e) => {
@@ -239,7 +241,12 @@ fn page<T: Template>(status: StatusCode, template: T) -> Response {
     }
 }
 
-fn message(status: StatusCode, title: &str, body: &str, link: Option<(&str, &str)>) -> Response {
+pub(crate) fn message(
+    status: StatusCode,
+    title: &str,
+    body: &str,
+    link: Option<(&str, &str)>,
+) -> Response {
     page(
         status,
         MessagePage {
@@ -251,7 +258,7 @@ fn message(status: StatusCode, title: &str, body: &str, link: Option<(&str, &str
     )
 }
 
-fn when(t: OffsetDateTime) -> String {
+pub(crate) fn when(t: OffsetDateTime) -> String {
     let format = time::macros::format_description!("[year]-[month]-[day] [hour]:[minute] UTC");
     t.format(&format).unwrap_or_default()
 }
@@ -276,7 +283,7 @@ fn set_cookie(name: &str, value: &str, max_age: i64) -> (header::HeaderName, Str
     )
 }
 
-async fn current_session(
+pub(crate) async fn current_session(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<Option<Session>, AppError> {
@@ -310,7 +317,7 @@ fn sign_in_redirect(next: &str) -> Response {
     .into_response()
 }
 
-fn csrf_ok(session: &Session, submitted: &str) -> bool {
+pub(crate) fn csrf_ok(session: &Session, submitted: &str) -> bool {
     session
         .csrf_token
         .as_bytes()
@@ -318,7 +325,7 @@ fn csrf_ok(session: &Session, submitted: &str) -> bool {
         .into()
 }
 
-fn csrf_failed() -> Response {
+pub(crate) fn csrf_failed() -> Response {
     message(
         StatusCode::FORBIDDEN,
         "Form expired",
@@ -328,7 +335,7 @@ fn csrf_failed() -> Response {
 }
 
 /// The signed-in session, or a response sending the visitor to sign in.
-async fn require_session(
+pub(crate) async fn require_session(
     state: &AppState,
     headers: &HeaderMap,
     next: &str,
@@ -558,6 +565,13 @@ async fn account_page(State(state): Shared, headers: HeaderMap) -> PageResult {
             last_used: d.last_used_at.map(when).unwrap_or_else(|| "never".into()),
         })
         .collect();
+    let staff_role = crate::staff::role_for_email(
+        &state.pool,
+        &state.settings.owner_emails,
+        session.account.email.as_deref(),
+    )
+    .await?
+    .map(crate::staff::Role::as_str);
     let a = session.account;
     Ok(page(
         StatusCode::OK,
@@ -569,6 +583,7 @@ async fn account_page(State(state): Shared, headers: HeaderMap) -> PageResult {
             email: a.email,
             ban_reason: a.ban_reason,
             devices,
+            staff_role,
         },
     ))
 }

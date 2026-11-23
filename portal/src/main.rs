@@ -68,6 +68,9 @@ struct ServeArgs {
     /// Without it, rate limits use the connecting address.
     #[arg(long, env = "PORTAL_CLIENT_IP_HEADER")]
     client_ip_header: Option<String>,
+    /// Comma-separated Google emails with the owner role (full admin access, not removable).
+    #[arg(long, env = "PORTAL_OWNER_EMAILS", default_value = "")]
+    owner_emails: String,
     #[arg(long, env = "PORTAL_OPERATOR_CONTACT")]
     operator_contact: Option<String>,
     #[arg(long, env = "PORTAL_GOOGLE_CLIENT_ID")]
@@ -106,6 +109,7 @@ async fn connect(database: &DatabaseArgs) -> anyhow::Result<sqlx::PgPool> {
 async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let mut settings = Settings::new(&args.public_url)?;
     settings.operator_contact = args.operator_contact.filter(|c| !c.trim().is_empty());
+    settings.owner_emails = mag_portal::staff::parse_owner_emails(&args.owner_emails);
     settings.client_ip_header = args
         .client_ip_header
         .map(|h| h.trim().to_ascii_lowercase())

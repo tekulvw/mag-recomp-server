@@ -130,6 +130,7 @@ async fn harness(pool: PgPool) -> Harness {
 
     let mut settings = Settings::new("http://localhost").unwrap();
     settings.link_poll_seconds = 2;
+    settings.owner_emails = vec!["owner@example.test".into()];
     let ticket_key = SigningKey::from_slice(&Sha256::digest(b"portal flow test key")).unwrap();
     let state = Arc::new(AppState {
         pool: pool.clone(),
@@ -763,4 +764,353 @@ async fn claims_wait_for_name_changes(pool: PgPool) {
     .unwrap();
     tx.commit().await.unwrap();
     assert_eq!(claimer.await.unwrap(), ClaimOutcome::Reserved);
+}
+
+async fn id_of(h: &Harness, subject: &str) -> i32 {
+    db::accounts_by_email(&h.pool, &format!("{subject}@example.test"))
+        .await
+        .unwrap()[0]
+        .id
+}
+
+#[sqlx::test]
+async fn admin_panel_roles(pool: PgPool) {
+    let h = harness(pool).await;
+    // Signed out: sign in first. Signed in without a role: the panel does not exist.
+    assert_eq!(h.get("/admin", None).await.status(), StatusCode::SEE_OTHER);
+    let u = h.sign_in("player").await;
+    let csrf_u = h.csrf(&u).await;
+    h.post_form("/claim", &u, &[("csrf", &csrf_u), ("name", "Uniform")])
+        .await;
+    for path in ["/admin", "/admin/users", "/admin/staff", "/admin/names"] {
+        assert_eq!(
+            h.get(path, Some(&u)).await.status(),
+            StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
+    let player = id_of(&h, "player").await;
+    let r = h
+        .post_form(
+            &format!("/admin/users/{player}/ban"),
+            &u,
+            &[("csrf", &csrf_u), ("reason", "x")],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+
+    // The configured owner grants roles; forms need the CSRF token; owner is not grantable.
+    let o = h.sign_in("owner").await;
+    let csrf_o = h.csrf(&o).await;
+    let page = h.get("/admin", Some(&o)).await.text().await.unwrap();
+    assert!(page.contains("signed in as owner"));
+    assert!(
+        h.get("/account", Some(&o))
+            .await
+            .text()
+            .await
+            .unwrap()
+            .contains("href=\"/admin\"")
+    );
+    assert!(
+        !h.get("/account", Some(&u))
+            .await
+            .text()
+            .await
+            .unwrap()
+            .contains("href=\"/admin\"")
+    );
+    let r = h
+        .post_form(
+            "/admin/staff/set",
+            &o,
+            &[
+                ("csrf", "bad"),
+                ("email", "mod@example.test"),
+                ("role", "moderator"),
+            ],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    let r = h
+        .post_form(
+            "/admin/staff/set",
+            &o,
+            &[
+                ("csrf", &csrf_o),
+                ("email", "boss@example.test"),
+                ("role", "owner"),
+            ],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    for (email, role) in [
+        ("Mod@Example.test", "moderator"),
+        ("admin@example.test", "admin"),
+    ] {
+        let r = h
+            .post_form(
+                "/admin/staff/set",
+                &o,
+                &[("csrf", &csrf_o), ("email", email), ("role", role)],
+            )
+            .await;
+        assert_eq!(r.status(), StatusCode::SEE_OTHER, "{email}");
+    }
+    let staff = h.get("/admin/staff", Some(&o)).await.text().await.unwrap();
+    assert!(staff.contains("mod@example.test") && staff.contains("owner@example.test"));
+
+    // Moderators: view and ban players, nothing above them, no names or staff management.
+    let m = h.sign_in("mod").await;
+    let csrf_m = h.csrf(&m).await;
+    assert!(
+        h.get("/admin/users?q=unif", Some(&m))
+            .await
+            .text()
+            .await
+            .unwrap()
+            .contains("Uniform")
+    );
+    assert!(
+        !h.get("/admin/users?q=%25", Some(&m))
+            .await
+            .text()
+            .await
+            .unwrap()
+            .contains("Uniform"),
+        "LIKE wildcards are literal"
+    );
+    assert!(
+        h.get(&format!("/admin/users?q={player}"), Some(&m))
+            .await
+            .text()
+            .await
+            .unwrap()
+            .contains("Uniform")
+    );
+    assert_eq!(
+        h.get("/admin/staff", Some(&m)).await.status(),
+        StatusCode::FORBIDDEN
+    );
+    let r = h
+        .post_form(
+            &format!("/admin/users/{player}/ban"),
+            &m,
+            &[("csrf", &csrf_m), ("reason", "griefing")],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+    assert!(
+        db::account(&h.pool, player)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_banned()
+    );
+    let owner = id_of(&h, "owner").await;
+    let admin = id_of(&h, "mod").await;
+    for target in [owner, admin] {
+        let r = h
+            .post_form(
+                &format!("/admin/users/{target}/ban"),
+                &m,
+                &[("csrf", &csrf_m), ("reason", "x")],
+            )
+            .await;
+        assert_eq!(
+            r.status(),
+            StatusCode::FORBIDDEN,
+            "moderators cannot ban staff at or above them"
+        );
+    }
+    let r = h
+        .post_form(
+            &format!("/admin/users/{player}/delete"),
+            &m,
+            &[("csrf", &csrf_m), ("confirm", &player.to_string())],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    let r = h
+        .post_form(
+            "/admin/names/reserve",
+            &m,
+            &[("csrf", &csrf_m), ("names", "Zulu"), ("reason", "")],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    let r = h
+        .post_form(
+            &format!("/admin/users/{player}/unban"),
+            &m,
+            &[("csrf", &csrf_m)],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+
+    // Admins: grant moderator only, never act on admins or owners.
+    let a = h.sign_in("admin").await;
+    let csrf_a = h.csrf(&a).await;
+    let r = h
+        .post_form(
+            "/admin/staff/set",
+            &a,
+            &[
+                ("csrf", &csrf_a),
+                ("email", "two@example.test"),
+                ("role", "moderator"),
+            ],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+    let r = h
+        .post_form(
+            "/admin/staff/set",
+            &a,
+            &[
+                ("csrf", &csrf_a),
+                ("email", "three@example.test"),
+                ("role", "admin"),
+            ],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    let r = h
+        .post_form(
+            "/admin/staff/set",
+            &a,
+            &[
+                ("csrf", &csrf_a),
+                ("email", "owner@example.test"),
+                ("role", "moderator"),
+            ],
+        )
+        .await;
+    assert_eq!(
+        r.status(),
+        StatusCode::FORBIDDEN,
+        "owners cannot be demoted"
+    );
+    let r = h
+        .post_form(
+            "/admin/staff/remove",
+            &a,
+            &[("csrf", &csrf_a), ("email", "admin@example.test")],
+        )
+        .await;
+    assert_eq!(
+        r.status(),
+        StatusCode::FORBIDDEN,
+        "nobody removes a peer or themselves"
+    );
+    let r = h
+        .post_form(
+            "/admin/staff/remove",
+            &a,
+            &[("csrf", &csrf_a), ("email", "two@example.test")],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+    let r = h
+        .post_form(
+            &format!("/admin/users/{owner}/ban"),
+            &a,
+            &[("csrf", &csrf_a), ("reason", "x")],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+
+    // Admins manage names and delete accounts; deleted names stay reserved.
+    let r = h
+        .post_form(
+            "/admin/names/reserve",
+            &a,
+            &[
+                ("csrf", &csrf_a),
+                ("names", "Zulu, Yankee 9bad Uniform"),
+                ("reason", ""),
+            ],
+        )
+        .await;
+    let html = r.text().await.unwrap();
+    assert!(html.contains("Zulu: reserved") && html.contains("Yankee: reserved"));
+    assert!(
+        html.contains("9bad: not a valid player name")
+            && html.contains("Uniform: an account already has it")
+    );
+    let fresh = h.sign_in("fresh").await;
+    let fresh_id = id_of(&h, "fresh").await;
+    let r = h
+        .post_form(
+            &format!("/admin/users/{fresh_id}/assign-name"),
+            &a,
+            &[("csrf", &csrf_a), ("name", "zulu")],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+    assert!(
+        h.get("/account", Some(&fresh))
+            .await
+            .text()
+            .await
+            .unwrap()
+            .contains("<strong>Zulu</strong>")
+    );
+    h.post_form(
+        "/admin/names/release",
+        &a,
+        &[("csrf", &csrf_a), ("name", "Yankee")],
+    )
+    .await;
+    assert!(db::reserved_names(&h.pool).await.unwrap().is_empty());
+    let r = h
+        .post_form(
+            &format!("/admin/users/{player}/delete"),
+            &a,
+            &[("csrf", &csrf_a), ("confirm", "nope")],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    let r = h
+        .post_form(
+            &format!("/admin/users/{player}/delete"),
+            &a,
+            &[("csrf", &csrf_a), ("confirm", &player.to_string())],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+    assert!(db::account(&h.pool, player).await.unwrap().is_none());
+    assert_eq!(
+        db::reserved_names(&h.pool).await.unwrap()[0].name,
+        "Uniform"
+    );
+
+    // Every change is in the audit log, newest first.
+    let log = h.get("/admin", Some(&o)).await.text().await.unwrap();
+    for action in [
+        "grant role",
+        "ban",
+        "unban",
+        "remove role",
+        "reserve name",
+        "assign name",
+        "release name",
+        "delete account",
+    ] {
+        assert!(log.contains(&format!("<td>{action}</td>")), "{action}");
+    }
+    assert!(log.contains("mod@example.test") && log.contains("griefing"));
+    // Revoked roles take effect at once.
+    let r = h
+        .post_form(
+            "/admin/staff/remove",
+            &o,
+            &[("csrf", &csrf_o), ("email", "mod@example.test")],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        h.get("/admin", Some(&m)).await.status(),
+        StatusCode::NOT_FOUND
+    );
 }

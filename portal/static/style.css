@@ -26,3 +26,5 @@ dd { margin: 0; }
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: .4rem .5rem; border-bottom: 1px solid var(--line); }
 @media (max-width: 32rem) { table, thead, tbody, tr, th, td { display: block; } thead { display: none; } td { border: 0; padding: .1rem 0; } tr { border-bottom: 1px solid var(--line); padding: .5rem 0; } }
+.admin-nav { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; padding-bottom: .5rem; border-bottom: 1px solid var(--line); }
+textarea, select { font: inherit; padding: .5rem; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; }

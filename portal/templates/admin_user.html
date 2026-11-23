@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Account {{ id }}{% endblock %}
+{% block content %}
+{% include "admin_nav.html" %}
+<h1>Account {{ id }}</h1>
+<dl>
+  <dt>Player name</dt><dd>{% if let Some(n) = name %}<strong>{{ n }}</strong>{% else %}none{% endif %}</dd>
+  <dt>Email</dt><dd>{{ email }}</dd>
+  <dt>Signed in with</dt><dd>{{ provider }}</dd>
+  <dt>Joined</dt><dd>{{ created }}</dd>
+  <dt>Staff role</dt><dd>{% if let Some(r) = target_role %}{{ r }}{% else %}none{% endif %}</dd>
+  <dt>Status</dt><dd>{% if let Some(b) = ban %}<strong>banned</strong> {{ b }}{% else %}active{% endif %}</dd>
+</dl>
+
+{% if !can_act %}
+<p class="alert">This account's role is not below yours, so you cannot change it.</p>
+{% else %}
+<h2>Ban</h2>
+{% if ban.is_some() %}
+<form method="post" action="/admin/users/{{ id }}/unban"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Lift ban</button></form>
+{% else %}
+<form method="post" action="/admin/users/{{ id }}/ban" class="stack">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>Reason (the player sees it)<input name="reason" maxlength="200" required></label>
+  <button class="danger">Ban account</button>
+</form>
+{% endif %}
+{% endif %}
+
+<h2>Linked launchers</h2>
+{% if devices.is_empty() %}<p class="quiet">None.</p>{% else %}
+<table>
+  <thead><tr><th>Launcher</th><th>Linked</th><th>Last used</th><th></th></tr></thead>
+  <tbody>
+  {% for d in devices %}
+  <tr><td>{{ d.label }}</td><td>{{ d.created }}</td><td>{{ d.last_used }}</td>
+    <td>{% if can_act %}<form method="post" action="/admin/users/{{ id }}/devices/{{ d.id }}/revoke"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="link">Unlink</button></form>{% endif %}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if can_act && is_admin %}
+{% if name.is_none() %}
+<h2>Assign a reserved name</h2>
+<form method="post" action="/admin/users/{{ id }}/assign-name" class="stack">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>Reserved name<input name="name" maxlength="15" required></label>
+  <button>Assign</button>
+</form>
+{% endif %}
+<h2>Delete account</h2>
+<p>Removes the sign-in and launchers. The player name stays reserved.</p>
+<form method="post" action="/admin/users/{{ id }}/delete" class="stack">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>Type <strong>{{ id }}</strong> to confirm<input name="confirm" autocomplete="off" required></label>
+  <button class="danger">Delete account</button>
+</form>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Reserved names{% endblock %}
+{% block content %}
+{% include "admin_nav.html" %}
+<h1>Reserved names</h1>
+<p>Nobody can claim a reserved name. Assign one to its owner from their account page.</p>
+{% if !results.is_empty() %}<ul class="alert">{% for r in results %}<li>{{ r }}</li>{% endfor %}</ul>{% endif %}
+{% if is_admin %}
+<form method="post" action="/admin/names/reserve" class="stack">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>Names (separated by spaces, commas or new lines)<textarea name="names" rows="3" required></textarea></label>
+  <label>Reason<input name="reason" maxlength="200" placeholder="existing player"></label>
+  <button>Reserve</button>
+</form>
+{% endif %}
+{% if names.is_empty() %}<p class="quiet">No reserved names.</p>{% else %}
+<table>
+  <thead><tr><th>Name</th><th>Reason</th><th>Since</th><th></th></tr></thead>
+  <tbody>
+  {% for n in names %}
+  <tr><td>{{ n.name }}</td><td>{{ n.reason }}</td><td>{{ n.created }}</td>
+    <td>{% if is_admin %}<form method="post" action="/admin/names/release"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="name" value="{{ n.name }}"><button class="link">Release</button></form>{% endif %}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

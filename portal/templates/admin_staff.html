@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Staff{% endblock %}
+{% block content %}
+{% include "admin_nav.html" %}
+<h1>Staff</h1>
+<p>Roles follow the Google email someone signs in with, so you can add people before their first sign-in. Moderators can view users, ban and unlink launchers. Admins can also manage names, delete accounts and grant the moderator role. Owners are set in the server configuration.</p>
+{% if let Some(e) = error %}<p class="alert">{{ e }}</p>{% endif %}
+<h2>Owners</h2>
+<ul>{% for o in owners %}<li>{{ o }}</li>{% endfor %}</ul>
+<h2>Admins and moderators</h2>
+{% if staff.is_empty() %}<p class="quiet">None yet.</p>{% else %}
+<table>
+  <thead><tr><th>Email</th><th>Role</th><th>Granted by</th><th>Since</th><th></th></tr></thead>
+  <tbody>
+  {% for s in staff %}
+  <tr><td>{{ s.email }}</td><td>{{ s.role }}</td><td>{{ s.granted_by }}</td><td>{{ s.created }}</td>
+    <td>{% if s.editable %}<form method="post" action="/admin/staff/remove"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="email" value="{{ s.email }}"><button class="link">Remove</button></form>{% endif %}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% if !grantable.is_empty() %}
+<h2>Add or change a role</h2>
+<form method="post" action="/admin/staff/set" class="stack">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>Google email<input name="email" type="email" maxlength="254" required></label>
+  <label>Role<select name="role">{% for g in grantable %}<option value="{{ g }}">{{ g }}</option>{% endfor %}</select></label>
+  <button>Save role</button>
+</form>
+{% endif %}
+{% endblock %}
