@@ -54,7 +54,8 @@ holds ticket test vectors for other verifiers; regenerate them with
 | `PORTAL_GOOGLE_CLIENT_ID` | yes | OAuth client ID. |
 | `PORTAL_GOOGLE_CLIENT_SECRET_FILE` | yes | File holding the OAuth client secret. |
 | `PORTAL_TICKET_KEY_FILE` | yes | PKCS#8 PEM P-256 private key from `mag-portal keygen`. |
-| `PORTAL_TICKET_AUDIENCE` | yes | The game server's host name, such as `play.magtest.online`. Tickets are valid only there. |
+| `PORTAL_TICKET_AUDIENCE` | yes | The game server's host name, such as `play.magtest.online`. Tickets are valid only there. It is the default audience: launchers that name none get it. |
+| `PORTAL_TICKET_EXTRA_AUDIENCES` | no | More game server host names, comma-separated, such as `test.magtest.online`, held to the same rule. A launcher may ask for a ticket for any of them (see "Get a ticket"). |
 | `PORTAL_TICKET_KEY_ID` | no | Key ID written into tickets (default 1). Change it when rotating keys. |
 | `PORTAL_TICKET_LIFETIME_SECONDS` | no | Ticket lifetime, 60 to 3600 (default 600). |
 | `PORTAL_FONT_DIR` | no | Folder of the web fonts listed in `fonts.txt`, served at `/fonts/`. The image sets it; without it pages use system fonts. |
@@ -94,13 +95,19 @@ Show `user_code` and `verification_uri` (or open `verification_uri_complete` in 
 | `400 expired_token` | The code expired; start again. |
 | `400 invalid_grant` | Unknown or already used code. |
 
-**Get a ticket** — `POST /api/v1/ticket` with `Authorization: Bearer mgd_…`, before each sign-in:
+**Get a ticket** — `POST /api/v1/ticket` with `Authorization: Bearer mgd_…`, before each sign-in.
+The body is optional: `{"audience": "test.magtest.online"}` asks for a ticket for that game server
+(any case; it is lowercased). No body, an empty body, a body without `audience`, or a null or empty
+`audience` means the default audience (`PORTAL_TICKET_AUDIENCE`), so launchers that send no body
+keep working. The response's `audience` says which one the ticket is for:
 
 ```json
 {"ticket":"<base64>","expires_at":1800000600,"account_id":42,"player_name":"Alpha","audience":"play.magtest.online"}
 ```
 
 `401 invalid_token` means the launcher was unlinked: forget the token and link again.
+`400 unknown_audience` means the portal does not issue tickets for that server, and
+`400 invalid_request` that the body was not that JSON object.
 `403 banned` (with `reason`) and `409 no_player_name` are shown to the player.
 
 **Verifying keys** — `GET /api/v1/ticket-keys` returns `{"keys":[{"id":1,"alg":"ES256","spki":"<base64 DER>"}]}`.
@@ -132,7 +139,26 @@ Run `mag-portal admin <command>` with `DATABASE_URL` set (in Kubernetes, `kubect
 | `assign <name> --account-id <id>` | Give a reserved name to an account without a name. |
 | `release <name>` | Let anyone claim a reserved name. |
 | `reserved` | List reserved names. |
+| `service-account create <name>` | Create a service account for a free or reserved name. |
+| `service-account mint-token <name> --label <text>` | Mint a launcher token. Only the token goes to stdout, once; store it. |
+| `service-account list` | Service accounts and their tokens (IDs, labels, use; never the tokens). |
+| `service-account revoke-token <name> <device-id>` | Revoke one token. |
+
+The `service-account` commands write the audit log as `operator (command line)`.
 
 Banned accounts cannot delete themselves (that would shed the ban); delete them on request with SQL. Deleting an account (from its account page) keeps its name reserved, because the game server
 keeps characters under the name. To move existing players over, reserve every name that has
 characters, then assign each one when its owner signs in and asks (`find-email` finds them).
+
+## Service accounts
+
+Service accounts (admin panel: `/admin/service-accounts`) are fixed player identities for automation, such
+as the test clients `PlayerLinux`, `PlayerRetail` and `Player`. They never sign in with Google: their
+provider is `service` with a random subject, so no Google sign-in can match one, and the site never
+honours a session for one. Staff mint their launcher tokens instead of linking a launcher. Admins
+create one for a name that is free or reserved (taking over the reservation, keeping its stored
+spelling), mint a labelled `mgd_` token (shown once on the result page, never stored or shown again,
+only its hash is kept), revoke tokens and delete the account (its name stays reserved). Service
+accounts get tickets through the same API as everyone else, and bans apply to them. Moderators can
+see them, with their tokens' labels and use, but cannot change them, ban them or revoke their
+tokens: they are operator infrastructure, so changing them needs an admin.

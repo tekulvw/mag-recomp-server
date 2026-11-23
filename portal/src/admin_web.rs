@@ -29,6 +29,7 @@ const MAX_REASON: usize = 200;
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
+        .merge(service::routes())
         .route("/admin", get(dashboard))
         .route("/admin/users", get(users))
         .route("/admin/users/{id}", get(user_page))
@@ -164,7 +165,19 @@ async fn target_account(
             "You can only act on accounts whose role is below yours.",
         )));
     }
+    if !may_change(actor.role, &account, role) {
+        return Err(Box::new(forbidden(
+            "Only admins can change service accounts.",
+        )));
+    }
     Ok((account, role))
+}
+
+/// Whether `actor` may change `account` (holding `role`): only accounts ranked below them,
+/// and service accounts (operator test identities, `service`) only from admin up, so
+/// moderators can see them but not ban them or unlink their launchers.
+fn may_change(actor: Role, account: &db::Account, role: Option<Role>) -> bool {
+    staff::outranks(actor, role) && (actor >= Role::Admin || !account.is_service())
 }
 
 fn describe(account: &db::Account) -> String {
@@ -259,6 +272,7 @@ struct UserRow {
     created: String,
     banned: bool,
     devices: i64,
+    service: bool,
 }
 
 #[derive(Template)]
@@ -300,6 +314,7 @@ async fn users(
             created: when(a.created_at),
             banned: a.banned_at.is_some(),
             devices: a.devices,
+            service: a.kind == db::SERVICE_KIND,
         })
         .collect();
     let Nav {
@@ -396,7 +411,7 @@ async fn user_page(State(state): Shared, headers: HeaderMap, Path(id): Path<i32>
             created: when(account.created_at),
             ban,
             target_role: target_role.map(Role::as_str),
-            can_act: staff::outranks(actor.role, target_role),
+            can_act: may_change(actor.role, &account, target_role),
             devices,
         },
     ))
@@ -807,3 +822,6 @@ async fn staff_remove(
     staff::log(&state.pool, actor.account(), "remove role", &email, "").await?;
     Ok(Redirect::to("/admin/staff").into_response())
 }
+
+// Service accounts; after `guard!`, which it uses.
+mod service;

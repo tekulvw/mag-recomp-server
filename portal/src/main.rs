@@ -87,6 +87,9 @@ struct ServeArgs {
     /// The game server host name tickets are for.
     #[arg(long, env = "PORTAL_TICKET_AUDIENCE")]
     ticket_audience: String,
+    /// More game server host names, comma-separated, a launcher may ask tickets for.
+    #[arg(long, env = "PORTAL_TICKET_EXTRA_AUDIENCES", default_value = "")]
+    ticket_extra_audiences: String,
     #[arg(long, env = "PORTAL_TICKET_LIFETIME_SECONDS", default_value_t = 600)]
     ticket_lifetime_seconds: u64,
     /// Skip migrations at start (run `mag-portal migrate` separately).
@@ -123,7 +126,8 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         args.ticket_key_id,
         &args.ticket_audience,
         args.ticket_lifetime_seconds,
-    )?;
+    )?
+    .with_extra_audiences(&config::parse_audiences(&args.ticket_extra_audiences)?)?;
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())

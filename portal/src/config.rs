@@ -56,8 +56,28 @@ impl Settings {
 pub struct TicketIssuer {
     key: SigningKey,
     pub key_id: u8,
+    /// The default audience (`PORTAL_TICKET_AUDIENCE`), used when a launcher names none.
     pub audience: String,
+    /// More game servers a launcher may ask for (`PORTAL_TICKET_EXTRA_AUDIENCES`).
+    pub extra_audiences: Vec<String>,
     pub lifetime_seconds: u64,
+}
+
+/// Comma-separated audiences, each held to the same rule as the default one. Empty entries
+/// are skipped.
+pub fn parse_audiences(value: &str) -> anyhow::Result<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    for entry in value.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+        if !ticket::valid_audience(entry) {
+            bail!(
+                "ticket audience {entry:?} must be a lowercase host name of at most 63 characters"
+            );
+        }
+        if !out.iter().any(|a| a == entry) {
+            out.push(entry.to_owned());
+        }
+    }
+    Ok(out)
 }
 
 impl TicketIssuer {
@@ -77,12 +97,43 @@ impl TicketIssuer {
             key,
             key_id,
             audience: audience.to_owned(),
+            extra_audiences: Vec::new(),
             lifetime_seconds,
         })
     }
 
+    /// Also issues tickets for these game servers when a launcher asks for one of them.
+    pub fn with_extra_audiences(mut self, extra: &[String]) -> anyhow::Result<Self> {
+        for audience in extra {
+            if !ticket::valid_audience(audience) {
+                bail!(
+                    "ticket audience {audience:?} must be a lowercase host name of at most 63 characters"
+                );
+            }
+            if *audience != self.audience && !self.extra_audiences.contains(audience) {
+                self.extra_audiences.push(audience.clone());
+            }
+        }
+        Ok(self)
+    }
+
+    /// The audience a ticket request gets: the default when it names none (or an empty one),
+    /// otherwise the named one lowercased, if it is allowed. `None` for any other name.
+    pub fn resolve_audience(&self, requested: Option<&str>) -> Option<&str> {
+        let requested = match requested {
+            None | Some("") => return Some(&self.audience),
+            Some(r) => r.to_ascii_lowercase(),
+        };
+        std::iter::once(&self.audience)
+            .chain(&self.extra_audiences)
+            .find(|a| **a == requested)
+            .map(String::as_str)
+    }
+
+    /// A ticket for `audience`, which the caller has resolved with `resolve_audience`.
     pub fn issue(
         &self,
+        audience: &str,
         account_id: u32,
         player_name: &str,
         now: u64,
@@ -93,7 +144,7 @@ impl TicketIssuer {
             expires_at: now + self.lifetime_seconds,
             account_id,
             nonce: tokens::random_bytes(),
-            audience: self.audience.clone(),
+            audience: audience.to_owned(),
             player_name: player_name.to_owned(),
         };
         Ok((claims.sign(&self.key)?, claims.expires_at))
@@ -136,4 +187,61 @@ pub fn read_secret_file(path: &Path) -> anyhow::Result<String> {
         bail!("{} is empty", path.display());
     }
     Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    fn issuer() -> TicketIssuer {
+        let key = SigningKey::from_slice(&Sha256::digest(b"config test key")).unwrap();
+        TicketIssuer::new(key, 1, "play.example.test", 600).unwrap()
+    }
+
+    #[test]
+    fn audiences() {
+        assert_eq!(
+            parse_audiences(" test.example.test, ,lab-2.example.test,test.example.test").unwrap(),
+            vec!["test.example.test", "lab-2.example.test"]
+        );
+        assert!(parse_audiences("").unwrap().is_empty());
+        for bad in ["Test.example.test", "a b", "x_y.test", &"a".repeat(64)] {
+            assert!(parse_audiences(bad).is_err(), "{bad}");
+        }
+        let extra = parse_audiences("test.example.test,play.example.test").unwrap();
+        let t = issuer().with_extra_audiences(&extra).unwrap();
+        assert_eq!(t.extra_audiences, vec!["test.example.test"]);
+        assert_eq!(t.resolve_audience(None), Some("play.example.test"));
+        assert_eq!(t.resolve_audience(Some("")), Some("play.example.test"));
+        assert_eq!(
+            t.resolve_audience(Some("TEST.Example.test")),
+            Some("test.example.test")
+        );
+        assert_eq!(
+            t.resolve_audience(Some("play.example.test")),
+            Some("play.example.test")
+        );
+        assert_eq!(t.resolve_audience(Some("other.example.test")), None);
+        assert!(issuer().with_extra_audiences(&["Bad".into()]).is_err());
+        assert_eq!(issuer().resolve_audience(Some("test.example.test")), None);
+    }
+
+    #[test]
+    fn tickets_carry_the_chosen_audience() {
+        let t = issuer()
+            .with_extra_audiences(&["test.example.test".into()])
+            .unwrap();
+        let mut keys = ticket::VerifyingKeys::default();
+        keys.insert(1, *t.key.verifying_key());
+        let (bytes, _) = t
+            .issue("test.example.test", 7, "PlayerLinux", 1_000)
+            .unwrap();
+        let claims = ticket::verify(&bytes, &keys, "test.example.test", 1_001).unwrap();
+        assert_eq!(claims.audience, "test.example.test");
+        assert_eq!(
+            ticket::verify(&bytes, &keys, "play.example.test", 1_001),
+            Err(TicketError::WrongAudience)
+        );
+    }
 }

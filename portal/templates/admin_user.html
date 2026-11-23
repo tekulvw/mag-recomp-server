@@ -6,14 +6,14 @@
 <dl>
   <dt>Player name</dt><dd>{% if let Some(n) = name %}<strong>{{ n }}</strong>{% else %}none{% endif %}</dd>
   <dt>Email</dt><dd>{{ email }}</dd>
-  <dt>Signed in with</dt><dd>{{ provider }}</dd>
+  <dt>Signed in with</dt><dd>{% if provider == "service" %}nothing: service account · <a href="/admin/service-accounts">tokens</a>{% else %}{{ provider }}{% endif %}</dd>
   <dt>Joined</dt><dd>{{ created }}</dd>
   <dt>Staff role</dt><dd>{% if let Some(r) = target_role %}{{ r }}{% else %}none{% endif %}</dd>
   <dt>Status</dt><dd>{% if let Some(b) = ban %}<strong>banned</strong> {{ b }}{% else %}active{% endif %}</dd>
 </dl>
 
 {% if !can_act %}
-<p class="alert">This account's role is not below yours, so you cannot change it.</p>
+<p class="alert">{% if provider == "service" %}Only admins can change service accounts.{% else %}This account's role is not below yours, so you cannot change it.{% endif %}</p>
 {% else %}
 <h2>Ban</h2>
 {% if ban.is_some() %}

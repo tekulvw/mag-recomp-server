@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Token for {{ name }}{% endblock %}
+{% block content %}
+{% include "admin_nav.html" %}
+<div class="panel">
+<h1>Token for {{ name }}</h1>
+<p>Launcher token #{{ device_id }} ({{ label }}) for service account {{ id }}. The launcher sends it as <code>Authorization: Bearer …</code> to get tickets.</p>
+<p class="alert">Copy it now. Only its hash is stored, so it is never shown again; if it is lost, revoke it and mint another.</p>
+<label>Launcher token<input readonly value="{{ token }}" autocomplete="off" spellcheck="false"></label>
+<p><a class="button" href="/admin/service-accounts">Done</a></p>
+</div>
+{% endblock %}

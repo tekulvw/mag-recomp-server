@@ -1053,13 +1053,37 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
         .map(str::trim)
 }
 
-async fn api_ticket(State(state): Shared, headers: HeaderMap) -> Result<Response, AppError> {
+#[derive(Deserialize, Default)]
+struct TicketRequest {
+    /// The game server the ticket is for; the default audience when absent or empty.
+    audience: Option<String>,
+}
+
+/// The optional ticket request body: nothing (or only whitespace) asks for the default.
+fn ticket_request(body: &[u8]) -> Option<TicketRequest> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Some(TicketRequest::default());
+    }
+    serde_json::from_slice(body).ok()
+}
+
+async fn api_ticket(
+    State(state): Shared,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Response, AppError> {
+    let Some(request) = ticket_request(&body) else {
+        return Ok(api_error(StatusCode::BAD_REQUEST, "invalid_request"));
+    };
     let account = match bearer(&headers) {
         Some(token) => db::device_account(&state.pool, token).await?,
         None => None,
     };
     let Some(account) = account else {
         return Ok(api_error(StatusCode::UNAUTHORIZED, "invalid_token"));
+    };
+    let Some(audience) = state.tickets.resolve_audience(request.audience.as_deref()) else {
+        return Ok(api_error(StatusCode::BAD_REQUEST, "unknown_audience"));
     };
     if account.is_banned() {
         return Ok((
@@ -1077,13 +1101,13 @@ async fn api_ticket(State(state): Shared, headers: HeaderMap) -> Result<Response
     };
     let now = OffsetDateTime::now_utc().unix_timestamp() as u64;
     let account_id = u32::try_from(account.id)?;
-    let (ticket, expires_at) = state.tickets.issue(account_id, name, now)?;
+    let (ticket, expires_at) = state.tickets.issue(audience, account_id, name, now)?;
     Ok(Json(json!({
         "ticket": STANDARD.encode(ticket),
         "expires_at": expires_at,
         "account_id": account_id,
         "player_name": name,
-        "audience": state.tickets.audience,
+        "audience": audience,
     }))
     .into_response())
 }
@@ -1132,6 +1156,23 @@ mod tests {
         assert_eq!(client_label(Some(" MAG \u{7} launcher ")), "MAG  launcher");
         assert_eq!(client_label(Some("evil\u{202e}rehcnual")), "evilrehcnual");
         assert_eq!(client_label(Some(&"x".repeat(100))).len(), MAX_LABEL_LEN);
+    }
+
+    #[test]
+    fn ticket_bodies() {
+        for empty in [&b""[..], b"  \n", b"{}", b"{\"audience\":null}"] {
+            assert_eq!(ticket_request(empty).unwrap().audience, None);
+        }
+        assert_eq!(
+            ticket_request(br#"{"audience":"Test.example.test"}"#)
+                .unwrap()
+                .audience
+                .as_deref(),
+            Some("Test.example.test")
+        );
+        for bad in [&b"nope"[..], b"[]", b"{\"audience\":7}"] {
+            assert!(ticket_request(bad).is_none());
+        }
     }
 
     #[test]

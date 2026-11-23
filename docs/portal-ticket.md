@@ -18,7 +18,7 @@ All integers are unsigned and big-endian. `A` is the audience length and `N` the
 | 22 | 4 | account ID | portal account ID, never 0 |
 | 26 | 16 | nonce | random; limits reuse (rule 6) |
 | 42 | 1 | `A` | 1 to 63 |
-| 43 | `A` | audience | the game server's host name, lowercase ASCII letters, digits, `.` and `-` |
+| 43 | `A` | audience | the host name of the game server the ticket is for, lowercase ASCII letters, digits, `.` and `-` |
 | 43+`A` | 1 | `N` | 3 to 15 |
 | 44+`A` | `N` | player name | ASCII letters, digits, `-` and `_`, starting with a letter |
 | 44+`A`+`N` | 64 | signature | ECDSA P-256 over SHA-256 of bytes `0 … 43+A+N`, as `r ‖ s` (32 bytes each) |
@@ -36,7 +36,9 @@ saying which check failed to the client:
    `s` form are valid; the portal emits low `s`.
 3. `issued at` is no more than 60 seconds in the future, `expires at` is in the future, and the
    lifetime (`expires at − issued at`) is at most 3600 seconds.
-4. The audience equals the verifier's own configured host name.
+4. The audience equals the verifier's own configured host name. One portal can issue tickets for
+   several game servers (such as `play.magtest.online` and a LAN test server,
+   `test.magtest.online`); the audience keeps a ticket for one from being accepted by another.
 5. The account ID is not 0 and the name follows the rule above.
 6. The nonce has been accepted fewer times than the verifier's reuse limit, and remembered until
    its ticket expires. The game reuses one ticket for several sign-ins (MAPS, MAS and statistics
@@ -46,6 +48,16 @@ saying which check failed to the client:
 
 The player name keeps the case the player chose. Servers that key accounts by lowercase name
 lowercase it after verification.
+
+## Audiences
+
+The portal issues tickets for its default audience, `PORTAL_TICKET_AUDIENCE`, and for any host
+listed in `PORTAL_TICKET_EXTRA_AUDIENCES`. A launcher picks one with the optional body
+`{"audience": "<host>"}` on `POST /api/v1/ticket` (lowercased by the portal); without a body, or
+without the field, it gets the default. An unlisted host gets `400 {"error":"unknown_audience"}`.
+The response's `audience` field names the audience written into the ticket. Every game server
+verifies with the same published keys and its own host name, so the same launcher token serves
+each of them, and a ticket for one cannot be used on another.
 
 ## Keys
 
