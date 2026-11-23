@@ -1,0 +1,14 @@
+# Web fonts the site serves from /fonts/, fetched and verified by the Dockerfile.
+# All three families are under the SIL Open Font License 1.1 (from @fontsource 5.3.0).
+# <file or license name>  <sha256>  <url>
+chakra-petch-latin-500-normal.woff2 36ad966cb653de70ba37355c41003b02de8940b2df6cbcd46480a6ad8cadd65d https://cdn.jsdelivr.net/npm/@fontsource/chakra-petch@5.3.0/files/chakra-petch-latin-500-normal.woff2
+chakra-petch-latin-600-normal.woff2 a5888696e9eb1b4bbbecc8eb3922b8369f49d4bddb72263e033cbd17f399be76 https://cdn.jsdelivr.net/npm/@fontsource/chakra-petch@5.3.0/files/chakra-petch-latin-600-normal.woff2
+chakra-petch-latin-700-normal.woff2 ce5095dc1cb200aaa939e38067a0677018d10e9f26ec38cdcf1557ac524fc775 https://cdn.jsdelivr.net/npm/@fontsource/chakra-petch@5.3.0/files/chakra-petch-latin-700-normal.woff2
+inter-latin-400-normal.woff2 8909904ab6c872eb994093482a88a28eca2cd95912d7b6fecd72103b0dc07edc https://cdn.jsdelivr.net/npm/@fontsource/inter@5.3.0/files/inter-latin-400-normal.woff2
+inter-latin-500-normal.woff2 f3779f1efccc4bdcdf9c0a02ab95bf6bd092ed09c48c08cedc725889edd1d19f https://cdn.jsdelivr.net/npm/@fontsource/inter@5.3.0/files/inter-latin-500-normal.woff2
+inter-latin-600-normal.woff2 f9a06e79cd3a2a20951c0f0e28f66dd0e6d3fda73911d640a2125c8fcb78f21a https://cdn.jsdelivr.net/npm/@fontsource/inter@5.3.0/files/inter-latin-600-normal.woff2
+jetbrains-mono-latin-400-normal.woff2 14425ba9c695763c1547f48a206b7aa60350a33ae23de09f0407877f3fcd89eb https://cdn.jsdelivr.net/npm/@fontsource/jetbrains-mono@5.3.0/files/jetbrains-mono-latin-400-normal.woff2
+jetbrains-mono-latin-600-normal.woff2 400c6bfda18d5d14acad1c15d6dcb9f8e13c015e7286317e0b9a482539bef147 https://cdn.jsdelivr.net/npm/@fontsource/jetbrains-mono@5.3.0/files/jetbrains-mono-latin-600-normal.woff2
+chakra-petch-LICENSE 8f32c96ea465c5916489845361238b31b365414228bc2e4e45e3ae98ba1d311a https://cdn.jsdelivr.net/npm/@fontsource/chakra-petch@5.3.0/LICENSE
+inter-LICENSE 3b0a5fca3d17942cde889069889dedbbbd075e9b599968c82a95f4d944e9b345 https://cdn.jsdelivr.net/npm/@fontsource/inter@5.3.0/LICENSE
+jetbrains-mono-LICENSE 403581b69dac5cff4079205e01c6b467e56af449ecbd7247693ddb1baafa005b https://cdn.jsdelivr.net/npm/@fontsource/jetbrains-mono@5.3.0/LICENSE

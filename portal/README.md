@@ -23,8 +23,10 @@ cargo test --locked
 ```
 
 `docker build --target check portal` runs the same checks with its own PostgreSQL inside the
-build, as CI does. `docker build portal` builds the image (`mag-portal serve` by default,
-listening on port 8080 as UID 10001).
+build, as CI does. `docker build portal` builds the image, which runs `mag-portal serve` by default,
+listening on port 8080 as UID 10001. The build downloads the web fonts listed in `fonts.txt`
+(Chakra Petch, Inter and JetBrains Mono, all SIL Open Font License 1.1) and checks each against its
+SHA-256; their licenses go to `/usr/share/licenses/mag-recomp-server/fonts/`.
 Sign-in starts are limited to 30 a minute per client address.
 
 The tests run a fake OpenID provider and never contact Google. `tests/ticket-vectors.json`
@@ -55,6 +57,7 @@ holds ticket test vectors for other verifiers; regenerate them with
 | `PORTAL_TICKET_AUDIENCE` | yes | The game server's host name, such as `play.magtest.online`. Tickets are valid only there. |
 | `PORTAL_TICKET_KEY_ID` | no | Key ID written into tickets (default 1). Change it when rotating keys. |
 | `PORTAL_TICKET_LIFETIME_SECONDS` | no | Ticket lifetime, 60 to 3600 (default 600). |
+| `PORTAL_FONT_DIR` | no | Folder of the web fonts listed in `fonts.txt`, served at `/fonts/`. The image sets it; without it pages use system fonts. |
 | `PORTAL_OWNER_EMAILS` | no | Comma-separated Google emails with the owner role in the admin panel. Owners cannot be changed from the site. |
 | `PORTAL_CLIENT_IP_HEADER` | no | Header the trusted proxy appends the client address to (`x-forwarded-for`); the last entry is used. Without it, rate limits use the connecting address, which behind a proxy is the proxy. |
 | `PORTAL_OPERATOR_CONTACT` | no | Contact text shown on the privacy page. |

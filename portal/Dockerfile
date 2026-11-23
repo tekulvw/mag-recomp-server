@@ -31,12 +31,28 @@ RUN mkdir -p /out-licenses \
     && find /usr/local/cargo/registry/src -type f \( -iname '*license*' -o -iname '*notice*' \) \
        -exec cp --parents -t /out-licenses/ '{}' +
 
+# Web fonts (fonts.txt): pinned URLs, each checked against its SHA-256 before use.
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS fonts
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY fonts.txt /fonts.txt
+RUN set -eu; mkdir -p /out/fonts /out/licenses; \
+    grep -v '^#' /fonts.txt | while read -r name sum url; do \
+      [ -n "$name" ] || continue; \
+      case "$name" in *.woff2) dest=/out/fonts/$name;; *) dest=/out/licenses/$name.txt;; esac; \
+      curl -fsSL --retry 3 -o "$dest" "$url"; \
+      echo "$sum  $dest" | sha256sum -c -; \
+    done; \
+    test "$(ls /out/fonts | wc -l)" -eq "$(grep -c '^[^#].*\.woff2 ' /fonts.txt)"
+
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --create-home portal
 COPY --from=build /src/portal/target/release/mag-portal /usr/local/bin/mag-portal
 COPY --from=licenses /out-licenses/ /usr/share/licenses/mag-recomp-server/
 COPY LICENSE /usr/share/licenses/mag-recomp-server/Project-MIT.txt
+COPY --from=fonts /out/fonts/ /usr/share/mag-portal/fonts/
+COPY --from=fonts /out/licenses/ /usr/share/licenses/mag-recomp-server/fonts/
+ENV PORTAL_FONT_DIR=/usr/share/mag-portal/fonts
 USER portal
 WORKDIR /home/portal
 EXPOSE 8080

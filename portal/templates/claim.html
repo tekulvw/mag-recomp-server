@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Choose your player name{% endblock %}
 {% block content %}
+<div class="panel narrow">
 <h1>Choose your player name</h1>
 <p>This is your name on the server. You cannot change it later.</p>
 {% if let Some(e) = error %}<p class="alert">{{ e }}</p>{% endif %}
@@ -12,4 +13,5 @@
   <p class="quiet">3 to 15 letters, digits, - or _, starting with a letter.</p>
   <button>Claim name</button>
 </form>
+</div>
 {% endblock %}
