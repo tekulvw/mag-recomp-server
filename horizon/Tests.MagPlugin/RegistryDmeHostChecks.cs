@@ -214,6 +214,7 @@ internal static partial class LeadershipProgressionChecks
         public string SelectedProfile { get; private set; }
         public volatile bool PauseHeartbeat;
         public bool SupportsParties;
+        public int AdmissionEpoch = 1;
         public Func<JsonObject, Task> BeforePartyReply;
         public volatile bool DropNextPartyReply;
         public Func<JsonObject, bool> RefuseParty;
@@ -298,7 +299,7 @@ internal static partial class LeadershipProgressionChecks
                             selected.Remove("maximum_players");
                             selected.Remove("team_capacity");
                             selected["formation_id"] = request["formation_id"]!.DeepClone();
-                            if (SupportsParties) selected["admission_epoch"] = 1;
+                            if (SupportsParties) selected["admission_epoch"] = Volatile.Read(ref AdmissionEpoch);
                             response["selected_match"] = selected;
                             break;
                         case "reserve":

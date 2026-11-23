@@ -23,6 +23,106 @@ internal static partial class LeadershipProgressionChecks
         finally { Server.Medius.Program.Settings.MagApplicationId = previous; }
     });
 
+    public static void PartyTerminalRequeue() => WithDirectory(directory =>
+    {
+        int previous = Server.Medius.Program.Settings.MagApplicationId;
+        Server.Medius.Program.Settings.MagApplicationId = 20231;
+        try { VerifyPartyTerminalRequeue(directory).GetAwaiter().GetResult(); }
+        finally { Server.Medius.Program.Settings.MagApplicationId = previous; }
+    });
+
+    static async Task VerifyPartyTerminalRequeue(string directory)
+    {
+        var store = new LocalCharacterStore(Path.Combine(directory, "party-terminal.json"));
+        string[] accounts = { "alpha", "bravo", "charlie", "delta" };
+        for (int i = 0; i < accounts.Length; i++)
+            Check(store.CreateForAccount(new MagCreateCharacterRequest { AccountName = accounts[i],
+                Faction = (byte)(i < 2 ? 0 : 1), UniverseId = 26, NpId = new byte[36] }, accounts[i]).Result
+                == MagNetResult.Success, "Party terminal fixture character creation");
+
+        await using var worker = new RegistryWorker("first") { SupportsParties = true };
+        await using var spare = new RegistryWorker("second");
+        JsonObject Worker(string id, int port, bool draining) => new() { ["worker_id"] = id,
+            ["worker_host"] = "127.0.0.1", ["worker_port"] = port, ["minimum_players"] = 3,
+            ["maximum_players"] = 3, ["minimum_players_per_team"] = new JsonArray(1, 1), ["draining"] = draining };
+        var config = new JsonObject { ["format"] = "mag_world_registry_v1", ["application_id"] = 20231,
+            ["client_address"] = "192.0.2.9", ["client_tcp_port"] = 12073, ["party_invite_seconds"] = 30,
+            ["workers"] = new JsonArray(Worker("first", worker.Port, false), Worker("second", spare.Port, true)) };
+        await using var registry = new MagWorldRegistry(MagWorldRegistryConfig.Parse(config.ToJsonString()), store);
+        await registry.InitializeAsync();
+        var sessions = accounts.Select(account => MakeSession(store, 20231, account, store.ReadForAccount(account).Single().Id)).ToArray();
+        var output = sessions.Select(_ => new ConcurrentQueue<MagMessage>()).ToArray();
+        var leader = sessions[0]; var member = sessions[1];
+        registry.RegisterPartySession(leader, () => true, output[0].Enqueue, null);
+        registry.RegisterPartySession(member, () => true, output[1].Enqueue, null);
+        Check(registry.RoutePartyMembership(leader, new MagRetailPartyInvite { Inviter = leader.AccountId, Invitee = member.AccountId }),
+            "Terminal fixture invite refused");
+        uint partyId = output[1].OfType<MagRetailPartyInvite>().Single().PartyId;
+        Check(registry.RoutePartyMembership(member, new MagRetailPartyInviteResponse
+            { PartyId = partyId, Inviter = leader.AccountId, Responder = member.AccountId }), "Terminal fixture invite response refused");
+
+        void Queue(int index, int transaction, uint id = 0) => registry.QueueJoin(sessions[index],
+            new MagRetailJoinGameRequest { TransactionId = transaction, Preference = 1, Value = 2, PartyId = id },
+            output[index].Enqueue, () => true);
+        int Successes(int index) => output[index].OfType<MagJoinGameResponse>().Count(reply => reply.Result == 0);
+        JsonObject[] Cohorts() => worker.Requests.Where(request => request["op"]!.GetValue<string>() == "reserve_party").ToArray();
+        static string Id(JsonObject row, string key) => row[key]!.GetValue<string>();
+        static JsonObject[] Owners(JsonObject cohort) => cohort["members"]!.AsArray().Select(node =>
+        {
+            var owner = node!.DeepClone().AsObject();
+            owner["world_id"] = cohort["world_id"]!.DeepClone();
+            return owner;
+        }).ToArray();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        async Task Until(Func<bool> condition)
+        {
+            while (!condition()) { await registry.TickAsync(); await Task.Delay(20, deadline.Token); }
+        }
+
+        Queue(0, 2, partyId);
+        Queue(2, 3);
+        await Until(() => Successes(0) == 1 && Successes(1) == 1 && Successes(2) == 1);
+        var first = Cohorts().Single();
+        var firstOwners = Owners(first);
+        var oldOpponent = worker.Reservations.Single();
+        var slot = ((IEnumerable)typeof(MagWorldRegistry).GetField("_slots", HostInternals)!.GetValue(registry)!).Cast<object>().First();
+        var host = (LocalDmeHost)slot.GetType().GetField("Host")!.GetValue(slot)!;
+        var claimed = firstOwners.Append(oldOpponent).Select(owner => ConnectFixture(host, owner)).ToArray();
+        await Until(() => claimed.All(registry.CanUse));
+
+        Queue(3, 4);
+        await registry.TickAsync();
+        Check(registry.Status(1).QueueSizes[7] == 1 && Successes(3) == 0 && Cohorts().Length == 1,
+            "An opposite-faction waiter entered a full live match");
+        Check(!registry.CancelPartyQueue(leader, partyId) && claimed.All(registry.CanUse),
+            "Published cancellation evicted a claimed player");
+
+        RouteFixture(host, TerminalReply("party-terminal-round", firstOwners.Append(oldOpponent).ToArray()));
+        Volatile.Write(ref worker.AdmissionEpoch, 2);
+        claimed[0].OnTcpDisconnected();
+        await Until(() => worker.Requests.Any(request => request["op"]!.GetValue<string>() == "release" &&
+            Id(request, "reservation_id") == Id(firstOwners[0], "reservation_id")));
+        Check(registry.CanUse(claimed[1]) && registry.CanUse(claimed[2]) && Successes(3) == 0,
+            "Leaving results evicted another claimed player or consumed the waiting ticket");
+
+        Queue(0, 5, partyId);
+        await Until(() => Successes(0) == 2 && Successes(1) == 2 && Successes(3) == 1);
+        var second = Cohorts().Last();
+        var secondOwners = Owners(second);
+        Check(Cohorts().Length == 2 && first["admission_epoch"]!.GetValue<int>() == 1 && second["admission_epoch"]!.GetValue<int>() == 2 &&
+            Id(first, "formation_id") != Id(second, "formation_id") && Id(first, "cohort_id") != Id(second, "cohort_id"),
+            "Requeue reused a prior formation, cohort, or admission epoch");
+        Check(firstOwners.Select(owner => owner["account_id"]!.GetValue<uint>())
+                .SequenceEqual(secondOwners.Select(owner => owner["account_id"]!.GetValue<uint>())) &&
+            firstOwners.Zip(secondOwners).All(pair => Id(pair.First, "reservation_id") != Id(pair.Second, "reservation_id") &&
+                Id(pair.First, "access_key") != Id(pair.Second, "access_key")),
+            "Requeue split the party, changed the roster, or reused transport identity");
+        var roster = output[0].OfType<MagRetailPartyRoster>().Last();
+        Check(roster.PartyId == partyId && roster.Status == 3 && roster.Members.SequenceEqual(new[] { leader.AccountId, member.AccountId }) &&
+            registry.CanUse(claimed[2]) && !registry.CanUse(claimed[1]),
+            "Second admission failed to preserve the party or released the unrelated results transport");
+    }
+
     static async Task VerifyPartyRegistry(string directory, bool cancel, bool claimOne = false)
     {
         var store = new LocalCharacterStore(Path.Combine(directory, $"party-{cancel}-{claimOne}.json"));
