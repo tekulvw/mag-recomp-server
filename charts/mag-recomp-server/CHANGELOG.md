@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.7.0](https://github.com/tekulvw/mag-recomp-server/compare/chart-v0.6.0...chart-v0.7.0) (2026-11-23)
+
+
+### Features
+
+* **data:** support portable mode bundles ([#166](https://github.com/tekulvw/mag-recomp-server/issues/166)) ([7fbaace](https://github.com/tekulvw/mag-recomp-server/commit/7fbaacee689966906170861ffb13f499d2eae380))
+* **medius:** verify portal game tickets ([#195](https://github.com/tekulvw/mag-recomp-server/issues/195)) ([2b7f4f6](https://github.com/tekulvw/mag-recomp-server/commit/2b7f4f62f146e0edf87750c9a1dbd4d1f0c12b0e))
+
+
+### Bug Fixes
+
+* **chart:** accept Acquisition game mode ([#167](https://github.com/tekulvw/mag-recomp-server/issues/167)) ([4304886](https://github.com/tekulvw/mag-recomp-server/commit/430488644352cd59f40d1fbb4191368db09c09aa))
+
 ## [0.6.0](https://github.com/tekulvw/mag-recomp-server/compare/chart-v0.5.0...chart-v0.6.0) (2026-11-11)
 
 
