@@ -1114,3 +1114,38 @@ async fn admin_panel_roles(pool: PgPool) {
         StatusCode::NOT_FOUND
     );
 }
+
+#[sqlx::test]
+async fn homepage_for_everyone(pool: PgPool) {
+    let h = harness(pool).await;
+    let r = h.get("/", None).await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let html = r.text().await.unwrap();
+    for needle in [
+        "https://github.com/tekulvw/mag-recomp\"",
+        "https://github.com/tekulvw/mag-recomp-server\"",
+        "href=\"/auth/google\">Sign in with Google",
+        "play.magtest.online",
+        "Not affiliated",
+    ] {
+        assert!(html.contains(needle), "{needle}");
+    }
+    // Signed in, the page stays and offers the account instead.
+    let s = h.sign_in("home").await;
+    let html = h.get("/", Some(&s)).await.text().await.unwrap();
+    let sign_in_button = "href=\"/auth/google\">Sign in with Google";
+    assert!(
+        html.contains("href=\"/claim\">Choose your player name") && !html.contains(sign_in_button)
+    );
+    let csrf = h.csrf(&s).await;
+    h.post_form("/claim", &s, &[("csrf", &csrf), ("name", "Hotel")])
+        .await;
+    assert!(
+        h.get("/", Some(&s))
+            .await
+            .text()
+            .await
+            .unwrap()
+            .contains("Your account: Hotel")
+    );
+}
