@@ -252,6 +252,10 @@ namespace Server.Medius
         // Operator policy: new characters start at this level as if they had earned it
         // (threshold XP and every gained level's skill points). Null keeps the catalog default.
         public byte? StartingLevel { get; set; }
+        // Operator policy: a character completing Training reaches at least this level as if it had
+        // earned it (threshold XP and every gained level's skill points). Only new completions are
+        // affected; the completed flag stays the receipt. Null keeps the catalog's bonus alone.
+        public byte? TrainingLevel { get; set; }
         private readonly ICharacterStoreCommitter _committer;
         public LocalCharacterStore(string path) : this(path, new AtomicCharacterStoreCommitter()) { }
         public LocalCharacterStore(string path, ICharacterStoreCommitter committer)
@@ -655,6 +659,12 @@ namespace Server.Medius
             if (rules.ExperienceBonus > int.MaxValue - previousExperience) return Deny("experience-overflow");
             int experience = previousExperience + rules.ExperienceBonus;
             byte level = rules.Progression.LevelForExperience(experience);
+            if (TrainingLevel is byte minimum && level < minimum)
+            {
+                if (minimum > rules.Progression.MaximumLevel) return Deny("training-level-unsupported");
+                // The bonus left the character below the minimum, so the threshold is above its XP.
+                experience = rules.Progression.ThresholdForLevel(minimum); level = minimum;
+            }
             byte points = rules.Progression.PointsAfterGain(character.ToRecord().SkillPoints, previousLevel, level);
             character.Flags |= rules.CompletedFlagMask;
             character.Experience = experience; character.Level = level; character.SkillPoints = points;

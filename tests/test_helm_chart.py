@@ -258,6 +258,17 @@ class ChartTests(unittest.TestCase):
         for invalid in (0, 256, '3', [3]):
             render({'runtime': {'startingLevel': invalid}}, ok=False)
 
+    def test_optional_training_level(self):
+        def medius_env(docs):
+            return [{e['name']: e.get('value') for e in c.get('env', [])}
+                    for d in docs if d['kind'] == 'Deployment'
+                    for c in d['spec']['template']['spec']['containers'] if c['name'] in ('medius', 'maps')]
+        self.assertTrue(all('MAG_TRAINING_LEVEL' not in env for env in medius_env(render())))
+        envs = medius_env(render({'runtime': {'trainingLevel': 3}}))
+        self.assertTrue(envs and all(env.get('MAG_TRAINING_LEVEL') == '3' and 'MAG_STARTING_LEVEL' not in env for env in envs))
+        for invalid in (0, 256, '3', [3]):
+            render({'runtime': {'trainingLevel': invalid}}, ok=False)
+
     def test_optional_initial_spawn_delay_override(self):
         default = gameplay_arguments(render())
         self.assertNotIn('--initial-spawn-delay-ms', default)

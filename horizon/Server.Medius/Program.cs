@@ -58,21 +58,38 @@ namespace Server.Medius
         public static byte InitialSkillPoints { get; private set; }
         /// <summary>Optional operator starting level for new characters (MAG_STARTING_LEVEL).</summary>
         public static byte? StartingLevel { get; private set; }
+        /// <summary>Optional operator minimum level reached on completing Training (MAG_TRAINING_LEVEL).</summary>
+        public static byte? TrainingLevel { get; private set; }
         public static LocalCharacterStore CreateCharacterStore() => new LocalCharacterStore(Settings.MagCharacterStorePath)
         { TrainingCompletionCatalog = Settings.MagApplicationId == 20231 ? TrainingCompletionCatalog : null,
             LoadoutCatalog = Settings.EnableMagCharacterCatalogs || (Settings.MagApplicationId == 20231 && LoadoutCatalog?.ApplicationId == 20231) ? LoadoutCatalog : null,
             SkillCatalog = Settings.EnableMagCharacterCatalogs || (Settings.MagApplicationId == 20231 && SkillCatalog?.ApplicationId == 20231) ? SkillCatalog : null,
             ProgressionCatalog = Settings.MagApplicationId == 20231 || Settings.EnableMagCharacterCatalogs ? ProgressionCatalog : null,
             InitialSkillPoints = Settings.EnableMagCharacterCatalogs ? InitialSkillPoints : (byte)0,
-            StartingLevel = StartingLevel };
+            StartingLevel = StartingLevel, TrainingLevel = TrainingLevel };
         /// <summary>Fail fast on a starting level the progression catalog cannot represent.</summary>
-        public static byte? ParseStartingLevel(string value, MagProgressionCatalog catalog)
+        public static byte? ParseStartingLevel(string value, MagProgressionCatalog catalog) =>
+            ParseOperatorLevel("MAG_STARTING_LEVEL", value, catalog, catalog?.InitialLevel ?? 1);
+        /// <summary>
+        /// Fail fast on a Training level that either progression table cannot represent: the setting
+        /// is applied with the Training-completion catalog's table, so that catalog is required too.
+        /// </summary>
+        public static byte? ParseTrainingLevel(string value, MagProgressionCatalog catalog, MagTrainingCompletionCatalog training)
+        {
+            byte? level = ParseOperatorLevel("MAG_TRAINING_LEVEL", value, catalog, 1);
+            if (level == null) return null;
+            if (training == null) throw new InvalidDataException("MAG_TRAINING_LEVEL requires a Training-completion catalog.");
+            if (level > training.Progression.MaximumLevel)
+                throw new InvalidDataException($"MAG_TRAINING_LEVEL must be between 1 and {training.Progression.MaximumLevel}.");
+            return level;
+        }
+        static byte? ParseOperatorLevel(string variable, string value, MagProgressionCatalog catalog, byte minimum)
         {
             if (string.IsNullOrWhiteSpace(value)) return null;
-            if (!byte.TryParse(value.Trim(), out byte level)) throw new InvalidDataException("MAG_STARTING_LEVEL must be a level number.");
-            if (catalog == null) throw new InvalidDataException("MAG_STARTING_LEVEL requires a progression catalog.");
-            if (level < catalog.InitialLevel || level > catalog.MaximumLevel)
-                throw new InvalidDataException($"MAG_STARTING_LEVEL must be between {catalog.InitialLevel} and {catalog.MaximumLevel}.");
+            if (!byte.TryParse(value.Trim(), out byte level)) throw new InvalidDataException($"{variable} must be a level number.");
+            if (catalog == null) throw new InvalidDataException($"{variable} requires a progression catalog.");
+            if (level < minimum || level > catalog.MaximumLevel)
+                throw new InvalidDataException($"{variable} must be between {minimum} and {catalog.MaximumLevel}.");
             return level;
         }
         internal static void LoadCharacterCatalog()
@@ -83,6 +100,7 @@ namespace Server.Medius
             if (!string.IsNullOrEmpty(progressionCatalog) && !Path.IsPathFullyQualified(progressionCatalog)) throw new InvalidDataException("MAG progression catalog path must be absolute.");
             ProgressionCatalog = string.IsNullOrEmpty(progressionCatalog) ? null : MagProgressionCatalog.Load(progressionCatalog, Settings.MagApplicationId);
             StartingLevel = ParseStartingLevel(Environment.GetEnvironmentVariable("MAG_STARTING_LEVEL"), ProgressionCatalog);
+            TrainingLevel = ParseTrainingLevel(Environment.GetEnvironmentVariable("MAG_TRAINING_LEVEL"), ProgressionCatalog, TrainingCompletionCatalog);
             // Retail purchases are independent of prototype kit/grant activation.
             string retailSkills = Environment.GetEnvironmentVariable("MAG_RETAIL_SKILL_CATALOG");
             if (!string.IsNullOrEmpty(retailSkills) && (Settings.MagApplicationId != 20231 || !Path.IsPathFullyQualified(retailSkills)))

@@ -249,6 +249,7 @@
           "maximum": 8
         },
         "startingLevel": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 1, "maximum": 255}]},
+        "trainingLevel": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 1, "maximum": 255}]},
         "initialSpawnDelayMs": {
           "oneOf": [
             {"type": "null"},
