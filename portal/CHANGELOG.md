@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.0](https://github.com/tekulvw/mag-recomp-server/compare/portal-v0.1.0...portal-v0.2.0) (2026-11-23)
+
+
+### Features
+
+* **portal:** add service accounts and per-server ticket audiences ([#203](https://github.com/tekulvw/mag-recomp-server/issues/203)) ([104431d](https://github.com/tekulvw/mag-recomp-server/commit/104431d1892cb91e08eac4633d17b1cc3bd311db))
+* **portal:** let staff view characters and set levels on the game server ([#201](https://github.com/tekulvw/mag-recomp-server/issues/201)) ([26e3443](https://github.com/tekulvw/mag-recomp-server/commit/26e3443675df684ff15cee6befd0d8f314874e4d))
+
 ## 0.1.0 (2026-11-23)
 
 
