@@ -7,7 +7,7 @@ using RT.Models.MAG;
 namespace Server.Medius
 {
     /// <summary>Isolated local MAS protocol session; no Medius account or PSN ticket validation.</summary>
-    public sealed class MagMasSession
+    public sealed class MagMasSession : IMagPortalSession
     {
         public enum SessionState { AwaitingHello, ProtocolInfoSent, ProtocolAcknowledged, LocalDevelopmentAuthenticated, CharacterCreated, AccountLoginSent, CharacterDataSent }
         public SessionState State { get; private set; } = SessionState.AwaitingHello;
@@ -20,6 +20,25 @@ namespace Server.Medius
         public LocalCharacterStore CharacterStore { get; set; }
         public string StorageStatus { get; private set; } = "inactive";
         public string AuthenticatedAccount { get; private set; }
+        /// <summary>Portal tickets in required mode; null keeps the development identity policy.</summary>
+        public MagPortalTicketPolicy PortalTickets { get; set; }
+        /// <summary>Portal account ID of a ticket-authenticated session; 0 otherwise.</summary>
+        public uint PortalAccountId { get; private set; }
+        public string PortalTicketStatus { get; private set; } = "inactive";
+        private readonly MagPortalTicketAssembly _portalTicket = new MagPortalTicketAssembly();
+        /// <summary>Idle limit for portal account liveness; MAS.cs sets the application's client timeout.</summary>
+        public int PortalLiveTimeoutSeconds { get; set; } = 30;
+        private bool _portalSessionEnded;
+        public bool IsPortalSessionLive(DateTime now) =>
+            !_portalSessionEnded && !IsExpired(now, PortalLiveTimeoutSeconds);
+        /// <summary>The connection closed: free its portal account for the next sign-in.</summary>
+        public void EndPortalSession()
+        {
+            _portalSessionEnded = true;
+            PortalTickets?.Sessions.Release(this);
+        }
+        // Portal tickets replace the development identity check, not the local account stack behind it.
+        private bool AccountAuthEnabled => DevelopmentAuthEnabled || PortalTickets != null;
         private uint _selectedCharacterId;
         private DateTime _lastActivityUtc;
 
@@ -51,7 +70,19 @@ namespace Server.Medius
                     // Client build differences are nonfatal. Do not ping-pong the acknowledgement.
                     State = SessionState.ProtocolAcknowledged;
                     break;
-                case MagNpAuthenticateRequest request when DevelopmentAuthEnabled &&
+                case MagNpAuthenticateRequest request when PortalTickets != null && State == SessionState.ProtocolAcknowledged:
+                    {
+                        var outcome = PortalTickets.Authenticate(_portalTicket, request, this, now);
+                        PortalTicketStatus = outcome.Reason.Code();
+                        ObserveActivity(now);
+                        if (!outcome.Accepted) return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();
+                        AuthenticatedAccount = outcome.Account; PortalAccountId = outcome.AccountId;
+                        State = SessionState.LocalDevelopmentAuthenticated;
+                        return Reply(applicationId, request is MagRetailNpAuthenticateRequest
+                            ? new MagRetailNpAuthenticateResponse { TransactionId = request.TransactionId, Success = true }
+                            : new MagNpAuthenticateResponse { TransactionId = request.TransactionId, Success = true });
+                    }
+                case MagNpAuthenticateRequest request when PortalTickets == null && DevelopmentAuthEnabled &&
                     State == SessionState.ProtocolAcknowledged && MagDevelopmentAccountPolicy.Accepts(request):
                     AuthenticatedAccount = MagDevelopmentAccountPolicy.Account(request);
                     State = SessionState.LocalDevelopmentAuthenticated;
@@ -59,7 +90,7 @@ namespace Server.Medius
                     return Reply(applicationId, request is MagRetailNpAuthenticateRequest
                         ? new MagRetailNpAuthenticateResponse { TransactionId = request.TransactionId, Success = true }
                         : new MagNpAuthenticateResponse { TransactionId = request.TransactionId, Success = true });
-                case MagAccountLoginRequest request when AccountLoginEnabled && DevelopmentAuthEnabled && CharacterStorageEnabled &&
+                case MagAccountLoginRequest request when AccountLoginEnabled && AccountAuthEnabled && CharacterStorageEnabled &&
                     (State == SessionState.LocalDevelopmentAuthenticated || State == SessionState.CharacterCreated):
                     MagLoginTicket ticket = null;
                     try
@@ -81,7 +112,7 @@ namespace Server.Medius
                         : new MagAccountLoginResponse { TransactionId = request.TransactionId, Result = 0 });
                     State = SessionState.AccountLoginSent;
                     return Reply(applicationId, ticket.CreateResponse(request.TransactionId));
-                case MagCharacterDataRequest request when CharacterDataEnabled && AccountLoginEnabled && DevelopmentAuthEnabled &&
+                case MagCharacterDataRequest request when CharacterDataEnabled && AccountLoginEnabled && AccountAuthEnabled &&
                     CharacterStorageEnabled && State == SessionState.AccountLoginSent && MagDevelopmentAccountPolicy.HasZeroRsa(request):
                     try
                     {
@@ -105,7 +136,7 @@ namespace Server.Medius
                     { StorageStatus = "character-data-storage-error"; }
                     // A negative 0239 still requires a full record. Do not invent one for an unavailable identity.
                     break;
-                case MagCreateCharacterRequest request when DevelopmentAuthEnabled && CharacterStorageEnabled &&
+                case MagCreateCharacterRequest request when AccountAuthEnabled && CharacterStorageEnabled &&
                     (State == SessionState.LocalDevelopmentAuthenticated || State == SessionState.CharacterCreated):
                     var result = MagNetResult.Error;
                     try

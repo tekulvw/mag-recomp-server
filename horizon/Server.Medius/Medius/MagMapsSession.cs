@@ -8,7 +8,7 @@ using RT.Models.MAG;
 namespace Server.Medius
 {
     /// <summary>Local development MAPS session; no Medius account or PSN ticket validation.</summary>
-    public sealed class MagMapsSession
+    public sealed class MagMapsSession : IMagPortalSession
     {
         public enum SessionState { AwaitingHello, HelloSent, WaitingForAuthentication, LocalDevelopmentAuthenticated, ContentSent, CharacterListSent, WaitingForUniverse }
         public SessionState State { get; private set; } = SessionState.AwaitingHello;
@@ -18,6 +18,25 @@ namespace Server.Medius
         public LocalCharacterStore CharacterStore { get; set; }
         public string StorageStatus { get; private set; } = "inactive";
         public string AuthenticatedAccount { get; private set; }
+        /// <summary>Portal tickets in required mode; null keeps the development identity policy.</summary>
+        public MagPortalTicketPolicy PortalTickets { get; set; }
+        /// <summary>Portal account ID of a ticket-authenticated session; 0 otherwise.</summary>
+        public uint PortalAccountId { get; private set; }
+        public string PortalTicketStatus { get; private set; } = "inactive";
+        private readonly MagPortalTicketAssembly _portalTicket = new MagPortalTicketAssembly();
+        /// <summary>Idle limit for portal account liveness; MAS.cs sets the application's client timeout.</summary>
+        public int PortalLiveTimeoutSeconds { get; set; } = 30;
+        private bool _portalSessionEnded;
+        public bool IsPortalSessionLive(DateTime now) =>
+            !_portalSessionEnded && !IsExpired(now, PortalLiveTimeoutSeconds);
+        /// <summary>The connection closed: free its portal account for the next sign-in.</summary>
+        public void EndPortalSession()
+        {
+            _portalSessionEnded = true;
+            PortalTickets?.Sessions.Release(this);
+        }
+        // Portal tickets replace the development identity check, not the local account stack behind it.
+        private bool AccountAuthEnabled => DevelopmentAuthEnabled || PortalTickets != null;
         private uint _selectedCharacterId;
         private DateTime _lastActivityUtc;
         private readonly MagServerNews _news;
@@ -53,7 +72,11 @@ namespace Server.Medius
                     return Reply(applicationId, applicationId == 20231
                         ? new MagRetailMapsHelloResponse { Success = true, Online = true, FactionMask = 7, AuxiliaryString = string.Empty, AuxiliaryValue = 0 }
                         : new MagMapsHelloResponse { Success = true, Online = true, FactionMask = 7 });
-                case MagRetailNpAuthenticateRequest request when DevelopmentAuthEnabled &&
+                case MagRetailNpAuthenticateRequest request when PortalTickets != null && State == SessionState.HelloSent:
+                    if (!PortalAuthenticate(request, now)) return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();
+                    State = SessionState.WaitingForUniverse;
+                    return Reply(applicationId, new MagRetailNpAuthenticateResponse { TransactionId = request.TransactionId, Success = true });
+                case MagRetailNpAuthenticateRequest request when PortalTickets == null && DevelopmentAuthEnabled &&
                     State == SessionState.HelloSent && MagDevelopmentAccountPolicy.Accepts(request):
                     AuthenticatedAccount = MagDevelopmentAccountPolicy.Account(request);
                     State = SessionState.WaitingForUniverse;
@@ -67,19 +90,23 @@ namespace Server.Medius
                     State = SessionState.WaitingForAuthentication;
                     ObserveActivity(now);
                     return Reply(applicationId, UniverseResponse(request.TransactionId, false));
-                case MagNpAuthenticateRequest request when DevelopmentAuthEnabled &&
+                case MagNpAuthenticateRequest request when PortalTickets != null && State == SessionState.WaitingForAuthentication:
+                    if (!PortalAuthenticate(request, now)) return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();
+                    State = SessionState.LocalDevelopmentAuthenticated;
+                    return Reply(applicationId, new MagNpAuthenticateResponse { TransactionId = request.TransactionId, Success = true });
+                case MagNpAuthenticateRequest request when PortalTickets == null && DevelopmentAuthEnabled &&
                     State == SessionState.WaitingForAuthentication && MagDevelopmentAccountPolicy.Accepts(request):
                     AuthenticatedAccount = MagDevelopmentAccountPolicy.Account(request);
                     State = SessionState.LocalDevelopmentAuthenticated;
                     ObserveActivity(now);
                     return Reply(applicationId, new MagNpAuthenticateResponse { TransactionId = request.TransactionId, Success = true });
-                case MagRetailPatchRequest request when applicationId == 20231 && DevelopmentAuthEnabled &&
+                case MagRetailPatchRequest request when applicationId == 20231 && AccountAuthEnabled &&
                     State == SessionState.LocalDevelopmentAuthenticated && request.HighestVersion == 0 && request.InitialVersion == 0 &&
                     request.BuildString == "ABmagprod370048" && request.Language == "english":
                     // Explicit no-download local policy for the captured retail build; retain authentication state for retries.
                     ObserveActivity(now);
                     return Reply(applicationId, new MagRetailNoPatchResponse());
-                case MagNewsEulaRequest request when DevelopmentAuthEnabled &&
+                case MagNewsEulaRequest request when AccountAuthEnabled &&
                     State == SessionState.LocalDevelopmentAuthenticated && request.Language == "english" &&
                     MagDevelopmentAccountPolicy.HasZeroRsa(request):
                     State = SessionState.ContentSent;
@@ -88,7 +115,7 @@ namespace Server.Medius
                         new MagNewsEulaResponse { TransactionId = request.TransactionId, Finished = true, ContentType = MagContentType.News,
                             Content = (_news ?? MagServerNews.Current).Content, Timestamp = (_news ?? MagServerNews.Current).Timestamp },
                         new MagNewsEulaResponse { TransactionId = request.TransactionId, Finished = true, ContentType = MagContentType.Eula });
-                case MagCharacterListRequest request when DevelopmentAuthEnabled && (State == SessionState.ContentSent ||
+                case MagCharacterListRequest request when AccountAuthEnabled && (State == SessionState.ContentSent ||
                     (CharacterStorageEnabled && State == SessionState.CharacterListSent)) &&
                     MagDevelopmentAccountPolicy.HasZeroRsa(request):
                     State = SessionState.CharacterListSent;
@@ -111,6 +138,16 @@ namespace Server.Medius
             }
             ObserveActivity(now);
             return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();
+        }
+
+        private bool PortalAuthenticate(MagNpAuthenticateRequest request, DateTime now)
+        {
+            var outcome = PortalTickets.Authenticate(_portalTicket, request, this, now);
+            PortalTicketStatus = outcome.Reason.Code();
+            ObserveActivity(now);
+            if (!outcome.Accepted) return false;
+            AuthenticatedAccount = outcome.Account; PortalAccountId = outcome.AccountId;
+            return true;
         }
 
         private static MagUniverseListResponse UniverseResponse(int transactionId, bool retail)

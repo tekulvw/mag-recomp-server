@@ -113,6 +113,18 @@ Legacy-specific optional inputs can still be passed through `data.gameplayExtraA
 
 Catalog mounts are read-only in application containers. Logs and temporary files use writable `emptyDir` volumes. Gameplay refuses events it cannot record, so a full event log stops the game server. Set `logs.rotation.segmentBytes` (at least 65536) to split the event log, and tick telemetry when enabled, into numbered segments at record boundaries, and `logs.rotation.retentionSeconds` to delete closed segments older than that. Retention bounds disk use by age only; size it so the expected log rate over the retention period stays well under `logs.sizeLimit`. Rotation needs a gameplay image that supports `--log-segment-bytes`; it is off by default. Gameplay creates a unique event-log directory on each container start because the server rejects reuse of an existing event-log path. The applications run as UID/GID 10001, drop Linux capabilities, use the runtime-default seccomp profile, and do not receive a service-account token. Application root filesystems remain writable for compatibility with Horizon's startup writes. The optional DNS image uses a read-only root filesystem and adds only the `NET_BIND_SERVICE` capability to its otherwise empty capability set, because the upstream image marks its binary with that file capability and cannot execute with it removed from the bounding set. It still runs without privilege escalation on port 1053.
 
+## Optional portal game tickets
+
+`portalTickets.mode: required` makes MAPS and MAS accept only portal game tickets instead of the development player name. Set `portalTickets.audience` to the host name players connect to and `portalTickets.keys` to key ID to base64 SubjectPublicKeyInfo entries from the portal's `GET /api/v1/ticket-keys`; they are public keys. The chart then sets `MAG_PORTAL_TICKETS`, `MAG_PORTAL_TICKET_AUDIENCE` and `MAG_PORTAL_TICKET_KEYS` in both Medius containers, and refuses to render `required` without an audience and a key. The default `"off"` (quote it; bare `off` is a YAML boolean) sets nothing. See [docs/portal-ticket.md](../../docs/portal-ticket.md#medius-verification-operators) for rollout and rotation.
+
+```yaml
+portalTickets:
+  mode: required
+  audience: play.example.test
+  keys:
+    "1": <base64 SPKI from /api/v1/ticket-keys>
+```
+
 ## Optional forwarding DNS
 
 Set `dns.enabled: true`, `dns.answerIPv4` to the reachable server address, and `dns.hostnames` to the exact original game hostnames observed for the client build. Retained retail client evidence identifies `mag.ps3.online.scea.com` as the original MAPS hostname; the prototype uses numeric addresses and cannot be redirected by DNS alone. The default hostname list stays empty so enabling DNS always requires an explicit choice. The observed original retail settings use TCP 10073 and UDP 10072 for that bootstrap endpoint. The example below overrides only the retail MAPS hostname and maps its TCP bootstrap port to the chart MAPS listener. Supply a separately verified compatible retail runtime profile and matching private catalogs; this snippet does not select a protocol version:

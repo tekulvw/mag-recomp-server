@@ -46,6 +46,8 @@ namespace Server.Medius
 
         public static MediusManager Manager = new MediusManager();
         public static MagLoginRegistry MagLoginTickets = new MagLoginRegistry();
+        /// <summary>Portal ticket sign-in (MAG_PORTAL_TICKETS=required); null keeps the development identity policy.</summary>
+        public static MagPortalTicketPolicy PortalTickets { get; private set; }
         public static LocalDmeHost LocalDme;
         public static MagWorldRegistry WorldRegistry;
         public static IMagGameplayLobby GameplayLobby => (IMagGameplayLobby)WorldRegistry ?? LocalDme;
@@ -259,6 +261,9 @@ namespace Server.Medius
         {
             int waitMs = sleepMS;
             LoadCharacterCatalog();
+            PortalTickets = MagPortalTicketPolicy.FromSettings(MagPortalTicketSettings.FromEnvironment());
+            if (PortalTickets != null)
+                Logger.Info($"Portal tickets required: audience={PortalTickets.Settings.Audience} keys={string.Join(",", PortalTickets.Settings.Keys.Keys.OrderBy(id => id))}");
             PublishActiveAccounts();
 
             string registryPath=Environment.GetEnvironmentVariable("MAG_WORLD_REGISTRY");

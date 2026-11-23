@@ -4,3 +4,9 @@ network:
   authDns: auth.example.invalid
 runtime:
   existingSecret: mag-runtime-keys
+# Exercises the optional portal ticket environment with the portal's public test-vector key.
+portalTickets:
+  mode: required
+  audience: auth.example.invalid
+  keys:
+    "1": MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEXvgof3Vza4+kYlYDHvNkzoWnOiYVUPKfTwLOxfsFFv2tfRNAngFLgL48OzLv2VMJ+iYgvwndYncrd9TFMMLxrw==
