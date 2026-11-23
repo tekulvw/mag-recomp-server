@@ -93,6 +93,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/", get(home))
         .route("/privacy", get(privacy))
         .route("/style.css", get(stylesheet))
+        .route("/fonts/{name}", get(font))
         .route("/healthz", get(healthz))
         .route("/auth/google", get(sign_in))
         .route("/auth/google/callback", get(sign_in_callback))
@@ -122,8 +123,8 @@ async fn security_headers(mut response: Response) -> Response {
     set(
         h,
         header::CONTENT_SECURITY_POLICY,
-        "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; \
-         frame-ancestors 'none'; base-uri 'none'",
+        "default-src 'none'; style-src 'self'; img-src 'self'; font-src 'self'; \
+         form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
     );
     set(h, header::X_CONTENT_TYPE_OPTIONS, "nosniff");
     set(h, header::REFERRER_POLICY, "same-origin");
@@ -372,6 +373,30 @@ async fn privacy(State(state): Shared, headers: HeaderMap) -> PageResult {
             contact: state.settings.operator_contact.clone(),
         },
     ))
+}
+
+/// A web font from the configured folder. Names are lowercase letters, digits and `-` ending
+/// `.woff2`, so a request can never leave the folder.
+async fn font(State(state): Shared, Path(name): Path<String>) -> Response {
+    let plain = name.len() <= 80
+        && name.ends_with(".woff2")
+        && name[..name.len() - 6]
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    let Some(dir) = state.settings.font_dir.as_ref().filter(|_| plain) else {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    };
+    match tokio::fs::read(dir.join(&name)).await {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, "font/woff2"),
+                (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, "not found").into_response(),
+    }
 }
 
 async fn stylesheet() -> Response {

@@ -69,6 +69,9 @@ struct ServeArgs {
     #[arg(long, env = "PORTAL_CLIENT_IP_HEADER")]
     client_ip_header: Option<String>,
     /// Comma-separated Google emails with the owner role (full admin access, not removable).
+    /// Folder holding the fonts.txt web fonts (the image sets it).
+    #[arg(long, env = "PORTAL_FONT_DIR")]
+    font_dir: Option<PathBuf>,
     #[arg(long, env = "PORTAL_OWNER_EMAILS", default_value = "")]
     owner_emails: String,
     #[arg(long, env = "PORTAL_OPERATOR_CONTACT")]
@@ -110,6 +113,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let mut settings = Settings::new(&args.public_url)?;
     settings.operator_contact = args.operator_contact.filter(|c| !c.trim().is_empty());
     settings.owner_emails = mag_portal::staff::parse_owner_emails(&args.owner_emails);
+    settings.font_dir = args.font_dir;
     settings.client_ip_header = args
         .client_ip_header
         .map(|h| h.trim().to_ascii_lowercase())

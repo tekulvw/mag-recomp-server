@@ -1,9 +1,11 @@
 {% extends "base.html" %}
 {% block title %}Link this launcher?{% endblock %}
 {% block content %}
+<div class="panel narrow">
+<p class="eyebrow">Link your launcher</p>
 <h1>Link this launcher?</h1>
+<p class="code"><span>{{ shown_code }}</span></p>
 <dl>
-  <dt>Code</dt><dd><strong>{{ shown_code }}</strong></dd>
   <dt>Launcher</dt><dd>{{ label }}</dd>
   <dt>Requested</dt><dd>{{ requested }}</dd>
 </dl>
@@ -14,4 +16,5 @@
   <button name="decision" value="approve">Link launcher</button>
   <button name="decision" value="deny" class="secondary">Cancel</button>
 </form>
+</div>
 {% endblock %}

@@ -2,85 +2,76 @@
 {% block title %}MAG, playable again{% endblock %}
 {% block content %}
 <section class="hero">
-  <p class="eyebrow">Community server · play.magtest.online</p>
-  <h1>MAG, playable again.</h1>
-  <p class="lede">
-    <a href="https://github.com/tekulvw/mag-recomp">mag-recomp</a> is a native static recompilation of
-    the PlayStation&nbsp;3 shooter <em>MAG</em> for macOS, Windows and Linux. This site runs the community
-    server it connects to, and the accounts that keep your player name yours.
-  </p>
-  <div class="row">
-    {% if nav_csrf.is_some() %}
-    {% if let Some(name) = player_name %}<a class="button" href="/account">Your account: {{ name }}</a>{% else %}<a class="button" href="/claim">Choose your player name</a>{% endif %}
-    {% else %}
-    <a class="button" href="/auth/google">Sign in with Google</a>
-    {% endif %}
-    <a class="button secondary" href="https://github.com/tekulvw/mag-recomp/releases">Get the installer</a>
+  <div>
+    <p class="eyebrow">Community server · play.magtest.online</p>
+    <h1>MAG,<br>playable<br><em>again.</em></h1>
+    <p class="lede">
+      <a href="https://github.com/tekulvw/mag-recomp">mag-recomp</a> is a native static recompilation of
+      the PlayStation&nbsp;3 shooter <em>MAG</em> for macOS, Windows and Linux. This site runs the community
+      server it connects to, and the accounts that keep your player name yours.
+    </p>
+    <div class="row">
+      {% if nav_csrf.is_some() %}
+      {% if let Some(name) = player_name %}<a class="button" href="/account">Your account: {{ name }}</a>{% else %}<a class="button" href="/claim">Choose your player name</a>{% endif %}
+      {% else %}
+      <a class="button" href="/auth/google">Sign in with Google</a>
+      {% endif %}
+      <a class="button secondary" href="https://github.com/tekulvw/mag-recomp/releases">Get the installer</a>
+    </div>
+  </div>
+  <div class="panel">
+    <p class="eyebrow">Your account</p>
+    <h2>One name, yours alone</h2>
+    <p>Sign in with Google and claim your player name: nobody else can then play under it, and your characters follow you to any computer.</p>
+    <p class="quiet">Linking the MAG launcher to your account arrives in an upcoming release; until then the server still signs players in by name.</p>
   </div>
 </section>
 
-<section>
+<section id="play">
   <h2>How to play</h2>
-  <ol class="steps">
-    <li><strong>Bring your own copy.</strong> You need an unmodified disc dump of the retail v1.0 release
-      (BCUS98110). Nothing from the game is ever downloaded or shared.</li>
-    <li><strong>Build it on your computer.</strong> Download the installer for macOS (Apple Silicon),
-      Windows 10/11 or Ubuntu 24.04+ from the
-      <a href="https://github.com/tekulvw/mag-recomp/releases">mag-recomp releases</a>, choose your game
-      folder and click <em>Build MAG</em>. It takes about an hour and needs around 20&nbsp;GB of space.</li>
-    <li><strong>Pick your name and play.</strong> MAG connects to <code>play.magtest.online</code> by
-      default. A controller is the recommended way to play.</li>
+  <ol class="tiles">
+    <li class="tile"><span class="num">01</span><h3>Bring your own copy</h3>
+      <p>An unmodified disc dump of the retail v1.0 release (BCUS98110). Nothing from the game is ever downloaded or shared.</p></li>
+    <li class="tile"><span class="num">02</span><h3>Build it on your computer</h3>
+      <p>Get the installer for macOS (Apple Silicon), Windows 10/11 or Ubuntu 24.04+ from the
+      <a href="https://github.com/tekulvw/mag-recomp/releases">releases</a>, choose your game folder and click <em>Build MAG</em>. About an hour and 20&nbsp;GB.</p></li>
+    <li class="tile"><span class="num">03</span><h3>Pick your name and play</h3>
+      <p>MAG connects to <code>play.magtest.online</code> by default. A controller is the recommended way to play.</p></li>
   </ol>
-  <p class="quiet">The <a href="https://github.com/tekulvw/mag-recomp#for-players">player guide</a> covers
-    first launch on each system, controls and settings.</p>
+  <p class="quiet">The <a href="https://github.com/tekulvw/mag-recomp#for-players">player guide</a> covers first launch on each system, controls and settings.</p>
 </section>
 
-<section>
-  <h2>Your account</h2>
-  <p>Sign in with Google and claim your player name: nobody else can then play under it, and your
-    characters follow you to any computer. Linking the MAG launcher to your account arrives in an
-    upcoming release; until then the server still signs players in by name.</p>
-</section>
-
-<section>
+<section id="projects">
   <h2>The projects</h2>
   <div class="cards">
     <a class="card" href="https://github.com/tekulvw/mag-recomp">
-      <h3>mag-recomp</h3>
-      <p>The recompiled game client, its runtime glue and the one-button installer that builds MAG from
-        your own copy.</p>
+      <span class="tag">Client</span>
+      <h3>mag-recomp →</h3>
+      <p>The recompiled game client, its runtime glue and the one-button installer that builds MAG from your own copy.</p>
     </a>
     <a class="card" href="https://github.com/tekulvw/mag-recomp-server">
-      <h3>mag-recomp-server</h3>
+      <span class="tag">Server</span>
+      <h3>mag-recomp-server →</h3>
       <p>The replacement server: a Rust gameplay engine, the Medius lobby stack, and this accounts site.</p>
     </a>
     <a class="card" href="https://github.com/sp00nznet/ps3recomp">
-      <h3>ps3recomp</h3>
+      <span class="tag">SDK</span>
+      <h3>ps3recomp →</h3>
       <p>The PlayStation&nbsp;3 static recompilation SDK that mag-recomp is built on.</p>
     </a>
   </div>
 </section>
 
-<section>
-  <h2>Status</h2>
-  <p>MAG builds and plays on all three systems, signs in and joins online matches on this server. It is
-    not finished: rendering has known gaps, audio stutters, and frame rates vary by system while
-    performance work continues.</p>
+<section class="split" id="community">
+  <div>
+    <h2>Status</h2>
+    <p>MAG builds and plays on all three systems, signs in and joins online matches on this server. It is not finished: rendering has known gaps, audio stutters, and frame rates vary by system while performance work continues.</p>
+  </div>
+  <div>
+    <h2>Help and community</h2>
+    <p>Questions, install problems and play sessions: the <a href="https://discord.gg/HBB95hUQ5f">MAG Recomp Discord</a>. Reproducible bugs go to <a href="https://github.com/tekulvw/mag-recomp/issues">mag-recomp issues</a>, or <a href="https://github.com/tekulvw/mag-recomp-server/issues">server issues</a> for matches, sign-in or this site.</p>
+  </div>
 </section>
 
-<section>
-  <h2>Help and community</h2>
-  <p>Questions, install problems and play sessions: the
-    <a href="https://discord.gg/HBB95hUQ5f">MAG Recomp Discord</a>. Reproducible bugs go to
-    <a href="https://github.com/tekulvw/mag-recomp/issues">mag-recomp issues</a>, or
-    <a href="https://github.com/tekulvw/mag-recomp-server/issues">server issues</a> for problems with
-    matches, sign-in or this site.</p>
-</section>
-
-<section class="notice">
-  <p><strong>Unofficial fan project.</strong> Not affiliated with or endorsed by Sony Interactive
-    Entertainment or Zipper Interactive. The projects contain no game code, assets, keys or firmware;
-    you supply files from your own legitimately owned copy, and everything generated from them stays on
-    your machine. See the <a href="https://github.com/tekulvw/mag-recomp/blob/main/NOTICE.md">legal notice</a>.</p>
-</section>
+<p class="notice"><strong>Unofficial fan project.</strong> Not affiliated with or endorsed by Sony Interactive Entertainment or Zipper Interactive. The projects contain no game code, assets, keys or firmware; you supply files from your own legitimately owned copy, and everything generated from them stays on your machine. See the <a href="https://github.com/tekulvw/mag-recomp/blob/main/NOTICE.md">legal notice</a>.</p>
 {% endblock %}

@@ -23,6 +23,9 @@ pub struct Settings {
     /// Request header holding the client address, as a comma-separated list whose last
     /// entry the trusted proxy appended (`x-forwarded-for`). `None` uses the peer address.
     pub client_ip_header: Option<String>,
+    /// Folder of the web fonts listed in fonts.txt; `None` serves none (pages fall back to
+    /// system fonts).
+    pub font_dir: Option<std::path::PathBuf>,
     /// Lowercase Google emails that always have the owner role; set by the operator, never
     /// changeable from the site.
     pub owner_emails: Vec<String>,
@@ -44,6 +47,7 @@ impl Settings {
             link_poll_seconds: 5,
             max_pending_links: 10_000,
             client_ip_header: None,
+            font_dir: None,
             owner_emails: Vec::new(),
         })
     }

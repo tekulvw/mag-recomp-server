@@ -131,6 +131,17 @@ async fn harness(pool: PgPool) -> Harness {
     let mut settings = Settings::new("http://localhost").unwrap();
     settings.link_poll_seconds = 2;
     settings.owner_emails = vec!["owner@example.test".into()];
+    let fonts = std::env::temp_dir().join(format!(
+        "portal-fonts-{}",
+        mag_portal::tokens::b64url(&mag_portal::tokens::random_bytes::<9>())
+    ));
+    std::fs::create_dir_all(&fonts).unwrap();
+    std::fs::write(
+        fonts.join("chakra-petch-latin-700-normal.woff2"),
+        b"wOF2 fixture",
+    )
+    .unwrap();
+    settings.font_dir = Some(fonts);
     let ticket_key = SigningKey::from_slice(&Sha256::digest(b"portal flow test key")).unwrap();
     let state = Arc::new(AppState {
         pool: pool.clone(),
@@ -311,6 +322,14 @@ async fn sign_in_link_and_ticket(pool: PgPool) {
         .await
         .unwrap();
     assert!(page.contains("choose one") && page.contains("subject-a@example.test"));
+    // Behind Cloudflare, addresses outside these markers become dead links (see base.html).
+    let on = page.find("<!--email_off-->").unwrap();
+    let off = page.find("<!--/email_off-->").unwrap();
+    let at = page.find("subject-a@example.test").unwrap();
+    assert!(
+        on < at && at < off,
+        "the email must sit inside the email_off markers"
+    );
     let csrf = csrf_from(&page);
 
     // Claim a name; forms without the session's CSRF token are refused.
@@ -1148,4 +1167,50 @@ async fn homepage_for_everyone(pool: PgPool) {
             .unwrap()
             .contains("Your account: Hotel")
     );
+}
+
+#[sqlx::test]
+async fn fonts_and_page_policy(pool: PgPool) {
+    let h = harness(pool).await;
+    let r = h
+        .get("/fonts/chakra-petch-latin-700-normal.woff2", None)
+        .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(r.headers()["content-type"], "font/woff2");
+    assert!(
+        r.headers()["cache-control"]
+            .to_str()
+            .unwrap()
+            .contains("immutable")
+    );
+    assert_eq!(r.bytes().await.unwrap().as_ref(), b"wOF2 fixture");
+    for bad in [
+        "/fonts/missing-font.woff2",
+        "/fonts/chakra-petch-latin-700-normal.ttf",
+        "/fonts/..%2Fchakra-petch-latin-700-normal.woff2",
+        "/fonts/Chakra-Petch.woff2",
+    ] {
+        assert_eq!(
+            h.get(bad, None).await.status(),
+            StatusCode::NOT_FOUND,
+            "{bad}"
+        );
+    }
+    let csp = h.get("/", None).await.headers()["content-security-policy"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(csp.contains("font-src 'self'") && csp.contains("style-src 'self'"));
+    assert!(!csp.contains("unsafe-inline"));
+    // The policy blocks inline styles, so no template may rely on one.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("templates");
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains("style=") && !text.contains("<style"),
+            "{}",
+            path.display()
+        );
+    }
 }
