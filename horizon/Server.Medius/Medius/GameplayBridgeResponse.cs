@@ -58,6 +58,8 @@ namespace Server.Medius {
   public IReadOnlyList<string> ReservationIds {get;}
   internal GameplayMatchTerminal(uint world,string match,string reason,IReadOnlyList<string> reservations) { WorldId=world;MatchId=match;Reason=reason;ReservationIds=reservations; }
  }
+ /// <summary>A served world frame's place in its worker process's numbered stream.</summary>
+ public sealed record GameplayWorldStreamPosition(string Epoch, ulong Sequence);
  public sealed record GameplayPartyReservation(string Status, string FormationId, string ProfileId, string CohortId,
   uint WorldId, ulong AdmissionEpoch, byte? Team, ushort? Squad, IReadOnlyList<string> ReservationIds);
  public sealed class GameplayBridgeResponse {
@@ -80,6 +82,9 @@ namespace Server.Medius {
   public bool SupportsCommittedLoadoutSelections => Capabilities.Contains("committed_loadout_selection_v1",StringComparer.Ordinal);
   public bool SupportsLoadoutLayoutChanges => Capabilities.Contains("loadout_layout_revision_v1",StringComparer.Ordinal);
   public bool SupportsWorkerRegistry => Capabilities.Contains("worker_registry_v1",StringComparer.Ordinal);
+  public bool SupportsWorldStreamResume => Capabilities.Contains("world_stream_resume_v1",StringComparer.Ordinal);
+  public bool SupportsEventReplay => Capabilities.Contains("event_replay_v1",StringComparer.Ordinal);
+  public GameplayWorldStreamPosition WorldStream {get; internal set;}
   internal GameplayBridgeResponse(bool ok,string error,IReadOnlyList<GameplayBridgeMessage> messages,GameplayBridgeFailure failure=GameplayBridgeFailure.None,IReadOnlyList<GameplayReward> rewards=null,GameplayMatchTerminal matchTerminal=null,IReadOnlyList<GameplayLoadoutSelection> loadoutSelections=null,IReadOnlyList<string> capabilities=null,IReadOnlyList<MagMatchProfile> matchProfiles=null,GameplaySelectedMatch selectedMatch=null,GameplayWorkerIdentity workerIdentity=null,GameplayPartyReservation partyReservation=null){PartyReservation=partyReservation;MatchProfiles=matchProfiles??Array.Empty<MagMatchProfile>();SelectedMatch=selectedMatch;WorkerIdentity=workerIdentity;LoadoutSelections=loadoutSelections??Array.Empty<GameplayLoadoutSelection>();Capabilities=capabilities??Array.Empty<string>();Ok=ok;Error=error;Messages=messages;Failure=failure;Rewards=rewards??Array.Empty<GameplayReward>();MatchTerminal=matchTerminal;}
   internal static GameplayBridgeResponse Failed(GameplayBridgeFailure failure,long elapsed)=>new GameplayBridgeResponse(false,null,Array.Empty<GameplayBridgeMessage>(),failure){ElapsedMilliseconds=elapsed};
  }
@@ -117,7 +122,8 @@ namespace Server.Medius {
     bool hasSelectedMatch=root.TryGetProperty("selected_match",out var selectedMatch);
     bool hasWorkerIdentity=root.TryGetProperty("worker_identity",out var workerIdentity);
     bool hasParty=root.TryGetProperty("party_reservation",out var party);
-    var fields=new List<string>{"v","request_id","ok","error","messages"};if(hasParty)fields.Add("party_reservation");if(hasProfiles)fields.Add("match_profiles");if(hasSelectedMatch)fields.Add("selected_match");if(hasSelections)fields.Add("loadout_selections");if(hasCapabilities)fields.Add("capabilities");if(hasRewards)fields.Add("rewards");if(hasTerminal)fields.Add("match_terminal");if(hasWorkerIdentity)fields.Add("worker_identity");
+    bool hasWorldStream=root.TryGetProperty("world_stream",out var worldStream);
+    var fields=new List<string>{"v","request_id","ok","error","messages"};if(hasParty)fields.Add("party_reservation");if(hasProfiles)fields.Add("match_profiles");if(hasSelectedMatch)fields.Add("selected_match");if(hasSelections)fields.Add("loadout_selections");if(hasCapabilities)fields.Add("capabilities");if(hasRewards)fields.Add("rewards");if(hasTerminal)fields.Add("match_terminal");if(hasWorkerIdentity)fields.Add("worker_identity");if(hasWorldStream)fields.Add("world_stream");
     if(!ExactFields(root,fields.ToArray())||!root.GetProperty("v").TryGetInt32(out var version)||version!=2||
      root.GetProperty("request_id").ValueKind!=JsonValueKind.String||root.GetProperty("request_id").GetString()!=requestId)return false;
     GameplayWorkerIdentity parsedIdentity=null;
@@ -234,7 +240,15 @@ namespace Server.Medius {
      }
      parsedParty=new GameplayPartyReservation(status,formation,profile,cohort,world,epoch,team,squad,ids.AsReadOnly());
     }
-    response=new GameplayBridgeResponse(success,error.ValueKind==JsonValueKind.String?error.GetString():null,parsed.AsReadOnly(),rewards:parsedRewards.AsReadOnly(),matchTerminal:parsedTerminal,loadoutSelections:parsedSelections.AsReadOnly(),capabilities:parsedCapabilities.AsReadOnly(),matchProfiles:parsedProfiles,selectedMatch:parsedMatch,workerIdentity:parsedIdentity,partyReservation:parsedParty);return true;
+    GameplayWorldStreamPosition parsedPosition=null;
+    if(hasWorldStream) {
+     if(!success||!ExactFields(worldStream,"epoch","sequence")||worldStream.GetProperty("epoch").ValueKind!=JsonValueKind.String||
+      !worldStream.GetProperty("sequence").TryGetUInt64(out var sequence))return false;
+     var epoch=worldStream.GetProperty("epoch").GetString();
+     if(epoch.Length<16||epoch.Length>64||!epoch.All(c=>char.IsAsciiLetterOrDigit(c)||c=='-'||c=='_'))return false;
+     parsedPosition=new GameplayWorldStreamPosition(epoch,sequence);
+    }
+    response=new GameplayBridgeResponse(success,error.ValueKind==JsonValueKind.String?error.GetString():null,parsed.AsReadOnly(),rewards:parsedRewards.AsReadOnly(),matchTerminal:parsedTerminal,loadoutSelections:parsedSelections.AsReadOnly(),capabilities:parsedCapabilities.AsReadOnly(),matchProfiles:parsedProfiles,selectedMatch:parsedMatch,workerIdentity:parsedIdentity,partyReservation:parsedParty){WorldStream=parsedPosition};return true;
    }catch(Exception e)when(e is JsonException||e is InvalidOperationException||e is FormatException||e is ArgumentException||e is KeyNotFoundException){return false;}
   }
  }
