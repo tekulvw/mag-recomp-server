@@ -323,6 +323,39 @@ impl<W: Write> Engine<W> {
         Ok(())
     }
 
+    /// Whether a selected profile can install its bot service without
+    /// exhausting a revision after the selection is recorded.
+    pub(crate) fn bot_resupply_revisions_available(&self) -> bool {
+        self.bot_resupply.revision < u64::MAX && self.bot_resupply.approach_revision < u64::MAX
+    }
+
+    /// Replace world-bound bot service with the newly selected profile's inputs.
+    /// Startup already validated them against this exact world; a profile
+    /// without them leaves bot service disabled rather than reusing another
+    /// world's providers.
+    pub(crate) fn install_profile_bot_resupply(
+        &mut self,
+        catalog: Option<Catalog>,
+        approach: Option<crate::bot_resupply_approach_policy::Policy>,
+    ) {
+        self.bot_resupply.provider = None;
+        self.bot_resupply.approach = None;
+        let Some(catalog) = catalog else {
+            return;
+        };
+        let Some(binding) = Binding::capture(self) else {
+            return;
+        };
+        self.bot_resupply.provider = Some((catalog, binding));
+        self.bot_resupply.revision = self.bot_resupply.revision.saturating_add(1);
+        if let Some(policy) = approach
+            && self.navmesh_world.is_some()
+        {
+            // Revisions were checked before selection was recorded.
+            let _ = self.install_resupply_approach(policy);
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn install_synthetic_bot_resupply(&mut self, catalog: Catalog) {
         let binding = Binding::capture(self).unwrap();
