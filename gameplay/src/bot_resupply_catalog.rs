@@ -7,11 +7,46 @@ use std::{
     time::Duration,
 };
 
-const MAP: &str = "mag_cosmodrome_final";
-const LEVEL_SHA: &str = "8157f5abc55ddd2ca9eaad3379e87ae909d0b8f7c9b08fa04f1f1e2d8018d96e";
-const CLV_SHA: &str = "d336caea88351dda5f3204a34e64fdde8eabdf0532b3133e2338cdd150488f4b";
-const QUALIFICATION_SHA: &str = "f24127b06399d1353e4bb1c1a73943278227cd31a1488eda409096099b089b0d";
 const MAX_CATALOG_BYTES: u64 = 65_536;
+
+/// Source identity and qualified provider count for one retail Sabotage map.
+struct MapPins {
+    map: &'static str,
+    level_sha256: &'static str,
+    clv_sha256: &'static str,
+    qualification_sha256: &'static str,
+    providers: usize,
+}
+
+/// Maps whose visible, unfrozen, unsnapped supply placements have a private
+/// qualification witness. Catalogs for any other map are rejected.
+const QUALIFIED_MAPS: [MapPins; 3] = [
+    MapPins {
+        map: "mag_cosmodrome_final",
+        level_sha256: "8157f5abc55ddd2ca9eaad3379e87ae909d0b8f7c9b08fa04f1f1e2d8018d96e",
+        clv_sha256: "d336caea88351dda5f3204a34e64fdde8eabdf0532b3133e2338cdd150488f4b",
+        qualification_sha256: "f24127b06399d1353e4bb1c1a73943278227cd31a1488eda409096099b089b0d",
+        providers: 3,
+    },
+    MapPins {
+        map: "mag_kennicott_final",
+        level_sha256: "399a38f568f4cd4c9c1d787b8ebbe857506b807638dc19f7e2e893ef051332ec",
+        clv_sha256: "f17814c8eea43f636541059c8eb910d3707ced53ff9d1cc87d0ad83300825b56",
+        qualification_sha256: "39f2839c01b2251b84acac85b11cbcc0e66fae460afde11017abc03ff3840d06",
+        providers: 2,
+    },
+    MapPins {
+        map: "mag_remote_comms_final",
+        level_sha256: "f066f00a74a58d36a531526f4216538300362d5f358a0f40c6b75f2edc226313",
+        clv_sha256: "71f5dd11198a5d8d34055276a0fa031f8b8e833f2b8a6c6b9edb9fc4f3a1c888",
+        qualification_sha256: "0198100a8c9bae0ae20b9df17a3cfa4b0ee4b3f689a00828abd47a1f744c3a1c",
+        providers: 3,
+    },
+];
+
+fn map_pins(map: &str) -> Option<&'static MapPins> {
+    QUALIFIED_MAPS.iter().find(|pins| pins.map == map)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProviderKey {
@@ -132,18 +167,19 @@ impl Catalog {
 
     #[cfg(test)]
     pub(crate) fn synthetic(anchor: [f64; 3], tick_rate_seconds: f32) -> Self {
+        let pins = &QUALIFIED_MAPS[0];
         Self {
             source_sha256: "e".repeat(64),
             schema_version: 1,
             application_id: 20231,
-            map: MAP.into(),
+            map: pins.map.into(),
             mode: 0,
             spawn_sha256: "c".repeat(64),
             collision_sha256: "d".repeat(64),
             source: Source {
-                archive_sha256: LEVEL_SHA.into(),
-                clv_sha256: CLV_SHA.into(),
-                qualification_sha256: QUALIFICATION_SHA.into(),
+                archive_sha256: pins.level_sha256.into(),
+                clv_sha256: pins.clv_sha256.into(),
+                qualification_sha256: pins.qualification_sha256.into(),
             },
             providers: vec![Provider {
                 source_offset: 120,
@@ -175,17 +211,19 @@ impl Catalog {
     }
 
     fn valid(&self) -> bool {
+        let Some(pins) = map_pins(&self.map) else {
+            return false;
+        };
         let mut names = BTreeSet::new();
         self.schema_version == 1
             && self.application_id == 20231
-            && self.map == MAP
             && self.mode == 0
             && is_digest(&self.spawn_sha256)
             && is_digest(&self.collision_sha256)
-            && self.source.archive_sha256 == LEVEL_SHA
-            && self.source.clv_sha256 == CLV_SHA
-            && self.source.qualification_sha256 == QUALIFICATION_SHA
-            && self.providers.len() == 3
+            && self.source.archive_sha256 == pins.level_sha256
+            && self.source.clv_sha256 == pins.clv_sha256
+            && self.source.qualification_sha256 == pins.qualification_sha256
+            && self.providers.len() == pins.providers
             && self
                 .providers
                 .windows(2)
@@ -240,7 +278,13 @@ mod tests {
     use super::*;
     use serde_json::{Value, json};
 
+    const MAP: &str = "mag_cosmodrome_final";
+
     fn fixture() -> Value {
+        fixture_for(&QUALIFIED_MAPS[0])
+    }
+
+    fn fixture_for(pins: &MapPins) -> Value {
         let profile = |source_offset, name_token| {
             json!({
                 "source_offset": source_offset, "name_token": name_token,
@@ -251,13 +295,81 @@ mod tests {
                 "tick_rate_seconds": 2.5, "tolerance_m": 2.0,
             })
         };
+        let providers: Vec<Value> = [(120, 9), (124, 8), (130, 7), (136, 6)]
+            .into_iter()
+            .take(pins.providers)
+            .map(|(offset, name)| profile(offset, name))
+            .collect();
         json!({
-            "schema_version": 1, "application_id": 20231, "map": MAP, "mode": 0,
+            "schema_version": 1, "application_id": 20231, "map": pins.map, "mode": 0,
             "spawn_sha256": "c".repeat(64), "collision_sha256": "d".repeat(64),
-            "source": {"archive_sha256": LEVEL_SHA, "clv_sha256": CLV_SHA,
-                       "qualification_sha256": QUALIFICATION_SHA},
-            "providers": [profile(120, 9), profile(124, 8), profile(130, 7)],
+            "source": {"archive_sha256": pins.level_sha256, "clv_sha256": pins.clv_sha256,
+                       "qualification_sha256": pins.qualification_sha256},
+            "providers": providers,
         })
+    }
+
+    fn parses(raw: &Value) -> bool {
+        Catalog::from_bytes(&serde_json::to_vec(raw).unwrap()).is_ok()
+    }
+
+    #[test]
+    fn bot_resupply_catalog_accepts_each_qualified_sabotage_map_with_its_own_pins() {
+        assert_eq!(QUALIFIED_MAPS[0].map, MAP);
+        assert_eq!(QUALIFIED_MAPS[0].providers, 3);
+        for pins in &QUALIFIED_MAPS {
+            let raw = fixture_for(pins);
+            assert!(parses(&raw), "{}", pins.map);
+            let catalog = Catalog::from_bytes(&serde_json::to_vec(&raw).unwrap()).unwrap();
+            assert_eq!(catalog.keys().count(), pins.providers);
+            let (spawn, collision) = ("c".repeat(64), "d".repeat(64));
+            assert!(
+                catalog
+                    .validate_binding(20231, pins.map, 0, &spawn, &collision)
+                    .is_ok()
+            );
+            for other in QUALIFIED_MAPS.iter().filter(|other| other.map != pins.map) {
+                assert!(
+                    catalog
+                        .validate_binding(20231, other.map, 0, &spawn, &collision)
+                        .is_err()
+                );
+                // Another map's source identity or witness never qualifies this map.
+                for (field, value) in [
+                    ("archive_sha256", other.level_sha256),
+                    ("clv_sha256", other.clv_sha256),
+                    ("qualification_sha256", other.qualification_sha256),
+                ] {
+                    let mut mixed = raw.clone();
+                    mixed["source"][field] = json!(value);
+                    assert!(!parses(&mixed), "{} {field}", pins.map);
+                }
+            }
+            // The provider count is exact per map.
+            let mut fewer = raw.clone();
+            fewer["providers"].as_array_mut().unwrap().pop();
+            assert!(!parses(&fewer), "{}", pins.map);
+            let mut more = raw.clone();
+            let extra = json!({
+                "source_offset": 900, "name_token": 99,
+                "instance_sha256": "a".repeat(64),
+                "definition_offset": 100, "definition_token": 33, "definition_sha256": "b".repeat(64),
+                "center": [0.0, 0.0, 0.0], "euler_xyz_degrees": [0.0, 0.0, 0.0],
+                "scales_xyz": [1.0, 1.0, 1.0], "axes": [[1.0,0.0,0.0], [0.0,1.0,0.0], [0.0,0.0,1.0]],
+                "tick_rate_seconds": 1.0, "tolerance_m": 1.0,
+            });
+            more["providers"].as_array_mut().unwrap().push(extra);
+            assert!(!parses(&more), "{}", pins.map);
+        }
+    }
+
+    #[test]
+    fn bot_resupply_catalog_rejects_unqualified_maps() {
+        for map in ["mag_baku_final", "synthetic_map", ""] {
+            let mut raw = fixture();
+            raw["map"] = json!(map);
+            assert!(!parses(&raw), "{map}");
+        }
     }
 
     #[test]
