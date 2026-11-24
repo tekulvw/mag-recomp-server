@@ -184,5 +184,58 @@ class CompiledTerrainTokenTests(unittest.TestCase):
                     retail_compiled.manifest_terrain_token(self.manifest(*tokens))
 
 
+class DynamicExclusionTests(unittest.TestCase):
+    @staticmethod
+    def pack(parent, sha):
+        return dict(source_sha256=sha, resource_binding=dict(parent_token=parent))
+
+    @staticmethod
+    def record(offset, token, definition_class):
+        return dict(name=f'0x{offset:08x}', instance_properties_offset=offset - 64,
+                    definition_class=definition_class, collision_offset=offset,
+                    placement=dict(token=token, sha256='e' * 64))
+
+    def packs(self):
+        return {'11111111': [self.pack('00000000', 'a' * 64)],
+                '22222222': [self.pack('0badf00d', 'b' * 64), self.pack('00000000', 'c' * 64)]}
+
+    def test_animated_parented_instances_are_listed_and_static_ones_kept(self):
+        records = [self.record(0x100, '11111111', 'StaticObjectProperties'),
+                   self.record(0x200, '22222222', retail_compiled.ANIMATED_CLASS),
+                   self.record(0x300, '11111111', None)]
+        kept, excluded = retail_compiled.dynamic_exclusions(
+            records, self.packs(), {'11111111': {'d' * 64}, '22222222': {'f' * 64}})
+        self.assertEqual([r['collision_offset'] for r in kept], [0x100, 0x300])
+        self.assertEqual(len(excluded), 1)
+        row = excluded[0]
+        self.assertEqual((row['instance_id'], row['instance_name'], row['resource_token']),
+                         ('compiled:200', '0x00000200', '22222222'))
+        self.assertEqual(row['resource_member_sha256'], ['f' * 64])
+        self.assertEqual(row['packfile_sha256'], ['b' * 64, 'c' * 64])
+        self.assertEqual(row['parent_tokens'], ['0badf00d'])
+        self.assertEqual(row['reason'], retail_compiled.DYNAMIC_REASON)
+
+    def test_parented_collision_on_other_classes_is_not_excluded(self):
+        for definition_class in ('StaticObjectProperties', None):
+            with self.subTest(definition_class=definition_class):
+                with self.assertRaisesRegex(ValueError, 'non-animated'):
+                    retail_compiled.dynamic_exclusions(
+                        [self.record(0x200, '22222222', definition_class)], self.packs(),
+                        {'22222222': {'f' * 64}})
+
+    def test_exclusions_are_recorded_in_world_and_region_provenance(self):
+        self.assertEqual(retail_compiled.exclusion_provenance([]), [])
+        _, excluded = retail_compiled.dynamic_exclusions(
+            [self.record(0x200, '22222222', retail_compiled.ANIMATED_CLASS)], self.packs(),
+            {'22222222': {'f' * 64}})
+        lines = retail_compiled.exclusion_provenance(excluded)
+        self.assertIn('1 animated parent-attached', lines[0])
+        for text in ('compiled:200', '22222222', 'f' * 64, 'b' * 64, '0badf00d', 'dynamic'):
+            self.assertIn(text, lines[1])
+        region = retail_compiled.static_region([0., 0., 0.], [10., 10., 10.], ['source'] + lines)
+        self.assertTrue(region['ground_verified'] and region['obstacles_verified'])
+        self.assertEqual(region['provenance'][-2:], lines)
+
+
 if __name__ == '__main__':
     unittest.main()

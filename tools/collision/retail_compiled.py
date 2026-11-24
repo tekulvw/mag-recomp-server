@@ -2,7 +2,9 @@
 """Place existing retail neutral meshes using bound compiled collision records.
 
 Static export by default. Parent attachments require an explicit, source-bound
-reference-pose export; those outputs never certify a physics region.
+reference-pose export; those outputs never certify a physics region. As an
+explicit alternative, animated instances attached to parents can be excluded as
+dynamic collision; each exclusion is recorded in the world provenance.
 """
 import argparse
 import collections
@@ -16,6 +18,59 @@ from archive import Psarc
 from world import decode_collision_record, bake_vertex, nondegenerate_triangles
 from retail_terrain import ROOT, MAP, TERRAIN, module, require, sha, native_proof
 from retail_placement import verify_placement
+
+
+ANIMATED_CLASS = 'AnimatedObjectProperties'
+DYNAMIC_REASON = ('animated instance attached to a parent; its collision moves with the parent and is '
+                  'dynamic, outside initial compiled static geometry')
+
+
+def has_parent(bound_packs):
+    return any(pack['resource_binding']['parent_token'] != '00000000' for pack in bound_packs)
+
+
+def dynamic_exclusions(records, packs, member_sha256):
+    """Split animated parent-attached compiled records from static ones.
+
+    Only instances whose authored definition class is animated are excluded;
+    any other parented collision still needs a reference-pose export.
+    """
+    kept, excluded = [], []
+    for record in records:
+        token = record['placement']['token']
+        bound = packs.get(token, [])
+        if not has_parent(bound):
+            kept.append(record)
+            continue
+        require(record.get('definition_class') == ANIMATED_CLASS,
+                'parented collision on a non-animated instance cannot be excluded as dynamic')
+        excluded.append(dict(
+            instance_id=f"compiled:{record['collision_offset']:x}", instance_name=record['name'],
+            instance_properties_offset=record['instance_properties_offset'],
+            collision_offset=record['collision_offset'], record_sha256=record['placement']['sha256'],
+            definition_class=ANIMATED_CLASS, resource_token=token,
+            resource_member_sha256=sorted(member_sha256[token]),
+            packfile_sha256=sorted({pack['source_sha256'] for pack in bound}),
+            parent_tokens=sorted({pack['resource_binding']['parent_token'] for pack in bound
+                                  if pack['resource_binding']['parent_token'] != '00000000'}),
+            reason=DYNAMIC_REASON))
+    return kept, excluded
+
+
+def exclusion_provenance(excluded):
+    """Provenance lines naming every excluded dynamic instance."""
+    if not excluded:
+        return []
+    lines = [f'Dynamic exclusions: {len(excluded)} animated parent-attached compiled instances are omitted '
+             'as moving collision; every other present compiled record resolves.']
+    for row in excluded:
+        lines.append(
+            f"Dynamic exclusion {row['instance_id']}: instance {row['instance_name']}, "
+            f"class {row['definition_class']}, resource {row['resource_token']}, "
+            f"resource member SHA256 {','.join(row['resource_member_sha256'])}, "
+            f"packfile SHA256 {','.join(row['packfile_sha256'])}, "
+            f"parents {','.join(row['parent_tokens'])}, reason: {row['reason']}")
+    return lines
 
 
 def static_region(lower, upper, provenance):
@@ -60,6 +115,7 @@ def compiled_records(join, clv):
         require(placement['token'] == row['collision_mesh_token'], 'compiled/native instance resource token mismatch')
         counts['compiled_present'] += 1
         records.append(dict(name=row['name'], instance_properties_offset=offset,
+                            definition_class=row.get('definition_class'),
                             world_geometry_offset=start,
                             collision_offset=collision, placement=placement))
     return records, dict(counts)
@@ -117,6 +173,7 @@ def export(args):
     records, counts = compiled_records(join, clv)
     native = module('compiled_native_zrb', Path(__file__).with_name('zrb_records.py'))
     packs = collections.defaultdict(list)
+    member_sha256 = collections.defaultdict(set)
     for member in manifest['resource_members']:
         bound = [p for p in member['packfiles'] if p.get('resource_binding') and p.get('neutral_output')]
         if not bound:
@@ -138,9 +195,14 @@ def export(args):
             require(pack['source_sha256'] == source['sha256'] and pack['unsupported_collision_objects'] == 0
                     and sha(raw[source['offset']:source['offset']+source['bytes']]) == source['sha256'], 'partial/unverified source pack')
             packs[binding['resource_name_token']].append(pack)
+            member_sha256[binding['resource_name_token']].add(member['sha256'])
     require(terrain_token in packs and all(p['resource_binding']['physics_type_raw'] == 1 for p in packs[terrain_token]), 'terrain binding absent')
-    parented = any(pack['resource_binding']['parent_token'] != '00000000'
-                   for record in records for pack in packs.get(record['placement']['token'], []))
+    excluded = []
+    if getattr(args, 'exclude_animated_parented', False):
+        require(not getattr(args, 'reference_pose', False),
+                'dynamic exclusion and reference-pose export are mutually exclusive')
+        records, excluded = dynamic_exclusions(records, packs, member_sha256)
+    parented = any(has_parent(packs.get(record['placement']['token'], [])) for record in records)
     resolver = None
     if parented:
         require(getattr(args, 'reference_pose', False) and getattr(args, 'parent_proof', None),
@@ -197,6 +259,9 @@ def export(args):
                 'Other entity-created collision and global dynamic resources are outside this adapter.',
                 'Live bot physics and obstacle alignment remain unaccepted.']
     scope = 'initial_compiled_static_geometry'
+    if excluded:
+        unknowns.append('Excluded animated parent-attached collision is absent; its current pose and '
+                        'blocking are not represented and need dynamic collision support.')
     if resolver is not None:
         scope = 'compiled_reference_pose'
         unknowns[0] = 'scope=compiled_reference_pose; parent attachments use frozen compiled poses, not current animation.'
@@ -205,6 +270,7 @@ def export(args):
                   f'Existing instance join SHA256 {sha(join_bytes)}', f'Externally supplied terrain proof SHA256 {sha(terrain_bytes)}',
                   f'Externally supplied placement proof SHA256 {sha(placement_bytes)}',
                   'Final compiled collision matrices; no authored Euler/SnapToTerrain or second scale application.']
+    provenance.extend(exclusion_provenance(excluded))
     regions = []
     if args.physics_region_min is not None or args.physics_region_max is not None:
         require(args.physics_region_min is not None and args.physics_region_max is not None, 'require both region bounds')
@@ -222,6 +288,8 @@ def export(args):
                   world_bytes=len(world_bytes), world_sha256=sha(world_bytes), missing_resources=missing,
                   bindings=bindings, exact_zero_area_removals=removed,
                   geometry_files={k: list(v[0]) for k, v in cache.items()}, unknowns=unknowns)
+    if excluded:
+        report['dynamic_exclusions'] = excluded
     if resolver is not None:
         report['parent_resolution'] = resolver.report()
     args.output.mkdir(parents=True)
@@ -247,6 +315,9 @@ def main():
                         'defaults to the map manifest\'s single type1 terrain resource')
     parser.add_argument('--reference-pose', action='store_true', help='Allow frozen compiled parent poses without verified physics regions')
     parser.add_argument('--parent-proof', type=Path, help='Externally reviewed, ELF-bound retail parent witness')
+    parser.add_argument('--exclude-animated-parented', action='store_true',
+                        help='Omit animated parent-attached compiled instances as dynamic collision, '
+                             'recording each exclusion; a physics region may then be declared')
     parser.add_argument('--physics-region-min', type=lambda s: [float(v) for v in s.split(',')])
     parser.add_argument('--physics-region-max', type=lambda s: [float(v) for v in s.split(',')])
     export(parser.parse_args())
