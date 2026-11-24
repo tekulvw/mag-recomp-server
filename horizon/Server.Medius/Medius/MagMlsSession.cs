@@ -40,21 +40,31 @@ namespace Server.Medius
         public void ObserveActivity(DateTime now)
         { if (IsBound && _registry.Touch(_channelId, now)) _lastActivity = now; }
         public bool IsExpired(DateTime now) => IsBound && (now - _lastActivity).TotalSeconds >= 120;
+        // Why the last plugin message went unanswered before reaching a handler, or null.
+        public string LastRefusal { get; private set; }
+        // Lower-case hex of the first bytes of an unanswered message, so a capture can name it.
+        public static string PayloadHead(byte[] payload, int limit = 64) =>
+            payload == null ? "" : Convert.ToHexString(payload, 0, Math.Min(payload.Length, limit)).ToLowerInvariant() +
+                (payload.Length > limit ? "..." : "");
         public IReadOnlyList<RT_MSG_SERVER_PLUGIN_TO_APP> HandleMany(RT_MSG_CLIENT_APP_TO_PLUGIN envelope, DateTime now)
         {
-            if (!IsBound || IsExpired(now) || !envelope.IsValid || envelope.PluginId != 0 ||
-                !MagMessageCodec.TryParseClientForApplication(envelope.Payload, ApplicationId, out var message)) return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();
+            LastRefusal = null;
+            if (!IsBound || IsExpired(now) || !envelope.IsValid) return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();
+            if (!MagPluginRouting.IsClientPluginId(ApplicationId, envelope.PluginId))
+            { LastRefusal = $"unexpected-plugin-id={envelope.PluginId}"; return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>(); }
+            if (!MagMessageCodec.TryParseClientForApplication(envelope.Payload, ApplicationId, out var message))
+            { LastRefusal = "unknown-or-malformed-type"; return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>(); }
             if (message is MagHello && State == SessionState.TransportReady)
             {
                 State = SessionState.ProtocolSent; ObserveActivity(now);
-                return new[] { MagMessageCodec.ToPluginMessageForApplication(new MagProtocolInfo { ProtocolVersion = Program.Settings.MagProtocolVersion, BuildNumber = 0 }, ApplicationId) };
+                return new[] { MagPluginRouting.ToMlsClient(new MagProtocolInfo { ProtocolVersion = Program.Settings.MagProtocolVersion, BuildNumber = 0 }, ApplicationId) };
             }
             if (message is MagProtocolInfo protocol && State == SessionState.ProtocolSent && protocol.ProtocolVersion == Program.Settings.MagProtocolVersion)
                 State = SessionState.Ready;
             if (message is MagKeepAlive && ApplicationId == 20231 && State == SessionState.Ready)
             {
                 ObserveActivity(now);
-                return new[] { MagMessageCodec.ToPluginMessageForApplication(new MagKeepAlive(), ApplicationId) };
+                return new[] { MagPluginRouting.ToMlsClient(new MagKeepAlive(), ApplicationId) };
             }
             if (message is MagRetailAccountLogoutRequest logout && ApplicationId == 20231 && State == SessionState.Ready)
             {
@@ -63,7 +73,7 @@ namespace Server.Medius
                 // on this channel until it closes, and the channel close releases the ticket.
                 StorageStatus = "account-logout-acknowledged";
                 ObserveActivity(now);
-                return new[] { MagMessageCodec.ToPluginMessageForApplication(new MagRetailAccountLogoutResponse { TransactionId = logout.TransactionId, Success = true }, ApplicationId) };
+                return new[] { MagPluginRouting.ToMlsClient(new MagRetailAccountLogoutResponse { TransactionId = logout.TransactionId, Success = true }, ApplicationId) };
             }
             if (message is MagTrainingCompletedRequest && ApplicationId == 20231 && State == SessionState.Ready)
             {
@@ -78,7 +88,7 @@ namespace Server.Medius
                         if (outcome.Result == MagNetResult.Success)
                         {
                             ObserveActivity(now);
-                            return new[] { MagMessageCodec.ToPluginMessageForApplication(new MagCharacterRecordNotification { Record = outcome.Record }, ApplicationId) };
+                            return new[] { MagPluginRouting.ToMlsClient(new MagCharacterRecordNotification { Record = outcome.Record }, ApplicationId) };
                         }
                     }
                 }
@@ -108,7 +118,7 @@ namespace Server.Medius
                 catch (Exception e) when (e is IOException || e is InvalidDataException || e is UnauthorizedAccessException)
                 { StorageStatus = "skill-storage-error-no-success"; }
                 ObserveActivity(now);
-                return new[] { MagMessageCodec.ToPluginMessageForApplication(response, ApplicationId) };
+                return new[] { MagPluginRouting.ToMlsClient(response, ApplicationId) };
             }
             if (message is MagRetailNominationsUpdate nominations && State == SessionState.Ready)
             {
@@ -146,7 +156,7 @@ namespace Server.Medius
                 catch (Exception e) when (e is IOException || e is InvalidDataException || e is UnauthorizedAccessException)
                 { StorageStatus = "character-data-storage-error"; }
                 ObserveActivity(now);
-                return new[] { MagMessageCodec.ToPluginMessageForApplication(response, ApplicationId) };
+                return new[] { MagPluginRouting.ToMlsClient(response, ApplicationId) };
             }
             if (State == SessionState.Ready && message is (MagLoadoutUpdateRequest or MagRetailLoadoutDeleteRequest))
             {
@@ -181,7 +191,7 @@ namespace Server.Medius
                 MagMessage response = deleting
                     ? new MagRetailLoadoutDeleteResponse { Success = success }
                     : new MagLoadoutUpdateResponse { Success = success };
-                return new[] { MagMessageCodec.ToPluginMessageForApplication(response, ApplicationId) };
+                return new[] { MagPluginRouting.ToMlsClient(response, ApplicationId) };
             }
             ObserveActivity(now); return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();
         }

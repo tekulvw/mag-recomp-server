@@ -134,7 +134,7 @@ internal static class LoadoutPreferenceStoreChecks
             Check(replies.Count == 1 && replies[0].Payload.SequenceEqual(new byte[] { 0x02, 0x22, 0 }) &&
                 session.StorageStatus == "loadout-layout-capability-unavailable" && callbacks == 0 &&
                 File.ReadAllBytes(path).SequenceEqual(before), "Older worker did not prevent a delete before mutation");
-            Check(session.HandleMany(ArmoryEnvelope(wire, 1), now).Count == 0, "Wrong plugin entered the Armory delete route");
+            Check(session.HandleMany(ArmoryEnvelope(wire, 2), now).Count == 0, "Wrong plugin entered the Armory delete route");
             session.CanDeleteLoadout = () => true;
             session.CharacterStore = new LocalCharacterStore(path, new FailedCommitter()) { LoadoutCatalog = store.LoadoutCatalog };
             replies = session.HandleMany(ArmoryEnvelope(wire), now);
@@ -143,7 +143,7 @@ internal static class LoadoutPreferenceStoreChecks
                 File.ReadAllBytes(path).SequenceEqual(before), "Failed durable delete acknowledged success or changed the store");
             session.CharacterStore = store;
             replies = session.HandleMany(ArmoryEnvelope(wire), now);
-            Check(replies.Count == 1 && replies[0].PluginId == 0 && replies[0].Payload.SequenceEqual(new byte[] { 0x02, 0x22, 0x80 }),
+            Check(replies.Count == 1 && replies[0].PluginId == MagPluginRouting.RetailMlsPluginId && replies[0].Payload.SequenceEqual(new byte[] { 0x02, 0x22, 0x80 }),
                 "Authenticated retail delete did not return the native success response");
             var current = new LocalCharacterStore(path) { LoadoutCatalog = store.LoadoutCatalog }.ReadForAccount("alpha").Single();
             Check(current.LastUsedLoadout == 0 && current.Loadouts.Select(row => row.UpdateId).SequenceEqual(new byte[] { 2, 3, 4, 5, 0 }) &&
