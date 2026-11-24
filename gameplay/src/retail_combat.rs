@@ -528,6 +528,22 @@ impl RetailCombatCatalog {
             .get(&item_id)
             .ok_or(RetailCombatError::UnsupportedItem(item_id))
     }
+    /// Grenade items with authored Character blast damage, in ID order. The
+    /// static-world blast treats any static crossing as cover, so it needs no
+    /// material penetration.
+    pub fn frag_damage_items(&self) -> Result<Vec<u16>, RetailCombatError> {
+        if !self.0.authority.grenade_damage {
+            return Err(RetailCombatError::PendingAuthority(
+                RetailCombatCapability::GrenadeDamage,
+            ));
+        }
+        if self.0.grenades.is_empty() {
+            return Err(RetailCombatError::InvalidMetadata(
+                "frag Character blast requires supported grenade profiles".into(),
+            ));
+        }
+        Ok(self.0.grenades.keys().copied().collect())
+    }
     /// Qualify the ordinary on-foot frag path separately from legacy grenade damage.
     pub fn validate_frag_character_blast(&self) -> Result<(), RetailCombatError> {
         if !self.0.authority.grenade_damage {
