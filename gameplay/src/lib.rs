@@ -195,6 +195,8 @@ pub mod objective_catalog;
 pub mod objective_control;
 pub mod objective_range;
 pub mod owner_update;
+#[cfg(test)]
+mod party_late_entry_tests;
 pub mod party_reservation;
 pub mod player_tracking;
 pub mod progression;
@@ -1879,6 +1881,7 @@ impl<W: Write> Engine<W> {
                 }
                 if self.party_reservations.enabled() {
                     capabilities.push(party_reservation::CAPABILITY.into());
+                    capabilities.push(party_reservation::LATE_ENTRY_CAPABILITY.into());
                     registry.party_summaries()
                 } else {
                     registry.summaries()

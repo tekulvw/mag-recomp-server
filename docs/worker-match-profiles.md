@@ -252,13 +252,29 @@ the selected `team` and `squad`, and the original ordered `reservation_ids`.
 An exact retry can use a new correlation request ID.
 
 Complete each formation's group reservations before making any members
-claimable or sending their descriptors. A new group cannot enter after any
-current member claims. An exact `release_party` for the same binding rolls back
+claimable or sending their descriptors. An exact `release_party` for the same binding rolls back
 an entirely unclaimed cohort. It may also fence a never-admitted exact cohort
 with an empty ID list. Success has `status: "released"` and the ordered IDs
 when applicable. It omits team and squad. The worker retains this
 acknowledgment through empty-world cleanup until the next selection commits.
 Use ordinary release for individual departures after publication.
+
+The same worker also advertises `party_late_entry_v1`. Once any current
+member has claimed, the selected match is running and `reserve_party`
+admits the group late with the same binding (the running round's
+`admission_epoch`). The worker still validates and records the whole cohort
+once before installing anyone. It picks one squad on the group's side with
+a free human seat for every member; bots never count as occupants. With no
+such squad it splits the group across the fewest squads on that side,
+emptiest first, and returns the leader's squad. A forming match keeps the
+one-squad rule. After the record, bots holding a member's player ID,
+overfilling the chosen squads or exceeding the side's team capacity retire
+immediately; the regular bot reconciliation then keeps the profile's fill
+total. Refusals name their cause: `party_no_room` (world, side or squad
+room), `party_faction_mismatch` (a member's faction differs or is not in the
+selected pair), `party_match_ending` (the selected match is terminal),
+`party_member_conflict`, `party_formation_stale` and the existing scope
+errors. A refusal changes nothing.
 
 ## Selection lifetime and durability
 

@@ -1,9 +1,14 @@
-//! Internal preclaim cohort admission for explicitly enabled retail workers.
+//! Internal cohort admission for explicitly enabled retail workers: into a
+//! forming match before any claim, and (late entry) into a running match.
 use crate::*;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const CAPABILITY: &str = "party_reservation_v1";
+/// A group may also enter a running (already claimed) match of its formation.
+/// It joins one squad on its side when one has room for every member, or
+/// else the fewest squads on that side; bots give up the seats it takes.
+pub(crate) const LATE_ENTRY_CAPABILITY: &str = "party_late_entry_v1";
 // Retain failed-reserve rollback tombstones for the whole selection, including
 // when there are no actors. Never evict one and allow a late reserve through.
 const MAX_COHORTS_PER_FORMATION: usize = 128;
@@ -260,13 +265,12 @@ impl<W: Write> Engine<W> {
     }
 
     fn check_party_scope(&self, binding: Binding<'_>) -> Result<(), &'static str> {
+        if self.match_terminal.is_some() && self.selected_match_is(binding) {
+            return Err("party_match_ending");
+        }
         if self.match_terminal.is_some()
             || self.round_number > binding.admission_epoch
-            || !self.selected_match.as_ref().is_some_and(|selected| {
-                selected.formation_id == binding.formation_id
-                    && selected.profile_id == binding.profile_id
-                    && selected.admission_epoch == Some(binding.admission_epoch)
-            })
+            || !self.selected_match_is(binding)
         {
             return Err("party_formation_stale");
         }
@@ -283,6 +287,14 @@ impl<W: Write> Engine<W> {
             return Err("party_world_conflict");
         }
         Ok(())
+    }
+
+    fn selected_match_is(&self, binding: Binding<'_>) -> bool {
+        self.selected_match.as_ref().is_some_and(|selected| {
+            selected.formation_id == binding.formation_id
+                && selected.profile_id == binding.profile_id
+                && selected.admission_epoch == Some(binding.admission_epoch)
+        })
     }
 
     fn party_member(&self, id: &str, world_id: u32, allocation: u64) -> Option<&Active> {
@@ -329,7 +341,7 @@ impl<W: Write> Engine<W> {
             None => {}
         }
         self.party_reservations.check_room()?;
-        let (squad, prepared) = self.prepare_party(binding, members)?;
+        let (squad, late, prepared) = self.prepare_party(binding, members)?;
         let reply = binding.reply(
             Status::Reserved,
             Some(squad),
@@ -342,8 +354,13 @@ impl<W: Write> Engine<W> {
             .iter()
             .map(|member| json!({"account_id":member.account_id,"player_id":member.player_id}))
             .collect();
+        let squads: BTreeSet<u16> = prepared
+            .iter()
+            .map(|admission| admission.squad_catalog.squad_index())
+            .collect();
         self.record(
-            json!({"op":"party_reserved","party_reservation":reply,"members":accounts}),
+            json!({"op":"party_reserved","party_reservation":reply,"members":accounts,
+                "late_entry":late,"squads":squads}),
             wall,
         )?;
         let previous = self.active.take();
@@ -364,23 +381,83 @@ impl<W: Write> Engine<W> {
                 allocation_sequence: self.sequence,
             },
         );
+        if late {
+            let players: Vec<u16> = members.iter().map(|member| member.player_id).collect();
+            // The cohort is durable and installed. Bot seats are derived world
+            // state: if this eager displacement stops early, the next bot tick
+            // reconciles the same squads and team, so the reply stays committed.
+            let _ = self.displace_bots_for_party(&players, &squads, squad / 16, now, wall);
+        }
         Ok(reply)
+    }
+
+    /// Retire bots that occupy a late group's player indices, overfill its
+    /// squads or push its side past the team capacity. Humans own their seats.
+    fn displace_bots_for_party(
+        &mut self,
+        players: &[u16],
+        squads: &BTreeSet<u16>,
+        team: u16,
+        now: Duration,
+        wall: u64,
+    ) -> Result<(), &'static str> {
+        if self.bot_registry.bots.is_empty() {
+            return Ok(());
+        }
+        for &player in players {
+            self.retire_bot_for_human(player, now, wall)?;
+        }
+        let policy = self.match_profile();
+        let (squad_capacity, team_capacity) = (policy.squad_capacity, policy.team_capacity);
+        for &squad in squads {
+            while self.squad_reservation_count(squad) + self.bot_registry.members(squad).count()
+                > squad_capacity
+            {
+                let Some(id) = self.bot_registry.members(squad).max() else {
+                    break;
+                };
+                self.retire_bot_for_human(id, now, wall)?;
+            }
+        }
+        let team = team as u8;
+        loop {
+            let humans = self
+                .active
+                .iter()
+                .chain(self.peers.values())
+                .filter(|actor| actor.team() == team)
+                .count();
+            let bots: Vec<u16> = self
+                .bot_registry
+                .bots
+                .iter()
+                .filter(|(_, bot)| bot.target.squad.team() == team)
+                .map(|(&id, _)| id)
+                .collect();
+            if humans + bots.len() <= team_capacity {
+                return Ok(());
+            }
+            let Some(&id) = bots.last() else {
+                return Ok(());
+            };
+            self.retire_bot_for_human(id, now, wall)?;
+        }
     }
 
     fn prepare_party(
         &self,
         binding: Binding<'_>,
         members: &[Member],
-    ) -> Result<(u16, Vec<admission::PreparedAdmission>), &'static str> {
+    ) -> Result<(u16, bool, Vec<admission::PreparedAdmission>), &'static str> {
         self.validate_objective_configuration(self.wire_profile)?;
         let policy = self.match_profile();
         if !policy.auto_assign_teams {
             return Err("party_profile_unavailable");
         }
         let current: Vec<_> = self.active.iter().chain(self.peers.values()).collect();
-        if current.iter().any(|actor| actor.claimed.is_some()) {
-            return Err("party_requires_preclaim_formation");
-        }
+        // Once any member of the formation has claimed, the match is running:
+        // a group enters late, beside the humans and bots already playing.
+        let late = current.iter().any(|actor| actor.claimed.is_some());
         let round_number = if current.is_empty() {
             self.round_number
                 .checked_add(1)
@@ -392,18 +469,24 @@ impl<W: Write> Engine<W> {
             return Err("party_formation_stale");
         }
         if current.len() + members.len() > self.maximum_players {
-            return Err("match_full");
+            return Err("party_no_room");
         }
         let mut reservations = BTreeSet::new();
         let mut players = BTreeSet::new();
         let mut accounts = BTreeSet::new();
         let faction = members[0].character.faction;
+        if faction != policy.attacking_faction && faction != policy.defending_faction {
+            return Err("party_faction_mismatch");
+        }
         let mut candidates = Vec::with_capacity(members.len());
         for member in members {
             if usize::from(member.player_id) >= self.maximum_players {
                 return Err("invalid_player_slot");
             }
-            if member.character.faction != faction || member.character.universe_id != 26 {
+            if member.character.faction != faction {
+                return Err("party_faction_mismatch");
+            }
+            if member.character.universe_id != 26 {
                 return Err("unsupported_match_character");
             }
             if self.released_reservations.contains(&member.reservation_id)
@@ -425,21 +508,82 @@ impl<W: Write> Engine<W> {
             let modifiers = self.validate_admission_character(&member.character)?;
             candidates.push((member.reservation(binding.world_id), modifiers));
         }
-        let mut squad_catalog = self.allocate_squad_for(faction, members.len())?;
-        let squad = squad_catalog.squad_index();
-        let shared_spawn = self.squad_spawn_for(squad).ok_or("missing_squad_spawn")?;
-        squad_catalog.set_runtime_default(shared_spawn)?;
-        let prepared = candidates
-            .into_iter()
-            .map(|(candidate, modifiers)| admission::PreparedAdmission {
+        let catalogs = match self.allocate_squad_for(faction, members.len()) {
+            Ok(catalog) => vec![catalog; members.len()],
+            Err("match_full") if late => self.allocate_split_party(faction, members.len())?,
+            Err("match_full") => return Err("party_no_room"),
+            Err("unsupported_match_character") => return Err("party_faction_mismatch"),
+            Err(code) => return Err(code),
+        };
+        let mut prepared = Vec::with_capacity(members.len());
+        for ((candidate, modifiers), mut squad_catalog) in candidates.into_iter().zip(catalogs) {
+            let shared_spawn = self
+                .squad_spawn_for(squad_catalog.squad_index())
+                .ok_or("missing_squad_spawn")?;
+            squad_catalog.set_runtime_default(shared_spawn)?;
+            prepared.push(admission::PreparedAdmission {
                 candidate,
                 modifiers,
-                squad_catalog: squad_catalog.clone(),
+                squad_catalog,
                 shared_spawn,
                 round_number,
+            });
+        }
+        Ok((prepared[0].squad_catalog.squad_index(), late, prepared))
+    }
+
+    /// Late-entry fallback when no single squad on the group's side has room
+    /// for all of it: keep the group on its side in the fewest squads, filling
+    /// the emptiest squad first (the leader's). Bots never count as occupants.
+    fn allocate_split_party(
+        &self,
+        faction: u8,
+        members: usize,
+    ) -> Result<Vec<spawn_catalog::SpawnCatalog>, &'static str> {
+        let catalog = self
+            .spawn_catalog
+            .as_ref()
+            .ok_or("spawn_catalog_unavailable")?;
+        let policy = catalog.match_profile();
+        let team = if faction == policy.attacking_faction {
+            0
+        } else {
+            1
+        };
+        let humans = self
+            .active
+            .iter()
+            .chain(self.peers.values())
+            .filter(|actor| actor.team() == team)
+            .count();
+        if humans + members > policy.team_capacity {
+            return Err("party_no_room");
+        }
+        let mut vacancies: Vec<_> = catalog
+            .map_pool()
+            .squads
+            .iter()
+            .filter(|binding| binding.team == team)
+            .map(|binding| {
+                let free = policy
+                    .squad_capacity
+                    .saturating_sub(self.squad_reservation_count(binding.index));
+                (std::cmp::Reverse(free), binding.index)
             })
+            .filter(|(free, _)| free.0 > 0)
             .collect();
-        Ok((squad, prepared))
+        vacancies.sort_unstable();
+        let mut catalogs = Vec::with_capacity(members);
+        for (std::cmp::Reverse(free), index) in vacancies {
+            let squad = catalog.for_squad(index)?;
+            for _ in 0..free.min(members - catalogs.len()) {
+                catalogs.push(squad.clone());
+            }
+            if catalogs.len() == members {
+                return Ok(catalogs);
+            }
+        }
+        Err("party_no_room")
     }
 
     fn release_party(&mut self, binding: Binding<'_>, wall: u64) -> Result<Reply, &'static str> {
