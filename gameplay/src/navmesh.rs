@@ -16,6 +16,9 @@ pub use movement_profile::MovementProfile;
 #[cfg(test)]
 #[path = "navmesh_movement_profile_tests.rs"]
 mod movement_profile_tests;
+#[cfg(test)]
+#[path = "navmesh_staged_tests.rs"]
+mod staged_tests;
 pub use reference::{
     ReferenceManifest, ReferenceNavMesh, bake_reference, bake_reference_with_movement_profile,
 };
@@ -141,6 +144,15 @@ pub struct Route {
     pub waypoint_drop_ids: Vec<Option<u32>>,
     #[serde(default)]
     pub predicted_remaining_health: Option<u16>,
+    /// Detour search nodes the query used (in-process diagnostic only).
+    #[serde(skip)]
+    pub search_nodes: u32,
+    /// Corridor pieces of a staged route; zero for a single direct search.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub stages: u32,
+}
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 impl Route {
     /// Follow only a bounded prefix of a complete, validated corridor. Never
@@ -277,6 +289,8 @@ unsafe extern "C" {
         npoints: *mut c_int,
         refs: *mut u64,
         nrefs: *mut c_int,
+        nodes: *mut c_int,
+        stages: *mut c_int,
     ) -> c_int;
     fn mag_nav_component(
         handle: *mut std::ffi::c_void,
@@ -727,6 +741,8 @@ impl NavMesh {
         let mut refs = vec![0u64; 1024];
         let mut np = 0;
         let mut nr = 0;
+        let mut nodes = 0;
+        let mut stages = 0;
         let h = self
             .native
             .lock()
@@ -743,6 +759,8 @@ impl NavMesh {
                 &mut np,
                 refs.as_mut_ptr(),
                 &mut nr,
+                &mut nodes,
+                &mut stages,
             )
         };
         let status = match status {
@@ -788,6 +806,8 @@ impl NavMesh {
             waypoint_drop_ids: vec![None; waypoint_count],
             predicted_remaining_health: None,
             query_us: began.elapsed().as_micros().min(u64::MAX as u128) as u64,
+            search_nodes: nodes.max(0) as u32,
+            stages: stages.max(0) as u32,
         })
     }
     pub fn component_diagnostic(

@@ -12,6 +12,8 @@
   <dt>Version</dt><dd>{{ version }}</dd>
   <dt>Logs</dt><dd>{% if log_names.is_empty() %}none{% else %}{{ log_names.len() }} ({{ log_bytes }} bytes compressed){% endif %}</dd>
 </dl>
+<h2>Player comment</h2>
+{% if let Some(c) = comment %}<p class="comment">{{ c }}</p>{% else %}<p class="quiet">None sent.</p>{% endif %}
 {% if !log_names.is_empty() %}
 <h2>Logs</h2>
 <table>

@@ -131,6 +131,9 @@ pub(crate) struct BotRegistry {
     pub(super) traffic_cursor: u16,
     pub(super) firearm_cursor: u16,
     pub(super) delay_book: crate::bot_traffic_costs::Book,
+    /// Placements per (spawn point, population source spawn); static geometry.
+    pub(super) spawn_qualification:
+        BTreeMap<(u16, u16), Result<crate::bot_spawn_selection::QualifiedPoint, &'static str>>,
 }
 #[derive(Clone)]
 pub(super) struct WorldBot {
@@ -1191,6 +1194,40 @@ impl<W: Write> Engine<W> {
         }
         Ok(())
     }
+    /// The wave deadline a dead bot's next life is due at, once reached.
+    /// Once a dead life reaches its wave, the deadline is retained through an
+    /// occupied spawn and the team's clock rollover.
+    fn due_bot_respawn(
+        &self,
+        id: u16,
+        now: Duration,
+        respawn_delays: [u32; 2],
+    ) -> Result<Option<Duration>, &'static str> {
+        let bot = &self.bot_registry.bots[&id];
+        if bot.health != 0 {
+            return Ok(None);
+        }
+        let runtime = bot.target.runtime.ok_or("bot_runtime_missing")?;
+        let config = self.bot_registry.config.as_ref().unwrap();
+        if config.regional_team.is_some()
+            && self.spawn_catalog.as_ref().is_none_or(|catalog| {
+                !regional_slot_source_active(catalog, &config.slots[bot.slot])
+            })
+        {
+            return Ok(None);
+        }
+        let team = usize::from(bot.target.squad.team());
+        let deadline = match bot.due_respawn_wave {
+            Some((generation, deadline)) if generation == runtime.generation => deadline,
+            _ => match self.team_waves[team] {
+                Some(clock) => clock.next_after(runtime.since)?,
+                None => runtime
+                    .since
+                    .saturating_add(Duration::from_millis(respawn_delays[team].into())),
+            },
+        };
+        Ok((now >= deadline).then_some(deadline))
+    }
     pub(crate) fn tick_bots(
         &mut self,
         now: Duration,
@@ -1325,35 +1362,27 @@ impl<W: Write> Engine<W> {
                     break;
                 }
             };
+            // A due dead life chooses its spawn (the squad's active set) first.
+            let life_spawn = match self.due_bot_respawn(id, now, respawn_delays)? {
+                Some(deadline) => {
+                    let bot = &self.bot_registry.bots[&id];
+                    let (squad, slot) = (bot.target.squad.squad_index(), bot.slot);
+                    Some((
+                        deadline,
+                        self.choose_bot_life_spawn(id, squad, slot, &actors, &mut receipts)?,
+                    ))
+                }
+                None => None,
+            };
             let motion_world = guarded_world.as_ref().or(self.collision_world.as_ref());
             let bot = self.bot_registry.bots.get_mut(&id).unwrap();
             let runtime = bot.target.runtime.unwrap();
             if bot.health == 0 {
-                let config = self.bot_registry.config.as_ref().unwrap();
-                if config.regional_team.is_some()
-                    && self.spawn_catalog.as_ref().is_none_or(|catalog| {
-                        !regional_slot_source_active(catalog, &config.slots[bot.slot])
-                    })
-                {
+                let Some((deadline, choice)) = life_spawn else {
                     continue;
-                }
-                let team = usize::from(bot.target.squad.team());
-                // Once a dead life reaches its wave, retain that deadline
-                // through an occupied spawn and the team's clock rollover.
-                let deadline = match bot.due_respawn_wave {
-                    Some((generation, deadline)) if generation == runtime.generation => deadline,
-                    _ => match self.team_waves[team] {
-                        Some(clock) => clock.next_after(runtime.since)?,
-                        None => runtime
-                            .since
-                            .saturating_add(Duration::from_millis(respawn_delays[team].into())),
-                    },
                 };
-                if now < deadline {
-                    continue;
-                }
                 bot.due_respawn_wave = Some((runtime.generation, deadline));
-                if actors.occupied(id, point(bot.target.position), bot_physics::Body::default())? {
+                let crate::bot_spawn_selection::LifeSpawnChoice::Spawn(spawn) = choice else {
                     if bot
                         .respawn_wait
                         .is_none_or(|last| now.saturating_sub(last) >= Duration::from_secs(1))
@@ -1362,7 +1391,8 @@ impl<W: Write> Engine<W> {
                         bot.respawn_wait = Some(now);
                     }
                     continue;
-                }
+                };
+                bot.target.position = spawn.position;
                 let mut runtime = BotRuntime::spawned(now, bot.target.position);
                 runtime.generation = self.bot_registry.generations[&id]
                     .checked_add(1)
@@ -1410,9 +1440,9 @@ impl<W: Write> Engine<W> {
                     &bot.target.loadout,
                     self.wire_profile,
                 )?);
-                receipts.push(
-                    json!({"op":"bot_respawn","object_index":id,"generation":runtime.generation}),
-                );
+                receipts.push(json!({"op":"bot_respawn","object_index":id,
+                    "generation":runtime.generation,"spawn_point_index":spawn.spawn_point,
+                    "arrival":spawn.arrival.code(),"position":spawn.position}));
             }
             if !bot.has_supply_action()
                 && !self.bot_registry.config.as_ref().unwrap().autonomous
@@ -2832,7 +2862,29 @@ impl<W: Write> Engine<W> {
                 .unwrap_or(0)
                 .checked_add(1)
                 .ok_or("bot_generation_exhausted")?;
-            let mut runtime = BotRuntime::spawned(now, slot.position);
+            // A refill mid-match starts at the squad's active spawn as well.
+            let mut life_receipts = Vec::new();
+            let spawn = match self.choose_bot_life_spawn(
+                index,
+                squad.squad_index(),
+                slot_index,
+                actors,
+                &mut life_receipts,
+            )? {
+                crate::bot_spawn_selection::LifeSpawnChoice::Spawn(spawn) => spawn,
+                // The slot was free when selected above.
+                crate::bot_spawn_selection::LifeSpawnChoice::Wait => {
+                    crate::bot_spawn_selection::LifeSpawn {
+                        position: slot.position,
+                        spawn_point: slot.source_spawn,
+                        arrival: crate::bot_spawn_selection::Arrival::PopulationSlot,
+                    }
+                }
+            };
+            for receipt in life_receipts {
+                self.record(receipt, wall)?;
+            }
+            let mut runtime = BotRuntime::spawned(now, spawn.position);
             runtime.generation = generation;
             runtime.phase = BotPhase::Complete;
             let guarded_world = match config
@@ -2887,7 +2939,7 @@ impl<W: Write> Engine<W> {
             } else {
                 None
             };
-            self.record(json!({"op":"bot_population_spawn","name":display_name,"name_index":name_index,"object_index":index,"generation":generation,"team":team,"squad_index":squad.squad_index(),"source_spawn":slot.source_spawn,"slot":slot_index,"position":slot.position}),wall)?;
+            self.record(json!({"op":"bot_population_spawn","name":display_name,"name_index":name_index,"object_index":index,"generation":generation,"team":team,"squad_index":squad.squad_index(),"source_spawn":slot.source_spawn,"slot":slot_index,"spawn_point_index":spawn.spawn_point,"arrival":spawn.arrival.code(),"position":spawn.position}),wall)?;
             if let Some(clock) = new_clock {
                 self.team_waves[usize::from(team)] = Some(clock);
             }
@@ -2902,7 +2954,7 @@ impl<W: Write> Engine<W> {
                         object_index: index,
                         display_name: Some(display_name),
                         generation: 0,
-                        position: slot.position,
+                        position: spawn.position,
                         faction,
                         squad,
                         roster_published: true,
@@ -2983,6 +3035,7 @@ impl<W: Write> Engine<W> {
         self.bot_registry.collision_evidence = None;
         self.bot_registry.regional_unavailable = None;
         self.bot_registry.firearm_cursor = 0;
+        self.bot_registry.spawn_qualification.clear();
     }
 }
 

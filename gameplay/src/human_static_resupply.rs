@@ -253,12 +253,17 @@ fn interval(base: f32, modifier: f32) -> Result<f32, &'static str> {
     }
 }
 
-fn equipped_grenade<W: Write>(actor: &Active, engine: &Engine<W>) -> Option<(u16, u8)> {
+/// The resupplied item and its inventory cap in each equipment gear.
+fn equipped_grenades<W: Write>(actor: &Active, engine: &Engine<W>) -> [Option<(u16, u8)>; 2] {
+    crate::GRENADE_GEARS.map(|gear| equipped_grenade(actor, engine, gear))
+}
+
+fn equipped_grenade<W: Write>(actor: &Active, engine: &Engine<W>, gear: u8) -> Option<(u16, u8)> {
     let kit = actor.equipped_loadout()?;
     let item = kit
         .inventories
         .get(usize::from(kit.handle.inventory_index))?
-        .slots[4]?;
+        .slots[usize::from(gear)]?;
     if engine
         .gas_grenades
         .as_deref()
@@ -341,7 +346,7 @@ impl<W: Write> Engine<W> {
         }
         let generation = living_generation(actor).ok_or("static_resupply_character_ineligible")?;
         if provider.percent_refresh_rate == 0.0
-            && equipped_grenade(actor, self).is_none()
+            && equipped_grenades(actor, self).iter().all(Option::is_none)
             && !self
                 .infantry_rockets
                 .as_deref()
@@ -407,7 +412,7 @@ impl<W: Write> Engine<W> {
                 continue;
             }
             let generation = living_generation(actor);
-            let frag = equipped_grenade(actor, self);
+            let frags = equipped_grenades(actor, self);
             let launcher = self
                 .infantry_rockets
                 .as_deref()
@@ -423,7 +428,7 @@ impl<W: Write> Engine<W> {
             let modifiers = leadership.modifiers(actor);
             let mut health_update = None;
             let mut sessions = Vec::with_capacity(actor.static_resupply.len());
-            let mut remaining = actor.grenade_remaining;
+            let mut remaining = crate::GRENADE_GEARS.map(|gear| actor.grenade_count(gear));
             let mut changed = false;
             for session in &actor.static_resupply {
                 let Some(provider) = catalog.provider(session.target).filter(|provider| {
@@ -437,7 +442,7 @@ impl<W: Write> Engine<W> {
                     continue;
                 };
                 if provider.percent_refresh_rate == 0.0
-                    && frag.is_none()
+                    && frags.iter().all(Option::is_none)
                     && launcher.is_none()
                     && underbarrel.is_none()
                     && guided.is_none()
@@ -472,7 +477,8 @@ impl<W: Write> Engine<W> {
                 if let Some(model) = heal {
                     health_update = Some(model);
                 }
-                let after = frag.map_or(remaining, |(_, cap)| cap);
+                let after: [u8; 2] =
+                    std::array::from_fn(|gear| frags[gear].map_or(remaining[gear], |(_, cap)| cap));
                 if launcher_state.is_none()
                     && let Some(catalog) = launcher
                 {
@@ -494,7 +500,9 @@ impl<W: Write> Engine<W> {
                 }
                 audit.push(json!({"reservation":actor.reservation.id,"provider":session.target,"operation":"pulse",
                     "world":actor.reservation.world,"round":session.round,"generation":session.generation,
-                    "item":frag.map(|(item, _)| item),"before":remaining,"after":after,"interval_seconds":next.interval,
+                    "item":frags[0].map(|(item, _)| item),"before":remaining[0],"after":after[0],
+                    "gear5_item":frags[1].map(|(item, _)| item),"gear5_before":remaining[1],"gear5_after":after[1],
+                    "interval_seconds":next.interval,
                     "health_before":before.health_quarter_points,
                     "health_after":heal.map(|model| model.health_quarter_points),
                     "launcher_refilled":launcher_state.is_some()}));
@@ -552,7 +560,9 @@ impl<W: Write> Engine<W> {
                 .or_else(|| self.peers.get_mut(&reservation))
             {
                 actor.static_resupply = sessions;
-                actor.grenade_remaining = remaining;
+                for (gear, count) in crate::GRENADE_GEARS.into_iter().zip(remaining) {
+                    actor.set_grenade_count(gear, count);
+                }
                 if let Some(state) = launcher_state {
                     actor.infantry_rocket_state = state;
                 }

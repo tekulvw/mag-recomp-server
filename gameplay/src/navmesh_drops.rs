@@ -317,6 +317,8 @@ impl NavMesh {
             waypoint_kinds: Vec::new(),
             waypoint_drop_ids: Vec::new(),
             predicted_remaining_health: Some(hp),
+            search_nodes: 0,
+            stages: 0,
         };
         let mut from = start;
         let mut remaining = hp;
@@ -343,6 +345,8 @@ impl NavMesh {
                 .waypoint_drop_ids
                 .extend(vec![None; ground.waypoints.len()]);
             route.corridor_refs.extend(ground.corridor_refs);
+            route.search_nodes = route.search_nodes.saturating_add(ground.search_nodes);
+            route.stages = route.stages.saturating_add(ground.stages);
             if let Some(link) = link {
                 // Supported launch/landing are steering hints only; never assign pose Y.
                 route.waypoints.push(link.launch);

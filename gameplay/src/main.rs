@@ -165,6 +165,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     let mut firearm_assist_rules_path: Option<PathBuf> = None;
     let mut skill_path: Option<PathBuf> = None;
     let mut retail_armory_path: Option<PathBuf> = None;
+    let mut smoke_grenade_rules_path: Option<PathBuf> = None;
     let mut leadership_passives_path: Option<PathBuf> = None;
     let mut leadership_role_policy_path: Option<PathBuf> = None;
     let mut structure_path: Option<PathBuf> = None;
@@ -427,6 +428,15 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                         .into(),
                 );
             }
+            "--smoke-grenade-rules" => {
+                smoke_grenade_rules_path = Some(
+                    args.next()
+                        .ok_or_else(|| {
+                            io::Error::other("--smoke-grenade-rules requires an absolute path")
+                        })?
+                        .into(),
+                );
+            }
             "--skill-catalog" => {
                 skill_path = Some(
                     args.next()
@@ -592,7 +602,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             }
             _ => {
                 return Err(io::Error::other(
-                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--match-profiles /absolute/MATCH_PROFILES.json] [--party-reservations] [--active-abilities /absolute/ACTIVE_ABILITIES.json] [--squad-orders /absolute/ORDERS.json] [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--dynamic-bodies /absolute/BODIES.json] [--static-partition /absolute/PARTITION.json] [--acquisition-gameplay /absolute/GAMEPLAY.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--firearm-assist-rules /absolute/ASSISTS.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--worker-id ID] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json [--collision-coverage COVERAGE.json]] [--navmesh-world MESH.mag-nav] [--regional-walk-coverage /absolute/COVERAGE.json] [--movement-profile /absolute/MOVEMENT.json] [--bot-fill-total N --bot-population POPULATION.json] [--bot-perception on|off] [--bot-names /absolute/NAMES.json] [--bot-resupply-catalog /absolute/SUPPLY.json] [--bot-resupply-approach-policy /absolute/APPROACH.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS] [--log-segment-bytes BYTES [--log-retention-s SECONDS]]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
+                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--match-profiles /absolute/MATCH_PROFILES.json] [--party-reservations] [--active-abilities /absolute/ACTIVE_ABILITIES.json] [--squad-orders /absolute/ORDERS.json] [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--dynamic-bodies /absolute/BODIES.json] [--static-partition /absolute/PARTITION.json] [--acquisition-gameplay /absolute/GAMEPLAY.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--firearm-assist-rules /absolute/ASSISTS.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--smoke-grenade-rules /absolute/SMOKE.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--worker-id ID] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json [--collision-coverage COVERAGE.json]] [--navmesh-world MESH.mag-nav] [--regional-walk-coverage /absolute/COVERAGE.json] [--movement-profile /absolute/MOVEMENT.json] [--bot-fill-total N --bot-population POPULATION.json] [--bot-perception on|off] [--bot-names /absolute/NAMES.json] [--bot-resupply-catalog /absolute/SUPPLY.json] [--bot-resupply-approach-policy /absolute/APPROACH.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS] [--log-segment-bytes BYTES [--log-retention-s SECONDS]]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
                 ));
             }
         }
@@ -664,6 +674,28 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         {
             return Err(io::Error::other(
                 "--match-profiles does not support global bunker arguments, global bot population or resupply (configure bots in each profile), dummy or collision-query",
+            ));
+        }
+    }
+    if let Some(path) = &smoke_grenade_rules_path {
+        if !path.is_absolute() {
+            return Err(io::Error::other(
+                "--smoke-grenade-rules requires an absolute path",
+            ));
+        }
+        if match_profiles_path.is_some() || acquisition_gameplay_path.is_some() {
+            return Err(io::Error::other(
+                "configure smoke grenades inside the Acquisition or Domination configuration",
+            ));
+        }
+        if application_id != Some(20231) || collision_query.is_some() {
+            return Err(io::Error::other(
+                "--smoke-grenade-rules requires a retail gameplay worker",
+            ));
+        }
+        if objective_path.is_none() {
+            return Err(io::Error::other(
+                "--smoke-grenade-rules requires --objective-catalog",
             ));
         }
     }
@@ -1152,18 +1184,35 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                 .map_err(io::Error::other)?;
         }
     }
-    let smoke_grenades = acquisition_config
-        .as_ref()
-        .map(|config| config.smoke_grenade_source())
-        .transpose()?
-        .flatten()
+    // Acquisition carries its own smoke rules; a direct Sabotage or
+    // Suppression worker names them on the command line.
+    let smoke_grenade_source = match &smoke_grenade_rules_path {
+        Some(path) => {
+            let mut raw = Vec::new();
+            std::fs::File::open(path)?
+                .take((1 << 20) + 1)
+                .read_to_end(&mut raw)?;
+            if raw.len() > 1 << 20 {
+                return Err(io::Error::other("invalid_smoke_grenade_rules"));
+            }
+            Some(raw)
+        }
+        None => acquisition_config
+            .as_ref()
+            .map(|config| config.smoke_grenade_source())
+            .transpose()?
+            .flatten(),
+    };
+    let smoke_grenades = smoke_grenade_source
         .map(|source| {
             mag_gameplay::smoke_grenades::Catalog::from_bytes(
                 &source,
                 &item_catalog,
                 &objective_catalog
                     .as_ref()
-                    .expect("direct Acquisition objectives")
+                    .ok_or_else(|| {
+                        io::Error::other("smoke grenade rules require an objective catalog")
+                    })?
                     .source()
                     .source_image_sha256,
             )
@@ -2074,7 +2123,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         );
         println!(
             "{}",
-            serde_json::json!({"event":"listening","application_id":application_id.unwrap_or(20230),"match_profiles":match_profiles_path,"active_abilities":active_abilities_path,"squad_orders":squad_orders_path,"profile_selection":if application_id.is_some(){"explicit"}else{"legacy"},"protocol":mag_gameplay::BRIDGE_VERSION,"address":listener.local_addr()?.to_string(),"collision":collision_info,"spawn_catalog":spawn_path,"objective_catalog":objective_info,"item_catalog":item_path,"character_blast_rules":blast_rules_path,"retail_combat_metadata":retail_metadata,"bootstrap_loadouts":bootstrap_loadouts_path,"fall_damage_rules":fall_rules_path,"incapacitation_rules":incapacitation_rules_path,"character_damage_rules":character_damage_rules_path,"firearm_assist_rules":firearm_assist_rules_path,"skill_catalog":skill_path,"retail_armory_catalog":retail_armory_path,"leadership_passives":leadership_passives_path,"leadership_role_policy":leadership_role_policy_path,"bunkers":bunker_info,"tick_telemetry":telemetry_path,"tick_budget_us":tick_budget_us,"scheduler":"independent_50ms_when_subscribed","bot_fill_total":bot_fill_total,"initial_spawn_delay_ms":effective_initial_spawn_delay_ms,"initial_spawn_delay_source":if initial_spawn_delay_ms.is_some(){"override"}else{"catalog"},"bot_population":bot_population_path,"bot_resupply_catalog":bot_resupply_catalog_path,"bot_resupply_approach_policy":bot_resupply_approach_policy_path,"bot_names":bot_names_path,"bot_names_count":bot_names_count,"development_dummy_position":actual_dummy_position})
+            serde_json::json!({"event":"listening","application_id":application_id.unwrap_or(20230),"match_profiles":match_profiles_path,"active_abilities":active_abilities_path,"squad_orders":squad_orders_path,"profile_selection":if application_id.is_some(){"explicit"}else{"legacy"},"protocol":mag_gameplay::BRIDGE_VERSION,"address":listener.local_addr()?.to_string(),"collision":collision_info,"spawn_catalog":spawn_path,"objective_catalog":objective_info,"item_catalog":item_path,"character_blast_rules":blast_rules_path,"retail_combat_metadata":retail_metadata,"bootstrap_loadouts":bootstrap_loadouts_path,"fall_damage_rules":fall_rules_path,"incapacitation_rules":incapacitation_rules_path,"character_damage_rules":character_damage_rules_path,"firearm_assist_rules":firearm_assist_rules_path,"skill_catalog":skill_path,"retail_armory_catalog":retail_armory_path,"smoke_grenade_rules":smoke_grenade_rules_path,"leadership_passives":leadership_passives_path,"leadership_role_policy":leadership_role_policy_path,"bunkers":bunker_info,"tick_telemetry":telemetry_path,"tick_budget_us":tick_budget_us,"scheduler":"independent_50ms_when_subscribed","bot_fill_total":bot_fill_total,"initial_spawn_delay_ms":effective_initial_spawn_delay_ms,"initial_spawn_delay_source":if initial_spawn_delay_ms.is_some(){"override"}else{"catalog"},"bot_population":bot_population_path,"bot_resupply_catalog":bot_resupply_catalog_path,"bot_resupply_approach_policy":bot_resupply_approach_policy_path,"bot_names":bot_names_path,"bot_names_count":bot_names_count,"development_dummy_position":actual_dummy_position})
         );
         let context = Arc::new(ConnectionContext {
             engine,
@@ -3140,6 +3189,33 @@ mod runtime_profile_tests {
         let mut relative = files.args();
         relative.extend(["--bot-names".to_string(), "names.json".to_string()]);
         assert!(run(relative).unwrap_err().to_string().contains("absolute"));
+    }
+
+    #[test]
+    fn direct_smoke_rules_cli_requires_an_absolute_path_and_objective_provenance() {
+        let files = SyntheticCatalogs::new();
+        let mut relative = files.args();
+        relative.extend([
+            "--smoke-grenade-rules".to_string(),
+            "smoke.json".to_string(),
+        ]);
+        assert!(
+            run(relative)
+                .unwrap_err()
+                .to_string()
+                .contains("--smoke-grenade-rules requires an absolute path")
+        );
+        let mut unbound = files.args();
+        unbound.extend([
+            "--smoke-grenade-rules".to_string(),
+            files.0.join("smoke.json").display().to_string(),
+        ]);
+        assert!(
+            run(unbound)
+                .unwrap_err()
+                .to_string()
+                .contains("--smoke-grenade-rules requires --objective-catalog")
+        );
     }
 
     #[test]

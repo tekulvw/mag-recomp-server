@@ -363,8 +363,12 @@ pub(super) fn hit<W: Write>(
                 {
                     plan.combat.death_notifications.push(notification);
                 }
+                // The result is final once the match is terminal, but the
+                // ending window still admits damage. Leave the frozen counter
+                // alone instead of refusing the shot, as queued frags do.
                 if ordinary_retail_firearm
                     && damage.health_quarter_points == 0
+                    && ctx.engine.match_terminal.is_none()
                     && let Some(bot) = registry_target
                 {
                     plan.combat.bot_firearm_kd = Some(bot_firearm_kd::Plan::prepare(
@@ -555,11 +559,16 @@ pub(super) fn fire_grenade<W: Write>(
         && active.life.is_alive()
         && owned;
     let mut created = false;
+    // Either equipment gear can hold the throwable; the request names it.
+    let gear = request.ammo_index;
+    let grenade_gear = crate::GRENADE_GEARS.contains(&gear);
+    let remaining = active.grenade_count(gear);
     let kit = active.equipped_loadout();
     let grenade_item = kit
         .as_ref()
+        .filter(|_| grenade_gear)
         .and_then(|k| k.inventories.get(k.handle.inventory_index as usize))
-        .and_then(|i| i.slots[4]);
+        .and_then(|i| i.slots[usize::from(gear)]);
     let gas = grenade_item.is_some_and(|id| {
         ctx.engine
             .gas_grenades
@@ -579,7 +588,7 @@ pub(super) fn fire_grenade<W: Write>(
         plan.gameplay_denial = Some("projectile_requires_living_on_foot_character");
     } else if gas && !gas_grenades::owns_poison_skill(active) {
         plan.gameplay_denial = Some("gas_grenade_requires_owned_skill");
-    } else if request.ammo_index != 4
+    } else if !grenade_gear
         || request.projectile_index
             >= u16::from(projectile::projectile_slot_count(ctx.engine.wire_profile))
         || grenade.is_none()
@@ -626,7 +635,7 @@ pub(super) fn fire_grenade<W: Write>(
             ctx.engine.wire_profile,
         ) {
             Ok(projectile::LaunchDisposition::Duplicate { .. }) => (),
-            Ok(projectile::LaunchDisposition::Created { .. }) if active.grenade_remaining == 0 => {
+            Ok(projectile::LaunchDisposition::Created { .. }) if remaining == 0 => {
                 plan.gameplay_denial = Some("grenade_ammo_empty")
             }
             Ok(projectile::LaunchDisposition::Created {
@@ -691,7 +700,7 @@ pub(super) fn fire_grenade<W: Write>(
                             )?;
                         }
                         plan.combat.new_projectiles = Some(flights);
-                        plan.combat.new_grenade_remaining = Some(active.grenade_remaining - 1);
+                        plan.combat.new_grenade_remaining = Some((gear, remaining - 1));
                         created = true;
                     }
                     Err(code) => plan.gameplay_denial = Some(code),
@@ -707,7 +716,7 @@ pub(super) fn fire_grenade<W: Write>(
         "throw_power":request.throw_power,"target_id":request.target_id,
         "shooter_id":request.shooter_id,"shooter_client_index":request.shooter_client_index,
         "projectile_index":request.projectile_index,"projectile_created":created,"damage_applied":false,
-        "ammo_remaining":plan.combat.new_grenade_remaining.unwrap_or(active.grenade_remaining)}),
+        "ammo_remaining":plan.combat.new_grenade_remaining.map_or(remaining, |(_, left)| left)}),
     )
 }
 

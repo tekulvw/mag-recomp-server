@@ -23,6 +23,53 @@ pub(crate) fn resolve_manifest_path(directory: &Path, child: &mut PathBuf) -> io
     Ok(())
 }
 
+/// The catalogs that can qualify an equipped item as a throwable.
+#[derive(Clone, Copy)]
+pub(crate) struct ThrowCatalogs<'a> {
+    pub items: &'a item_catalog::ItemCatalog,
+    pub smoke: Option<&'a smoke_grenades::Catalog>,
+    pub gas: Option<&'a gas_grenades::Catalog>,
+    pub flash: Option<&'a flash_grenades::Catalog>,
+}
+
+/// Throw parameters for an equipped item: a configured smoke, gas or flash
+/// capability first, then the ordinary frag catalog.
+pub(crate) fn grenade_parameters(
+    catalogs: ThrowCatalogs<'_>,
+    faction: u8,
+    item: u16,
+) -> Option<item_catalog::GrenadeParameters> {
+    catalogs
+        .smoke
+        .and_then(|catalog| catalog.variant(faction, item))
+        .map(|variant| variant.parameters())
+        .or_else(|| catalogs.gas?.variant(faction, item).map(|v| v.parameters()))
+        .or_else(|| {
+            catalogs
+                .flash?
+                .variant(faction, item)
+                .map(|v| v.parameters())
+        })
+        .or_else(|| catalogs.items.grenade(item).ok())
+}
+
+/// A new life's stock for each equipment gear, from that gear's own item.
+pub(crate) fn initial_grenade_counts(
+    catalogs: ThrowCatalogs<'_>,
+    faction: u8,
+    kit: Option<&replication::CharacterLoadout>,
+) -> [u8; 2] {
+    GRENADE_GEARS.map(|gear| {
+        kit.and_then(|kit| {
+            kit.inventories
+                .get(usize::from(kit.handle.inventory_index))
+                .and_then(|inventory| inventory.slots[usize::from(gear)])
+        })
+        .and_then(|item| grenade_parameters(catalogs, faction, item))
+        .map_or(0, |parameters| parameters.initial_count)
+    })
+}
+
 /// Loaded dependencies for engine construction. Loading and validation happen
 /// before supplying this value; constructing the engine performs no file I/O.
 pub struct EngineResources {
@@ -287,7 +334,7 @@ impl<W: Write> Engine<W> {
                     &self.acquisition_gameplay,
                     &self.domination_gameplay
                 ),
-                (1, Some(_), None) | (2, None, Some(_))
+                (0, None, None) | (1, Some(_), None) | (2, None, Some(_))
             )
         {
             return Err("smoke_grenade_mode_required");
@@ -301,23 +348,16 @@ impl<W: Write> Engine<W> {
         faction: u8,
         item: u16,
     ) -> Option<item_catalog::GrenadeParameters> {
-        self.smoke_grenades
-            .as_deref()
-            .and_then(|catalog| catalog.variant(faction, item))
-            .map(|variant| variant.parameters())
-            .or_else(|| {
-                self.gas_grenades
-                    .as_deref()?
-                    .variant(faction, item)
-                    .map(|v| v.parameters())
-            })
-            .or_else(|| {
-                self.flash_grenades
-                    .as_deref()?
-                    .variant(faction, item)
-                    .map(|v| v.parameters())
-            })
-            .or_else(|| self.item_catalog.grenade(item).ok())
+        grenade_parameters(
+            ThrowCatalogs {
+                items: &self.item_catalog,
+                smoke: self.smoke_grenades.as_deref(),
+                gas: self.gas_grenades.as_deref(),
+                flash: self.flash_grenades.as_deref(),
+            },
+            faction,
+            item,
+        )
     }
 
     pub(super) fn free_smoke_volume_index(&self, planned: &smoke_runtime::State) -> Option<u16> {

@@ -66,10 +66,13 @@ pub enum ReportsCommand {
         /// Only reports from the last N days.
         #[arg(long, value_parser = clap::value_parser!(i64).range(1..=3650))]
         days: Option<i64>,
+        /// Only reports with a player comment.
+        #[arg(long)]
+        has_comment: bool,
         #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(i64).range(1..=10_000))]
         limit: i64,
     },
-    /// A report's metadata and its client, session and metrics JSON.
+    /// A report's metadata, player comment and its client, session and metrics JSON.
     Show { report_id: String },
     /// Write one of a report's logs, decompressed, to stdout.
     Log { report_id: String, name: String },
@@ -340,6 +343,7 @@ pub async fn run_reports(
             platform,
             since,
             days,
+            has_comment,
             limit,
         } => {
             let since =
@@ -349,11 +353,16 @@ pub async fn run_reports(
                 trigger,
                 platform,
                 since,
+                has_comment,
             };
             for r in reports::list(pool, &filter, limit).await? {
+                let comment = r.user_comment.as_deref().map_or_else(
+                    || "-".to_owned(),
+                    |c| reports::comment_preview(c, reports::COMMENT_PREVIEW),
+                );
                 writeln!(
                     out,
-                    "{}\t{}\t{} ({})\t{}\t{}\t{}\t{} logs, {} bytes",
+                    "{}\t{}\t{} ({})\t{}\t{}\t{}\t{} logs, {} bytes\t{}",
                     r.id,
                     rfc3339(r.received_at),
                     r.player_name.as_deref().unwrap_or("-"),
@@ -362,7 +371,8 @@ pub async fn run_reports(
                     r.platform,
                     r.client_version,
                     r.log_names.len(),
-                    r.log_bytes
+                    r.log_bytes,
+                    comment
                 )?;
             }
         }
@@ -390,6 +400,15 @@ pub async fn run_reports(
                 },
                 r.log_bytes
             )?;
+            match &r.user_comment {
+                Some(c) => {
+                    writeln!(out, "comment")?;
+                    for line in reports::comment_text(c).lines() {
+                        writeln!(out, "  {line}")?;
+                    }
+                }
+                None => writeln!(out, "comment none")?,
+            }
             writeln!(out, "client {}", pretty(&d.client))?;
             for (label, json) in [("session", &d.session), ("metrics", &d.metrics)] {
                 match json {

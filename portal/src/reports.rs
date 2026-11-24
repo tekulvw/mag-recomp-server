@@ -24,7 +24,13 @@ pub const SCHEMA_VERSION: u64 = 1;
 /// The largest request body the endpoint reads.
 pub const MAX_BODY: usize = 4 << 20;
 pub const MAX_CLIENT: usize = 16 << 10;
-pub const MAX_SESSION: usize = 4 << 10;
+/// `session` holds a player comment of up to `MAX_COMMENT` characters, which serializes to at
+/// most 6002 bytes (each character escaped as `\u00XX`), plus 4 KiB or more for everything else.
+pub const MAX_SESSION: usize = 12 << 10;
+/// The longest `session.user_comment`, in Unicode scalar values.
+pub const MAX_COMMENT: usize = 1000;
+/// How many characters of a comment the report lists show.
+pub const COMMENT_PREVIEW: usize = 60;
 pub const MAX_METRICS: usize = 64 << 10;
 pub const MAX_LOGS: usize = 8;
 pub const MAX_LOG: usize = 2 << 20;
@@ -196,6 +202,13 @@ pub fn parse(body: &[u8]) -> Result<NewReport, Invalid> {
         _ => return Err(invalid("client.platform must be macos, linux or windows")),
     };
     let client = object("client", raw.client, MAX_CLIENT)?;
+    // Checked before the size of `session`, so an overlong comment gets its own answer. Any
+    // other kind of value is free-form JSON like the rest of `session`.
+    if let Some(Value::String(c)) = raw.session.as_ref().and_then(|s| s.get("user_comment"))
+        && c.chars().count() > MAX_COMMENT
+    {
+        return Err(invalid("user_comment too long"));
+    }
     let session = optional_object("session", raw.session, MAX_SESSION)?;
     let metrics = optional_object("metrics", raw.metrics, MAX_METRICS)?;
     let raw_logs = raw.logs.unwrap_or_default();
@@ -442,6 +455,8 @@ pub struct ReportRow {
     pub client_version: String,
     pub log_names: Vec<String>,
     pub log_bytes: i64,
+    /// `session.user_comment`, when it is a string with something besides white space in it.
+    pub user_comment: Option<String>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -453,12 +468,23 @@ pub struct ReportDetail {
     pub metrics: Option<String>,
 }
 
+/// `session.user_comment` if it is a string holding more than white space, else NULL.
+macro_rules! comment_sql {
+    () => {
+        "CASE WHEN jsonb_typeof(r.session->'user_comment') = 'string'
+                   AND r.session->>'user_comment' ~ '[^[:space:]]'
+              THEN r.session->>'user_comment' END"
+    };
+}
+
 macro_rules! report_sql {
     ($extra:literal, $tail:literal) => {
         concat!(
             "SELECT r.id::text AS id, r.account_id, a.player_name, a.kind AS account_kind,
                     r.received_at, r.trigger, r.platform, r.client_version, r.log_names,
-                    r.log_bytes",
+                    r.log_bytes, ",
+            comment_sql!(),
+            " AS user_comment",
             $extra,
             " FROM reports r JOIN accounts a ON a.id = r.account_id ",
             $tail
@@ -473,22 +499,29 @@ pub struct Filter {
     pub trigger: Option<String>,
     pub platform: Option<String>,
     pub since: Option<OffsetDateTime>,
+    /// Only reports with a player comment.
+    pub has_comment: bool,
 }
 
 /// Reports matching `filter`, newest first.
 pub async fn list(pool: &PgPool, filter: &Filter, limit: i64) -> sqlx::Result<Vec<ReportRow>> {
-    sqlx::query_as(report_sql!(
-        "",
-        "WHERE ($1::text IS NULL OR lower(a.player_name) = $1)
-           AND ($2::text IS NULL OR r.trigger = $2)
-           AND ($3::text IS NULL OR r.platform = $3)
-           AND ($4::timestamptz IS NULL OR r.received_at >= $4)
-         ORDER BY r.received_at DESC LIMIT $5"
+    sqlx::query_as(concat!(
+        report_sql!(
+            "",
+            "WHERE ($1::text IS NULL OR lower(a.player_name) = $1)
+               AND ($2::text IS NULL OR r.trigger = $2)
+               AND ($3::text IS NULL OR r.platform = $3)
+               AND ($4::timestamptz IS NULL OR r.received_at >= $4)
+               AND (NOT $5 OR "
+        ),
+        comment_sql!(),
+        " IS NOT NULL) ORDER BY r.received_at DESC LIMIT $6"
     ))
     .bind(filter.account.as_deref().map(crate::names::name_key))
     .bind(&filter.trigger)
     .bind(&filter.platform)
     .bind(filter.since)
+    .bind(filter.has_comment)
     .bind(limit)
     .fetch_all(pool)
     .await
@@ -505,6 +538,41 @@ pub async fn detail(pool: &PgPool, id: &str) -> sqlx::Result<Option<ReportDetail
     .bind(id)
     .fetch_optional(pool)
     .await
+}
+
+/// Characters a comment never shows to staff: control characters (except as noted by the
+/// callers) and the invisible marks that reorder text.
+fn hidden(c: char) -> bool {
+    c.is_control()
+        || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+}
+
+/// A comment on one line for report lists: white space runs become one space, hidden
+/// characters go, and past `max` characters it is cut and ends in an ellipsis.
+pub fn comment_preview(text: &str, max: usize) -> String {
+    let flat: String = text
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .filter(|c| !hidden(*c))
+        .collect();
+    let line = flat.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() <= max {
+        return line;
+    }
+    let mut cut: String = line.chars().take(max).collect();
+    cut.truncate(cut.trim_end().len());
+    cut.push('…');
+    cut
+}
+
+/// A whole comment for staff to read: line breaks and tabs stay (`\r\n` and `\r` become `\n`),
+/// other hidden characters go.
+pub fn comment_text(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .chars()
+        .map(|c| if c == '\r' { '\n' } else { c })
+        .filter(|c| matches!(c, '\n' | '\t') || !hidden(*c))
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
@@ -741,6 +809,59 @@ mod tests {
             assert!(check(&v).is_err(), "{what}");
         }
         assert!(parse(b"{").is_err());
+    }
+
+    #[test]
+    fn comment_limits() {
+        let with = |comment: Value| {
+            let mut v = base();
+            v["trigger"] = json!("manual");
+            v["session"] = json!({ "server": "play.example.test", "user_comment": comment });
+            check(&v)
+        };
+        // At the limit, in the characters that serialize longest, the session still fits.
+        for c in ["x", "\u{4e2d}", "\u{1f600}", "\"", "\u{1}"] {
+            let r = with(json!(c.repeat(MAX_COMMENT))).unwrap();
+            let session: Value = serde_json::from_str(r.session.as_deref().unwrap()).unwrap();
+            assert_eq!(session["user_comment"], json!(c.repeat(MAX_COMMENT)));
+            assert_eq!(
+                with(json!(c.repeat(MAX_COMMENT + 1))).unwrap_err(),
+                Invalid("user_comment too long".into())
+            );
+        }
+        // Other kinds of value are free-form, like the rest of the session.
+        assert!(with(json!(42)).is_ok());
+        assert!(with(json!({"text": "x".repeat(2 * MAX_COMMENT)})).is_ok());
+        assert!(
+            with(json!({"text": "x".repeat(MAX_SESSION)}))
+                .unwrap_err()
+                .0
+                .contains("larger")
+        );
+    }
+
+    #[test]
+    fn comment_display() {
+        assert_eq!(comment_preview("  short  ", 60), "short");
+        assert_eq!(
+            comment_preview("one\ntwo\r\n\tthree\u{1b}[31m red\u{202e}x\u{7}", 60),
+            "one two three[31m redx"
+        );
+        let long = format!("{} tail", "\u{4e2d}".repeat(59));
+        assert_eq!(
+            comment_preview(&long, 60),
+            format!("{}…", "\u{4e2d}".repeat(59))
+        );
+        assert_eq!(comment_preview(&"a".repeat(60), 60), "a".repeat(60));
+        assert_eq!(
+            comment_preview(&"a".repeat(61), 60),
+            format!("{}…", "a".repeat(60))
+        );
+        assert_eq!(comment_preview("\u{1}\u{2}", 60), "");
+        assert_eq!(
+            comment_text("a\r\nb\rc\n\td\u{1b}[2J\u{2066}e\u{0}"),
+            "a\nb\nc\n\td[2Je"
+        );
     }
 
     #[test]

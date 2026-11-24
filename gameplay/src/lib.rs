@@ -57,6 +57,7 @@ pub mod bot_registry;
 pub mod bot_resupply;
 pub mod bot_resupply_approach_policy;
 pub mod bot_resupply_catalog;
+mod bot_spawn_selection;
 mod bot_stat_publication;
 mod bot_traffic_costs;
 mod bot_traffic_flow;
@@ -226,6 +227,8 @@ pub mod smoke_grenades;
 mod smoke_runtime;
 #[cfg(test)]
 mod smoke_runtime_tests;
+#[cfg(test)]
+mod smoke_sabotage_tests;
 pub mod smoke_volume_replication;
 pub mod spawn_catalog;
 mod spawn_progression;
@@ -298,7 +301,26 @@ fn deserialize_skills<'de, D: serde::Deserializer<'de>>(
 ) -> Result<Option<[u32; 5]>, D::Error> {
     <[u32; 5]>::deserialize(deserializer).map(Some)
 }
+/// Both loadout equipment gears can hold a throwable. The client names the
+/// gear it threw from in the launch request's ammo index.
+pub(crate) const GRENADE_GEARS: [u8; 2] = [4, 5];
+
 impl Active {
+    /// Remaining throws for the item in an equipment gear.
+    fn grenade_count(&self, gear: u8) -> u8 {
+        if gear == GRENADE_GEARS[1] {
+            self.gear5_grenade_remaining
+        } else {
+            self.grenade_remaining
+        }
+    }
+    fn set_grenade_count(&mut self, gear: u8, remaining: u8) {
+        if gear == GRENADE_GEARS[1] {
+            self.gear5_grenade_remaining = remaining;
+        } else {
+            self.grenade_remaining = remaining;
+        }
+    }
     /// Equipment published for this life is independent of future saved edits.
     fn equipped_loadout(&self) -> Option<replication::CharacterLoadout> {
         let handle = self.current_inventory_handle?;
@@ -1228,7 +1250,10 @@ struct Active {
     projectile_replicas: projectile_replication::ProjectileReplicas,
     projectile_cleanup: [Option<ProjectileCleanup>; projectile::MAX_PROJECTILE_SLOTS],
     projectile_publications: Vec<ProjectilePublication>,
+    /// Remaining throws for the item in equipment gear 4.
     grenade_remaining: u8,
+    /// Remaining throws for the item in the second equipment gear, 5.
+    gear5_grenade_remaining: u8,
     flash_yaw: Option<flash_grenades::YawWitness>,
     static_resupply: Vec<human_static_resupply::Session>,
     observed_primary: Option<replication::InventoryItem>,
