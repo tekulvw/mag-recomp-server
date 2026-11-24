@@ -208,6 +208,8 @@ pub mod protocol;
 pub mod replication;
 pub mod retail_armory;
 pub mod retail_combat;
+#[cfg(test)]
+mod retail_firearm_coverage_tests;
 pub mod retail_melee;
 pub mod rotating_log;
 mod score_clock;

@@ -853,7 +853,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     }
     // Validate once before listening; the installed catalog resolves ordinary retail hits.
     let mut retail_combat_catalog = None;
-    let retail_metadata = match &retail_metadata_path {
+    let mut retail_metadata = match &retail_metadata_path {
         Some(path) => {
             if !path.is_absolute() {
                 return Err(io::Error::other(
@@ -1089,6 +1089,16 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         .map_err(io::Error::other)?;
     if let Some(combat) = retail_combat_catalog {
         item_catalog = item_catalog.with_retail_combat(combat);
+        // Character firearms beyond the projected rows come from the loaded
+        // item catalog; record which ones did and did not qualify.
+        if let (Some(info), Ok(combat)) = (retail_metadata.as_mut(), item_catalog.retail_combat()) {
+            info["item_catalog_bullets"] = serde_json::json!(combat.derived_bullet_ids());
+            info["item_catalog_bullet_skips"] = item_catalog
+                .derived_bullet_skips()
+                .iter()
+                .map(|skip| serde_json::json!({"item":skip.item_id,"reason":skip.reason}))
+                .collect();
+        }
     }
     if let Some(path) = &retail_armory_path {
         if !path.is_absolute() {

@@ -491,6 +491,34 @@ pub(super) fn hit<W: Write>(
             audit.remove("magazine");
         }
         audit.insert("fire_mode".into(), json!(request.fire_mode));
+        // Name the equipment behind an ordinary firearm refusal so gaps in
+        // weapon or attachment coverage are visible in the event log.
+        if plan.gameplay_denial.is_some_and(|code| {
+            code.starts_with("unsupported_bullet") || code.starts_with("unsupported_retail_bullet")
+        }) && let Some(kit) = active.equipped_loadout()
+            && let Some(slots) = active
+                .current_inventory_handle
+                .and_then(|handle| kit.inventories.get(usize::from(handle.inventory_index)))
+                .map(|inventory| inventory.slots)
+        {
+            let attachment_slots: &[usize] = match request.gear_index {
+                0 => &[15, 16, 17],
+                1 => &[19, 20],
+                _ => &[],
+            };
+            let weapon = slots
+                .get(usize::from(request.gear_index))
+                .copied()
+                .flatten();
+            let attachments: serde_json::Map<String, serde_json::Value> = attachment_slots
+                .iter()
+                .filter_map(|&slot| slots[slot].map(|item| (slot.to_string(), json!(item))))
+                .collect();
+            audit.insert(
+                "refused_equipment".into(),
+                json!({"gear":request.gear_index,"weapon":weapon,"attachments":attachments}),
+            );
+        }
     }
     Ok(audit)
 }
