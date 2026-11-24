@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "scope": "All 73 catalog filenames known to this source import; presence in this inventory does not mean every file is required by every runtime mode.",
+  "scope": "All 74 catalog filenames known to this source import; presence in this inventory does not mean every file is required by every runtime mode.",
   "status_definitions": {
     "direct": "Included parser/projector reads explicit original data or an included earlier catalog; no unpublished evidence input.",
     "direct-with-policy": "Included projector also requires explicit local operator policy.",
@@ -239,6 +239,19 @@
         "extract-item-catalog.py"
       ],
       "limitations": "Reads authored server.zpr fields and supported-build scalar offsets only. No DEV ELF, disassembly/DWARF subprocess, debug-string copies or native instruction literals are bundled/generated. Fixed hash/layout support; not generic new-build analysis."
+    },
+    {
+      "output": "retail-incapacitation.json",
+      "status": "direct",
+      "command": "extract-retail-incapacitation-rules.py --game-archive GAME_ARCHIVE --output INCAPACITATION_RULES; project-retail-combat-incapacitation.py --combat COMBAT --item-catalog ITEMS --output COMBAT_WITH_DOWNED_BODY",
+      "inputs": "Exact supported retail game archive (SHA256 checked); for an older combat catalog, the same item catalog its provenance names",
+      "dependencies": [
+        "Python 3.11+ standard library",
+        "tools/collision/archive.py",
+        "tools/collision/packfile.py",
+        "extract-item-catalog.py"
+      ],
+      "limitations": "Authored downed-damage threshold and bleed-out time only. Physical-state exclusions are not authored in the read member and are emitted empty. The combat step only adds authored per-row incapMult values; it keeps every other value and proves no native damage path or client acceptance."
     },
     {
       "output": "retail-item-bindings.json",

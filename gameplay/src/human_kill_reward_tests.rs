@@ -418,6 +418,7 @@ pub(crate) fn configured_fixture(engine: Engine<Vec<u8>>) -> Engine<Vec<u8>> {
             incapacitated_damage_threshold_hp: 83.0,
             incapacitated_duration_seconds: 7.0,
             excluded_character_states: vec![22],
+            provenance: None,
         })
         .unwrap();
     reserve(&mut engine, 0);

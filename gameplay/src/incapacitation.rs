@@ -9,6 +9,10 @@ pub struct Rules {
     pub incapacitated_damage_threshold_hp: f32,
     pub incapacitated_duration_seconds: f32,
     pub excluded_character_states: Vec<u16>,
+    /// Optional source binding written by the projector. It is audit metadata
+    /// only and never changes a decision.
+    #[serde(default)]
+    pub provenance: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -154,6 +158,7 @@ mod tests {
             incapacitated_damage_threshold_hp: 48.0,
             incapacitated_duration_seconds: 12.0,
             excluded_character_states: vec![6, 9],
+            provenance: None,
         }
     }
 
@@ -182,6 +187,32 @@ mod tests {
             Rules::from_value(
                 json!({"schema_version":1,"incapacitated_damage_threshold_hp":48.0,
             "incapacitated_duration_seconds":12.0,"excluded_character_states":[],"unknown":true})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn projected_provenance_is_accepted_as_audit_only_object() {
+        let value = json!({"schema_version":1,"incapacitated_damage_threshold_hp":48.0,
+            "incapacitated_duration_seconds":12.0,"excluded_character_states":[6,9],
+            "provenance":{"member_sha256":"invented"}});
+        let loaded = Rules::from_value(value).unwrap();
+        assert_eq!(
+            loaded.provenance.as_ref().unwrap()["member_sha256"],
+            "invented"
+        );
+        let mut plain = loaded.clone();
+        plain.provenance = None;
+        assert_eq!(plain, rules());
+        assert_eq!(
+            loaded.admit(47.0, 1, 0.0, Duration::ZERO),
+            rules().admit(47.0, 1, 0.0, Duration::ZERO)
+        );
+        assert!(
+            Rules::from_value(
+                json!({"schema_version":1,"incapacitated_damage_threshold_hp":48.0,
+            "incapacitated_duration_seconds":12.0,"excluded_character_states":[],"provenance":"x"})
             )
             .is_err()
         );

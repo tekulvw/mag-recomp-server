@@ -3752,6 +3752,14 @@ mod runtime_profile_tests {
         }
         files.write("combat.json", &combat);
         assert!(run(args()).is_ok());
+        // Projected rules carry an audit-only provenance object.
+        files.write(
+            "incapacitation.json",
+            &serde_json::json!({"schema_version":1,
+            "incapacitated_damage_threshold_hp":83.0,"incapacitated_duration_seconds":7.0,
+            "excluded_character_states":[],"provenance":{"member_sha256":"invented"}}),
+        );
+        assert!(run(args()).is_ok());
         let mut relative = files.args();
         relative.extend([
             "--incapacitation-rules".into(),
