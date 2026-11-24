@@ -55,6 +55,7 @@ namespace Server.Medius
                             ticket.Value.Request.Value == request.Value && ticket.Value.Alive && PartyTicketCurrent(ticket))) return;
                         if (_parties == null || !_partySessions.TryGetValue(session, out var member) ||
                             _parties.GetLeaderMembers(member, partyId) is not { Count: >= 2 } party ||
+                            PartyExceedsPortCapacity(party.Count) ||
                             current.Any(ticket => ticket.Value.Party != null &&
                                 ticket.Value.Party.Any(p => party.Contains(p))) ||
                             current.Any(ticket => ticket.Value.Account != value.Account &&
@@ -93,6 +94,24 @@ namespace Server.Medius
                 if(owner!=null)Volatile.Write(ref owner.Cancelled,1);
             }
             owner?.Assigned?.Host.CancelQueuedJoin(session,owner.Request);
+        }
+        // A group larger than every forwarded DME port can never play together.
+        bool PartyExceedsPortCapacity(int members)
+        {
+            if (_portBudget.Capacity is not int capacity || members <= capacity) return false;
+            Logger.Warn($"Party queue refused: reason=dme_port_capacity members={members} {_portBudget.Describe()}");
+            return true;
+        }
+        DateTime _nextPortHoldLog;
+        // Humans that can still get a DME port: free leases less the tickets
+        // already forwarded to a world but not yet reserved there.
+        int? HumanRoom(IEnumerable<MagWorldPlacementState> states) =>
+            _portBudget.Bounded ? _portBudget.Available - states.Sum(state => state.PendingCount) : null;
+        void LogPortHold(int waiting, int? room)
+        {
+            var now = DateTime.UtcNow;
+            lock (_gate) { if (now < _nextPortHoldLog) return; _nextPortHoldLog = now.AddSeconds(30); }
+            Logger.Warn($"Registry placement held: reason=dme_port_capacity waiting={waiting} room={room} {_portBudget.Describe()}");
         }
         void StartPlacement()
         {
@@ -162,8 +181,16 @@ namespace Server.Medius
                         s.LiveTeamCounts, s.PendingTeamCounts, s.LiveCount, s.PendingTeamCounts.Sum(), s.CanForm,
                         s.AcceptsLateParties && !slot.Faulted);
                 }).ToArray();
-                var plan = MagWorldPlacement.PlanNext(eligible.Select(e => e.Human).ToArray(), states, RandomNumberGenerator.GetInt32);
-                if (plan == null) return;
+                var humans = eligible.Select(e => e.Human).ToArray();
+                int? room = HumanRoom(states);
+                var plan = MagWorldPlacement.PlanNext(humans, states, RandomNumberGenerator.GetInt32, room);
+                if (plan == null)
+                {
+                    // Say so when free ports, not worlds, keep players waiting.
+                    if (room != null && MagWorldPlacement.PlanNext(humans, states, _ => 0) != null)
+                        LogPortHold(humans.Sum(human => human.Size), room);
+                    return;
+                }
                 var target = _slots.Single(s => s.Config.WorkerId == plan.WorkerId);
                 using var batch=target.Host.BeginRegistryBatch();
                 if (plan.NewFormation && !target.Host.TryStageRegistryFormation(plan.Profile.ProfileId,

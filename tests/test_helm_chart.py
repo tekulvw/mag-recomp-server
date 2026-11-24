@@ -869,6 +869,25 @@ class ChartTests(unittest.TestCase):
         for port in range(10474, 10506):
             self.assertTrue(self.policy_allows(policy, port, 'UDP', 'elsewhere'), port)
 
+    def test_medius_dme_human_capacity(self):
+        def env(docs):
+            main = next(c for c in self.medius_pod(docs)['spec']['containers'] if c['name'] == 'medius')
+            return {e['name']: e.get('value') for e in main['env'] if e['name'].startswith('MAG_DME_')}
+        # The forwarded range is the admission cap: one human per port, across every world.
+        self.assertEqual(env(render()), {'MAG_DME_UDP_PORT_END': '10474'})
+        self.assertEqual(env(render({'network': {'udpPortRange': {'start': 10474, 'end': 10505}}})),
+                         {'MAG_DME_UDP_PORT_END': '10505'})
+        self.assertEqual(env(render({'network': {'udpPortRange': {'start': 10474, 'end': 10505}, 'dmeHumanCapacity': 20}})),
+                         {'MAG_DME_UDP_PORT_END': '10505', 'MAG_DME_HUMAN_CAPACITY': '20'})
+        for bad in (0, 33, '20'):
+            with self.subTest(capacity=bad):
+                render({'network': {'udpPortRange': {'start': 10474, 'end': 10505}, 'dmeHumanCapacity': bad}}, ok=False)
+        # MAPS hands out no DME ports.
+        for d in render():
+            if d['kind'] == 'Deployment' and d['metadata']['name'].endswith('-maps'):
+                for c in d['spec']['template']['spec']['containers']:
+                    self.assertFalse(any(e['name'].startswith('MAG_DME_') for e in c.get('env', [])))
+
     def test_package(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = subprocess.run([HELM, 'package', str(CHART), '--destination', tmp], capture_output=True, text=True)

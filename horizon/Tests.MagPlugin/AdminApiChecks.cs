@@ -316,4 +316,34 @@ internal static class AdminApiChecks
         }
         finally { api.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
     }
+
+    /// <summary>The signed status endpoint shows DME ports in use against the cap.</summary>
+    public static void DmePorts()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "mag-synthetic-admin-ports-" + Guid.NewGuid());
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var now = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            var store = new LocalCharacterStore(Path.Combine(directory, "characters.json"));
+            var budget = new MagDmePortBudget(10505, null);
+            var held = budget.TryAcquire(5);
+            var api = new MagAdminApi(new IPEndPoint(IPAddress.Loopback, 0), Secret, store, directory, directory, () => now, _ => { }, budget);
+            var response = api.Handle(Signed("GET", "/admin/v1/dme-ports", now));
+            Check(response.Status == 200, "DME port status refused");
+            var body = Json(response);
+            Check(body.GetProperty("capacity").GetInt32() == 32 && body.GetProperty("in_use").GetInt32() == 5 &&
+                body.GetProperty("available").GetInt32() == 27 && body.GetProperty("first_port").GetInt32() == 10474 &&
+                body.GetProperty("last_port").GetInt32() == 10505 && body.GetProperty("source").GetString() == "port_range" &&
+                body.TryGetProperty("udp_ports_bound", out _), "DME port status lost ports in use against the cap");
+            Check(api.Handle(Signed("POST", "/admin/v1/dme-ports", now, "{}")).Status == 405, "DME port status accepted a write");
+            Check(api.Handle(Signed("GET", "/admin/v1/dme-ports", now, tamper: s => s[..63])).Status == 401, "DME port status skipped authentication");
+            var open = new MagAdminApi(new IPEndPoint(IPAddress.Loopback, 0), Secret, store, directory, directory, () => now, _ => { });
+            var unbounded = Json(open.Handle(Signed("GET", "/admin/v1/dme-ports", now)));
+            Check(unbounded.GetProperty("capacity").ValueKind == JsonValueKind.Null && unbounded.GetProperty("source").GetString() == "unbounded",
+                "Unbounded DME ports reported a cap");
+            foreach (var lease in held) lease.Dispose();
+        }
+        finally { Directory.Delete(directory, true); }
+    }
 }

@@ -14,9 +14,22 @@ namespace Server.Medius
     /// <summary>Pure placement over already leased, owned world snapshots.</summary>
     public static class MagWorldPlacement
     {
+        /// <param name="humanRoom">Humans that can still get a DME UDP port across
+        /// every world, or null when ports are unbounded.</param>
         public static MagWorldPlacementDecision PlanNext(IReadOnlyList<MagQueuedHuman> humans,
-            IReadOnlyList<MagWorldPlacementState> worlds, Func<int, int> random)
+            IReadOnlyList<MagWorldPlacementState> worlds, Func<int, int> random, int? humanRoom = null)
         {
+            if (humanRoom is int free)
+            {
+                if (free <= 0) return null;
+                // Ports go out in queue order. The oldest party that does not fit
+                // the free ports keeps them for itself: humans queued after it
+                // wait, so ports freed one at a time cannot starve the group.
+                var blocked = humans.Where(human => human.Size > free).OrderBy(human => human.Order).FirstOrDefault();
+                if (blocked != null) humans = humans.Where(human => human.Order < blocked.Order).ToArray();
+                worlds = worlds.Select(world => world with { MaximumPlayers = Math.Min(world.MaximumPlayers,
+                    world.LiveCount + world.PendingCount + free) }).ToArray();
+            }
             // A waiting party joins a running compatible match first.
             var late = PlanLateParty(humans, worlds);
             if (late != null) return late;
@@ -73,7 +86,9 @@ namespace Server.Medius
             IReadOnlyList<MagWorldPlacementState> worlds, Func<int, int> random)
         {
             var candidates = new List<MagWorldPlacementDecision>();
-            foreach (var world in worlds.Where(w => w.Ready && !w.Draining && w.CanForm))
+            // A port-capped world whose minima no longer fit cannot form.
+            foreach (var world in worlds.Where(w => w.Ready && !w.Draining && w.CanForm &&
+                w.MaximumPlayers >= w.MinimumPlayers && w.MinimumPlayersPerTeam.Sum() <= w.MaximumPlayers))
             {
                 var selection = MagFactionMatchmaking.Select(humans, world.Profiles, world.MinimumPlayers,
                     world.MaximumPlayers, world.MinimumPlayersPerTeam, random);

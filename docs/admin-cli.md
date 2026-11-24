@@ -91,6 +91,7 @@ Anything else is `401 {"error":"unauthorized"}`; the log records only the reason
 | `GET /admin/v1/accounts` | `200 {"accounts":[{"account","level","experience","skill_points","session"}]}` |
 | `GET /admin/v1/characters/{account}` | `200 {"account","level","experience","skill_points","next_level_experience","session"}`; `next_level_experience` is null at the maximum level |
 | `POST /admin/v1/characters/{account}/level` with `{"level":N,"apply":bool}` | `200 {"applied","account","from_level","to_level","experience_before","experience_after","skill_points_before","skill_points_after","backup"}`; `backup` is the backup file name, or null for a dry run |
+| `GET /admin/v1/dme-ports` | `200 {"capacity","in_use","available","first_port","last_port","source","udp_ports_bound"}`: humans holding a DME UDP port across all worlds against the [cap](configured-world-registry.md#dme-port-capacity). `capacity`, `available` and `last_port` are null when unbounded; `source` is `port_range`, `override` or `unbounded`; `udp_ports_bound` counts sockets actually bound |
 
 `session` is `online`, `offline` or `unknown`, decided as `accounts list` decides it.
 Set-level refusals are `409 {"error":code,"message":text}`:

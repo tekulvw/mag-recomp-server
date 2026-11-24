@@ -50,6 +50,8 @@ namespace Server.Medius
         public static MagPortalTicketPolicy PortalTickets { get; private set; }
         public static LocalDmeHost LocalDme;
         public static MagWorldRegistry WorldRegistry;
+        /// <summary>DME humans across every world (MAG_DME_UDP_PORT_END, MAG_DME_HUMAN_CAPACITY).</summary>
+        public static MagDmePortBudget DmePortBudget { get; private set; } = MagDmePortBudget.Unbounded();
         public static IMagGameplayLobby GameplayLobby => (IMagGameplayLobby)WorldRegistry ?? LocalDme;
         public static MagLoadoutCatalog LoadoutCatalog { get; private set; }
         public static MagSkillCatalog SkillCatalog { get; private set; }
@@ -285,7 +287,8 @@ namespace Server.Medius
             MagAdminApiSettings.RequireMainRole(Settings);
             string storePath = Settings.MagCharacterStorePath;
             AdminApi = new MagAdminApi(settings.Listen, settings.Secret, CreateCharacterStore(),
-                MagAdminOperations.BackupDirectory(storePath), MagAdminOperations.MarkerDirectory(), () => DateTime.UtcNow, message => Logger.Info(message));
+                MagAdminOperations.BackupDirectory(storePath), MagAdminOperations.MarkerDirectory(), () => DateTime.UtcNow, message => Logger.Info(message),
+                DmePortBudget);
             AdminApi.Start();
             Logger.Info($"Admin API listening on {AdminApi.LocalEndPoint}.");
         }
@@ -298,6 +301,7 @@ namespace Server.Medius
             if (PortalTickets != null)
                 Logger.Info($"Portal tickets required: audience={PortalTickets.Settings.Audience} keys={string.Join(",", PortalTickets.Settings.Keys.Keys.OrderBy(id => id))}");
             PublishActiveAccounts();
+            DmePortBudget = MagDmePortBudget.FromEnvironment();
             StartAdminApi();
 
             string registryPath=Environment.GetEnvironmentVariable("MAG_WORLD_REGISTRY");
@@ -308,11 +312,11 @@ namespace Server.Medius
                 if(registryPath!=null) {
                     var registryConfig=MagWorldRegistryConfig.Load(registryPath);
                     if(Settings.MagApplicationId!=registryConfig.ApplicationId) throw new InvalidDataException("Registry application must match the configured MAG lobby application.");
-                    WorldRegistry=new MagWorldRegistry(registryConfig,CreateCharacterStore(),registryPath);
+                    WorldRegistry=new MagWorldRegistry(registryConfig,CreateCharacterStore(),registryPath,DmePortBudget);
                     await WorldRegistry.StartAsync();
                 } else {
                     LocalDme = new LocalDmeHost(new GameplayBridge(Environment.GetEnvironmentVariable("MAG_GAMEPLAY_HOST") ?? "mag-gameplay",
-                        int.Parse(Environment.GetEnvironmentVariable("MAG_GAMEPLAY_PORT") ?? "31000")), CreateCharacterStore());
+                        int.Parse(Environment.GetEnvironmentVariable("MAG_GAMEPLAY_PORT") ?? "31000")), CreateCharacterStore(), DmePortBudget);
                     await LocalDme.StartAsync();
                 }
             }
