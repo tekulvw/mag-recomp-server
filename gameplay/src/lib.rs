@@ -54,6 +54,7 @@ pub mod bot_registry;
 pub mod bot_resupply;
 pub mod bot_resupply_approach_policy;
 pub mod bot_resupply_catalog;
+mod bot_spawn_selection;
 mod bot_stat_publication;
 mod bot_traffic_costs;
 mod bot_traffic_flow;

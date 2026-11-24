@@ -30,7 +30,8 @@ mag-gameplay --bind 127.0.0.1:0 --log /tmp/sim.jsonl \
 The run is deterministic for identical inputs, so compare policy changes on
 the same inputs; a single run does not show variance.
 
-Useful evidence receipts: `bot_population_spawn` / `bot_respawn` (life starts),
+Useful evidence receipts: `bot_population_spawn` / `bot_respawn` (life starts,
+with the spawn point and arrival chosen as in [bot-active-spawns.md](bot-active-spawns.md)),
 `bot_drop_admission` (`queued`, `granted`, `convoy_departing`, `released` with
 `reason`), `bot_drop_delay_sample` (per-passage phase timestamps) and
 `bot_planning_slice`.
