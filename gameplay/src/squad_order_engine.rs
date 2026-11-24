@@ -50,11 +50,18 @@ impl<W: Write> Engine<W> {
         self.squad_orders = Some(Runtime::new(rules));
         Ok(self)
     }
+    /// Sabotage has no source gameplay provider; the order runtime owns its tag.
+    pub(crate) fn sabotage_squad_assignments(&self) -> bool {
+        self.match_profile().game_type == 0
+            && self.acquisition_gameplay.is_none()
+            && self.domination_gameplay.is_none()
+            && self.objective_catalog.is_some()
+    }
     fn squad_order_authority(&self, actor: &Active) -> Result<u16, &'static str> {
         if !self.match_started || self.match_terminal.is_some() {
             return Err("match_not_playing");
         }
-        if !matches!(self.match_profile().game_type, 1 | 2) {
+        if !matches!(self.match_profile().game_type, 1 | 2) && !self.sabotage_squad_assignments() {
             return Err("squad_orders_mode_unavailable");
         }
         if !actor.entered_game || !actor.ready_for_updates || actor.initial_objects.is_none() {
@@ -103,6 +110,12 @@ impl<W: Write> Engine<W> {
                     _ => replication::MatchPhase::PreGame,
                 },
             )?;
+        } else if self.sabotage_squad_assignments() {
+            self.objective_catalog
+                .as_ref()
+                .ok_or("retail_objective_catalog_required")?
+                .initial_assignment(squad)?;
+            candidate.runtime.state.set_manual_tag(squad, target)?;
         } else {
             return Err("manual_tag_requires_gameplay_provider");
         }
@@ -179,6 +192,9 @@ impl<W: Write> Engine<W> {
             {
                 self.set_candidate_tag(&mut candidate, squad, u32::MAX)?;
             }
+            // Only Sabotage stores a tag here; other modes keep it in their provider.
+            // Like waypoint cleanup, an index outside the order table is ignored.
+            let _ = candidate.runtime.state.set_manual_tag(squad, u32::MAX);
         }
         Ok(Some(candidate))
     }
@@ -233,7 +249,7 @@ impl<W: Write> Engine<W> {
                     .as_ref()
                     .and_then(|w| w.squad_assignment(squad))
             })
-            .map_or(u32::MAX, |a| a.tagged_object);
+            .map_or_else(|| state.manual_tag(squad), |a| a.tagged_object);
         Snapshot {
             tagged_object: tag,
             waypoint: state.waypoint(squad),

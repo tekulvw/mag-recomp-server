@@ -404,3 +404,312 @@ fn traffic_driven_event_returns_order_and_roster_replacement_contains_cleanup() 
     assert_eq!(replacements[0].active, Some(false));
     assert!(!replacements[0].has_position);
 }
+
+const SABOTAGE_LEADER: u16 = 1;
+const SABOTAGE_MEMBER: u16 = 2;
+const SABOTAGE_SQUAD: u16 = 16;
+
+fn sabotage_leadership() -> (
+    leadership_passives::LeadershipCatalog,
+    leadership_runtime::RolePolicy,
+) {
+    let (passives, _) = crate::platoon_ability_engine_tests::platoon_leadership();
+    let policy = leadership_runtime::RolePolicy::from_json(
+        &json!({
+            "schema_version":2,"application_id":20231,"squad_leader":"native","development_bindings":[],
+            "native_election":{"source_sha256":"c3".repeat(32),"squad_level_weight":1.0,
+                "squad_mslc_weight":1.0,"default_record":{
+                    "leadership_level":1,"nominations":1,"matches_since_last_command":0}}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    (passives, policy)
+}
+
+/// Independently authored Sabotage worker: game type 0 objective catalog, no
+/// Acquisition/Domination provider, native squad election and squad orders.
+fn sabotage_fixture(orders: bool) -> Engine<Vec<u8>> {
+    let (passives, policy) = sabotage_leadership();
+    let mut base = crate::spawn_progression::tests::engine()
+        .with_leadership_passives(passives, policy)
+        .unwrap();
+    if orders {
+        base = base
+            .with_squad_orders(squad_orders::Rules {
+                squad_order_cooldown_ms: 1000,
+            })
+            .unwrap();
+    }
+    let mut engine = crate::human_kill_reward_tests::configured_fixture(base);
+    crate::spawn_progression::reserve(&mut engine, SABOTAGE_MEMBER);
+    let catalog = std::sync::Arc::new(
+        engine
+            .spawn_catalog
+            .as_ref()
+            .unwrap()
+            .for_squad(SABOTAGE_SQUAD)
+            .unwrap(),
+    );
+    let member = actor_mut(&mut engine, SABOTAGE_MEMBER);
+    member.squad_catalog = catalog;
+    crate::spawn_progression::ready(member);
+    member.nominations = 0;
+    // Keep the original killer as the event-dispatching active actor.
+    if let Some(active) = engine.active.take() {
+        engine.peers.insert(active.reservation.id.clone(), active);
+    }
+    engine.active = engine
+        .peers
+        .remove(&format!("synthetic-reservation-{SABOTAGE_LEADER:04}"));
+    assert!(engine.active.is_some());
+    actor_mut(&mut engine, 0).nominations = 0;
+    actor_mut(&mut engine, SABOTAGE_LEADER).nominations = 1;
+    engine.match_started = true;
+    engine.reconcile_squad_leaders().unwrap();
+    assert_eq!(engine.match_profile().game_type, 0);
+    assert!(engine.sabotage_squad_assignments());
+    assert_eq!(
+        engine.squad_leader_index(SABOTAGE_SQUAD, &[u16::MAX; 8]),
+        SABOTAGE_LEADER
+    );
+    engine
+}
+
+fn tag_as(engine: &mut Engine<Vec<u8>>, player: u16, target_id: u32, millis: u64) -> Value {
+    let mut wire = 0x0206u16.to_be_bytes().to_vec();
+    wire.extend(target_id.to_be_bytes());
+    let response = event(engine, player, &wire, millis, 1);
+    assert!(response.ok, "{:?}", response.error);
+    assert!(response.rewards.is_empty());
+    last_decision(engine, "tagged_object")
+}
+
+fn published_tag(engine: &Engine<Vec<u8>>, player: u16, squad: u16) -> Option<u32> {
+    actor(engine, player)
+        .pending_shared
+        .iter()
+        .filter_map(|wire| packet_orders(wire, engine.wire_profile, squad)?.tag)
+        .last()
+}
+
+#[test]
+fn sabotage_held_leader_sets_changes_and_clears_a_replicated_objective_tag() {
+    const TARGET: u32 = 0x0c80_000b;
+    const CHANGED: u32 = 0x0c80_000a;
+    let mut engine = sabotage_fixture(true);
+    engine.world_tick_enabled = true;
+    let tag_state = |engine: &Engine<Vec<u8>>| order_state(engine).manual_tag(SABOTAGE_SQUAD);
+
+    // Neither a member of the leader's squad nor another squad's member may tag.
+    for player in [SABOTAGE_MEMBER, 0] {
+        assert_eq!(
+            tag_as(&mut engine, player, TARGET, 501)["reason"],
+            "squad_order_requires_held_squad_leader"
+        );
+    }
+    for forged in [0x0c80_0063, 0x0d80_000b, 0x0c80_ffff] {
+        assert_eq!(
+            tag_as(&mut engine, SABOTAGE_LEADER, forged, 501)["reason"],
+            "squad_order_target_unavailable"
+        );
+    }
+    assert_eq!(tag_state(&engine), u32::MAX);
+
+    assert_eq!(
+        tag_as(&mut engine, SABOTAGE_LEADER, TARGET, 501)["accepted"],
+        true
+    );
+    assert_eq!(tag_state(&engine), TARGET);
+    engine
+        .queue_squad_orders(Duration::from_millis(501), 1)
+        .unwrap();
+    assert_eq!(
+        engine.squad_roster_orders(SABOTAGE_SQUAD),
+        Some((TARGET, false))
+    );
+    let assignment = engine
+        .frago_assignment(actor(&engine, SABOTAGE_MEMBER))
+        .unwrap();
+    assert_eq!(assignment.tagged_object, TARGET);
+    assert_eq!(assignment.primary_index, 10);
+    for player in [SABOTAGE_LEADER, SABOTAGE_MEMBER] {
+        assert_eq!(
+            published_tag(&engine, player, SABOTAGE_SQUAD),
+            Some(TARGET),
+            "squad member {player} receives the FRAGO"
+        );
+    }
+
+    // Changing shares the native set gate; clearing does not.
+    assert_eq!(
+        tag_as(&mut engine, SABOTAGE_LEADER, CHANGED, 502)["reason"],
+        "squad_order_cooldown"
+    );
+    assert_eq!(
+        tag_as(&mut engine, SABOTAGE_LEADER, u32::MAX, 502)["accepted"],
+        true
+    );
+    assert_eq!(tag_state(&engine), u32::MAX);
+    engine
+        .queue_squad_orders(Duration::from_millis(502), 1)
+        .unwrap();
+    assert_eq!(
+        published_tag(&engine, SABOTAGE_MEMBER, SABOTAGE_SQUAD),
+        Some(u32::MAX)
+    );
+    assert_eq!(
+        tag_as(&mut engine, SABOTAGE_LEADER, CHANGED, 1501)["accepted"],
+        true
+    );
+    assert_eq!(tag_state(&engine), CHANGED);
+
+    // Losing the held role clears the order with the reconciliation.
+    actor_mut(&mut engine, SABOTAGE_LEADER).nominations = 0;
+    engine.reconcile_squad_leaders().unwrap();
+    assert_eq!(
+        engine.squad_leader_index(SABOTAGE_SQUAD, &[u16::MAX; 8]),
+        u16::MAX
+    );
+    assert_eq!(tag_state(&engine), u32::MAX);
+    actor_mut(&mut engine, SABOTAGE_LEADER).nominations = 1;
+    engine.reconcile_squad_leaders().unwrap();
+    assert_eq!(
+        tag_as(&mut engine, SABOTAGE_LEADER, TARGET, 2600)["accepted"],
+        true
+    );
+    engine.reset_objective_world();
+    assert_eq!(tag_state(&engine), u32::MAX);
+    assert!(engine.pending_rewards.is_empty());
+}
+
+#[test]
+fn sabotage_without_squad_order_rules_denies_with_a_configuration_reason() {
+    let mut engine = sabotage_fixture(false);
+    assert_eq!(
+        tag_as(&mut engine, SABOTAGE_LEADER, 0x0c80_000b, 501)["reason"],
+        "squad_orders_unconfigured"
+    );
+}
+
+fn sabotage_geometry(engine: &mut Engine<Vec<u8>>, near: &[u16]) {
+    let map_name = engine.map_name().to_owned();
+    let catalog = engine.objective_catalog.as_mut().unwrap();
+    let objectives: Vec<_> = catalog
+        .objects
+        .iter()
+        .map(|o| {
+            let position = if near.contains(&o.object_index) {
+                [130., 3., 100.]
+            } else {
+                [1000., 3., 1000.]
+            };
+            json!({"object_index":o.object_index,"position":position,"radius":5.})
+        })
+        .collect();
+    catalog.frago = Some(
+        serde_json::from_value(json!({"schema_version":1,"map_name":map_name,"game_type":0,
+            "source":{"authored_catalog_sha256":catalog.source().authored_catalog_sha256,
+                "progression_catalog_sha256":"b".repeat(64),
+                "source_image_sha256":catalog.source().source_image_sha256},
+            "vehicle_range":7.,"objectives":objectives}))
+        .unwrap(),
+    );
+}
+
+fn sabotage_kill(engine: &mut Engine<Vec<u8>>, now_ms: u64) -> progression::RewardEvent {
+    let leader = actor_mut(engine, SABOTAGE_LEADER);
+    leader.reservation.character.frago_bonus_enabled = Some(true);
+    leader.tracking.server_position(
+        replication::CharacterPosition {
+            x: 130.,
+            y: 3.,
+            z: 100.,
+        },
+        player_tracking::PositionOrigin::ServerSpawn,
+        0,
+    );
+    let before: std::collections::BTreeSet<_> = engine.pending_rewards.keys().cloned().collect();
+    crate::human_kill_reward_tests::hit(engine, 20, now_ms).unwrap();
+    engine
+        .pending_rewards
+        .values()
+        .find(|r| r.kind == progression::RewardKind::EnemyKilled && !before.contains(&r.reward_id))
+        .unwrap()
+        .clone()
+}
+
+#[test]
+fn sabotage_frago_kill_bonus_follows_the_manual_tag_or_current_primary() {
+    // Only the tagged objective is in range: no bonus until the leader tags it.
+    let mut engine = sabotage_fixture(true);
+    sabotage_geometry(&mut engine, &[11]);
+    assert_eq!(sabotage_kill(&mut engine, 1000).frago, None);
+    let mut engine = sabotage_fixture(true);
+    sabotage_geometry(&mut engine, &[11]);
+    assert_eq!(
+        tag_as(&mut engine, SABOTAGE_LEADER, 0x0c80_000b, 501)["accepted"],
+        true
+    );
+    assert_eq!(sabotage_kill(&mut engine, 1000).frago, Some(true));
+
+    // The current primary objective qualifies on its own.
+    let mut engine = sabotage_fixture(true);
+    sabotage_geometry(&mut engine, &[10]);
+    assert_eq!(sabotage_kill(&mut engine, 1000).frago, Some(true));
+}
+
+fn sabotage_activation_rewards(frago_admitted: bool) -> Vec<progression::RewardEvent> {
+    let mut engine = sabotage_fixture(true);
+    sabotage_geometry(&mut engine, &[]);
+    let catalog = engine.objective_catalog.as_mut().unwrap();
+    catalog
+        .objects
+        .iter_mut()
+        .find(|o| o.object_index == 10)
+        .unwrap()
+        .reward = Some(objective_catalog::ObjectiveRewardRule {
+        category: 1,
+        subtype: 12,
+        demolition: false,
+    });
+    engine.objective_world = Some(objective_control::ObjectiveWorld::new(catalog));
+    let attacker = actor_mut(&mut engine, 0);
+    attacker.reservation.character.frago_objective_bonus_enabled = Some(frago_admitted);
+    if let Some(active) = engine.active.take() {
+        engine.peers.insert(active.reservation.id.clone(), active);
+    }
+    engine.active = engine.peers.remove("synthetic-reservation-0000");
+    assert_eq!(
+        engine
+            .frago_assignment(actor(&engine, 0))
+            .unwrap()
+            .primary_index,
+        10
+    );
+    let wire = protocol::ObjectiveInteraction {
+        target_object_id: 0x0c80_000a,
+        kind: protocol::ObjectiveInteractionKind::Activate,
+        actor_index: 0,
+        trigger_index: 0,
+    }
+    .encode();
+    crate::spawn_progression::tests::dispatch(&mut engine, &wire, 100).unwrap();
+    engine
+        .tick_objectives(Duration::from_millis(110), 1)
+        .unwrap();
+    engine.pending_reward_batch()
+}
+
+#[test]
+fn sabotage_primary_objective_rewards_carry_the_frago_fact_only_when_admitted() {
+    let rewards = sabotage_activation_rewards(true);
+    assert_eq!(
+        rewards[0].kind,
+        progression::RewardKind::PrimaryObjectiveActivated
+    );
+    assert!(rewards.iter().all(|reward| reward.frago == Some(true)));
+    let rewards = sabotage_activation_rewards(false);
+    assert!(!rewards.is_empty());
+    assert!(rewards.iter().all(|reward| reward.frago.is_none()));
+}

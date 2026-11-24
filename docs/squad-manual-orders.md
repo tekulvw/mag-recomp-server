@@ -1,9 +1,12 @@
 # Manual squad orders
 
-Source-backed Acquisition and Domination support tagged-object FRAGO orders and
-map waypoints from the currently held squad leader. Configure a retail worker
-with `--squad-orders /absolute/ORDERS.json` and native leadership. Without that
-configuration the typed requests are recognized and denied. The setting applies
+Acquisition, Domination and Sabotage support tagged-object FRAGO orders and map
+waypoints from the currently held squad leader. Configure a retail worker with
+`--squad-orders /absolute/ORDERS.json` and native leadership
+(`--leadership-passives` and `--leadership-role-policy`). Without that
+configuration the typed requests are recognized and denied: a worker without
+native leadership has no held squad leader (`squad_order_requires_held_squad_leader`),
+and one without order rules reports `squad_orders_unconfigured`. The setting applies
 to standalone and formation-registry workers; each round gets fresh order state.
 
 Generate the rules with `tools/extraction/project-retail-squad-orders.py` from
@@ -29,6 +32,17 @@ assignment refresh keeps the primary objective separate from the manual tag and
 chooses the effective tagged object. Clearing returns to authored fallback order,
 subject to the same native refresh gates. Automatic objective changes also
 publish the resulting effective tag.
+
+Sabotage has no source gameplay provider, so the order runtime keeps each
+squad's manual tag itself. The tag is a replacement policy, not a decoded native
+refresh: it stays until the leader clears or replaces it, the leader loses the
+role, or the round resets. The Sabotage objective catalog carries no FRAGO
+fallback order list, so a cleared tag publishes FFFFFFFF. The squad's FRAGO assignment pairs that tag with
+the existing Sabotage primary, the first authored objective that is not Inactive,
+Completed or Locked. Kill, support and objective rewards use it with the existing
+geometry and admission gates. Sabotage objective rewards take the objective as
+their context. Sabotage FRAGO geometry still needs a projector extension for the
+Sabotage authored classes; without geometry, rewards keep base XP.
 
 Orders commit only after the event is recorded. Loss or replacement of the held
 squad leader clears the waypoint and manual tag with the role reconciliation,
