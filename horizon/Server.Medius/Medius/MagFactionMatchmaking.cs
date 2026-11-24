@@ -4,8 +4,14 @@ using System.Linq;
 
 namespace Server.Medius
 {
+    /// <param name="BotFillTotal">World population the worker fills with bots when it advertises
+    /// <c>bot_fill_v1</c>; such a profile may start without a human on each side.</param>
     public sealed record MagMatchProfile(string ProfileId, int GameType, byte AttackingFaction,
-        byte DefendingFaction, int MaximumPlayers, int TeamCapacity, int? SquadCapacity = null, IReadOnlyList<int> SquadCounts = null);
+        byte DefendingFaction, int MaximumPlayers, int TeamCapacity, int? SquadCapacity = null, IReadOnlyList<int> SquadCounts = null,
+        int? BotFillTotal = null)
+    {
+        public bool BotFill => BotFillTotal.HasValue;
+    }
     public sealed record MagQueuedHuman(string TicketId, int GameType, byte Faction, long Order, int Size = 1);
     public sealed record MagFactionSelection(MagMatchProfile Profile, IReadOnlyList<MagQueuedHuman> Players);
 
@@ -27,11 +33,12 @@ namespace Server.Medius
                 ValidateProfile(profile);
                 if (!ids.Add(profile.ProfileId)) throw new ArgumentException("Duplicate match profile identity.", nameof(profiles));
             }
-            // A new opposing formation always needs a human on each side, even
-            // when the operator's generic startup policy permits solo matches.
-            var minima = new[] { Math.Max(1, minimumPerTeam[0]), Math.Max(1, minimumPerTeam[1]) };
-            int minimum = Math.Max(2, minimumPlayers);
-            var feasible = profiles.Select(p => Cohort(ordered, p, minimum, maximumPlayers, minima))
+            // A new opposing formation needs a human on each side, even when the
+            // operator's generic startup policy permits solo matches, unless the
+            // worker fills that profile with bots. A bot-filled profile uses the
+            // operator's minima as configured, so one human may start it.
+            var feasible = profiles.Select(p => Cohort(ordered, p, FormationMinimum(p, minimumPlayers),
+                    maximumPlayers, FormationMinima(p, minimumPerTeam)))
                 .Where(selection => selection != null).ToArray();
             if (feasible.Length == 0) return null;
 
@@ -50,6 +57,16 @@ namespace Server.Medius
                 .OrderByDescending(group => group.Key).Select(group => group.First()).ToArray();
             return orientations[Draw(nextRandom, orientations.Length)];
         }
+
+        /// <summary>Human total required to form a new match on this profile.</summary>
+        public static int FormationMinimum(MagMatchProfile profile, int configured) =>
+            profile?.BotFill == true ? Math.Max(1, configured) : Math.Max(2, configured);
+
+        /// <summary>Per-side human minima required to form a new match on this profile.</summary>
+        public static int[] FormationMinima(MagMatchProfile profile, IReadOnlyList<int> configured) =>
+            profile?.BotFill == true
+                ? new[] { Math.Max(0, configured[0]), Math.Max(0, configured[1]) }
+                : new[] { Math.Max(1, configured[0]), Math.Max(1, configured[1]) };
 
         /// <summary>Select oldest eligible humans for an already fixed pair.
         /// Unlike new formation, one human may late join either configured side.</summary>
@@ -185,7 +202,8 @@ namespace Server.Medius
                 profile.AttackingFaction == profile.DefendingFaction || profile.MaximumPlayers < 1 ||
                 profile.MaximumPlayers > 64 || profile.TeamCapacity < 1 || profile.TeamCapacity > 32 ||
                 (profile.SquadCapacity.HasValue && (profile.SquadCapacity < 1 || profile.SquadCapacity > profile.TeamCapacity)) ||
-                (profile.SquadCounts != null && (profile.SquadCounts.Count != 2 || profile.SquadCounts.Any(n => n < 1 || n > 32))))
+                (profile.SquadCounts != null && (profile.SquadCounts.Count != 2 || profile.SquadCounts.Any(n => n < 1 || n > 32))) ||
+                (profile.BotFillTotal.HasValue && (profile.BotFillTotal < 2 || profile.BotFillTotal > profile.MaximumPlayers)))
                 throw new ArgumentException("Profiles require an identity, mode 0..2, opposing factions and bounded capacities.", nameof(profile));
         }
 

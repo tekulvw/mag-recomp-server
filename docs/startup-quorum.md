@@ -50,6 +50,11 @@ same rule when choosing the initial GameState phase. Expired, backlogged, unclai
 and unready reservations are excluded. Duplicate reservation account IDs or
 supplied authenticated account names cannot inflate the counts. Bot registry
 actors and development targets have no eligible human reservation and do not count.
+Bots never satisfy a configured minimum. Faction matchmaking normally raises the
+configured minima to one human per side; a match profile the worker fills with
+bots is the opt-in exception, where a configured minimum of one with `[0, 0]`
+starts the world for one human (see
+[bot-filled profiles](worker-match-profiles.md#bot-filled-profiles)).
 A Ready withdrawal or departure before play keeps the match waiting.
 
 Once playing, loss of startup quorum does not stop or restart the clock. Late

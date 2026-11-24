@@ -631,10 +631,12 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                 "--match-profiles requires --application-id 20231",
             ));
         }
+        // Bot populations and resupply providers are map-bound; profiles carry
+        // their own. `--bot-fill-total` and `--bot-names` remain worker-wide
+        // defaults for profiles that do not set their own.
         if bot_population_path.is_some()
             || bot_resupply_catalog_path.is_some()
             || bot_resupply_approach_policy_path.is_some()
-            || bot_fill_total != 0
             || development_dummy
             || structure_path.is_some()
             || bunker_path.is_some()
@@ -642,7 +644,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             || collision_query.is_some()
         {
             return Err(io::Error::other(
-                "--match-profiles does not support global bunker arguments, bots, dummy or collision-query",
+                "--match-profiles does not support global bunker arguments, global bot population or resupply (configure bots in each profile), dummy or collision-query",
             ));
         }
     }
@@ -1600,7 +1602,8 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         .transpose()?
         .unwrap_or_default();
     let bot_names_count = bot_names.len();
-    if bot_fill_total > bot_names_count {
+    // Profile workers validate name capacity per profile (a row may bring its own names).
+    if match_profiles_path.is_none() && bot_fill_total > bot_names_count {
         return Err(io::Error::other(
             "bot names have insufficient capacity for --bot-fill-total",
         ));
@@ -1781,6 +1784,20 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                 .validate_dynamic_bodies(catalog, bindings)
                 .map_err(io::Error::other)?;
         }
+        if bot_fill_total > 0 {
+            registry
+                .set_default_bot_fill_total(bot_fill_total)
+                .map_err(io::Error::other)?;
+        }
+        // Each profile's bots are checked against its own world before any log opens.
+        registry
+            .validate_bots(&mag_gameplay::match_profiles::BotValidationInputs {
+                items: &item_catalog,
+                wire_profiles: &wire_profiles,
+                names: &bot_names,
+                fall_damage_rules: fall_rules.as_ref(),
+            })
+            .map_err(io::Error::other)?;
     }
     let mut resources = match application_id {
         Some(id) => {
@@ -1808,7 +1825,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         }
         println!(
             "{}",
-            serde_json::json!({"event":"catalogs_validated","application_id":application_id,"skill_application_id":skill_catalog.application_id(),"bunkers":bunker_info,"fall_damage_enabled":fall_rules.is_some(),"incapacitation_enabled":incapacitation_rules.is_some(),"character_damage_rules_enabled":character_damage_rules.is_some(),"firearm_assists_enabled":firearm_assist_rules.is_some(),"bot_resupply_validated":bot_resupply_catalog.is_some(),"bot_resupply_approach_validated":bot_resupply_approach_policy.is_some(),"bot_resupply_drop_validated":bot_resupply_approach_policy.as_ref().is_some_and(|policy|policy.allowed_drop_id().is_some()),"dynamic_body_catalog_validated":dynamic_bodies.is_some(),"static_partitions_validated":static_partitions.len(),"acquisition_gameplay_validated":acquisition_setup.is_some(),"acquisition_apc_crew_validated":ground_vehicles.as_ref().is_some_and(|ground|ground.has_acquisition_apc_crew()) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_acquisition_apc_crew()),"squad_orders_validated":squad_orders.is_some(),"active_abilities_validated":active_abilities.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_active_abilities()),"domination_gameplay_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_domination_gameplay()),"guided_launchers_validated":guided_launchers.is_some() ||match_profiles.as_ref().is_some_and(|p|p.has_guided_launchers()),"infantry_rockets_validated":infantry_rockets.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_infantry_rockets()),"flash_grenades_validated":flash_grenades.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_flash_grenades()),"gas_grenades_validated":gas_grenades.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_gas_grenades()),"smoke_grenades_validated":smoke_grenades.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_smoke_grenades()),"underbarrel_launchers_validated":underbarrel_launchers.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_underbarrel_launchers()),"hospital_rockets_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rockets()),"hospital_rocket_ground_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rocket_ground()),"hospital_rocket_helo_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rocket_helo()),"frag_character_blast_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.frag_character_blast) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_frag_character_blast()),"human_static_resupply_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.has_human_static_resupply()) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_human_static_resupply()),"frag_ground_areas_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.has_frag_ground_areas()) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_frag_ground_areas()),"frag_helo_areas_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_frag_helo_areas()),"hospital_blast_areas_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_blast_areas()),"projectile_contacts_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.has_projectile_contacts()) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_projectile_contacts()),"scope":"schema_and_profile_validation_not_client_acceptance"})
+            serde_json::json!({"event":"catalogs_validated","application_id":application_id,"skill_application_id":skill_catalog.application_id(),"bunkers":bunker_info,"fall_damage_enabled":fall_rules.is_some(),"incapacitation_enabled":incapacitation_rules.is_some(),"character_damage_rules_enabled":character_damage_rules.is_some(),"firearm_assists_enabled":firearm_assist_rules.is_some(),"bot_resupply_validated":bot_resupply_catalog.is_some(),"bot_resupply_approach_validated":bot_resupply_approach_policy.is_some(),"bot_resupply_drop_validated":bot_resupply_approach_policy.as_ref().is_some_and(|policy|policy.allowed_drop_id().is_some()),"profile_bot_fill_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_bot_fill()),"dynamic_body_catalog_validated":dynamic_bodies.is_some(),"static_partitions_validated":static_partitions.len(),"acquisition_gameplay_validated":acquisition_setup.is_some(),"acquisition_apc_crew_validated":ground_vehicles.as_ref().is_some_and(|ground|ground.has_acquisition_apc_crew()) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_acquisition_apc_crew()),"squad_orders_validated":squad_orders.is_some(),"active_abilities_validated":active_abilities.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_active_abilities()),"domination_gameplay_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_domination_gameplay()),"guided_launchers_validated":guided_launchers.is_some() ||match_profiles.as_ref().is_some_and(|p|p.has_guided_launchers()),"infantry_rockets_validated":infantry_rockets.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_infantry_rockets()),"flash_grenades_validated":flash_grenades.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_flash_grenades()),"gas_grenades_validated":gas_grenades.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_gas_grenades()),"smoke_grenades_validated":smoke_grenades.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_smoke_grenades()),"underbarrel_launchers_validated":underbarrel_launchers.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_underbarrel_launchers()),"hospital_rockets_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rockets()),"hospital_rocket_ground_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rocket_ground()),"hospital_rocket_helo_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rocket_helo()),"frag_character_blast_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.frag_character_blast) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_frag_character_blast()),"human_static_resupply_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.has_human_static_resupply()) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_human_static_resupply()),"frag_ground_areas_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.has_frag_ground_areas()) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_frag_ground_areas()),"frag_helo_areas_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_frag_helo_areas()),"hospital_blast_areas_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_blast_areas()),"projectile_contacts_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.has_projectile_contacts()) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_projectile_contacts()),"scope":"schema_and_profile_validation_not_client_acceptance"})
         );
         return Ok(());
     }
@@ -1935,7 +1952,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         if let Some(rules) = squad_orders {
             engine = engine.with_squad_orders(rules).map_err(io::Error::other)?;
         }
-        if bot_fill_total > 0 {
+        if bot_fill_total > 0 && match_profiles_path.is_none() {
             let path = bot_population_path
                 .as_ref()
                 .ok_or_else(|| io::Error::other("--bot-fill-total requires --bot-population"))?;
@@ -3131,7 +3148,6 @@ mod runtime_profile_tests {
         for flags in [
             vec!["--bot-population", "/synthetic/missing.json"],
             vec!["--bot-resupply-approach-policy", "/synthetic/missing.json"],
-            vec!["--bot-fill-total", "1"],
             vec!["--development-dummy"],
             vec!["--leadership-passives", "/synthetic/missing.json"],
             vec!["--bunker-catalog", "/synthetic/missing.json"],
@@ -3145,6 +3161,42 @@ mod runtime_profile_tests {
             args.extend(flags.into_iter().map(str::to_owned));
             assert!(run(args).is_err());
         }
+    }
+
+    #[test]
+    fn registry_profile_bots_are_validated_per_profile_before_logs() {
+        std::thread::Builder::new()
+            .stack_size(1024 * 1024)
+            .spawn(|| {
+                let files = SyntheticCatalogs::new();
+                let manifest = synthetic_match_profile(&files);
+                let mut args = files.args();
+                args.extend(["--match-profiles".into(), manifest.display().to_string()]);
+                // A worker-wide fill total needs at least one profile population.
+                let mut defaulted = args.clone();
+                defaulted.extend(["--bot-fill-total".into(), "2".into()]);
+                assert!(
+                    run(defaulted)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("bot_fill_total_requires_profile_bot_population")
+                );
+                // A population authored for another map is refused, naming its profile.
+                files.write("profile-bots.json", &serde_json::json!({
+                    "format":"mag_bot_population_v1","map_name":"synthetic_other","firearms":{"enabled":false},
+                    "slots":[{"team":0,"position":{"x":10.,"y":2.,"z":12.}},{"team":1,"position":{"x":14.,"y":2.,"z":12.}}]}));
+                files.write("profiles.json", &serde_json::json!({"format":"mag_match_profiles_v1","profiles":[{
+                    "profile_id":"synthetic-profile","spawn_catalog":files.0.join("profile-spawns.json"),
+                    "bot_population":files.0.join("profile-bots.json"),"bot_fill_total":2}]}));
+                let error = run(args).unwrap_err().to_string();
+                assert!(
+                    error.contains("match profile synthetic-profile: bot_population_map_profile_mismatch"),
+                    "{error}"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

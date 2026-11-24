@@ -127,8 +127,8 @@ namespace Server.Medius
                 bool ready = ReadyForGameplay;
                 bool draining = Draining;
                 return new LocalDmeWorkerPlacement(ready, draining, CanStageRegistryFormation(ready && !draining),
-                    _matchProfiles, _formationStartup ?? _startupPolicy,
-                    Array.AsReadOnly(_formationTeamMinima ?? new[] { 0, 0 }),
+                    _matchProfiles, (_formationStartup == null ? null : PlacementStartup) ?? _startupPolicy,
+                    Array.AsReadOnly((_formationTeamMinima == null ? null : PlacementTeamMinima) ?? new[] { 0, 0 }),
                     live > 0 && _formationConfigured ? _formedProfile : null,
                     Array.AsReadOnly(liveCounts), live, Array.AsReadOnly(pendingCounts), pending.Count);
             }

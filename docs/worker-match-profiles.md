@@ -79,9 +79,60 @@ A platoon promotion can vacate a squad leadership slot, which the worker
 refills in the same roster update. Both schemas elect from the worker's
 assigned roster. Retail's separate pre-match squad reassignment is outside
 that policy.
-Registry mode rejects development role bindings, global bot population, global
-bunker arguments and development dummy settings. Per-profile Domination
-hospitals are supported.
+Registry mode rejects development role bindings, the global
+`--bot-population`/`--bot-resupply-*` arguments, global bunker arguments and
+development dummy settings. A bot population and its resupply providers are
+bound to one map, so each profile supplies its own (see below). Per-profile
+Domination hospitals are supported.
+
+## Bot-filled profiles
+
+A profile row can fill its world with bots. The optional row fields are:
+
+| Field | Meaning |
+| --- | --- |
+| `bot_population` | `mag_bot_population_v1` file for this profile's map. Required by every other bot field. |
+| `bot_fill_total` | Total world population (humans plus bots). Defaults to the worker's `--bot-fill-total`. |
+| `bot_names` | Bot names for this profile. Defaults to the worker's `--bot-names` (or the synthetic names). |
+| `bot_resupply_catalog` | Optional bot resupply providers. Sabotage profiles only. |
+| `bot_resupply_approach_policy` | Optional approach policy. Requires `bot_resupply_catalog` and the profile's navmesh. |
+
+Paths resolve like the other row resources. Bots that route need the
+profile's own `navmesh_world` (and its `collision_world`). An example row with
+invented paths:
+
+```json
+{
+  "profile_id": "synthetic-sabotage-a0-d1",
+  "spawn_catalog": "worlds/synthetic-a0-d1/spawns.json",
+  "objective_catalog": "worlds/synthetic-a0-d1/objectives.json",
+  "collision_world": "worlds/synthetic-home1/collision.json",
+  "navmesh_world": "worlds/synthetic-home1/navmesh.mag-nav",
+  "bot_population": "worlds/synthetic-home1/bots.json",
+  "bot_fill_total": 64,
+  "bot_names": "names/bots.json"
+}
+```
+
+Startup loads these files and then runs the ordinary bot population checks
+for each profile on a scratch engine that holds only that profile's spawn
+catalog, collision world, navmesh and bunkers plus the worker's items, wire
+profiles, names and fall-damage rules. The check covers the population's map,
+capacity, team and squad slots, spawn bindings, terrain support, navmesh
+coverage, bot firearms and, when present, the resupply binding and approach
+policy. Any failure refuses startup before logs or listeners open, with an
+error of the form `match profile <profile_id>: <reason>`. `--validate-catalogs`
+reports `profile_bot_fill_validated`. A worker-wide `--bot-fill-total` is
+refused unless at least one row has a population. Populations that use
+regional collision or a regional team are refused: they need a
+coverage-qualified regional navmesh and live structure state that profile rows
+cannot supply.
+
+Selecting a profile installs that profile's validated population, names and
+resupply inputs; selecting a profile without bots leaves bots disabled. Bots
+start filling once a human is on foot, keep each team at no more than half of
+the fill total, and yield seats to humans who join later. Domination bots
+fight but do not capture objectives.
 
 An interactive Domination profile additionally supplies `domination_round` and
 `domination_gameplay`, ground vehicles, character damage rules and collision.
@@ -131,7 +182,9 @@ the preloaded setup, while a repeated identical selection preserves it.
 ## Bridge contract
 
 A successful `hello` advertises capability `match_profiles_v1` and a
-`match_profiles` array. Standard rows contain:
+`match_profiles` array. A worker with at least one bot-filled profile also
+advertises `bot_fill_v1`, and each such row adds `bot_fill_total`.
+Standard rows contain:
 
 ```json
 {
@@ -169,11 +222,14 @@ A successful normal bridge response includes `selected_match`:
 }
 ```
 
-Selection defaults to a two-human quorum with one on each side. Registry
-configuration rejects a lower total minimum or a zero minimum on either side.
-The coordinator then configures the selected match's human minimum/capacity with
-`configure_match`, including at least one human per selected faction, and admits
-the cohort. Late joins use the existing selected formation and its two sides.
+Selection of a profile without bots defaults to a two-human quorum with one on
+each side, and `configure_match` rejects a lower total minimum or a zero
+minimum on either side. Selection of a bot-filled profile defaults to one human
+and no per-side minimum; `configure_match` then also accepts a total minimum of
+one and zero per-side minima. This opt-in deliberately lets one human start a
+match whose sides are otherwise bots. The coordinator then configures the
+selected match's human minimum/capacity with `configure_match` and admits the
+cohort. Late joins use the existing selected formation and its two sides.
 The worker never changes a saved character's faction.
 
 ## Group reservation opt-in
@@ -221,6 +277,8 @@ selection journal entry. Failed writes or log limits do not install or
 acknowledge the new world. A successful switch resets objective/spawn/round
 state, world and match clocks, roster/turret/repair/parachute state and bot runtime,
 and replaces every world resource, including clearing omitted optional resources.
+That includes the bot population and resupply providers, which come only from
+the selected profile.
 Global item/skill resources, reward receipts and persistence acknowledgement
 history remain intact.
 

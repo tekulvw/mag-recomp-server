@@ -60,10 +60,12 @@ namespace Server.Medius
                     host = host.TrimEnd('.').ToLowerInvariant();
                     int workerPort = Integer(row, "worker_port", 1, 65535);
                     if (!endpoints.Add(host + ":" + workerPort)) throw Invalid();
-                    int minimum = Integer(row, "minimum_players", 2, 64), maximum = Integer(row, "maximum_players", minimum, 64);
+                    // One human may start a worker whose profiles advertise bot fill; workers
+                    // without it still form only with a human on each side (see MagFactionMatchmaking).
+                    int minimum = Integer(row, "minimum_players", 1, 64), maximum = Integer(row, "maximum_players", minimum, 64);
                     var teamRows = row.GetProperty("minimum_players_per_team");
                     if (teamRows.ValueKind != JsonValueKind.Array || teamRows.GetArrayLength() != 2) throw Invalid();
-                    var teams = teamRows.EnumerateArray().Select(x => x.TryGetInt32(out int n) && n >= 1 && n <= 32 ? n : throw Invalid()).ToArray();
+                    var teams = teamRows.EnumerateArray().Select(x => x.TryGetInt32(out int n) && n >= 0 && n <= 32 ? n : throw Invalid()).ToArray();
                     var policy = new MagMatchStartupPolicy(minimum, maximum, teams);
                     var drain = row.GetProperty("draining");
                     if (drain.ValueKind != JsonValueKind.True && drain.ValueKind != JsonValueKind.False) throw Invalid();

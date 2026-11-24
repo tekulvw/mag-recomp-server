@@ -8,6 +8,9 @@ use std::{
 };
 
 pub const CAPABILITY: &str = "match_profiles_v1";
+/// Advertised when at least one profile fills its world with bots, so one
+/// human can start that profile (see `Summary::bot_fill_total`).
+pub const BOT_FILL_CAPABILITY: &str = "bot_fill_v1";
 const MAX_MANIFEST: u64 = 1_048_576;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -22,6 +25,9 @@ pub struct Summary {
     pub squad_capacity: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub squad_counts: Option<[usize; 2]>,
+    /// Total world population (humans plus bots) this profile fills to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_fill_total: Option<usize>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -59,7 +65,95 @@ struct Source {
     bunker_placement: Option<PathBuf>,
     bunker_structure: Option<PathBuf>,
     bunker_allocation: Option<PathBuf>,
+    bot_population: Option<PathBuf>,
+    bot_fill_total: Option<usize>,
+    bot_names: Option<PathBuf>,
+    bot_resupply_catalog: Option<PathBuf>,
+    bot_resupply_approach_policy: Option<PathBuf>,
 }
+/// One profile's bot inputs. A population is map-bound, so startup validates
+/// it against this profile's own world before the worker advertises it.
+#[derive(Clone)]
+struct ProfileBots {
+    population: bot_registry::BotPopulation,
+    total: Option<usize>,
+    names: Option<bot_names::Catalog>,
+    resupply: Option<bot_resupply_catalog::Catalog>,
+    approach: Option<bot_resupply_approach_policy::Policy>,
+    validated: bool,
+}
+impl ProfileBots {
+    fn load(source: &Source) -> io::Result<Option<Self>> {
+        let Some(path) = &source.bot_population else {
+            if source.bot_fill_total.is_some()
+                || source.bot_names.is_some()
+                || source.bot_resupply_catalog.is_some()
+                || source.bot_resupply_approach_policy.is_some()
+            {
+                return Err(profile_error(
+                    &source.profile_id,
+                    &"match_profile_bot_settings_require_population",
+                ));
+            }
+            return Ok(None);
+        };
+        let named = |code: &dyn std::fmt::Display| profile_error(&source.profile_id, code);
+        if source.bot_resupply_approach_policy.is_some() && source.bot_resupply_catalog.is_none() {
+            return Err(named(&"bot_resupply_approach_requires_provider_catalog"));
+        }
+        let population = bot_registry::BotPopulation::load(path).map_err(|e| named(&e))?;
+        // Regional walking binds a coverage-qualified navmesh and live
+        // Acquisition structure state that profile rows cannot supply.
+        if population.regional_collision.is_some() || population.regional_team.is_some() {
+            return Err(named(&"match_profile_bot_regional_collision_unsupported"));
+        }
+        Ok(Some(Self {
+            population,
+            total: source.bot_fill_total,
+            names: source
+                .bot_names
+                .as_ref()
+                .map(|path| bot_names::Catalog::load(path))
+                .transpose()
+                .map_err(|e| named(&e))?,
+            resupply: source
+                .bot_resupply_catalog
+                .as_ref()
+                .map(bot_resupply_catalog::Catalog::load)
+                .transpose()
+                .map_err(|e| named(&e))?,
+            approach: source
+                .bot_resupply_approach_policy
+                .as_ref()
+                .map(bot_resupply_approach_policy::Policy::load)
+                .transpose()
+                .map_err(|e| named(&e))?,
+            validated: false,
+        }))
+    }
+}
+fn profile_error(profile_id: &str, code: &dyn std::fmt::Display) -> io::Error {
+    io::Error::other(format!("match profile {profile_id}: {code}"))
+}
+/// Worker-wide inputs that bot validation shares with the served engine.
+pub struct BotValidationInputs<'a> {
+    pub items: &'a Arc<item_catalog::ItemCatalog>,
+    pub wire_profiles: &'a wire_profile::WireProfileCatalog,
+    pub names: &'a bot_names::Catalog,
+    pub fall_damage_rules: Option<&'a fall_damage::Rules>,
+}
+/// A profile whose bot configuration does not fit its own world.
+#[derive(Debug)]
+pub struct BotValidationError {
+    pub profile_id: String,
+    pub code: &'static str,
+}
+impl std::fmt::Display for BotValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "match profile {}: {}", self.profile_id, self.code)
+    }
+}
+impl std::error::Error for BotValidationError {}
 #[derive(Clone)]
 struct Loaded {
     summary: Summary,
@@ -91,9 +185,11 @@ struct Loaded {
     underbarrel_launchers: Option<Arc<crate::underbarrel_launchers::Catalog>>,
     ground_turret_source: Option<Arc<[u8]>>,
     acquisition_apc_turret_source: Option<Arc<[u8]>>,
+    bots: Option<ProfileBots>,
 }
 pub struct Registry {
     profiles: BTreeMap<String, Loaded>,
+    default_bot_fill_total: Option<usize>,
 }
 impl Registry {
     pub fn validate_dynamic_bodies(
@@ -197,12 +293,17 @@ impl Registry {
                 source.bunker_placement.as_mut(),
                 source.bunker_structure.as_mut(),
                 source.bunker_allocation.as_mut(),
+                source.bot_population.as_mut(),
+                source.bot_names.as_mut(),
+                source.bot_resupply_catalog.as_mut(),
+                source.bot_resupply_approach_policy.as_mut(),
             ]
             .into_iter()
             .flatten()
             {
                 crate::resources::resolve_manifest_path(directory, path)?;
             }
+            let bots = ProfileBots::load(&source)?;
             let mut spawns = spawn_catalog::SpawnCatalog::load(&source.spawn_catalog)?;
             if source.acquisition_gameplay.is_some() && source.domination_gameplay.is_some() {
                 return Err(io::Error::other("conflicting_match_gameplay_configuration"));
@@ -558,6 +659,7 @@ impl Registry {
                 team_capacity: policy.team_capacity,
                 squad_capacity: None,
                 squad_counts: None,
+                bot_fill_total: None,
             };
             profiles.insert(
                 source.profile_id,
@@ -591,10 +693,57 @@ impl Registry {
                     underbarrel_launchers: None,
                     ground_turret_source,
                     acquisition_apc_turret_source,
+                    bots,
                 },
             );
         }
-        Ok(Self { profiles })
+        Ok(Self {
+            profiles,
+            default_bot_fill_total: None,
+        })
+    }
+
+    /// Apply the worker's `--bot-fill-total` to every profile that has a bot
+    /// population but no explicit `bot_fill_total` of its own.
+    pub fn set_default_bot_fill_total(&mut self, total: usize) -> Result<(), &'static str> {
+        if total == 0 {
+            return Err("invalid_bot_fill_total");
+        }
+        if !self.profiles.values().any(|profile| profile.bots.is_some()) {
+            return Err("bot_fill_total_requires_profile_bot_population");
+        }
+        self.default_bot_fill_total = Some(total);
+        Ok(())
+    }
+
+    pub fn has_bot_fill(&self) -> bool {
+        self.profiles.values().any(|profile| profile.bots.is_some())
+    }
+
+    /// Validate every profile's bots against that profile's own spawn catalog,
+    /// collision, navmesh and global items/names by running the ordinary bot
+    /// population checks on a scratch engine that holds only that world. The
+    /// settled population is kept for selection, which performs no I/O.
+    pub fn validate_bots(
+        &mut self,
+        inputs: &BotValidationInputs<'_>,
+    ) -> Result<(), BotValidationError> {
+        let default_total = self.default_bot_fill_total;
+        for (profile_id, loaded) in &mut self.profiles {
+            let Some(mut bots) = loaded.bots.take() else {
+                continue;
+            };
+            let result = validate_profile_bots(loaded, &mut bots, default_total, inputs);
+            if result.is_ok() {
+                loaded.summary.bot_fill_total = bots.total;
+            }
+            loaded.bots = Some(bots);
+            result.map_err(|code| BotValidationError {
+                profile_id: profile_id.clone(),
+                code,
+            })?;
+        }
+        Ok(())
     }
     pub fn bind_smoke_grenades(
         &mut self,
@@ -1260,6 +1409,54 @@ impl Registry {
         self.profiles.values().map(|p| p.summary.clone()).collect()
     }
 }
+fn validate_profile_bots(
+    loaded: &Loaded,
+    bots: &mut ProfileBots,
+    default_total: Option<usize>,
+    inputs: &BotValidationInputs<'_>,
+) -> Result<(), &'static str> {
+    if bots.validated {
+        return Ok(());
+    }
+    let total = bots
+        .total
+        .or(default_total)
+        .ok_or("match_profile_bot_fill_total_required")?;
+    // Bot resupply is only qualified for direct Sabotage workers; keep the
+    // same scope for profiles.
+    if bots.resupply.is_some() && loaded.summary.game_type != 0 {
+        return Err("bot_resupply_requires_sabotage_profile");
+    }
+    let names = bots.names.clone().unwrap_or_else(|| inputs.names.clone());
+    let resources = EngineResources::for_application(
+        Arc::clone(inputs.items),
+        loaded.spawns.clone(),
+        loaded.bunkers.clone(),
+        inputs.wire_profiles.clone(),
+        20231,
+    )?
+    .with_bot_names(names.clone());
+    let mut scratch = Engine::from_resources(io::sink(), u64::MAX, resources);
+    scratch.collision_world = loaded.collision.clone();
+    scratch.navmesh_world = loaded.navmesh.clone();
+    scratch.fall_damage_rules = inputs.fall_damage_rules.cloned();
+    let mut scratch = scratch.with_bot_population(bots.population.clone(), total)?;
+    if let Some(catalog) = bots.resupply.clone() {
+        scratch.configure_bot_resupply_catalog(catalog)?;
+    }
+    if let Some(policy) = bots.approach.clone() {
+        scratch.configure_bot_resupply_approach_policy(policy)?;
+    }
+    bots.population = scratch
+        .bot_registry
+        .config
+        .take()
+        .ok_or("bot_population_unavailable")?;
+    bots.total = Some(total);
+    bots.names = Some(names);
+    bots.validated = true;
+    Ok(())
+}
 fn absolute(path: &Path) -> io::Result<()> {
     if path.is_absolute() {
         Ok(())
@@ -1318,6 +1515,14 @@ impl<W: Write> Engine<W> {
             return Err("oic_leadership_requires_strategic_effects");
         }
         registry.validate_runtime(&self.item_catalog, self.wire_profile)?;
+        registry
+            .validate_bots(&BotValidationInputs {
+                items: &self.item_catalog,
+                wire_profiles: &self.wire_profiles,
+                names: &self.bot_names,
+                fall_damage_rules: self.fall_damage_rules.as_ref(),
+            })
+            .map_err(|error| error.code)?;
         registry.bind_hospital_turrets(&self.item_catalog)?;
         registry.bind_ground_turrets(&self.item_catalog)?;
         registry.bind_infantry_rockets(&self.item_catalog)?;
@@ -1416,6 +1621,16 @@ impl<W: Write> Engine<W> {
         {
             resources.validate_vehicles(vehicles)?;
         }
+        if loaded
+            .bots
+            .as_ref()
+            .is_some_and(|bots| !bots.validated || bots.total.is_none())
+        {
+            return Err("match_profile_bots_unvalidated");
+        }
+        if !self.bot_resupply_revisions_available() {
+            return Err("bot_resupply_catalog_revision_exhausted");
+        }
         // Allocate everything before the durable acknowledgement. A failed record
         // must leave the previously selected world, identity and outboxes intact.
         let selected = SelectedMatch {
@@ -1478,7 +1693,25 @@ impl<W: Write> Engine<W> {
         }
         self.retire_match_selection();
         self.reset_objective_world();
-        self.bot_registry = Default::default();
+        // Install this profile's own validated population (or none); bots never
+        // carry another world's map-bound slots or providers into this one.
+        let bot_fill = loaded.bots.is_some();
+        let (bot_resupply, bot_approach) = match loaded.bots {
+            Some(bots) => {
+                self.bot_registry = bot_registry::BotRegistry::for_validated_population(
+                    bots.population,
+                    bots.total.unwrap_or_default(),
+                );
+                if let Some(names) = bots.names {
+                    self.bot_names = names;
+                }
+                (bots.resupply, bots.approach)
+            }
+            None => {
+                self.bot_registry = Default::default();
+                (None, None)
+            }
+        };
         self.spawn_catalog = Some(loaded.spawns);
         self.bunker_world = loaded.bunkers;
         self.objective_catalog = loaded.objectives;
@@ -1535,8 +1768,16 @@ impl<W: Write> Engine<W> {
         self.automatic_heal = Default::default();
         self.alpha_turret = Default::default();
         self.alpha_turret_reporter = None;
-        self.minimum_players = 2;
-        self.minimum_players_per_team = [1; 2];
+        self.install_profile_bot_resupply(bot_resupply, bot_approach);
+        // Bot-filled profiles default to a one-human start; others keep the
+        // two-human, one-per-side formation default.
+        if bot_fill {
+            self.minimum_players = 1;
+            self.minimum_players_per_team = [0; 2];
+        } else {
+            self.minimum_players = 2;
+            self.minimum_players_per_team = [1; 2];
+        }
         self.maximum_players = loaded.summary.maximum_players;
         self.match_started = self.starts_without_quorum();
         self.party_reservations.clear();
@@ -2631,6 +2872,7 @@ mod tests {
                     team_capacity: policy.team_capacity,
                     squad_capacity: None,
                     squad_counts: None,
+                    bot_fill_total: None,
                     maximum_players: policy.team_capacity * 2,
                 },
                 spawns,
@@ -2660,6 +2902,7 @@ mod tests {
                 ground_turret_source: None,
                 acquisition_apc_turret_source: None,
                 acquisition: Some(sample.acquisition_gameplay.unwrap().setup),
+                bots: None,
             },
         );
     }
@@ -3158,6 +3401,286 @@ mod tests {
             );
             assert_eq!(response.ok, expected, "{:?}", response.error);
         }
+    }
+
+    // Synthetic bot-filled profiles: an invented flat floor and two slots per
+    // world, validated against the profile's own map rather than the base.
+    fn bot_floor(files: &Files, defender: u8) -> PathBuf {
+        files.write(&format!("floor-{defender}.json"), json!({
+            "format":"mag_collision_world","schema_version":1,"coordinate_space":"world",
+            "metadata":{"map_name":format!("synthetic_home_{defender}"),"build":"synthetic","coverage":"provisional",
+                "provenance":["Synthetic profile bot floor"],"unknowns":["Not a game map"],
+                "physics_regions":[{"min":[-10.,-5.,-10.],"max":[10.,8.,10.],"ground_verified":true,
+                    "obstacles_verified":true,"provenance":["Synthetic floor"]}]},
+            "instances":[{"id":"floor","vertices_xyz":[[-10.,0.,-10.],[10.,0.,-10.],[10.,0.,10.],[-10.,0.,10.]],
+                "triangles":[[0,2,1],[0,3,2]]}]
+        }))
+    }
+    fn bot_population(files: &Files, map: &str) -> PathBuf {
+        files.write(&format!("population-{map}.json"), json!({
+            "format":"mag_bot_population_v1","map_name":map,"firearms":{"enabled":false},
+            "slots":[{"team":0,"position":{"x":2.,"y":0.,"z":2.}},{"team":1,"position":{"x":6.,"y":0.,"z":2.}}]
+        }))
+    }
+    fn bot_names_file(files: &Files, names: &[&str]) -> PathBuf {
+        let entries: Vec<_> = names.iter().map(|name| json!({"name": name})).collect();
+        files.write(
+            &format!("names-{}.json", names.len()),
+            json!({"entries": entries}),
+        )
+    }
+    /// Row "bots" (Sabotage 0 vs 1) fills with bots; row "plain" (1 vs 0) does not.
+    fn bot_manifest(files: &Files, bots: Value) -> PathBuf {
+        let mut row = json!({
+            "profile_id":"bots","spawn_catalog":files.spawns(0, 0, 1),
+            "collision_world":bot_floor(files, 1),
+        });
+        for (key, value) in bots.as_object().unwrap() {
+            row[key] = value.clone();
+        }
+        files.write(
+            "bot-profiles.json",
+            json!({"format":"mag_match_profiles_v1","profiles":[
+                row, {"profile_id":"plain","spawn_catalog":files.spawns(0, 1, 0)}
+            ]}),
+        )
+    }
+    fn bot_ready_row(files: &Files) -> Value {
+        json!({
+            "bot_population": bot_population(files, "synthetic_home_1"),
+            "bot_fill_total": 2,
+            "bot_names": bot_names_file(files, &["Profile Alpha", "Profile Bravo"]),
+        })
+    }
+    fn bot_base_engine(files: &Files) -> Engine<Vec<u8>> {
+        let resources = EngineResources::for_application(
+            Arc::new(crate::bot_registry::identity_tests::bootstrap_items()),
+            spawn_catalog::SpawnCatalog::load(files.spawns(0, 0, 1)).unwrap(),
+            None,
+            crate::resources::tests::wire_profiles(),
+            20231,
+        )
+        .unwrap();
+        Engine::from_resources(Vec::new(), 100_000, resources)
+    }
+    fn configure_quorum(
+        engine: &mut Engine<Vec<u8>>,
+        minimum: usize,
+        teams: [usize; 2],
+    ) -> Response {
+        engine.handle(
+            Request::ConfigureMatch {
+                v: BRIDGE_VERSION,
+                request_id: "configure".into(),
+                minimum_players: minimum,
+                minimum_players_per_team: teams,
+                maximum_players: 2,
+                application_id: 20231,
+            },
+            Duration::ZERO,
+            1,
+        )
+    }
+
+    #[test]
+    fn bot_filled_profile_is_advertised_installed_and_starts_with_one_human() {
+        let files = Files::new();
+        let registry = Registry::load(bot_manifest(&files, bot_ready_row(&files))).unwrap();
+        let mut engine = bot_base_engine(&files)
+            .with_match_profiles(registry)
+            .unwrap();
+        // No bots run in the unselected base world.
+        assert!(!engine.bot_registry.enabled());
+        let hello = serde_json::to_value(engine.describe_worker("hello".into(), false)).unwrap();
+        assert!(
+            hello["capabilities"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(BOT_FILL_CAPABILITY))
+        );
+        let rows = hello["match_profiles"].as_array().unwrap();
+        let row = |id: &str| rows.iter().find(|row| row["profile_id"] == id).unwrap();
+        assert_eq!(row("bots")["bot_fill_total"], json!(2));
+        assert!(row("plain").get("bot_fill_total").is_none());
+
+        assert!(select(&mut engine, "formation-bots", "bots").ok);
+        assert!(engine.bot_registry.enabled());
+        assert_eq!(engine.bot_names.name_for(0), Some("Profile Alpha"));
+        assert_eq!(
+            (engine.minimum_players, engine.minimum_players_per_team),
+            (1, [0, 0])
+        );
+        assert!(
+            engine.match_started,
+            "one bot-filled human starts the world"
+        );
+        let one = configure_quorum(&mut engine, 1, [0, 0]);
+        assert!(one.ok, "{:?}", one.error);
+        assert!(configure_quorum(&mut engine, 1, [1, 0]).ok);
+
+        // The lone human's side keeps that seat; the bot fills the other side.
+        assert!(reserve(&mut engine).ok);
+        engine
+            .reconcile_bot_population(Duration::ZERO, 1, &mut Default::default())
+            .unwrap();
+        let teams: Vec<_> = engine
+            .bot_registry
+            .bots
+            .values()
+            .map(|bot| bot.target.squad.team())
+            .collect();
+        assert_eq!(teams, [1]);
+    }
+
+    #[test]
+    fn selecting_a_profile_without_bots_clears_bots_and_keeps_two_human_sides() {
+        let files = Files::new();
+        let registry = Registry::load(bot_manifest(&files, bot_ready_row(&files))).unwrap();
+        let mut worker = bot_base_engine(&files)
+            .with_match_profiles(registry)
+            .unwrap();
+        let engine = &mut worker;
+        assert!(select(engine, "formation-bots", "bots").ok);
+        assert!(engine.bot_registry.enabled());
+        assert!(select(engine, "formation-plain", "plain").ok);
+        assert!(!engine.bot_registry.enabled());
+        assert_eq!(
+            (engine.minimum_players, engine.minimum_players_per_team),
+            (2, [1, 1])
+        );
+        assert_eq!(
+            configure_quorum(engine, 1, [0, 0]).error.as_deref(),
+            Some("match_profiles_require_two_human_sides")
+        );
+        assert!(configure_quorum(engine, 2, [1, 1]).ok);
+        // A registry without any bot rows advertises nothing new.
+        let plain = self::engine(&files, Vec::new(), 100_000);
+        let hello = serde_json::to_value(plain.describe_worker("hello".into(), false)).unwrap();
+        assert!(
+            !hello["capabilities"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(BOT_FILL_CAPABILITY))
+        );
+        assert!(
+            hello["match_profiles"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row.get("bot_fill_total").is_none())
+        );
+    }
+
+    #[test]
+    fn profile_bots_are_refused_at_startup_against_their_own_world() {
+        let files = Files::new();
+        let refused = |row: Value| {
+            let mut registry = Registry::load(bot_manifest(&files, row)).unwrap();
+            let names = bot_names::Catalog::default();
+            let items = Arc::new(crate::bot_registry::identity_tests::bootstrap_items());
+            let error = registry
+                .validate_bots(&BotValidationInputs {
+                    items: &items,
+                    wire_profiles: &crate::resources::tests::wire_profiles(),
+                    names: &names,
+                    fall_damage_rules: None,
+                })
+                .unwrap_err();
+            assert_eq!(error.profile_id, "bots");
+            assert!(error.to_string().starts_with("match profile bots: "));
+            error.code
+        };
+        // A population authored for another map never runs in this world.
+        let mut row = bot_ready_row(&files);
+        row["bot_population"] = json!(bot_population(&files, "synthetic_home_0"));
+        assert_eq!(refused(row), "bot_population_map_profile_mismatch");
+        let mut row = bot_ready_row(&files);
+        row["bot_names"] = json!(bot_names_file(&files, &["Only One"]));
+        assert_eq!(refused(row), "bot_names_insufficient_capacity");
+        let mut row = bot_ready_row(&files);
+        row["bot_fill_total"] = json!(4);
+        row["bot_names"] = json!(bot_names_file(&files, &["N1", "N2", "N3", "N4"]));
+        assert_eq!(refused(row), "bot_population_capacity");
+        let mut row = bot_ready_row(&files);
+        row.as_object_mut().unwrap().remove("bot_fill_total");
+        assert_eq!(refused(row), "match_profile_bot_fill_total_required");
+        // A slot beyond this profile's verified floor has no supported ground.
+        let mut row = bot_ready_row(&files);
+        row["bot_population"] = json!(files.write("off-floor.json", json!({
+            "format":"mag_bot_population_v1","map_name":"synthetic_home_1","firearms":{"enabled":false},
+            "slots":[{"team":0,"position":{"x":2.,"y":0.,"z":2.}},{"team":1,"position":{"x":60.,"y":0.,"z":2.}}]
+        })));
+        assert_eq!(refused(row), "bot_physics_geometry_coverage_unknown");
+
+        // The engine applies the same validation before installing a registry.
+        let mut row = bot_ready_row(&files);
+        row["bot_population"] = json!(bot_population(&files, "synthetic_home_0"));
+        assert_eq!(
+            bot_base_engine(&files)
+                .with_match_profiles(Registry::load(bot_manifest(&files, row)).unwrap())
+                .err(),
+            Some("bot_population_map_profile_mismatch")
+        );
+
+        // A worker-wide default fills rows without their own total.
+        let mut row = bot_ready_row(&files);
+        row.as_object_mut().unwrap().remove("bot_fill_total");
+        let mut registry = Registry::load(bot_manifest(&files, row)).unwrap();
+        registry.set_default_bot_fill_total(2).unwrap();
+        let mut engine = bot_base_engine(&files)
+            .with_match_profiles(registry)
+            .unwrap();
+        assert!(select(&mut engine, "formation-default", "bots").ok);
+        assert!(engine.bot_registry.enabled());
+        assert_eq!(
+            files.registry().set_default_bot_fill_total(2),
+            Err("bot_fill_total_requires_profile_bot_population")
+        );
+    }
+
+    #[test]
+    fn profile_bot_settings_are_bound_to_a_population_and_supported_scope() {
+        let files = Files::new();
+        let load_error = |row: Value| {
+            Registry::load(bot_manifest(&files, row))
+                .err()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(
+            load_error(json!({"bot_fill_total": 2})),
+            "match profile bots: match_profile_bot_settings_require_population"
+        );
+        let mut row = bot_ready_row(&files);
+        row["bot_resupply_approach_policy"] = json!(files.0.join("approach.json"));
+        assert_eq!(
+            load_error(row),
+            "match profile bots: bot_resupply_approach_requires_provider_catalog"
+        );
+        let regional = files.write(
+            "regional.json",
+            json!({
+                "format":"mag_bot_population_v1","map_name":"synthetic_home_1","regional_team":0,
+                "slots":[{"team":0,"position":{"x":2.,"y":0.,"z":2.}}]
+            }),
+        );
+        let mut row = bot_ready_row(&files);
+        row["bot_population"] = json!(regional);
+        assert!(load_error(row).starts_with("match profile bots: "));
+        // Global populations stay refused: they belong to one map.
+        let global: crate::bot_registry::BotPopulation = serde_json::from_slice(
+            &std::fs::read(bot_population(&files, "synthetic_home_1")).unwrap(),
+        )
+        .unwrap();
+        let registry = Registry::load(bot_manifest(&files, bot_ready_row(&files))).unwrap();
+        assert_eq!(
+            bot_base_engine(&files)
+                .with_match_profiles(registry)
+                .unwrap()
+                .with_bot_population(global, 2)
+                .err(),
+            Some("match_profiles_unsupported_world_extras")
+        );
     }
 
     #[test]
