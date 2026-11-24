@@ -18,7 +18,7 @@ Tests need a PostgreSQL server they can create throwaway databases on:
 
 ```sh
 docker run -d --rm --name portal-pg -e POSTGRES_USER=portal -e POSTGRES_PASSWORD=portal \
-  -p 127.0.0.1:55432:5432 postgres:17-alpine
+  -p 127.0.0.1:55432:5432 postgres:17-alpine -c fsync=off -c synchronous_commit=off -c full_page_writes=off
 export DATABASE_URL=postgres://portal:portal@127.0.0.1:55432/portal
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
@@ -31,6 +31,11 @@ listening on port 8080 as UID 10001. The build downloads the web fonts listed in
 (Chakra Petch, Inter and JetBrains Mono, all SIL Open Font License 1.1) and checks each against its
 SHA-256; their licenses go to `/usr/share/licenses/mag-recomp-server/fonts/`.
 Sign-in starts are limited to 30 a minute per client address.
+
+Turning durability off (`fsync=off` and the rest) suits a throwaway test server only; it keeps
+the checkpoint each test's `DROP DATABASE` waits for from stalling on disk writes. Database tests use `#[sqlx::test]` for their
+database but open their pool through `tests/support` (see there why) and end with
+`test_db.close().await`.
 
 The tests run a fake OpenID provider and never contact Google. `tests/ticket-vectors.json`
 holds ticket test vectors for other verifiers; regenerate them with

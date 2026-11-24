@@ -137,6 +137,35 @@ impl Catalog {
         })
     }
 
+    /// Builds the three stock dumb-fire launcher rows straight from the loaded
+    /// item catalog's authored weapon and rocket definitions, for modes without
+    /// a separately projected launcher catalog. The combat metadata must name
+    /// this exact item catalog. Each faction must author exactly one dumb-fire
+    /// rocket launcher, and every derived row passes the same checks as a
+    /// projected one.
+    pub fn from_item_catalog(items: &ItemCatalog) -> Result<Self, &'static str> {
+        if items.application_id() != RETAIL_APPLICATION {
+            return Err("infantry_rocket_mode_required");
+        }
+        if !items.retail_combat_describes_items() {
+            return Err("derived_infantry_rocket_source_unbound");
+        }
+        let mut variants = Vec::with_capacity(3);
+        let mut ammo_tokens = BTreeSet::new();
+        for faction in 0..3_u8 {
+            let variant = derived_variant(items, faction)?;
+            if !ammo_tokens.insert(variant.ammo_token) {
+                return Err("derived_infantry_rocket_ammo_mismatch");
+            }
+            variants.push(variant);
+        }
+        Ok(Self {
+            variants: variants
+                .try_into()
+                .map_err(|_| "derived_infantry_rocket_launcher_missing")?,
+        })
+    }
+
     pub fn variant(&self, faction: u8, item_id: u16) -> Option<&Variant> {
         self.variants
             .get(usize::from(faction))
@@ -146,6 +175,113 @@ impl Catalog {
     pub fn variants(&self) -> &[Variant] {
         &self.variants
     }
+}
+
+/// The faction's single authored dumb-fire rocket launcher and its rocket.
+fn derived_variant(items: &ItemCatalog, faction: u8) -> Result<Variant, &'static str> {
+    let namespace = format!("FactionItemList{}:", faction + 1);
+    let raw = items.raw();
+    let mut found = None;
+    for (item_id, reference) in items.retail_item_refs() {
+        if !reference.starts_with(&namespace) {
+            continue;
+        }
+        let Ok(weapon) = items.weapon_parameters(item_id) else {
+            continue;
+        };
+        let ammo_name = weapon["ammo_name"].as_str().unwrap_or_default();
+        let ammo = &raw["definitions"]["projectile_ammo"][ammo_name]["parameters"];
+        if weapon["category"].as_str() != Some("kWepCategoryRocketLauncher")
+            || ammo["propulsion_strategy"].as_str() != Some("kWepPropulsionStrategyRocketDumb")
+        {
+            continue;
+        }
+        if found.replace((item_id, weapon, ammo_name, ammo)).is_some() {
+            return Err("derived_infantry_rocket_launcher_ambiguous");
+        }
+    }
+    let (item_id, weapon, ammo_name, ammo) =
+        found.ok_or("derived_infantry_rocket_launcher_missing")?;
+    let sight_name = weapon["required_sight_attachment"]
+        .as_str()
+        .ok_or("derived_infantry_rocket_sight_missing")?;
+    let stock_sight_item_id = items
+        .retail_item_refs()
+        .find(|(_, reference)| {
+            let item = &raw["items"][*reference];
+            reference.starts_with(&namespace)
+                && item["definition"]["group"].as_str() == Some("attachments")
+                && item["definition"]["name"].as_str() == Some(sight_name)
+        })
+        .map(|(id, _)| id)
+        .ok_or("derived_infantry_rocket_sight_missing")?;
+    let fire = &weapon["fire_mode"];
+    let float = |value: &Value| value.as_f64().map(|value| value as f32).unwrap_or(f32::NAN);
+    let count = |value: &Value| {
+        value
+            .as_u64()
+            .and_then(|value| u8::try_from(value).ok())
+            .unwrap_or(0)
+    };
+    let spine = ammo["capsuleHeight"]
+        .as_array()
+        .filter(|axes| axes.len() == 3)
+        .ok_or("derived_infantry_rocket_ammo_mismatch")?;
+    let variant = Variant {
+        faction,
+        item_id,
+        stock_sight_item_id,
+        ammo_token: ammo_crc32(ammo_name).ok_or("derived_infantry_rocket_ammo_mismatch")?,
+        weapon: Weapon {
+            magazine_size: count(&weapon["magazine_capacity"]),
+            initial_magazine_count: count(&weapon["initial_magazine_count"]),
+            refire_seconds: float(&fire["refire_time"]),
+            reload_seconds: float(&fire["reload_time"]),
+        },
+        flight: Flight {
+            radius_m: ammo["radius"].as_f64().unwrap_or(f64::NAN),
+            capsule_spine_local_xyz: std::array::from_fn(|axis| {
+                spine[axis].as_f64().unwrap_or(f64::NAN)
+            }),
+            speed_mps: float(&ammo["launch_velocity"]),
+            armed_time_seconds: float(&ammo["m_fArmedTime"]),
+            auto_explode_distance_m: float(&ammo["rocketAutoExplodeDistance"]),
+            lifetime_seconds: float(&ammo["m_fLifetimeMax"]),
+            age_grace_seconds: NATIVE_PROJECTILE_AGE_GRACE_SECONDS,
+        },
+        blast: Blast {
+            half_radius_m: float(&ammo["half_damage_radius"]),
+            outer_radius_m: float(&ammo["full_damage_radius"]),
+            material_penetration: float(&ammo["MaterialPenetration"]),
+            character_hp: float(&ammo["damage"]["character"]),
+            vehicle_hp: float(&ammo["damage"]["vehicle"]),
+        },
+    };
+    variant
+        .validate_role(items, weapon)
+        .map_err(|_| "derived_infantry_rocket_role_mismatch")?;
+    if !variant.weapon.matches(weapon) {
+        return Err("derived_infantry_rocket_weapon_mismatch");
+    }
+    if ammo["id"].as_str() != Some(ammo_name)
+        || !variant.flight.matches(ammo)
+        || !variant.blast.matches(ammo)
+    {
+        return Err("derived_infantry_rocket_ammo_mismatch");
+    }
+    Ok(variant)
+}
+
+/// Whether `item_id` is an authored rocket launcher that steers its rocket.
+pub(crate) fn is_guided_launcher(items: &ItemCatalog, item_id: u16) -> bool {
+    items.weapon_parameters(item_id).is_ok_and(|weapon| {
+        let ammo_name = weapon["ammo_name"].as_str().unwrap_or_default();
+        weapon["category"].as_str() == Some("kWepCategoryRocketLauncher")
+            && items.raw()["definitions"]["projectile_ammo"][ammo_name]["parameters"]
+                ["propulsion_strategy"]
+                .as_str()
+                == Some("kWepPropulsionStrategyRocketGuided")
+    })
 }
 
 impl Source {

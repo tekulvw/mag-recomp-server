@@ -407,7 +407,7 @@ impl<W: Write> Engine<W> {
                                 .as_deref()
                                 .ok_or("infantry_rocket_rules_required")?,
                         )
-                        .ok_or("infantry_rocket_weapon_unqualified")?,
+                        .ok_or_else(|| self.unqualified_launcher(actor))?,
                     )
                 }
             }
@@ -426,7 +426,8 @@ impl<W: Write> Engine<W> {
             _ => return Err("infantry_rocket_weapon_unqualified"),
         };
         if actor.wire_profile.application_id() != 20231
-            || !matches!(self.match_profile().game_type, 1 | 2)
+            || !(matches!(self.match_profile().game_type, 1 | 2)
+                || self.static_rocket_world().is_some())
             || !self.match_started
             || self.match_terminal.is_some()
             || !self.round_combat_allowed(now)
@@ -1060,6 +1061,9 @@ impl<W: Write> Engine<W> {
         if !self.round_combat_allowed(now) || self.match_terminal.is_some() {
             return Err("infantry_rocket_combat_ended");
         }
+        if let Some(world) = self.static_rocket_world() {
+            return Ok(self.plan_static_rocket_steps(world, flights, now_ms));
+        }
         let collision = self
             .domination_gameplay
             .as_ref()
@@ -1416,6 +1420,8 @@ impl<W: Write> Engine<W> {
                 helo,
                 hospital,
             })
+        } else if self.acquisition_gameplay.is_none() && self.static_rocket_world().is_some() {
+            self.prepare_static_rocket_effects(flight, position, now)
         } else {
             let runtime = self
                 .acquisition_gameplay
@@ -1467,6 +1473,9 @@ impl<W: Write> Engine<W> {
         }
     }
 }
+
+#[path = "static_world_rockets.rs"]
+mod static_world;
 
 #[cfg(test)]
 #[path = "infantry_rocket_runtime_tests.rs"]

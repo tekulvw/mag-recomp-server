@@ -15,8 +15,9 @@ and supply its monotonic clock.
 
 ## External resources
 
-The strict rules schema has four fields. This example is **independently invented
-synthetic data**, not a game preset:
+The strict rules schema has four required fields and an optional, audit-only
+`provenance` object. This example is **independently invented synthetic data**,
+not a game preset:
 
 ```json
 {
@@ -40,6 +41,26 @@ coverage, prevention and owned damage modifiers. Startup rejects missing body
 multipliers when the feature is enabled; there is no living-body fallback.
 Actual catalogs, rules, source evidence and accounts remain external private
 inputs. Nothing in the public examples establishes real-client acceptance.
+
+### Producing the inputs
+
+`tools/extraction/extract-retail-incapacitation-rules.py --game-archive GAME
+--output RULES` reads the threshold and bleed-out time from the character
+gameplay settings in the hash-checked retail archive and records their member
+digest and JSON pointers in `provenance`. That resource names no physical-state
+exclusions, so the tool writes an empty `excluded_character_states`; add states
+only from separately qualified evidence.
+
+A combat catalog projected before body rows carried the field fails startup
+with `incapacitation requires explicit body multipliers`. Instead of a full
+reprojection, `tools/extraction/project-retail-combat-incapacitation.py --combat
+COMBAT --item-catalog ITEMS --output NEW_COMBAT` adds each row's authored
+`incapMult`. It requires the item catalog the combat catalog names in
+`provenance.catalog_sha256`, checks that every row's source pointer, living
+multiplier and armor area still match that authored entry, and keeps every other
+value. Both tools write a new file and support `--check`. Validate the result
+with `mag-gameplay --validate-catalogs ... --incapacitation-rules RULES` before
+packaging a new data bundle.
 
 The Helm chart can pass this optional flag through `data.gameplayExtraArgs`, using
 an operator-supplied file under `/data`. No deployment or data bundle is implied

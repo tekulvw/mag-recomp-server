@@ -9,6 +9,7 @@ pub(crate) fn rules() -> incapacitation::Rules {
         incapacitated_damage_threshold_hp: 83.0,
         incapacitated_duration_seconds: 7.0,
         excluded_character_states: vec![22],
+        provenance: None,
     }
 }
 
@@ -447,6 +448,44 @@ fn failed_expiry_audit_leaves_the_downed_life_and_pending_publications_unchanged
     );
     assert_downed(&engine, Duration::from_secs(7));
     assert!(patient(&engine).pending_shared.is_empty());
+}
+
+#[test]
+fn downed_owner_gives_up_once_without_a_second_death_and_cannot_be_revived_after() {
+    let mut engine = two_actors(0.4);
+    dispatch_pending_damage(&mut engine, 40.0, 1000);
+    assert!(matches!(
+        patient(&engine).life,
+        CharacterLife::Incapacitated { generation: 4, .. }
+    ));
+    assert_eq!(patient(&engine).reward_statistics.get(&12), Some(&1));
+    // The patient owns the request; its healer becomes an ordinary peer.
+    let healer = engine.active.take().unwrap();
+    engine.active = engine.peers.remove("synthetic-reservation-0000");
+    engine.peers.insert(healer.reservation.id.clone(), healer);
+    let mut give_up = 0x0215u16.to_be_bytes().to_vec();
+    give_up.extend(0x0380_0000u32.to_be_bytes());
+    dispatch(&mut engine, &give_up, 2000).unwrap();
+    let actor = engine.active.as_ref().unwrap();
+    assert!(matches!(
+        actor.life,
+        CharacterLife::AwaitingRespawn { generation: 4 }
+    ));
+    assert_eq!(actor.last_damage.health_quarter_points, 0);
+    assert_eq!(actor.last_damage.conditions & 2, 0);
+    assert_eq!(actor.reward_statistics.get(&12), Some(&1));
+    // Back to the healer: a give-up cannot be undone by a late revive.
+    let patient_actor = engine.active.take().unwrap();
+    let healer_id = engine.peers.keys().next().unwrap().clone();
+    engine.active = engine.peers.remove(&healer_id);
+    engine
+        .peers
+        .insert(patient_actor.reservation.id.clone(), patient_actor);
+    let _ = dispatch(&mut engine, &request(0x0380_0000), 3000);
+    assert!(matches!(
+        patient(&engine).life,
+        CharacterLife::AwaitingRespawn { generation: 4 }
+    ));
 }
 
 #[test]

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Project a bot-only provider catalog from the original Sabotage Cosmodrome level."""
+"""Project a bot-only provider catalog from one original retail Sabotage level."""
 import argparse
 import json
 import math
@@ -10,14 +10,34 @@ import runpy
 TOOLS = Path(__file__).resolve().parent / "extraction"
 SHARED = runpy.run_path(str(TOOLS / "extract-retail-objective-volumes.py"))
 HELPERS = runpy.run_path(str(TOOLS / "retail_map_helpers.py"))
-MAP = "mag_cosmodrome_final"
-MEMBER = f"/run/mag/ps3/levels/{MAP}/{MAP}.clv"
-LEVEL_SHA = "8157f5abc55ddd2ca9eaad3379e87ae909d0b8f7c9b08fa04f1f1e2d8018d96e"
-CLV_SHA = "d336caea88351dda5f3204a34e64fdde8eabdf0532b3133e2338cdd150488f4b"
+SABOTAGE_MAPS = runpy.run_path(str(TOOLS / "project-retail-sabotage-objectives.py"))["SABOTAGE_MAPS"]
+DEFAULT_MAP = "mag_cosmodrome_final"
+# Per-map qualification: the expected visible, unfrozen, unsnapped provider
+# count and the SHA-256 of the private witness that qualified that selection.
+# Level archive and CLV identities come from the pinned Sabotage map table.
+QUALIFIED = {
+    "mag_cosmodrome_final": dict(
+        providers=3,
+        qualification_sha256="f24127b06399d1353e4bb1c1a73943278227cd31a1488eda409096099b089b0d"),
+    "mag_kennicott_final": dict(
+        providers=2,
+        qualification_sha256="39f2839c01b2251b84acac85b11cbcc0e66fae460afde11017abc03ff3840d06"),
+    "mag_remote_comms_final": dict(
+        providers=3,
+        qualification_sha256="0198100a8c9bae0ae20b9df17a3cfa4b0ee4b3f689a00828abd47a1f744c3a1c"),
+}
 CLASS = "SupplyPointObjectProperties"
 QUALIFIED_START_TOLERANCE_M = 1.0
-RECEIPT_SHA = "f24127b06399d1353e4bb1c1a73943278227cd31a1488eda409096099b089b0d"
 require, sha = SHARED["require"], SHARED["sha"]
+
+
+def map_pins(map_name):
+    require(map_name in QUALIFIED and map_name in SABOTAGE_MAPS,
+            f"unsupported retail Sabotage map: {map_name}")
+    level = SABOTAGE_MAPS[map_name]
+    return dict(QUALIFIED[map_name], level_sha256=level["level_sha256"],
+                clv_sha256=level["clv_sha256"],
+                member=f"/run/mag/ps3/levels/{map_name}/{map_name}.clv")
 
 
 def values(fields):
@@ -51,25 +71,27 @@ def provider(row, definitions):
     }
 
 
-def validate_bindings(spawn_raw, collision_raw):
+def validate_bindings(spawn_raw, collision_raw, map_name=DEFAULT_MAP):
+    map_pins(map_name)
     spawns = json.loads(spawn_raw)
     mode = spawns["match_profile"]["game_type"]
-    require(spawns["active"]["map_name"] == MAP and type(mode) is int and mode == 0,
-            "spawn catalog must select Cosmodrome Sabotage")
+    require(spawns["active"]["map_name"] == map_name and type(mode) is int and mode == 0,
+            f"spawn catalog must select {map_name} Sabotage")
     collision = json.loads(collision_raw)
     require(collision["format"] == "mag_collision_world"
             and collision["coordinate_space"] == "world"
-            and collision["metadata"]["map_name"] == MAP,
-            "collision world must use Cosmodrome world coordinates")
+            and collision["metadata"]["map_name"] == map_name,
+            f"collision world must use {map_name} world coordinates")
 
 
-def project(archive_raw, spawn_raw, collision_raw):
-    validate_bindings(spawn_raw, collision_raw)
-    require(sha(archive_raw) == LEVEL_SHA, "wrong original Cosmodrome level archive")
+def project(archive_raw, spawn_raw, collision_raw, map_name=DEFAULT_MAP):
+    pins = map_pins(map_name)
+    validate_bindings(spawn_raw, collision_raw, map_name)
+    require(sha(archive_raw) == pins["level_sha256"], f"wrong original {map_name} level archive")
     extractor = runpy.run_path(str(TOOLS / "build-retail-spawn-catalog.py"))["extractor"]()
     archive = extractor.Psarc(archive_raw)
-    raw = archive.extract(archive.names.index(MEMBER) + 1)
-    require(sha(raw) == CLV_SHA, "wrong original Cosmodrome CLV")
+    raw = archive.extract(archive.names.index(pins["member"]) + 1)
+    require(sha(raw) == pins["clv_sha256"], f"wrong original {map_name} CLV")
     clv = extractor.retail_clv(raw)
     definitions = {}
     for match in SHARED["CLASS_HEADER"].finditer(raw):
@@ -89,14 +111,15 @@ def project(archive_raw, spawn_raw, collision_raw):
                               "tick_rate_seconds": tick}
     providers = [row for instance in clv.tables("InstanceProperties")
                  if (row := provider(instance, definitions)) is not None]
-    require(len(providers) == 3, "Cosmodrome must have three qualified replacement providers")
+    require(len(providers) == pins["providers"],
+            f"{map_name} must have {pins['providers']} qualified replacement providers")
     require(len({row["name_token"] for row in providers}) == len(providers),
             "ambiguous supply point name token")
     return {
-        "schema_version": 1, "application_id": 20231, "map": MAP, "mode": 0,
+        "schema_version": 1, "application_id": 20231, "map": map_name, "mode": 0,
         "spawn_sha256": sha(spawn_raw), "collision_sha256": sha(collision_raw),
-        "source": {"archive_sha256": LEVEL_SHA, "clv_sha256": CLV_SHA,
-                   "qualification_sha256": RECEIPT_SHA},
+        "source": {"archive_sha256": pins["level_sha256"], "clv_sha256": pins["clv_sha256"],
+                   "qualification_sha256": pins["qualification_sha256"]},
         "providers": providers,
     }
 
@@ -105,6 +128,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("--level-archive", "--spawn-catalog", "--collision-world", "--out"):
         parser.add_argument(name, required=True, type=Path)
+    parser.add_argument("--map", choices=sorted(QUALIFIED), default=DEFAULT_MAP,
+                        help=f"retail Sabotage map to project (default {DEFAULT_MAP})")
     parser.add_argument("--receipt", type=Path)
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
@@ -114,7 +139,7 @@ def main():
             files.append(args.receipt)
         require(len(set(path.resolve() for path in files)) == len(files), "input and outputs must be distinct")
         rules = project(args.level_archive.read_bytes(), args.spawn_catalog.read_bytes(),
-                        args.collision_world.read_bytes())
+                        args.collision_world.read_bytes(), args.map)
         encode = lambda obj: (json.dumps(obj, indent=2, sort_keys=True, allow_nan=False) + "\n").encode()
         result = encode(rules)
         receipt = encode({"schema_version": 1, "catalog_sha256": sha(result),

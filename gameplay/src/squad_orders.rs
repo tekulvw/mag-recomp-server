@@ -69,6 +69,8 @@ pub struct Waypoint {
 struct Squad {
     last_set_ms: u32,
     waypoint: Option<Waypoint>,
+    /// Manual tag owned here only for modes without a source gameplay provider.
+    manual_tag: Option<u32>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -104,6 +106,24 @@ impl State {
                 active: true,
             });
         }
+    }
+
+    /// The squad's manual tagged object, or FFFFFFFF when none is set.
+    pub fn manual_tag(&self, squad: u16) -> u32 {
+        self.squads
+            .get(usize::from(squad))
+            .and_then(|squad| squad.manual_tag)
+            .unwrap_or(u32::MAX)
+    }
+
+    /// FFFFFFFF clears the tag. Setting a tag does not stamp the shared gate.
+    pub fn set_manual_tag(&mut self, squad: u16, target: u32) -> Result<(), &'static str> {
+        let squad = self
+            .squads
+            .get_mut(usize::from(squad))
+            .ok_or("unknown_squad_order_squad")?;
+        squad.manual_tag = (target != u32::MAX).then_some(target);
+        Ok(())
     }
 
     pub fn clear_waypoint(&mut self, squad: u16) {
@@ -192,5 +212,26 @@ mod tests {
         assert!(!state.can_set(17, 4001, &rules));
         assert!(state.can_set(16, 4001, &rules));
         assert!(state.waypoint(32).is_none());
+    }
+
+    #[test]
+    fn manual_tags_set_change_and_clear_without_touching_the_gate() {
+        let rules = Rules {
+            squad_order_cooldown_ms: 1800,
+        };
+        let mut state = State::default();
+        assert_eq!(state.manual_tag(3), u32::MAX);
+        state.set_manual_tag(3, 0x0c80_000a).unwrap();
+        assert_eq!(state.manual_tag(3), 0x0c80_000a);
+        assert_eq!(state.manual_tag(4), u32::MAX);
+        state.set_manual_tag(3, 0x0c80_000b).unwrap();
+        assert_eq!(state.manual_tag(3), 0x0c80_000b);
+        state.set_manual_tag(3, u32::MAX).unwrap();
+        assert_eq!(state.manual_tag(3), u32::MAX);
+        assert!(state.can_set(3, 1301, &rules));
+        assert_eq!(
+            state.set_manual_tag(32, 0x0c80_000a),
+            Err("unknown_squad_order_squad")
+        );
     }
 }

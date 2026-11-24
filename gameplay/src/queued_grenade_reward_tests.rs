@@ -1181,6 +1181,7 @@ fn bot_firearm_kd_scheduler_counts_incapacitating_hit_once() {
             incapacitated_damage_threshold_hp: 83.,
             incapacitated_duration_seconds: 7.,
             excluded_character_states: vec![22],
+            provenance: None,
         })
         .unwrap();
     let mut death_rows = Vec::new();

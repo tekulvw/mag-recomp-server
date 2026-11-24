@@ -22,7 +22,7 @@ RUN set -eu; \
     pg="$(ls -d /usr/lib/postgresql/*/bin | head -n1)"; \
     mkdir -p /tmp/pg && chown postgres /tmp/pg; \
     su postgres -c "$pg/initdb -D /tmp/pg/data -U portal --auth=trust >/dev/null"; \
-    su postgres -c "$pg/pg_ctl -D /tmp/pg/data -o '-k /tmp/pg -c listen_addresses=127.0.0.1' -w start >/dev/null"; \
+    su postgres -c "$pg/pg_ctl -D /tmp/pg/data -o '-k /tmp/pg -c listen_addresses=127.0.0.1 -c fsync=off -c synchronous_commit=off -c full_page_writes=off' -w start >/dev/null"; \
     DATABASE_URL=postgres://portal@127.0.0.1:5432/postgres cargo test --locked; \
     su postgres -c "$pg/pg_ctl -D /tmp/pg/data -m fast stop >/dev/null"
 

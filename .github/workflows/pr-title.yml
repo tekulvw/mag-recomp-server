@@ -2,13 +2,19 @@ name: PR title
 
 on:
   pull_request:
-    types: [opened, reopened, synchronize, edited, ready_for_review]
+    # closed cancels a still-queued check of a merged or closed PR.
+    types: [opened, reopened, synchronize, edited, ready_for_review, closed]
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   pr-title:
+    if: github.event.action != 'closed'
     runs-on: mag-recomp-server
     timeout-minutes: 5
     steps:

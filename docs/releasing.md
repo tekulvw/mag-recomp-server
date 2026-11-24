@@ -158,9 +158,14 @@ and the [Horizon runtime guide](../horizon/README.md).
 ## Main image testing channel
 
 The separate `Main container images` workflow runs after pushes to `main`.
-It runs the public source checks, then builds the `linux/amd64` server and portal
-images from that exact commit. Each image is first published as `sha-<full-commit-sha>`.
-Only after every build succeeds does the workflow advance these moving aliases:
+It builds the `linux/amd64` server and portal images from that exact commit,
+but only for components whose build context changed: each image is also tagged
+`tree-<git-tree-sha>` with the Git tree of its directory (`horizon`, `gameplay`
+or `portal`), and a component whose tree is already published is reused. Before
+building, it runs the public source checks for the paths the push changed and
+for every component it builds. Each built image is published as `sha-<full-commit-sha>`.
+Only after every build succeeds does the workflow advance these moving aliases,
+and reused images also get the commit's `sha-` tag then:
 
 ```text
 ghcr.io/tekulvw/mag-recomp-server-medius:main
@@ -168,18 +173,22 @@ ghcr.io/tekulvw/mag-recomp-server-game:main
 ghcr.io/tekulvw/mag-recomp-server-portal:main
 ```
 
-Runs are queued without replacing pending runs, with separate concurrency groups
-for each branch, and promotion checks the repository's current main SHA.
-Rerunning an old workflow cannot move `main` back to an older commit. If checks
+A newer push to `main` cancels the older run, so only the newest commit builds;
+because images are keyed by tree, a component changed only in a cancelled
+commit is built by the next run. Promotion checks the repository's current main
+SHA, and reruns use a separate concurrency group, so rerunning an old workflow
+cannot cancel current main or move `main` back to an older commit. If checks
 or any build fails, the existing `main` aliases remain on the previous
 successful build. Promotion consists of one registry write per image; a registry failure
-between them can temporarily leave different revisions. Rerun the failed
-promotion job for current main to finish it. The workflow summary and image
-`org.opencontainers.image.revision` labels identify the source commit. Forks
-publish under their own lower-case owner namespace.
+or cancellation between them can temporarily leave different revisions. The next
+run, or rerunning the failed promotion job for current main, finishes it. The
+workflow summary names the source commit and tree of each image; the
+`org.opencontainers.image.revision` label of a reused image names the commit
+that first built it. Forks publish under their own lower-case owner namespace.
 
-`Run workflow` on the `main` branch rebuilds the channel without cutting a
-release. Dispatches on other branches do not publish. This channel creates no
+`Run workflow` on the `main` branch runs every check and refreshes the channel
+without cutting a release; select `rebuild` to rebuild images whose tree is
+already published. Dispatches on other branches do not publish. This channel creates no
 Git tags or GitHub releases, never moves stable SemVer or `latest` image tags,
 and does not publish a rolling chart or deploy services. Stable releases remain
 under the human release process above. NEWS still contains the component release

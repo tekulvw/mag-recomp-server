@@ -315,3 +315,115 @@ fn finite_round_budget_debits_only_the_candidate_and_refills_without_erasing_ref
         "infantry_rocket_clock_reversed"
     );
 }
+
+impl Fixture {
+    /// The item catalog as loaded from a file that the combat metadata names.
+    fn bound_items(&self, matching_source: bool) -> ItemCatalog {
+        use sha2::{Digest, Sha256};
+        let bytes = serde_json::to_vec(&self.items).unwrap();
+        let mut combat = self.combat.clone();
+        combat["provenance"]["catalog_sha256"] = json!(if matching_source {
+            format!("{:x}", Sha256::digest(&bytes))
+        } else {
+            "0".repeat(64)
+        });
+        let directory = std::env::temp_dir().join(format!(
+            "mag-synthetic-derived-rockets-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("items.json"), &bytes).unwrap();
+        std::fs::write(
+            directory.join("blast.json"),
+            json!({"schema_version":1,"applications":[20230,20231],"character_damage":{
+                "armor_rating_reduction":0.0,"armor_prevention_reduction":0.0,
+                "hit_location":0,"damage_type":10}})
+            .to_string(),
+        )
+        .unwrap();
+        let items = ItemCatalog::load_for_application(
+            directory.join("items.json"),
+            directory.join("blast.json"),
+            20231,
+        );
+        std::fs::remove_dir_all(&directory).unwrap();
+        items
+            .unwrap()
+            .with_retail_combat(RetailCombatCatalog::from_json(&combat.to_string()).unwrap())
+    }
+
+    fn ammo(&mut self, faction: u8) -> &mut Value {
+        &mut self.items["definitions"]["projectile_ammo"][format!("synthetic_ammo_{faction}")]["parameters"]
+    }
+}
+
+#[test]
+fn item_catalog_derivation_reproduces_each_faction_launcher_row() {
+    let derived = Catalog::from_item_catalog(&Fixture::new().bound_items(true)).unwrap();
+    assert_eq!(derived.variants(), synthetic_catalog().variants());
+    for faction in 0..3 {
+        let variant = derived.variant(faction, item_id(faction)).unwrap();
+        assert_eq!(variant.blast.character_hp, 87.);
+        assert_eq!(variant.blast.half_radius_m, 1.5);
+        assert_eq!(variant.blast.outer_radius_m, 3.75);
+    }
+}
+
+#[test]
+fn item_catalog_derivation_requires_metadata_naming_that_catalog() {
+    let fixture = Fixture::new();
+    for items in [fixture.items(), fixture.bound_items(false)] {
+        assert_eq!(
+            Catalog::from_item_catalog(&items).unwrap_err(),
+            "derived_infantry_rocket_source_unbound"
+        );
+    }
+}
+
+#[test]
+fn item_catalog_derivation_refuses_missing_ambiguous_or_inconsistent_launchers() {
+    let mut guided = Fixture::new();
+    guided.ammo(0)["propulsion_strategy"] = json!("kWepPropulsionStrategyRocketGuided");
+    let items = guided.bound_items(true);
+    assert!(is_guided_launcher(&items, item_id(0)));
+    assert!(!is_guided_launcher(&items, item_id(1)));
+    assert_eq!(
+        Catalog::from_item_catalog(&items).unwrap_err(),
+        "derived_infantry_rocket_launcher_missing"
+    );
+
+    let mut twice = Fixture::new();
+    let (reference, mut copy) = item(1, 40, "synthetic_launcher_1", "kWeapon", "weapons");
+    copy["name"] = json!("synthetic_launcher_1");
+    twice.items["items"][reference] = copy;
+    assert_eq!(
+        Catalog::from_item_catalog(&twice.bound_items(true)).unwrap_err(),
+        "derived_infantry_rocket_launcher_ambiguous"
+    );
+
+    let mut magazine = Fixture::new();
+    magazine.items["definitions"]["weapons"]["synthetic_launcher_2"]["parameters"]["magazine_capacity"] =
+        json!(2);
+    assert_eq!(
+        Catalog::from_item_catalog(&magazine.bound_items(true)).unwrap_err(),
+        "derived_infantry_rocket_weapon_mismatch"
+    );
+
+    let mut timer = Fixture::new();
+    timer.ammo(2)["detonation_timer"] = json!(0.5);
+    assert_eq!(
+        Catalog::from_item_catalog(&timer.bound_items(true)).unwrap_err(),
+        "derived_infantry_rocket_ammo_mismatch"
+    );
+
+    let mut sightless = Fixture::new();
+    sightless.items["items"]
+        .as_object_mut()
+        .unwrap()
+        .remove("FactionItemList2:16");
+    assert_eq!(
+        Catalog::from_item_catalog(&sightless.bound_items(true)).unwrap_err(),
+        "derived_infantry_rocket_sight_missing"
+    );
+}

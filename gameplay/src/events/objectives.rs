@@ -467,14 +467,16 @@ impl<W: Write> Engine<W> {
         let rewards: Vec<_> = world
             .take_reward_actions()
             .into_iter()
-            .filter(|action| {
-                self.peers.values().chain(self.active.iter()).any(|actor| {
-                    actor.reservation.id == action.recipient.reservation_id
-                        && actor.reservation.world == action.recipient.world_id
-                        && actor.reservation.player == action.recipient.player_id
-                })
-            })
-            .map(|action| {
+            .filter_map(|action| {
+                let actor = self
+                    .peers
+                    .values()
+                    .chain(self.active.iter())
+                    .find(|actor| {
+                        actor.reservation.id == action.recipient.reservation_id
+                            && actor.reservation.world == action.recipient.world_id
+                            && actor.reservation.player == action.recipient.player_id
+                    })?;
                 let id = format!(
                     "objective-{:016x}-{}-{}-{:?}",
                     self.round_number,
@@ -482,7 +484,15 @@ impl<W: Write> Engine<W> {
                     action.started_at.as_nanos(),
                     action.kind
                 );
-                action.recipient.event(id, action.kind, 1)
+                // The objective itself is the context; current squad orders and
+                // pose decide FRAGO. Modes without an assignment keep base XP.
+                Some(self.frago_objective_reward(
+                    action.recipient.event(id, action.kind, 1),
+                    actor,
+                    self.frago_object_position(0x0c80_0000 | u32::from(action.object_index)),
+                    self.frago_assignment(actor),
+                    frago::Frame::default(),
+                ))
             })
             .collect();
         self.check_reward_capacity(&rewards)?;
