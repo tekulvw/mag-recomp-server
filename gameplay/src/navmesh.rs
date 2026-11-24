@@ -1,5 +1,10 @@
 //! Offline Recast bake and shared Detour navigation for verified static worlds.
 //! Route queries never certify raw collision edges; physical movement remains authoritative.
+use mag_navmesh_sys::{
+    mag_nav_bake, mag_nav_column_goals, mag_nav_component, mag_nav_component_id, mag_nav_contains,
+    mag_nav_contains_settlement_column, mag_nav_destroy, mag_nav_free_bytes, mag_nav_goals,
+    mag_nav_load, mag_nav_route, mag_nav_tile_stats,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{ffi::c_int, sync::Mutex, time::Instant};
@@ -252,89 +257,6 @@ fn valid_bounds(b: &Bounds) -> bool {
             && b.max[i] > b.min[i]
             && b.max[i] - b.min[i] <= 4096.
     })
-}
-unsafe extern "C" {
-    fn mag_nav_bake(
-        verts: *const f32,
-        nv: c_int,
-        tris: *const c_int,
-        nt: c_int,
-        min: *const f32,
-        max: *const f32,
-        out: *mut *mut u8,
-        size: *mut c_int,
-        mode: c_int,
-        slope_degrees: f32,
-    ) -> c_int;
-    fn mag_nav_free_bytes(data: *mut u8);
-    fn mag_nav_load(
-        data: *const u8,
-        size: c_int,
-        min: *const f32,
-        max: *const f32,
-        mode: c_int,
-        node_limit: c_int,
-    ) -> *mut std::ffi::c_void;
-    fn mag_nav_destroy(handle: *mut std::ffi::c_void);
-    fn mag_nav_tile_stats(
-        handle: *const std::ffi::c_void,
-        occupied: *mut c_int,
-        max_polygons: *mut c_int,
-    );
-    fn mag_nav_route(
-        handle: *mut std::ffi::c_void,
-        start: *const f32,
-        goal: *const f32,
-        radius: f32,
-        ps: *mut f32,
-        pg: *mut f32,
-        points: *mut f32,
-        npoints: *mut c_int,
-        refs: *mut u64,
-        nrefs: *mut c_int,
-        nodes: *mut c_int,
-        stages: *mut c_int,
-    ) -> c_int;
-    fn mag_nav_component(
-        handle: *mut std::ffi::c_void,
-        start: *const f32,
-        goal: *const f32,
-        closest: *mut f32,
-        min: *mut f32,
-        max: *mut f32,
-        count: *mut c_int,
-        total: *mut c_int,
-    ) -> c_int;
-    fn mag_nav_component_id(handle: *mut std::ffi::c_void, position: *const f32) -> c_int;
-    fn mag_nav_goals(
-        handle: *mut std::ffi::c_void,
-        goal: *const f32,
-        radius: f32,
-        components: *mut c_int,
-        points: *mut f32,
-        count: *mut c_int,
-    ) -> c_int;
-    fn mag_nav_column_goals(
-        handle: *mut std::ffi::c_void,
-        goal: *const f32,
-        radius: f32,
-        height: f32,
-        components: *mut c_int,
-        points: *mut f32,
-        count: *mut c_int,
-    ) -> c_int;
-    fn mag_nav_contains(
-        handle: *mut std::ffi::c_void,
-        p: *const f32,
-        refs: *const u64,
-        nrefs: c_int,
-    ) -> c_int;
-    fn mag_nav_contains_settlement_column(
-        handle: *mut std::ffi::c_void,
-        p: *const f32,
-        refs: *const u64,
-        nrefs: c_int,
-    ) -> c_int;
 }
 /// Runtime tile layout. `Auto` keeps the 256-tile formats (v2/v3, byte for
 /// byte unchanged) whenever the grid fits and uses the wide layout otherwise.

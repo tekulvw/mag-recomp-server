@@ -14,7 +14,8 @@ credentials. Operators supply required runtime resources separately.
 | Path | Contents |
 | --- | --- |
 | `gameplay/` | Rust gameplay state, protocol codecs, bots, collision and navigation |
-| `gameplay/vendor/recastnavigation/` | Pinned Recast/Detour sources and original license |
+| `gameplay/navmesh-sys/` | C++ navmesh bridge, its build script and raw FFI declarations |
+| `gameplay/navmesh-sys/vendor/recastnavigation/` | Pinned Recast/Detour sources and original license |
 | `horizon/` | Horizon SCERT/Medius transport, lobby integration and synthetic checks |
 | `portal/` | Player accounts website: Google sign-in, launcher linking and signed game tickets ([portal](portal/README.md)) |
 | `charts/mag-recomp-server/` | Independently versioned Helm deployment, including optional forwarding DNS |

@@ -10,6 +10,7 @@ default-run = "mag-gameplay"
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = { version = "=1.0.149", features = ["float_roundtrip", "raw_value"] }
 sha2 = "=0.10.9"
+mag-navmesh-sys = { path = "navmesh-sys" }
 
 [[bin]]
 name = "mag-navmesh"

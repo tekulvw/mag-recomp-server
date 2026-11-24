@@ -1,0 +1,12 @@
+# Raw bindings to the C++ navmesh bridge and the pinned Recast/Detour sources it
+# builds. A path dependency rather than part of mag-gameplay so that cargo builds
+# the C++ once per target directory: as a non-member it is shared by clippy,
+# test and build, and edits to gameplay's Rust sources never rerun its build
+# script. The safe API lives in gameplay's navmesh module.
+[package]
+name = "mag-navmesh-sys"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+links = "mag_navmesh"

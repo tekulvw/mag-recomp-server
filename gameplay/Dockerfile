@@ -3,15 +3,15 @@
 FROM rust:1.99.0-slim-bookworm@sha256:2c3a22f0a5533ea2dd5a16627bc841228151faa2d4de2644ac9987e4a2f1f2fa AS build
 RUN apt-get update && apt-get install -y --no-install-recommends g++ ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /src/gameplay
-COPY Cargo.toml Cargo.lock build.rs ./
+COPY Cargo.toml Cargo.lock ./
 COPY LICENSE ./
 COPY src/ src/
-COPY vendor/ vendor/
+COPY navmesh-sys/ navmesh-sys/
 COPY data/synthetic-bot-objective-policy.json data/synthetic-wire-profiles.json data/synthetic-movement-metadata.json data/
 RUN cargo build --locked --release --bins
 RUN mkdir -p /out-licenses \
     && cp LICENSE /out-licenses/Project-MIT.txt \
-    && cp vendor/recastnavigation/License.txt /out-licenses/RecastNavigation.txt \
+    && cp navmesh-sys/vendor/recastnavigation/License.txt /out-licenses/RecastNavigation.txt \
     && find /usr/local/cargo/registry/src -type f \( -iname '*license*' -o -iname '*notice*' \) \
        -exec cp --parents -t /out-licenses/ '{}' +
 

@@ -4,6 +4,10 @@
 
 Use Rust 1.99.0, a C++11 compiler (`c++`, or set `CXX`) and `ar`. The native build
 compiles the vendored Recast/Detour sources; it does not extract game resources.
+It lives in the `gameplay/navmesh-sys` path dependency, which holds the C++ navmesh
+bridge, the vendored sources and the raw FFI declarations; the safe API is
+`gameplay/src/navmesh.rs`. Cargo builds that C++ once per target directory, shared
+by clippy, test and build, and edits to gameplay's Rust sources do not rebuild it.
 
 ```sh
 cargo fmt --manifest-path gameplay/Cargo.toml --all -- --check
