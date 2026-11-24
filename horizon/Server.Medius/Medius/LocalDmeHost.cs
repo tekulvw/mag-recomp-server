@@ -740,7 +740,7 @@ namespace Server.Medius
                     if (!Route(reply))
                     {
                         if (current) { reservation.Invalidated = true; reservation.ReleaseReason = reply.Failure == GameplayBridgeFailure.None && !reply.Ok ? "rust_rejection" : "invalid_bridge_reply"; }
-                        Logger.Warn($"Gameplay bridge event refused: player={client.DmeId} failure={reply.Failure} elapsed_ms={elapsed.ElapsedMilliseconds}; invalidating current reservation");
+                        Logger.Warn($"Gameplay bridge event refused: player={client.DmeId} failure={reply.Failure} error={reply.Error ?? "none"} elapsed_ms={elapsed.ElapsedMilliseconds}; invalidating current reservation");
                         continue;
                     }
                     if (current) reservation.Deadline = DateTime.UtcNow.AddSeconds(120);
