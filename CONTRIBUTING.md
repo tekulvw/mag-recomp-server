@@ -16,6 +16,10 @@ Document their origin. Strict JSON schemas can use hash-bound provenance in
 in an access-controlled integration workspace.
 
 Run the publication guard and affected synthetic checks before committing.
+Pull request CI runs only the checks the changed paths need (see
+`.github/scripts/select-checks.sh`); the publication guard always runs, and a
+change under `.github/` runs every check. A new push, or closing the PR, cancels
+its stale run.
 Describe the resulting behavior and its validation. Do not claim real-client
 acceptance, gameplay performance or production readiness from synthetic tests.
 

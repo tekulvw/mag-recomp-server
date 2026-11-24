@@ -4,41 +4,116 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      rebuild:
+        description: Rebuild every image, even when its source tree is already published
+        type: boolean
+        default: false
 
 permissions: {}
 
-# Keep main-alias promotion ordered, including manual retries. A stale queued
-# run is also checked against current main before it can move either alias.
+# Only the newest main commit builds: a new push cancels the older run. Images
+# are keyed by their source tree, so a commit whose run was cancelled is built
+# by the next run that needs it. Reruns get their own group, so retrying an old
+# run cannot cancel or displace current main, and promotion checks that its
+# commit is still current main before it moves any alias.
 concurrency:
-  group: main-container-images-${{ github.ref }}
-  cancel-in-progress: false
-  queue: max
+  group: main-container-images-${{ github.ref }}${{ github.run_attempt != '1' && '-rerun' || '' }}
+  cancel-in-progress: true
 
 jobs:
-  checks:
+  plan:
     if: github.ref == 'refs/heads/main'
+    runs-on: mag-recomp-server
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      build: ${{ steps.plan.outputs.build }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      checks: ${{ steps.plan.outputs.checks }}
+      medius_tree: ${{ steps.plan.outputs.medius_tree }}
+      game_tree: ${{ steps.plan.outputs.game_tree }}
+      portal_tree: ${{ steps.plan.outputs.portal_tree }}
+    steps:
+      - name: Check out the main commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Choose the images to build and the checks to run
+        id: plan
+        env:
+          BEFORE: ${{ github.event.before }}
+          REBUILD: ${{ inputs.rebuild && 'true' || 'false' }}
+        run: |
+          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          # Check what this push changed; a dispatch or an unreadable diff checks everything...
+          checks=all
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ -n "$BEFORE" ] &&
+            git fetch --no-tags --depth=1 origin "$BEFORE" && paths="$(git diff --name-only "$BEFORE" HEAD)"; then
+            checks="$(printf '%s\n' "$paths" | .github/scripts/select-checks.sh changed | sed -n 's/=true$//p' | tr '\n' ' ')"
+          fi
+          # ...and every component that must be built. An image is keyed by the Git tree
+          # of its build context: an identical tree was already checked, built and published.
+          include=''
+          build=false
+          for entry in horizon:medius gameplay:game portal:portal; do
+            context="${entry%%:*}"
+            suffix="${entry#*:}"
+            tree="$(git rev-parse "HEAD:$context")"
+            echo "${suffix}_tree=$tree" >> "$GITHUB_OUTPUT"
+            image="ghcr.io/$owner/mag-recomp-server-$suffix"
+            if [ "$REBUILD" != true ] && docker buildx imagetools inspect "$image:tree-$tree" > /dev/null 2>&1; then
+              printf '* Reusing `%s:tree-%s`.\n' "$image" "$tree" >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+            build=true
+            include="$include${include:+,}{\"context\":\"$context\",\"suffix\":\"$suffix\",\"tree\":\"$tree\"}"
+            case "$context" in
+              # The configured-world check runs Medius against real gameplay workers.
+              horizon|gameplay) checks="$checks $context registry" ;;
+              *) checks="$checks $context" ;;
+            esac
+            printf '* Building `%s` from tree `%s`.\n' "$image" "$tree" >> "$GITHUB_STEP_SUMMARY"
+          done
+          # shellcheck disable=SC2086 # checks is a word list
+          checks="$(printf '%s\n' boundary $checks | sort -u | tr '\n' ' ')"
+          printf '* Checks: %s\n' "$checks" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "build=$build"
+            echo "matrix={\"include\":[$include]}"
+            echo "checks=$checks"
+          } >> "$GITHUB_OUTPUT"
+
+  checks:
+    needs: plan
     permissions:
       contents: read
     uses: ./.github/workflows/check.yml
     with:
       ref: ${{ github.sha }}
+      checks: ${{ needs.plan.outputs.checks }}
 
   build-images:
-    needs: checks
+    needs: [plan, checks]
+    if: needs.plan.outputs.build == 'true'
     runs-on: mag-recomp-server
     permissions:
       contents: read
       packages: write
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - context: horizon
-            suffix: medius
-          - context: gameplay
-            suffix: game
-          - context: portal
-            suffix: portal
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - name: Check out the tested main commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -66,7 +141,9 @@ jobs:
           context: ./${{ matrix.context }}
           platforms: linux/amd64
           push: true
-          tags: ${{ steps.source.outputs.image }}:sha-${{ github.sha }}
+          tags: |
+            ${{ steps.source.outputs.image }}:sha-${{ github.sha }}
+            ${{ steps.source.outputs.image }}:tree-${{ matrix.tree }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -74,7 +151,11 @@ jobs:
           cache-to: type=gha,mode=max,scope=main-${{ matrix.suffix }}
 
   promote-main:
-    needs: build-images
+    needs: [plan, checks, build-images]
+    # Also when nothing needed building: every image is then reused by its tree.
+    if: >-
+      !cancelled() && needs.plan.result == 'success' && needs.checks.result == 'success'
+      && (needs.build-images.result == 'success' || needs.build-images.result == 'skipped')
     runs-on: mag-recomp-server
     permissions:
       contents: read
@@ -94,6 +175,9 @@ jobs:
       - name: Promote current main images
         env:
           GH_TOKEN: ${{ github.token }}
+          MEDIUS_TREE: ${{ needs.plan.outputs.medius_tree }}
+          GAME_TREE: ${{ needs.plan.outputs.game_tree }}
+          PORTAL_TREE: ${{ needs.plan.outputs.portal_tree }}
         run: |
           current_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
           if [ "$current_sha" != "$GITHUB_SHA" ]; then
@@ -101,8 +185,13 @@ jobs:
             exit 0
           fi
           owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
-          for suffix in medius game portal; do
+          for entry in "medius:$MEDIUS_TREE" "game:$GAME_TREE" "portal:$PORTAL_TREE"; do
+            suffix="${entry%%:*}"
+            tree="${entry#*:}"
+            test -n "$tree"
             image="ghcr.io/$owner/mag-recomp-server-$suffix"
-            docker buildx imagetools create --prefer-index=false --tag "$image:main" "$image:sha-$GITHUB_SHA"
-            printf '* Published `%s:main` from `%s`.\n' "$image" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+            # A reused image also gets this commit's sha- tag, so every main commit has one.
+            docker buildx imagetools create --prefer-index=false \
+              --tag "$image:sha-$GITHUB_SHA" --tag "$image:main" "$image:tree-$tree"
+            printf '* Published `%s:main` from `%s` (source tree `%s`).\n' "$image" "$GITHUB_SHA" "$tree" >> "$GITHUB_STEP_SUMMARY"
           done
