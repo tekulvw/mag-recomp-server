@@ -23,7 +23,9 @@ For Sabotage and Acquisition:
 4. Acknowledge the exact profile and formation identity on an idle Rust worker,
    then configure its human quorum. Only then admit the selected cohort.
 5. Lock the pairing for that cohort. Late joins fill only its two factions within
-   team/world capacity. Once the round is terminal, workers advertising
+   team/world capacity. In a configured registry a same-faction party of up to
+   eight can also join late, together on its side (see
+   [late party entry](configured-world-registry.md#late-party-entry)). Once the round is terminal, workers advertising
    `independent_match_cohorts_v1` can retain its results separately and admit a
    next cohort with a different pairing and map. Old releases and reward ACKs
    do not block unrelated next-cohort admission. Legacy workers keep their

@@ -76,6 +76,7 @@ namespace Server.Medius {
   public GameplayWorkerIdentity WorkerIdentity {get;}
   public GameplayPartyReservation PartyReservation {get;}
   public bool SupportsPartyReservations => Capabilities.Contains("party_reservation_v1",StringComparer.Ordinal);
+  public bool SupportsPartyLateEntry => SupportsPartyReservations && Capabilities.Contains("party_late_entry_v1",StringComparer.Ordinal);
   public bool SupportsActiveLoadoutRefresh => Capabilities.Contains("active_loadout_refresh_v1",StringComparer.Ordinal);
   public bool SupportsCommittedLoadoutSelections => Capabilities.Contains("committed_loadout_selection_v1",StringComparer.Ordinal);
   public bool SupportsLoadoutLayoutChanges => Capabilities.Contains("loadout_layout_revision_v1",StringComparer.Ordinal);

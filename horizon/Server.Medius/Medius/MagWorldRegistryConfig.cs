@@ -55,7 +55,7 @@ namespace Server.Medius
                     "MAG_ADVERTISE_IPV4" => address, "MAG_GAME_TCP_PORT" => port.ToString(System.Globalization.CultureInfo.InvariantCulture), _ => null
                 });
                 var array = root.GetProperty("workers");
-                if (array.ValueKind != JsonValueKind.Array || array.GetArrayLength() < 2 || array.GetArrayLength() > 16) throw Invalid();
+                if (array.ValueKind != JsonValueKind.Array || array.GetArrayLength() < 1 || array.GetArrayLength() > 16) throw Invalid();
                 var ids = new HashSet<string>(StringComparer.Ordinal);
                 var endpoints = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 var workers = new List<MagConfiguredWorker>();

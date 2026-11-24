@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using DotNetty.Common.Internal.Logging;
 using RT.Models.MAG;
 
 namespace Server.Medius
@@ -8,6 +9,10 @@ namespace Server.Medius
     /// <summary>Private retail party membership. Access is serialized by the lobby gate.</summary>
     public sealed class MagPartyDirectory
     {
+        /// <summary>One authored squad: a party always fits a single squad, so it
+        /// can enter a running match together (late entry).</summary>
+        public const int MaximumMembers = 8;
+        static readonly IInternalLogger Logger = InternalLoggerFactory.GetInstance<MagPartyDirectory>();
         public sealed record Member(string Account, uint AccountId, byte Faction, Func<bool> Current,
             Action<MagRetailPartyMessage> Send);
 
@@ -26,7 +31,6 @@ namespace Server.Medius
         readonly TimeSpan _lifetime;
         uint _nextId;
         const int MaximumOnline = 4096;
-        const int MaximumMembership = 32;
         const int MaximumInvitations = 64;
 
         public MagPartyDirectory(TimeSpan lifetime)
@@ -131,9 +135,15 @@ namespace Server.Medius
                 SendRoster(party);
             }
             if (!ReferenceEquals(party.Members[0], owner) || party.Status != 1 ||
-                party.Members.Count >= MaximumMembership || party.InvitedAccounts.Count >= MaximumInvitations ||
-                !party.InvitedAccounts.Add(invite.Invitee))
+                party.InvitedAccounts.Count >= MaximumInvitations || party.InvitedAccounts.Contains(invite.Invitee))
                 return false;
+            // Outstanding invitations hold seats, so an accepted invite never overfills.
+            if (party.Members.Count + party.Pending.Count >= MaximumMembers)
+            {
+                Logger.Warn($"Retail party invite refused: reason=party_full party={party.Id} members={party.Members.Count} pending={party.Pending.Count} maximum={MaximumMembers}");
+                return false;
+            }
+            party.InvitedAccounts.Add(invite.Invitee);
             // The response has no invite nonce. Never reuse an inviter/party/target tuple.
             party.Pending.Add(target.AccountId, (target, now + _lifetime));
             target.Send(new MagRetailPartyInvite { PartyId = party.Id, Inviter = owner.AccountId, Invitee = target.AccountId });
@@ -149,7 +159,11 @@ namespace Server.Medius
                 return false;
             party.Pending.Remove(target.AccountId);
             if (answer.Response != 0) return true;
-            if (party.Members.Count >= MaximumMembership) return false;
+            if (party.Members.Count >= MaximumMembers)
+            {
+                Logger.Warn($"Retail party join refused: reason=party_full party={party.Id} maximum={MaximumMembers}");
+                return false;
+            }
             party.Members.Add(target);
             _membership.Add(target.AccountId, party);
             target.Send(new MagRetailPartyJoined { PartyId = party.Id });

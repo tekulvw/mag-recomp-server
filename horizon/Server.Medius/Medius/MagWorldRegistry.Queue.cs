@@ -159,7 +159,8 @@ namespace Server.Medius
                     var s = slot.Host.GetPlacement();
                     return new MagWorldPlacementState(slot.Config.WorkerId, s.Ready && !slot.Faulted, s.Draining || slot.Faulted,
                         s.StartupPolicy.MinimumPlayers, s.StartupPolicy.MaximumPlayers, s.MinimumPlayersPerTeam.ToArray(), s.Profiles, s.CurrentProfile,
-                        s.LiveTeamCounts, s.PendingTeamCounts, s.LiveCount, s.PendingTeamCounts.Sum(), s.CanForm);
+                        s.LiveTeamCounts, s.PendingTeamCounts, s.LiveCount, s.PendingTeamCounts.Sum(), s.CanForm,
+                        s.AcceptsLateParties && !slot.Faulted);
                 }).ToArray();
                 var plan = MagWorldPlacement.PlanNext(eligible.Select(e => e.Human).ToArray(), states, RandomNumberGenerator.GetInt32);
                 if (plan == null) return;
