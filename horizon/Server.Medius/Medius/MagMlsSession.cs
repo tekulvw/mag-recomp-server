@@ -52,6 +52,8 @@ namespace Server.Medius
             if (!IsBound || IsExpired(now) || !envelope.IsValid) return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();
             if (!MagPluginRouting.IsClientPluginId(ApplicationId, envelope.PluginId))
             { LastRefusal = $"unexpected-plugin-id={envelope.PluginId}"; return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>(); }
+            if (MagRetailClanCodec.TryReadClanType(envelope.Payload, ApplicationId, out var clanType))
+                return HandleClan(envelope.Payload, clanType, now);
             if (!MagMessageCodec.TryParseClientForApplication(envelope.Payload, ApplicationId, out var message))
             { LastRefusal = "unknown-or-malformed-type"; return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>(); }
             if (message is MagHello && State == SessionState.TransportReady)
@@ -194,6 +196,22 @@ namespace Server.Medius
                 return new[] { MagPluginRouting.ToMlsClient(response, ApplicationId) };
             }
             ObserveActivity(now); return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();
+        }
+        // Retail clans are not implemented, so every account is in none. The Community screen asks for
+        // the player's clan list before it shows anything (Friends included) and accepts "no results"
+        // as success. Other clan requests stay unanswered and are reported with their bytes.
+        private IReadOnlyList<RT_MSG_SERVER_PLUGIN_TO_APP> HandleClan(byte[] payload, byte clanType, DateTime now)
+        {
+            if (State != SessionState.Ready)
+            { LastRefusal = $"clan-type={clanType:x2}-before-ready"; return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>(); }
+            if (clanType != MagRetailClanCodec.GetClanListType)
+            { LastRefusal = $"unhandled-clan-type={clanType:x2}"; ObserveActivity(now); return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>(); }
+            if (!MagRetailClanCodec.TryParseGetClanListRequest(payload, ApplicationId, out var requestId, out var accountId))
+            { LastRefusal = "malformed-clan-list-request"; ObserveActivity(now); return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>(); }
+            // Another account's list is empty too, so a mismatch is only recorded.
+            StorageStatus = accountId == AccountId ? "clan-list-no-clans" : $"clan-list-no-clans-other-account={accountId}/session={AccountId}";
+            ObserveActivity(now);
+            return new[] { MagPluginRouting.ToMlsClient(MagRetailClanCodec.SerializeNoClansResponse(requestId), ApplicationId) };
         }
         // Kind 2 names the character id (the id players see in a match); kind 1 names a character.
         // A name is the stored name first, else the one character whose display name it is, since

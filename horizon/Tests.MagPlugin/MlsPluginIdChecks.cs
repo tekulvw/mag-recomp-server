@@ -83,6 +83,78 @@ internal static partial class LeadershipProgressionChecks
         });
     });
 
+    // Retail clan list: MAG type 01FC, then a little-endian clan body. Every account is in no clan.
+    public static void RetailClanList() => WithDirectory(directory =>
+    {
+        var store = new LocalCharacterStore(Path.Combine(directory, "characters.json")) { ProgressionCatalog = Load(directory, Catalog()) };
+        Create(store, "alpha", "Alpha");
+        static byte[] Request(uint requestId, uint accountId, byte clanType = 0x02) =>
+            new byte[] { 0x01, 0xFC, clanType }.Concat(BitConverter.GetBytes(requestId)).Concat(BitConverter.GetBytes(accountId)).ToArray();
+        Check(BitConverter.IsLittleEndian, "Synthetic clan requests assume a little-endian host");
+
+        // Request decode: exactly type 2, request id and account id, little-endian, retail only.
+        byte[] wire = Request(0x11223344, 0x0A0B0C0D);
+        Check(wire.SequenceEqual(new byte[] { 0x01, 0xFC, 0x02, 0x44, 0x33, 0x22, 0x11, 0x0D, 0x0C, 0x0B, 0x0A }), "Synthetic clan request layout is wrong");
+        Check(MagRetailClanCodec.TryParseGetClanListRequest(wire, 20231, out var requestId, out var accountId) &&
+            requestId == 0x11223344 && accountId == 0x0A0B0C0D, "Retail clan list request did not decode");
+        Check(!MagRetailClanCodec.TryParseGetClanListRequest(wire[..10], 20231, out _, out _), "A short clan list request decoded");
+        Check(!MagRetailClanCodec.TryParseGetClanListRequest(wire.Concat(new byte[] { 0 }).ToArray(), 20231, out _, out _), "A long clan list request decoded");
+        Check(!MagRetailClanCodec.TryParseGetClanListRequest(Request(1, 1, 0x05), 20231, out _, out _), "Another clan type decoded as a clan list request");
+        Check(!MagRetailClanCodec.TryReadClanType(wire, 20230, out _) && !MagRetailClanCodec.TryParseGetClanListRequest(wire, 20230, out _, out _),
+            "The prototype claimed retail clan traffic");
+        Check(!MagRetailClanCodec.TryReadClanType(new byte[] { 0x01, 0xFC }, 20231, out _), "A clan message without a clan type decoded");
+
+        // Reply: 01FC, then type 2, the echoed request id, status 10 (no results) and the last-packet flag.
+        Check(MagRetailClanCodec.SerializeNoClansResponse(0x11223344).SequenceEqual(
+            new byte[] { 0x01, 0xFC, 0x02, 0x44, 0x33, 0x22, 0x11, 0x0A, 0x00, 0x00, 0x00, 0x01 }), "No-clans reply bytes are wrong");
+
+        WithApplication(20231, () =>
+        {
+            byte id = MagPluginRouting.RetailMlsPluginId;
+            var now = DateTime.UtcNow;
+            var registry = new MagLoginRegistry();
+            var ticket = registry.IssueForAccount("alpha", 1, 1, now);
+            var session = new MagMlsSession { CharacterStore = store };
+            Check(session.TryBind(new RT_MSG_CLIENT_CONNECT_TCP { AppId = 20231, TargetWorldId = 1, AccessToken = ticket.AccessToken, SessionKey = ticket.SessionKey },
+                registry, "synthetic-clan-channel", now) && session.Accept(now) && session.CompleteTransport(now), "Synthetic MLS transport setup failed");
+            session.HandleMany(PluginEnvelope(new MagHello(), 20231, 0), now);
+            Check(session.HandleMany(RawEnvelope(Request(1, session.AccountId), id), now).Count == 0 && session.LastRefusal == "clan-type=02-before-ready",
+                "A clan request was answered before the MLS handshake finished");
+            session.HandleMany(PluginEnvelope(new MagProtocolInfo { ProtocolVersion = Server.Medius.Program.Settings.MagProtocolVersion }, 20231, id), now);
+            Check(session.State == MagMlsSession.SessionState.Ready, "Synthetic MLS handshake failed");
+
+            var replies = session.HandleMany(RawEnvelope(Request(0xCAFE0001, session.AccountId), id), now);
+            Check(replies.Count == 1 && replies[0].PluginId == id && session.LastRefusal == null && session.StorageStatus == "clan-list-no-clans" &&
+                replies[0].Payload.SequenceEqual(MagRetailClanCodec.SerializeNoClansResponse(0xCAFE0001)),
+                "The player's clan list was not answered with no clans and the echoed request id");
+            replies = session.HandleMany(RawEnvelope(Request(7, session.AccountId + 100), id), now);
+            Check(replies.Count == 1 && replies[0].Payload.SequenceEqual(MagRetailClanCodec.SerializeNoClansResponse(7)) &&
+                session.StorageStatus == $"clan-list-no-clans-other-account={session.AccountId + 100}/session={session.AccountId}",
+                "Another account's clan list was not answered with no clans and recorded");
+            Check(session.HandleMany(RawEnvelope(Request(8, session.AccountId)[..10], id), now).Count == 0 &&
+                session.LastRefusal == "malformed-clan-list-request", "A short clan list request was answered");
+            Check(session.HandleMany(RawEnvelope(Request(8, session.AccountId).Concat(new byte[] { 0 }).ToArray(), id), now).Count == 0 &&
+                session.LastRefusal == "malformed-clan-list-request", "A long clan list request was answered");
+            Check(session.HandleMany(RawEnvelope(Request(9, session.AccountId, 0x05), id), now).Count == 0 &&
+                session.LastRefusal == "unhandled-clan-type=05", "An unknown clan type was answered or not reported");
+        });
+
+        WithApplication(20230, () =>
+        {
+            var now = DateTime.UtcNow;
+            var registry = new MagLoginRegistry();
+            var ticket = registry.IssueForAccount("alpha", 1, 1, now);
+            var session = new MagMlsSession { CharacterStore = store };
+            Check(session.TryBind(new RT_MSG_CLIENT_CONNECT_TCP { AppId = 20230, TargetWorldId = 1, AccessToken = ticket.AccessToken, SessionKey = ticket.SessionKey },
+                registry, "synthetic-prototype-clan-channel", now) && session.Accept(now) && session.CompleteTransport(now), "Synthetic prototype MLS setup failed");
+            session.HandleMany(PluginEnvelope(new MagHello(), 20230, 0), now);
+            session.HandleMany(PluginEnvelope(new MagProtocolInfo { ProtocolVersion = Server.Medius.Program.Settings.MagProtocolVersion }, 20230, 0), now);
+            Check(session.State == MagMlsSession.SessionState.Ready, "Synthetic prototype MLS handshake failed");
+            Check(session.HandleMany(RawEnvelope(Request(1, session.AccountId), 0), now).Count == 0 && session.LastRefusal == "unknown-or-malformed-type",
+                "The prototype answered retail clan traffic");
+        });
+    });
+
     private static RT_MSG_CLIENT_APP_TO_PLUGIN PluginEnvelope(MagMessage message, int applicationId, byte pluginId) =>
         RawEnvelope(MagMessageCodec.SerializeForApplication(message, applicationId), pluginId);
 

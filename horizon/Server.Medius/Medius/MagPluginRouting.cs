@@ -35,5 +35,9 @@ namespace Server.Medius
             envelope.PluginId = MlsPluginId(applicationId);
             return envelope;
         }
+
+        // For payloads outside the MAG message codec, such as retail clan messages.
+        public static RT_MSG_SERVER_PLUGIN_TO_APP ToMlsClient(byte[] payload, int applicationId) =>
+            new RT_MSG_SERVER_PLUGIN_TO_APP { PluginId = MlsPluginId(applicationId), Payload = payload };
     }
 }
