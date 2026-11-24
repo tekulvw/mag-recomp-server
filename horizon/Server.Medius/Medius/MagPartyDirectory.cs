@@ -24,6 +24,7 @@ namespace Server.Medius
             public readonly Dictionary<uint, (Member Target, DateTime Expires)> Pending = new();
             public sbyte Status = 1;
             public sbyte GameType = -1;
+            public bool OpenInvite;
         }
 
         readonly Dictionary<uint, Member> _online = new();
@@ -49,7 +50,18 @@ namespace Server.Medius
                 Remove(member);
             foreach (var party in _membership.Values.Distinct())
                 foreach (var target in party.Pending.Where(x => x.Value.Expires <= now || !Owns(x.Value.Target)).ToArray())
+                {
                     party.Pending.Remove(target.Key);
+                    // The inviter otherwise never learns the invitation lapsed.
+                    NotifyInviter(party.Members[0], target.Key, party.Id, Owns(target.Value.Target)
+                        ? MagRetailPartyInviteResponse.Timeout : MagRetailPartyInviteResponse.Error);
+                }
+        }
+
+        void NotifyInviter(Member inviter, uint declined, uint partyId, byte reason)
+        {
+            if (Owns(inviter))
+                inviter.Send(new MagRetailPartyDecline { Declined = declined, PartyId = partyId, Reason = reason });
         }
 
         public bool Register(Member member)
@@ -114,6 +126,18 @@ namespace Server.Medius
                 case MagRetailPartyLeave leave when current != null && current.Id == leave.PartyId:
                     Leave(member, current);
                     return true;
+                case MagRetailPartyOpenInvite open when current != null && current.Id == open.PartyId &&
+                    ReferenceEquals(current.Members[0], member):
+                    if (current.OpenInvite != open.OpenInvite)
+                    {
+                        current.OpenInvite = open.OpenInvite;
+                        SendRoster(current);
+                    }
+                    return true;
+                case MagRetailPartyRejoinRequest rejoin when current != null && current.Id == rejoin.PartyId:
+                    // No party voice world exists here; the client keeps playing without party voice.
+                    Logger.Info($"Retail party voice rejoin not offered: reason=party_voice_unsupported party={current.Id}");
+                    return true;
                 default:
                     return false;
             }
@@ -122,9 +146,15 @@ namespace Server.Medius
         bool Invite(Member owner, Party party, MagRetailPartyInvite invite, DateTime now)
         {
             if (invite.Inviter != owner.AccountId || invite.PartyId != (party?.Id ?? 0) ||
-                invite.Invitee == owner.AccountId || !_online.TryGetValue(invite.Invitee, out var target) ||
-                !Owns(target) || target.Faction != owner.Faction || _membership.ContainsKey(invite.Invitee))
+                invite.Invitee == 0 || invite.Invitee == owner.AccountId) return false;
+            if (!_online.TryGetValue(invite.Invitee, out var target) || !Owns(target) ||
+                target.Faction != owner.Faction || _membership.ContainsKey(invite.Invitee))
+            {
+                // A genuine inviter learns the invite went nowhere instead of waiting on silence.
+                NotifyInviter(owner, invite.Invitee, invite.PartyId, _membership.ContainsKey(invite.Invitee)
+                    ? MagRetailPartyInviteResponse.InParty : MagRetailPartyInviteResponse.Error);
                 return false;
+            }
             if (party == null)
             {
                 if (_nextId == 1u << 24) return false;
@@ -134,13 +164,18 @@ namespace Server.Medius
                 owner.Send(new MagRetailPartyJoined { PartyId = party.Id });
                 SendRoster(party);
             }
-            if (!ReferenceEquals(party.Members[0], owner) || party.Status != 1 ||
-                party.InvitedAccounts.Count >= MaximumInvitations || party.InvitedAccounts.Contains(invite.Invitee))
+            if (!ReferenceEquals(party.Members[0], owner)) return false;
+            if (party.Status != 1 || party.InvitedAccounts.Count >= MaximumInvitations ||
+                party.InvitedAccounts.Contains(invite.Invitee))
+            {
+                NotifyInviter(owner, invite.Invitee, party.Id, MagRetailPartyInviteResponse.Error);
                 return false;
+            }
             // Outstanding invitations hold seats, so an accepted invite never overfills.
             if (party.Members.Count + party.Pending.Count >= MaximumMembers)
             {
                 Logger.Warn($"Retail party invite refused: reason=party_full party={party.Id} members={party.Members.Count} pending={party.Pending.Count} maximum={MaximumMembers}");
+                NotifyInviter(owner, invite.Invitee, party.Id, MagRetailPartyInviteResponse.Error);
                 return false;
             }
             party.InvitedAccounts.Add(invite.Invitee);
@@ -152,16 +187,23 @@ namespace Server.Medius
 
         bool Answer(Member target, Party existing, MagRetailPartyInviteResponse answer)
         {
-            if (existing != null || answer.Responder != target.AccountId || answer.Response > 4 ||
+            if (answer.Responder != target.AccountId || answer.Response > MagRetailPartyInviteResponse.Timeout ||
                 !_membership.TryGetValue(answer.Inviter, out var party) || party.Id != answer.PartyId ||
-                party.Status != 1 || party.Members[0].AccountId != answer.Inviter ||
+                party.Members[0].AccountId != answer.Inviter ||
                 !party.Pending.TryGetValue(target.AccountId, out var pending) || !ReferenceEquals(pending.Target, target))
                 return false;
             party.Pending.Remove(target.AccountId);
-            if (answer.Response != 0) return true;
-            if (party.Members.Count >= MaximumMembers)
+            var inviter = party.Members[0];
+            if (answer.Response != MagRetailPartyInviteResponse.Accept)
             {
-                Logger.Warn($"Retail party join refused: reason=party_full party={party.Id} maximum={MaximumMembers}");
+                NotifyInviter(inviter, target.AccountId, party.Id, answer.Response);
+                return true;
+            }
+            if (existing != null || party.Status != 1 || party.Members.Count >= MaximumMembers)
+            {
+                Logger.Warn($"Retail party join refused: reason={(existing != null ? "in_party" : party.Status != 1 ? "party_busy" : "party_full")} party={party.Id} maximum={MaximumMembers}");
+                NotifyInviter(inviter, target.AccountId, party.Id, existing != null
+                    ? MagRetailPartyInviteResponse.InParty : MagRetailPartyInviteResponse.Error);
                 return false;
             }
             party.Members.Add(target);
@@ -196,7 +238,7 @@ namespace Server.Medius
             foreach (var recipient in party.Members.Where(member => member.Current()))
                 recipient.Send(new MagRetailPartyRoster { PartyId = party.Id,
                     Members = party.Members.Select(member => member.AccountId).ToArray(),
-                    Status = party.Status, GameType = party.GameType });
+                    Status = party.Status, GameType = party.GameType, OpenInvite = party.OpenInvite });
         }
     }
 }

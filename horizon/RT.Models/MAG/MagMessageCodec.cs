@@ -23,7 +23,7 @@ namespace RT.Models.MAG
         public static bool TryParseClientForApplication(byte[] payload, int applicationId, out MagMessage message)
         {
             if (TryParseForApplication(payload, applicationId, out message) && (message is MagRetailPartyInvite || message is MagRetailPartyInviteResponse ||
-                message is MagRetailPartyLeave || message is MagRetailCancelJoinRequest || message is MagTrainingCompletedRequest || message is MagKeepAlive || message is MagJoinGameRequest || message is MagServerStatusRequest || message is MagHello || message is MagProtocolInfo || message is MagAccountLoginRequest || message is MagCharacterDataRequest ||
+                message is MagRetailPartyLeave || message is MagRetailPartyOpenInvite || message is MagRetailPartyRejoinRequest || message is MagRetailCancelJoinRequest || message is MagTrainingCompletedRequest || message is MagKeepAlive || message is MagJoinGameRequest || message is MagServerStatusRequest || message is MagHello || message is MagProtocolInfo || message is MagAccountLoginRequest || message is MagCharacterDataRequest ||
                 message is MagNpAuthenticateRequest || message is MagUniverseListRequest || message is MagRetailPatchRequest ||
                 message is MagNewsEulaRequest || message is MagCharacterListRequest || message is MagCreateCharacterRequest || message is MagLoadoutUpdateRequest || message is MagRetailLoadoutDeleteRequest || message is MagPurchaseSkillRequest)) return true;
             message = null;
@@ -44,7 +44,7 @@ namespace RT.Models.MAG
                 var reader = new MagBitReader(payload);
                 ushort messageType = reader.ReadUInt16();
                 // Retail0031 is logout, not prototype NP auth. Never fall back for conflicting IDs.
-                MagMessage parsed = applicationId == 20231 && ((messageType >= 0x0011 && messageType <= 0x0015) || (messageType >= 0x001a && messageType <= 0x0021) || (messageType >= 0x002b && messageType <= 0x002f) || (messageType >= 0x0031 && messageType <= 0x0038) || messageType == 0x01f5 || messageType == 0x01f6)
+                MagMessage parsed = applicationId == 20231 && ((messageType >= 0x0011 && messageType <= 0x0015) || (messageType >= 0x001a && messageType <= 0x0027) || (messageType >= 0x002b && messageType <= 0x002f) || (messageType >= 0x0031 && messageType <= 0x0038) || messageType == 0x01f5 || messageType == 0x01f6)
                     ? messageType switch
                     {
                         0x0012 => new MagRetailJoinGameRequest(),
@@ -57,6 +57,10 @@ namespace RT.Models.MAG
                         0x001f => new MagRetailPartyJoined(),
                         0x0020 => new MagRetailPartyLeft(),
                         0x0021 => new MagRetailPartyRoster(),
+                        0x0022 => new MagRetailPartyDecline(),
+                        0x0025 => new MagRetailPartyOpenInvite(),
+                        0x0026 => new MagRetailPartyRejoinRequest(),
+                        0x0027 => new MagRetailPartyRejoinResponse(),
                         0x002d => new MagTrainingCompletedRequest(),
                         0x002e => new MagRetailAccountLoginRequest(),
                         0x002f => new MagRetailAccountLoginResponse(),
@@ -149,8 +153,23 @@ namespace RT.Models.MAG
                         invite.PartyId = reader.ReadUInt32(); invite.Invitee = reader.ReadUInt32(); invite.Inviter = reader.ReadUInt32();
                         break;
                     case MagRetailPartyInviteResponse answer:
-                        answer.Response = reader.ReadByte(); answer.PartyId = reader.ReadUInt32();
-                        answer.Responder = reader.ReadUInt32(); answer.Inviter = reader.ReadUInt32();
+                        answer.Response = reader.ReadByte(); answer.Inviter = reader.ReadUInt32();
+                        answer.Responder = reader.ReadUInt32(); answer.PartyId = reader.ReadUInt32();
+                        break;
+                    case MagRetailPartyDecline decline:
+                        decline.Declined = reader.ReadUInt32(); decline.PartyId = reader.ReadUInt32(); decline.Reason = reader.ReadByte();
+                        break;
+                    case MagRetailPartyOpenInvite open:
+                        open.OpenInvite = reader.ReadBoolean(); open.PartyId = reader.ReadUInt32();
+                        break;
+                    case MagRetailPartyRejoinRequest rejoin:
+                        rejoin.PartyId = reader.ReadUInt32();
+                        break;
+                    case MagRetailPartyRejoinResponse voice:
+                        voice.PartyId = reader.ReadUInt32(); voice.MediusWorldUid = reader.ReadUInt32();
+                        voice.ConnectionType = reader.ReadUInt16(); voice.AddressType = reader.ReadUInt16();
+                        voice.ServerAddress = reader.ReadBytes(16); voice.ServerPort = reader.ReadUInt16(); voice.WorldId = reader.ReadUInt32();
+                        voice.AccessKey = reader.ReadBytes(17); voice.Piuid = reader.ReadUInt32();
                         break;
                     case MagRetailPartyLeave leave:
                         leave.PartyId = reader.ReadUInt32();
@@ -344,8 +363,24 @@ namespace RT.Models.MAG
                     writer.WriteUInt32(invite.PartyId); writer.WriteUInt32(invite.Invitee); writer.WriteUInt32(invite.Inviter);
                     break;
                 case MagRetailPartyInviteResponse answer:
-                    writer.WriteByte(answer.Response); writer.WriteUInt32(answer.PartyId);
-                    writer.WriteUInt32(answer.Responder); writer.WriteUInt32(answer.Inviter);
+                    writer.WriteByte(answer.Response); writer.WriteUInt32(answer.Inviter);
+                    writer.WriteUInt32(answer.Responder); writer.WriteUInt32(answer.PartyId);
+                    break;
+                case MagRetailPartyDecline decline:
+                    writer.WriteUInt32(decline.Declined); writer.WriteUInt32(decline.PartyId); writer.WriteByte(decline.Reason);
+                    break;
+                case MagRetailPartyOpenInvite open:
+                    writer.WriteBoolean(open.OpenInvite); writer.WriteUInt32(open.PartyId);
+                    break;
+                case MagRetailPartyRejoinRequest rejoin:
+                    writer.WriteUInt32(rejoin.PartyId);
+                    break;
+                case MagRetailPartyRejoinResponse voice:
+                    if (voice.ServerAddress?.Length != 16 || voice.AccessKey?.Length != 17) throw new ArgumentException("Invalid DME descriptor widths.");
+                    writer.WriteUInt32(voice.PartyId); writer.WriteUInt32(voice.MediusWorldUid);
+                    writer.WriteUInt16(voice.ConnectionType); writer.WriteUInt16(voice.AddressType);
+                    writer.WriteBytes(voice.ServerAddress); writer.WriteUInt16(voice.ServerPort); writer.WriteUInt32(voice.WorldId);
+                    writer.WriteBytes(voice.AccessKey); writer.WriteUInt32(voice.Piuid);
                     break;
                 case MagRetailPartyLeave leave:
                     writer.WriteUInt32(leave.PartyId);
