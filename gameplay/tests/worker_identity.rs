@@ -496,3 +496,108 @@ fn cli_validates_worker_id_bounds_before_startup() {
     let worker = Worker::spawn(Some(&id));
     worker.identity(&id);
 }
+
+fn event_records(worker: &Worker) -> usize {
+    std::fs::read_to_string(&worker.log)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.contains(r#""op":"event""#))
+        .count()
+}
+
+/// Wait for the asynchronous event log to settle on a record count.
+fn settled_event_records(worker: &Worker) -> usize {
+    let mut seen = event_records(worker);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        std::thread::sleep(Duration::from_millis(200));
+        let now = event_records(worker);
+        if now == seen || Instant::now() > deadline {
+            return now;
+        }
+        seen = now;
+    }
+}
+
+#[test]
+fn served_world_stream_resumes_on_the_same_process_and_events_apply_once() {
+    let worker = Worker::spawn(None);
+    let hello = worker.hello();
+    for capability in ["world_stream_resume_v1", "event_replay_v1"] {
+        assert!(
+            hello["capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == capability),
+            "{hello}"
+        );
+    }
+    assert_eq!(worker.request(&configure())["ok"], true);
+    assert_eq!(worker.request(&reserve())["ok"], true);
+
+    // A retried event ID is applied once and answered with the same reply.
+    let before = settled_event_records(&worker);
+    let first = worker.request(&event());
+    assert_eq!(first["ok"], true, "{first}");
+    let applied = settled_event_records(&worker);
+    assert_eq!(applied, before + 1, "the event was not recorded");
+    assert_eq!(worker.request(&event()), first, "a retry got another reply");
+    assert_eq!(
+        settled_event_records(&worker),
+        applied,
+        "a retry was applied again"
+    );
+
+    let subscribe = json!({"op":"subscribe_world","v":2,"request_id":"subscribe",
+        "world_id":WORLD,"positions":true});
+    let mut stream = worker.open(&subscribe.to_string());
+    let ack = frame(&mut stream);
+    assert_eq!(ack["ok"], true, "{ack}");
+    let epoch = ack["world_stream"]["epoch"].as_str().unwrap().to_owned();
+    assert_eq!(epoch.len(), 32);
+    let base = ack["world_stream"]["sequence"].as_u64().unwrap();
+    let handled = frame(&mut stream);
+    assert_eq!(handled["world_stream"]["sequence"], base + 1, "{handled}");
+    let lost = frame(&mut stream);
+    assert_eq!(lost["world_stream"]["sequence"], base + 2, "{lost}");
+    drop(stream);
+
+    // Horizon handled only base + 1; resume replays the rest in order.
+    let resume = |epoch: &str, after: u64| {
+        json!({"op":"subscribe_world","v":2,"request_id":"resume","world_id":WORLD,
+            "positions":true,"resume":{"epoch":epoch,"after":after}})
+        .to_string()
+    };
+    let deadline = Instant::now() + DEADLINE;
+    let (mut resumed, ack) = loop {
+        let mut stream = worker.open(&resume(&epoch, base + 1));
+        let ack = frame(&mut stream);
+        // The broken subscription is retired once the worker sees its close.
+        if ack["error"] != "world_subscription_exists" || Instant::now() > deadline {
+            break (stream, ack);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(ack["ok"], true, "{ack}");
+    assert_eq!(ack["request_id"], "resume");
+    assert_eq!(ack["world_stream"]["sequence"], base + 1);
+    let replayed = frame(&mut resumed);
+    assert_eq!(replayed["world_stream"]["sequence"], base + 2, "{replayed}");
+    assert_eq!(replayed["request_id"], "resume");
+    let live = frame(&mut resumed);
+    assert_eq!(live["world_stream"]["sequence"], base + 3, "{live}");
+    drop(resumed);
+
+    // Another process's position is refused.
+    let deadline = Instant::now() + DEADLINE;
+    let refused = loop {
+        let refused = frame(&mut worker.open(&resume("00000000000000000000000000000000", 1)));
+        if refused["error"] != "world_subscription_exists" || Instant::now() > deadline {
+            break refused;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(refused["ok"], false, "{refused}");
+    assert_eq!(refused["error"], "world_resume_unavailable");
+}

@@ -233,6 +233,7 @@ pub mod underbarrel_launchers;
 pub mod vehicle_exit;
 pub mod wire_profile;
 pub mod worker_identity;
+pub mod world_stream;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::io::{self, Read, Write};
@@ -600,7 +601,7 @@ impl Request {
         }
     }
 }
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutboundMessage {
     pub reservation_id: String,
@@ -609,7 +610,7 @@ pub struct OutboundMessage {
     pub plugin_id: u8,
     pub payload_hex: String,
 }
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Response {
     pub v: u8,
@@ -637,6 +638,9 @@ pub struct Response {
     pub party_reservation: Option<party_reservation::Reply>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_identity: Option<worker_identity::WorkerIdentity>,
+    /// Served world-stream frame position, sent only to subscribers that ask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub world_stream: Option<world_stream::Position>,
 }
 impl Response {
     pub fn success(request_id: String) -> Self {
@@ -654,6 +658,7 @@ impl Response {
             selected_match: None,
             party_reservation: None,
             worker_identity: None,
+            world_stream: None,
         }
     }
 

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Diagnostics;
 using System.Net;
@@ -46,11 +47,19 @@ namespace Server.Medius {
   public Task<GameplayBridgeResponse> RequestReleaseAsync(object request) => ExchangeAsync(request,true);
   // This connection owns only unsolicited world ticks. Ordinary requests retain
   // their existing request/reply path and are never replayed after a timeout.
-  public async Task SubscribeWorldAsync(uint worldId,string requestId,Func<GameplayBridgeResponse,Task> receive,CancellationToken cancellationToken) {
+  public Task SubscribeWorldAsync(uint worldId,string requestId,Func<GameplayBridgeResponse,Task> receive,CancellationToken cancellationToken)=>
+   SubscribeWorldAsync(worldId,requestId,false,null,receive,cancellationToken);
+  /// <summary>Subscribe to world frames. With <paramref name="positions"/> (world_stream_resume_v1)
+  /// every frame carries its position; <paramref name="resumeAfter"/> asks the same worker process
+  /// to replay the frames after that position first. A worker that cannot (another process, or
+  /// frames no longer retained) refuses with <see cref="GameplayWorldResumeRefusedException"/>.</summary>
+  public async Task SubscribeWorldAsync(uint worldId,string requestId,bool positions,GameplayWorldStreamPosition resumeAfter,Func<GameplayBridgeResponse,Task> receive,CancellationToken cancellationToken) {
    if(string.IsNullOrEmpty(requestId)||receive==null)throw new ArgumentException("Invalid world subscription.");
    var identity=WorkerIdentity;
    if(_expectedWorkerId!=null&&(identity==null||HasWorkerIdentityFault))throw new GameplayWorkerIdentityException();
-   var request=new {v=2,request_id=requestId,op="subscribe_world",world_id=worldId};
+   var request=new Dictionary<string,object>{["v"]=2,["request_id"]=requestId,["op"]="subscribe_world",["world_id"]=worldId};
+   if(positions||resumeAfter!=null)request["positions"]=true;
+   if(resumeAfter!=null)request["resume"]=new Dictionary<string,object>{["epoch"]=resumeAfter.Epoch,["after"]=resumeAfter.Sequence};
    var body=identity==null?JsonSerializer.SerializeToUtf8Bytes(request):AttachWorkerIdentity(JsonSerializer.SerializeToElement(request),identity);
    using var socket=new TcpClient();
    using(var connect=CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)) {
@@ -77,7 +86,12 @@ namespace Server.Medius {
     }
     if(!GameplayBridgeResponseCodec.TryParse(line.ToArray(),requestId,true,out var reply))throw new InvalidDataException("Invalid gameplay world stream response.");
     if(identity!=null&&!VerifyWorkerReply(reply,false))throw new GameplayWorkerIdentityException();
-    if(!reply.Ok)throw new InvalidDataException("Invalid gameplay world stream response.");
+    if(!reply.Ok) {
+     if(reply.Error=="world_resume_unavailable")throw new GameplayWorldResumeRefusedException();
+     // The previous subscription has not been retired yet; try again shortly.
+     if(reply.Error=="world_subscription_exists")throw new IOException("Gameplay world subscription is still held.");
+     throw new InvalidDataException("Invalid gameplay world stream response.");
+    }
     cancellationToken.ThrowIfCancellationRequested();await receive(reply);
    }
   }
@@ -164,5 +178,10 @@ namespace Server.Medius {
    catch(Exception e) when(e is IOException || e is SocketException) { return Failed(GameplayBridgeFailure.Unavailable); }
    catch(Exception e) when(e is JsonException || e is InvalidOperationException || e is FormatException) { return Failed(GameplayBridgeFailure.InvalidRequest); }
   }
+ }
+ /// <summary>The worker cannot replay the requested frames: it is another process, or
+ /// the frames are no longer retained. Sessions that depended on them must end.</summary>
+ public sealed class GameplayWorldResumeRefusedException : IOException {
+  public GameplayWorldResumeRefusedException() : base("Gameplay world stream cannot resume.") {}
  }
 }

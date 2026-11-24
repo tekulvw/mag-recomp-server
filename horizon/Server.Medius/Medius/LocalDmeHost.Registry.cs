@@ -40,8 +40,10 @@ namespace Server.Medius
         bool Draining => _operatorDraining || (InRegistry && (_bridge.HasWorkerIdentityFault || _readDrainPolicy?.Invoke() == true));
         bool HasWorldStreamLease => _worldStreamHealthy && (!InRegistry ||
             (!_bridge.HasWorkerIdentityFault && _timeProvider.GetElapsedTime(_lastWorldFrameTimestamp) < WorldStreamLease));
-        bool ReadyForGameplay => _ready && !_disposed && HasWorldStreamLease;
-        bool ReadyForAdmission => ReadyForGameplay && !Draining;
+        // A legacy stream that is resuming keeps its sessions usable (client events
+        // still reach the worker) but admits no one until frames flow again.
+        bool ReadyForGameplay => _ready && !_disposed && (HasWorldStreamLease || (_worldStreamResuming && !InRegistry));
+        bool ReadyForAdmission => _ready && !_disposed && HasWorldStreamLease && !Draining;
 
         public void SetDraining(bool draining)
         {
