@@ -100,6 +100,101 @@ static class PartyMembershipChecks
         directory.Register(replacement);
         Check(!directory.Apply(friend, response, now.AddSeconds(10)), "Retired channel acquired replacement authority");
         Capacity(now);
+        InviteFlow(now);
+    }
+
+    // Retail invite UI flow, driven by client-ordered wire bytes.
+    static void InviteFlow(DateTime now)
+    {
+        var directory = new MagPartyDirectory(TimeSpan.FromSeconds(10));
+        var wire = new List<(uint To, MagRetailPartyMessage Message)>();
+        MagPartyDirectory.Member Online(uint id, byte faction = 1)
+        {
+            var member = new MagPartyDirectory.Member($"flow-{id}", id, faction, () => true, m => wire.Add((id, m)));
+            Check(directory.Register(member), "Flow fixture registration failed");
+            return member;
+        }
+        MagRetailPartyMessage Client(string hex)
+        {
+            Check(MagMessageCodec.TryParseClientForApplication(Convert.FromHexString(hex), 20231, out var parsed) &&
+                parsed is MagRetailPartyMessage, $"Client fixture {hex} refused");
+            return (MagRetailPartyMessage)parsed;
+        }
+        var leader = Online(0x11);
+        var friend = Online(0x13);
+        var shy = Online(0x15);
+        var late = Online(0x17);
+        var outsider = Online(0x19);
+        var stranger = Online(0x1B);
+
+        Check(directory.Apply(leader, Client("001A000000000000001300000011"), now), "Leader's first invite refused");
+        Check(wire.Count == 3 && wire[0] is (0x11, MagRetailPartyJoined) &&
+            wire[1] is (0x11, MagRetailPartyRoster { Members: [0x11], Status: 1, OpenInvite: false }) &&
+            wire[2] is (0x13, MagRetailPartyInvite { Invitee: 0x13, Inviter: 0x11 }), "New party or forwarded invite missing");
+        uint party = ((MagRetailPartyJoined)wire[0].Message).PartyId;
+        Check(party != 0 && ((MagRetailPartyInvite)wire[2].Message).PartyId == party, "Forwarded invite lost the party id");
+
+        // Accept: the joiner learns its party first, then every member gets the roster, leader first.
+        wire.Clear();
+        Check(directory.Apply(friend, Client($"001B00" + "00000011" + "00000013" + $"{party:X8}"), now), "Client-ordered accept refused");
+        Check(wire.Count == 3 && wire[0] is (0x13, MagRetailPartyJoined { PartyId: var joined }) && joined == party &&
+            wire[1] is (0x11, MagRetailPartyRoster { Members: [0x11, 0x13] }) &&
+            wire[2] is (0x13, MagRetailPartyRoster { Members: [0x11, 0x13] }), "Accept did not deliver join then leader-first rosters");
+
+        // Decline: the inviter is told who declined and why.
+        wire.Clear();
+        Check(directory.Apply(leader, Client($"001A{party:X8}0000001500000011"), now) && wire.Single().To == 0x15,
+            "Second invite not forwarded");
+        wire.Clear();
+        Check(directory.Apply(shy, Client($"001B01" + "00000011" + "00000015" + $"{party:X8}"), now), "Decline refused");
+        Check(wire.Single() is (0x11, MagRetailPartyDecline { Declined: 0x15, Reason: 1 } decline) &&
+            MagMessageCodec.SerializeForApplication(decline, 20231).SequenceEqual(Convert.FromHexString($"002200000015{party:X8}01")),
+            "Decline notice missing or misencoded");
+
+        // Expiry: an unanswered invitation is reported to the inviter as a timeout, once.
+        wire.Clear();
+        Check(directory.Apply(leader, Client($"001A{party:X8}0000001700000011"), now), "Expiring invite not forwarded");
+        wire.Clear();
+        directory.Prune(now.AddSeconds(9));
+        Check(wire.Count == 0, "Live invitation reported early");
+        directory.Prune(now.AddSeconds(10));
+        directory.Prune(now.AddSeconds(11));
+        Check(wire.Single() is (0x11, MagRetailPartyDecline { Declined: 0x17, Reason: 4 } timeout) && timeout.PartyId == party,
+            "Invitation expiry not reported once to the inviter");
+        wire.Clear();
+        Check(!directory.Apply(late, Client($"001B00" + "00000011" + "00000017" + $"{party:X8}"), now.AddSeconds(11)) && wire.Count == 0,
+            "Expired invitation accepted");
+
+        // An invite to someone already partied is answered with an in-party notice, not forwarded.
+        var other = Online(0x1D);
+        Check(directory.Apply(outsider, Client("001A000000000000001D00000019"), now) &&
+            directory.Apply(other, Client($"001B00000000190000001D{((MagRetailPartyJoined)wire[0].Message).PartyId:X8}"), now),
+            "Second party fixture failed");
+        wire.Clear();
+        Check(!directory.Apply(leader, Client($"001A{party:X8}0000001900000011"), now) &&
+            wire.Single() is (0x11, MagRetailPartyDecline { Declined: 0x19, Reason: 3 }), "Partied invitee not reported as in party");
+        wire.Clear();
+        Check(!directory.Apply(stranger, Client("001A000000000000001300000011"), now) && wire.Count == 0,
+            "Forged inviter drew a notice");
+
+        // Open invite: only the leader toggles it, and every roster then carries it.
+        wire.Clear();
+        Check(!directory.Apply(friend, new MagRetailPartyOpenInvite { OpenInvite = true, PartyId = party }, now) && wire.Count == 0,
+            "A non-leader changed open invite");
+        var open = Client("0025" + Convert.ToHexString(MagMessageCodec.SerializeForApplication(
+            new MagRetailPartyOpenInvite { OpenInvite = true, PartyId = party }, 20231)[2..]));
+        Check(directory.Apply(leader, open, now) && wire.Count == 2 &&
+            wire.All(x => x.Message is MagRetailPartyRoster { OpenInvite: true }) && wire[0].To == 0x11,
+            "Open invite not reflected in every roster");
+        wire.Clear();
+        Check(directory.Apply(leader, open, now) && wire.Count == 0, "Unchanged open invite resent rosters");
+        Check(directory.Apply(leader, new MagRetailPartyOpenInvite { OpenInvite = false, PartyId = party }, now) &&
+            wire.Count == 2 && wire.All(x => x.Message is MagRetailPartyRoster { OpenInvite: false }), "Open invite not cleared");
+
+        // Voice rejoin: recognised for a member and refused without a reply (no party voice world).
+        wire.Clear();
+        Check(directory.Apply(friend, Client($"0026{party:X8}"), now) && wire.Count == 0, "Voice rejoin not handled quietly");
+        Check(!directory.Apply(shy, Client($"0026{party:X8}"), now), "Non-member voice rejoin accepted");
     }
 
     static void Capacity(DateTime now)

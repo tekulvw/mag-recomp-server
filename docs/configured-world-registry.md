@@ -60,8 +60,36 @@ publication, a cancel releases the original entry's still-unclaimed
 reservations and leaves claimed members in the match. A leader leaving
 dissolves the party. An invite response carries no generation
 on the wire, so a party never reissues an invitation to the same account.
-Expiry, departure and capacity are replacement policy. This scope does not
-emit the native decline-presentation event or support open parties and voice.
+Expiry, departure and capacity are replacement policy.
+
+The retail invite flow runs as follows. The leader's invite (application type
+`0x1A`, carrying party id, invitee account id and inviter account id) creates
+the party on first use, answering the leader with joined (`0x1F`) and a roster
+(`0x21`), and is forwarded to the invitee. The invitee's answer (`0x1B`) is
+read in the client's order: response, inviter, the invitee itself, party id.
+An accept sends the joiner `0x1F` and then the roster to every member, leader
+first, in the same lobby turn, well inside the client's five-second joining
+window. A decline (or the client's error, in-party or timeout answer) is
+relayed to the inviter as a decline notice (`0x22`: invitee, party id,
+reason). The inviter also gets that notice with reason timeout when an
+invitation expires unanswered, with reason in-party when the invitee already
+belongs to a party, and with reason error when the invite cannot be delivered
+(the target is offline, on another faction, already invited, or the party is
+full or queued). Invites whose inviter or party id does not match the sender
+draw no notice.
+
+The open-invite toggle (`0x25`: one flag bit, then the party id) is accepted
+from the current leader only. It is stored on the party and carried in every
+later roster; a change resends the roster to all members. The flag does not yet
+change who may invite: retail semantics for it are not established, so only
+the leader invites either way.
+
+There is no party voice world. A member's voice rejoin request (`0x26`, sent
+after its game connection drops) is recognised and logged
+(`reason=party_voice_unsupported`) but not answered; the client then carries on
+without party voice. The voice descriptor reply (`0x27`) exists only in the
+codec. Party-range types the retail client never acts on (`0x16`, `0x18`,
+`0x19`, `0x1D`, `0x1E`, `0x23`, `0x24`) are not parsed and draw no reply.
 
 A group counts toward the human startup and team limits as one indivisible
 entry. It occupies one authored squad in a new formation. Solo late joins
