@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.11.0](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.10.0...gameplay-v0.11.0) (2026-11-24)
+
+
+### Features
+
+* **gameplay:** let bots notice, hear and react to threats while busy ([#234](https://github.com/tekulvw/mag-recomp-server/issues/234)) ([39cb853](https://github.com/tekulvw/mag-recomp-server/commit/39cb853f3b8f21ad2975f037232c739224808af9))
+* **gameplay:** send bots to defend and defuse armed objectives ([#240](https://github.com/tekulvw/mag-recomp-server/issues/240)) ([89b2513](https://github.com/tekulvw/mag-recomp-server/commit/89b25135636be472c0e556dd486f978e176446d6))
+
+
+### Bug Fixes
+
+* **gameplay:** let Sabotage frag grenades damage Characters ([#238](https://github.com/tekulvw/mag-recomp-server/issues/238)) ([242fad7](https://github.com/tekulvw/mag-recomp-server/commit/242fad7d9157f8b959b8a2b0b32e7c6369d7745d))
+
 ## [0.10.0](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.9.0...gameplay-v0.10.0) (2026-11-24)
 
 

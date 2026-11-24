@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.2](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.8.1...medius-v0.8.2) (2026-11-24)
+
+
+### Bug Fixes
+
+* **medius:** save the lobby squad-leader volunteer preference ([#239](https://github.com/tekulvw/mag-recomp-server/issues/239)) ([6f0ae32](https://github.com/tekulvw/mag-recomp-server/commit/6f0ae328c5daaedce77161ea57dba915d8f88372))
+
 ## [0.8.1](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.8.0...medius-v0.8.1) (2026-11-24)
 
 
