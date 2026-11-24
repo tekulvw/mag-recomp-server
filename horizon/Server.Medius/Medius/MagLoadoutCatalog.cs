@@ -182,6 +182,9 @@ namespace Server.Medius
         }
         public bool IsStarterDefaultItem(byte faction, int slot, short itemId) => itemId >= 0 && slot >= 0 && slot < 22 &&
             _defaults.TryGetValue(faction, out var rows) && rows.Any(row => row.Items[slot] == itemId);
+        public bool IsMagazineWeapon(short itemId) => _primaryWeapons.Contains(itemId);
+        public bool GrantsOrdinal(byte faction, int ordinal) => ordinal >= 0 && ordinal < 768 &&
+            _grants.TryGetValue(faction, out var grants) && (grants.AvailableItems[ordinal >> 5] & (1u << (ordinal & 31))) != 0;
         public bool HasValidPrimary(MagLoadout loadout) => Valid(loadout) && _primaryWeapons.Contains(loadout.Items[0]);
         public MagLoadout[] DefaultsForFaction(byte faction) => _defaults.TryGetValue(faction, out var defaults) ? defaults.Select(Clone).ToArray() : null;
         private static MagLoadout Clone(MagLoadout row) => new MagLoadout { UpdateId = row.UpdateId, Items = (short[])row.Items.Clone() };
