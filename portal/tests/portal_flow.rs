@@ -26,6 +26,9 @@ use rsa::traits::PublicKeyParts;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+
+mod support;
 
 const CLIENT_ID: &str = "test-client";
 const ISSUER: &str = "https://issuer.example.test";
@@ -146,7 +149,8 @@ async fn harness_full(
     let provider_url = format!("http://{provider_addr}");
 
     let mut settings = Settings::new("http://localhost").unwrap();
-    settings.link_poll_seconds = 2;
+    // Long enough that a loaded machine cannot stretch two back-to-back polls past it.
+    settings.link_poll_seconds = 60;
     settings.owner_emails = vec!["owner@example.test".into()];
     let fonts = std::env::temp_dir().join(format!(
         "portal-fonts-{}",
@@ -335,7 +339,8 @@ impl Harness {
 }
 
 #[sqlx::test]
-async fn sign_in_link_and_ticket(pool: PgPool) {
+async fn sign_in_link_and_ticket(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     let h = harness(pool).await;
 
     // Signed-out visitors are sent to sign in, and come back where they were going.
@@ -408,7 +413,7 @@ async fn sign_in_link_and_ticket(pool: PgPool) {
     let device_code = start["device_code"].as_str().unwrap().to_owned();
     let user_code = start["user_code"].as_str().unwrap().to_owned();
     assert_eq!(start["verification_uri"], "http://localhost/link");
-    assert_eq!(start["interval"], 2);
+    assert_eq!(start["interval"], 60);
     assert_eq!(
         h.poll(&device_code).await.1["error"],
         "authorization_pending"
@@ -525,10 +530,12 @@ async fn sign_in_link_and_ticket(pool: PgPool) {
         h.get("/account", Some(&session)).await.status(),
         StatusCode::SEE_OTHER
     );
+    test_db.close().await;
 }
 
 #[sqlx::test]
-async fn names_stay_with_their_characters(pool: PgPool) {
+async fn names_stay_with_their_characters(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     let h = harness(pool).await;
     let a = h.sign_in("subject-a").await;
     let csrf_a = h.csrf(&a).await;
@@ -628,10 +635,12 @@ async fn names_stay_with_their_characters(pool: PgPool) {
         db::ReserveOutcome::InUse
     );
     drop(c);
+    test_db.close().await;
 }
 
 #[sqlx::test]
-async fn sign_in_rejections(pool: PgPool) {
+async fn sign_in_rejections(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     let h = harness(pool).await;
     let start = h.get("/auth/google", None).await;
     let flow = set_cookies(&start)[FLOW_COOKIE].clone();
@@ -696,10 +705,12 @@ async fn sign_in_rejections(pool: PgPool) {
         .unwrap();
     assert_eq!(flow.return_to, "/account");
     let _ = oidc::GOOGLE_ISSUERS;
+    test_db.close().await;
 }
 
 #[sqlx::test]
-async fn banned_accounts_cannot_link(pool: PgPool) {
+async fn banned_accounts_cannot_link(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     let h = harness(pool).await;
     let s = h.sign_in("subject-d").await;
     let csrf = h.csrf(&s).await;
@@ -739,10 +750,12 @@ async fn banned_accounts_cannot_link(pool: PgPool) {
         "access_denied"
     );
     assert_eq!(db::cleanup(&h.pool).await.unwrap(), 0);
+    test_db.close().await;
 }
 
 #[sqlx::test]
-async fn launcher_api_limits_and_errors(pool: PgPool) {
+async fn launcher_api_limits_and_errors(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     let h = harness(pool).await;
     let start = || h.http.post(format!("{}/api/v1/device/start", h.base));
     // A body that is not JSON gets a JSON error a launcher can read.
@@ -769,10 +782,12 @@ async fn launcher_api_limits_and_errors(pool: PgPool) {
     let r = start().send().await.unwrap();
     assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(r.json::<Value>().await.unwrap()["error"], "rate_limited");
+    test_db.close().await;
 }
 
 #[sqlx::test]
-async fn banned_accounts_cannot_delete_themselves(pool: PgPool) {
+async fn banned_accounts_cannot_delete_themselves(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     let h = harness(pool).await;
     let s = h.sign_in("subject-f").await;
     let csrf = h.csrf(&s).await;
@@ -795,12 +810,14 @@ async fn banned_accounts_cannot_delete_themselves(pool: PgPool) {
             .unwrap()
             .is_some_and(|a| a.is_banned())
     );
+    test_db.close().await;
 }
 
 /// A claim waits for any transaction holding the name's lock, so it sees a reservation that
 /// transaction commits (the deletion path) instead of racing it.
 #[sqlx::test]
-async fn claims_wait_for_name_changes(pool: PgPool) {
+async fn claims_wait_for_name_changes(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     let a = db::upsert_identity(&pool, "google", "subject-g", None)
         .await
         .unwrap();
@@ -820,6 +837,7 @@ async fn claims_wait_for_name_changes(pool: PgPool) {
     .unwrap();
     tx.commit().await.unwrap();
     assert_eq!(claimer.await.unwrap(), ClaimOutcome::Reserved);
+    test_db.close().await;
 }
 
 async fn id_of(h: &Harness, subject: &str) -> i32 {
@@ -830,7 +848,8 @@ async fn id_of(h: &Harness, subject: &str) -> i32 {
 }
 
 #[sqlx::test]
-async fn admin_panel_roles(pool: PgPool) {
+async fn admin_panel_roles(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     let h = harness(pool).await;
     // Signed out: sign in first. Signed in without a role: the panel does not exist.
     assert_eq!(h.get("/admin", None).await.status(), StatusCode::SEE_OTHER);
@@ -1169,6 +1188,7 @@ async fn admin_panel_roles(pool: PgPool) {
         h.get("/admin", Some(&m)).await.status(),
         StatusCode::NOT_FOUND
     );
+    test_db.close().await;
 }
 
 /// The ticket in a ticket response, verified against the published key for `audience`.
@@ -1211,7 +1231,8 @@ async fn service_with_token(pool: &PgPool, name: &str) -> (i32, String) {
 }
 
 #[sqlx::test]
-async fn tickets_for_each_game_server(pool: PgPool) {
+async fn tickets_for_each_game_server(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     let h = harness(pool).await;
     let (id, token) = service_with_token(&h.pool, "PlayerLinux").await;
 
@@ -1284,10 +1305,12 @@ async fn tickets_for_each_game_server(pool: PgPool) {
         (status, body["error"].as_str()),
         (StatusCode::UNAUTHORIZED, Some("invalid_token"))
     );
+    test_db.close().await;
 }
 
 #[sqlx::test]
-async fn service_accounts_in_the_admin_panel(pool: PgPool) {
+async fn service_accounts_in_the_admin_panel(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     let h = harness(pool).await;
     let o = h.sign_in("owner").await;
     let csrf_o = h.csrf(&o).await;
@@ -1617,10 +1640,12 @@ async fn service_accounts_in_the_admin_panel(pool: PgPool) {
         assert!(log.contains(&format!("<td>{action}</td>")), "{action}");
     }
     assert!(log.contains("took over the reserved name") && log.contains("linux-ci"));
+    test_db.close().await;
 }
 
 #[sqlx::test]
-async fn service_accounts_never_sign_in(pool: PgPool) {
+async fn service_accounts_never_sign_in(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     let h = harness(pool).await;
     let (id, _) = service_with_token(&h.pool, "PlayerRetail").await;
     let svc = db::account(&h.pool, id).await.unwrap().unwrap();
@@ -1660,10 +1685,12 @@ async fn service_accounts_never_sign_in(pool: PgPool) {
     ] {
         assert!(sqlx::query(sql).execute(&h.pool).await.is_err(), "{sql}");
     }
+    test_db.close().await;
 }
 
 #[sqlx::test]
-async fn service_account_commands(pool: PgPool) {
+async fn service_account_commands(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     use mag_portal::admin::{ServiceCommand, run_service};
     let h = harness(pool).await;
     async fn run(pool: &PgPool, command: ServiceCommand) -> anyhow::Result<String> {
@@ -1792,10 +1819,12 @@ async fn service_account_commands(pool: PgPool) {
             .all(|r| r.0 == mag_portal::staff::OPERATOR_ACTOR)
     );
     assert!(rows.iter().all(|r| !r.2.contains(&token[4..])));
+    test_db.close().await;
 }
 
 #[sqlx::test]
-async fn homepage_for_everyone(pool: PgPool) {
+async fn homepage_for_everyone(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     let h = harness(pool).await;
     let r = h.get("/", None).await;
     assert_eq!(r.status(), StatusCode::OK);
@@ -1827,10 +1856,12 @@ async fn homepage_for_everyone(pool: PgPool) {
             .unwrap()
             .contains("Your account: Hotel")
     );
+    test_db.close().await;
 }
 
 #[sqlx::test]
-async fn fonts_and_page_policy(pool: PgPool) {
+async fn fonts_and_page_policy(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     let h = harness(pool).await;
     let r = h
         .get("/fonts/chakra-petch-latin-700-normal.woff2", None)
@@ -1873,10 +1904,12 @@ async fn fonts_and_page_policy(pool: PgPool) {
             path.display()
         );
     }
+    test_db.close().await;
 }
 
 #[sqlx::test]
-async fn stylesheet_address_changes_with_its_content(pool: PgPool) {
+async fn stylesheet_address_changes_with_its_content(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     let h = harness(pool).await;
     let version = mag_portal::web::style_version();
     let html = h.get("/", None).await.text().await.unwrap();
@@ -1899,6 +1932,7 @@ async fn stylesheet_address_changes_with_its_content(pool: PgPool) {
             "{stale}"
         );
     }
+    test_db.close().await;
 }
 
 // ---- Game server section, against a fake Medius admin API ----
@@ -2099,7 +2133,8 @@ async fn body(r: reqwest::Response) -> (StatusCode, String) {
 }
 
 #[sqlx::test]
-async fn game_server_not_configured(pool: PgPool) {
+async fn game_server_not_configured(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     let h = harness(pool).await;
     let u = h.sign_in("player").await;
     assert_eq!(
@@ -2130,10 +2165,12 @@ async fn game_server_not_configured(pool: PgPool) {
         .await
         .unwrap();
     assert!(!page.contains("/admin/game/characters/"));
+    test_db.close().await;
 }
 
 #[sqlx::test]
-async fn game_server_characters_and_levels(pool: PgPool) {
+async fn game_server_characters_and_levels(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     let (medius, url) = fake_medius_server().await;
     let h = harness_with(
         pool,
@@ -2336,10 +2373,12 @@ async fn game_server_characters_and_levels(pool: PgPool) {
     let (status, page) = body(h.get("/admin/game/characters/broken", Some(&o)).await).await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert!(page.contains("unexpected answer: HTTP 500"));
+    test_db.close().await;
 }
 
 #[sqlx::test]
-async fn game_server_errors_are_shown(pool: PgPool) {
+async fn game_server_errors_are_shown(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     // The portal holds a different secret than the game server: every call gets 401.
     let (medius, url) = fake_medius_server().await;
     let h = harness_with(
@@ -2385,6 +2424,7 @@ async fn game_server_errors_are_shown(pool: PgPool) {
     let (status, page) = body(h.get("/admin/game", Some(&o)).await).await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert!(page.contains("Could not reach the game server"), "{page}");
+    test_db.close().await;
 }
 
 // ---- Launcher reports ----
@@ -2519,7 +2559,8 @@ mod report_support {
 use report_support::*;
 
 #[sqlx::test]
-async fn reports_are_stored_once(pool: PgPool) {
+async fn reports_are_stored_once(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     let dir = temp_dir("reports");
     let h = harness_full(pool, None, Some(dir_reports(&dir)), roomy_limits()).await;
     let (_, token) = person_with_token(&h.pool, "rep-a", "Romeo").await;
@@ -2569,10 +2610,12 @@ async fn reports_are_stored_once(pool: PgPool) {
         b"frame 1 slow\n"
     );
     std::fs::remove_dir_all(&dir).unwrap();
+    test_db.close().await;
 }
 
 #[sqlx::test]
-async fn reports_refuse_bad_requests(pool: PgPool) {
+async fn reports_refuse_bad_requests(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     let dir = temp_dir("reports");
     let h = harness_full(pool, None, Some(dir_reports(&dir)), roomy_limits()).await;
     let (id, token) = person_with_token(&h.pool, "rep-c", "Tango").await;
@@ -2688,6 +2731,7 @@ async fn reports_refuse_bad_requests(pool: PgPool) {
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(v["error"], "banned");
     std::fs::remove_dir_all(&dir).unwrap();
+    test_db.close().await;
 }
 
 async fn staff_ban(pool: &PgPool, id: i32) {
@@ -2699,7 +2743,8 @@ async fn staff_ban(pool: &PgPool, id: i32) {
 }
 
 #[sqlx::test]
-async fn reports_have_daily_allowances(pool: PgPool) {
+async fn reports_have_daily_allowances(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     let dir = temp_dir("reports");
     let h = harness_full(pool, None, Some(dir_reports(&dir)), roomy_limits()).await;
     let (_, person) = person_with_token(&h.pool, "rep-d", "Uniform").await;
@@ -2757,10 +2802,12 @@ async fn reports_have_daily_allowances(pool: PgPool) {
     assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
     assert!(r.headers().contains_key("retry-after"));
     std::fs::remove_dir_all(&dir).unwrap();
+    test_db.close().await;
 }
 
 #[sqlx::test]
-async fn reports_off_and_per_address_limit(pool: PgPool) {
+async fn reports_off_and_per_address_limit(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     // Off: 503 for everyone, before the token is looked at.
     let h = harness(pool.clone()).await;
     let (_, token) = person_with_token(&h.pool, "rep-e", "Victor").await;
@@ -2789,6 +2836,7 @@ async fn reports_off_and_per_address_limit(pool: PgPool) {
     assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(r.headers()["retry-after"], "60");
     std::fs::remove_dir_all(&dir).unwrap();
+    test_db.close().await;
 }
 
 /// Ages a folder past the sweep's grace period.
@@ -2801,7 +2849,8 @@ fn age(path: &std::path::Path) {
 }
 
 #[sqlx::test]
-async fn expired_reports_and_orphans_are_purged(pool: PgPool) {
+async fn expired_reports_and_orphans_are_purged(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     use mag_portal::report_store::log_key;
     let dir = temp_dir("reports");
     let service = dir_reports(&dir);
@@ -2891,10 +2940,12 @@ async fn expired_reports_and_orphans_are_purged(pool: PgPool) {
         .unwrap();
     assert_eq!(count, 0);
     std::fs::remove_dir_all(&dir).unwrap();
+    test_db.close().await;
 }
 
 #[sqlx::test]
-async fn report_commands(pool: PgPool) {
+async fn report_commands(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     use mag_portal::admin::ReportsCommand;
     use mag_portal::report_store::{DirStore, ReportStore};
     let dir = temp_dir("reports");
@@ -3052,10 +3103,12 @@ async fn report_commands(pool: PgPool) {
         ]
     );
     std::fs::remove_dir_all(&dir).unwrap();
+    test_db.close().await;
 }
 
 #[sqlx::test]
-async fn report_comments(pool: PgPool) {
+async fn report_comments(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     use mag_portal::admin::ReportsCommand;
     use mag_portal::staff::{self, Role};
     let dir = temp_dir("reports");
@@ -3171,10 +3224,12 @@ async fn report_comments(pool: PgPool) {
     let (_, detail) = body(h.get(&format!("/admin/reports/{odd_id}"), Some(&m)).await).await;
     assert!(!detail.contains("class=\"comment\""), "{detail}");
     std::fs::remove_dir_all(&dir).unwrap();
+    test_db.close().await;
 }
 
 #[sqlx::test]
-async fn reports_in_the_admin_panel(pool: PgPool) {
+async fn reports_in_the_admin_panel(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     use mag_portal::staff::{self, Role};
     let dir = temp_dir("reports");
     let h = harness_full(pool, None, Some(dir_reports(&dir)), roomy_limits()).await;
@@ -3278,6 +3333,7 @@ async fn reports_in_the_admin_panel(pool: PgPool) {
     assert_eq!(action, "download report log");
     assert_eq!(target, format!("report {id}"));
     std::fs::remove_dir_all(&dir).unwrap();
+    test_db.close().await;
 }
 
 // ---- S3 report store against an in-process fake ----
@@ -3365,7 +3421,8 @@ fn s3_args(
 }
 
 #[sqlx::test]
-async fn reports_in_an_s3_bucket(pool: PgPool) {
+async fn reports_in_an_s3_bucket(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     use mag_portal::admin::ReportsCommand;
     let s3 = Arc::new(FakeS3::default());
     let addr = serve(Router::new().fallback(fake_s3).with_state(s3.clone())).await;
@@ -3469,4 +3526,5 @@ async fn reports_in_an_s3_bucket(pool: PgPool) {
         .unwrap();
     assert_eq!(count, 0);
     std::fs::remove_dir_all(&keys).unwrap();
+    test_db.close().await;
 }

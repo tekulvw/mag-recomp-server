@@ -18,6 +18,9 @@ use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+
+mod support;
 
 struct Harness {
     base: String,
@@ -242,7 +245,8 @@ fn friend<'a>(social: &'a Value, name: &str) -> &'a Value {
 }
 
 #[sqlx::test]
-async fn request_accept_and_presence(pool: PgPool) {
+async fn request_accept_and_presence(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     let h = harness(pool).await;
     let alpha = h.named("Alpha").await;
     let bravo = h.named("Bravo").await;
@@ -335,10 +339,12 @@ async fn request_accept_and_presence(pool: PgPool) {
         StatusCode::NO_CONTENT
     );
     assert_eq!(friend(&h.social(&bravo).await, "Alpha")["online"], true);
+    test_db.close().await;
 }
 
 #[sqlx::test]
-async fn crossing_requests_become_friends(pool: PgPool) {
+async fn crossing_requests_become_friends(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     let h = harness(pool).await;
     let alpha = h.named("Alpha").await;
     let bravo = h.named("Bravo").await;
@@ -348,10 +354,12 @@ async fn crossing_requests_become_friends(pool: PgPool) {
         assert_eq!(v["friends"].as_array().unwrap().len(), 1);
         assert!(names(&v["incoming"]).is_empty() && names(&v["outgoing"]).is_empty());
     }
+    test_db.close().await;
 }
 
 #[sqlx::test]
-async fn decline_cancel_and_remove(pool: PgPool) {
+async fn decline_cancel_and_remove(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     let h = harness(pool).await;
     let alpha = h.named("Alpha").await;
     let bravo = h.named("Bravo").await;
@@ -409,10 +417,12 @@ async fn decline_cancel_and_remove(pool: PgPool) {
     for p in [&alpha, &bravo] {
         assert!(h.social(p).await["friends"].as_array().unwrap().is_empty());
     }
+    test_db.close().await;
 }
 
 #[sqlx::test]
-async fn blocks_hide_presence_and_requests(pool: PgPool) {
+async fn blocks_hide_presence_and_requests(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     let h = harness(pool).await;
     let alpha = h.named("Alpha").await;
     let bravo = h.named("Bravo").await;
@@ -485,10 +495,12 @@ async fn blocks_hide_presence_and_requests(pool: PgPool) {
     assert_eq!(names(&a["blocked"]), ["Charlie"]);
     assert_eq!(names(&a["incoming"]), ["Bravo"]);
     assert_eq!(h.request(&alpha, "Bravo").await.1["status"], "accepted");
+    test_db.close().await;
 }
 
 #[sqlx::test]
-async fn presence_expires_and_goes_offline(pool: PgPool) {
+async fn presence_expires_and_goes_offline(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     let h = harness(pool).await;
     let alpha = h.named("Alpha").await;
     let bravo = h.named("Bravo").await;
@@ -565,10 +577,12 @@ async fn presence_expires_and_goes_offline(pool: PgPool) {
             "{bad}"
         );
     }
+    test_db.close().await;
 }
 
 #[sqlx::test]
-async fn auth_and_name_errors(pool: PgPool) {
+async fn auth_and_name_errors(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     let h = harness(pool).await;
     let alpha = h.named("Alpha").await;
     let unnamed = h.person("unnamed", None).await;
@@ -670,10 +684,12 @@ async fn auth_and_name_errors(pool: PgPool) {
         "accepted"
     );
     assert_eq!(h.social(&service).await["self"], "PlayerLinux");
+    test_db.close().await;
 }
 
 #[sqlx::test]
-async fn lookup_finds_exact_names(pool: PgPool) {
+async fn lookup_finds_exact_names(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     let limits = web::Limits {
         lookup: RateLimiter::new(5, Duration::from_secs(60)),
         ..roomy()
@@ -724,6 +740,7 @@ async fn lookup_finds_exact_names(pool: PgPool) {
     assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(r.headers()["retry-after"], "60");
     assert_eq!(r.json::<Value>().await.unwrap()["error"], "rate_limited");
+    test_db.close().await;
 }
 
 /// Accounts `Filler1..=n` holding names, made in one statement.
@@ -743,7 +760,8 @@ async fn fillers(pool: &PgPool, n: i32) -> Vec<i32> {
 }
 
 #[sqlx::test]
-async fn list_limits(pool: PgPool) {
+async fn list_limits(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     let h = harness_with(pool, roomy()).await;
     let alpha = h.named("Alpha").await;
     let bravo = h.named("Bravo").await;
@@ -832,10 +850,12 @@ async fn list_limits(pool: PgPool) {
         )
         .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
+    test_db.close().await;
 }
 
 #[sqlx::test]
-async fn per_account_rate_limits(pool: PgPool) {
+async fn per_account_rate_limits(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     let limits = web::Limits {
         presence: RateLimiter::new(3, Duration::from_secs(60)),
         social_changes: RateLimiter::new(2, Duration::from_secs(60)),
@@ -904,10 +924,12 @@ async fn per_account_rate_limits(pool: PgPool) {
         h.page("/friends", &alpha).await.status(),
         StatusCode::TOO_MANY_REQUESTS
     );
+    test_db.close().await;
 }
 
 #[sqlx::test]
-async fn friends_page_flows(pool: PgPool) {
+async fn friends_page_flows(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     let h = harness_with(pool, roomy()).await;
     let alpha = h.named("Alpha").await;
     let bravo = h.named("Bravo").await;
@@ -1094,10 +1116,12 @@ async fn friends_page_flows(pool: PgPool) {
     // The privacy page explains presence.
     let privacy = h.page("/privacy", &bravo).await.text().await.unwrap();
     assert!(privacy.contains("Friends and status") && privacy.contains("60 seconds"));
+    test_db.close().await;
 }
 
 #[sqlx::test]
-async fn staff_see_counts_and_deletion_cascades(pool: PgPool) {
+async fn staff_see_counts_and_deletion_cascades(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
     let h = harness_with(pool, roomy()).await;
     let alpha = h.named("Alpha").await;
     let bravo = h.named("Bravo").await;
@@ -1145,4 +1169,5 @@ async fn staff_see_counts_and_deletion_cascades(pool: PgPool) {
             .unwrap()
             .is_empty()
     );
+    test_db.close().await;
 }
