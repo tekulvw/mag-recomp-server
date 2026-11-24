@@ -48,6 +48,17 @@ when a qualified terminal receipt is settled. Existing saved rows take precedenc
 Saved nomination and matches-since-command bytes are preserved; this increment
 does not invent their independent advancement or mutation rules.
 
+The retail lobby sends the player's volunteer preference as plugin message
+`0x0243`: the type followed by one byte of squad/platoon/OIC bits (1/2/4), with
+no header and no reply. The client sends it and then its join request without
+waiting, so the MLS session commits the byte to the saved record's nominations
+before it handles the join, and that admission carries it. The bits are stored
+as sent; gameplay masks them by leadership level at admission and elects among
+the nominated humans. Bits outside 1/2/4 are refused and change nothing. A row
+with no leadership record gains one at the level its native record already
+publishes (1), with no point balance. The MLS log line's status names
+the outcome and the bits received.
+
 ## Publication and acceptance
 
 The existing native full character record carries cumulative leadership points

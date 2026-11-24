@@ -474,6 +474,26 @@ namespace Server.Medius
             Commit(path, all); // Atomic durable save must finish before the session acknowledges the purchase.
             return Outcome(MagNetResult.Success, "skill-purchase-committed");
         }
+        // Saves the volunteer bits as sent; gameplay masks them by leadership level at admission,
+        // so a later rank-up honours a standing preference. A row without a leadership record
+        // gains one at the level its native record already publishes (1), with no point balance.
+        public CharacterCreationOutcome SaveNominationsForAccount(string account, uint characterId, byte nominations)
+        {
+            if (!MagDevelopmentAccountPolicy.ValidAccount(account) || characterId == 0)
+                return Outcome(MagNetResult.Error, "invalid-nominations-identity");
+            if ((nominations & ~MagRetailNominationsUpdate.KnownBits) != 0)
+                return Outcome(MagNetResult.Error, "unsupported-nomination-bits");
+            string path = ValidPath(); Directory.CreateDirectory(Path.GetDirectoryName(path));
+            using var lease = AcquireLock(path + ".lock");
+            var all = ReadAll().ToList();
+            var character = all.SingleOrDefault(c => c.Account == account && c.Id == characterId);
+            if (character == null) return Outcome(MagNetResult.Error, "character-not-owned");
+            if (character.Leadership?.Nominations == nominations) return Outcome(MagNetResult.Success, "nominations-unchanged");
+            character.Leadership ??= new StoredLeadershipRecord { LeadershipLevel = 1 };
+            character.Leadership.Nominations = nominations;
+            Commit(path, all); // The preference is durable before the session handles its join request.
+            return Outcome(MagNetResult.Success, "nominations-committed");
+        }
         public CharacterCreationOutcome SaveLastUsedLoadoutForAccount(string account, uint characterId, byte loadoutIndex, ulong expectedLayoutRevision = 0)
         {
             if (!MagDevelopmentAccountPolicy.ValidAccount(account) || characterId == 0 || loadoutIndex >= 5)
