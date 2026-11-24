@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.9.0](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.8.1...gameplay-v0.9.0) (2026-11-24)
+
+
+### Features
+
+* **gameplay:** extend human bullet damage to every retail firearm ([#218](https://github.com/tekulvw/mag-recomp-server/issues/218)) ([6d66198](https://github.com/tekulvw/mag-recomp-server/commit/6d661983334e13a09925374cdab76c2016f39eca))
+* **gameplay:** fill match profiles with per-profile bots and start them with one human ([#213](https://github.com/tekulvw/mag-recomp-server/issues/213)) ([b840db8](https://github.com/tekulvw/mag-recomp-server/commit/b840db87731801903adeb5bb52490ce66e75d2fc))
+* **gameplay:** load whole-map navmeshes with hash-bound coverage sidecars ([#212](https://github.com/tekulvw/mag-recomp-server/issues/212)) ([e1fe923](https://github.com/tekulvw/mag-recomp-server/commit/e1fe92301d6b0e388fb03da282b31abb92b25f6a))
+* **medius:** place parties into running matches and cap parties at one squad ([#221](https://github.com/tekulvw/mag-recomp-server/issues/221)) ([322ca80](https://github.com/tekulvw/mag-recomp-server/commit/322ca8086bf8d5a4557c6cf60b6054dd09a00b32))
+
+
+### Bug Fixes
+
+* keep matches alive through short gameplay stalls ([#217](https://github.com/tekulvw/mag-recomp-server/issues/217)) ([344ec1e](https://github.com/tekulvw/mag-recomp-server/commit/344ec1ef8592c848ff550ac40313f8842cb89b4c))
+
 ## [0.8.1](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.8.0...gameplay-v0.8.1) (2026-11-24)
 
 
