@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.1](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.8.0...gameplay-v0.8.1) (2026-11-24)
+
+
+### Bug Fixes
+
+* **medius:** reconfigure the gameplay worker whenever it reconnects ([#208](https://github.com/tekulvw/mag-recomp-server/issues/208)) ([3ef3300](https://github.com/tekulvw/mag-recomp-server/commit/3ef3300b440521e75795d60c9eb09520941b6810))
+
 ## [0.8.0](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.7.1...gameplay-v0.8.0) (2026-11-23)
 
 

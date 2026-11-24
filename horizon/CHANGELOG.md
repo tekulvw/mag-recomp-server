@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.1](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.7.0...medius-v0.7.1) (2026-11-24)
+
+
+### Bug Fixes
+
+* **medius:** answer lobby player cards and show online IDs in matches ([#209](https://github.com/tekulvw/mag-recomp-server/issues/209)) ([3e4b7eb](https://github.com/tekulvw/mag-recomp-server/commit/3e4b7eb535e86f0bc308d6609b710b77621027e8))
+* **medius:** reconfigure the gameplay worker whenever it reconnects ([#208](https://github.com/tekulvw/mag-recomp-server/issues/208)) ([3ef3300](https://github.com/tekulvw/mag-recomp-server/commit/3ef3300b440521e75795d60c9eb09520941b6810))
+
 ## [0.7.0](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.6.0...medius-v0.7.0) (2026-11-23)
 
 
