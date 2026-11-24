@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.8.0](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.7.1...medius-v0.8.0) (2026-11-24)
+
+
+### Features
+
+* **chart:** run configured gameplay workers behind the world registry ([#214](https://github.com/tekulvw/mag-recomp-server/issues/214)) ([6fb825f](https://github.com/tekulvw/mag-recomp-server/commit/6fb825fc621f84a12ab41c88e3541fee5ce783d1))
+* **gameplay:** fill match profiles with per-profile bots and start them with one human ([#213](https://github.com/tekulvw/mag-recomp-server/issues/213)) ([b840db8](https://github.com/tekulvw/mag-recomp-server/commit/b840db87731801903adeb5bb52490ce66e75d2fc))
+* **medius:** accept 12-hour portal tickets and answer refusals ([#216](https://github.com/tekulvw/mag-recomp-server/issues/216)) ([aa91046](https://github.com/tekulvw/mag-recomp-server/commit/aa910468f686374be412b44627cefb6e7a627953))
+* **medius:** place parties into running matches and cap parties at one squad ([#221](https://github.com/tekulvw/mag-recomp-server/issues/221)) ([322ca80](https://github.com/tekulvw/mag-recomp-server/commit/322ca8086bf8d5a4557c6cf60b6054dd09a00b32))
+
+
+### Bug Fixes
+
+* keep matches alive through short gameplay stalls ([#217](https://github.com/tekulvw/mag-recomp-server/issues/217)) ([344ec1e](https://github.com/tekulvw/mag-recomp-server/commit/344ec1ef8592c848ff550ac40313f8842cb89b4c))
+* **medius:** accept never-awarded apparel in retail loadout saves ([#211](https://github.com/tekulvw/mag-recomp-server/issues/211)) ([1c2294e](https://github.com/tekulvw/mag-recomp-server/commit/1c2294e8997ef5ee7bd78f75736e9485796e9806))
+
 ## [0.7.1](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.7.0...medius-v0.7.1) (2026-11-24)
 
 

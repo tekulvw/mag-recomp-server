@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/tekulvw/mag-recomp-server/compare/chart-v0.9.0...chart-v0.10.0) (2026-11-24)
+
+
+### Features
+
+* **chart:** run configured gameplay workers behind the world registry ([#214](https://github.com/tekulvw/mag-recomp-server/issues/214)) ([6fb825f](https://github.com/tekulvw/mag-recomp-server/commit/6fb825fc621f84a12ab41c88e3541fee5ce783d1))
+
 ## [0.9.0](https://github.com/tekulvw/mag-recomp-server/compare/chart-v0.8.0...chart-v0.9.0) (2026-11-23)
 
 
