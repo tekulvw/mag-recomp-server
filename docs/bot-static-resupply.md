@@ -94,6 +94,12 @@ python3 tools/project-bot-resupply-approach.py \
   --receipt /absolute/APPROACH.receipt.json
 ```
 
+For a collision world that declares no physics region and is used with a
+coverage sidecar (`collision_coverage` in a match profile), also pass
+`--collision-coverage /absolute/COVERAGE.json`. The goal queries then use the
+sidecar, and the receipt records its SHA-256 as `collision_coverage_sha256`.
+Without the option the command, policy and receipt are unchanged.
+
 Each policy allows 1–16 route queries per tick and 1–16 anchors per provider.
 Projection uses at most 16 explicit sample offsets, each within 5 m of the
 authored center. Projection and runtime goal radii are 0.05–5 m; retry intervals

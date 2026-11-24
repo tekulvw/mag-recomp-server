@@ -73,3 +73,14 @@ class ResupplyApproachProjectorTests(unittest.TestCase):
             bad = {**parameters(), key: value}
             with self.subTest(key=key, value=value), self.assertRaises(ValueError):
                 project(source(), WORLD, bad, lambda *_: reply([(2, [1, 2, 3])]))
+
+    def test_coverage_sidecar_is_passed_to_goal_queries_only_when_supplied(self):
+        command = runpy.run_path(str(SCRIPT))["goals_command"]
+        plain = command("/cli", "/mesh", "/world", None, [1, 2, 3], 0.75)
+        self.assertEqual(plain, ["/cli", "goals", "--mesh", "/mesh", "--collision-world", "/world",
+                                 "--goal", "1,2,3", "--goal-radius", "0.75"])
+        covered = command("/cli", "/mesh", "/world", "/coverage", [1, 2, 3], 0.75)
+        self.assertEqual(covered[:8], ["/cli", "goals", "--mesh", "/mesh", "--collision-world", "/world",
+                                       "--collision-coverage", "/coverage"])
+        self.assertEqual(covered[8:], plain[6:])
+
