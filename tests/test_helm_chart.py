@@ -28,9 +28,10 @@ def render(extra=None, ok=True):
     return result.stderr
 
 
-def gameplay_arguments(docs):
+def gameplay_arguments(docs, deployment=None):
     """Execute the rendered launcher with a harmless argv recorder, never a game server."""
     container = next(c for d in docs if d['kind'] == 'Deployment'
+                     and deployment in (None, d['metadata']['name'])
                      for c in d['spec']['template']['spec']['containers'] if c['name'] == 'gameplay')
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
@@ -568,6 +569,305 @@ class ChartTests(unittest.TestCase):
         ]
         for case in cases:
             with self.subTest(case=case): render(case, ok=False)
+
+    WORKER_SHA = {'sabotage': 'b' * 64, 'acquisition': 'c' * 64, 'domination': 'd' * 64}
+
+    @classmethod
+    def workers(cls):
+        """Three synthetic workers; the store location comes from data.s3 unless a worker overrides it."""
+        return [
+            {'id': 'sabotage', 'matchProfiles': 'sabotage/match-profiles.json',
+             'data': {'s3': {'key': 'workers/sabotage.tar.gz', 'sha256': cls.WORKER_SHA['sabotage']}}},
+            {'id': 'acquisition', 'name': 'acq', 'matchProfiles': 'acquisition/match-profiles.json',
+             'data': {'revision': '2', 's3': {'key': 'workers/acquisition.tar.gz', 'sha256': cls.WORKER_SHA['acquisition'],
+                                              'bucket': 'other-bucket', 'forcePathStyle': False},
+                      'files': {'spawns': 'acquisition/spawns.json', 'botNames': 'acquisition/names.json'}},
+             'extraArgs': ['--party-reservations'], 'minimumPlayers': 1, 'maximumPlayers': 16,
+             'minimumPlayersPerTeam': [2, 2], 'resources': {'requests': {'cpu': '1', 'memory': '1Gi'}},
+             'nodeSelector': {'example.invalid/pool': 'gameplay'},
+             'tolerations': [{'key': 'dedicated', 'operator': 'Equal', 'value': 'gameplay', 'effect': 'NoSchedule'}]},
+            {'id': 'domination', 'matchProfiles': 'domination/match-profiles.json', 'emptyDirSizeLimit': '12Gi',
+             'data': {'s3': {'key': 'workers/domination.tar.gz', 'sha256': cls.WORKER_SHA['domination']}},
+             'navigation': {'s3': {'key': 'navigation/domination.tar.gz', 'sha256': 'e' * 64}, 'emptyDirSizeLimit': '4Gi'},
+             'draining': True},
+        ]
+
+    @classmethod
+    def worker_values(cls, workers=None, **extra):
+        values = {'data': {'mode': 's3', 's3': {'endpoint': 'https://objects.example.invalid', 'bucket': 'private-runtime',
+                                                'key': 'medius/catalogs.tar.gz', 'sha256': 'a' * 64, 'versionId': 'medius-version',
+                                                'existingSecret': 'object-store'}},
+                  'gameplayWorkers': cls.workers() if workers is None else workers}
+        values.update(extra)
+        return values
+
+    @staticmethod
+    def medius_pod(docs):
+        return next(d for d in docs if d['kind'] == 'Deployment' and d['metadata']['name'].endswith('-medius'))['spec']['template']
+
+    def test_no_gameplay_workers_keeps_the_single_gameplay_graph(self):
+        def text(extra):
+            values = {**BASE, **extra}
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.json') as f:
+                json.dump(values, f); f.flush()
+                result = subprocess.run([HELM, 'template', 'test', str(CHART), '-f', f.name], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout
+        s3 = {'data': {'mode': 's3', 's3': {'bucket': 'b', 'key': 'k', 'sha256': 'a' * 64, 'existingSecret': 's'}}}
+        for extra in ({}, s3):
+            self.assertEqual(text(extra), text({**extra, 'gameplayWorkers': [], 'worldRegistry': {'workerWaitSeconds': 300},
+                                                'network': {**BASE['network'], 'udpPortRange': {'start': 10474, 'end': 10474}}}))
+        docs = render()
+        self.assertEqual([d['metadata']['name'] for d in docs if d['kind'] == 'Deployment'],
+                         ['test-mag-recomp-server-gameplay', 'test-mag-recomp-server-medius'])
+        self.assertFalse(any(d['metadata']['name'].endswith('-world-registry') for d in docs))
+        pod = self.medius_pod(docs)
+        self.assertNotIn('wait-for-workers', [c['name'] for c in pod['spec']['initContainers']])
+        self.assertFalse(any(k.startswith('checksum/gameplay') or k == 'checksum/world-registry' for k in pod['metadata']['annotations']))
+        env = {e['name']: e.get('value') for e in pod['spec']['containers'][0]['env']}
+        self.assertEqual(env['MAG_GAMEPLAY_HOST'], 'test-mag-recomp-server-gameplay')
+        self.assertNotIn('MAG_WORLD_REGISTRY', env)
+        self.assertNotIn('--worker-id', gameplay_arguments(docs))
+        scripts = next(d for d in docs if d['kind'] == 'ConfigMap' and d['metadata']['name'].endswith('-scripts'))
+        self.assertNotIn('wait_for_workers.py', scripts['data'])
+
+    def test_three_gameplay_workers(self):
+        docs = render(self.worker_values(worldRegistry={'partyInviteSeconds': 30}))
+        name = 'test-mag-recomp-server'
+        suffixes = {'sabotage': 'sabotage', 'acquisition': 'acq', 'domination': 'domination'}
+        deployments = {d['metadata']['name']: d for d in docs if d['kind'] == 'Deployment'}
+        self.assertEqual(sorted(deployments), sorted([f'{name}-gameplay-{s}' for s in suffixes.values()] + [f'{name}-medius']))
+        services = {d['metadata']['name']: d for d in docs if d['kind'] == 'Service'}
+        self.assertEqual(sorted(n for n, d in services.items() if d['spec']['type'] == 'ClusterIP'),
+                         sorted(f'{name}-gameplay-{s}' for s in suffixes.values()))
+        workers = {w['id']: w for w in self.workers()}
+        for worker_id, suffix in suffixes.items():
+            with self.subTest(worker=worker_id):
+                deployment = deployments[f'{name}-gameplay-{suffix}']
+                service = services[f'{name}-gameplay-{suffix}']
+                pod = deployment['spec']['template']
+                labels = pod['metadata']['labels']
+                self.assertEqual(deployment['spec']['selector']['matchLabels'], {k: labels[k] for k in service['spec']['selector']})
+                self.assertEqual(service['spec']['selector']['app.kubernetes.io/component'], f'gameplay-{suffix}')
+                self.assertEqual(service['spec']['ports'], [{'name': 'bridge', 'port': 31000, 'targetPort': 'bridge', 'protocol': 'TCP'}])
+                self.assertEqual((deployment['spec']['replicas'], deployment['spec']['strategy']['type']), (1, 'Recreate'))
+                args = gameplay_arguments(docs, deployment['metadata']['name'])
+                self.assertEqual(args[args.index('--worker-id') + 1], worker_id)
+                self.assertEqual(args[args.index('--match-profiles') + 1], f'/data/{worker_id}/match-profiles.json')
+                self.assertEqual(args[args.index('--application-id') + 1], '20231')
+                self.assertEqual(args[args.index('--bind') + 1], '0.0.0.0:31000')
+                spec = pod['spec']
+                init = {c['name']: c for c in spec['initContainers']}
+                fetch = {e['name']: e['value'] for e in init['fetch-data']['env']}
+                self.assertEqual(fetch['DATA_KEY'], f'workers/{worker_id}.tar.gz')
+                self.assertEqual(fetch['DATA_VERSION'], '', 'a worker must never inherit the Medius object version')
+                self.assertEqual(fetch['S3_ENDPOINT'], 'https://objects.example.invalid')
+                self.assertEqual(init['fetch-data']['envFrom'], [{'secretRef': {'name': 'object-store'}}])
+                self.assertIn(self.WORKER_SHA[worker_id], init['verify-data']['args'])
+                self.assertNotIn('a' * 64, init['verify-data']['args'])
+                volumes = {v['name']: v for v in spec['volumes']}
+                self.assertEqual(volumes['data']['emptyDir']['sizeLimit'], workers[worker_id].get('emptyDirSizeLimit', '8Gi'))
+                container = spec['containers'][0]
+                self.assertTrue(next(m for m in container['volumeMounts'] if m['name'] == 'data')['readOnly'])
+        acquisition = deployments[f'{name}-gameplay-acq']['spec']['template']
+        fetch = {e['name']: e['value'] for e in next(c for c in acquisition['spec']['initContainers'] if c['name'] == 'fetch-data')['env']}
+        self.assertEqual((fetch['DATA_BUCKET'], fetch['ADDRESSING_STYLE']), ('other-bucket', 'virtual'))
+        self.assertEqual(acquisition['metadata']['annotations']['data-revision'], '2')
+        args = gameplay_arguments(docs, f'{name}-gameplay-acq')
+        self.assertEqual(args[args.index('--spawn-catalog') + 1], '/data/acquisition/spawns.json')
+        self.assertEqual(args[args.index('--bot-names') + 1], '/data/acquisition/names.json')
+        self.assertEqual(args[args.index('--item-catalog') + 1], '/data/retail-items.json')
+        self.assertEqual(args[-1], '--party-reservations')
+        self.assertEqual(acquisition['spec']['containers'][0]['resources'], {'requests': {'cpu': '1', 'memory': '1Gi'}})
+        self.assertEqual(acquisition['spec']['nodeSelector'], {'example.invalid/pool': 'gameplay'})
+        self.assertEqual(acquisition['spec']['tolerations'][0]['key'], 'dedicated')
+        sabotage = deployments[f'{name}-gameplay-sabotage']['spec']['template']['spec']
+        self.assertEqual(sabotage['nodeSelector'], {'kubernetes.io/arch': 'amd64'})
+        self.assertNotIn('tolerations', sabotage)
+        self.assertEqual(sabotage['containers'][0]['resources']['limits'], {'memory': '2Gi'})
+        self.assertNotIn('navigation', [v['name'] for v in sabotage['volumes']])
+        domination = deployments[f'{name}-gameplay-domination']['spec']['template']
+        init = {c['name']: c for c in domination['spec']['initContainers']}
+        self.assertEqual({e['name']: e['value'] for e in init['fetch-navigation']['env']}['DATA_KEY'], 'navigation/domination.tar.gz')
+        self.assertIn('e' * 64, init['verify-navigation']['args'])
+        self.assertIn({'name': 'navigation', 'mountPath': '/catalogs'}, init['verify-navigation']['volumeMounts'])
+        self.assertIn({'name': 'navigation', 'mountPath': '/navigation', 'readOnly': True}, domination['spec']['containers'][0]['volumeMounts'])
+        volumes = {v['name']: v for v in domination['spec']['volumes']}
+        self.assertEqual(volumes['navigation']['emptyDir']['sizeLimit'], '4Gi')
+        self.assertEqual(volumes['navigation-archive']['emptyDir']['sizeLimit'], '4Gi')
+
+        # Medius keeps its own bundle and reads the registry; client_address follows MAG_ADVERTISE_IPV4.
+        pod = self.medius_pod(docs)
+        init = {c['name']: c for c in pod['spec']['initContainers']}
+        self.assertIn('a' * 64, init['verify-data']['args'])
+        self.assertEqual({e['name']: e['value'] for e in init['fetch-data']['env']}['DATA_VERSION'], 'medius-version')
+        containers = {c['name']: c for c in pod['spec']['containers']}
+        env = {e['name']: e.get('value') for e in containers['medius']['env']}
+        self.assertEqual(env['MAG_WORLD_REGISTRY'], '/world-registry/world-registry.json')
+        self.assertEqual(env['MAG_LOCAL_DME'], '1')
+        self.assertEqual(env['MAG_ADVERTISE_IPV4'], '203.0.113.10')
+        self.assertNotIn('MAG_GAMEPLAY_HOST', env)
+        self.assertIn({'name': 'world-registry', 'mountPath': '/world-registry', 'readOnly': True}, containers['medius']['volumeMounts'])
+        self.assertNotIn('world-registry', [m['name'] for m in containers['maps']['volumeMounts']])
+        self.assertNotIn('MAG_WORLD_REGISTRY', {e['name'] for e in containers['maps']['env']})
+        volume = next(v for v in pod['spec']['volumes'] if v['name'] == 'world-registry')
+        self.assertEqual(volume, {'name': 'world-registry', 'configMap': {'name': f'{name}-world-registry'}})
+        registry = json.loads(next(d for d in docs if d['metadata']['name'] == f'{name}-world-registry')['data']['world-registry.json'])
+        self.assertEqual({k: v for k, v in registry.items() if k != 'workers'},
+                         {'format': 'mag_world_registry_v1', 'application_id': 20231, 'client_address': '$MAG_ADVERTISE_IPV4',
+                          'client_tcp_port': 10473, 'party_invite_seconds': 30})
+        self.assertEqual(registry['workers'], [
+            {'worker_id': 'sabotage', 'worker_host': f'{name}-gameplay-sabotage', 'worker_port': 31000, 'minimum_players': 2,
+             'maximum_players': 8, 'minimum_players_per_team': [1, 1], 'draining': False},
+            {'worker_id': 'acquisition', 'worker_host': f'{name}-gameplay-acq', 'worker_port': 31000, 'minimum_players': 1,
+             'maximum_players': 16, 'minimum_players_per_team': [2, 2], 'draining': False},
+            {'worker_id': 'domination', 'worker_host': f'{name}-gameplay-domination', 'worker_port': 31000, 'minimum_players': 2,
+             'maximum_players': 8, 'minimum_players_per_team': [1, 1], 'draining': True},
+        ])
+        for worker in registry['workers']:
+            self.assertIn(worker['worker_host'], services)
+        self.assertNotIn('party_invite_seconds', json.loads(next(
+            d for d in render(self.worker_values()) if d['metadata']['name'] == f'{name}-world-registry')['data']['world-registry.json']))
+        wait = init['wait-for-workers']
+        self.assertEqual(wait['command'], ['python3', '/scripts/wait_for_workers.py'])
+        self.assertEqual(wait['args'], ['300'] + [f'{name}-gameplay-{s}:31000' for s in ('sabotage', 'acq', 'domination')])
+        self.assertEqual(list(init)[-1], 'wait-for-workers')
+        self.assertNotIn('wait-for-workers', [c['name'] for c in self.medius_pod(render(self.worker_values(
+            worldRegistry={'workerWaitSeconds': 0})))['spec']['initContainers']])
+        scripts = next(d for d in docs if d['kind'] == 'ConfigMap' and d['metadata']['name'].endswith('-scripts'))
+        self.assertIn('data_bundle.py', scripts['data'])
+        self.assertIn('wait_for_workers.py', scripts['data'])
+        # Workers use s3 bundles even when Medius reads an existing claim.
+        claim = render({'gameplayWorkers': self.workers()[:2], 'data': {'s3': {'bucket': 'private-runtime', 'existingSecret': 'object-store'}}})
+        self.assertIn('persistentVolumeClaim', next(v for v in self.medius_pod(claim)['spec']['volumes'] if v['name'] == 'data'))
+        self.assertIn('data_bundle.py', next(d for d in claim if d['metadata']['name'].endswith('-scripts'))['data'])
+
+    def test_gameplay_worker_rollout_couples_medius(self):
+        """Medius never adopts a restarted worker, so anything that rolls a worker must roll Medius too."""
+        def snapshot(workers=None, **extra):
+            docs = render(self.worker_values(workers, **extra))
+            pods = {d['metadata']['name'].replace('test-mag-recomp-server-', ''): d['spec']['template'] for d in docs if d['kind'] == 'Deployment'}
+            registry = next(d for d in docs if d['metadata']['name'].endswith('-world-registry'))['data']['world-registry.json']
+            return pods, registry
+        base, registry = snapshot()
+        annotations = base['medius']['metadata']['annotations']
+        for suffix in ('sabotage', 'acq', 'domination'):
+            self.assertRegex(annotations[f'checksum/gameplay-{suffix}'], '^[0-9a-f]{64}$')
+        self.assertRegex(annotations['checksum/world-registry'], '^[0-9a-f]{64}$')
+
+        def changed(workers=None, **extra):
+            pods, _ = snapshot(workers, **extra)
+            return {name for name in base if pods.get(name) != base[name]}
+        bundle = self.workers(); bundle[0]['data']['s3']['sha256'] = 'f' * 64
+        self.assertEqual(changed(bundle), {'gameplay-sabotage', 'medius'})
+        args = self.workers(); args[2]['extraArgs'] = ['--collision-world', '/data/collision.json']
+        self.assertEqual(changed(args), {'gameplay-domination', 'medius'})
+        self.assertEqual(changed(images={'gameplay': {'tag': '9.9.9'}}),
+                         {'gameplay-sabotage', 'gameplay-acq', 'gameplay-domination', 'medius'})
+        self.assertEqual(changed(nodeSelector={'kubernetes.io/arch': 'arm64'}),
+                         {'gameplay-sabotage', 'gameplay-domination', 'medius'})
+        # Structural registry changes rebuild Medius only; workers keep running.
+        minimum = self.workers(); minimum[0]['minimumPlayers'] = 4
+        self.assertEqual(changed(minimum), {'medius'})
+        # Drain flags reload live: only the registry file changes, no Pod restarts.
+        drain = self.workers(); drain[0]['draining'] = True
+        pods, drained = snapshot(drain)
+        self.assertEqual(pods, base)
+        self.assertNotEqual(drained, registry)
+        self.assertTrue(json.loads(drained)['workers'][0]['draining'])
+
+    def test_gameplay_worker_validation(self):
+        workers = self.workers()
+        def invalid(changes, index=0, message=None, **extra):
+            entries = self.workers()
+            entries[index] = {**entries[index], **changes}
+            for key in [k for k, v in changes.items() if v is None]:
+                del entries[index][key]
+            error = render(self.worker_values(entries, **extra), ok=False)
+            if message:
+                self.assertIn(message, error)
+        self.assertIn('2 to 16', render(self.worker_values(workers[:1]), ok=False))
+        render(self.worker_values([{**workers[0], 'id': f'w{i}'} for i in range(17)]), ok=False)
+        render(self.worker_values([{**workers[0], 'id': f'w{i}'} for i in range(16)]))
+        invalid({'id': 'acquisition', 'name': 'other'}, message='repeats id')
+        invalid({'name': 'acq'}, message='repeats name')
+        invalid({'extraArgs': ['--worker-id', 'other']}, message='chart-managed')
+        invalid({'extraArgs': ['--match-profiles=/data/other.json']}, message='chart-managed')
+        invalid({'extraArgs': ['--item-catalog', '/data/x.json']}, message='chart-managed')
+        invalid({'minimumPlayers': 9}, message='cannot exceed')
+        invalid({'name': 'a' * 32}, message='63 characters')
+        for changes in ({'matchProfiles': None}, {'matchProfiles': '../profiles.json'}, {'matchProfiles': '/data/profiles.json'},
+                        {'data': None}, {'data': {'s3': {'key': 'k'}}}, {'data': {'s3': {'sha256': 'a' * 64}}},
+                        {'data': {'s3': {'key': 'k', 'sha256': 'bad'}}}, {'id': 'Upper'}, {'id': 'under_score'}, {'id': ''},
+                        {'minimumPlayers': 0}, {'maximumPlayers': 65}, {'minimumPlayersPerTeam': [1]}, {'minimumPlayersPerTeam': [0, 1]},
+                        {'draining': 'yes'}, {'navigation': {'s3': {'key': 'k', 'sha256': 'a' * 64}, 'mountPath': '/data'}},
+                        {'navigation': {'s3': {'key': 'k', 'sha256': 'a' * 64}, 'mountPath': 'relative'}},
+                        {'navigation': {'emptyDirSizeLimit': '1Gi'}}, {'unknown': True}):
+            with self.subTest(changes=changes):
+                invalid(changes)
+        self.assertIn('20231', render(self.worker_values(runtime={'existingSecret': 'runtime-keys', 'applicationId': 20230,
+                                                                  'protocolVersion': 1725, 'gameType': 2},
+                                                         images={'gameplay': {'tag': '0.1.0'}}), ok=False))
+        # Without a store to inherit, each worker must name its own bucket and Secret.
+        error = render({'gameplayWorkers': workers[:2]}, ok=False)
+        self.assertIn('s3.bucket', error)
+        for invalid_registry in ({'partyInviteSeconds': 0}, {'partyInviteSeconds': 301}, {'workerWaitSeconds': -1}, {'other': 1}):
+            render(self.worker_values(worldRegistry=invalid_registry), ok=False)
+
+    def test_wait_for_workers_script(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('wait_for_workers', CHART / 'files' / 'wait_for_workers.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        import socket
+        with socket.socket() as listener, socket.socket() as reserved:
+            listener.bind(('127.0.0.1', 0)); listener.listen()
+            reserved.bind(('127.0.0.1', 0))  # Bound but not listening: connections are refused.
+            ready = f'127.0.0.1:{listener.getsockname()[1]}'
+            closed = f'127.0.0.1:{reserved.getsockname()[1]}'
+            self.assertEqual(module.wait(5, [ready]), [])
+            clock = iter(range(100)).__next__
+            self.assertEqual(module.wait(3, [ready, closed], clock=clock, sleep=lambda _: None), [closed])
+            result = subprocess.run([os.sys.executable, str(CHART / 'files' / 'wait_for_workers.py'), '0', ready, closed],
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, 'Medius must still start without an unreachable worker')
+            self.assertIn(closed, result.stderr)
+            self.assertIn(f'ready: {ready}', result.stdout)
+            self.assertNotEqual(subprocess.run([os.sys.executable, str(CHART / 'files' / 'wait_for_workers.py'), 'x', ready],
+                                               capture_output=True, timeout=10).returncode, 0)
+
+    def test_medius_udp_port_range(self):
+        def udp(docs):
+            service = next(d for d in docs if d['kind'] == 'Service' and d['metadata']['name'].endswith('-medius'))
+            main = next(c for c in self.medius_pod(docs)['spec']['containers'] if c['name'] == 'medius')
+            return ([p for p in service['spec']['ports'] if p['protocol'] == 'UDP'],
+                    [p for p in main['ports'] if p['protocol'] == 'UDP'])
+        service, container = udp(render())
+        self.assertEqual(service, [{'name': 'game-udp', 'port': 10474, 'targetPort': 'game-udp', 'protocol': 'UDP'}])
+        self.assertEqual(container, [{'name': 'game-udp', 'containerPort': 10474, 'protocol': 'UDP'}])
+        docs = render({'network': {'udpPortRange': {'start': 10474, 'end': 10505}}})
+        service, container = udp(docs)
+        self.assertEqual([p['port'] for p in service], list(range(10474, 10506)))
+        self.assertEqual([p['containerPort'] for p in container], list(range(10474, 10506)))
+        self.assertEqual(service[1], {'name': 'game-udp-10475', 'port': 10475, 'targetPort': 10475, 'protocol': 'UDP'})
+        names = [p['name'] for p in service]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertTrue(all(len(n) <= 15 for n in names))
+        pod = self.medius_pod(docs)['spec']
+        declared = [(p['containerPort'], p['protocol']) for c in pod['containers'] for p in c['ports']]
+        self.assertEqual(len(declared), len(set(declared)))
+        for bad in ({'start': 10475, 'end': 10505}, {'start': 10474, 'end': 10473}, {'start': 10474, 'end': 10730}, {'start': 10474, 'end': '10505'}):
+            with self.subTest(range=bad):
+                render({'network': {'udpPortRange': bad}}, ok=False)
+        # An admin API port inside the UDP range stays closed on TCP but open for UDP game traffic.
+        selector = {'matchLabels': {'kubernetes.io/metadata.name': 'mag-portal'}}
+        docs = render({'network': {'udpPortRange': {'start': 10474, 'end': 10505}},
+                       'adminApi': {'enabled': True, 'existingSecret': 'mag-admin-api', 'allowedNamespaceSelector': selector}})
+        policy = next(d for d in docs if d['kind'] == 'NetworkPolicy')
+        self.assertFalse(self.policy_allows(policy, 10490, 'TCP', 'elsewhere'))
+        self.assertTrue(self.policy_allows(policy, 10490, 'TCP', 'mag-portal'))
+        for port in range(10474, 10506):
+            self.assertTrue(self.policy_allows(policy, port, 'UDP', 'elsewhere'), port)
 
     def test_package(self):
         with tempfile.TemporaryDirectory() as tmp:

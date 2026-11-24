@@ -2,6 +2,8 @@
 network:
   advertisedIPv4: 203.0.113.10
   authDns: auth.example.invalid
+  # Forwards one UDP port per concurrent human; covers the admin port, which stays TCP-restricted.
+  udpPortRange: {start: 10474, end: 10505}
 runtime:
   existingSecret: mag-runtime-keys
 # Exercises the optional portal ticket environment with the portal's public test-vector key.
@@ -17,3 +19,15 @@ adminApi:
   allowedNamespaceSelector:
     matchLabels:
       kubernetes.io/metadata.name: mag-portal
+# Exercises the configured world registry with two synthetic worker bundles; no object is fetched.
+gameplayWorkers:
+  - id: sabotage
+    matchProfiles: sabotage/match-profiles.json
+    data:
+      s3: {bucket: private-runtime, key: workers/sabotage.tar.gz, sha256: "1111111111111111111111111111111111111111111111111111111111111111", existingSecret: mag-object-store}
+  - id: domination
+    matchProfiles: domination/match-profiles.json
+    data:
+      s3: {bucket: private-runtime, key: workers/domination.tar.gz, sha256: "2222222222222222222222222222222222222222222222222222222222222222", existingSecret: mag-object-store}
+    navigation:
+      s3: {bucket: private-runtime, key: navigation/domination.tar.gz, sha256: "3333333333333333333333333333333333333333333333333333333333333333", existingSecret: mag-object-store}
