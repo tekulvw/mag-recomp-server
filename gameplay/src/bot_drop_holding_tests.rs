@@ -136,16 +136,32 @@ fn queue_for_drop(engine: &mut Engine<Vec<u8>>, id: u16, launch_x: f64) {
     bot.drop_queue_since = Some(Duration::ZERO);
 }
 
+/// How much of the planning slice each staging pass may use. The ring scan
+/// stops on the wall-clock slice, so tests pin it to either extreme instead
+/// of depending on how fast the machine runs.
+#[derive(Clone, Copy)]
+enum Slice {
+    /// Never runs out: every pass scans `drop_holding_scan` candidates.
+    Unlimited,
+    /// Already spent: every pass scans exactly one candidate.
+    Spent,
+}
+
 /// Stage the walker until it has a holding spot or `passes` run out.
-fn stage(engine: &mut Engine<Vec<u8>>, id: u16, passes: usize) -> Vec<Value> {
+fn stage(engine: &mut Engine<Vec<u8>>, id: u16, passes: usize, slice: Slice) -> Vec<Value> {
     let mut policy = ObjectivePolicy::bundled();
-    // Generous slices: an unoptimised test build must not cut scans short.
-    policy.planning_slice_us = 10_000;
+    policy.planning_slice_us = match slice {
+        Slice::Unlimited => u64::MAX,
+        Slice::Spent => 100,
+    };
     let actors = crate::actor_collision::ActorGrid::default();
     let mut receipts = Vec::new();
     for pass in 0..passes {
         let now = Duration::from_millis(100 * pass as u64);
-        let started = Instant::now();
+        let started = match slice {
+            Slice::Unlimited => Instant::now(),
+            Slice::Spent => Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
+        };
         engine
             .plan_drop_holding(
                 id,
@@ -165,8 +181,9 @@ fn stage(engine: &mut Engine<Vec<u8>>, id: u16, passes: usize) -> Vec<Value> {
     receipts
 }
 
-#[test]
-fn a_walker_on_a_narrow_ledge_holds_where_it_stands_when_no_ring_spot_fits() {
+/// Stage on the narrow ledge, where no ring spot fits, and check the walker
+/// holds in place exactly when its ticket has scanned the whole ring.
+fn holds_in_place_after_the_whole_ring(slice: Slice, scanned_per_pass: usize) {
     let (mut engine, id) = walkway_engine();
     // The launch is near the walkway's side, so every ring column around it
     // misses the 0.4 m walkable strip down the walkway's centre line.
@@ -176,7 +193,9 @@ fn a_walker_on_a_narrow_ledge_holds_where_it_stands_when_no_ring_spot_fits() {
         .runtime
         .unwrap()
         .position;
-    let receipts = stage(&mut engine, id, 12);
+    let policy = ObjectivePolicy::bundled();
+    let ring = policy.drop_holding_candidate_limit;
+    let receipts = stage(&mut engine, id, ring + 1, slice);
     let actions: Vec<_> = receipts
         .iter()
         .map(|r| (r["action"].as_str().unwrap(), r["result"].clone()))
@@ -193,12 +212,25 @@ fn a_walker_on_a_narrow_ledge_holds_where_it_stands_when_no_ring_spot_fits() {
     assert_eq!(actions.last().unwrap().0, "stage_in_place");
     assert!(!bot.drop_approach_ready);
     assert_eq!(bot.drop_holding_misses, 0);
-    let policy = ObjectivePolicy::bundled();
+    // The fallback comes on the pass that completes the ring, never earlier.
     assert_eq!(
         receipts.len(),
-        policy.drop_holding_candidate_limit / policy.drop_holding_scan,
-        "the fallback comes on the pass that completes the ring"
+        ring.div_ceil(scanned_per_pass),
+        "{actions:?}"
     );
+}
+
+#[test]
+fn a_walker_on_a_narrow_ledge_holds_where_it_stands_when_no_ring_spot_fits() {
+    let scan = ObjectivePolicy::bundled().drop_holding_scan;
+    holds_in_place_after_the_whole_ring(Slice::Unlimited, scan);
+}
+
+#[test]
+fn a_spent_planning_slice_delays_holding_in_place_until_the_ring_is_scanned() {
+    // Under load each pass scans one candidate; the whole ring is still
+    // required, just spread over more passes.
+    holds_in_place_after_the_whole_ring(Slice::Spent, 1);
 }
 
 #[test]
@@ -211,7 +243,12 @@ fn a_ring_spot_on_the_walkway_is_still_preferred_to_holding_in_place() {
         .runtime
         .unwrap()
         .position;
-    let receipts = stage(&mut engine, id, 4);
+    let receipts = stage(
+        &mut engine,
+        id,
+        ObjectivePolicy::bundled().drop_holding_candidate_limit,
+        Slice::Unlimited,
+    );
     let bot = &engine.bot_registry.bots[&id];
     let goal = bot.drop_holding_goal.expect("a ring spot");
     assert_ne!(goal, here);
