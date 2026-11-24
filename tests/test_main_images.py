@@ -79,7 +79,7 @@ class MainImagesTests(unittest.TestCase):
         cache = '${{ steps.source.outputs.image }}:buildcache'
         self.assertEqual(build['with']['cache-from'], 'type=registry,ref=' + cache)
         self.assertEqual(build['with']['cache-to'], 'type=registry,ref=' + cache + ',mode=max,ignore-error=true')
-        for name in ('main-images.yml', 'check.yml', 'publish-image.yml', 'release-please.yml', 'runner-image.yml'):
+        for name in ('main-images.yml', 'check.yml', 'publish-image.yml', 'release-please.yml'):
             self.assertNotIn('type=gha', (ROOT / '.github/workflows' / name).read_text(), name)
 
     def test_configured_world_cache_is_refreshed_only_from_checked_main(self):
@@ -121,38 +121,15 @@ class MainImagesTests(unittest.TestCase):
         self.assertEqual(build['with']['cache-from'], 'type=registry,ref=${{ steps.source.outputs.image }}:buildcache')
         self.assertNotIn('cache-to', build['with'])
 
-    def test_runner_image_builds_from_main_with_a_runner_version_and_run_number_tag(self):
-        spec = yaml.load((ROOT / '.github/workflows/runner-image.yml').read_text(), Loader=yaml.BaseLoader)
-        self.assertEqual(set(spec['on']), {'pull_request', 'push', 'workflow_dispatch'})
-        self.assertEqual(spec['on']['push']['branches'], ['main'])
-        paths = {'images/runner/**', '.github/workflows/runner-image.yml'}
-        self.assertEqual(set(spec['on']['push']['paths']), paths)
-        self.assertEqual(set(spec['on']['pull_request']['paths']), paths)
-        self.assertEqual(spec['permissions'], {})
-        # Pull requests build the image with a read-only token and publish nothing.
-        test = spec['jobs']['test']
-        self.assertEqual(test['if'], "github.event_name == 'pull_request'")
-        self.assertEqual(test['permissions'], {'contents': 'read'})
-        build = next(s for s in test['steps'] if s.get('uses', '').startswith('docker/build-push-action@'))
-        self.assertEqual(build['with']['outputs'], 'type=cacheonly')
-        self.assertNotIn('push', build['with'])
-        job = spec['jobs']['publish']
-        self.assertEqual(job['if'], "github.event_name != 'pull_request' && github.ref == 'refs/heads/main'")
-        self.assertEqual(job['permissions'], {'contents': 'read', 'packages': 'write'})
-        step = next(s for s in job['steps'] if s.get('id') == 'source')
-        with tempfile.TemporaryDirectory() as directory:
-            output = Path(directory) / 'output'
-            env = {**os.environ, 'GITHUB_REPOSITORY_OWNER': 'Example', 'GITHUB_RUN_NUMBER': '7',
-                   'GITHUB_OUTPUT': str(output)}
-            result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', step['run']], cwd=ROOT,
-                                    env=env, capture_output=True, text=True, timeout=5)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            values = dict(line.split('=', 1) for line in output.read_text().splitlines())
-        self.assertEqual(values['image'], 'ghcr.io/example/mag-recomp-server-runner')
-        self.assertRegex(values['tag'], r'^\d+\.\d+\.\d+-7$')
-        # The base is pinned by digest, so a rebuild changes only what images/runner changes.
-        self.assertRegex((ROOT / 'images/runner/Dockerfile').read_text(),
-                         r'(?m)^ARG BASE_IMAGE=ghcr\.io/[^:@\s]+:[^@\s]+@sha256:[0-9a-f]{64}$')
+    def test_portal_installs_postgresql_only_when_the_runner_lacks_it(self):
+        spec = yaml.load((ROOT / '.github/workflows/check.yml').read_text(), Loader=yaml.BaseLoader)
+        steps = spec['jobs']['portal']['steps']
+        probe = next(i for i, s in enumerate(steps) if s.get('id') == 'postgres')
+        tools = next(i for i, s in enumerate(steps) if s.get('uses') == './.github/actions/self-hosted-linux')
+        self.assertLess(probe, tools)
+        self.assertIn('/usr/lib/postgresql/*/bin/initdb', steps[probe]['run'])
+        self.assertIn('packages=postgresql', steps[probe]['run'])
+        self.assertEqual(steps[tools]['with']['packages'], '${{ steps.postgres.outputs.packages }}')
 
     def run_plan(self, existing=(), diff='', event='push', before='b' * 40, fetch_fails=False, rebuild='false'):
         step = next(s for s in workflow()['jobs']['plan']['steps'] if s.get('id') == 'plan')

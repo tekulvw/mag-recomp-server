@@ -185,12 +185,21 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
+      # The shared runner image (arc-runner-mag) ships PostgreSQL; install it only where it is missing.
+      - name: Look for an installed PostgreSQL server
+        id: postgres
+        run: |
+          if ls /usr/lib/postgresql/*/bin/initdb > /dev/null 2>&1; then
+            echo "packages=" >> "$GITHUB_OUTPUT"
+          else
+            echo "packages=postgresql" >> "$GITHUB_OUTPUT"
+          fi
       # Natively, with the dependency build cached between runs: the Docker check stage compiled
       # every dependency three times from scratch and exported a multi-GB image nothing used.
       - uses: ./.github/actions/self-hosted-linux
         with:
           rust: 'true'
-          packages: postgresql
+          packages: ${{ steps.postgres.outputs.packages }}
       - run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
       # Only main saves. Pull requests restore main's dependency build; a PR-scoped copy (~550 MB)
       # is usable only by that PR's own reruns and pushes main's entries out of the 10 GB cache.
