@@ -139,6 +139,8 @@ gameplay/target/release/mag-navmesh search-spawn-exits --mesh MESH_WITH_DROP_JSO
   --output EXITS_DIRECTORY
 ```
 
+A runtime route query searches at most 16,384 Detour nodes. On a whole-map mesh, a long ground route inside one walking component can exhaust that pool. The runtime then plans the route in stages. At load it groups each tile's polygons into clusters that connect without leaving the tile, and joins neighbouring clusters through one representative crossing per ordered pair. A staged query first orders the clusters from start to goal. It then searches the polygon corridor in pieces of about 96 m along that order, keeps the first half of each piece so the next piece starts inside a locally shortest path, and string-pulls the joined corridor. One query, including the direct attempt, uses at most four node pools. A route that still cannot complete keeps the direct partial result and reports `out_of_nodes`. Routes that fit the pool are unchanged, and corridors keep the 1,024-polygon limit. Staged routes report their piece count as `stages`.
+
 `prepare.py` reports `runtime_grid_tiles` and `runtime_layout` in its manifest and refuses bounds over 512 tiles. The bake prints the chosen format. Bake bounds default to the first verified region: the world's own region, else the sidecar's. `search-spawn-exits` extends the drop links already in the mesh, so add each seed drop first. Drop links need the 45-degree formats (`v2`/`v4`); a profiled mesh refuses them. At runtime, pass the same sidecar with `--collision-coverage` or a match profile's `collision_coverage`.
 
 ### Offline whole-map reference navigation

@@ -3,6 +3,7 @@
 #include "DetourNavMesh.h"
 #include "DetourNavMeshBuilder.h"
 #include "DetourNavMeshQuery.h"
+#include "DetourNode.h"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -10,13 +11,28 @@
 #include <vector>
 #include <map>
 #include <cstdint>
+#include <functional>
+#include <queue>
 
+// One directed crossing between two tile clusters, represented by a single
+// point on the shared edge of a linked polygon pair.
+struct StagePortal {
+    int from, to;
+    dtPolyRef from_ref, to_ref;
+    float point[3];
+};
 struct MagNav {
     dtNavMesh* mesh;
     dtNavMeshQuery* query;
     std::map<dtPolyRef,int> component;
     bool reference;
     bool component_partition_separates_links;
+    // Staged routing hierarchy. A cluster is a set of polygons in one tile
+    // that are connected without leaving the tile; portals join clusters.
+    std::vector<int> tile_offset;
+    std::vector<int> poly_cluster;
+    std::vector<int> cluster_portals;
+    std::vector<StagePortal> portals;
     ~MagNav() { dtFreeNavMeshQuery(query); dtFreeNavMesh(mesh); }
 };
 struct BakeObjects {
@@ -114,6 +130,285 @@ static void select_tile_faces(const std::vector<BoundsXZ>& bounds, const int* tr
             selected.insert(selected.end(), tris + 3*i, tris + 3*i + 3);
         }
     }
+}
+// Staged routing. A long ground route can need more search nodes than the
+// query pool holds. The hierarchy below plans a coarse order of tile clusters
+// first and then searches the polygon corridor in bounded pieces between
+// crossings on that order. Every piece is an ordinary complete Detour path.
+static int cluster_of(const MagNav* h, dtPolyRef ref) {
+    unsigned int salt = 0, tile = 0, poly = 0;
+    h->mesh->decodePolyId(ref, salt, tile, poly);
+    if (tile >= h->tile_offset.size() || h->tile_offset[tile] < 0) return -1;
+    const size_t index = static_cast<size_t>(h->tile_offset[tile]) + poly;
+    return index < h->poly_cluster.size() ? h->poly_cluster[index] : -1;
+}
+// Midpoint of the part of polygon edge `link.edge` that the link covers.
+static void link_midpoint(const dtMeshTile* tile, const dtPoly& poly, const dtLink& link, float* out) {
+    const float* a = &tile->verts[poly.verts[link.edge] * 3];
+    const float* b = &tile->verts[poly.verts[(link.edge + 1) % poly.vertCount] * 3];
+    float low = 0.f, high = 1.f;
+    if (link.side != 0xff) {
+        low = link.bmin / 255.f;
+        high = link.bmax / 255.f;
+    }
+    const float t = (low + high) * .5f;
+    for (int k = 0; k < 3; ++k) out[k] = a[k] + (b[k] - a[k]) * t;
+}
+static void poly_center(const dtNavMesh* mesh, dtPolyRef ref, float* center) {
+    const dtMeshTile* tile = nullptr;
+    const dtPoly* poly = nullptr;
+    mesh->getTileAndPolyByRefUnsafe(ref, &tile, &poly);
+    center[0] = center[1] = center[2] = 0.f;
+    for (int i = 0; i < poly->vertCount; ++i)
+        for (int k = 0; k < 3; ++k) center[k] += tile->verts[poly->verts[i] * 3 + k];
+    for (int k = 0; k < 3; ++k) center[k] /= static_cast<float>(poly->vertCount);
+}
+static float distance3(const float* a, const float* b) {
+    const float dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+static bool build_stages(MagNav* h) {
+    const dtNavMesh* mesh = h->mesh;
+    const int max_tiles = mesh->getMaxTiles();
+    h->tile_offset.assign(max_tiles, -1);
+    size_t total = 0;
+    for (int t = 0; t < max_tiles; ++t) {
+        const dtMeshTile* tile = mesh->getTile(t);
+        if (!tile->header) continue;
+        h->tile_offset[t] = static_cast<int>(total);
+        total += tile->header->polyCount;
+    }
+    h->poly_cluster.assign(total, -1);
+    int clusters = 0;
+    std::vector<int> stack;
+    for (int t = 0; t < max_tiles; ++t) {
+        const dtMeshTile* tile = mesh->getTile(t);
+        if (!tile->header) continue;
+        const int base = h->tile_offset[t];
+        for (int i = 0; i < tile->header->polyCount; ++i) {
+            if (h->poly_cluster[base + i] >= 0) continue;
+            h->poly_cluster[base + i] = clusters;
+            stack.assign(1, i);
+            while (!stack.empty()) {
+                const int current = stack.back();
+                stack.pop_back();
+                const dtPoly& poly = tile->polys[current];
+                for (unsigned int l = poly.firstLink; l != DT_NULL_LINK; l = tile->links[l].next) {
+                    const dtPolyRef next = tile->links[l].ref;
+                    unsigned int salt = 0, next_tile = 0, next_poly = 0;
+                    if (!next) continue;
+                    mesh->decodePolyId(next, salt, next_tile, next_poly);
+                    if (static_cast<int>(next_tile) != t || h->poly_cluster[base + next_poly] >= 0) continue;
+                    h->poly_cluster[base + next_poly] = clusters;
+                    stack.push_back(static_cast<int>(next_poly));
+                }
+            }
+            ++clusters;
+        }
+    }
+    std::vector<StagePortal> crossings;
+    for (int t = 0; t < max_tiles; ++t) {
+        const dtMeshTile* tile = mesh->getTile(t);
+        if (!tile->header) continue;
+        const dtPolyRef base_ref = mesh->getPolyRefBase(tile);
+        for (int i = 0; i < tile->header->polyCount; ++i) {
+            const int from = h->poly_cluster[h->tile_offset[t] + i];
+            const dtPoly& poly = tile->polys[i];
+            for (unsigned int l = poly.firstLink; l != DT_NULL_LINK; l = tile->links[l].next) {
+                const dtLink& link = tile->links[l];
+                if (!link.ref) continue;
+                const int to = cluster_of(h, link.ref);
+                if (to < 0 || to == from) continue;
+                StagePortal crossing{from, to, base_ref | static_cast<dtPolyRef>(i), link.ref, {0.f, 0.f, 0.f}};
+                link_midpoint(tile, poly, link, crossing.point);
+                crossings.push_back(crossing);
+            }
+        }
+    }
+    std::stable_sort(crossings.begin(), crossings.end(), [](const StagePortal& a, const StagePortal& b) {
+        return a.from != b.from ? a.from < b.from : a.to < b.to;
+    });
+    // One representative crossing per ordered cluster pair: the actual
+    // crossing nearest the mean of all of them.
+    h->portals.clear();
+    for (size_t begin = 0; begin < crossings.size();) {
+        size_t end = begin;
+        float mean[3] = {0.f, 0.f, 0.f};
+        while (end < crossings.size() && crossings[end].from == crossings[begin].from
+               && crossings[end].to == crossings[begin].to) {
+            for (int k = 0; k < 3; ++k) mean[k] += crossings[end].point[k];
+            ++end;
+        }
+        for (int k = 0; k < 3; ++k) mean[k] /= static_cast<float>(end - begin);
+        size_t best = begin;
+        for (size_t i = begin + 1; i < end; ++i)
+            if (distance3(crossings[i].point, mean) < distance3(crossings[best].point, mean)) best = i;
+        h->portals.push_back(crossings[best]);
+        begin = end;
+    }
+    h->cluster_portals.assign(clusters + 1, 0);
+    for (const StagePortal& portal : h->portals) ++h->cluster_portals[portal.from + 1];
+    for (int c = 0; c < clusters; ++c) h->cluster_portals[c + 1] += h->cluster_portals[c];
+    return true;
+}
+// Least-cost order of portals from the start cluster to the goal cluster,
+// costing straight lines between consecutive crossing points.
+static bool coarse_route(const MagNav* h, int start_cluster, const float* start,
+                         int goal_cluster, const float* goal, std::vector<int>& route) {
+    route.clear();
+    const int n = static_cast<int>(h->portals.size());
+    std::vector<float> cost(n + 1, 3.0e38f);
+    std::vector<int> parent(n + 1, -1);
+    std::vector<char> closed(n + 1, 0);
+    typedef std::pair<float, int> Item;
+    std::priority_queue<Item, std::vector<Item>, std::greater<Item>> open;
+    const auto relax = [&](int from, const float* at, int cluster, float base) {
+        if (cluster == goal_cluster) {
+            const float total = base + distance3(at, goal);
+            if (total < cost[n]) { cost[n] = total; parent[n] = from; open.push(Item(total, n)); }
+        }
+        for (int q = h->cluster_portals[cluster]; q < h->cluster_portals[cluster + 1]; ++q) {
+            const float total = base + distance3(at, h->portals[q].point);
+            if (total < cost[q]) {
+                cost[q] = total;
+                parent[q] = from;
+                open.push(Item(total + distance3(h->portals[q].point, goal), q));
+            }
+        }
+    };
+    relax(-1, start, start_cluster, 0.f);
+    while (!open.empty()) {
+        const int current = open.top().second;
+        open.pop();
+        if (closed[current]) continue;
+        closed[current] = 1;
+        if (current == n) {
+            for (int p = parent[n]; p >= 0; p = parent[p]) route.push_back(p);
+            std::reverse(route.begin(), route.end());
+            return true;
+        }
+        const StagePortal& portal = h->portals[current];
+        relax(current, portal.point, portal.to, cost[current]);
+    }
+    return false;
+}
+// Corridor polygons joined at shared polygons; a revisited polygon closes a
+// loop, which is cut so the corridor stays a simple chain of linked polygons.
+static void append_without_loops(std::vector<dtPolyRef>& corridor, std::map<dtPolyRef, size_t>& seen,
+                                 const dtPolyRef* path, int count) {
+    for (int i = 0; i < count; ++i) {
+        const auto known = seen.find(path[i]);
+        if (known == seen.end()) {
+            seen.emplace(path[i], corridor.size());
+            corridor.push_back(path[i]);
+            continue;
+        }
+        for (size_t j = known->second + 1; j < corridor.size(); ++j) seen.erase(corridor[j]);
+        corridor.resize(known->second + 1);
+    }
+}
+static constexpr float StageSpan = 96.f;
+// Search nodes one staged route may use in total, in query pools, including
+// the direct attempt that ran out of nodes first. A piece is only started
+// while a whole pool still fits, so this is a hard bound.
+static constexpr int StagePools = 4;
+static constexpr size_t StageCorridorCap = 8192;
+// status as mag_nav_route: 0 complete, 1 partial, 3 out of nodes, 6 failure.
+static int staged_corridor(MagNav* h, const dtQueryFilter& filter, dtPolyRef start_ref, dtPolyRef goal_ref,
+                           const float* start, const float* goal, int node_budget,
+                           std::vector<dtPolyRef>& corridor, int* nodes, int* stages) {
+    corridor.clear();
+    const int start_cluster = cluster_of(h, start_ref), goal_cluster = cluster_of(h, goal_ref);
+    std::vector<int> coarse;
+    if (start_cluster < 0 || goal_cluster < 0 || start_cluster == goal_cluster
+        || !coarse_route(h, start_cluster, start, goal_cluster, goal, coarse)) return 3;
+    const int targets = static_cast<int>(coarse.size()) + 1;
+    const auto target_ref = [&](int k) { return k + 1 == targets ? goal_ref : h->portals[coarse[k]].to_ref; };
+    const auto target_point = [&](int k) { return k + 1 == targets ? goal : h->portals[coarse[k]].point; };
+    std::vector<float> along(targets, 0.f);
+    for (int k = 0; k < targets; ++k)
+        along[k] = (k ? along[k - 1] : 0.f) + distance3(k ? target_point(k - 1) : start, target_point(k));
+    std::map<dtPolyRef, size_t> seen;
+    dtPolyRef piece[1024];
+    float centers[1024];
+    dtPolyRef current_ref = start_ref;
+    float current[3];
+    rcVcopy(current, start);
+    // `next` is the first target still ahead and `to_next` the distance to it.
+    int next = 0;
+    float to_next = along[0];
+    // Each piece advances at least one polygon; the cap only guards the loop.
+    for (int iteration = 0; iteration < 4 * targets + 64; ++iteration) {
+        int k = next;
+        while (k + 1 < targets && to_next + along[k + 1] - along[next] <= StageSpan) ++k;
+        int count = 0;
+        while (true) {
+            if (*nodes + h->query->getNodePool()->getMaxNodes() > node_budget) return 3;
+            const dtStatus status = h->query->findPath(current_ref, target_ref(k), current, target_point(k),
+                                                       &filter, piece, &count, 1024);
+            *nodes += h->query->getNodePool()->getNodeCount();
+            if (dtStatusFailed(status)) return 6;
+            if (count > 0 && piece[count - 1] == target_ref(k)
+                && !dtStatusDetail(status, DT_OUT_OF_NODES | DT_PARTIAL_RESULT | DT_BUFFER_TOO_SMALL)) break;
+            if (k == next) return dtStatusDetail(status, DT_OUT_OF_NODES) ? 3 : 1;
+            k = next + (k - next) / 2;
+        }
+        ++*stages;
+        if (k + 1 == targets) {
+            append_without_loops(corridor, seen, piece, count);
+            return corridor.size() > StageCorridorCap ? 1 : 0;
+        }
+        // Keep only the first half of a piece that ends at a crossing: the
+        // next piece starts inside this locally shortest path, so the route
+        // is not pinned to the representative crossing points.
+        float previous[3], walked = 0.f;
+        poly_center(h->mesh, piece[0], previous);
+        centers[0] = 0.f;
+        for (int i = 1; i < count; ++i) {
+            float center[3];
+            poly_center(h->mesh, piece[i], center);
+            walked += distance3(previous, center);
+            centers[i] = walked;
+            rcVcopy(previous, center);
+        }
+        int keep = count;
+        if (count > 2 && walked > StageSpan * .25f) {
+            keep = 2;
+            while (keep < count && centers[keep - 1] < walked * .5f) ++keep;
+        }
+        append_without_loops(corridor, seen, piece, keep);
+        if (corridor.size() > StageCorridorCap) return 1;
+        if (keep == count) {
+            current_ref = target_ref(k);
+            rcVcopy(current, target_point(k));
+            next = k + 1;
+            to_next = along[next] - along[k];
+        } else {
+            // Still heading for target k, over the rest of this piece.
+            current_ref = piece[keep - 1];
+            poly_center(h->mesh, current_ref, current);
+            next = k;
+            to_next = walked - centers[keep - 1];
+        }
+    }
+    return 3;
+}
+static int staged_route(MagNav* h, const dtQueryFilter& filter, dtPolyRef start_ref, dtPolyRef goal_ref,
+                        const float* start, const float* goal, float* points, int* point_count,
+                        unsigned long long* refs, int* ref_count, int* nodes, int* stages) {
+    std::vector<dtPolyRef> corridor;
+    const int budget = StagePools * h->query->getNodePool()->getMaxNodes();
+    const int result = staged_corridor(h, filter, start_ref, goal_ref, start, goal, budget, corridor, nodes, stages);
+    if (result != 0) return result;
+    if (corridor.size() > 1024) return 1;
+    unsigned char flags[1024];
+    dtPolyRef pointrefs[1024];
+    const dtStatus straight = h->query->findStraightPath(start, goal, corridor.data(), static_cast<int>(corridor.size()),
+                                                         points, flags, pointrefs, point_count, 1024, 0);
+    if (dtStatusFailed(straight)) return 6;
+    *ref_count = static_cast<int>(corridor.size());
+    for (size_t i = 0; i < corridor.size(); ++i) refs[i] = static_cast<unsigned long long>(corridor[i]);
+    return dtStatusDetail(straight, DT_BUFFER_TOO_SMALL) ? 1 : 0;
 }
 extern "C" {
 // 0 success, 1 invalid/config, 2 bake failure, 3 allocation failure.
@@ -296,7 +591,9 @@ MagNav* mag_nav_load(const unsigned char* data,int size,const float* min,const f
                 }
             }++label;
         }
-    }return h;
+    }
+    if(!reference && !build_stages(h)){delete h;return nullptr;}
+    return h;
 }
 void mag_nav_destroy(MagNav* h) { delete h; }
 void mag_nav_tile_stats(const MagNav* h, int* occupied, int* max_polygons) {
@@ -347,9 +644,10 @@ static bool reverse_reference_route(MagNav* h, const dtQueryFilter& filter,
 }
 
 // status:0 complete,1 partial,2 disconnected,3 out of nodes,4 invalid start,5 invalid goal,6 query failure.
+// `nodes` reports search nodes used and `stages` the corridor pieces of a staged route (0 when direct).
 int mag_nav_route(MagNav* h,const float* start,const float* goal,float radius,float* projected_start,float* projected_goal,
-                  float* points,int* point_count,unsigned long long* refs,int* ref_count) {
-    *point_count=0;*ref_count=0;
+                  float* points,int* point_count,unsigned long long* refs,int* ref_count,int* nodes,int* stages) {
+    *point_count=0;*ref_count=0;*nodes=0;*stages=0;
     dtQueryFilter filter; filter.setIncludeFlags(1);filter.setExcludeFlags(0);
     const float se[3]={.75f,2.f,.75f}, ge[3]={radius,8.f,radius};
     dtPolyRef sr=0;
@@ -380,11 +678,20 @@ int mag_nav_route(MagNav* h,const float* start,const float* goal,float radius,fl
     const dtStatus status = h->query->findPath(sr, gr, projected_start, projected_goal,
                                                &filter, path, &count, 1024);
     if(dtStatusFailed(status)) return 6;
+    *nodes = h->query->getNodePool()->getNodeCount();
     if(!count) return h->reference ? 1 : 2;
     if (h->reference && selected.reachable && dtStatusDetail(status, DT_OUT_OF_NODES)
         && dtStatusDetail(status, DT_PARTIAL_RESULT)
         && reverse_reference_route(h, filter, sr, gr, projected_start, projected_goal,
                                    points, point_count, refs, ref_count)) return 0;
+    // A runtime route that ran out of nodes inside one walking component is
+    // retried in stages. If that fails too, the direct partial result stands.
+    if (!h->reference && selected.reachable && dtStatusDetail(status, DT_OUT_OF_NODES)) {
+        if (staged_route(h, filter, sr, gr, projected_start, projected_goal, points, point_count,
+                         refs, ref_count, nodes, stages) == 0) return 0;
+        *point_count = 0;
+        *ref_count = 0;
+    }
     float endpoint[3];rcVcopy(endpoint,projected_goal);
     const bool partial=path[count-1]!=gr || dtStatusDetail(status,DT_PARTIAL_RESULT) || dtStatusDetail(status,DT_BUFFER_TOO_SMALL);
     if(partial && dtStatusFailed(h->query->closestPointOnPoly(path[count-1],projected_goal,endpoint,nullptr))) return 6;
