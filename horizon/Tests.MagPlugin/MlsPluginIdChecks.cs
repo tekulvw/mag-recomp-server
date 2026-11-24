@@ -108,6 +108,34 @@ internal static partial class LeadershipProgressionChecks
         Check(MagRetailClanCodec.SerializeNoClansResponse(0x11223344).SequenceEqual(
             new byte[] { 0x01, 0xFC, 0x02, 0x44, 0x33, 0x22, 0x11, 0x0A, 0x00, 0x00, 0x00, 0x01 }), "No-clans reply bytes are wrong");
 
+        // Invitations request (0x0D), as logged by retail: type, request id 4, a zero byte, account 1.
+        static byte[] Invitations(uint requestId, uint accountId) =>
+            new byte[] { 0x01, 0xFC, 0x0D }.Concat(BitConverter.GetBytes(requestId)).Concat(new byte[] { 0 }).Concat(BitConverter.GetBytes(accountId)).ToArray();
+        byte[] loggedInvitations = Convert.FromHexString("01fc0d040000000001000000");
+        Check(Invitations(4, 1).SequenceEqual(loggedInvitations), "Synthetic clan invitations request layout is wrong");
+        Check(MagRetailClanCodec.TryParseGetInvitationsRequest(loggedInvitations, 20231, out requestId, out accountId) &&
+            requestId == 4 && accountId == 1, "Retail clan invitations request did not decode");
+        Check(MagRetailClanCodec.TryParseGetInvitationsRequest(Invitations(0x11223344, 0x0A0B0C0D), 20231, out requestId, out accountId) &&
+            requestId == 0x11223344 && accountId == 0x0A0B0C0D, "Retail clan invitations request fields did not decode");
+        Check(!MagRetailClanCodec.TryParseGetInvitationsRequest(loggedInvitations[..11], 20231, out _, out _), "A short clan invitations request decoded");
+        Check(!MagRetailClanCodec.TryParseGetInvitationsRequest(loggedInvitations.Concat(new byte[] { 0 }).ToArray(), 20231, out _, out _), "A long clan invitations request decoded");
+        Check(!MagRetailClanCodec.TryParseGetInvitationsRequest(loggedInvitations, 20230, out _, out _), "The prototype claimed a clan invitations request");
+        Check(!MagRetailClanCodec.TryParseGetClanListRequest(loggedInvitations, 20231, out _, out _), "A clan invitations request decoded as a clan list request");
+        // Reply: 01FC, then type 0x0D, the echoed request id, status 9 (success, no invitations) and the last-packet flag.
+        Check(MagRetailClanCodec.SerializeNoInvitationsResponse(4).SequenceEqual(
+            new byte[] { 0x01, 0xFC, 0x0D, 0x04, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x01 }), "No-invitations reply bytes are wrong");
+
+        // Lobby-entry request (0x14), as logged by retail: type, request id 2, then one byte 1.
+        byte[] loggedLobbyEntry = Convert.FromHexString("01fc140200000001");
+        Check(MagRetailClanCodec.TryParseLobbyEntryRequest(loggedLobbyEntry, 20231, out requestId) && requestId == 2,
+            "Retail lobby-entry clan request did not decode");
+        Check(!MagRetailClanCodec.TryParseLobbyEntryRequest(loggedLobbyEntry[..7], 20231, out _), "A short lobby-entry clan request decoded");
+        Check(!MagRetailClanCodec.TryParseLobbyEntryRequest(loggedLobbyEntry.Concat(new byte[] { 0 }).ToArray(), 20231, out _), "A long lobby-entry clan request decoded");
+        Check(!MagRetailClanCodec.TryParseLobbyEntryRequest(loggedLobbyEntry, 20230, out _), "The prototype claimed a lobby-entry clan request");
+        // Reply: 01FC, then type 0x14, the echoed request id and status 0.
+        Check(MagRetailClanCodec.SerializeLobbyEntryAck(0x11223344).SequenceEqual(
+            new byte[] { 0x01, 0xFC, 0x14, 0x44, 0x33, 0x22, 0x11, 0x00, 0x00, 0x00, 0x00 }), "Lobby-entry clan ack bytes are wrong");
+
         WithApplication(20231, () =>
         {
             byte id = MagPluginRouting.RetailMlsPluginId;
@@ -137,6 +165,28 @@ internal static partial class LeadershipProgressionChecks
                 session.LastRefusal == "malformed-clan-list-request", "A long clan list request was answered");
             Check(session.HandleMany(RawEnvelope(Request(9, session.AccountId, 0x05), id), now).Count == 0 &&
                 session.LastRefusal == "unhandled-clan-type=05", "An unknown clan type was answered or not reported");
+
+            replies = session.HandleMany(RawEnvelope(Invitations(0xCAFE0002, session.AccountId), id), now);
+            Check(replies.Count == 1 && replies[0].PluginId == id && session.LastRefusal == null && session.StorageStatus == "clan-invitations-none" &&
+                replies[0].Payload.SequenceEqual(MagRetailClanCodec.SerializeNoInvitationsResponse(0xCAFE0002)),
+                "The player's clan invitations were not answered with none and the echoed request id");
+            replies = session.HandleMany(RawEnvelope(Invitations(11, session.AccountId + 100), id), now);
+            Check(replies.Count == 1 && replies[0].Payload.SequenceEqual(MagRetailClanCodec.SerializeNoInvitationsResponse(11)) &&
+                session.StorageStatus == $"clan-invitations-none-other-account={session.AccountId + 100}/session={session.AccountId}",
+                "Another account's clan invitations were not answered with none and recorded");
+            Check(session.HandleMany(RawEnvelope(Invitations(12, session.AccountId)[..11], id), now).Count == 0 &&
+                session.LastRefusal == "malformed-clan-invitations-request", "A short clan invitations request was answered");
+            Check(session.HandleMany(RawEnvelope(Invitations(12, session.AccountId).Concat(new byte[] { 0 }).ToArray(), id), now).Count == 0 &&
+                session.LastRefusal == "malformed-clan-invitations-request", "A long clan invitations request was answered");
+
+            replies = session.HandleMany(RawEnvelope(loggedLobbyEntry, id), now);
+            Check(replies.Count == 1 && replies[0].PluginId == id && session.LastRefusal == null && session.StorageStatus == "clan-14-ack" &&
+                replies[0].Payload.SequenceEqual(MagRetailClanCodec.SerializeLobbyEntryAck(2)),
+                "The lobby-entry clan request was not acknowledged with the echoed request id");
+            Check(session.HandleMany(RawEnvelope(loggedLobbyEntry[..7], id), now).Count == 0 &&
+                session.LastRefusal == "malformed-clan-14-request", "A short lobby-entry clan request was answered");
+            Check(session.HandleMany(RawEnvelope(loggedLobbyEntry.Concat(new byte[] { 0 }).ToArray(), id), now).Count == 0 &&
+                session.LastRefusal == "malformed-clan-14-request", "A long lobby-entry clan request was answered");
         });
 
         WithApplication(20230, () =>
@@ -152,6 +202,9 @@ internal static partial class LeadershipProgressionChecks
             Check(session.State == MagMlsSession.SessionState.Ready, "Synthetic prototype MLS handshake failed");
             Check(session.HandleMany(RawEnvelope(Request(1, session.AccountId), 0), now).Count == 0 && session.LastRefusal == "unknown-or-malformed-type",
                 "The prototype answered retail clan traffic");
+            Check(session.HandleMany(RawEnvelope(loggedInvitations, 0), now).Count == 0 && session.LastRefusal == "unknown-or-malformed-type" &&
+                session.HandleMany(RawEnvelope(loggedLobbyEntry, 0), now).Count == 0 && session.LastRefusal == "unknown-or-malformed-type",
+                "The prototype answered retail clan invitations or lobby-entry traffic");
         });
     });
 
