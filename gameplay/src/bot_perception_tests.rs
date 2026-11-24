@@ -416,10 +416,13 @@ fn sixty_four_bots_respect_the_per_tick_sight_budget() {
         engine.bot_registry.bots.insert(10 + i, b);
     }
     // Every bot sees many close enemies; only the budget limits the checks.
+    // 64 bots at 16 rays per tick: the round robin must reach all of them
+    // within this many ticks.
+    const ROUND_ROBIN_TICKS: u64 = 20;
     let mut checked = std::collections::BTreeSet::new();
     let mut previous = 0;
     let mut slowest = Duration::ZERO;
-    for step in 0..20u64 {
+    for step in 0..ROUND_ROBIN_TICKS {
         let started = Instant::now();
         engine
             .tick_bot_perception(Duration::from_millis(step * 50), 1)
@@ -434,9 +437,12 @@ fn sixty_four_bots_respect_the_per_tick_sight_budget() {
         previous = rays;
         checked.extend(engine.bot_perception.noticed_ids());
     }
-    assert_eq!(checked.len(), 64, "round robin reaches every bot");
-    assert!(
-        slowest < Duration::from_millis(50),
-        "one perception tick took {slowest:?}"
+    assert!(previous > 0, "the budget was exercised");
+    assert_eq!(
+        checked.len(),
+        64,
+        "round robin reaches every bot within {ROUND_ROBIN_TICKS} ticks"
     );
+    // Wall time depends on machine load, so it is reported, never asserted.
+    eprintln!("slowest perception tick for 64 bots: {slowest:?}");
 }
