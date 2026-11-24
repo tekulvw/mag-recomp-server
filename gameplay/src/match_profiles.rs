@@ -48,6 +48,7 @@ struct Source {
     objective_catalog: Option<PathBuf>,
     active_abilities: Option<PathBuf>,
     collision_world: Option<PathBuf>,
+    collision_coverage: Option<PathBuf>,
     navmesh_world: Option<PathBuf>,
     movement_profile: Option<PathBuf>,
     ground_vehicles: Option<PathBuf>,
@@ -185,6 +186,7 @@ impl Registry {
                 source.objective_catalog.as_mut(),
                 source.active_abilities.as_mut(),
                 source.collision_world.as_mut(),
+                source.collision_coverage.as_mut(),
                 source.navmesh_world.as_mut(),
                 source.movement_profile.as_mut(),
                 source.ground_vehicles.as_mut(),
@@ -298,6 +300,22 @@ impl Registry {
             {
                 return Err(io::Error::other("match_profile_collision_map_mismatch"));
             }
+            // The sidecar binds to the world's exact hash; the cached world stays unchanged.
+            let collision = match (source.collision_coverage.as_ref(), collision) {
+                (Some(_), None) => {
+                    return Err(io::Error::other(
+                        "match_profile_collision_coverage_requires_collision",
+                    ));
+                }
+                (Some(path), Some(world)) => Some(
+                    world
+                        .with_coverage_sidecar(crate::collision_coverage::CoverageSidecar::load(
+                            path,
+                        )?)
+                        .map_err(io::Error::other)?,
+                ),
+                (None, world) => world,
+            };
             if source.movement_profile.is_some() && source.navmesh_world.is_none() {
                 return Err(io::Error::other(
                     "match_profile_movement_profile_requires_navmesh",
@@ -3280,6 +3298,100 @@ mod tests {
         );
         assert!(select(&mut engine, "formation-2", "without-world").ok);
         assert!(engine.collision_world.is_none() && engine.character_damage_rules.is_none());
+    }
+
+    #[test]
+    fn collision_coverage_sidecar_binds_to_the_profile_world_and_covers_its_navmesh() {
+        use sha2::Digest;
+        let files = Files::new();
+        let spawn = files.spawns(0, 0, 1);
+        let collision = files.write("collision.json", json!({"format":"mag_collision_world","schema_version":1,"coordinate_space":"world",
+            "metadata":{"map_name":"synthetic_home_1","build":"synthetic","coverage":"provisional","provenance":["SYNTHETIC floor"],"unknowns":["Not a game map"]},
+            "instances":[{"id":"floor","vertices_xyz":[[0.,0.,0.],[10.,0.,0.],[10.,0.,10.],[0.,0.,10.]],"triangles":[[0,2,1],[0,3,2]]}]}));
+        let world_sha256 = navmesh::sha256(&std::fs::read(&collision).unwrap());
+        let region = crate::collision::PhysicsRegion {
+            min: [0., -3., 0.],
+            max: [10., 3., 10.],
+            ground_verified: true,
+            obstacles_verified: true,
+            provenance: vec!["SYNTHETIC assertion".into()],
+        };
+        let sidecar = |world: &str| {
+            json!({"format":"mag_collision_coverage_v1","map_name":"synthetic_home_1",
+                "world_sha256":world,"basis":"operator_assertion","provenance":["SYNTHETIC"],
+                "physics_regions":[region]})
+        };
+        let coverage = files.write("coverage.json", sidecar(&world_sha256));
+        let foreign = files.write("foreign.json", sidecar(&"f".repeat(64)));
+        let vertices: Vec<[f32; 3]> =
+            vec![[0., 0., 0.], [10., 0., 0.], [10., 0., 10.], [0., 0., 10.]];
+        let triangles: Vec<[u32; 3]> = vec![[0, 2, 1], [0, 3, 2]];
+        let mut geometry = sha2::Sha256::new();
+        geometry.update(b"MAG-NAV-GEOMETRY-v1\0");
+        geometry.update(4u32.to_le_bytes());
+        geometry.update(2u32.to_le_bytes());
+        for value in vertices.iter().flatten() {
+            geometry.update(value.to_le_bytes());
+        }
+        for value in triangles.iter().flatten() {
+            geometry.update(value.to_le_bytes());
+        }
+        let artifact = navmesh::bake(navmesh::BakeInput {
+            format: "mag_navmesh_bake_input_v1".into(),
+            map_name: "synthetic_home_1".into(),
+            world_sha256: world_sha256.clone(),
+            geometry_sha256: format!("{:x}", geometry.finalize()),
+            bounds: navmesh::Bounds {
+                min: region.min,
+                max: region.max,
+            },
+            physics_regions: vec![region.clone()],
+            vertices,
+            triangles,
+        })
+        .unwrap();
+        let mesh = files.write("mesh.json", serde_json::to_value(&artifact).unwrap());
+        let load = |name: &str, row: Value| {
+            Registry::load(files.write(
+                name,
+                json!({"format":"mag_match_profiles_v1","profiles":[row]}),
+            ))
+        };
+        let row = json!({"profile_id":"covered","spawn_catalog":spawn,
+            "collision_world":collision,"navmesh_world":mesh});
+        assert_eq!(
+            load("uncovered.json", row.clone())
+                .err()
+                .unwrap()
+                .to_string(),
+            "navmesh_geometry_coverage_unknown"
+        );
+        let mut wrong = row.clone();
+        wrong["collision_coverage"] = json!(foreign);
+        assert_eq!(
+            load("foreign-profiles.json", wrong)
+                .err()
+                .unwrap()
+                .to_string(),
+            "collision_coverage_world_mismatch"
+        );
+        let orphan =
+            json!({"profile_id":"covered","spawn_catalog":spawn,"collision_coverage":coverage});
+        assert_eq!(
+            load("orphan.json", orphan).err().unwrap().to_string(),
+            "match_profile_collision_coverage_requires_collision"
+        );
+        let mut covered = row;
+        covered["collision_coverage"] = json!(coverage);
+        let registry = load("covered.json", covered).unwrap();
+        let world = registry.profiles["covered"].collision.as_ref().unwrap();
+        assert_eq!(world.source_sha256(), world_sha256);
+        assert!(world.metadata().physics_regions.is_empty());
+        assert_eq!(
+            world.coverage_sidecar().unwrap().world_sha256(),
+            world_sha256
+        );
+        assert!(registry.profiles["covered"].navmesh.is_some());
     }
 
     #[test]

@@ -7,6 +7,20 @@ use mag_gameplay::{
 use serde::Deserialize;
 use serde_json::json;
 use std::{collections::BTreeMap, fs, io::Write};
+
+/// Load a collision world and, when given, its hash-bound coverage sidecar.
+pub fn load_world(
+    path: &str,
+    coverage: Option<&str>,
+) -> Result<CollisionWorld, Box<dyn std::error::Error>> {
+    let world = CollisionWorld::load(path, CollisionLimits::default())?;
+    Ok(match coverage {
+        Some(coverage) => world.with_coverage_sidecar(
+            mag_gameplay::collision_coverage::CoverageSidecar::load(coverage)?,
+        )?,
+        None => world,
+    })
+}
 type Point = [f64; 3];
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -273,8 +287,10 @@ fn robust_descent(
     Ok(evidence)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     world_path: &str,
+    coverage_path: Option<&str>,
     mesh_path: &str,
     parameters: &str,
     output: &str,
@@ -337,7 +353,7 @@ pub fn run(
     }
     let out = std::path::Path::new(output);
     fs::create_dir(out)?;
-    let world = CollisionWorld::load(world_path, CollisionLimits::default())?;
+    let world = load_world(world_path, coverage_path)?;
     let hash = navmesh::sha256(&fs::read(world_path)?);
     let mut art: Artifact = serde_json::from_slice(&fs::read(mesh_path)?)?;
     let old = art.drop_links.clone();
@@ -593,6 +609,7 @@ struct ReplayCase {
 /// Replay exact retained physics state without resampling or assigning any pose.
 pub fn replay_case(
     world_path: &str,
+    coverage_path: Option<&str>,
     mesh_path: &str,
     fixture_path: &str,
     output: &str,
@@ -606,7 +623,7 @@ pub fn replay_case(
     {
         return Err("invalid replay slices".into());
     }
-    let world = CollisionWorld::load(world_path, CollisionLimits::default())?;
+    let world = load_world(world_path, coverage_path)?;
     let hash = navmesh::sha256(&fs::read(world_path)?);
     let art: Artifact = serde_json::from_slice(&fs::read(mesh_path)?)?;
     let mesh = NavMesh::load(art, &hash, &world.metadata().map_name)?;

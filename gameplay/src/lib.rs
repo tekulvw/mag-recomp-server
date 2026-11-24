@@ -60,6 +60,7 @@ mod bot_traffic_flow;
 pub mod bullet_hit;
 mod bunker_seats;
 pub mod collision;
+pub mod collision_coverage;
 mod convex_penetration;
 pub mod correction_ack;
 pub mod damage;

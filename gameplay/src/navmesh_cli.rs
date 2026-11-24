@@ -1,6 +1,7 @@
 mod navmesh_spawn_exit_cli;
 use mag_gameplay::navmesh::{
-    self, Artifact, BakeInput, MovementProfile, NavMesh, ReferenceManifest, ReferenceNavMesh,
+    self, Artifact, BakeInput, Layout, MovementProfile, NavMesh, ReferenceManifest,
+    ReferenceNavMesh,
 };
 use serde_json::json;
 use std::{
@@ -98,6 +99,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(String::as_str)
             .ok_or_else(|| format!("missing {key}"))
     };
+    let coverage = flags.get("--collision-coverage").map(String::as_str);
     let movement_profile = || {
         flags
             .get("--movement-profile")
@@ -221,23 +223,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         "bake" => {
-            if flags
-                .keys()
-                .any(|k| !["--input", "--output", "--movement-profile"].contains(&k.as_str()))
-            {
+            if flags.keys().any(|k| {
+                !["--input", "--output", "--movement-profile", "--layout"].contains(&k.as_str())
+            }) {
                 return Err("unknown bake flag".into());
             }
+            let layout = match flags.get("--layout").map(String::as_str) {
+                None | Some("auto") => Layout::Auto,
+                Some("wide") => Layout::Wide,
+                Some(_) => return Err("--layout must be auto or wide".into()),
+            };
             let input: BakeInput =
                 serde_json::from_slice(&read(get("--input")?, 128 * 1024 * 1024)?)?;
             let began = Instant::now();
-            let artifact = match movement_profile()?.as_ref() {
-                Some(rules) => navmesh::bake_with_movement_profile(input, rules),
-                None => navmesh::bake(input),
-            }?;
+            let grid_tiles = navmesh::grid_tiles(&input.bounds);
+            let artifact = navmesh::bake_with_layout(input, movement_profile()?.as_ref(), layout)?;
             write(Some(&get("--output")?.to_string()), &artifact)?;
             eprintln!(
                 "{}",
-                json!({"op":"bake_complete","elapsed_ms":began.elapsed().as_millis(),"detour_bytes":artifact.detour_data.len(),"world_sha256":artifact.world_sha256,"detour_sha256":artifact.detour_sha256})
+                json!({"op":"bake_complete","elapsed_ms":began.elapsed().as_millis(),"format":artifact.format,"grid_tiles":grid_tiles,"detour_bytes":artifact.detour_data.len(),"world_sha256":artifact.world_sha256,"detour_sha256":artifact.detour_sha256})
             );
         }
         "search-spawn-exits" => {
@@ -245,6 +249,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ![
                     "--mesh",
                     "--collision-world",
+                    "--collision-coverage",
                     "--parameters",
                     "--output",
                     "--fall-damage-rules",
@@ -256,6 +261,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             navmesh_spawn_exit_cli::run(
                 get("--collision-world")?,
+                coverage,
                 get("--mesh")?,
                 get("--parameters")?,
                 get("--output")?,
@@ -265,12 +271,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         "replay-drop" => {
             if flags.keys().any(|k| {
-                !["--mesh", "--collision-world", "--fixture", "--output"].contains(&k.as_str())
+                ![
+                    "--mesh",
+                    "--collision-world",
+                    "--collision-coverage",
+                    "--fixture",
+                    "--output",
+                ]
+                .contains(&k.as_str())
             }) {
                 return Err("unknown replay-drop flag".into());
             }
             navmesh_spawn_exit_cli::replay_case(
                 get("--collision-world")?,
+                coverage,
                 get("--mesh")?,
                 get("--fixture")?,
                 get("--output")?,
@@ -281,6 +295,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ![
                     "--mesh",
                     "--collision-world",
+                    "--collision-coverage",
                     "--launch",
                     "--landing",
                     "--speed",
@@ -295,8 +310,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 serde_json::from_slice(&read(get("--mesh")?, navmesh::MAX_ARTIFACT_JSON_BYTES)?)?;
             let world_path = get("--collision-world")?;
             let hash = navmesh::sha256(&read(world_path, 128 * 1024 * 1024)?);
-            let world =
-                mag_gameplay::collision::CollisionWorld::load(world_path, Default::default())?;
+            let world = navmesh_spawn_exit_cli::load_world(world_path, coverage)?;
             let mesh = NavMesh::load(artifact.clone(), &hash, &world.metadata().map_name)?;
             mesh.validate_coverage(&world)?;
             let link = navmesh::DropLink::certify(
@@ -316,6 +330,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ![
                     "--mesh",
                     "--collision-world",
+                    "--collision-coverage",
                     "--goal",
                     "--goal-radius",
                     "--output",
@@ -327,10 +342,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let artifact: Artifact =
                 serde_json::from_slice(&read(get("--mesh")?, navmesh::MAX_ARTIFACT_JSON_BYTES)?)?;
-            let world = mag_gameplay::collision::CollisionWorld::load(
-                get("--collision-world")?,
-                Default::default(),
-            )?;
+            let world = navmesh_spawn_exit_cli::load_world(get("--collision-world")?, coverage)?;
             let mesh = match movement_profile()?.as_ref() {
                 Some(rules) => NavMesh::load_with_movement_profile(
                     artifact,
@@ -397,7 +409,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else if command == "inspect" {
                 let mut value = serde_json::to_value(mesh.artifact())?;
                 value.as_object_mut().unwrap().remove("detour_data");
-                value["detour_bytes"] = json!(mesh.artifact().detour_data.len());
+                value["detour_bytes"] = json!(mesh.detour_bytes());
                 write(flags.get("--output"), &value)?;
             } else {
                 let start = point(get("--start")?)?;

@@ -577,3 +577,346 @@ fn goal_candidates_filter_by_radius_and_validate_input() {
     assert!(mesh.goal_candidates([f64::NAN, 0., 10.], 1.).is_err());
     assert!(mesh.goal_candidates([10., 0., 10.], 5.1).is_err());
 }
+
+fn geometry_sha256(vertices: &[[f32; 3]], triangles: &[[u32; 3]]) -> String {
+    let mut h = Sha256::new();
+    h.update(b"MAG-NAV-GEOMETRY-v1\0");
+    h.update((vertices.len() as u32).to_le_bytes());
+    h.update((triangles.len() as u32).to_le_bytes());
+    for x in vertices.iter().flatten() {
+        h.update(x.to_le_bytes());
+    }
+    for x in triangles.iter().flatten() {
+        h.update(x.to_le_bytes());
+    }
+    format!("{:x}", h.finalize())
+}
+
+fn bundle_version(artifact: &Artifact) -> u32 {
+    u32::from_le_bytes(artifact.detour_data[4..8].try_into().unwrap())
+}
+
+fn bundle_tiles(artifact: &Artifact) -> u32 {
+    u32::from_le_bytes(artifact.detour_data[8..12].try_into().unwrap())
+}
+
+struct TempDir(std::path::PathBuf);
+impl TempDir {
+    fn new(label: &str) -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "mag-nav-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&path).unwrap();
+        Self(path)
+    }
+    fn write(&self, name: &str, value: &serde_json::Value) -> std::path::PathBuf {
+        let path = self.0.join(name);
+        fs::write(&path, serde_json::to_vec(value).unwrap()).unwrap();
+        path
+    }
+}
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+const WIDE_SIDE: f64 = 870.;
+
+/// A synthetic square floor wider than the 256-tile grid (819.2 m), as a
+/// collision world without its own physics regions plus a hash-bound sidecar.
+struct WideWorld {
+    _dir: TempDir,
+    world: std::path::PathBuf,
+    sidecar: std::path::PathBuf,
+    world_sha256: String,
+    region: PhysicsRegion,
+}
+
+fn wide_world() -> WideWorld {
+    let dir = TempDir::new("wide-world");
+    let side = WIDE_SIDE;
+    let world = dir.write(
+        "world.json",
+        &serde_json::json!({
+            "format":"mag_collision_world","schema_version":1,"coordinate_space":"world",
+            "metadata":{"map_name":"synthetic_wide","build":"synthetic","coverage":"provisional",
+                "provenance":["SYNTHETIC wide floor"],"unknowns":["Not a game map"]},
+            "instances":[{"id":"floor","vertices_xyz":[[0.,0.,0.],[side,0.,0.],[side,0.,side],[0.,0.,side]],
+                "triangles":[[0,2,1],[0,3,2]]}]
+        }),
+    );
+    let world_sha256 = sha256(&fs::read(&world).unwrap());
+    let region = PhysicsRegion {
+        min: [0., -3., 0.],
+        max: [side, 3., side],
+        ground_verified: true,
+        obstacles_verified: true,
+        provenance: vec!["SYNTHETIC operator assertion".into()],
+    };
+    let sidecar = dir.write(
+        "coverage.json",
+        &serde_json::json!({
+            "format":"mag_collision_coverage_v1","map_name":"synthetic_wide",
+            "world_sha256":world_sha256,"basis":"operator_assertion",
+            "provenance":["SYNTHETIC whole-world assertion"],"physics_regions":[region]
+        }),
+    );
+    WideWorld {
+        _dir: dir,
+        world,
+        sidecar,
+        world_sha256,
+        region,
+    }
+}
+
+fn wide_input(world: &WideWorld) -> BakeInput {
+    let side = WIDE_SIDE as f32;
+    let vertices = vec![
+        [0., 0., 0.],
+        [side, 0., 0.],
+        [side, 0., side],
+        [0., 0., side],
+    ];
+    let triangles = vec![[0, 2, 1], [0, 3, 2]];
+    BakeInput {
+        format: "mag_navmesh_bake_input_v1".into(),
+        map_name: "synthetic_wide".into(),
+        world_sha256: world.world_sha256.clone(),
+        geometry_sha256: geometry_sha256(&vertices, &triangles),
+        bounds: Bounds {
+            min: world.region.min,
+            max: world.region.max,
+        },
+        // prepare.py appends the sidecar's regions to the world's (here none).
+        physics_regions: vec![world.region.clone()],
+        vertices,
+        triangles,
+    }
+}
+
+#[test]
+fn whole_map_world_bakes_more_than_256_tiles_and_loads_with_sidecar_coverage() {
+    use mag_gameplay::{
+        bot_physics::{Body, PhysicsError, WorldTerrain},
+        collision::{CollisionLimits, CollisionWorld},
+        collision_coverage::CoverageSidecar,
+    };
+    let fixture = wide_world();
+    let input = wide_input(&fixture);
+    assert_eq!(grid_tiles(&input.bounds), 17 * 17);
+    let mut uncovered = wide_input(&fixture);
+    uncovered.physics_regions.clear();
+    assert_eq!(
+        bake(uncovered).unwrap_err(),
+        Error("navmesh_geometry_coverage_unknown")
+    );
+    let artifact = bake(input).unwrap();
+    assert_eq!(artifact.format, "mag_navmesh_world_v4");
+    assert_eq!(artifact.bake_config, WIDE_BAKE_CONFIG);
+    assert_eq!(bundle_version(&artifact), 5);
+    assert!(bundle_tiles(&artifact) > MAX_RUNTIME_TILES);
+    // The runtime reads the serialized JSON artifact.
+    let artifact: Artifact =
+        serde_json::from_slice(&serde_json::to_vec(&artifact).unwrap()).unwrap();
+
+    let world = CollisionWorld::load(&fixture.world, CollisionLimits::default()).unwrap();
+    let mesh = NavMesh::load(artifact.clone(), world.source_sha256(), "synthetic_wide").unwrap();
+    let route = mesh.route([3., 0., 3.], [866., 0., 866.], 0.5).unwrap();
+    assert_eq!(route.status, Status::Complete);
+    assert!(route.length_m > 1200.);
+    assert!(mesh.contains([435., 0., 435.], &route));
+    // Coverage at runtime comes from the loaded world plus its sidecar only.
+    assert_eq!(
+        mesh.validate_coverage(&world).unwrap_err(),
+        Error("navmesh_geometry_coverage_unknown")
+    );
+    let body = Body::default();
+    let terrain = WorldTerrain::new(Some(&world), "synthetic_wide").unwrap();
+    assert!(matches!(
+        terrain.require_horizontal_coverage([10., 0., 10.], [12., 0., 10.], body),
+        Err(PhysicsError::CoverageUnknown)
+    ));
+    let covered = world
+        .with_coverage_sidecar(CoverageSidecar::load(&fixture.sidecar).unwrap())
+        .unwrap();
+    assert_eq!(covered.source_sha256(), fixture.world_sha256);
+    mesh.validate_coverage(&covered).unwrap();
+    let terrain = WorldTerrain::new(Some(&covered), "synthetic_wide").unwrap();
+    terrain
+        .require_horizontal_coverage([10., 0., 10.], [12., 0., 10.], body)
+        .unwrap();
+    // The body corridor still has to fit inside the asserted region.
+    assert!(matches!(
+        terrain.require_horizontal_coverage([0.1, 0., 10.], [2., 0., 10.], body),
+        Err(PhysicsError::CoverageUnknown)
+    ));
+
+    // A wide artifact cannot be relabelled as a 256-tile artifact or vice versa.
+    let mut relabelled = artifact;
+    relabelled.format = "mag_navmesh_world_v2".into();
+    relabelled.bake_config = BAKE_CONFIG.into();
+    assert_eq!(
+        NavMesh::load(relabelled, world.source_sha256(), "synthetic_wide")
+            .err()
+            .unwrap(),
+        Error("navmesh_invalid_binary")
+    );
+}
+
+#[test]
+fn small_bakes_keep_the_256_tile_format_and_wide_layout_is_explicitly_versioned() {
+    let legacy = bake(wide_fixture(false)).unwrap();
+    assert_eq!(legacy.format, "mag_navmesh_world_v2");
+    assert_eq!(legacy.bake_config, BAKE_CONFIG);
+    assert_eq!(bundle_version(&legacy), 1);
+    let wide = bake_with_layout(wide_fixture(false), None, Layout::Wide).unwrap();
+    assert_eq!(wide.format, "mag_navmesh_world_v4");
+    assert_eq!(bundle_version(&wide), 5);
+    // Face culling and the smaller polygon cap change no tile payload.
+    assert_eq!(legacy.detour_data[8..], wide.detour_data[8..]);
+    for artifact in [legacy.clone(), wide.clone()] {
+        let mesh = NavMesh::load(artifact, &"0".repeat(64), "synthetic").unwrap();
+        assert_eq!(
+            mesh.route([3., 0., 10.], [147., 0., 10.], 0.2)
+                .unwrap()
+                .status,
+            Status::Complete
+        );
+    }
+    let mut relabelled = legacy;
+    relabelled.format = wide.format.clone();
+    relabelled.bake_config = wide.bake_config.clone();
+    assert_eq!(
+        NavMesh::load(relabelled, &"0".repeat(64), "synthetic")
+            .err()
+            .unwrap(),
+        Error("navmesh_invalid_binary")
+    );
+}
+
+#[test]
+fn wide_grid_envelope_and_byte_caps_are_enforced() {
+    let fixture = wide_world();
+    let mut input = wide_input(&fixture);
+    input.bounds.max[0] = 1200.;
+    input.bounds.max[2] = 1200.;
+    input.physics_regions[0].max = input.bounds.max;
+    assert!(grid_tiles(&input.bounds) > u64::from(MAX_WIDE_RUNTIME_TILES));
+    assert_eq!(bake(input).unwrap_err(), Error("navmesh_grid_limit"));
+    let mut input = wide_input(&fixture);
+    input.bounds.max[1] = 420.;
+    input.physics_regions[0].max = input.bounds.max;
+    assert_eq!(bake(input).unwrap_err(), Error("navmesh_envelope_invalid"));
+
+    let small = bake_with_layout(wide_fixture(false), None, Layout::Wide).unwrap();
+    let oversized = |mut artifact: Artifact, bytes: u64| {
+        artifact.detour_data = vec![0; bytes as usize];
+        artifact.detour_sha256 = sha256(&artifact.detour_data);
+        NavMesh::load(artifact, &"0".repeat(64), "synthetic")
+            .err()
+            .unwrap()
+    };
+    // Over the wide cap: refused before the binary is parsed.
+    assert_eq!(
+        oversized(small.clone(), MAX_WIDE_ARTIFACT_BYTES + 1),
+        Error("navmesh_binary_hash_mismatch")
+    );
+    // Over the 256-tile cap but within the wide cap: only the wide format parses it.
+    assert_eq!(
+        oversized(small, MAX_ARTIFACT_BYTES + 1),
+        Error("navmesh_invalid_binary")
+    );
+    let legacy = bake(wide_fixture(false)).unwrap();
+    assert_eq!(
+        oversized(legacy, MAX_ARTIFACT_BYTES + 1),
+        Error("navmesh_binary_hash_mismatch")
+    );
+    const { assert!(MAX_ARTIFACT_JSON_BYTES >= MAX_WIDE_ARTIFACT_BYTES * 4) };
+}
+
+#[test]
+fn cli_bakes_wide_layout_and_binds_coverage_sidecar_to_world_queries() {
+    let fixture = wide_world();
+    let dir = TempDir::new("wide-cli");
+    let mut input = wide_fixture(false);
+    input.map_name = "synthetic_wide".into();
+    input.world_sha256 = fixture.world_sha256.clone();
+    input.bounds.min[1] = -3.;
+    input.bounds.max[1] = 3.;
+    input.bounds.max[2] = 20.;
+    input.physics_regions = vec![fixture.region.clone()];
+    let input_path = dir.write(
+        "input.json",
+        &serde_json::json!({
+            "format":input.format,"map_name":input.map_name,"world_sha256":input.world_sha256,
+            "geometry_sha256":input.geometry_sha256,"bounds":input.bounds,
+            "physics_regions":input.physics_regions,"vertices":input.vertices,"triangles":input.triangles
+        }),
+    );
+    let mesh = dir.0.join("mesh.mag-nav");
+    let cli = || Command::new(env!("CARGO_BIN_EXE_mag-navmesh"));
+    let rejected = cli()
+        .args(["bake", "--layout", "tall", "--input"])
+        .arg(&input_path)
+        .arg("--output")
+        .arg(&mesh)
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    let baked = cli()
+        .args(["bake", "--layout", "wide", "--input"])
+        .arg(&input_path)
+        .arg("--output")
+        .arg(&mesh)
+        .output()
+        .unwrap();
+    assert!(
+        baked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&baked.stderr)
+    );
+    let artifact: Artifact = serde_json::from_slice(&fs::read(&mesh).unwrap()).unwrap();
+    assert_eq!(artifact.format, "mag_navmesh_world_v4");
+
+    let goals = |coverage: Option<&std::path::Path>| {
+        let mut command = cli();
+        command
+            .args(["goals", "--goal", "10,0,10", "--goal-radius", "1", "--mesh"])
+            .arg(&mesh)
+            .arg("--collision-world")
+            .arg(&fixture.world);
+        if let Some(coverage) = coverage {
+            command.arg("--collision-coverage").arg(coverage);
+        }
+        command.output().unwrap()
+    };
+    let without = goals(None);
+    assert!(!without.status.success());
+    assert!(String::from_utf8_lossy(&without.stderr).contains("navmesh_geometry_coverage_unknown"));
+    let with = goals(Some(&fixture.sidecar));
+    assert!(
+        with.status.success(),
+        "{}",
+        String::from_utf8_lossy(&with.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&with.stdout).unwrap();
+    assert_eq!(report["world_sha256"], fixture.world_sha256);
+    assert_eq!(report["candidates"].as_array().unwrap().len(), 1);
+
+    let mut foreign =
+        serde_json::from_slice::<serde_json::Value>(&fs::read(&fixture.sidecar).unwrap()).unwrap();
+    foreign["world_sha256"] = serde_json::json!("f".repeat(64));
+    let foreign = dir.write("foreign.json", &foreign);
+    let mismatched = goals(Some(&foreign));
+    assert!(!mismatched.status.success());
+    assert!(
+        String::from_utf8_lossy(&mismatched.stderr).contains("collision_coverage_world_mismatch")
+    );
+}
