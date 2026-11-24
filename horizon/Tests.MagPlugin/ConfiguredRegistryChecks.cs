@@ -39,7 +39,24 @@ internal static class ConfiguredRegistryChecks
         drain["workers"]![1]!["worker_port"]=31003;
         try {config.ValidateDrainReload(MagWorldRegistryConfig.Parse(drain.ToJsonString()));throw new Exception("Structural live reload accepted");} catch(ArgumentException) { }
         try {MagWorldRegistryConfig.Parse(original.ToJsonString().Replace("\"application_id\":20231","\"application_id\":20231,\"application_id\":20231"));throw new Exception("Duplicate property accepted");} catch(ArgumentException) { }
+        AdvertisedAddress();
         Placement();
+    }
+    static void AdvertisedAddress()
+    {
+        var placeholder=Configuration();placeholder["client_address"]=MagWorldRegistryConfig.AdvertisedAddressPlaceholder;
+        Func<string,string> Env(string value)=>name=>name=="MAG_ADVERTISE_IPV4"?value:null;
+        var config=MagWorldRegistryConfig.Parse(placeholder.ToJsonString(),Env("203.0.113.10"));
+        Check(config.ClientAddress.ToString()=="203.0.113.10","Placeholder client address did not follow MAG_ADVERTISE_IPV4");
+        var drain=Configuration();drain["client_address"]=MagWorldRegistryConfig.AdvertisedAddressPlaceholder;drain["workers"]![0]!["draining"]=true;
+        config.ValidateDrainReload(MagWorldRegistryConfig.Parse(drain.ToJsonString(),Env("203.0.113.10")));
+        try {config.ValidateDrainReload(MagWorldRegistryConfig.Parse(drain.ToJsonString(),Env("203.0.113.11")));throw new Exception("Changed advertised address reloaded live");} catch(ArgumentException) { }
+        foreach(var bad in new[]{null,"","0.0.0.0","203.0.113","not-an-address"})
+        {try {MagWorldRegistryConfig.Parse(placeholder.ToJsonString(),Env(bad));throw new Exception("Invalid advertised address accepted");} catch(ArgumentException) { }}
+        // Only the exact placeholder reads the environment; a literal address ignores it.
+        Check(MagWorldRegistryConfig.Parse(Configuration().ToJsonString(),Env("203.0.113.10")).ClientAddress.ToString()=="127.0.0.1","Literal client address was replaced");
+        var near=Configuration();near["client_address"]="$MAG_ADVERTISE_IPV4 ";
+        try {MagWorldRegistryConfig.Parse(near.ToJsonString(),Env("203.0.113.10"));throw new Exception("Inexact placeholder accepted");} catch(ArgumentException) { }
     }
     static MagWorldPlacementState World(string id,bool ready=true,bool draining=false,MagMatchProfile current=null,int[] counts=null)=>new(
         id,ready,draining,2,2,new[]{1,1},

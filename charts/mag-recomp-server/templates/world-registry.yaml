@@ -1,0 +1,13 @@
+{{- if .Values.gameplayWorkers }}
+{{- $pods := dict "root" . }}
+{{- $_ := include "mag.pods" $pods }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mag.name" . }}-world-registry
+  labels: {{ include "mag.labels" . | nindent 4 }}
+data:
+  # Mounted as a directory so kubelet replaces it atomically: Medius reloads drain flags live.
+  world-registry.json: |
+{{ include "mag.worldRegistry" (dict "root" . "pods" $pods.pods) | indent 4 }}
+{{- end }}
