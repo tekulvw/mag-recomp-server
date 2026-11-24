@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/tekulvw/mag-recomp-server/compare/portal-v0.5.0...portal-v0.5.1) (2026-11-24)
+
+
+### Bug Fixes
+
+* **portal:** answer API requests with a quick retryable 503 when the database is busy ([#252](https://github.com/tekulvw/mag-recomp-server/issues/252)) ([c2422df](https://github.com/tekulvw/mag-recomp-server/commit/c2422dfc94853a5f6b78414d4566161287faeeba))
+
 ## [0.5.0](https://github.com/tekulvw/mag-recomp-server/compare/portal-v0.4.0...portal-v0.5.0) (2026-11-24)
 
 
