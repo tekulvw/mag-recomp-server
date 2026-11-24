@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.1](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.8.0...medius-v0.8.1) (2026-11-24)
+
+
+### Bug Fixes
+
+* **gameplay:** keep players in the match when a bullet kills a bot after the result ([#227](https://github.com/tekulvw/mag-recomp-server/issues/227)) ([9022218](https://github.com/tekulvw/mag-recomp-server/commit/9022218313ce1f1f00452535d0436f3d40011e39))
+* **medius:** read retail party invite answers in client order and notify inviters ([#231](https://github.com/tekulvw/mag-recomp-server/issues/231)) ([fcebd2c](https://github.com/tekulvw/mag-recomp-server/commit/fcebd2c7821c81ced4dbbd1a6d243a6ca49e549b))
+
 ## [0.8.0](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.7.1...medius-v0.8.0) (2026-11-24)
 
 

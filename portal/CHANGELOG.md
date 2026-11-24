@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/tekulvw/mag-recomp-server/compare/portal-v0.4.0...portal-v0.5.0) (2026-11-24)
+
+
+### Features
+
+* **portal:** show player comments on launcher reports ([#225](https://github.com/tekulvw/mag-recomp-server/issues/225)) ([edf4f09](https://github.com/tekulvw/mag-recomp-server/commit/edf4f09c88535c0b1413245c6534ab7fd9dc253a))
+
 ## [0.4.0](https://github.com/tekulvw/mag-recomp-server/compare/portal-v0.3.0...portal-v0.4.0) (2026-11-24)
 
 
