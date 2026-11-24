@@ -115,3 +115,21 @@ fn a_route_into_a_dense_layered_stack_projects_onto_the_nearest_polygon() {
     assert_eq!(dropped.status, Status::Complete);
     assert_eq!(dropped.projected_goal, wide.projected_goal);
 }
+
+#[test]
+fn column_candidates_reach_every_floor_of_a_tall_stack() {
+    let mesh = stack();
+    let goal = [0.7, 0., 0.7];
+    // The 5 m sphere sees five floors; a 7 m column sees all seven, each
+    // within the column's horizontal radius of the goal.
+    let column = mesh.column_candidates(goal, 1., 7.).unwrap();
+    let mut heights: Vec<_> = column.iter().map(|(_, p)| p[1].round()).collect();
+    heights.sort_by(f64::total_cmp);
+    assert_eq!(heights, [-7., -4., -2., 0., 2., 4., 7.]);
+    assert!(
+        column
+            .iter()
+            .all(|(_, p)| (p[0] - goal[0]).hypot(p[2] - goal[2]) <= 1.0001)
+    );
+    assert!(mesh.column_candidates(goal, 1., 40.).is_err());
+}

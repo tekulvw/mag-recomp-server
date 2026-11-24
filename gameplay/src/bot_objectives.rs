@@ -518,6 +518,64 @@ fn supported(
         body,
     )
 }
+/// A role route's goal must project onto the navmesh within this distance.
+const ROLE_GOAL_TOLERANCE_M: f64 = 0.3;
+/// The vertical column searched for a navmesh floor under or over a role spot.
+const ROLE_FLOOR_RADIUS_M: f64 = 3.;
+const ROLE_FLOOR_HEIGHT_M: f64 = 16.;
+/// Nearest floors of that column tried for physical support.
+const ROLE_FLOOR_TRIES: usize = 3;
+/// A role spot is an offset from the objective at the objective's own height.
+/// Around a raised or layered objective (a tower, a rooftop) that height can
+/// be in the air, inside a structure, or on a ledge the eroded navmesh does
+/// not reach, so no route can end there. The nearest navmesh floor in the
+/// spot's vertical column then stands in for it, if it is physically
+/// supported as well. A spot the original search supports on the navmesh is
+/// kept unchanged.
+fn supported_role(
+    world: Option<&collision::CollisionWorld>,
+    mesh: Option<&navmesh::NavMesh>,
+    map: &str,
+    raw: replication::CharacterPosition,
+    policy: &ObjectivePolicy,
+    body: bot_physics::Body,
+) -> Result<replication::CharacterPosition, &'static str> {
+    let direct = supported(world, map, raw, policy, body);
+    let Some(mesh) = mesh else {
+        return direct;
+    };
+    let on_mesh = |goal: replication::CharacterPosition| {
+        mesh.goal_candidates(point(goal), ROLE_GOAL_TOLERANCE_M)
+            .is_ok_and(|floors| !floors.is_empty())
+    };
+    if direct.is_ok_and(on_mesh) {
+        return direct;
+    }
+    let Ok(mut floors) =
+        mesh.column_candidates(point(raw), ROLE_FLOOR_RADIUS_M, ROLE_FLOOR_HEIGHT_M)
+    else {
+        return direct;
+    };
+    let from = point(raw);
+    let gap = |p: &[f64; 3]| (0..3).map(|i| (p[i] - from[i]).powi(2)).sum::<f64>();
+    floors.sort_by(|a, b| gap(&a.1).total_cmp(&gap(&b.1)));
+    floors
+        .into_iter()
+        .take(ROLE_FLOOR_TRIES)
+        .find_map(|(_, floor)| {
+            supported_interval(
+                world,
+                map,
+                position([floor[0], floor[1] + 0.5, floor[2]]),
+                1.,
+                1.,
+                body,
+            )
+            .ok()
+            .filter(|goal| on_mesh(*goal))
+        })
+        .map_or(direct, Ok)
+}
 fn supported_operator(
     world: Option<&collision::CollisionWorld>,
     map: &str,
@@ -2885,8 +2943,17 @@ impl<W: Write> Engine<W> {
                                 range,
                                 body,
                             )
-                        } else {
+                        } else if recovering {
                             supported(self.collision_world.as_ref(), &map, raw, &policy, body)
+                        } else {
+                            supported_role(
+                                self.collision_world.as_ref(),
+                                self.navmesh_world.as_deref(),
+                                &map,
+                                raw,
+                                &policy,
+                                body,
+                            )
                         }
                     });
             cache_hits += usize::from(cached);
@@ -3013,7 +3080,7 @@ impl<W: Write> Engine<W> {
                         now,
                         bot.health,
                         self.fall_damage_rules.as_ref(),
-                        Some(0.3),
+                        Some(ROLE_GOAL_TOLERANCE_M),
                         &drop_costs,
                         None,
                         policy.spawn_exit_goal_weight,
@@ -3127,3 +3194,6 @@ mod public_synthetic_policy_tests {
 #[cfg(test)]
 #[path = "bot_drop_holding_tests.rs"]
 mod drop_holding_tests;
+#[cfg(test)]
+#[path = "bot_role_goal_tests.rs"]
+mod role_goal_tests;

@@ -96,6 +96,19 @@ staging spot, the planner uses `wave_route_queries_per_tick`,
 `wave_candidate_checks_per_tick` and `wave_planning_slice_us` (each only ever
 raises the ordinary limit) so a spawn wave is routed together.
 
+## Role destinations around raised objectives
+
+A role spot (`attack_roles`, `defend_roles`, armed-objective duties) is an
+offset from the objective at the objective's own height. Around a tower or a
+rooftop that height can be in the air, inside a structure, or on a ledge the
+eroded navmesh does not reach. When the ground search (`ground_search_m`)
+finds no support there, or the supported spot is more than 0.3 m from the
+navmesh (the route goal tolerance), the nearest navmesh floor within 3 m
+horizontally and 16 m vertically stands in for it, provided the body is
+supported there too; up to three floors are tried. A spot already supported on
+the navmesh is unchanged. Operator approaches and recovery steps keep their own
+search.
+
 ## Receipts
 
 - `bot_drop_admission` with `action: "convoy_departing"` marks an owner moving
