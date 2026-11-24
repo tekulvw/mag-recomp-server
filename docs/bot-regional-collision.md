@@ -9,8 +9,9 @@ The object contains five lowercase SHA-256 strings: `world_sha256`,
 `structural_clv_sha256`. Its `min` and `max` are finite world-space XYZ
 corners, with a positive span of at most 128 m on each axis. It is accepted
 only for application 20231 and Acquisition. Every input must match the loaded
-resource, and a pre-existing verified static physics region must enclose the
-whole requested region. The guard does not grant static coverage.
+resource, and a pre-existing verified static physics region (from the world or
+its [coverage sidecar](collision-coverage-sidecar.md)) must enclose the whole
+requested region. The guard does not grant static coverage.
 
 A loaded runtime navmesh must bind to that collision world, fit inside the
 region, and contain no drop links. An offline reference mesh remains an

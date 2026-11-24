@@ -63,8 +63,12 @@ All six ordered faction pairs for each mode can be listed; the registry does not
 invent or fill missing pairs.
 
 Objective map/mode/wire identities, squad assignments and forward spawns must
-agree. Collision metadata must match the spawn map. Navmesh requires collision,
-its exact source hash, matching map and coverage validation. Vehicles and
+agree. Collision metadata must match the spawn map. An optional
+`collision_coverage` path supplies a [coverage sidecar](collision-coverage-sidecar.md)
+for the row's `collision_world`; it requires collision and must name that world's
+exact hash and map. Navmesh requires collision,
+its exact source hash, matching map and coverage validation against the world's
+regions and any sidecar regions. Vehicles and
 character damage rules retain their existing exact spawn-source hash checks.
 Item catalogs, bootstrap equipment, combat/skill data and the map-independent
 falling/incapacitation rules remain global. Bootstrap faction coverage is checked
