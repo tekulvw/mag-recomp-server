@@ -363,8 +363,12 @@ pub(super) fn hit<W: Write>(
                 {
                     plan.combat.death_notifications.push(notification);
                 }
+                // The result is final once the match is terminal, but the
+                // ending window still admits damage. Leave the frozen counter
+                // alone instead of refusing the shot, as queued frags do.
                 if ordinary_retail_firearm
                     && damage.health_quarter_points == 0
+                    && ctx.engine.match_terminal.is_none()
                     && let Some(bot) = registry_target
                 {
                     plan.combat.bot_firearm_kd = Some(bot_firearm_kd::Plan::prepare(
