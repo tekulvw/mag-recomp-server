@@ -33,11 +33,14 @@ network:
   annotations: {}
   externalTrafficPolicy: Cluster
   # UDP game ports on the Medius Service and Pod. The integrated DME gives each connected human
-  # the next free UDP port from 10474 upward, across every world, and has no upper limit, so
-  # make the range at least as large as the most humans connected at once.
+  # the next free UDP port from 10474 upward, across every world. Medius admits at most one human
+  # per port in this range (MAG_DME_UDP_PORT_END); the rest wait in the queue until a port frees.
   udpPortRange:
     start: 10474
     end: 10474
+  # Optional lower cap on concurrent DME humans across all worlds (MAG_DME_HUMAN_CAPACITY),
+  # at most the size of udpPortRange. Null uses the range size.
+  dmeHumanCapacity: null
 runtime:
   # Existing Secret with medius-keys.json; never put RSA material in Helm values.
   existingSecret: ""

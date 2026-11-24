@@ -34,7 +34,8 @@ For Sabotage and Acquisition:
 Waiting does not block MLS keepalive, status or cancellation processing. Refreshes
 preserve queue age and replace callback ownership; duplicate accounts count once.
 Disconnected, expired, replaced or cancelled sessions cannot inflate population.
-The pending queue is bounded at4096 human owners.
+The pending queue is bounded at4096 human owners. Admission is also bounded by the
+forwarded DME UDP ports; see [DME port capacity](configured-world-registry.md#dme-port-capacity).
 
 Retail waiting updates use the original0014 layout: common header, one-bit
 success, signed eight-bit raw queue enum, then12 unaligned u32 counts. Updates

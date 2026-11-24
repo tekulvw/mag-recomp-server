@@ -82,6 +82,12 @@ namespace Server.Dme.Config
         public int UDPPort { get; set; } = 50000;
 
         /// <summary>
+        /// Last UDP port a client may be given, or 0 for no limit. A client that
+        /// would need a port past it gets none instead of an unreachable one.
+        /// </summary>
+        public int UDPPortLast { get; set; } = 0;
+
+        /// <summary>
         /// Logging settings.
         /// </summary>
         public LogSettings Logging { get; set; } = new LogSettings();

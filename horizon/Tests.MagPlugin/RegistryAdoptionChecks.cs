@@ -18,6 +18,7 @@ internal static class RegistryAdoptionChecks
             LeadershipProgressionChecks.RegistryAdoptionRefusal();
             LeadershipProgressionChecks.RegistryAdoptionCapAndSwitch();
             LeadershipProgressionChecks.RegistryLateWorkerStart();
+            LeadershipProgressionChecks.RegistryAdoptionPortLeases();
         }
         finally { Server.Medius.Program.Settings.MagApplicationId = previous; }
     }
@@ -33,7 +34,10 @@ internal static partial class LeadershipProgressionChecks
         ["maximum_players"] = 2, ["minimum_players_per_team"] = new JsonArray(1, 1), ["draining"] = false
     };
 
-    static MagWorldRegistry AdoptionRegistry(LocalCharacterStore store, JsonObject adoption, params JsonObject[] workers)
+    static MagWorldRegistry AdoptionRegistry(LocalCharacterStore store, JsonObject adoption, params JsonObject[] workers) =>
+        AdoptionRegistry(store, adoption, null, workers);
+
+    static MagWorldRegistry AdoptionRegistry(LocalCharacterStore store, JsonObject adoption, MagDmePortBudget ports, params JsonObject[] workers)
     {
         var config = new JsonObject
         {
@@ -41,7 +45,7 @@ internal static partial class LeadershipProgressionChecks
             ["client_tcp_port"] = 12073, ["workers"] = new JsonArray(workers)
         };
         if (adoption != null) config["worker_restart_adoption"] = adoption;
-        return new MagWorldRegistry(MagWorldRegistryConfig.Parse(config.ToJsonString()), store);
+        return new MagWorldRegistry(MagWorldRegistryConfig.Parse(config.ToJsonString()), store, portBudget: ports);
     }
 
     static LocalCharacterStore AdoptionStore(string directory, string name, params (string Account, byte Faction)[] accounts)
@@ -208,6 +212,63 @@ internal static partial class LeadershipProgressionChecks
             await TickUntil(registry, () => join.IsCompleted && late.IsCompleted, "Queued players did not form a match after adoption");
             Check(join.Result.Result == 0 && late.Result.Result == 0 && Counters(registry, "first").Adoptions == 1,
                 "Queued players were not admitted into the adopted world");
+        }
+    });
+
+    /// <summary>With every DME port leased by two live matches, restarting one worker mid-match
+    /// returns its players' port leases exactly once, and the waiting players use those ports
+    /// for the next match in the adopted world, whose world ID has changed.</summary>
+    public static void RegistryAdoptionPortLeases() => WithDirectory(directory =>
+    {
+        var store = AdoptionStore(directory, "ports", ("alpha", 0), ("bravo", 1), ("charlie", 0), ("delta", 1), ("echo", 0), ("foxtrot", 1));
+        Run().GetAwaiter().GetResult();
+
+        async Task Run()
+        {
+            var ports = new MagDmePortBudget(MagDmePortBudget.FirstPort + 3, null);
+            await using var first = new RegistryWorker("first") { Fence = true };
+            await using var second = new RegistryWorker("second") { Fence = true };
+            await using var registry = AdoptionRegistry(store, null, ports, AdoptionWorkerRow("first", first.Port), AdoptionWorkerRow("second", second.Port));
+            await registry.InitializeAsync();
+            int transaction = 0;
+            Task<MagJoinGameResponse>[] Queue(params string[] accounts) =>
+                accounts.Select(account => QueueRegistryJoin(registry, store, account, ++transaction)).ToArray();
+            async Task<MagJoinGameResponse[]> Admit(Task<MagJoinGameResponse>[] queued)
+            {
+                await TickUntil(registry, () => queued.All(t => t.IsCompleted), "Synthetic admission did not finish");
+                return await Task.WhenAll(queued);
+            }
+            var victimPair = await Admit(Queue("alpha", "bravo"));
+            var survivorPair = await Admit(Queue("charlie", "delta"));
+            Check(victimPair.Concat(survivorPair).All(r => r.Result == 0) && ports.InUse == 4 && ports.Available == 0,
+                "Two matches did not lease every DME port");
+            string victimId = registry.Worlds.Single(w => w.WorldId == victimPair[0].WorldId).WorkerId;
+            string survivorId = victimId == "first" ? "second" : "first";
+            var victim = victimId == "first" ? first : second;
+            var oldWorld = World(registry, victimId).WorldId;
+            var survivorBefore = World(registry, survivorId);
+            var alphaReservation = victim.Reservations.Single(r => r["account_id"]!.GetValue<uint>() == store.ReadForAccount("alpha").Single().Id);
+            var alphaClient = ConnectFixture(RegistryHost(registry, victimId), alphaReservation);
+
+            // Two more players wait only for ports.
+            var waiting = Queue("echo", "foxtrot");
+            await TickFor(registry, TimeSpan.FromMilliseconds(500));
+            Check(waiting.All(t => !t.IsCompleted) && ports.InUse == 4, "Players were admitted past the DME port capacity");
+
+            await RestartWorker(registry, victim, victimId, "fixture-restarted");
+            var admitted = await Admit(waiting);
+            var adopted = World(registry, victimId);
+            Check(adopted.IncarnationId == "fixture-restarted" && adopted.WorldId != oldWorld && alphaClient.IsDestroyed &&
+                admitted.All(r => r.Result == 0 && r.WorldId == adopted.WorldId),
+                "The waiting players did not take the freed ports in the adopted world");
+            Check(ports.InUse == 4 && World(registry, survivorId) == survivorBefore &&
+                Counters(registry, victimId) is { Adoptions: 1, WriteOffs: 1 } c && c.ReleasedPlayers + c.DroppedReleases >= 2,
+                "Port leases were not returned exactly once by the restart, or the other match changed");
+
+            // The released players now wait for ports rather than over-admitting.
+            var requeued = Queue("alpha", "bravo");
+            await TickFor(registry, TimeSpan.FromMilliseconds(500));
+            Check(requeued.All(t => !t.IsCompleted) && ports.InUse == 4, "Released players were admitted past the DME port capacity");
         }
     });
 

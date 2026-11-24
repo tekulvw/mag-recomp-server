@@ -203,6 +203,14 @@
             ]
           }
         },
+        "dmeHumanCapacity": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "maximum": 256
+        },
         "udpPortRange": {
           "type": "object",
           "additionalProperties": false,

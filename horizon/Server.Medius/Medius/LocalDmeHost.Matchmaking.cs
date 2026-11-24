@@ -207,6 +207,23 @@ namespace Server.Medius
                     // raw enum; the original consumer still refreshes its30s timeout.
                     QueuedType=0,QueueSizes=(uint[])counts.Clone()});
         }
+        // Called with _gate held: the most humans a standalone formation may take
+        // with the free DME ports, or 0 when its minima no longer fit.
+        int StandaloneHumanMaximum(int minimumPlayers,int[] minima)
+        {
+            int maximum=Math.Min(_maximumPlayers,_portBudget.Available);
+            if(maximum>=minimumPlayers&&minima.Sum()<=maximum)return maximum;
+            LogPortHold($"Faction formation held: reason=dme_port_capacity minimum={minimumPlayers}");
+            return 0;
+        }
+        DateTime _nextPortHoldLog;
+        /// <summary>At most one port-capacity hold line per 30 seconds per world.</summary>
+        void LogPortHold(string message)
+        {
+            var now=DateTime.UtcNow;
+            lock(_gate){if(now<_nextPortHoldLog)return;_nextPortHoldLog=now.AddSeconds(30);}
+            Logger.Warn($"{message} {_portBudget.Describe()}");
+        }
         void StartMatchmakingPump()
         {
             lock(_gate)
@@ -271,8 +288,12 @@ namespace Server.Medius
                     if(_formedProfile==null)
                     {
                         if (InRegistry) return;
+                        // A standalone world owns every DME port; registry placement
+                        // applies the shared cap before forwarding tickets.
+                        int maximum=StandaloneHumanMaximum(PlacementStartup.MinimumPlayers,PlacementTeamMinima);
+                        if(maximum==0)return;
                         var selection=MagFactionMatchmaking.Select(_humanQueue.Snapshot().Select(e=>e.Human).ToArray(),
-                            _matchProfiles,PlacementStartup.MinimumPlayers,_maximumPlayers,PlacementTeamMinima,RandomNumberGenerator.GetInt32);
+                            _matchProfiles,PlacementStartup.MinimumPlayers,maximum,PlacementTeamMinima,RandomNumberGenerator.GetInt32);
                         if(selection==null)return;
                         if(!AdvanceTerminalCohort())return;
                         _formedProfile=selection.Profile;_formationId=Id();
@@ -310,8 +331,9 @@ namespace Server.Medius
                         cohort = null;
                     else if(!_reservations.Values.Any(IsLiveCohort))
                     {
-                        var selection=MagFactionMatchmaking.ForProfile(_humanQueue.Snapshot().Select(e=>e.Human).ToArray(),profile,
-                            StartupFor(profile).MinimumPlayers,_maximumPlayers,MinimaFor(profile));
+                        int maximum=InRegistry?_maximumPlayers:StandaloneHumanMaximum(StartupFor(profile).MinimumPlayers,MinimaFor(profile));
+                        var selection=maximum==0?null:MagFactionMatchmaking.ForProfile(_humanQueue.Snapshot().Select(e=>e.Human).ToArray(),profile,
+                            StartupFor(profile).MinimumPlayers,maximum,MinimaFor(profile));
                         if (selection == null)
                         {
                             if (!InRegistry) { ResetFormation(); return; }
@@ -339,7 +361,8 @@ namespace Server.Medius
                         cohort=_humanQueue.Snapshot().Where(e=>e.Human.Size==1&&e.Human.GameType==profile.GameType&&
                             (e.Human.Faction==profile.AttackingFaction||e.Human.Faction==profile.DefendingFaction)&&
                             _reservations.Values.Count(r=>IsLiveCohort(r)&&r.Faction==e.Human.Faction)<profile.TeamCapacity)
-                            .Take(_reservations.Values.Count(IsLiveCohort)<Math.Min(_maximumPlayers,profile.MaximumPlayers)?1:0).ToArray();
+                            .Take(_reservations.Values.Count(IsLiveCohort)<Math.Min(_maximumPlayers,profile.MaximumPlayers)&&
+                                (InRegistry||_portBudget.Available>0)?1:0).ToArray();
                     }
                 }
                 if (cohort == null) { AbandonRegistryFormation(); return; }

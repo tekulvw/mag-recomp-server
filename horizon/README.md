@@ -77,6 +77,9 @@ listener ports separately in `medius.json`. The embedded local DME listens on
 TCP 10073 and UDP 10474 on all interfaces; its handshake advertises the selected
 IPv4 address and UDP 10474. A load balancer must map the advertised game TCP
 port to 10073 and preserve UDP 10474. The Helm chart supplies these mappings.
+Each further concurrent human gets the next UDP port; `MAG_DME_UDP_PORT_END`
+(and optionally `MAG_DME_HUMAN_CAPACITY`) caps admitted humans at the forwarded
+ports, see docs/configured-world-registry.md, "DME port capacity".
 DNS overrides change only hostname resolution; they cannot change client ports
 or replace compatible certificate templates.
 

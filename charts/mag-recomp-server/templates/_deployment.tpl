@@ -148,6 +148,14 @@ spec:
             - {name: MAG_GAMEPLAY_NEWS_PATH, value: /news/gameplay-CHANGELOG.md}
             {{- if $main }}
             - {name: MAG_LOCAL_DME, value: "1"}
+            {{- /* One admitted human per forwarded DME UDP port, across every world. */}}
+            - {name: MAG_DME_UDP_PORT_END, value: {{ include "mag.udpPortEnd" $root | quote }}}
+            {{- with $root.Values.network.dmeHumanCapacity }}
+            {{- if gt (int .) (int (include "mag.udpPortCount" $root)) }}
+            {{- fail "network.dmeHumanCapacity cannot exceed the ports in network.udpPortRange" }}
+            {{- end }}
+            - {name: MAG_DME_HUMAN_CAPACITY, value: {{ . | int | toString | quote }}}
+            {{- end }}
             {{- if $registry }}
             - {name: MAG_WORLD_REGISTRY, value: /world-registry/world-registry.json}
             {{- else }}

@@ -216,6 +216,15 @@ forcePathStyle) from data.s3; key, sha256 and versionId always belong to the wor
 {{- end -}}
 {{- toJson (untilStep 10475 (int (add1 $end)) 1) -}}
 {{- end -}}
+{{- /* Last forwarded DME UDP port, validated like mag.extraUdpPorts. */ -}}
+{{- define "mag.udpPortEnd" -}}
+{{- $_ := include "mag.extraUdpPorts" . -}}
+{{- int ((.Values.network.udpPortRange | default dict).end | default 10474) -}}
+{{- end -}}
+{{- /* Forwarded DME UDP ports: the most humans Medius admits at once across every world. */ -}}
+{{- define "mag.udpPortCount" -}}
+{{- sub (int (include "mag.udpPortEnd" .)) 10473 -}}
+{{- end -}}
 {{- /*
 The configured world registry (docs/configured-world-registry.md) as JSON: (dict "root" $ "pods" <mag.pods>
 "structure" bool). Medius reads client_address from MAG_ADVERTISE_IPV4, so an operator that keeps that

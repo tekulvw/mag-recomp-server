@@ -48,14 +48,23 @@ namespace Server.Dme
         #region Port Management
 
         private static ConcurrentDictionary<int, UdpServer> _portToServer = new ConcurrentDictionary<int, UdpServer>();
+        /// <summary>UDP ports currently held by DME clients.</summary>
+        public static int PortsInUse => _portToServer.Count;
+
         private void RegisterPort()
         {
-            int i = Program.Settings.UDPPort;
-            while (_portToServer.ContainsKey(i))
-                ++i;
-
-            if (_portToServer.TryAdd(i, this))
-                Port = i;
+            int last = Program.Settings.UDPPortLast;
+            for (int i = Program.Settings.UDPPort; last <= 0 || i <= last; ++i)
+            {
+                if (i > ushort.MaxValue)
+                    break;
+                if (_portToServer.TryAdd(i, this))
+                {
+                    Port = i;
+                    return;
+                }
+            }
+            Logger.Warn($"No DME UDP port free: first={Program.Settings.UDPPort} last={last} in_use={_portToServer.Count}");
         }
 
         private void FreePort()
@@ -79,6 +88,9 @@ namespace Server.Dme
         /// </summary>
         public virtual async Task Start()
         {
+            // Never advertise a port outside the forwarded range.
+            if (Port < 0)
+                throw new InvalidOperationException("No DME UDP port is free in the configured range.");
             _scertHandler = new ScertDatagramHandler();
 
             //

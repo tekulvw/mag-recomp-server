@@ -32,6 +32,7 @@ namespace Server.Medius
         readonly string _configPath;
         readonly Slot[] _slots;
         readonly Server.Dme.MediusManager _manager;
+        readonly MagDmePortBudget _portBudget;
         readonly object _gate = new();
         IReadOnlySet<string> _drainingWorkers;
         readonly System.Threading.SemaphoreSlim _progressionGate = new(1,1);
@@ -40,11 +41,14 @@ namespace Server.Medius
         DateTime _nextConfigRead;
         string _lastConfigFailure;
 
-        public MagWorldRegistry(MagWorldRegistryConfig config, LocalCharacterStore store, string configPath = null)
+        /// <param name="portBudget">DME humans across every world; null is unbounded.</param>
+        public MagWorldRegistry(MagWorldRegistryConfig config, LocalCharacterStore store, string configPath = null,
+            MagDmePortBudget portBudget = null)
         {
             _config = config ?? throw new ArgumentNullException(nameof(config));
             _store = store ?? throw new ArgumentNullException(nameof(store));
             _configPath = configPath;
+            _portBudget = portBudget ?? MagDmePortBudget.Unbounded();
             if (config.PartyInviteSeconds is int seconds) _parties = new MagPartyDirectory(TimeSpan.FromSeconds(seconds));
             _drainingWorkers = config.Workers.Where(w=>w.Draining).Select(w=>w.WorkerId).ToHashSet(StringComparer.Ordinal);
             _manager = new Server.Dme.MediusManager(config.ApplicationId) { LocalOnly = true };
@@ -55,7 +59,7 @@ namespace Server.Medius
         {
             var options = new LocalDmeHostOptions(_config.ApplicationId, 0, row.MinimumPlayers, row.MaximumPlayers,
                 row.MinimumPlayersPerTeam.ToArray(), new[] { 0, 1, 2 }, _config.ClientAddress, _config.ClientTcpPort, row.WorkerId);
-            var host = new LocalDmeHost(bridge, _store, options, progressionGate:_progressionGate);
+            var host = new LocalDmeHost(bridge, _store, options, progressionGate:_progressionGate, portBudget:_portBudget);
             host.DurableProgressionCommitted += RefreshProgressionOwners;
             host.SetDrainPolicy(()=>System.Threading.Volatile.Read(ref _drainingWorkers).Contains(row.WorkerId));
             return new Slot { Config = row, Bridge = bridge, Host = host };
@@ -66,6 +70,8 @@ namespace Server.Medius
         public Task<MagJoinGameResponse> JoinAsync(MagMlsSession session, MagJoinGameRequest request, Action<MagCharacterRecord> notify=null) =>
             Task.FromResult(JoinResponse(request.TransactionId,2));
         public bool UsesFactionMatchmaking => true;
+        /// <summary>DME UDP ports shared by every configured world.</summary>
+        public MagDmePortBudget PortBudget => _portBudget;
         public bool SupportsLoadoutLayoutChanges => _slots.All(slot => slot.Host.SupportsLoadoutLayoutChanges);
         public IReadOnlyList<MagRegisteredWorld> Worlds => Array.AsReadOnly(_slots.Select(slot => {
             var state = slot.Host.GetPlacement();
@@ -98,7 +104,9 @@ namespace Server.Medius
             if (DmeProgram.LocalGameplay != null || DmeProgram.TcpServer.IsRunning || DmeProgram.Managers.ContainsKey(_config.ApplicationId))
             { await DisposeAsync(); throw new IOException("Integrated DME ownership is already assigned."); }
             DmeProgram.SERVER_IP = _config.ClientAddress;
-            DmeProgram.Settings.TCPPort = 10073; DmeProgram.Settings.UDPPort = 10474;
+            DmeProgram.Settings.TCPPort = 10073; DmeProgram.Settings.UDPPort = MagDmePortBudget.FirstPort;
+            DmeProgram.Settings.UDPPortLast = _portBudget.LastPort ?? 0;
+            Logger.Info($"DME UDP port capacity for {_slots.Length} worlds: {_portBudget.Describe()}");
             DmeProgram.Plugins = Program.Plugins ?? new Server.Plugins.PluginsManager("plugins/");
             DmeProgram.Managers.Add(_config.ApplicationId, _manager);
             DmeProgram.LocalGameplay = this;
