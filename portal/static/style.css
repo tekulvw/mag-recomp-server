@@ -118,6 +118,7 @@ th { font: 12px var(--mono); letter-spacing: 0.1em; text-transform: uppercase; c
 td { padding: 10px 12px; border-bottom: 1px solid var(--line); color: var(--body); }
 td form { margin: 0; }
 .table-scroll { overflow-x: auto; }
+.comment { margin: 0; padding: 16px; max-height: 32rem; overflow-y: auto; background: var(--panel); border: 1px solid var(--line); color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; }
 pre.json { margin: 0; padding: 16px; overflow-x: auto; max-height: 32rem; background: var(--panel); border: 1px solid var(--line); font: 13px/1.5 var(--mono); color: var(--fg); white-space: pre; }
 
 /* Link code */

@@ -2922,6 +2922,7 @@ async fn report_commands(pool: PgPool) {
             platform: platform.map(Into::into),
             since: None,
             days: Some(1),
+            has_comment: false,
             limit: 50,
         }
     };
@@ -2953,6 +2954,7 @@ async fn report_commands(pool: PgPool) {
         platform: None,
         since: Some(time::OffsetDateTime::now_utc() + time::Duration::hours(1)),
         days: None,
+        has_comment: false,
         limit: 50,
     };
     assert!(run_cli(&h.pool, None, since).await.unwrap().is_empty());
@@ -2971,6 +2973,7 @@ async fn report_commands(pool: PgPool) {
         "{out}"
     );
     assert!(out.contains("logs launcher.log"), "{out}");
+    assert!(out.contains("\ncomment none\n"), "{out}");
     assert!(
         run_cli(
             &h.pool,
@@ -3048,6 +3051,125 @@ async fn report_commands(pool: PgPool) {
             ),
         ]
     );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[sqlx::test]
+async fn report_comments(pool: PgPool) {
+    use mag_portal::admin::ReportsCommand;
+    use mag_portal::staff::{self, Role};
+    let dir = temp_dir("reports");
+    let h = harness_full(pool, None, Some(dir_reports(&dir)), roomy_limits()).await;
+    let (_, token) = person_with_token(&h.pool, "rep-k", "Kilo").await;
+    let manual = |comment: Value| {
+        let mut v = report(&new_id(), &[]);
+        v["trigger"] = json!("manual");
+        v["session"]["user_comment"] = comment;
+        v
+    };
+    let text = "Stutter at the <b>gate</b> & \"spawn\"\r\n\u{1b}[31msecond line\u{202e}\nthird \u{4e2d}\u{6587} line, long enough to need cutting short";
+    let with = manual(json!(text));
+    let with_id = with["report_id"].as_str().unwrap().to_owned();
+    assert_eq!(h.report(&token, &with).await.0, StatusCode::CREATED);
+    let odd = manual(json!({"text": "not a string"}));
+    let odd_id = odd["report_id"].as_str().unwrap().to_owned();
+    assert_eq!(h.report(&token, &odd).await.0, StatusCode::CREATED);
+    let blank = manual(json!(" \n\t "));
+    assert_eq!(h.report(&token, &blank).await.0, StatusCode::CREATED);
+    let plain = report(&new_id(), &[]);
+    assert_eq!(h.report(&token, &plain).await.0, StatusCode::CREATED);
+
+    // Stored exactly as sent.
+    let (stored,): (Option<String>,) =
+        sqlx::query_as("SELECT session->>'user_comment' FROM reports WHERE id = $1::uuid")
+            .bind(&with_id)
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+    assert_eq!(stored.as_deref(), Some(text));
+
+    // Too long: refused, and nothing stored. 1000 characters of three bytes each fit.
+    let (status, v) = h
+        .report(&token, &manual(json!("\u{4e2d}".repeat(1001))))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    assert_eq!(v["error"], "invalid_report");
+    assert_eq!(v["detail"], "user_comment too long");
+    assert_eq!(
+        h.report(&token, &manual(json!("\u{4e2d}".repeat(1000))))
+            .await
+            .0,
+        StatusCode::CREATED
+    );
+
+    // The CLI list shows a one-line preview; --has-comment keeps only real comments.
+    let list = |has_comment| ReportsCommand::List {
+        account: Some("kilo".into()),
+        trigger: None,
+        platform: None,
+        since: None,
+        days: None,
+        has_comment,
+        limit: 50,
+    };
+    let preview = mag_portal::reports::comment_preview(text, 60);
+    assert_eq!(
+        preview,
+        "Stutter at the <b>gate</b> & \"spawn\" [31msecond line third \u{4e2d}…"
+    );
+    let out = run_cli(&h.pool, None, list(false)).await.unwrap();
+    assert_eq!(out.lines().count(), 5, "{out}");
+    let line = out.lines().find(|l| l.starts_with(&with_id)).unwrap();
+    assert!(line.ends_with(&format!("\t{preview}")), "{line}");
+    let line = out.lines().find(|l| l.starts_with(&odd_id)).unwrap();
+    assert!(line.ends_with("\t-"), "{line}");
+    let out = run_cli(&h.pool, None, list(true)).await.unwrap();
+    assert_eq!(out.lines().count(), 2, "{out}");
+    assert!(out.contains(&with_id) && !out.contains(&odd_id), "{out}");
+
+    // The CLI show prints the whole comment, line by line, without terminal controls.
+    let show = |id: &str| ReportsCommand::Show {
+        report_id: id.into(),
+    };
+    let out = run_cli(&h.pool, None, show(&with_id)).await.unwrap();
+    assert!(
+        out.contains(
+            "\ncomment\n  Stutter at the <b>gate</b> & \"spawn\"\n  [31msecond line\n  third \u{4e2d}\u{6587} line, long enough to need cutting short\nclient "
+        ),
+        "{out}"
+    );
+    let out = run_cli(&h.pool, None, show(&odd_id)).await.unwrap();
+    assert!(out.contains("\ncomment none\n"), "{out}");
+
+    // The panel lists a preview and shows the whole comment, escaped.
+    let m = h.sign_in("mod").await;
+    let granter = id_of(&h, "mod").await;
+    staff::set_staff(&h.pool, "mod@example.test", Role::Moderator, granter)
+        .await
+        .unwrap();
+    let (status, list) = body(h.get("/admin/reports", Some(&m)).await).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(list.contains(&with_id) && list.contains(&odd_id), "{list}");
+    assert!(
+        list.contains("Stutter at the &#60;b&#62;gate&#60;/b&#62; &#38;")
+            && !list.contains("<b>gate"),
+        "{list}"
+    );
+    assert!(!list.contains("cutting") && list.contains("third \u{4e2d}…"));
+    let (_, filtered) = body(h.get("/admin/reports?comment=yes", Some(&m)).await).await;
+    assert!(filtered.contains(&with_id) && !filtered.contains(&odd_id));
+    assert!(filtered.contains("<option value=\"yes\" selected>"));
+    let (status, detail) = body(h.get(&format!("/admin/reports/{with_id}"), Some(&m)).await).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        detail.contains(
+            "<p class=\"comment\">Stutter at the &#60;b&#62;gate&#60;/b&#62; &#38; &#34;spawn&#34;\n[31msecond line\nthird \u{4e2d}\u{6587} line, long enough to need cutting short</p>"
+        ),
+        "{detail}"
+    );
+    assert!(!detail.contains("<b>gate") && !detail.contains('\u{1b}'));
+    let (_, detail) = body(h.get(&format!("/admin/reports/{odd_id}"), Some(&m)).await).await;
+    assert!(!detail.contains("class=\"comment\""), "{detail}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
