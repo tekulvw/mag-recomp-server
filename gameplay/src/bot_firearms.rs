@@ -676,6 +676,13 @@ impl<W: Write> Engine<W> {
                 !servicing && state.reload(now, schedule, metadata.magazine_capacity);
             let reload_receipt=reload_changed.then(||json!({"op":"bot_firearm_reload","timestamp_ms":now.as_millis() as u64,"object_index":id,"generation":me.life.generation,"magazine":state.magazine,"reserve":state.reserve,"reloading":state.reload_until.is_some()}));
             let from = muzzle(me.feet);
+            // An attacker hunting a disarmer looks for that enemy first.
+            let priority = self.armed_priority_target(&self.bot_registry.bots[&id]);
+            if priority.is_some_and(|p| state.target.as_ref().is_some_and(|t| t.id != p))
+                && now >= state.next_perception
+            {
+                state.target = None;
+            }
             let mut blocked = None;
             let mut threat = bot_resupply::Threat::Deferred;
             if state.target.as_ref().is_some_and(|life| {
@@ -708,8 +715,9 @@ impl<W: Write> Engine<W> {
                     })
                     .collect();
                 candidates.sort_by(|a, b| {
-                    length(from, torso(a.feet))
-                        .total_cmp(&length(from, torso(b.feet)))
+                    (Some(b.life.id) == priority)
+                        .cmp(&(Some(a.life.id) == priority))
+                        .then(length(from, torso(a.feet)).total_cmp(&length(from, torso(b.feet))))
                         .then(a.life.id.cmp(&b.life.id))
                 });
                 let mut selected = None;

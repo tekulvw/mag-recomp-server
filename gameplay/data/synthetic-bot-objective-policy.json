@@ -112,6 +112,22 @@
       "side_m": 0.0
     }
   ],
+  "armed": {
+    "enabled": true,
+    "defender_cap": 8,
+    "attacker_cap": 8,
+    "reach_m": 160.0,
+    "converge_radius_m": [
+      3.0,
+      7.0
+    ],
+    "guard_radius_m": [
+      8.0,
+      14.0
+    ],
+    "contest_radius_m": 15.0,
+    "late_disarm_ms": 8000
+  },
   "defend_roles": [
     {
       "name": "synthetic_defend_0",

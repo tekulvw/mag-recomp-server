@@ -189,6 +189,9 @@ pub struct ObjectivePolicy {
     reinforced_squad_lateral_m: [f64; 4],
     attack_roles: Vec<DestinationRole>,
     defend_roles: Vec<DestinationRole>,
+    /// Converge/guard duties around armed objectives (`bot_armed_objectives`).
+    #[serde(default)]
+    pub(super) armed: crate::bot_armed_objectives::ArmedPolicy,
 }
 impl ObjectivePolicy {
     pub fn bundled() -> Self {
@@ -221,6 +224,7 @@ impl ObjectivePolicy {
             || !(100..=20000).contains(&self.wave_planning_slice_us)
             || !(0. ..=1.).contains(&self.spawn_exit_goal_weight)
             || !(1000..=30000).contains(&self.drop_holding_progress_stall_ms)
+            || !self.armed.validate()
             || !(1..=32).contains(&self.candidate_checks_per_tick)
             || !(1..=4).contains(&self.route_queries_per_tick)
             || !(1..=8).contains(&self.fresh_route_share)
@@ -310,6 +314,7 @@ pub(super) struct Director {
     /// Queue staging support, sampled in a narrow vertical window around the
     /// launch floor (kept apart from retreat/egress support sampling).
     staging_cache: BTreeMap<(u32, [u32; 3]), Result<replication::CharacterPosition, &'static str>>,
+    pub(super) armed: crate::bot_armed_objectives::Book,
 }
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct CandidateKey {
@@ -325,6 +330,8 @@ pub(super) struct Task {
     pub(super) objective: Option<u16>,
     pub(super) goal: Option<replication::CharacterPosition>,
     pub(super) role_goal: Option<replication::CharacterPosition>,
+    /// Armed-objective duty that replaces the squad's normal destination.
+    pub(super) armed: Option<crate::bot_armed_objectives::Assignment>,
     generation: u32,
     pub(super) recovering: bool,
     continuing: bool,
@@ -396,14 +403,16 @@ fn assignment(
         .ok()
         .filter(|id| *id != u16::MAX)
 }
-/// Supported shared actions only. In particular A/B defenders have no capture action.
-pub(super) fn operator_action(
-    object: &objective_catalog::Objective,
+/// Supported shared actions only. A/B defenders have no capture action; they
+/// may only deactivate an attacker capture inside its completion window.
+pub(super) fn operator_action<'a>(
+    object: &'a objective_catalog::Objective,
     state: replication::ObjectiveState,
     team: u8,
+    world: &objective_control::ObjectiveWorld,
 ) -> Option<(
     protocol::ObjectiveInteractionKind,
-    crate::objective_range::ObjectiveRange<'_>,
+    crate::objective_range::ObjectiveRange<'a>,
 )> {
     use protocol::ObjectiveInteractionKind::{Activate, Deactivate};
     use replication::ObjectiveState::{Activated, Activating, Deactivated, Deactivating};
@@ -419,8 +428,16 @@ pub(super) fn operator_action(
         Some((kind, r.range()))
     } else {
         let r = object.interaction.as_ref()?;
-        (team != r.owner_team && matches!(state, Deactivated | Activating))
-            .then_some((Activate, r.range()))
+        if team != r.owner_team && matches!(state, Deactivated | Activating) {
+            Some((Activate, r.range()))
+        } else if team == r.owner_team
+            && matches!(state, Activated | Deactivating)
+            && world.defender_can_deactivate(object.object_index)
+        {
+            Some((Deactivate, r.range()))
+        } else {
+            None
+        }
     }
 }
 pub(crate) fn operator_safe(bot: &crate::bot_registry::WorldBot) -> bool {
@@ -2226,6 +2243,21 @@ impl<W: Write> Engine<W> {
                 (squad, objective)
             })
             .collect();
+        let duties = self.plan_armed_duties(&policy.armed, now, &mut receipts);
+        let centers: BTreeMap<u16, [f64; 3]> = if duties.is_empty() {
+            BTreeMap::new()
+        } else {
+            self.armed_objectives()
+                .into_iter()
+                .map(|a| (a.index, a.center))
+                .collect()
+        };
+        // An armed-objective duty replaces the squad's lane for that bot.
+        let target_of = |id: u16, squad: u16| {
+            duties
+                .get(&id)
+                .map_or(assigned[&squad], |d| Some(d.objective))
+        };
         let mut operators = BTreeMap::new();
         if policy.interactions_enabled
             && self.match_started
@@ -2247,15 +2279,17 @@ impl<W: Write> Engine<W> {
                     continue;
                 }
                 let state = world.state(index).unwrap();
+                let disarm_open = self.disarm_open(index, now, &policy.armed);
                 let mut choices = Vec::new();
                 for (&id, bot) in &self.bot_registry.bots {
                     let r = bot.target.runtime.unwrap();
-                    if assigned[&bot.target.squad.squad_index()] != Some(index)
+                    if target_of(id, bot.target.squad.squad_index()) != Some(index)
                         || !operator_safe(bot)
                     {
                         continue;
                     }
-                    let Some((_, range)) = operator_action(object, state, bot.target.squad.team())
+                    let Some((_, range)) =
+                        operator_action(object, state, bot.target.squad.team(), world)
                     else {
                         continue;
                     };
@@ -2281,6 +2315,11 @@ impl<W: Write> Engine<W> {
                         || (bot.task.operator
                             && bot.task.objective == Some(index)
                             && bot.task.generation == r.generation);
+                    // Outnumbered defenders clear the area before starting a
+                    // disarm (only defenders have an action on an armed objective).
+                    if !stable && !disarm_open {
+                        continue;
+                    }
                     choices.push((!stable, distance(r.position, position(range.anchor())), id));
                 }
                 choices.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)).then(a.2.cmp(&b.2)));
@@ -2298,6 +2337,7 @@ impl<W: Write> Engine<W> {
             if bot.has_supply_action() {
                 continue;
             }
+            let settled = operator_safe(bot);
             let t = &mut bot.task;
             if t.generation != r.generation {
                 *t = Task {
@@ -2305,18 +2345,22 @@ impl<W: Write> Engine<W> {
                     ..Default::default()
                 };
             }
-            let target = assigned[&bot.target.squad.squad_index()];
-            let wide = target.is_some_and(|objective| {
-                assigned
-                    .iter()
-                    .filter(|(s, o)| {
-                        **s / 16 == bot.target.squad.squad_index() / 16 && **o == Some(objective)
-                    })
-                    .count()
-                    > 2
-            });
+            let armed = duties.get(&id).copied();
+            let target = target_of(id, bot.target.squad.squad_index());
+            let wide = armed.is_none()
+                && target.is_some_and(|objective| {
+                    assigned
+                        .iter()
+                        .filter(|(s, o)| {
+                            **s / 16 == bot.target.squad.squad_index() / 16
+                                && **o == Some(objective)
+                        })
+                        .count()
+                        > 2
+                });
             let operator = target.is_some_and(|index| operators.get(&index) == Some(&id));
-            if t.objective != target || t.wide != wide || t.operator != operator {
+            if t.objective != target || t.wide != wide || t.operator != operator || t.armed != armed
+            {
                 if t.operator != operator {
                     receipts.push(json!({"op":"bot_objective_operator","object_index":id,"generation":r.generation,"objective":target,"selected":operator,"timestamp_ms":now.as_millis()as u64}));
                 }
@@ -2331,12 +2375,29 @@ impl<W: Write> Engine<W> {
                     crate::bot_traffic_costs::next_reconsideration(now, id, &policy.drop_delay);
                 bot.drop_approach_ready = false;
                 t.wide = wide;
+                t.armed = armed;
                 t.objective = target;
                 t.routed = false;
                 t.retry_at = now;
                 t.candidate_attempts = 0;
                 t.attempts = 0;
                 t.unavailable_reported = false;
+                // A new duty taken by a bot already covering the objective
+                // keeps its spot: it stops here instead of walking to a ring place.
+                if let Some(duty) = armed.filter(|_| !operator && settled)
+                    && let Some(center) = centers.get(&duty.objective)
+                    && (f64::from(r.position.x) - center[0])
+                        .hypot(f64::from(r.position.z) - center[2])
+                        <= duty.duty.ring(&policy.armed)[1]
+                {
+                    t.goal = Some(r.position);
+                    t.role_goal = Some(r.position);
+                    t.routed = true;
+                    t.retry_at = now + Duration::from_millis(policy.stall_ms);
+                    bot.target.pending_move = None;
+                    bot.target.runtime.as_mut().unwrap().phase = BotPhase::Complete;
+                    receipts.push(json!({"op":"bot_objective_task","timestamp_ms":now.as_millis()as u64,"object_index":id,"objective":duty.objective,"destination_role":duty.duty.code(),"role":if duty.duty == crate::bot_armed_objectives::Duty::Converge {"defend"} else {"attack"},"goal":r.position,"held_position":true}));
+                }
             }
             if let Some(y) = bot.traffic_yield.as_mut() {
                 if t.goal.is_none() && t.role_goal.is_none() {
@@ -2647,14 +2708,12 @@ impl<W: Write> Engine<W> {
                     .iter()
                     .find(|o| o.object_index == objective)
                     .unwrap();
+                let world = self.objective_world.as_ref().unwrap();
                 operator_action(
                     object,
-                    self.objective_world
-                        .as_ref()
-                        .unwrap()
-                        .state(objective)
-                        .unwrap(),
+                    world.state(objective).unwrap(),
                     bot.target.squad.team(),
+                    world,
                 )
                 .unwrap()
             });
@@ -2663,8 +2722,16 @@ impl<W: Write> Engine<W> {
                 back_m: 0.,
                 side_m: 0.,
             };
+            let armed = bot.task.armed.filter(|_| !operator);
+            let armed_role = armed.map(|a| DestinationRole {
+                name: a.duty.code().into(),
+                back_m: 0.,
+                side_m: 0.,
+            });
             let role = if operator {
                 &operator_role
+            } else if let Some(role) = &armed_role {
+                role
             } else if defending {
                 &policy.defend_roles[usize::from(bot.role_slot)]
             } else {
@@ -2689,6 +2756,14 @@ impl<W: Write> Engine<W> {
             let mut raw = if let Some((_, range)) = operator_rule {
                 // Grounding and the range itself are checked again before the route is accepted.
                 position(range.approach(candidate_attempt))
+            } else if let Some(duty) = armed {
+                position(crate::bot_armed_objectives::duty_point(
+                    center.map(f64::from),
+                    objective,
+                    duty,
+                    &policy.armed,
+                    candidate_attempt,
+                ))
             } else {
                 role_candidate(center, anchor, role, offset)
             };

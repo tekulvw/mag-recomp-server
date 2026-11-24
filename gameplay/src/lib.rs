@@ -42,6 +42,7 @@ pub mod ballistics;
 pub mod blast_rules;
 pub mod blast_visibility;
 pub mod bootstrap_loadouts;
+mod bot_armed_objectives;
 mod bot_firearm_kd;
 pub mod bot_firearms;
 pub mod bot_healing;
