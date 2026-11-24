@@ -1,25 +1,44 @@
 # Bot-only static resupply
 
-The optional Cosmodrome Sabotage provider catalog enables one timed reserve
-refill for a dry idle bot at an authored supply point. Load it with
+The optional Sabotage provider catalog enables one timed reserve refill for a
+dry idle bot at an authored supply point. Load it with
 `--bot-resupply-catalog /absolute/SUPPLY.json` alongside a firearm-enabled bot
 population. The worker requires retail mode0, the selected source map, and exact
 spawn/collision file digests. The option is absent by default.
 
+Catalogs are supported for the three retail Sabotage maps. Each map pins its
+level archive and CLV identity, its expected provider count and the SHA-256 of
+the private witness that qualified its selection. The tool and the worker share
+these values:
+
+| Map | Providers |
+| --- | --- |
+| `mag_cosmodrome_final` | 3 |
+| `mag_kennicott_final` | 2 |
+| `mag_remote_comms_final` | 3 |
+
+The worker rejects catalogs for any other map, a source identity or witness
+digest from another map, and any provider count other than the pinned one.
+Level and CLV digests come from `SABOTAGE_MAPS` in
+`tools/extraction/project-retail-sabotage-objectives.py`.
+
 Project private operator data from the owned original level and current runtime
-inputs using the maintained tool:
+inputs using the maintained tool. `--map` selects the level; it defaults to
+`mag_cosmodrome_final`, and the Cosmodrome output is unchanged by the option:
 
 ```sh
 python3 tools/project-retail-bot-resupply.py \
-  --level-archive /absolute/mag_cosmodrome_final.psarc \
+  --map mag_kennicott_final \
+  --level-archive /absolute/mag_kennicott_final.psarc \
   --spawn-catalog /absolute/SPAWNS.json \
   --collision-world /absolute/WORLD.json \
   --out /absolute/SUPPLY.json \
   --receipt /absolute/SUPPLY.receipt.json
 ```
 
-Add `--check` to reproduce existing bytes. The first supported allowlist selects
-visible, unfrozen, unsnapped source placements. That is an explicit replacement
+The spawn catalog and collision world must select the same map in mode0. Add
+`--check` to reproduce existing bytes. The supported allowlist selects visible,
+unfrozen, unsnapped source placements. That is an explicit replacement
 policy, not a native activation claim. Original files and generated provider
 catalogs are external inputs and are never bundled into public source.
 
@@ -130,8 +149,8 @@ credits; a one-credit policy can alternate failed walking and enabled drop
 surveys across retries. The option does not authorize taking over an unrelated
 active movement.
 
-Human020b interoperability, native packed target identities, other maps and
-native animation/presentation remain separate. Internal provider
+Human020b interoperability, native packed target identities, non-Sabotage
+maps and native animation/presentation remain separate. Internal provider
 keys identify exact source instances and are not emitted as native handles.
 No human account, resupply XP, UI state or use packet is fabricated. Native
 live-match review and release cutting remain the maintainer's responsibility.
