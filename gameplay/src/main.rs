@@ -683,17 +683,14 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                 "--smoke-grenade-rules requires an absolute path",
             ));
         }
-        if match_profiles_path.is_some() || acquisition_gameplay_path.is_some() {
-            return Err(io::Error::other(
-                "configure smoke grenades inside the Acquisition or Domination configuration",
-            ));
-        }
         if application_id != Some(20231) || collision_query.is_some() {
             return Err(io::Error::other(
                 "--smoke-grenade-rules requires a retail gameplay worker",
             ));
         }
-        if objective_path.is_none() {
+        // A registry worker binds the rules to each profile's own objective
+        // catalog; a direct worker binds them to its base catalog.
+        if match_profiles_path.is_none() && objective_path.is_none() {
             return Err(io::Error::other(
                 "--smoke-grenade-rules requires --objective-catalog",
             ));
@@ -1184,10 +1181,12 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                 .map_err(io::Error::other)?;
         }
     }
-    // Acquisition carries its own smoke rules; a direct Sabotage or
-    // Suppression worker names them on the command line.
-    let smoke_grenade_source = match &smoke_grenade_rules_path {
-        Some(path) => {
+    // Smoke rules come only from the command line, for every mode. A direct
+    // worker installs them on its world; a registry worker binds them to
+    // each of its profiles below.
+    let mut smoke_grenade_rules = smoke_grenade_rules_path
+        .as_ref()
+        .map(|path| {
             let mut raw = Vec::new();
             std::fs::File::open(path)?
                 .take((1 << 20) + 1)
@@ -1195,13 +1194,13 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             if raw.len() > 1 << 20 {
                 return Err(io::Error::other("invalid_smoke_grenade_rules"));
             }
-            Some(raw)
-        }
-        None => acquisition_config
-            .as_ref()
-            .map(|config| config.smoke_grenade_source())
-            .transpose()?
-            .flatten(),
+            Ok::<_, io::Error>(raw)
+        })
+        .transpose()?;
+    let smoke_grenade_source = if match_profiles_path.is_some() {
+        None
+    } else {
+        smoke_grenade_rules.take()
     };
     let smoke_grenades = smoke_grenade_source
         .map(|source| {
@@ -1721,6 +1720,11 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         .as_ref()
         .map(mag_gameplay::match_profiles::Registry::load)
         .transpose()?;
+    if let (Some(registry), Some(raw)) = (&mut match_profiles, smoke_grenade_rules.take()) {
+        registry
+            .set_smoke_grenade_rules(Arc::from(raw))
+            .map_err(io::Error::other)?;
+    }
     let native_leadership = leadership
         .as_ref()
         .is_some_and(|(_, policy)| policy.supports_match_profiles());
@@ -3625,6 +3629,70 @@ mod runtime_profile_tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    #[test]
+    fn one_smoke_flag_binds_every_registry_profile_without_a_base_objective_catalog() {
+        std::thread::Builder::new()
+            .stack_size(1024 * 1024)
+            .spawn(|| {
+                let files = SyntheticCatalogs::new();
+                let manifest = synthetic_match_profile(&files);
+                files.write("smoke.json", &serde_json::json!({}));
+                let smoke = files.0.join("smoke.json").display().to_string();
+                let mut args = files.args();
+                args.extend([
+                    "--match-profiles".into(),
+                    manifest.display().to_string(),
+                    "--smoke-grenade-rules".into(),
+                    smoke,
+                ]);
+                // No base --objective-catalog: each row binds the rules to its
+                // own objective catalog, which this Sabotage row lacks.
+                let error = run(args.clone()).unwrap_err().to_string();
+                assert!(
+                    error.contains("smoke_grenade_objectives_required"),
+                    "{error}"
+                );
+                let mut relative = args.clone();
+                *relative.last_mut().unwrap() = "smoke.json".into();
+                assert!(
+                    run(relative)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("--smoke-grenade-rules requires an absolute path")
+                );
+                // A game-type-1 row needs Acquisition gameplay to carry smoke.
+                let mut spawns = files.read("profile-spawns.json");
+                spawns["match_profile"]["game_type"] = serde_json::json!(1);
+                files.write("profile-spawns.json", &spawns);
+                let error = run(args).unwrap_err().to_string();
+                assert!(error.contains("smoke_grenade_mode_required"), "{error}");
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn direct_acquisition_worker_takes_the_smoke_flag() {
+        let files = SyntheticCatalogs::new();
+        let mut args = files.args();
+        args.extend([
+            "--smoke-grenade-rules".into(),
+            files.0.join("smoke.json").display().to_string(),
+            "--objective-catalog".into(),
+            files.0.join("objectives.json").display().to_string(),
+            "--acquisition-gameplay".into(),
+            files.0.join("acquisition.json").display().to_string(),
+        ]);
+        // The flag passes argument validation; the invented worker then
+        // stops at its missing Acquisition configuration file.
+        let error = run(args).unwrap_err().to_string();
+        assert!(
+            !error.contains("smoke") && error.contains("os error"),
+            "{error}"
+        );
     }
 
     #[test]

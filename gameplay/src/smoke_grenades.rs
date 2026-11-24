@@ -214,9 +214,115 @@ impl Variant {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The worker-wide native executable identity the rules must name.
+    pub(crate) const SYNTHETIC_ELF: &str = ELF;
+
+    /// The retail wire ID of an invented smoke item for `faction`.
+    pub(crate) fn synthetic_item_id(faction: u8) -> u16 {
+        ((u16::from(faction) + 1) << 10 | 20) + 50
+    }
+
+    /// Invented, source-shaped smoke rules with an item catalog and combat
+    /// provenance they bind to. Every hash is a placeholder, not a claim.
+    pub(crate) fn synthetic_rules_and_items() -> (Vec<u8>, ItemCatalog) {
+        let (catalog_sha, bindings_sha, bootstrap_sha) =
+            ("a".repeat(64), "b".repeat(64), "c".repeat(64));
+        let mut items = serde_json::Map::new();
+        let mut weapons = serde_json::Map::new();
+        let mut ammo = serde_json::Map::new();
+        let mut variants = Vec::new();
+        for faction in 0..3_u8 {
+            let namespace = format!("FactionItemList{}", faction + 1);
+            let reference = format!("{namespace}:20");
+            let name = format!("synthetic_smoke_{faction}");
+            let round = format!("synthetic_smoke_ammo_{faction}");
+            items.insert(
+                reference.clone(),
+                json!({"authored_ref": reference, "name": name, "item_type": "kWeapon",
+                    "faction_list": namespace, "local_ordinal": 20, "wire_item_id": null,
+                    "definition": {"group": "weapons", "name": name}}),
+            );
+            weapons.insert(
+                name.clone(),
+                json!({"parameters": {"id": name, "ammo_name": round,
+                    "category": "kWepCategoryGrenade", "infinite_ammo": false,
+                    "magazine_capacity": 1, "initial_magazine_count": 2}}),
+            );
+            ammo.insert(
+                round.clone(),
+                json!({"parameters": {"id": round,
+                    "propulsion_strategy": "kWepPropulsionStrategyThrown",
+                    "detonation_strategy": "kWepDetonationStrategyTimer",
+                    "explosion_strategy": "kWepExplosionStrategyVolume",
+                    "m_eAmmoPersistance": "kWepPersistanceGrenadeSmoke",
+                    "destroy_objective": false, "doHearingLoss": false,
+                    "detonation_timer": 2.0, "m_fLifetimeMax": 9.0, "m_fDuration": 6.0,
+                    "damage": {"character": 0, "characterAPierce": 0, "characterARedux": 0,
+                        "vehicle": 0, "vehicleAPierce": 0, "vehicleARedux": 0,
+                        "objective": 0, "objectiveAPierce": 0, "objectiveARedux": 0, "mine": 0}}}),
+            );
+            variants.push(
+                json!({"faction": faction, "item_id": synthetic_item_id(faction),
+                "ammo_token": ammo_crc32(&round).unwrap(), "initial_count": 2,
+                "fuse_ms": 2000, "projectile_lifetime_ms": 9000, "volume_duration_ms": 6000}),
+            );
+        }
+        let rules = json!({"schema": "mag_retail_smoke_grenades_v1", "application_id": APPLICATION,
+            "source": {"retail_elf_sha256": ELF, "retail_archive_sha256": ARCHIVE,
+                "item_catalog_sha256": catalog_sha, "item_bindings_sha256": bindings_sha,
+                "bootstrap_sha256": bootstrap_sha, "native_proof_sha256": "d".repeat(64)},
+            "variants": variants});
+        let items = json!({"schema_version": 2, "application_id": APPLICATION,
+            "build": {"source_archive_sha256": ARCHIVE}, "items": items,
+            "definitions": {"weapons": weapons, "projectile_ammo": ammo}});
+        let combat = json!({"schema_version": 2, "application_id": APPLICATION, "status": "synthetic",
+            "authority": {"bullet_damage": true, "armor_reduction": true, "body_damage": true,
+                "grenade_damage": false, "grenade_physics": false, "healing_schedule": false,
+                "ammo_tokens": false},
+            "provenance": {"catalog_sha256": catalog_sha, "binding_report_sha256": bindings_sha,
+                "source_archive_sha256": ARCHIVE, "original_retail_elf_sha256": ELF,
+                "bootstrap_sha256": bootstrap_sha},
+            "bullets": {}, "armor": {}, "grenades": {}, "healing": {}, "unsupported": {},
+            "body": (0..16).map(|location| json!({"location": location, "armor_area": 0,
+                "multiplier": 1.0, "source": {}})).collect::<Vec<_>>(), "limitations": []});
+        let armor = crate::blast_rules::CharacterBlastRules {
+            armor_rating_reduction: 0.0,
+            armor_prevention_reduction: 0.0,
+            hit_location: 0,
+            damage_type: 10,
+        };
+        let items = ItemCatalog::from_value_for_application(items, armor, APPLICATION)
+            .unwrap()
+            .with_retail_combat(
+                crate::retail_combat::RetailCombatCatalog::from_json(&combat.to_string()).unwrap(),
+            );
+        (serde_json::to_vec(&rules).unwrap(), items)
+    }
+
+    #[test]
+    fn synthetic_rules_bind_only_to_the_retail_executable() {
+        let (rules, items) = synthetic_rules_and_items();
+        let catalog = Catalog::from_bytes(&rules, &items, ELF).unwrap();
+        for faction in 0..3 {
+            let variant = catalog
+                .variant(faction, synthetic_item_id(faction))
+                .unwrap();
+            assert_eq!(variant.volume_duration_ms, 6000);
+            assert!(
+                catalog
+                    .variant(faction, synthetic_item_id((faction + 1) % 3))
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            Catalog::from_bytes(&rules, &items, &"3".repeat(64)).unwrap_err(),
+            "smoke_grenade_source_mismatch"
+        );
+    }
 
     #[test]
     fn only_exact_nondamaging_timed_volume_matches_source() {

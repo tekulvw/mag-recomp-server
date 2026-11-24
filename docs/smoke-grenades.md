@@ -28,19 +28,34 @@ tool rejects input/output aliases. Its proof identifies original inputs, source
 members, native instruction spans and each selected weapon/ammo definition.
 Keep the generated resource files and proof private.
 
-To enable the source capability, set `smoke_grenades` to the generated rules
-path in an Acquisition configuration, or `core.smoke_grenades` in a Domination
-configuration. Paths are relative to the containing configuration file. A
-direct Sabotage or Suppression worker (no Acquisition configuration and no
-`--match-profiles`) takes `--smoke-grenade-rules /absolute/SMOKE.json` instead,
-together with `--objective-catalog`, whose source image identifies the
-executable the rules were projected from. In the Helm chart, put the file in
-the data bundle and add both flags to `data.gameplayExtraArgs`. The catalog
-must match the loaded retail item, binding, bootstrap, archive and executable
-provenance. Omit the property or flag to leave support off; a smoke throw is
-then refused like any other unconfigured item, so no peer sees it. Ordinary
-frag configuration remains separate. `--validate-catalogs` reports whether
-configured smoke profiles were validated, without opening listeners.
+To enable the source capability, pass the generated rules to the gameplay
+worker with `--smoke-grenade-rules /absolute/SMOKE.json`. This one flag
+configures smoke for every mode: Sabotage, Acquisition and Domination. The
+rules are map-independent, like the falling and incapacitation rules, so one
+worker-wide file serves every world the worker runs.
+
+- A direct worker (no `--match-profiles`) also needs `--objective-catalog`, whose
+  source image identifies the executable the rules were projected from. This
+  includes a direct Acquisition worker started with `--acquisition-gameplay`.
+- A [match-profile registry worker](worker-match-profiles.md) binds the rules
+  to each profile's own objective catalog, so it needs no base
+  `--objective-catalog`. Startup refuses the flag if any profile lacks an
+  objective catalog, or if a game-type 1 or 2 profile has no Acquisition or
+  Domination gameplay configuration. Selecting any profile installs that
+  profile's smoke, and the next selection replaces it.
+
+Acquisition and Domination gameplay configurations no longer accept
+`smoke_grenades` or `core.smoke_grenades`. Startup refuses either field with an
+error that names `--smoke-grenade-rules`. In the Helm chart, put the file in the
+data bundle and add the flag to `data.gameplayExtraArgs`. For
+`gameplayWorkers`, put the file in each worker's bundle and add the flag to that
+worker's `extraArgs`.
+
+The catalog must match the loaded retail item, binding, bootstrap, archive and
+executable provenance. Omit the flag to leave support off; a smoke
+throw is then refused like any other unconfigured item, so no peer sees it.
+Ordinary frag configuration remains separate. `--validate-catalogs` reports
+whether configured smoke profiles were validated, without opening listeners.
 
 A saved kit can hold a throwable in either equipment gear, 4 or 5, and the
 launch request names the gear it was thrown from. The server accepts the

@@ -58,7 +58,8 @@ struct Core {
     projectile_contacts: Option<PathBuf>,
     infantry_rockets: Option<PathBuf>,
     guided_launchers: Option<PathBuf>,
-    smoke_grenades: Option<PathBuf>,
+    /// Retired: smoke rules come only from the worker's `--smoke-grenade-rules`.
+    smoke_grenades: Option<serde::de::IgnoredAny>,
     gas_grenades: Option<PathBuf>,
     flash_grenades: Option<PathBuf>,
     underbarrel_launchers: Option<PathBuf>,
@@ -265,6 +266,11 @@ impl Configuration {
             *input = directory.join(&*input);
         }
         if let Some(core) = &mut value.core {
+            if core.smoke_grenades.is_some() {
+                return Err(io::Error::other(
+                    "the Domination configuration no longer accepts core.smoke_grenades; pass the rules to the worker with --smoke-grenade-rules",
+                ));
+            }
             core.validate_scope()?;
             for input in [
                 &mut core.aircraft_links,
@@ -321,10 +327,6 @@ impl Configuration {
                 (
                     &mut core.guided_launchers,
                     "empty_domination_guided_launcher_source_path",
-                ),
-                (
-                    &mut core.smoke_grenades,
-                    "empty_domination_smoke_grenade_source_path",
                 ),
                 (
                     &mut core.gas_grenades,
@@ -500,14 +502,6 @@ impl Configuration {
         self.core
             .as_ref()
             .and_then(|core| core.guided_launchers.as_ref())
-            .map(|path| read(path, 1024 * 1024))
-            .transpose()
-    }
-
-    pub(crate) fn smoke_grenade_source(&self) -> io::Result<Option<Vec<u8>>> {
-        self.core
-            .as_ref()
-            .and_then(|core| core.smoke_grenades.as_ref())
             .map(|path| read(path, 1024 * 1024))
             .transpose()
     }
@@ -1157,13 +1151,6 @@ impl<W: Write> Engine<W> {
             )
             .map_err(io::Error::other)?;
         }
-        let smoke_grenades = config
-            .smoke_grenade_source()?
-            .map(|source| {
-                crate::smoke_grenades::Catalog::from_bytes(&source, &self.item_catalog, &native_elf)
-            })
-            .transpose()
-            .map_err(io::Error::other)?;
         let gas_grenades = config
             .gas_grenade_source()?
             .map(|source| {
@@ -1293,12 +1280,9 @@ impl<W: Write> Engine<W> {
         self.hospital_rocket_ground = world.state.hospital_rocket_ground.clone();
         self.frag_character_blast = world.state.frag_character_blast;
         self.domination_gameplay = Some(world);
+        // A new world starts without smoke; install the worker's rules with
+        // `with_smoke_grenades` after this world.
         self.smoke_grenades = None;
-        if let Some(catalog) = smoke_grenades {
-            self = self
-                .with_smoke_grenades(Arc::new(catalog))
-                .map_err(io::Error::other)?;
-        }
         self.gas_grenades = None;
         self.flash_grenades = None;
         if let Some(catalog) = gas_grenades {
@@ -1470,6 +1454,34 @@ mod tests {
         );
         std::fs::remove_file(&file).unwrap();
         std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn retired_core_smoke_field_points_operators_to_the_worker_flag() {
+        let directory = std::env::temp_dir().join(format!(
+            "mag-domination-retired-smoke-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let file = directory.join("config.json");
+        let mut value = json!({"format":"mag_domination_gameplay_configuration_v1",
+            "schema_version":1, "controller":"controller.json", "mission_start":"start.json",
+            "sim_schedule":"schedule.json", "forward_spawns":"fsp.json",
+            "structural_effects":"effects.json", "sequence_assets":"assets",
+            "initial_assignments":"assignments.json", "core":core()});
+        std::fs::write(&file, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(Configuration::load(&file).is_ok());
+        for smoke in [json!("smoke.json"), json!("")] {
+            value["core"]["smoke_grenades"] = smoke;
+            std::fs::write(&file, serde_json::to_vec(&value).unwrap()).unwrap();
+            let error = Configuration::load(&file).err().unwrap().to_string();
+            assert!(error.contains("--smoke-grenade-rules"), "{error}");
+        }
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 
     #[test]
