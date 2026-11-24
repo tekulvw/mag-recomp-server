@@ -493,21 +493,31 @@ pub async fn revoke_device(pool: &PgPool, account_id: i32, device_id: i32) -> sq
 }
 
 /// The account behind a device token, recording the use.
+///
+/// Recording the use is bookkeeping and only best effort: a database that answers reads but not
+/// writes (a primary failing over, a busy one) still lets launchers get tickets.
 pub async fn device_account(pool: &PgPool, device_token: &str) -> sqlx::Result<Option<Account>> {
     if !device_token.starts_with(DEVICE_TOKEN_PREFIX) {
         return Ok(None);
     }
     let hash = tokens::sha256(device_token.as_bytes());
-    let row: Option<(i32,)> = sqlx::query_as(
-        "UPDATE devices SET last_used_at = now() WHERE token_hash = $1 RETURNING account_id",
-    )
-    .bind(&hash[..])
-    .fetch_optional(pool)
-    .await?;
-    match row {
-        Some((id,)) => account(pool, id).await,
-        None => Ok(None),
+    let row: Option<(i32, i32)> =
+        sqlx::query_as("SELECT id, account_id FROM devices WHERE token_hash = $1")
+            .bind(&hash[..])
+            .fetch_optional(pool)
+            .await?;
+    let Some((device, account_id)) = row else {
+        return Ok(None);
+    };
+    let found = account(pool, account_id).await?;
+    if let Err(e) = sqlx::query("UPDATE devices SET last_used_at = now() WHERE id = $1")
+        .bind(device)
+        .execute(pool)
+        .await
+    {
+        tracing::warn!(error = %e, device, "device use not recorded");
     }
+    Ok(found)
 }
 
 // ---- Operator actions ----

@@ -7,7 +7,7 @@ use std::time::Duration as StdDuration;
 
 use askama::Template;
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{ConnectInfo, Form, FromRequestParts, Path, Query, State};
+use axum::extract::{ConnectInfo, Form, FromRequestParts, MatchedPath, Path, Query, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{AppendHeaders, Html, IntoResponse, Redirect, Response};
@@ -134,6 +134,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .merge(crate::admin_web::routes())
         .merge(crate::social_web::routes())
+        .layer(axum::middleware::from_fn(failed_requests))
         .layer(axum::middleware::map_response(security_headers))
         .with_state(state)
 }
@@ -160,6 +161,11 @@ async fn security_headers(mut response: Response) -> Response {
 
 // ---- Errors ----
 
+/// Seconds a client waits before retrying after `503 busy` (the `Retry-After` header).
+pub const BUSY_RETRY_SECONDS: u64 = 2;
+
+/// A request that failed with an error. Pages get an error page; [`failed_requests`] logs the
+/// failure with its route and answers launcher API requests in JSON instead.
 pub struct AppError(anyhow::Error);
 
 impl<E: Into<anyhow::Error>> From<E> for AppError {
@@ -168,15 +174,105 @@ impl<E: Into<anyhow::Error>> From<E> for AppError {
     }
 }
 
+/// The failure behind an [`AppError`] response, for [`failed_requests`].
+#[derive(Clone)]
+struct Failure {
+    error: Arc<str>,
+    busy: bool,
+}
+
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        tracing::error!(error = %self.0, "request failed");
-        message(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Something went wrong",
-            "The server could not finish that request. Try again in a moment.",
-            None,
-        )
+        let busy = database_unavailable(&self.0);
+        let mut response = if busy {
+            let mut page = message(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Busy",
+                "The server cannot reach its database right now. Try again in a moment.",
+                None,
+            );
+            page.headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from(BUSY_RETRY_SECONDS));
+            page
+        } else {
+            message(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Something went wrong",
+                "The server could not finish that request. Try again in a moment.",
+                None,
+            )
+        };
+        response.extensions_mut().insert(Failure {
+            error: format!("{:#}", self.0).into(),
+            busy,
+        });
+        response
+    }
+}
+
+/// Whether `e` (or anything it wraps) says the database cannot be used for a moment: the pool
+/// had no connection in time, the connection broke, or the server is shutting down, starting,
+/// or read-only while it fails over. Such requests answer `503 busy`, not `500`.
+pub fn database_unavailable(e: &anyhow::Error) -> bool {
+    e.chain().any(|cause| {
+        cause
+            .downcast_ref::<sqlx::Error>()
+            .is_some_and(sqlx_unavailable)
+    })
+}
+
+/// [`database_unavailable`] for one sqlx error.
+pub fn sqlx_unavailable(e: &sqlx::Error) -> bool {
+    match e {
+        sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed | sqlx::Error::Io(_) => true,
+        sqlx::Error::Database(db) => db.code().is_some_and(|code| unavailable_sqlstate(&code)),
+        _ => false,
+    }
+}
+
+/// PostgreSQL error codes for a database that is unavailable rather than refusing the request:
+/// class 08 (connection exception), 57P01 to 57P03 (shutting down, crashed, cannot connect
+/// now) and 25006 (read-only transaction: a standby, or a primary during failover).
+fn unavailable_sqlstate(code: &str) -> bool {
+    code.starts_with("08") || matches!(code, "57P01" | "57P02" | "57P03" | "25006")
+}
+
+/// `503 {"error":"busy"}` with `Retry-After`: the launcher API's answer while the database is
+/// unavailable.
+pub(crate) fn api_busy() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::RETRY_AFTER, HeaderValue::from(BUSY_RETRY_SECONDS))],
+        Json(json!({ "error": "busy" })),
+    )
+        .into_response()
+}
+
+/// Logs every request that failed with an [`AppError`], with its method and route, and gives
+/// launcher API requests (`/api/…`) a JSON error in place of the error page: `503 busy` (with
+/// `Retry-After`) while the database is unavailable, `500 server_error` otherwise.
+async fn failed_requests(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let method = request.method().clone();
+    // The route pattern, not the path, so names and codes in paths stay out of the log.
+    let route = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|p| p.as_str().to_owned())
+        .unwrap_or_else(|| request.uri().path().to_owned());
+    let api = request.uri().path().starts_with("/api/");
+    let response = next.run(request).await;
+    let Some(failure) = response.extensions().get::<Failure>().cloned() else {
+        return response;
+    };
+    let status = response.status().as_u16();
+    tracing::error!(%method, %route, status, error = %failure.error, "request failed");
+    match (api, failure.busy) {
+        (false, _) => response,
+        (true, true) => api_busy(),
+        (true, false) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error"),
     }
 }
 
@@ -1203,8 +1299,15 @@ async fn api_report(
     let outcome = match reports::submit(&state.pool, &service, &account, report).await {
         Ok(outcome) => outcome,
         Err(e) => {
-            tracing::error!(error = %e, report = %id, "report not stored");
-            return Ok(api_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error"));
+            let busy = database_unavailable(&e);
+            tracing::error!(error = %format!("{e:#}"), report = %id, busy, "report not stored");
+            // A launcher drops a report after a few 500s (it blames the report), so a database
+            // that is only unavailable answers 503 busy.
+            return Ok(if busy {
+                api_busy()
+            } else {
+                api_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error")
+            });
         }
     };
     Ok(match outcome {
@@ -1292,6 +1395,137 @@ mod tests {
         for bad in [&b"nope"[..], b"[]", b"{\"audience\":7}"] {
             assert!(ticket_request(bad).is_none());
         }
+    }
+
+    #[test]
+    fn unavailable_databases() {
+        for e in [
+            sqlx::Error::PoolTimedOut,
+            sqlx::Error::PoolClosed,
+            sqlx::Error::Io(std::io::ErrorKind::ConnectionReset.into()),
+        ] {
+            assert!(sqlx_unavailable(&e), "{e}");
+            let wrapped = anyhow::Error::from(e).context("loading the account");
+            assert!(database_unavailable(&wrapped));
+        }
+        for e in [
+            sqlx::Error::RowNotFound,
+            sqlx::Error::Protocol("nope".into()),
+        ] {
+            assert!(!sqlx_unavailable(&e), "{e}");
+        }
+        assert!(!database_unavailable(&anyhow::anyhow!("boom")));
+        for code in [
+            "08000", "08006", "08P01", "57P01", "57P02", "57P03", "25006",
+        ] {
+            assert!(unavailable_sqlstate(code), "{code}");
+        }
+        for code in ["23505", "42P01", "40001", "57014", "25P02", "53300"] {
+            assert!(!unavailable_sqlstate(code), "{code}");
+        }
+    }
+
+    /// Log lines written while the guard lives, on this thread.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+        type Writer = Captured;
+
+        fn make_writer(&'a self) -> Captured {
+            self.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_requests_are_logged_and_answered() {
+        let log = Captured::default();
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(log.clone())
+                .with_ansi(false)
+                .finish(),
+        );
+        async fn busy() -> Result<Response, AppError> {
+            Err(sqlx::Error::PoolTimedOut.into())
+        }
+        async fn broken() -> Result<Response, AppError> {
+            Err(anyhow::anyhow!("boom").into())
+        }
+        let app = Router::new()
+            .route("/api/v1/things/{name}", post(busy))
+            .route("/api/v1/broken", get(broken))
+            .route("/pages/{name}", get(busy))
+            .route("/pages/broken", get(broken))
+            .layer(axum::middleware::from_fn(failed_requests));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let http = reqwest::Client::new();
+
+        let r = http
+            .post(format!("{base}/api/v1/things/Alpha"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(r.headers()[header::RETRY_AFTER], "2");
+        assert_eq!(r.text().await.unwrap(), r#"{"error":"busy"}"#);
+
+        let r = http
+            .get(format!("{base}/api/v1/broken"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(r.text().await.unwrap(), r#"{"error":"server_error"}"#);
+
+        let r = http
+            .get(format!("{base}/pages/Alpha"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(r.headers()[header::RETRY_AFTER], "2");
+        assert!(r.text().await.unwrap().contains("Busy"));
+
+        let r = http
+            .get(format!("{base}/pages/broken"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(r.headers().get(header::RETRY_AFTER).is_none());
+        assert!(r.text().await.unwrap().contains("Something went wrong"));
+
+        let log = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        let lines: Vec<&str> = log
+            .lines()
+            .filter(|l| l.contains("request failed"))
+            .collect();
+        assert_eq!(lines.len(), 4, "{log}");
+        assert!(
+            lines[0].contains("method=POST") && lines[0].contains("route=/api/v1/things/{name}"),
+            "{log}"
+        );
+        assert!(lines[0].contains("status=503") && lines[0].contains("pool timed out"));
+        assert!(lines[1].contains("method=GET") && lines[1].contains("route=/api/v1/broken"));
+        assert!(lines[1].contains("status=500") && lines[1].contains("boom"));
+        assert!(lines[2].contains("route=/pages/{name}"));
+        assert!(lines[3].contains("route=/pages/broken"));
+        // Routes, not paths: names in paths stay out of the log.
+        assert!(!log.contains("Alpha"), "{log}");
     }
 
     #[test]

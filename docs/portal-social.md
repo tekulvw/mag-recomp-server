@@ -45,6 +45,7 @@ responses use the canonical spelling.
 | 400 | `self` | The call names the caller (calls that name another player). |
 | 400 | `invalid_request` | The body is not the expected JSON. |
 | 500 | `server_error` | The portal failed; retry later. |
+| 503 | `busy` | The portal's database is unavailable for a moment; retry after `Retry-After` (2 seconds). |
 
 Error bodies are `{"error": "<code>"}`.
 

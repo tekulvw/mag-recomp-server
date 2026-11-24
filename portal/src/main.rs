@@ -64,6 +64,10 @@ enum Switch {
 struct DatabaseArgs {
     #[arg(long, env = "DATABASE_URL", hide_env_values = true)]
     database_url: String,
+    /// Seconds a request waits for a database connection before it answers 503 busy.
+    #[arg(long, env = "PORTAL_DB_ACQUIRE_TIMEOUT_SECONDS", default_value_t = 3,
+          value_parser = clap::value_parser!(u64).range(1..=60))]
+    db_acquire_timeout_seconds: u64,
 }
 
 #[derive(Args)]
@@ -133,7 +137,7 @@ struct ServeArgs {
 async fn connect(database: &DatabaseArgs) -> anyhow::Result<sqlx::PgPool> {
     PgPoolOptions::new()
         .max_connections(10)
-        .acquire_timeout(Duration::from_secs(10))
+        .acquire_timeout(Duration::from_secs(database.db_acquire_timeout_seconds))
         .connect(&database.database_url)
         .await
         .context("connecting to the database")
