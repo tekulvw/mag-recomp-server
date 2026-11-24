@@ -173,9 +173,11 @@ ghcr.io/tekulvw/mag-recomp-server-game:main
 ghcr.io/tekulvw/mag-recomp-server-portal:main
 ```
 
-A newer push to `main` cancels the older run, so only the newest commit builds;
-because images are keyed by tree, a component changed only in a cancelled
-commit is built by the next run. Promotion checks the repository's current main
+Runs never cancel each other: a running run finishes, and a newer push replaces
+only a run still waiting, so at most the running commit and the newest commit
+build. Because images are keyed by tree, the waiting run reuses what the
+finished run built, and a component changed only in a replaced commit is built
+by the next run. Promotion checks the repository's current main
 SHA, and reruns use a separate concurrency group, so rerunning an old workflow
 cannot cancel current main or move `main` back to an older commit. If checks
 or any build fails, the existing `main` aliases remain on the previous
@@ -218,6 +220,24 @@ pin image digests when exact artifact reproducibility is needed. To return to
 stable, restore the selected stable tags/digests in your operator values and
 roll the test deployment again. Authenticate to GHCR first if the packages are
 private. This workflow never deploys either channel automatically.
+
+## CI layer caches
+
+Docker layer caches live in GHCR, as `buildcache` tags in the public component
+packages, not in the Actions cache:
+
+| Cache | Written by | Read by |
+| --- | --- | --- |
+| `mag-recomp-server-medius:buildcache` | `build-images` (main) | Medius releases and the `horizon` check, whose stage is part of the Medius build |
+| `mag-recomp-server-game:buildcache` | `build-images` (main) | gameplay releases |
+| `mag-recomp-server-portal:buildcache` | `build-images` (main) | portal releases |
+| `mag-recomp-server-game:buildcache-world-registry` | `check-caches` (main, after checks pass) | the `registry` check |
+
+Only `Main container images` runs on `main` write caches (`mode=max`). Pull
+requests, including those from forks, and releases only read them, anonymously
+because the packages are public; a missing or unreadable cache makes a build
+cold, never wrong. These tags are build caches, not images: do not pull or
+deploy them.
 
 ## OCI Helm chart
 

@@ -48,9 +48,11 @@ class MainImagesTests(unittest.TestCase):
         for name in ('build-images', 'promote-main'):
             self.assertEqual(jobs[name]['permissions'], {'contents': 'read', 'packages': 'write'})
 
-    def test_newest_main_cancels_older_runs_but_reruns_cannot_displace_it(self):
+    def test_running_main_finishes_and_only_the_newest_waits_but_reruns_cannot_displace_it(self):
         concurrency = workflow()['concurrency']
-        self.assertEqual(concurrency['cancel-in-progress'], 'true')
+        # A running build is never cancelled; GitHub keeps one waiting run, the newest.
+        self.assertEqual(concurrency['cancel-in-progress'], 'false')
+        self.assertNotIn('queue', concurrency)
         self.assertIn('${{ github.ref }}', concurrency['group'])
         # A rerun of an old commit gets its own group instead of cancelling current main.
         self.assertIn("github.run_attempt != '1' && '-rerun'", concurrency['group'])
@@ -70,6 +72,64 @@ class MainImagesTests(unittest.TestCase):
         self.assertIn('org.opencontainers.image.revision=${{ github.sha }}', build['with']['labels'])
         self.assertNotIn(':main', build['with']['tags'])
         self.assertNotIn('latest', build['with']['tags'])
+
+    def test_main_writes_registry_layer_caches_and_nothing_uses_the_actions_cache(self):
+        build = next(s for s in workflow()['jobs']['build-images']['steps']
+                     if s.get('uses', '').startswith('docker/build-push-action@'))
+        cache = '${{ steps.source.outputs.image }}:buildcache'
+        self.assertEqual(build['with']['cache-from'], 'type=registry,ref=' + cache)
+        self.assertEqual(build['with']['cache-to'], 'type=registry,ref=' + cache + ',mode=max,ignore-error=true')
+        for name in ('main-images.yml', 'check.yml', 'publish-image.yml', 'release-please.yml'):
+            self.assertNotIn('type=gha', (ROOT / '.github/workflows' / name).read_text(), name)
+
+    def test_configured_world_cache_is_refreshed_only_from_checked_main(self):
+        job = workflow()['jobs']['check-caches']
+        self.assertEqual(job['needs'], ['plan', 'checks'])
+        self.assertIn("' registry '", job['if'])
+        self.assertIn("' all '", job['if'])
+        self.assertEqual(job['permissions'], {'contents': 'read', 'packages': 'write'})
+        build = next(s for s in job['steps'] if s.get('uses', '').startswith('docker/build-push-action@'))
+        self.assertEqual(build['with']['file'], 'tests/Dockerfile.world-registry')
+        self.assertEqual(build['with']['outputs'], 'type=cacheonly')
+        self.assertIn(',mode=max', build['with']['cache-to'])
+        # Promotion never waits for a cache refresh.
+        self.assertNotIn('check-caches', workflow()['jobs']['promote-main']['needs'])
+
+    def test_pull_request_docker_checks_only_read_main_caches(self):
+        spec = yaml.load((ROOT / '.github/workflows/check.yml').read_text(), Loader=yaml.BaseLoader)
+        self.assertEqual(spec['permissions'], {'contents': 'read'})
+        for name, cache in (('horizon', 'mag-recomp-server-medius:buildcache'),
+                            ('registry', 'mag-recomp-server-game:buildcache-world-registry')):
+            job = spec['jobs'][name]
+            self.assertEqual(job['if'], f"needs.changes.outputs.{name} == 'true'")
+            self.assertNotIn('permissions', job)
+            self.assertFalse(any(s.get('uses', '').startswith('docker/login-action@') for s in job['steps']))
+            resolve = next(s for s in job['steps'] if s.get('id') == 'cache')
+            self.assertIn(cache, resolve['run'])
+            build = next(s for s in job['steps'] if s.get('uses', '').startswith('docker/build-push-action@'))
+            self.assertEqual(build['with']['target'], 'check')
+            self.assertEqual(build['with']['outputs'], 'type=cacheonly')
+            self.assertEqual(build['with']['cache-from'], 'type=registry,ref=${{ steps.cache.outputs.ref }}')
+            self.assertNotIn('cache-to', build['with'])
+        # main-images.yml writes the caches check.yml reads.
+        self.assertIn('mag-recomp-server-game:buildcache-world-registry',
+                      next(s for s in workflow()['jobs']['check-caches']['steps'] if s.get('id') == 'cache')['run'])
+
+    def test_releases_read_main_caches_without_writing(self):
+        spec = yaml.load((ROOT / '.github/workflows/publish-image.yml').read_text(), Loader=yaml.BaseLoader)
+        build = next(s for s in spec['jobs']['publish']['steps'] if s.get('uses', '').startswith('docker/build-push-action@'))
+        self.assertEqual(build['with']['cache-from'], 'type=registry,ref=${{ steps.source.outputs.image }}:buildcache')
+        self.assertNotIn('cache-to', build['with'])
+
+    def test_portal_installs_postgresql_only_when_the_runner_lacks_it(self):
+        spec = yaml.load((ROOT / '.github/workflows/check.yml').read_text(), Loader=yaml.BaseLoader)
+        steps = spec['jobs']['portal']['steps']
+        probe = next(i for i, s in enumerate(steps) if s.get('id') == 'postgres')
+        tools = next(i for i, s in enumerate(steps) if s.get('uses') == './.github/actions/self-hosted-linux')
+        self.assertLess(probe, tools)
+        self.assertIn('/usr/lib/postgresql/*/bin/initdb', steps[probe]['run'])
+        self.assertIn('packages=postgresql', steps[probe]['run'])
+        self.assertEqual(steps[tools]['with']['packages'], '${{ steps.postgres.outputs.packages }}')
 
     def run_plan(self, existing=(), diff='', event='push', before='b' * 40, fetch_fails=False, rebuild='false'):
         step = next(s for s in workflow()['jobs']['plan']['steps'] if s.get('id') == 'plan')

@@ -143,6 +143,23 @@ session's CSRF token and share the per-account limits above. Banned players get 
 
 Staff see each account's friend, request and block counts on its admin page.
 
+## In-game Community screen
+
+The game's COMMUNITY screen stays hidden until the player's clan list arrives, so the Friends tab
+depends on two Medius (MLS) answers besides the portal's presence:
+
+- **Plugin id.** The retail client sends its MLS plugin messages with the plugin id of the last
+  plugin message it received, and its clan requests stay unsent while that id is 0. Retail MLS
+  therefore sends every plugin message with plugin id 1 and accepts 0 (the client's hello) or 1
+  from the client. The prototype keeps 0.
+- **Clan list.** Clans are not implemented, so every account belongs to none. Clan messages use
+  MAG plugin type `0x01FC` in both directions: the big-endian MAG type, then a clan body whose
+  first byte is the clan message type and whose fields are little-endian. The clan list request
+  is type 2 with a 32-bit request id and the player's 32-bit account id. MLS answers it with type
+  2, the same request id, status 10 ("no results", which the game counts as success) and a final
+  byte of 1 marking the last packet. A request naming another account gets the same answer and is
+  recorded in the MLS log. Other clan types are logged with their first bytes and not answered.
+
 ## Storage
 
 Migration `0005_social.sql`: `friendships` (one row per pair, lower account ID first),
