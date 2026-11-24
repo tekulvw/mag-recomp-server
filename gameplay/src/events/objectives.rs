@@ -416,6 +416,7 @@ impl<W: Write> Engine<W> {
                         object,
                         world.state(index).unwrap(),
                         actor.team,
+                        &world,
                     ) else {
                         continue;
                     };

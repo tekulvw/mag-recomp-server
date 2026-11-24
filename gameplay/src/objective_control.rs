@@ -1023,6 +1023,21 @@ impl ObjectiveWorld {
             .then_some(fuse.trigger_index)
     }
 
+    /// The running window or fuse deadline in wire milliseconds, if any.
+    pub(crate) fn expiration_ms(&self, object_index: u16) -> Option<u32> {
+        self.objects
+            .get(&object_index)
+            .map(|object| object.state.expiration_time_ms)
+            .filter(|ms| *ms != 0)
+    }
+
+    /// A Sabotage capture point whose owner team may deactivate it.
+    pub(crate) fn defender_can_deactivate(&self, object_index: u16) -> bool {
+        self.objects.get(&object_index).is_some_and(|object| {
+            object.sabotage.is_some() && object.rule.as_ref().is_some_and(|r| r.can_deactivate)
+        })
+    }
+
     pub fn interaction_owner(&self, object_index: u16) -> Option<(u16, u32, u8)> {
         let object = self.objects.get(&object_index)?;
         if !matches!(
