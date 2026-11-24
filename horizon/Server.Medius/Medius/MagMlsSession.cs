@@ -56,6 +56,15 @@ namespace Server.Medius
                 ObserveActivity(now);
                 return new[] { MagMessageCodec.ToPluginMessageForApplication(new MagKeepAlive(), ApplicationId) };
             }
+            if (message is MagRetailAccountLogoutRequest logout && ApplicationId == 20231 && State == SessionState.Ready)
+            {
+                // The launcher logs out just before it hands off to the engine, whose own login
+                // follows on a fresh ticket. Acknowledge only: the launcher still sends keepalives
+                // on this channel until it closes, and the channel close releases the ticket.
+                StorageStatus = "account-logout-acknowledged";
+                ObserveActivity(now);
+                return new[] { MagMessageCodec.ToPluginMessageForApplication(new MagRetailAccountLogoutResponse { TransactionId = logout.TransactionId, Success = true }, ApplicationId) };
+            }
             if (message is MagTrainingCompletedRequest && ApplicationId == 20231 && State == SessionState.Ready)
             {
                 try
