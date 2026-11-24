@@ -67,6 +67,10 @@ namespace Server.Medius
         readonly TaskCompletionSource<bool> _firstWorldStream = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         Task _worldStreamWorker = Task.CompletedTask;
         bool _worldStreamHealthy;
+        // Legacy matches only: the connected gameplay worker accepted this host's
+        // configure_match. A worker that restarts alone loses it (see ConfigureGameplayAsync).
+        bool _gameplayConfigured;
+        CancellationTokenSource _worldSubscription;
         bool _supportsFragoKillBonus;
         bool _supportsFragoActionBonus;
         bool _supportsFragoObjectiveBonus;
@@ -171,7 +175,7 @@ namespace Server.Medius
                 bool hasDominationProfiles = UsesFactionMatchmaking && _matchProfiles.Any(profile => profile.GameType == 2);
                 if (_maximumPlayers > SupportedMaximumPlayers(_applicationId, _gameType, hasDominationProfiles))
                     throw new IOException("Expanded retail Domination admission requires all ordered faction profiles.");
-                if (!UsesFactionMatchmaking && !await _bridge.RequestAsync(_startupPolicy.ConfigureRequest(Id(), _applicationId)))
+                if (!UsesFactionMatchmaking && !await ConfigureGameplayAsync("startup"))
                     throw new IOException("Gameplay match configuration was not acknowledged.");
                 DmeProgram.SERVER_IP = _options.AdvertisedAddress;
                 DmeProgram.Settings.TCPPort = 10073;
@@ -186,6 +190,44 @@ namespace Server.Medius
                 await DmeProgram.TcpServer.StartAsync(); lock (_gate) _ready = true;
             }
             catch { await DisposeAsync(); throw; }
+        }
+        /// <summary>Send the legacy match limits to the connected gameplay worker.</summary>
+        /// <remarks>Gameplay starts every process in a one-player development default
+        /// and only configure_match sets the real limits. A worker restarted on its
+        /// own (for example a rolled Deployment) must be configured again before its
+        /// world stream may open admission, or it would refuse every second player
+        /// and stop respawning a long-lived player. Gameplay confirms identical
+        /// limits on a live match and refuses different ones with
+        /// match_configuration_locked; any refusal keeps admission closed and the
+        /// world stream retries on its normal one-second cadence.</remarks>
+        async Task<bool> ConfigureGameplayAsync(string reason)
+        {
+            var reply = await _bridge.RequestControlAsync(_startupPolicy.ConfigureRequest(Id(), _applicationId));
+            if (reply?.Ok != true)
+            {
+                Logger.Warn($"Gameplay worker configuration refused: reason={reason} max={_maximumPlayers} min={_minimumPlayers} error={reply?.Error ?? "none"} failure={reply?.Failure.ToString() ?? "Unavailable"}; admission stays closed");
+                return false;
+            }
+            lock (_gate) _gameplayConfigured = true;
+            Logger.Info($"Configured gameplay worker: max={_maximumPlayers} min={_minimumPlayers} application={_applicationId} reason={reason}");
+            return true;
+        }
+        /// <summary>A legacy worker refused admission as unconfigured: it restarted
+        /// behind a still-open world stream. Close admission and reconnect the stream,
+        /// which reconfigures the worker before it can become healthy again.</summary>
+        void GameplayConfigurationLost()
+        {
+            if (UsesFactionMatchmaking) return;
+            CancellationTokenSource subscription;
+            lock (_gate)
+            {
+                _gameplayConfigured = false;
+                _worldStreamHealthy = false;
+                subscription = _worldSubscription;
+            }
+            Logger.Warn("Gameplay worker reports match_not_configured; closing admission and reconnecting its world stream to reconfigure");
+            try { subscription?.Cancel(); }
+            catch (ObjectDisposedException) { } // That subscription already ended; the loop reconfigures.
         }
         void InitializeGameplayHello(GameplayBridgeResponse hello)
         {
@@ -348,6 +390,8 @@ namespace Server.Medius
                     // Gameplay may record the reservation before a later step of its reserve
                     // fails, so name the cause here instead of the default transport_closed.
                     reservation.ReleaseReason = AdmissionFailureReason(admittedReply, ready);
+                    if (admittedReply?.Failure == GameplayBridgeFailure.None && admittedReply.Error == "match_not_configured")
+                        GameplayConfigurationLost();
                     Logger.Warn($"Gameplay admission refused: player={client.DmeId} reason={reservation.ReleaseReason} error={admittedReply?.Error ?? "none"} failure={admittedReply?.Failure.ToString() ?? "Unavailable"} elapsed_ms={admittedReply?.ElapsedMilliseconds ?? -1} ready={readyFlag} world_stream={streamHealthy}");
                     bool terminalRefusal = _independentMatchCohorts && admittedReply?.Failure == GameplayBridgeFailure.None &&
                         admittedReply.Error is "results_cohort_limit" or "match_finished";
@@ -500,6 +544,18 @@ namespace Server.Medius
             var cancellation = _worldStreamCancellation.Token;
             while (!cancellation.IsCancellationRequested)
             {
+                // Each (re)connection may reach a new worker process. Legacy matches
+                // configure it before the stream can mark admission ready.
+                bool configured;
+                lock (_gate) configured = UsesFactionMatchmaking || _gameplayConfigured;
+                if (!configured && !await ConfigureGameplayAsync("world_stream_reconnect"))
+                {
+                    try { await Task.Delay(TimeSpan.FromSeconds(1), cancellation); }
+                    catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { break; }
+                    continue;
+                }
+                using var subscription = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+                lock (_gate) _worldSubscription = subscription;
                 try
                 {
                     await _bridge.SubscribeWorldAsync((uint)World.WorldId, Id(), async reply =>
@@ -507,6 +563,8 @@ namespace Server.Medius
                         lock (_gate)
                         {
                             if (_disposed || cancellation.IsCancellationRequested) return;
+                            if (!UsesFactionMatchmaking && !_gameplayConfigured)
+                                throw new IOException("Gameplay worker lost its match configuration.");
                             if (InRegistry && _worldStreamHealthy && !HasWorldStreamLease)
                                 throw new IOException("Gameplay world stream lease expired.");
                             if (!Route(reply)) throw new InvalidDataException("World stream recipient mismatch.");
@@ -515,7 +573,7 @@ namespace Server.Medius
                             _firstWorldStream.TrySetResult(true);
                         }
                         await ObserveReceiptsAsync(reply, true);
-                    }, cancellation);
+                    }, subscription.Token);
                 }
                 catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { break; }
                 catch (Exception error) when (error is IOException || error is InvalidDataException || error is System.Net.Sockets.SocketException || error is OperationCanceledException)
@@ -524,6 +582,8 @@ namespace Server.Medius
                     lock (_gate)
                     {
                         _worldStreamHealthy = false;
+                        // The next connection may reach a restarted worker.
+                        _gameplayConfigured = false;
                         affected = _reservations.Values.ToArray();
                         foreach (var reservation in affected) { reservation.Invalidated = true; reservation.ReleaseReason = "world_stream_gap"; }
                     }
@@ -536,6 +596,7 @@ namespace Server.Medius
                     await ReleaseReservationsAsync(affected);
                     if (InRegistry && _bridge.HasWorkerIdentityFault) break;
                 }
+                finally { lock (_gate) if (_worldSubscription == subscription) _worldSubscription = null; }
                 try { await Task.Delay(TimeSpan.FromSeconds(1), cancellation); }
                 catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { break; }
             }
