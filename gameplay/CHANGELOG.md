@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.10.0](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.9.0...gameplay-v0.10.0) (2026-11-24)
+
+
+### Features
+
+* **gameplay:** plan long bot routes in stages when the node pool runs out ([#222](https://github.com/tekulvw/mag-recomp-server/issues/222)) ([3ec1527](https://github.com/tekulvw/mag-recomp-server/commit/3ec1527e5cba1c12dbb25b55683c1cab39fb8763))
+* **gameplay:** qualify bot static resupply catalogs for every Sabotage map ([#237](https://github.com/tekulvw/mag-recomp-server/issues/237)) ([ea4e1d3](https://github.com/tekulvw/mag-recomp-server/commit/ea4e1d3d030a94c43a0c76df8772dda1eb571eb9))
+* **gameplay:** start bot lives at the squad's active spawns ([#224](https://github.com/tekulvw/mag-recomp-server/issues/224)) ([f6d0719](https://github.com/tekulvw/mag-recomp-server/commit/f6d0719156abe1ade91cbab49aa3bc22baec8158))
+* **tools:** project authored incapacitation rules and downed body multipliers ([#232](https://github.com/tekulvw/mag-recomp-server/issues/232)) ([766d12a](https://github.com/tekulvw/mag-recomp-server/commit/766d12a6e3396e3d2c710e06d7e5dd4c6b3413d2))
+
+
+### Bug Fixes
+
+* **gameplay:** keep players in the match when a bullet kills a bot after the result ([#227](https://github.com/tekulvw/mag-recomp-server/issues/227)) ([9022218](https://github.com/tekulvw/mag-recomp-server/commit/9022218313ce1f1f00452535d0436f3d40011e39))
+* **gameplay:** let Sabotage rocket launchers fly and deal damage ([#230](https://github.com/tekulvw/mag-recomp-server/issues/230)) ([79976be](https://github.com/tekulvw/mag-recomp-server/commit/79976bed99e6d26876993cb4488919c8b7542306))
+* **gameplay:** let Sabotage squad leaders set FRAGO targets ([#233](https://github.com/tekulvw/mag-recomp-server/issues/233)) ([44b0844](https://github.com/tekulvw/mag-recomp-server/commit/44b084433947accf57eb60243ca083b4dd577857))
+* **gameplay:** replicate smoke thrown from either equipment gear in Sabotage ([#228](https://github.com/tekulvw/mag-recomp-server/issues/228)) ([9475e42](https://github.com/tekulvw/mag-recomp-server/commit/9475e423bc3d1aaacf1f86c3b576ac57fa46c383))
+
 ## [0.9.0](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.8.1...gameplay-v0.9.0) (2026-11-24)
 
 
