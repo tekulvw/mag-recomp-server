@@ -25,6 +25,8 @@ namespace Server.Medius
             public string Id; public uint AccountId; public string Account; public uint CharacterId; public Action<MagCharacterRecord> Notify; public DmeClient Client; public DateTime Deadline; public byte Faction; public bool Accepted; public bool Claimed; public bool Invalidated; public string ReleaseReason; public string TerminalMatchId; public bool FragoActionBonusEnabled; public bool FragoObjectiveBonusEnabled; public bool ExtendedObjectiveRewardsEnabled; public bool RepairRewardsEnabled; public bool AssistRewardsEnabled; public bool AssistFragoBonusEnabled;
             public MagMlsSession QueueSession;
             public MagJoinGameRequest QueueRequest;
+            // This human's DME UDP port, held until its transport has stopped.
+            public MagDmePortBudget.Lease PortLease;
         }
         sealed class PendingRelease { public Reservation Reservation; public string RequestId; public DateTime NextAttempt; public DateTime? FirstRejected; public bool InFlight; }
         static readonly IInternalLogger Logger = InternalLoggerFactory.GetInstance<LocalDmeHost>();
@@ -37,6 +39,7 @@ namespace Server.Medius
         readonly LocalDmeHostOptions _options;
         readonly GameplayBridge _bridge;
         readonly LocalCharacterStore _store;
+        readonly MagDmePortBudget _portBudget;
         readonly object _gate = new object();
         readonly SemaphoreSlim _admission = new SemaphoreSlim(1, 1);
         readonly Dictionary<string, Reservation> _reservations = new Dictionary<string, Reservation>(StringComparer.Ordinal);
@@ -94,6 +97,7 @@ namespace Server.Medius
         bool _ready; bool _started; bool _disposed;
         bool _ownsIntegratedDme;
         public DmeWorld World { get; private set; }
+        public MagDmePortBudget PortBudget => _portBudget;
         public bool IsReady { get { lock (_gate) return ReadyForAdmission; } }
         // Rust evicts a reservation that has sent no event for its 120 s idle timeout.
         // Horizon stops forwarding events once it releases, so after this grace a
@@ -141,13 +145,15 @@ namespace Server.Medius
                 throw new ArgumentException("Local gameplay serves types2/3, plus retail Sabotage0 and bounded Acquisition1.");
             return retail && (gameType == 0 || gameType == 1 || gameType == 3 || (gameType == 2 && hasDominationProfiles)) ? 64 : 8;
         }
-        public LocalDmeHost(GameplayBridge bridge, LocalCharacterStore store) :
-            this(bridge, store, LocalDmeHostOptions.FromLegacySettings()) { }
+        public LocalDmeHost(GameplayBridge bridge, LocalCharacterStore store, MagDmePortBudget portBudget = null) :
+            this(bridge, store, LocalDmeHostOptions.FromLegacySettings(), portBudget: portBudget) { }
 
+        /// <param name="portBudget">DME humans shared by every world of this process; null is unbounded.</param>
         public LocalDmeHost(GameplayBridge bridge, LocalCharacterStore store, LocalDmeHostOptions options,
-            TimeProvider timeProvider = null, SemaphoreSlim progressionGate = null)
+            TimeProvider timeProvider = null, SemaphoreSlim progressionGate = null, MagDmePortBudget portBudget = null)
         {
             _options = options ?? throw new ArgumentNullException(nameof(options));
+            _portBudget = portBudget ?? MagDmePortBudget.Unbounded();
             _timeProvider = timeProvider ?? TimeProvider.System;
             _applicationId = options.ApplicationId;
             _startupPolicy = options.StartupPolicy;
@@ -193,7 +199,9 @@ namespace Server.Medius
                     throw new IOException("Gameplay match configuration was not acknowledged.");
                 DmeProgram.SERVER_IP = _options.AdvertisedAddress;
                 DmeProgram.Settings.TCPPort = 10073;
-                DmeProgram.Settings.UDPPort = 10474;
+                DmeProgram.Settings.UDPPort = MagDmePortBudget.FirstPort;
+                DmeProgram.Settings.UDPPortLast = _portBudget.LastPort ?? 0;
+                Logger.Info($"DME UDP port capacity: {_portBudget.Describe()}");
                 DmeProgram.Plugins = Program.Plugins ?? new Server.Plugins.PluginsManager("plugins/");
                 var manager = new Server.Dme.MediusManager(_applicationId) { LocalOnly = true };
                 DmeProgram.Managers.Add(_applicationId, manager);
@@ -313,6 +321,7 @@ namespace Server.Medius
                 return InRegistry && rejection == "host_not_ready" ? JoinResponse(request.TransactionId, 6) : failure;
             }
             await _admission.WaitAsync();
+            MagDmePortBudget.Lease lease = null;
             try
             {
                 lock (_gate) if (ownerCurrent != null && !ownerCurrent()) return failure;
@@ -344,6 +353,14 @@ namespace Server.Medius
                             (p.Reservation.TerminalMatchId != null || p.Reservation.Account == session.AuthenticatedAccount))) return JoinResponse(request.TransactionId, 6);
                         if (_rewardOwners.Count >= 4096 || _reservations.Values.Count(IsLiveCohort) >= _maximumPlayers ||
                             _reservations.Values.Any(r => IsLiveCohort(r) && r.AccountId == session.AccountId)) return JoinResponse(request.TransactionId, 6);
+                        // Every DME port is in use: the same "not now" answer as a
+                        // full world, which keeps a queued player waiting.
+                        lease = _portBudget.TryAcquire();
+                        if (lease == null)
+                        {
+                            LogPortHold("Gameplay join held: reason=dme_port_capacity");
+                            return JoinResponse(request.TransactionId, 6);
+                        }
                         admissionWorld = AdmissionWorld;
                     }
                     StoredCharacter character;
@@ -374,6 +391,8 @@ namespace Server.Medius
                         {
                             _reservations.Add(reservation.Id, reservation);
                             _rewardOwners.Add(reservation.Id, reservation);
+                            reservation.PortLease = lease;
+                            lease = null;
                             acknowledgement = _bridge.RequestControlAsync(reserve);
                         }
                         else
@@ -439,9 +458,15 @@ namespace Server.Medius
                 // Reconcile once after admission, closing saves committed between
                 // the initial store read and registration/reserve acknowledgement.
                 ArmoryLoadoutCommitted(reservation.Account, reservation.CharacterId);
+                Logger.Info($"Gameplay admission accepted: player={client.DmeId} dme_ports={_portBudget.InUse}/{_portBudget.Capacity?.ToString() ?? "unbounded"}");
                 return PrepareJoinDescriptor(request.TransactionId, client);
             }
-            finally { _admission.Release(); }
+            finally
+            {
+                // Returned only after any allocated client has stopped above.
+                lease?.Dispose();
+                _admission.Release();
+            }
         }
         (Reservation Owner, Dictionary<string, object> Character) PrepareReservation(
             MagMlsSession session, MagJoinGameRequest request, Action<MagCharacterRecord> notify,
@@ -1058,7 +1083,9 @@ namespace Server.Medius
                 r.Client.DmeWorld.RemoveLocalClient(r.Client);
             }
             Logger.Warn($"Gameplay reservation released: player={r.Client.DmeId} reason={r.ReleaseReason ?? (r.Deadline <= DateTime.UtcNow ? "application_inactivity" : "transport_closed")}");
-            await r.Client.Stop();
+            // The port is free again only once the transport has stopped.
+            try { await r.Client.Stop(); }
+            finally { r.PortLease?.Dispose(); }
             if (!defer && pending != null) await RetryReleaseAsync(pending);
         }
         async Task RetryReleaseAsync(PendingRelease pending)

@@ -36,6 +36,11 @@ if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(RealRegistryWo
     Test("configured registry real workers grouped", RealRegistryWorkerChecks.RunParties);
 }
 Test("registry DME host world and lease isolation", RegistryDmeHostChecks.Run);
+Test("DME port capacity configuration and leases", DmePortCapacityChecks.Budget);
+Test("DME port capacity bounds placement and keeps parties whole", DmePortCapacityChecks.Placement);
+Test("DME port capacity refuses standalone admission and frees ports on release", DmePortCapacityChecks.Admission);
+Test("DME port capacity holds registry players until transports release", DmePortCapacityChecks.Registry);
+Test("DME port capacity admits a party as a unit or refuses it", DmePortCapacityChecks.Parties);
 Test("bundled server NEWS formatting and bounds", ServerNewsChecks.Formatting);
 Test("bundled server NEWS and EULA wire responses", ServerNewsChecks.Run);
 
@@ -55,6 +60,7 @@ Test("mag-admin raises levels safely and honours live logins", AdminCliChecks.Ru
 Test("admin API is off by default and validates its configuration", AdminApiChecks.Settings);
 Test("admin API signs requests like the portal vectors", AdminApiChecks.Vectors);
 Test("admin API authenticates requests and shares the mag-admin rules", AdminApiChecks.Run);
+Test("admin API reports DME ports in use against the cap", AdminApiChecks.DmePorts);
 Test("medius starts through Program.Main, not the admin CLI", MediusEntryPointChecks.Run);
 Test("operator starting level creates earned-equivalent characters", StartingLevelChecks.Run);
 Test("operator Training level raises new completions to an earned-equivalent minimum", TrainingLevelChecks.Run);

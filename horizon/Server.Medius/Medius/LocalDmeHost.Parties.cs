@@ -118,6 +118,7 @@ namespace Server.Medius
             var stagedClients = new List<DmeClient>();
             bool published = false;
             bool provisional = false;
+            MagDmePortBudget.Lease[] leases = null;
             uint world = 0;
             ulong epoch = 0;
             Server.Dme.Models.World admissionWorld;
@@ -144,6 +145,13 @@ namespace Server.Medius
                         _reservations.Values.Count(IsLiveCohort) + tickets[0].Human.Size > Math.Min(_maximumPlayers, profile.MaximumPlayers) ||
                         _reservations.Values.Count(r => IsLiveCohort(r) && r.Faction == tickets[0].Human.Faction) + tickets[0].Human.Size > profile.TeamCapacity))
                         return false;
+                    // The whole group gets DME ports together or not at all.
+                    leases = _portBudget.TryAcquire(accounts.Length);
+                    if (leases == null)
+                    {
+                        LogPortHold($"Retail party admission held: reason=dme_port_capacity members={accounts.Length}");
+                        return false;
+                    }
                     _provisionalPartyAccounts.UnionWith(accounts);
                     provisional = true;
                     epoch = selectedEpoch;
@@ -173,6 +181,7 @@ namespace Server.Medius
                             admissionWorld.Manager.GetClientBySessionKey(client.SessionKey) != client) return false;
                         client.ApplicationId = _applicationId;
                         var prepared = PrepareReservation(session, party.Ticket.Value.Request, member.Notify, character, record, loadouts, client);
+                        prepared.Owner.PortLease = leases[stagedClients.Count - 1];
                         // The native queue request belongs to the leader. Every
                         // member still has its own authenticated DME reservation.
                         prepared.Owner.QueueSession = party.Ticket.Value.Session;
@@ -235,6 +244,7 @@ namespace Server.Medius
                         _registryFormationStaged = false;
                         published = true;
                     }
+                    Logger.Info($"Retail party admitted: members={owners.Length} late={late} dme_ports={_portBudget.InUse}/{_portBudget.Capacity?.ToString() ?? "unbounded"}");
                     foreach (var party in parties) party.Ticket.Value.CompleteParty(party.Descriptors);
                     return true;
                 }
@@ -270,6 +280,8 @@ namespace Server.Medius
                 }
                 finally
                 {
+                    // Unpublished members' ports return after their clients stopped above.
+                    if (!published && leases != null) foreach (var lease in leases) lease.Dispose();
                     if (provisional) lock (_gate) _provisionalPartyAccounts.Clear();
                     _admission.Release();
                 }

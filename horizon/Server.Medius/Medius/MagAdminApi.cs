@@ -164,14 +164,16 @@ namespace Server.Medius
         private readonly string _backupDirectory, _markerDirectory;
         private readonly Func<DateTime> _clock;
         private readonly Action<string> _log;
+        private readonly MagDmePortBudget _portBudget;
         private readonly SemaphoreSlim _connections = new SemaphoreSlim(MaximumConnections);
         private readonly CancellationTokenSource _stop = new CancellationTokenSource();
         private TcpListener _listener;
         private Task _acceptLoop;
 
         public MagAdminApi(IPEndPoint listen, byte[] secret, LocalCharacterStore store, string backupDirectory, string markerDirectory,
-            Func<DateTime> clock, Action<string> log)
+            Func<DateTime> clock, Action<string> log, MagDmePortBudget portBudget = null)
         {
+            _portBudget = portBudget ?? MagDmePortBudget.Unbounded();
             _listen = listen ?? throw new ArgumentNullException(nameof(listen));
             _authenticator = new MagAdminApiAuthenticator(secret);
             _store = store ?? throw new ArgumentNullException(nameof(store));
@@ -323,6 +325,8 @@ namespace Server.Medius
                         return request.Method != "GET" ? MethodNotAllowed("GET") : Character(account, now);
                     case ["", "admin", "v1", "characters", var account, "level"] when account.Length > 0:
                         return request.Method != "POST" ? MethodNotAllowed("POST") : SetLevel(account, request.Body, actor, now);
+                    case ["", "admin", "v1", "dme-ports"]:
+                        return request.Method != "GET" ? MethodNotAllowed("GET") : DmePorts();
                     default:
                         return MagAdminApiResponse.Error(404, "not_found");
                 }
@@ -342,6 +346,18 @@ namespace Server.Medius
             accounts = MagAdminOperations.ListAccounts(_store, _markerDirectory, now).Select(c => new
             { account = c.Account, level = c.Level, experience = c.Experience, skill_points = c.SkillPoints, session = c.Session })
         });
+
+        private MagAdminApiResponse DmePorts()
+        {
+            int inUse = _portBudget.InUse;
+            return MagAdminApiResponse.Json(200, new
+            {
+                capacity = _portBudget.Capacity, in_use = inUse,
+                available = _portBudget.Capacity is int cap ? Math.Max(0, cap - inUse) : (int?)null,
+                first_port = MagDmePortBudget.FirstPort, last_port = _portBudget.LastPort, source = _portBudget.Source,
+                udp_ports_bound = Server.Dme.UdpServer.PortsInUse
+            });
+        }
 
         private MagAdminApiResponse Character(string account, DateTime now)
         {

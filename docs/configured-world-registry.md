@@ -25,7 +25,7 @@ Set Horizon `MAG_LOCAL_DME=1`, `MAG_WORLD_REGISTRY` to an absolute JSON path, an
 }
 ```
 
-Use the reachable advertised IPv4 address in a real installation. Alternatively set `client_address` to exactly `"$MAG_ADVERTISE_IPV4"`; Horizon then reads the address from its `MAG_ADVERTISE_IPV4` environment variable, with the same validation, so a deployment that keeps that variable current needs no second copy. A drain reload resolves it again and rejects a changed address like any other structural change. The Helm chart's `gameplayWorkers` uses this form (see the chart README, "Configured gameplay workers"). All entries share this client address and TCP endpoint, with distinct registered DME world IDs and reservation tokens. This is one integrated Horizon/DME process with one transport listener and character-store authority. It does not support multiple Horizon replicas or arbitrary external DME servers. The integrated internal listener retains TCP `10073` and UDP `10474`; forwarding must match the advertised endpoint.
+Use the reachable advertised IPv4 address in a real installation. Alternatively set `client_address` to exactly `"$MAG_ADVERTISE_IPV4"`; Horizon then reads the address from its `MAG_ADVERTISE_IPV4` environment variable, with the same validation, so a deployment that keeps that variable current needs no second copy. A drain reload resolves it again and rejects a changed address like any other structural change. The Helm chart's `gameplayWorkers` uses this form (see the chart README, "Configured gameplay workers"). All entries share this client address and TCP endpoint, with distinct registered DME world IDs and reservation tokens, and one pool of DME UDP ports (see [DME port capacity](#dme-port-capacity)). This is one integrated Horizon/DME process with one transport listener and character-store authority. It does not support multiple Horizon replicas or arbitrary external DME servers. The integrated internal listener retains TCP `10073` and UDP `10474`; forwarding must match the advertised endpoint.
 
 The strict configuration accepts 1–16 entries, unique worker IDs and worker endpoints, capacities up to 64, a total minimum of at least one and exactly two nonnegative team minima that fit the maximum. Duplicate and unknown JSON fields, incomplete entries and files larger than 65536 bytes are rejected. Worker profile catalogs must support the requested faction pair, orientation and game mode. Each configured worker must advertise `worker_registry_v1` and acknowledge its scoped identity.
 
@@ -123,6 +123,21 @@ their DME tokens and then continues with ordinary solo admission. An
 uncertain reply is reconciled by the same cohort identity. A prepublication
 failure rolls back the attempted cohorts and ordinary per-person transport
 lifecycle applies after publication.
+
+## DME port capacity
+
+The integrated DME gives each connected human their own UDP port, the lowest free one from `10474` upward, shared by every world behind this Horizon and released when the transport closes. A port the router does not forward cannot carry game traffic, so Horizon admits at most one human per forwarded port:
+
+| Variable | Effect |
+| --- | --- |
+| `MAG_DME_UDP_PORT_END` | Last forwarded UDP port (`10474`-`65535`). The cap is the range size: `10505` gives 32 humans. The DME also hands out no port past it. |
+| `MAG_DME_HUMAN_CAPACITY` | Optional lower cap, from 1 to the range size. Alone, it also sets the range to that many ports from `10474`. |
+
+With neither set, the cap is unbounded as before. Invalid values stop Horizon at startup. The Helm chart sets `MAG_DME_UDP_PORT_END` from `network.udpPortRange.end`, and `MAG_DME_HUMAN_CAPACITY` from `network.dmeHumanCapacity`.
+
+Every gameplay reservation, live or showing results, holds one port from admission until its DME transport has stopped. Placement subtracts those ports and the tickets already forwarded to a world from the cap before planning, so new formations, solo late joins and late parties never reserve a human past it. A player who does not fit stays in the global queue and keeps receiving the ordinary waiting updates; no new reply or result is sent. A party needs a port for every member and enters as a unit. While the oldest waiting party does not fit the free ports, players queued after it wait too, so ports freed one at a time go to that party first; players queued before it are unaffected. A party larger than the whole cap can never play together and is refused when queued with the ordinary failure result (2). A reconnecting player queues again and waits like anyone else. If admission still finds every port taken (a race), the world answers its usual full-world result (6), which returns the ticket to the queue. The standalone single-world path applies the same cap to its formation and admission.
+
+Horizon logs the configured capacity at startup (`DME UDP port capacity ...`), `dme_ports=<in use>/<cap>` on each admission, and at most once per 30 seconds `Registry placement held: reason=dme_port_capacity` with the waiting humans and ports in use while players wait only for a port. The admin API's `GET /admin/v1/dme-ports` reports the same numbers (see [admin API](admin-cli.md#admin-api)).
 
 ## Drain and reconstruction
 

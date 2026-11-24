@@ -359,8 +359,15 @@ namespace Server.Dme
                         if (!_scertIdToClient.TryAdd(data.ClientObject.ScertId, data.ClientObject))
                             throw new Exception($"Duplicate scert client id");
 
-                        // start udp server
-                        await data.ClientObject.BeginUdp();
+                        // start udp server; with no forwarded port free, refuse the
+                        // connection rather than advertise a port the client cannot reach
+                        try { await data.ClientObject.BeginUdp(); }
+                        catch (InvalidOperationException e)
+                        {
+                            Logger.Warn($"DME client refused: player={data.ClientObject.DmeId} reason={e.Message}");
+                            await clientChannel.CloseAsync();
+                            return;
+                        }
 
 
                         if (scertClient.IsPS3Client)
