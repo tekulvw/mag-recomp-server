@@ -101,6 +101,27 @@ namespace Server.Medius
                 ObserveActivity(now);
                 return new[] { MagMessageCodec.ToPluginMessageForApplication(response, ApplicationId) };
             }
+            if (message is MagCharacterDataRequest lookup && State == SessionState.Ready)
+            {
+                // Lobby player cards may describe any player, so the lookup spans the whole store.
+                // Every request is answered: a missing character or unreadable store gets a failure
+                // carrying the codec's default (cleared) record, because silence leaves the card waiting.
+                var response = new MagCharacterDataResponse { TransactionId = lookup.TransactionId, RequestId = lookup.RequestId };
+                try
+                {
+                    var character = CharacterStore == null ? null : FindCharacter(CharacterStore.ReadAll(), lookup);
+                    if (character != null)
+                    {
+                        response.Record = character.ToRecord(); response.Success = true;
+                        StorageStatus = "character-data-served";
+                    }
+                    else StorageStatus = CharacterStore == null ? "character-data-store-unavailable" : "character-data-not-found";
+                }
+                catch (Exception e) when (e is IOException || e is InvalidDataException || e is UnauthorizedAccessException)
+                { StorageStatus = "character-data-storage-error"; }
+                ObserveActivity(now);
+                return new[] { MagMessageCodec.ToPluginMessageForApplication(response, ApplicationId) };
+            }
             if (State == SessionState.Ready && message is (MagLoadoutUpdateRequest or MagRetailLoadoutDeleteRequest))
             {
                 LoadoutRefreshStatus = "not-scheduled";
@@ -137,6 +158,18 @@ namespace Server.Medius
                 return new[] { MagMessageCodec.ToPluginMessageForApplication(response, ApplicationId) };
             }
             ObserveActivity(now); return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();
+        }
+        // Kind 2 names the character id (the id players see in a match); kind 1 names a character.
+        // A name is the stored name first, else the one character whose display name it is, since
+        // the in-match name of a linked character is its display name.
+        private static StoredCharacter FindCharacter(IReadOnlyList<StoredCharacter> characters, MagCharacterDataRequest lookup)
+        {
+            if (lookup.QueryKind == 2) return lookup.AccountId == 0 ? null : characters.FirstOrDefault(row => row.Id == lookup.AccountId);
+            if (lookup.QueryKind != 1 || string.IsNullOrEmpty(lookup.AccountName)) return null;
+            var stored = characters.FirstOrDefault(row => row.Name == lookup.AccountName);
+            if (stored != null) return stored;
+            var shown = characters.Where(row => row.DisplayName() == lookup.AccountName).Take(2).ToArray();
+            return shown.Length == 1 ? shown[0] : null;
         }
     }
 }

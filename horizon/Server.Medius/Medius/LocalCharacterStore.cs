@@ -100,6 +100,25 @@ namespace Server.Medius
             for (int index = 0; index < length; index++) result[index] = (starter?[index] ?? 0) | (purchased?[index] ?? 0);
             return result;
         }
+        /// <summary>The name other players see for this character.</summary>
+        public string DisplayName() => DisplayNameFor(Name, NpId);
+        /// <summary>
+        /// A linked character keeps an internal stored name (its login key, such as an online ID
+        /// followed by a slot suffix), but other players should see the online ID itself. That ID
+        /// is the leading text of the 36-byte NP identity, ending at the first zero byte within its
+        /// first 16 bytes. Use it when it is non-empty printable ASCII; otherwise (a zero identity
+        /// or anything unexpected) keep the stored name.
+        /// </summary>
+        public static string DisplayNameFor(string name, byte[] npId)
+        {
+            if (npId == null || npId.Length != 36) return name;
+            int length = Array.IndexOf(npId, (byte)0, 0, 16);
+            if (length < 0) length = 16;
+            if (length == 0) return name;
+            for (int index = 0; index < length; index++)
+                if (npId[index] < 33 || npId[index] > 126) return name;
+            return System.Text.Encoding.ASCII.GetString(npId, 0, length);
+        }
         public MagCharacterSummary ToSummary() => new MagCharacterSummary
         {
             AccountId = Id, Name = Name, Faction = Faction, HeadId = HeadId, VoiceId = VoiceId, UniverseId = UniverseId,

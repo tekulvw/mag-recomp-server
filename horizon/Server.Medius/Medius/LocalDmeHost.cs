@@ -449,7 +449,7 @@ namespace Server.Medius
             ["leadership_progression_enabled"] = progressionCatalog?.InitialLeadershipPoints.HasValue == true,
             ["account_id"] = progressionCatalog == null ? null : reservation.Account,
             ["progression"] = progressionCatalog == null ? null : new { experience = record.Experience, level = record.Level, skill_points = record.SkillPoints },
-            ["skills"] = record.Skills, ["character_id"] = record.AccountId, ["name"] = record.Name,
+            ["skills"] = record.Skills, ["character_id"] = record.AccountId, ["name"] = StoredCharacter.DisplayNameFor(record.Name, record.NpId),
             ["faction"] = record.Faction, ["head"] = record.HeadId, ["voice"] = record.VoiceId,
             ["universe_id"] = record.UniverseId, ["loadouts"] = admissionLoadouts
         };

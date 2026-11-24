@@ -101,6 +101,9 @@ Test("leadership commit failure, retry, and overflow", LeadershipProgressionChec
 Test("selected kit ownership and complete store preservation", LoadoutPreferenceStoreChecks.Run);
 Test("retail saved loadout delete commits and compacts the owned layout", LoadoutPreferenceStoreChecks.DeleteThroughMls);
 Test("account-bound NP identity creation and persistence", NpIdentityChecks.Run);
+Test("MLS answers lobby player-card character data for any character", LeadershipProgressionChecks.PlayerCardLookup);
+Test("linked characters display their online ID, not the stored login key", LeadershipProgressionChecks.PlayerCardDisplayName);
+Test("gameplay admission carries the display name", LeadershipProgressionChecks.PlayerCardAdmissionName);
 Test("portal ticket vectors from the portal", PortalTicketChecks.Vectors);
 Test("portal ticket layout, key, time and identity rules", PortalTicketChecks.Rules);
 Test("portal ticket chunk reassembly", PortalTicketChecks.Reassembly);
