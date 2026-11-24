@@ -301,6 +301,7 @@ namespace Server.Medius
                     lock(_gate){if(!ReadyForAdmission||_matchmakingCancellation.IsCancellationRequested)return;_formationAdmissionEpoch = reply.SelectedMatch.AdmissionEpoch; _formationConfigured=true;}
                 }
                 MagPendingHumanQueue<QueuedJoin>.Entry[] cohort;
+                bool lateParty = false;
                 lock(_gate)
                 {
                     PurgeHumanQueue();
@@ -324,6 +325,13 @@ namespace Server.Medius
                                 cohort = null;
                         }
                     }
+                    else if (InRegistry && _humanQueue.Snapshot().FirstOrDefault(e => e.Value.Party != null) is { } waitingParty)
+                    {
+                        // A forwarded party enters the running match alone and
+                        // atomically; solos wait for the next pass.
+                        cohort = new[] { waitingParty };
+                        lateParty = true;
+                    }
                     else
                     {
                         // Late admission preserves the chosen pair and observes
@@ -338,8 +346,19 @@ namespace Server.Medius
                 var parties = cohort.Where(ticket => ticket.Value.Party != null).ToArray();
                 if (parties.Length != 0)
                 {
-                    if (!await AdmitRegistryPartiesAsync(parties, profile, formation))
+                    if (!await AdmitRegistryPartiesAsync(parties, profile, formation, lateParty))
                     {
+                        if (lateParty)
+                        {
+                            // Never abandon a running match for one refused party.
+                            // Its registry ticket is already returned for placement.
+                            lock (_gate)
+                            {
+                                foreach (var party in parties) _humanQueue.Remove(party);
+                                _nextLatePartyAttempt = DateTime.UtcNow + LatePartyBackoff;
+                            }
+                            return;
+                        }
                         lock (_gate) _nextFormationAttempt = DateTime.UtcNow.AddSeconds(1);
                         AbandonRegistryFormation();
                         return;

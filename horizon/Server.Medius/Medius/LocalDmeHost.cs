@@ -248,6 +248,7 @@ namespace Server.Medius
         void InitializeGameplayHello(GameplayBridgeResponse hello)
         {
             _supportsPartyReservations = hello?.SupportsPartyReservations == true;
+            _supportsPartyLateEntry = hello?.SupportsPartyLateEntry == true;
             RequireLoadoutSelectionCapability(hello);
             _supportsLoadoutLayoutChanges = hello.SupportsLoadoutLayoutChanges;
             InitializeFactionMatchmaking(hello);

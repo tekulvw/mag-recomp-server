@@ -2166,7 +2166,7 @@ mod tests {
     }
 
     #[test]
-    fn party_bridge_real_claim_closes_new_admission_and_protects_whole_group() {
+    fn party_bridge_real_claim_protects_whole_group_and_admits_a_late_group() {
         let files = Files::new();
         let mut engine = party_worker(&files, true);
         let attacking = party_wire();
@@ -2191,12 +2191,6 @@ mod tests {
         assert!(!claimed.messages.is_empty());
         let before = engine.sequence;
         assert_eq!(
-            party_order(&mut engine, &opposing_party_wire())
-                .error
-                .as_deref(),
-            Some("party_requires_preclaim_formation")
-        );
-        assert_eq!(
             party_order(&mut engine, &party_release_wire(&attacking))
                 .error
                 .as_deref(),
@@ -2207,7 +2201,14 @@ mod tests {
             Some(accepted)
         );
         assert_eq!(engine.sequence, before);
-        assert_eq!(engine.active.iter().count() + engine.peers.len(), 2);
+        // The running match still admits a whole new group, late, together.
+        let late = party_order(&mut engine, &opposing_party_wire());
+        assert!(late.ok, "{:?}", late.error);
+        let late = late.party_reservation.unwrap();
+        assert_eq!((late.team, late.squad), (Some(1), Some(16)));
+        assert_eq!(engine.sequence, before + 1);
+        assert_eq!(engine.active.iter().count() + engine.peers.len(), 4);
+        assert!(String::from_utf8_lossy(&engine.writer).contains("\"late_entry\":true"));
     }
 
     #[test]
@@ -2232,7 +2233,7 @@ mod tests {
         let before = engine.sequence;
         assert_eq!(
             party_order(&mut engine, &attacking).error.as_deref(),
-            Some("match_full")
+            Some("party_no_room")
         );
         assert_eq!(engine.sequence, before);
         assert_eq!(engine.active.iter().count() + engine.peers.len(), 2);

@@ -21,7 +21,8 @@ namespace Server.Medius
     public sealed record LocalDmeWorkerPlacement(bool Ready, bool Draining, bool CanForm,
         IReadOnlyList<MagMatchProfile> Profiles, MagMatchStartupPolicy StartupPolicy,
         IReadOnlyList<int> MinimumPlayersPerTeam, MagMatchProfile CurrentProfile,
-        IReadOnlyList<int> LiveTeamCounts, int LiveCount, IReadOnlyList<int> PendingTeamCounts, int PendingQueueCount);
+        IReadOnlyList<int> LiveTeamCounts, int LiveCount, IReadOnlyList<int> PendingTeamCounts, int PendingQueueCount,
+        bool AcceptsLateParties = false);
 
     public sealed partial class LocalDmeHost
     {
@@ -132,7 +133,8 @@ namespace Server.Medius
                     _matchProfiles, (_formationStartup == null ? null : PlacementStartup) ?? _startupPolicy,
                     Array.AsReadOnly((_formationTeamMinima == null ? null : PlacementTeamMinima) ?? new[] { 0, 0 }),
                     live > 0 && _formationConfigured ? _formedProfile : null,
-                    Array.AsReadOnly(liveCounts), live, Array.AsReadOnly(pendingCounts), pending.Count);
+                    Array.AsReadOnly(liveCounts), live, Array.AsReadOnly(pendingCounts), pending.Count,
+                    ready && !draining && LatePartyOpen());
             }
         }
 

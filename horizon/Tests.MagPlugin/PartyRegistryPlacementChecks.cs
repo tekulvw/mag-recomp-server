@@ -19,6 +19,8 @@ internal static partial class LeadershipProgressionChecks
             VerifyOpposingParties(directory, true).GetAwaiter().GetResult();
             VerifyOpposingParties(directory, false, twoOnFirstSide: true).GetAwaiter().GetResult();
             VerifyMissingForwardedParty(directory).GetAwaiter().GetResult();
+            VerifyLatePartyEntry(directory, true).GetAwaiter().GetResult();
+            VerifyLatePartyEntry(directory, false).GetAwaiter().GetResult();
         }
         finally { Server.Medius.Program.Settings.MagApplicationId = previous; }
     });
@@ -212,6 +214,80 @@ internal static partial class LeadershipProgressionChecks
         finally { finishSecond.TrySetResult(); }
     }
 
+
+    // One human starts a bot-filled match; a same-faction party then joins that
+    // running match together instead of forming another. Without the worker's
+    // late-entry capability the party forms a new match on the spare worker.
+    static async Task VerifyLatePartyEntry(string directory, bool lateCapable)
+    {
+        var store = new LocalCharacterStore(Path.Combine(directory, $"late-party-{lateCapable}.json"));
+        foreach (var account in new[] { "alpha", "bravo", "charlie" })
+            Check(store.CreateForAccount(new MagCreateCharacterRequest
+                { AccountName = account, Faction = 0, UniverseId = 26, NpId = new byte[36] }, account).Result
+                == MagNetResult.Success, "Late party fixture character creation");
+        await using var worker = new RegistryWorker("first") { SupportsParties = true, SupportsBotFill = true, SupportsLateParties = lateCapable };
+        await using var spare = new RegistryWorker("second") { SupportsParties = true, SupportsBotFill = true, SupportsLateParties = lateCapable };
+        JsonObject Worker(string id, int port) => new() { ["worker_id"] = id, ["worker_host"] = "127.0.0.1",
+            ["worker_port"] = port, ["minimum_players"] = 1, ["maximum_players"] = 8,
+            ["minimum_players_per_team"] = new JsonArray(0, 0), ["draining"] = false };
+        var config = new JsonObject { ["format"] = "mag_world_registry_v1", ["application_id"] = 20231,
+            ["client_address"] = "192.0.2.9", ["client_tcp_port"] = 12073, ["party_invite_seconds"] = 30,
+            ["workers"] = new JsonArray(Worker("first", worker.Port), Worker("second", spare.Port)) };
+        await using var registry = new MagWorldRegistry(MagWorldRegistryConfig.Parse(config.ToJsonString()), store);
+        await registry.InitializeAsync();
+        MagMlsSession Session(string account) => MakeSession(store, 20231, account, store.ReadForAccount(account).Single().Id);
+        var leader = Session("alpha"); var member = Session("bravo"); var solo = Session("charlie");
+        var leaderMessages = new ConcurrentQueue<MagMessage>();
+        var memberMessages = new ConcurrentQueue<MagMessage>();
+        var soloMessages = new ConcurrentQueue<MagMessage>();
+        async Task Until(Func<bool> condition)
+        {
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            while (!condition()) { await registry.TickAsync(); await Task.Delay(20, deadline.Token); }
+        }
+        bool Success(ConcurrentQueue<MagMessage> queue) => queue.OfType<MagJoinGameResponse>().Any(r => r.Result == 0);
+        int Calls(RegistryWorker target, string op) => target.Requests.Count(r => r["op"]!.GetValue<string>() == op);
+
+        registry.QueueJoin(solo, new MagRetailJoinGameRequest { TransactionId = 1, Preference = 1, Value = 2 },
+            soloMessages.Enqueue, () => true);
+        await Until(() => Success(soloMessages));
+        Check(Calls(worker, "select_match_profile") == 1 && worker.Reservations.Count == 1 && Calls(spare, "select_match_profile") == 0,
+            "One human did not start the bot-filled match on the first worker");
+
+        registry.RegisterPartySession(leader, () => true, leaderMessages.Enqueue, null);
+        registry.RegisterPartySession(member, () => true, memberMessages.Enqueue, null);
+        Check(registry.RoutePartyMembership(leader, new MagRetailPartyInvite { Inviter = leader.AccountId, Invitee = member.AccountId }),
+            "Late party invite refused");
+        uint partyId = memberMessages.OfType<MagRetailPartyInvite>().Single().PartyId;
+        Check(registry.RoutePartyMembership(member, new MagRetailPartyInviteResponse
+            { PartyId = partyId, Inviter = leader.AccountId, Responder = member.AccountId }), "Late party answer refused");
+        registry.QueueJoin(leader, new MagRetailJoinGameRequest { TransactionId = 2, Preference = 1, Value = 2, PartyId = partyId },
+            leaderMessages.Enqueue, () => true);
+        await Until(() => Success(leaderMessages) && Success(memberMessages));
+
+        var joined = lateCapable ? worker : spare;
+        var request = joined.Requests.Single(r => r["op"]!.GetValue<string>() == "reserve_party");
+        var selection = joined.Requests.Single(r => r["op"]!.GetValue<string>() == "select_match_profile");
+        Check(request["formation_id"]!.ToJsonString() == selection["formation_id"]!.ToJsonString() &&
+            request["admission_epoch"]!.GetValue<ulong>() == 1 && request["members"]!.AsArray().Count == 2,
+            "The party reservation did not name its match's formation and epoch");
+        var replies = new[] { leaderMessages, memberMessages }
+            .Select(queue => queue.OfType<MagJoinGameResponse>().Single(r => r.Result == 0)).ToArray();
+        var soloReply = soloMessages.OfType<MagJoinGameResponse>().Single(r => r.Result == 0);
+        if (lateCapable)
+        {
+            Check(Calls(spare, "select_match_profile") == 0 && Calls(spare, "reserve_party") == 0 &&
+                Calls(worker, "select_match_profile") == 1 && replies.All(reply => reply.WorldId == soloReply.WorldId) &&
+                registry.Worlds[0].ReservedPlayers == 3 && registry.Worlds[1].ReservedPlayers == 0,
+                "The party did not join the running match together");
+        }
+        else
+        {
+            Check(Calls(worker, "reserve_party") == 0 && replies.All(reply => reply.WorldId != soloReply.WorldId) &&
+                registry.Worlds[0].ReservedPlayers == 1 && registry.Worlds[1].ReservedPlayers == 2,
+                "A worker without late entry admitted a party into its running match");
+        }
+    }
 
     static async Task VerifyMissingForwardedParty(string directory)
     {

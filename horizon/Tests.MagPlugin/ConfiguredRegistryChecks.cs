@@ -23,6 +23,10 @@ internal static class ConfiguredRegistryChecks
         foreach(var field in new[]{"worker_id","worker_host","worker_port","minimum_players","maximum_players","minimum_players_per_team","draining"}) {var bad=Configuration();bad["workers"]![0]!.AsObject().Remove(field);Refused(bad);}
         var duplicate=Configuration();duplicate["workers"]![1]!["worker_id"]="first";Refused(duplicate);
         duplicate=Configuration();duplicate["workers"]![1]!["worker_port"]=31001;Refused(duplicate);
+        // A single-world deployment can run as a one-worker registry (for parties); zero workers cannot.
+        var single=Configuration();single["workers"]!.AsArray().RemoveAt(1);
+        Check(MagWorldRegistryConfig.Parse(single.ToJsonString()).Workers.Single().WorkerId=="first","One configured worker was not loaded");
+        var none=Configuration();none["workers"]=new JsonArray();Refused(none);
         // One human may start a bot-filled worker: minimum 1 and zero team minima are valid.
         var solo=Configuration();solo["workers"]![0]!["minimum_players"]=1;solo["workers"]![0]!["minimum_players_per_team"]=new JsonArray(0,0);
         var soloConfig=MagWorldRegistryConfig.Parse(solo.ToJsonString());

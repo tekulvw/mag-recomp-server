@@ -15,18 +15,43 @@ namespace Server.Medius
     public sealed partial class LocalDmeHost
     {
         bool _supportsPartyReservations;
+        bool _supportsPartyLateEntry;
         readonly HashSet<string> _provisionalPartyAccounts = new(StringComparer.Ordinal);
         ulong? _formationAdmissionEpoch;
+        // A refused or unconfirmed late entry closes this world to parties briefly,
+        // so placement can try another world or a new formation instead.
+        static readonly TimeSpan LatePartyBackoff = TimeSpan.FromSeconds(5);
+        DateTime _nextLatePartyAttempt;
+
+        // Called with _gate held. One party at a time joins this running match.
+        bool LatePartyOpen() => InRegistry && _supportsPartyReservations && _supportsPartyLateEntry &&
+            !_registryFormationStaged && _formationConfigured && _formationEverAdmitted &&
+            _formedProfile?.SquadCapacity != null && _formationAdmissionEpoch != null && !_admissionTerminal &&
+            DateTime.UtcNow >= _nextLatePartyAttempt && _provisionalPartyAccounts.Count == 0 &&
+            _reservations.Values.Any(IsLiveCohort) && !_humanQueue.Snapshot().Any(ticket => ticket.Value.Party != null);
+
+        // Called with _gate held: room for a whole late party on its side.
+        bool LatePartyFits(int size, byte faction)
+        {
+            var live = _reservations.Values.Where(IsLiveCohort).ToArray();
+            int pending = _humanQueue.Snapshot().Sum(ticket => ticket.Human.Size);
+            int sidePending = _humanQueue.Snapshot().Where(ticket => ticket.Human.Faction == faction).Sum(ticket => ticket.Human.Size);
+            return live.Length + pending + size <= Math.Min(_maximumPlayers, _formedProfile.MaximumPlayers) &&
+                live.Count(r => r.Faction == faction) + sidePending + size <= _formedProfile.TeamCapacity;
+        }
 
         internal bool QueueRegistryParty(MagJoinGameRequest request, MagPartyAdmissionMember[] members,
             byte faction, Func<bool> current, Func<Func<bool>, bool> withOwnership, Action<IReadOnlyList<MagJoinGameResponse>> complete)
         {
             lock (_gate)
             {
+                PurgeHumanQueue();
+                bool late = !_registryFormationStaged && LatePartyOpen();
                 if (!InRegistry || !_supportsPartyReservations || !ReadyForAdmission || !current() ||
-                    !_registryFormationStaged || _formedProfile?.SquadCapacity is not int cap || members.Length < 2 ||
+                    !(_registryFormationStaged || late) || _formedProfile?.SquadCapacity is not int cap || members.Length < 2 ||
                     members.Length > cap || request.Value != _formedProfile.GameType ||
-                    (faction != _formedProfile.AttackingFaction && faction != _formedProfile.DefendingFaction))
+                    (faction != _formedProfile.AttackingFaction && faction != _formedProfile.DefendingFaction) ||
+                    (late && !LatePartyFits(members.Length, faction)))
                     return false;
                 var leader = members[0].Session;
                 _humanQueue.Put(leader.AuthenticatedAccount, (int)request.Value, faction,
@@ -87,7 +112,7 @@ namespace Server.Medius
         }
 
         async Task<bool> AdmitRegistryPartiesAsync(MagPendingHumanQueue<QueuedJoin>.Entry[] tickets,
-            MagMatchProfile profile, string formation)
+            MagMatchProfile profile, string formation, bool late = false)
         {
             var parties = tickets.Select(ticket => new PreparedParty(ticket)).ToArray();
             var stagedClients = new List<DmeClient>();
@@ -102,14 +127,23 @@ namespace Server.Medius
             {
                 lock (_gate)
                 {
+                    // A forming match admits its parties before anyone; a late
+                    // party joins the running match beside its live owners.
                     if (!ReadyForAdmission || !Current() || _formationAdmissionEpoch is not ulong selectedEpoch ||
-                        _formationId != formation || _formationEverAdmitted || _admissionTerminal ||
-                        _pendingReleases.Values.Any(pending => !IsResultsCohort(pending.Reservation)) ||
-                        _reservations.Values.Any(IsLiveCohort) || _rewardOwners.Count + tickets.Sum(ticket => ticket.Human.Size) > 4096)
+                        _formationId != formation || _formationEverAdmitted != late || _admissionTerminal ||
+                        (!late && (_pendingReleases.Values.Any(pending => !IsResultsCohort(pending.Reservation)) ||
+                            _reservations.Values.Any(IsLiveCohort))) ||
+                        _rewardOwners.Count + tickets.Sum(ticket => ticket.Human.Size) > 4096)
                         return false;
                     var accounts = tickets.SelectMany(ticket => ticket.Value.Accounts).ToArray();
                     if (accounts.Length != accounts.Distinct(StringComparer.Ordinal).Count() ||
                         _provisionalPartyAccounts.Count != 0) return false;
+                    if (late && (tickets.Length != 1 || !_reservations.Values.Any(IsLiveCohort) ||
+                        _reservations.Values.Any(owner => accounts.Contains(owner.Account, StringComparer.Ordinal)) ||
+                        _pendingReleases.Values.Any(pending => accounts.Contains(pending.Reservation.Account, StringComparer.Ordinal)) ||
+                        _reservations.Values.Count(IsLiveCohort) + tickets[0].Human.Size > Math.Min(_maximumPlayers, profile.MaximumPlayers) ||
+                        _reservations.Values.Count(r => IsLiveCohort(r) && r.Faction == tickets[0].Human.Faction) + tickets[0].Human.Size > profile.TeamCapacity))
+                        return false;
                     _provisionalPartyAccounts.UnionWith(accounts);
                     provisional = true;
                     epoch = selectedEpoch;
@@ -184,7 +218,7 @@ namespace Server.Medius
                     lock (_gate)
                     {
                         if (!ReadyForAdmission || !Current() || _formationId != formation || _formationAdmissionEpoch != epoch ||
-                            owners.Any(owner => owner.Client.IsDestroyed || owner.Client.Disconnected ||
+                            _admissionTerminal || owners.Any(owner => owner.Client.IsDestroyed || owner.Client.Disconnected ||
                                 admissionWorld.Manager.GetClientByAccessToken(owner.Client.Token) != owner.Client ||
                                 admissionWorld.Manager.GetClientBySessionKey(owner.Client.SessionKey) != owner.Client))
                             return false;

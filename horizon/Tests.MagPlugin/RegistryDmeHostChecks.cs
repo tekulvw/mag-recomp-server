@@ -298,6 +298,7 @@ internal static partial class LeadershipProgressionChecks
         public string SelectedProfile { get; private set; }
         public volatile bool PauseHeartbeat;
         public bool SupportsParties;
+        public bool SupportsLateParties;
         public bool SupportsBotFill;
         public Func<JsonObject, Task> BeforePartyReply;
         public volatile bool DropNextPartyReply;
@@ -371,6 +372,7 @@ internal static partial class LeadershipProgressionChecks
                             if (SupportsParties)
                             {
                                 response["capabilities"]!.AsArray().Add("party_reservation_v1");
+                                if (SupportsLateParties) response["capabilities"]!.AsArray().Add("party_late_entry_v1");
                                 foreach (var profile in response["match_profiles"]!.AsArray())
                                 {
                                     profile["squad_capacity"] = 2;
