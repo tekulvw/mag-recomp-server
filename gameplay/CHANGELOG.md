@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.11.1](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.11.0...gameplay-v0.11.1) (2026-11-24)
+
+
+### Bug Fixes
+
+* **gameplay:** ground role destinations on the navmesh around raised objectives ([#245](https://github.com/tekulvw/mag-recomp-server/issues/245)) ([3d94646](https://github.com/tekulvw/mag-recomp-server/commit/3d946468e00af981d17eeb09ae1baa8ee0f6ca28))
+* **gameplay:** let bots queue for drops on narrow, layered platforms ([#243](https://github.com/tekulvw/mag-recomp-server/issues/243)) ([c9b9a9c](https://github.com/tekulvw/mag-recomp-server/commit/c9b9a9c429bd2b516ac0e89d848cfe6164510c3e))
+
 ## [0.11.0](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.10.0...gameplay-v0.11.0) (2026-11-24)
 
 

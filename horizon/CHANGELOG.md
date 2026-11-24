@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.3](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.8.2...medius-v0.8.3) (2026-11-24)
+
+
+### Bug Fixes
+
+* **medius:** answer the launcher's account logout request ([#244](https://github.com/tekulvw/mag-recomp-server/issues/244)) ([278eeec](https://github.com/tekulvw/mag-recomp-server/commit/278eeec58adf7c4f9cae6952cbb98bc86a329798))
+* **medius:** send a non-zero MLS plugin id and answer the retail clan list ([#248](https://github.com/tekulvw/mag-recomp-server/issues/248)) ([dc176b2](https://github.com/tekulvw/mag-recomp-server/commit/dc176b2240130ff22eb9c258e0087632d62a9f6b))
+
 ## [0.8.2](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.8.1...medius-v0.8.2) (2026-11-24)
 
 
