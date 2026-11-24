@@ -76,10 +76,44 @@ actions, one record later than a direct write would.
 The bridge tolerates short worker stalls: event requests wait up to 6 seconds
 and control requests 2 seconds, and Medius ends the world stream only after 12
 seconds without a frame (gameplay sends a heartbeat every second and ends a
-subscription after 10 silent seconds). A world-stream gap still releases every
-player. A recipient whose reliable shared or notification queue exceeds 512
-entries is evicted with `replication_backlog_released`, which records both queue
-lengths.
+subscription after 10 silent seconds). A recipient whose reliable shared or
+notification queue exceeds 512 entries is evicted with
+`replication_backlog_released`, which records both queue lengths.
+
+### Resuming the world stream (`world_stream_resume_v1`)
+
+A served worker numbers each world frame it sends within an epoch drawn once per
+process, and keeps the last 512 frames (at most about 16 MiB) in a journal.
+Medius asks for these positions when the worker's hello lists
+`world_stream_resume_v1`. The acknowledgement of a subscription carries the
+position the next frame follows, and Medius checks that every frame is exactly
+the next one. When the stream breaks with a transport error, Medius keeps every
+reservation (players stay connected and their events still reach the worker,
+while admission stays closed), reconfigures a legacy match, and subscribes again
+with `resume: {epoch, after}` naming the last frame it routed. The same process
+replays the frames after that position and continues live, and Medius logs
+`Gameplay world stream resumed`. Medius releases the players with
+`world_stream_gap`, as before, when:
+
+- the worker refuses the resume with `world_resume_unavailable`, because it is
+  another process (a restart) or no longer holds the frames;
+- 20 seconds pass without a resumed stream;
+- a frame is out of sequence, misaddressed or malformed, or the worker reports
+  `match_not_configured`.
+
+Workers and Medius without the capability keep the previous behaviour, and a
+configured worker registry never resumes. The worker produces frames only while
+a subscription is registered, so the journal only has to cover frames in flight
+when a stream broke.
+
+### Retrying events (`event_replay_v1`)
+
+A served worker keeps its last 512 event replies by request ID and answers a
+repeated ID with the original reply without applying the event again. When the
+worker's hello lists `event_replay_v1`, Medius sends an unanswered event again
+with the same request ID, up to three attempts in all, 250 ms apart, before any
+later event in the same queue. Without the capability Medius never repeats an
+event, because a repeat could apply an uncertain shot twice.
 
 Do not combine the validator with `--collision-query`; diagnostic queries are a
 separate command. When an explicit application selects an optional collision
