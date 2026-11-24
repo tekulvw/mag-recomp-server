@@ -207,27 +207,21 @@ impl<'a> WorldTerrain<'a> {
             body.height + body.max_step + body.skin,
             body.radius,
         ];
-        let contains = |min: [f64; 3], max: [f64; 3]| {
-            (0..3).all(|i| {
-                from[i].min(to[i]) - margin[i] >= min[i] && from[i].max(to[i]) + upper[i] <= max[i]
-            })
-        };
+        let min = std::array::from_fn(|i| from[i].min(to[i]) - margin[i]);
+        let max = std::array::from_fn(|i| from[i].max(to[i]) + upper[i]);
         if let Some(guard) = self
             .world
             .bot_regional_guard()
             .filter(|guard| guard.walking_coverage)
         {
-            return contains(guard.region.min, guard.region.max)
+            let region = &guard.region;
+            return (0..3)
+                .all(|i| min[i] >= region.min[i] && max[i] <= region.max[i])
                 .then_some(())
                 .ok_or(PhysicsError::CoverageUnknown);
         }
-        let covered = self
-            .world
-            .metadata()
-            .physics_regions
-            .iter()
-            .any(|r| r.ground_verified && r.obstacles_verified && contains(r.min, r.max));
-        if covered {
+        // World regions and any hash-bound coverage sidecar form one set.
+        if self.world.covers_box(min, max) {
             Ok(())
         } else {
             Err(PhysicsError::CoverageUnknown)

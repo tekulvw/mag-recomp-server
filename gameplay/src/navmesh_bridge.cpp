@@ -64,7 +64,27 @@ static bool valid_blob(const unsigned char* data, int size, bool tiled=false) {
 static constexpr float TileWidth = 51.2f;
 static constexpr float TileBorder = 9 * .1f;
 static constexpr size_t RuntimeByteCap = 32u * 1024u * 1024u;
+static constexpr size_t WideRuntimeByteCap = 128u * 1024u * 1024u;
 static constexpr size_t ReferenceByteCap = 192u * 1024u * 1024u;
+// Mode bits: 1 reference, 2 movement-profiled slope, 4 wide runtime. Wide is a
+// runtime layout only; reference bundles already use the wide grid.
+struct ModeLimits {
+    bool reference, wide;
+    int tile_cap, poly_cap;
+    size_t byte_cap;
+};
+static bool mode_limits(int mode, ModeLimits* limits) {
+    if (mode < 0 || mode > 7 || (mode & 5) == 5) return false;
+    limits->reference = (mode & 1) != 0;
+    limits->wide = (mode & 4) != 0;
+    // Detour needs at least ten salt bits in a 32-bit reference: 256 tiles
+    // allow 16,384 polygons per tile and 512 tiles allow 8,192.
+    const bool grid512 = limits->reference || limits->wide;
+    limits->tile_cap = grid512 ? 512 : 256;
+    limits->poly_cap = grid512 ? 8192 : 16384;
+    limits->byte_cap = limits->reference ? ReferenceByteCap : limits->wide ? WideRuntimeByteCap : RuntimeByteCap;
+    return true;
+}
 struct BoundsXZ {
     float min_x, min_z, max_x, max_z;
 };
@@ -169,31 +189,34 @@ static const uint32_t BUNDLE_MAGIC=0x324e474d;
 static uint32_t bundle_version(int mode) {
     // Legacy runtime and reference versions are 1 and 2. The profiled
     // equivalents use 3 and 4, with the same respective tile capacities.
+    // Wide runtime bundles use 5 and, when profiled, 7.
     return static_cast<uint32_t>(mode) + 1;
 }
 int mag_nav_bake(const float* verts,int nv,const int* tris,int nt,const float* min,const float* max,
                  unsigned char** output,int* size,int mode,float slope_degrees) {
     *output=nullptr;*size=0;
-    if (mode<0 || mode>3 || !std::isfinite(slope_degrees) || slope_degrees<=0 || slope_degrees>60
+    ModeLimits limits;
+    if (!mode_limits(mode, &limits) || !std::isfinite(slope_degrees) || slope_degrees<=0 || slope_degrees>60
         || (!(mode&2) && slope_degrees!=45.f)) return 1;
-    const bool reference = (mode&1)!=0;
-    const int tile_cap = reference ? 512 : 256;
-    const int poly_cap = reference ? 8192 : 16384;
-    const size_t byte_cap = reference ? ReferenceByteCap : RuntimeByteCap;
+    const int tile_cap = limits.tile_cap;
+    const int poly_cap = limits.poly_cap;
+    const size_t byte_cap = limits.byte_cap;
+    // Face culling yields the same tile bytes; it only bounds per-tile work.
+    const bool cull = limits.reference || limits.wide;
     const int nx=static_cast<int>(std::ceil((max[0]-min[0])/TileWidth)), nz=static_cast<int>(std::ceil((max[2]-min[2])/TileWidth));
     if(nx<1 || nz<1 || nx*nz>tile_cap)return 1;
     BundleHeader header{};header.magic=BUNDLE_MAGIC;header.version=bundle_version(mode);header.width=TileWidth;rcVcopy(header.min,min);rcVcopy(header.max,max);
-    const auto bounds = reference ? triangle_bounds(verts, tris, nt) : std::vector<BoundsXZ>{};
+    const auto bounds = cull ? triangle_bounds(verts, tris, nt) : std::vector<BoundsXZ>{};
     std::vector<int> selected;
     std::vector<unsigned char> bytes(sizeof(header));
     for(int z=0;z<nz;++z)for(int x=0;x<nx;++x){
-        if (reference) {
+        if (cull) {
             select_tile_faces(bounds, tris, tile_bounds(min, x, z), selected);
             if (selected.empty()) continue;
         }
         unsigned char* tile=nullptr;int n=0;
-        const int result=bake_tile(verts,nv,reference ? selected.data() : tris,
-            reference ? static_cast<int>(selected.size()/3) : nt,min,max,&tile,&n,x,z,poly_cap,slope_degrees);
+        const int result=bake_tile(verts,nv,cull ? selected.data() : tris,
+            cull ? static_cast<int>(selected.size()/3) : nt,min,max,&tile,&n,x,z,poly_cap,slope_degrees);
         if(result==4)continue;
         if(result!=0){dtFree(tile);return result;}
         if(n<=0 || bytes.size()+4u+n>byte_cap){dtFree(tile);return 6;}
@@ -206,12 +229,12 @@ int mag_nav_bake(const float* verts,int nv,const int* tris,int nt,const float* m
 }
 MagNav* mag_nav_load(const unsigned char* data,int size,const float* min,const float* max,
                     int mode,int node_limit) {
-    if (mode<0 || mode>3) return nullptr;
-    const bool reference = (mode&1)!=0;
-    // Detour needs at least ten salt bits in a 32-bit reference.
-    const int tile_cap = reference ? 512 : 256;
-    const int poly_cap = reference ? 8192 : 16384;
-    const size_t byte_cap = reference ? ReferenceByteCap : RuntimeByteCap;
+    ModeLimits limits;
+    if (!mode_limits(mode, &limits)) return nullptr;
+    const bool reference = limits.reference;
+    const int tile_cap = limits.tile_cap;
+    const int poly_cap = limits.poly_cap;
+    const size_t byte_cap = limits.byte_cap;
     if(size<4 || static_cast<size_t>(size)>byte_cap || node_limit<1 || node_limit>16384)return nullptr;
     uint32_t magic;std::memcpy(&magic,data,4);const bool tiled=magic==BUNDLE_MAGIC;
     if (mode!=0 && !tiled) return nullptr;
@@ -224,7 +247,7 @@ MagNav* mag_nav_load(const unsigned char* data,int size,const float* min,const f
         for(int k=0;k<3;++k)if(!std::isfinite(bundle.min[k]) || !std::isfinite(bundle.max[k]) || std::fabs(bundle.min[k]-min[k])>.001f || std::fabs(bundle.max[k]-max[k])>.001f)return nullptr;
         const double grid_x = std::ceil((max[0]-min[0])/bundle.width);
         const double grid_z = std::ceil((max[2]-min[2])/bundle.width);
-        if (reference && (grid_x < 1 || grid_z < 1 || grid_x*grid_z > tile_cap)) return nullptr;
+        if ((reference || limits.wide) && (grid_x < 1 || grid_z < 1 || grid_x*grid_z > tile_cap)) return nullptr;
         size_t off=sizeof(bundle);std::map<std::pair<int,int>,bool> coordinates;
         for(uint32_t i=0;i<bundle.count;++i){
             if(off+4>static_cast<size_t>(size))return nullptr;uint32_t n;std::memcpy(&n,data+off,4);off+=4;

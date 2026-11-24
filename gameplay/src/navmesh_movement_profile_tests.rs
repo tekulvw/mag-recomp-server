@@ -170,3 +170,34 @@ fn profiled_runtime_artifact_requires_rules_and_refuses_legacy_drop_certificates
         Err(Error("navmesh_profiled_drop_links_unsupported"))
     ));
 }
+
+#[test]
+fn profiled_wide_layout_is_versioned_separately_and_requires_rules() {
+    let rules = MovementProfile::synthetic(54.);
+    let tiled = bake_with_movement_profile(ramp(false), &rules).unwrap();
+    let wide = bake_with_layout(ramp(false), Some(&rules), Layout::Wide).unwrap();
+    assert_eq!(wide.format, WIDE_PROFILED_RUNTIME_FORMAT);
+    assert_eq!(wide.bake_config, WIDE_PROFILED_RUNTIME_CONFIG);
+    assert_eq!(wide.detour_data[4..8], 7u32.to_le_bytes());
+    assert_eq!(wide.detour_data[8..], tiled.detour_data[8..]);
+    let world = wide.world_sha256.clone();
+    let map = wide.map_name.clone();
+    assert!(matches!(
+        NavMesh::load(wide.clone(), &world, &map),
+        Err(Error("navmesh_identity_mismatch"))
+    ));
+    assert_eq!(
+        NavMesh::load_with_movement_profile(wide.clone(), &world, &map, &rules)
+            .unwrap()
+            .body()
+            .max_slope_degrees,
+        54.
+    );
+    let mut relabeled = wide;
+    relabeled.detour_sha256 = tiled.detour_sha256;
+    relabeled.detour_data = tiled.detour_data;
+    assert!(matches!(
+        NavMesh::load_with_movement_profile(relabeled, &world, &map, &rules),
+        Err(Error("navmesh_invalid_binary"))
+    ));
+}

@@ -131,11 +131,7 @@ impl ReferenceNavMesh {
             rules,
             false,
         )
-        .map(|mut mesh| {
-            // Detour already owns checked copies of the tiles.
-            mesh.artifact.detour_data = Vec::new();
-            Self(mesh)
-        })
+        .map(Self)
     }
 
     pub fn route(&self, start: Point, goal: Point, goal_radius_m: f64) -> Result<Route, Error> {

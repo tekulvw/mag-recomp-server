@@ -23,9 +23,20 @@ pub type Point = [f64; 3];
 pub const UPSTREAM_COMMIT: &str = "6dc1667f580357e8a2154c28b7867bea7e8ad3a7";
 pub const LEGACY_BAKE_CONFIG: &str = "single-v1-cs0.1-ch0.05-height37-climb7-radius6-slope45-contour0.5-edge120-region64-merge400-detail0.6-error0.05-nvp6-nodes8192";
 pub const BAKE_CONFIG: &str = "tiled-v2-tile512-border9-cs0.1-ch0.05-height37-climb7-radius6-slope45-contour0.5-edge120-region64-merge400-detail0.6-error0.05-nvp6-nodes16384";
+/// Whole-map runtime layout: 512 tiles of 8,192 polygons each. With 32-bit
+/// polygon references, 9 tile bits and 13 polygon bits leave Detour 10 salt bits.
+pub const WIDE_BAKE_CONFIG: &str = "tiled-v4-tile512-border9-tiles512-polys8192-cs0.1-ch0.05-height37-climb7-radius6-slope45-contour0.5-edge120-region64-merge400-detail0.6-error0.05-nvp6-nodes16384";
+/// Binary cap for the 256-tile runtime formats (v1 to v3).
 pub const MAX_ARTIFACT_BYTES: u64 = 32 * 1024 * 1024;
+/// Binary cap for the 512-tile wide runtime formats (v4 and v5).
+pub const MAX_WIDE_ARTIFACT_BYTES: u64 = 128 * 1024 * 1024;
+pub const MAX_RUNTIME_TILES: u32 = 256;
+pub const MAX_WIDE_RUNTIME_TILES: u32 = 512;
 // JSON Vec<u8> uses up to four characters per byte, plus bounded metadata.
-pub const MAX_ARTIFACT_JSON_BYTES: u64 = MAX_ARTIFACT_BYTES * 4 + 1024 * 1024;
+pub const MAX_ARTIFACT_JSON_BYTES: u64 = MAX_WIDE_ARTIFACT_BYTES * 4 + 1024 * 1024;
+// Recast span heights use 13 bits of 0.05 m cells.
+const MAX_TILED_HEIGHT_M: f64 = 409.55;
+const TILE_WIDTH_M: f32 = 51.2;
 pub const MAX_REFERENCE_BYTES: u64 = 192 * 1024 * 1024;
 const REFERENCE_INPUT: &str = "mag_navmesh_reference_bake_input_v1";
 const REFERENCE_FORMAT: &str = "mag_navmesh_reference_v1";
@@ -33,6 +44,9 @@ const REFERENCE_CONFIG: &str = "reference-v1-tile512-border9-tiles512-polys8192-
 const PROFILED_RUNTIME_FORMAT: &str = "mag_navmesh_world_v3";
 const PROFILED_REFERENCE_FORMAT: &str = "mag_navmesh_reference_v2";
 const PROFILED_RUNTIME_CONFIG: &str = "tiled-v3-tile512-border9-cs0.1-ch0.05-height37-climb7-radius6-slope-source-v1-contour0.5-edge120-region64-merge400-detail0.6-error0.05-nvp6-nodes16384";
+const WIDE_RUNTIME_FORMAT: &str = "mag_navmesh_world_v4";
+const WIDE_PROFILED_RUNTIME_FORMAT: &str = "mag_navmesh_world_v5";
+const WIDE_PROFILED_RUNTIME_CONFIG: &str = "tiled-v5-tile512-border9-tiles512-polys8192-cs0.1-ch0.05-height37-climb7-radius6-slope-source-v1-contour0.5-edge120-region64-merge400-detail0.6-error0.05-nvp6-nodes16384";
 const PROFILED_REFERENCE_CONFIG: &str = "reference-v2-tile512-border9-tiles512-polys8192-cs0.1-ch0.05-height37-climb7-radius6-slope-source-v1-contour0.5-edge120-region64-merge400-detail0.6-error0.05-nvp6-nodes16384";
 const QUERY_NODE_LIMIT: c_int = 16_384;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -296,6 +310,14 @@ unsafe extern "C" {
         nrefs: c_int,
     ) -> c_int;
 }
+/// Runtime tile layout. `Auto` keeps the 256-tile formats (v2/v3, byte for
+/// byte unchanged) whenever the grid fits and uses the wide layout otherwise.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Layout {
+    #[default]
+    Auto,
+    Wide,
+}
 pub fn bake(input: BakeInput) -> Result<Artifact, Error> {
     bake_artifact(input, false, None, None)
 }
@@ -305,17 +327,47 @@ pub fn bake_with_movement_profile(
 ) -> Result<Artifact, Error> {
     bake_artifact(input, false, Some(rules), None)
 }
-
-fn bake_mode(reference: bool, profiled: bool) -> c_int {
-    c_int::from(reference) + 2 * c_int::from(profiled)
+pub fn bake_with_layout(
+    input: BakeInput,
+    rules: Option<&MovementProfile>,
+    layout: Layout,
+) -> Result<Artifact, Error> {
+    bake_layout(input, false, rules, None, layout)
 }
 
-fn format_and_config(reference: bool, profiled: bool) -> (&'static str, &'static str) {
-    match (reference, profiled) {
-        (false, false) => ("mag_navmesh_world_v2", BAKE_CONFIG),
-        (true, false) => (REFERENCE_FORMAT, REFERENCE_CONFIG),
-        (false, true) => (PROFILED_RUNTIME_FORMAT, PROFILED_RUNTIME_CONFIG),
-        (true, true) => (PROFILED_REFERENCE_FORMAT, PROFILED_REFERENCE_CONFIG),
+/// Tiles in the regular 51.2 m grid over the bounds, computed in the same f32
+/// arithmetic as the native baker.
+pub fn grid_tiles(bounds: &Bounds) -> u64 {
+    let axis = |i: usize| {
+        ((bounds.max[i] as f32 - bounds.min[i] as f32) / TILE_WIDTH_M)
+            .ceil()
+            .max(0.) as u64
+    };
+    axis(0) * axis(2)
+}
+
+fn bake_mode(reference: bool, profiled: bool, wide: bool) -> c_int {
+    c_int::from(reference) + 2 * c_int::from(profiled) + 4 * c_int::from(wide)
+}
+
+fn format_and_config(reference: bool, profiled: bool, wide: bool) -> (&'static str, &'static str) {
+    match (reference, profiled, wide) {
+        (false, false, false) => ("mag_navmesh_world_v2", BAKE_CONFIG),
+        (true, false, _) => (REFERENCE_FORMAT, REFERENCE_CONFIG),
+        (false, true, false) => (PROFILED_RUNTIME_FORMAT, PROFILED_RUNTIME_CONFIG),
+        (true, true, _) => (PROFILED_REFERENCE_FORMAT, PROFILED_REFERENCE_CONFIG),
+        (false, false, true) => (WIDE_RUNTIME_FORMAT, WIDE_BAKE_CONFIG),
+        (false, true, true) => (WIDE_PROFILED_RUNTIME_FORMAT, WIDE_PROFILED_RUNTIME_CONFIG),
+    }
+}
+
+fn byte_limit(reference: bool, wide: bool) -> u64 {
+    if reference {
+        MAX_REFERENCE_BYTES
+    } else if wide {
+        MAX_WIDE_ARTIFACT_BYTES
+    } else {
+        MAX_ARTIFACT_BYTES
     }
 }
 
@@ -332,6 +384,16 @@ fn bake_artifact(
     reference: bool,
     rules: Option<&MovementProfile>,
     coverage: Option<&regional::Coverage>,
+) -> Result<Artifact, Error> {
+    bake_layout(input, reference, rules, coverage, Layout::Auto)
+}
+
+fn bake_layout(
+    input: BakeInput,
+    reference: bool,
+    rules: Option<&MovementProfile>,
+    coverage: Option<&regional::Coverage>,
+    layout: Layout,
 ) -> Result<Artifact, Error> {
     let expected_format = if coverage.is_some() {
         regional::INPUT_SCHEMA
@@ -362,22 +424,25 @@ fn bake_artifact(
             return err("navmesh_regional_physics_regions_unsupported");
         }
     } else if !reference
-        && !input.physics_regions.iter().any(|r| {
-            r.ground_verified
-                && r.obstacles_verified
-                && !r.provenance.is_empty()
-                && (0..3).all(|i| {
-                    r.min[i].is_finite()
-                        && r.max[i].is_finite()
-                        && r.min[i] <= input.bounds.min[i]
-                        && r.max[i] >= input.bounds.max[i]
-                })
-        })
+        && !crate::collision_coverage::regions_cover(
+            &input.physics_regions,
+            input.bounds.min,
+            input.bounds.max,
+        )
     {
         return err("navmesh_geometry_coverage_unknown");
     }
+    let runtime = !reference && coverage.is_none();
+    let wide = runtime
+        && (layout == Layout::Wide || grid_tiles(&input.bounds) > u64::from(MAX_RUNTIME_TILES));
+    if wide && grid_tiles(&input.bounds) > u64::from(MAX_WIDE_RUNTIME_TILES) {
+        return err("navmesh_grid_limit");
+    }
+    if wide && input.bounds.max[1] - input.bounds.min[1] > MAX_TILED_HEIGHT_M {
+        return err("navmesh_envelope_invalid");
+    }
     if reference
-        && (input.bounds.max[1] - input.bounds.min[1] > 409.55
+        && (input.bounds.max[1] - input.bounds.min[1] > MAX_TILED_HEIGHT_M
             || input.vertices.iter().any(|point| {
                 (0..3).any(|axis| {
                     let value = f64::from(point[axis]);
@@ -436,7 +501,7 @@ fn bake_artifact(
             max.as_ptr(),
             &mut data,
             &mut size,
-            bake_mode(reference, rules.is_some()),
+            bake_mode(reference, rules.is_some(), wide),
             profile.max_slope_degrees as f32,
         )
     };
@@ -449,14 +514,14 @@ fn bake_artifact(
                 _ => "navmesh_reference_bake_failed",
             });
         }
-        return err("navmesh_bake_failed");
+        return err(match result {
+            1 if wide => "navmesh_grid_limit",
+            5 => "navmesh_tile_polygon_limit",
+            6 => "navmesh_bake_size_limit",
+            _ => "navmesh_bake_failed",
+        });
     }
-    let byte_limit = if reference {
-        MAX_REFERENCE_BYTES
-    } else {
-        MAX_ARTIFACT_BYTES
-    };
-    if data.is_null() || size <= 0 || size as u64 > byte_limit {
+    if data.is_null() || size <= 0 || size as u64 > byte_limit(reference, wide) {
         if !data.is_null() {
             unsafe { mag_nav_free_bytes(data) }
         }
@@ -464,7 +529,7 @@ fn bake_artifact(
     }
     let bytes = unsafe { std::slice::from_raw_parts(data, size as usize).to_vec() };
     unsafe { mag_nav_free_bytes(data) };
-    let (format, config) = format_and_config(reference, rules.is_some());
+    let (format, config) = format_and_config(reference, rules.is_some(), wide);
     Ok(Artifact {
         format: if coverage.is_some() {
             regional::MESH_FORMAT
@@ -494,7 +559,10 @@ impl Drop for Native {
     }
 }
 pub struct NavMesh {
+    /// Loaded metadata. Detour owns checked copies of the tiles, so the
+    /// artifact's `detour_data` is released after a successful load.
     artifact: Artifact,
+    detour_bytes: usize,
     regional_coverage: Option<regional::Coverage>,
     native: Mutex<Native>,
 }
@@ -535,7 +603,10 @@ impl NavMesh {
         rules: Option<&MovementProfile>,
         regional: bool,
     ) -> Result<Self, Error> {
-        let (format, config) = format_and_config(reference, rules.is_some());
+        let wide = !reference
+            && !regional
+            && artifact.format == format_and_config(false, rules.is_some(), true).0;
+        let (format, config) = format_and_config(reference, rules.is_some(), wide);
         let format = if regional {
             regional::MESH_FORMAT
         } else {
@@ -564,13 +635,8 @@ impl NavMesh {
         if rules.is_some() && !artifact.drop_links.is_empty() {
             return err("navmesh_profiled_drop_links_unsupported");
         }
-        let byte_limit = if reference {
-            MAX_REFERENCE_BYTES
-        } else {
-            MAX_ARTIFACT_BYTES
-        };
         if artifact.detour_data.len() < 100
-            || artifact.detour_data.len() > byte_limit as usize
+            || artifact.detour_data.len() as u64 > byte_limit(reference, wide)
             || artifact.detour_sha256 != sha256(&artifact.detour_data)
         {
             return err("navmesh_binary_hash_mismatch");
@@ -581,19 +647,22 @@ impl NavMesh {
                 artifact.detour_data.len() as c_int,
                 artifact.bounds.min.map(|v| v as f32).as_ptr(),
                 artifact.bounds.max.map(|v| v as f32).as_ptr(),
-                bake_mode(reference, rules.is_some()),
+                bake_mode(reference, rules.is_some(), wide),
                 node_limit,
             )
         };
         if handle.is_null() {
             return err("navmesh_invalid_binary");
         }
-        let mesh = Self {
+        let mut mesh = Self {
+            detour_bytes: artifact.detour_data.len(),
             artifact,
             regional_coverage: None,
             native: Mutex::new(Native(handle)),
         };
         mesh.validate_drop_links()?;
+        // A wide mesh can hold up to 128 MiB of tiles; keep one copy, not two.
+        mesh.artifact.detour_data = Vec::new();
         Ok(mesh)
     }
     /// Runtime coverage comes from the loaded collision world, not artifact assertions.
@@ -607,15 +676,7 @@ impl NavMesh {
             return err("navmesh_source_mismatch");
         }
         if world.metadata().map_name != self.artifact.map_name
-            || !world.metadata().physics_regions.iter().any(|r| {
-                r.ground_verified
-                    && r.obstacles_verified
-                    && !r.provenance.is_empty()
-                    && (0..3).all(|i| {
-                        r.min[i] <= self.artifact.bounds.min[i]
-                            && r.max[i] >= self.artifact.bounds.max[i]
-                    })
-            })
+            || !world.covers_box(self.artifact.bounds.min, self.artifact.bounds.max)
         {
             return err("navmesh_geometry_coverage_unknown");
         }
@@ -624,8 +685,13 @@ impl NavMesh {
     pub(crate) fn regional_coverage(&self) -> Option<&regional::Coverage> {
         self.regional_coverage.as_ref()
     }
+    /// Artifact metadata; `detour_data` is empty once loaded (see `detour_bytes`).
     pub fn artifact(&self) -> &Artifact {
         &self.artifact
+    }
+    /// Size of the verified Detour data that was loaded.
+    pub fn detour_bytes(&self) -> usize {
+        self.detour_bytes
     }
     pub fn body(&self) -> crate::bot_physics::Body {
         crate::bot_physics::Body {

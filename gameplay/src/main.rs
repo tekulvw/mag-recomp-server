@@ -133,6 +133,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     let mut telemetry_path: Option<PathBuf> = None;
     let mut tick_budget_us = None;
     let mut collision_path: Option<PathBuf> = None;
+    let mut collision_coverage_path: Option<PathBuf> = None;
     let mut navmesh_path: Option<PathBuf> = None;
     let mut regional_walk_path: Option<PathBuf> = None;
     let mut movement_profile_path: Option<PathBuf> = None;
@@ -501,6 +502,13 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                         .into(),
                 );
             }
+            "--collision-coverage" => {
+                collision_coverage_path = Some(
+                    args.next()
+                        .ok_or_else(|| io::Error::other("--collision-coverage requires a path"))?
+                        .into(),
+                );
+            }
             "--collision-query" => {
                 let start = args.next().ok_or_else(|| {
                     io::Error::other("--collision-query requires START END as x,y,z")
@@ -565,7 +573,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             }
             _ => {
                 return Err(io::Error::other(
-                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--match-profiles /absolute/MATCH_PROFILES.json] [--party-reservations] [--active-abilities /absolute/ACTIVE_ABILITIES.json] [--squad-orders /absolute/ORDERS.json] [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--dynamic-bodies /absolute/BODIES.json] [--static-partition /absolute/PARTITION.json] [--acquisition-gameplay /absolute/GAMEPLAY.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--firearm-assist-rules /absolute/ASSISTS.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--worker-id ID] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json] [--navmesh-world MESH.mag-nav] [--regional-walk-coverage /absolute/COVERAGE.json] [--movement-profile /absolute/MOVEMENT.json] [--bot-fill-total N --bot-population POPULATION.json] [--bot-names /absolute/NAMES.json] [--bot-resupply-catalog /absolute/SUPPLY.json] [--bot-resupply-approach-policy /absolute/APPROACH.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS] [--log-segment-bytes BYTES [--log-retention-s SECONDS]]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
+                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--match-profiles /absolute/MATCH_PROFILES.json] [--party-reservations] [--active-abilities /absolute/ACTIVE_ABILITIES.json] [--squad-orders /absolute/ORDERS.json] [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--dynamic-bodies /absolute/BODIES.json] [--static-partition /absolute/PARTITION.json] [--acquisition-gameplay /absolute/GAMEPLAY.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--firearm-assist-rules /absolute/ASSISTS.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--worker-id ID] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json [--collision-coverage COVERAGE.json]] [--navmesh-world MESH.mag-nav] [--regional-walk-coverage /absolute/COVERAGE.json] [--movement-profile /absolute/MOVEMENT.json] [--bot-fill-total N --bot-population POPULATION.json] [--bot-names /absolute/NAMES.json] [--bot-resupply-catalog /absolute/SUPPLY.json] [--bot-resupply-approach-policy /absolute/APPROACH.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS] [--log-segment-bytes BYTES [--log-retention-s SECONDS]]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
                 ));
             }
         }
@@ -667,12 +675,33 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     }
     // Geometry is loaded before opening logs/listeners. A bad file cannot
     // silently fall back to an empty collision world or accept a reservation.
+    if collision_coverage_path.is_some() && match_profiles_path.is_some() {
+        return Err(io::Error::other(
+            "configure collision coverage inside each match profile",
+        ));
+    }
     let collision_world = collision_path
         .as_ref()
         .map(|path| {
             CollisionWorld::load(path, CollisionLimits::default()).map_err(io::Error::other)
         })
         .transpose()?;
+    // A coverage sidecar must name this exact world; the world bytes stay unchanged.
+    let collision_world = match (&collision_coverage_path, collision_world) {
+        (Some(_), None) => {
+            return Err(io::Error::other(
+                "--collision-coverage requires --collision-world",
+            ));
+        }
+        (Some(path), Some(world)) => Some(
+            world
+                .with_coverage_sidecar(mag_gameplay::collision_coverage::CoverageSidecar::load(
+                    path,
+                )?)
+                .map_err(io::Error::other)?,
+        ),
+        (None, world) => world,
+    };
     let navmesh_world = if let Some(path) = navmesh_path {
         let world = collision_world
             .as_ref()
@@ -941,7 +970,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         ));
     }
     let collision_info = collision_world.as_ref().map(|world| serde_json::json!({
-        "source":collision_path,"metadata":world.metadata(),"stats":world.stats(),"bullet_authority":"audit_only","grenade_policy":"disk_triangles_three_body_samples","grenade_radius_enabled":development_grenade_radius,"active_map_name":catalog.map_name(),"map_matches_active":world.metadata().map_name == catalog.map_name()}));
+        "source":collision_path,"metadata":world.metadata(),"coverage_sidecar":world.coverage_sidecar().map(|sidecar| serde_json::json!({"source":collision_coverage_path,"sha256":sidecar.source_sha256(),"basis":sidecar.basis(),"regions":sidecar.regions()})),"stats":world.stats(),"bullet_authority":"audit_only","grenade_policy":"disk_triangles_three_body_samples","grenade_radius_enabled":development_grenade_radius,"active_map_name":catalog.map_name(),"map_matches_active":world.metadata().map_name == catalog.map_name()}));
     let objective_catalog = objective_path
         .as_ref()
         .map(mag_gameplay::objective_catalog::ObjectiveCatalog::load)
@@ -2856,6 +2885,79 @@ mod runtime_profile_tests {
         ]);
         assert_eq!(
             run(args).unwrap_err().to_string(),
+            "acquisition_gameplay_requires_character_damage_rules"
+        );
+        assert!(!log.exists());
+    }
+
+    #[test]
+    fn collision_coverage_sidecar_is_hash_bound_before_opening_log() {
+        let files = SyntheticCatalogs::new();
+        let mut spawns = files.read("spawns.json");
+        spawns["match_profile"]["game_type"] = serde_json::json!(1);
+        files.write("spawns.json", &spawns);
+        let map = spawns["maps"][0]["name"].clone();
+        files.write(
+            "world.json",
+            &serde_json::json!({
+                "format":"mag_collision_world","schema_version":1,"coordinate_space":"world",
+                "metadata":{"map_name":map,"build":"fixture",
+                    "coverage":"provisional","provenance":["synthetic"],"unknowns":[]},
+                "instances":[]
+            }),
+        );
+        let world_sha256 =
+            mag_gameplay::navmesh::sha256(&std::fs::read(files.0.join("world.json")).unwrap());
+        let sidecar = |world_sha256: &str| {
+            serde_json::json!({
+                "format":"mag_collision_coverage_v1","map_name":map,"world_sha256":world_sha256,
+                "basis":"operator_assertion","provenance":["synthetic"],
+                "physics_regions":[{"min":[-10.,-3.,-10.],"max":[10.,3.,10.],
+                    "ground_verified":true,"obstacles_verified":true,"provenance":["synthetic"]}]
+            })
+        };
+        files.write("coverage.json", &sidecar(&world_sha256));
+        files.write("foreign.json", &sidecar(&"f".repeat(64)));
+        let log = files.0.join("should-not-exist.jsonl");
+        let mut args = files.runtime_args();
+        args.extend([
+            "--acquisition-gameplay".into(),
+            files.0.join("gameplay.json").display().to_string(),
+            "--log".into(),
+            log.display().to_string(),
+        ]);
+        let with = |extra: &[&str]| {
+            let mut args = args.clone();
+            for name in extra {
+                args.push(if name.ends_with(".json") {
+                    files.0.join(name).display().to_string()
+                } else {
+                    name.to_string()
+                });
+            }
+            run(args).unwrap_err().to_string()
+        };
+        assert_eq!(
+            with(&["--collision-coverage", "coverage.json"]),
+            "--collision-coverage requires --collision-world"
+        );
+        assert_eq!(
+            with(&[
+                "--collision-world",
+                "world.json",
+                "--collision-coverage",
+                "foreign.json"
+            ]),
+            "collision_coverage_world_mismatch"
+        );
+        // The matching sidecar is accepted and startup proceeds to the next input.
+        assert_eq!(
+            with(&[
+                "--collision-world",
+                "world.json",
+                "--collision-coverage",
+                "coverage.json"
+            ]),
             "acquisition_gameplay_requires_character_damage_rules"
         );
         assert!(!log.exists());
