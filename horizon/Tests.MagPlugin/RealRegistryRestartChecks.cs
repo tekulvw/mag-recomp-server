@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using RT.Models.MAG;
 using Server.Medius;
 
@@ -36,16 +37,42 @@ internal static partial class LeadershipProgressionChecks
                     return await Task.WhenAll(queued);
                 }
 
+                // Wait for a settled state; on timeout, name what each worker held.
+                async Task Settle(Func<bool> condition, string failure, params RealRegistryWorkerChecks.Worker[] workers)
+                {
+                    try { await TickUntil(registry, condition, failure); }
+                    catch (Exception error) when (error.Message == failure)
+                    {
+                        throw new Exception($"{failure} ({string.Join("; ", workers.Select(Holdings))})");
+                    }
+                }
+
+                string Holdings(RealRegistryWorkerChecks.Worker worker)
+                {
+                    var world = World(registry, worker.Id);
+                    return $"{worker.Id}: world={world.WorldId} incarnation={world.IncarnationId} ready={world.Ready} draining={world.Draining} " +
+                        $"reserved_players={world.ReservedPlayers} journal_reserved={Reservations(worker).Count} journal_released={Releases(worker).Count}";
+                }
+
                 var victimPair = await Admit("alpha", "bravo");
                 var survivorPair = await Admit("charlie", "delta");
                 Check(victimPair.Concat(survivorPair).All(reply => reply.Result == 0), "Real worker admission failed before the restart");
+                Check(victimPair.Select(reply => reply.WorldId).Distinct().Count() == 1 && survivorPair.Select(reply => reply.WorldId).Distinct().Count() == 1 &&
+                    victimPair[0].WorldId != survivorPair[0].WorldId,
+                    $"Each admitted pair did not share a world of its own (worlds {string.Join(",", victimPair.Concat(survivorPair).Select(reply => reply.WorldId))})");
                 string victimId = registry.Worlds.Single(w => w.WorldId == victimPair[0].WorldId).WorkerId;
                 var victim = victimId == first.Id ? first : second;
                 var survivor = victimId == first.Id ? second : first;
+                // Poll instead of reading once: on a loaded host the registry's placement snapshot
+                // and the worker journals can trail the admission replies, and an attempt the queue
+                // refused and retried leaves a reserved row together with its release.
+                await Settle(() => World(registry, victimId).ReservedPlayers == 2 &&
+                    World(registry, survivor.Id) is { ReservedPlayers: 2 } held && held.WorldId == survivorPair[0].WorldId &&
+                    LiveReservations(victim).Count == 2 && LiveReservations(survivor).Count == 2,
+                    "Each real worker did not hold its own match", victim, survivor);
                 var before = World(registry, victimId);
                 var survivorBefore = World(registry, survivor.Id);
-                Check(survivorPair.All(reply => reply.WorldId == survivorBefore.WorldId) && survivorBefore.ReservedPlayers == 2 &&
-                    Reservations(victim).Count == 2 && Reservations(survivor).Count == 2, "Each real worker did not hold its own match");
+                int survivorReleases = Releases(survivor).Count;
 
                 // Crash the victim mid-match and start a new process on the same endpoint.
                 await victim.KillAsync();
@@ -59,17 +86,27 @@ internal static partial class LeadershipProgressionChecks
                 Check(adopted.WorldId != before.WorldId && adopted.ReservedPlayers == 0 && counters.Adoptions == 1 && counters.WriteOffs == 1 &&
                     counters.ReleasedPlayers + counters.DroppedReleases >= 2 && counters.LostRewards == 0,
                     "The real worker's old incarnation was not written off before its new world opened");
-                Check(World(registry, survivor.Id) == survivorBefore && Releases(survivor).Count == 0 &&
-                    Counters(registry, survivor.Id).WriteOffs == 0, "Adopting one real worker disturbed the other worker's match");
+                await Settle(() => World(registry, survivor.Id) == survivorBefore, "Adopting one real worker disturbed the other worker's match",
+                    survivor);
+                Check(Releases(survivor).Count == survivorReleases && Counters(registry, survivor.Id).WriteOffs == 0,
+                    "Adopting one real worker released or wrote off the other worker's match");
 
                 // The released players form a new match on the restarted process.
                 var again = await Admit("alpha", "bravo");
-                Check(again.All(reply => reply.Result == 0 && reply.WorldId == adopted.WorldId) && Reservations(replacement).Count == 2 &&
-                    Reservations(replacement).All(row => row["world_id"]!.GetValue<int>() == adopted.WorldId),
-                    "A new match did not form on the restarted real worker");
-                Check(World(registry, survivor.Id) == survivorBefore, "The other real worker's match changed during the new formation");
+                Check(again.All(reply => reply.Result == 0 && reply.WorldId == adopted.WorldId), "A new match did not form on the restarted real worker");
+                await Settle(() => LiveReservations(replacement) is { Count: 2 } rows && rows.All(row => row["world_id"]!.GetValue<int>() == adopted.WorldId),
+                    "The restarted real worker did not record the new match", replacement);
+                await Settle(() => World(registry, survivor.Id) == survivorBefore, "The other real worker's match changed during the new formation",
+                    survivor);
             }
             finally { if (replacement != null) await replacement.DisposeAsync(); }
         }
     });
+
+    /// <summary>Journal reservations without a matching release row.</summary>
+    private static IReadOnlyList<JsonObject> LiveReservations(RealRegistryWorkerChecks.Worker worker)
+    {
+        var released = Ids(Releases(worker));
+        return Reservations(worker).Where(row => !released.Contains(row["reservation_id"]!.GetValue<string>())).ToArray();
+    }
 }
