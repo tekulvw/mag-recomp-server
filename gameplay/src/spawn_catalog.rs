@@ -711,6 +711,49 @@ impl SpawnCatalog {
         Ok(())
     }
 
+    /// The point a squad's spawn currently resolves to, after the same local
+    /// fallback a squad catalog applies to natively unselectable points.
+    pub(crate) fn locally_selectable(&self, squad: u16, raw: u16) -> u16 {
+        self.locally_selectable_default(squad, raw)
+    }
+
+    /// A point a server-simulated bot body may arrive at for `squad` now: in
+    /// the squad's current runtime choices, currently active, and an on-foot
+    /// or airborne arrival kind. Seat, vehicle and unsupported points are not.
+    pub(crate) fn bot_arrival_point(&self, squad: u16, index: u16) -> Option<&SpawnLocation> {
+        if !self
+            .available_for_squad(squad)
+            .is_some_and(|points| points.contains(&index))
+            || !self.point_active(index)
+        {
+            return None;
+        }
+        self.point(index).filter(|point| {
+            matches!(
+                point.kind,
+                SpawnKind::Insertion
+                    | SpawnKind::Alternate
+                    | SpawnKind::OnFoot
+                    | SpawnKind::Parachute
+            )
+        })
+    }
+
+    /// Points a squad gained at runtime (objective progression, a Domination
+    /// spawn effect), most recently added first.
+    pub(crate) fn runtime_added_points(&self, squad: u16) -> Vec<u16> {
+        let authored = self
+            .selected_squad(squad)
+            .map_or(&[][..], |binding| binding.available.as_slice());
+        self.available_for_squad(squad)
+            .unwrap_or_default()
+            .iter()
+            .rev()
+            .copied()
+            .filter(|index| !authored.contains(index))
+            .collect()
+    }
+
     pub(crate) fn forward_applied(&self, rule: ForwardSpawnBinding) -> bool {
         self.runtime_squads
             .get(&rule.squad_index)
