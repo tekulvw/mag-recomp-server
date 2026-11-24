@@ -21,15 +21,22 @@ namespace Server.Medius
         MagWorldRegistryConfig(int application, IPAddress address, ushort port, MagConfiguredWorker[] workers, int? partyInviteSeconds)
         { ApplicationId = application; ClientAddress = address; ClientTcpPort = port; Workers = Array.AsReadOnly(workers); PartyInviteSeconds = partyInviteSeconds; }
 
-        public static MagWorldRegistryConfig Load(string path)
+        /// <summary>A <c>client_address</c> of exactly this text takes the address from MAG_ADVERTISE_IPV4,
+        /// so a deployment that keeps that variable current needs no second copy in the file.</summary>
+        public const string AdvertisedAddressPlaceholder = "$MAG_ADVERTISE_IPV4";
+
+        public static MagWorldRegistryConfig Load(string path) => Load(path, Environment.GetEnvironmentVariable);
+        public static MagWorldRegistryConfig Load(string path, Func<string, string> environment)
         {
             if (!Path.IsPathFullyQualified(path)) throw Invalid();
             var info = new FileInfo(path);
             if (!info.Exists || info.Length > 65536) throw Invalid();
-            return Parse(File.ReadAllText(path));
+            return Parse(File.ReadAllText(path), environment);
         }
-        public static MagWorldRegistryConfig Parse(string json)
+        public static MagWorldRegistryConfig Parse(string json) => Parse(json, Environment.GetEnvironmentVariable);
+        public static MagWorldRegistryConfig Parse(string json, Func<string, string> environment)
         {
+            if (environment == null) throw new ArgumentNullException(nameof(environment));
             if (json == null || System.Text.Encoding.UTF8.GetByteCount(json) > 65536) throw Invalid();
             try
             {
@@ -42,6 +49,7 @@ namespace Server.Medius
                 if (root.GetProperty("format").GetString() != "mag_world_registry_v1" ||
                     Integer(root, "application_id", 20231, 20231) != 20231) throw Invalid();
                 string address = Text(root, "client_address");
+                if (address == AdvertisedAddressPlaceholder) address = environment("MAG_ADVERTISE_IPV4") ?? throw Invalid();
                 int port = Integer(root, "client_tcp_port", 1, 65535);
                 var network = MagNetworkSettings.Load(key => key switch {
                     "MAG_ADVERTISE_IPV4" => address, "MAG_GAME_TCP_PORT" => port.ToString(System.Globalization.CultureInfo.InvariantCulture), _ => null
