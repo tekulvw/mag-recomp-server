@@ -101,6 +101,23 @@ namespace Server.Medius
                 ObserveActivity(now);
                 return new[] { MagMessageCodec.ToPluginMessageForApplication(response, ApplicationId) };
             }
+            if (message is MagRetailNominationsUpdate nominations && State == SessionState.Ready)
+            {
+                // The client sends its volunteer preference and then its join request without
+                // waiting, so this commits synchronously and answers nothing.
+                try
+                {
+                    if (CharacterStore == null || CharacterId == 0 || !MagDevelopmentAccountPolicy.ValidAccount(AuthenticatedAccount))
+                        StorageStatus = "nominations-identity-or-store-unavailable";
+                    else
+                        StorageStatus = CharacterStore.SaveNominationsForAccount(AuthenticatedAccount, CharacterId, nominations.Nominations).Reason;
+                }
+                catch (Exception e) when (e is IOException || e is InvalidDataException || e is UnauthorizedAccessException)
+                { StorageStatus = "nominations-storage-error"; }
+                StorageStatus += $"=0x{nominations.Nominations:x2}"; // The MLS log line shows the bits received.
+                ObserveActivity(now);
+                return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();
+            }
             if (message is MagCharacterDataRequest lookup && State == SessionState.Ready)
             {
                 // Lobby player cards may describe any player, so the lookup spans the whole store.

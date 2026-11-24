@@ -25,7 +25,7 @@ namespace RT.Models.MAG
             if (TryParseForApplication(payload, applicationId, out message) && (message is MagRetailPartyInvite || message is MagRetailPartyInviteResponse ||
                 message is MagRetailPartyLeave || message is MagRetailCancelJoinRequest || message is MagTrainingCompletedRequest || message is MagKeepAlive || message is MagJoinGameRequest || message is MagServerStatusRequest || message is MagHello || message is MagProtocolInfo || message is MagAccountLoginRequest || message is MagCharacterDataRequest ||
                 message is MagNpAuthenticateRequest || message is MagUniverseListRequest || message is MagRetailPatchRequest ||
-                message is MagNewsEulaRequest || message is MagCharacterListRequest || message is MagCreateCharacterRequest || message is MagLoadoutUpdateRequest || message is MagRetailLoadoutDeleteRequest || message is MagPurchaseSkillRequest)) return true;
+                message is MagNewsEulaRequest || message is MagCharacterListRequest || message is MagCreateCharacterRequest || message is MagLoadoutUpdateRequest || message is MagRetailLoadoutDeleteRequest || message is MagPurchaseSkillRequest || message is MagRetailNominationsUpdate)) return true;
             message = null;
             return false;
         }
@@ -92,6 +92,7 @@ namespace RT.Models.MAG
                     0x0220 => new MagLoadoutUpdateResponse(),
                     0x0221 when applicationId == 20231 => new MagRetailLoadoutDeleteRequest(),
                     0x0222 when applicationId == 20231 => new MagRetailLoadoutDeleteResponse(),
+                    0x0243 when applicationId == 20231 => new MagRetailNominationsUpdate(),
                     0x0236 => new MagCharacterListRequest(),
                     0x0237 => applicationId == 20231 ? new MagRetailCharacterListResponse() : new MagCharacterListResponse(),
                     0x0238 => new MagCharacterDataRequest(),
@@ -127,6 +128,9 @@ namespace RT.Models.MAG
                         break;
                     case MagRetailLoadoutDeleteResponse delete:
                         delete.Success = reader.ReadBoolean();
+                        break;
+                    case MagRetailNominationsUpdate nominations:
+                        nominations.Nominations = reader.ReadByte();
                         break;
                     case MagRetailPatchRequest patch:
                         patch.HighestVersion = unchecked((int)reader.ReadUInt32()); patch.InitialVersion = unchecked((int)reader.ReadUInt32());
@@ -322,6 +326,9 @@ namespace RT.Models.MAG
                     break;
                 case MagRetailLoadoutDeleteResponse delete:
                     writer.WriteBoolean(delete.Success);
+                    break;
+                case MagRetailNominationsUpdate nominations:
+                    writer.WriteByte(nominations.Nominations);
                     break;
                 case MagRetailPatchRequest patch:
                     writer.WriteUInt32(unchecked((uint)patch.HighestVersion)); writer.WriteUInt32(unchecked((uint)patch.InitialVersion));

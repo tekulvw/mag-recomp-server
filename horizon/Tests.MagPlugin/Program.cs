@@ -100,6 +100,9 @@ Test("leadership final context requires an authored catalog", LeadershipProgress
 Test("leadership admission capability follows the catalog", LeadershipProgressionChecks.AdmissionCapability);
 Test("leadership reconnect admission serializes reward settlement", LeadershipProgressionChecks.AdmissionRewardRace);
 Test("leadership commit failure, retry, and overflow", LeadershipProgressionChecks.FailedCommit);
+Test("leadership nomination preference wire", LeadershipProgressionChecks.NominationPreferenceWire);
+Test("leadership nomination preference reaches admission", LeadershipProgressionChecks.NominationPreferenceAdmission);
+Test("leadership nomination preference on legacy rows and pending sessions", LeadershipProgressionChecks.NominationPreferenceLegacyAndUnbound);
 Test("selected kit ownership and complete store preservation", LoadoutPreferenceStoreChecks.Run);
 Test("retail saved loadout delete commits and compacts the owned layout", LoadoutPreferenceStoreChecks.DeleteThroughMls);
 Test("retail skill purchase owns its equipment for loadout saves", LoadoutPreferenceStoreChecks.RetailSkillPurchaseOwnsItsEquipment);
