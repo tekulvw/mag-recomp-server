@@ -14,7 +14,9 @@ pub const NONCE_LEN: usize = 16;
 pub const SIGNATURE_LEN: usize = 64;
 /// Fixed bytes: header, times, account, nonce, two length bytes and the signature.
 pub const FIXED_LEN: usize = 4 + 1 + 1 + 8 + 8 + 4 + NONCE_LEN + 1 + 1 + SIGNATURE_LEN;
-pub const MAX_LIFETIME_SECONDS: u64 = 3600;
+/// Longest ticket lifetime the format allows: 12 hours, so a launcher can reconnect with the
+/// ticket it fetched at launch. Medius applies the same bound.
+pub const MAX_LIFETIME_SECONDS: u64 = 43_200;
 pub const MAX_FUTURE_SKEW_SECONDS: u64 = 60;
 pub const MAX_AUDIENCE_LEN: usize = 63;
 

@@ -25,6 +25,8 @@ namespace Server.Medius
         /// <summary>Portal account ID of a ticket-authenticated session; 0 otherwise.</summary>
         public uint PortalAccountId { get; private set; }
         public string PortalTicketStatus { get; private set; } = "inactive";
+        /// <summary>Staff log line when the last message refused a portal ticket; null otherwise.</summary>
+        public string PortalTicketRefusal { get; private set; }
         private readonly MagPortalTicketAssembly _portalTicket = new MagPortalTicketAssembly();
         /// <summary>Idle limit for portal account liveness; MAS.cs sets the application's client timeout.</summary>
         public int PortalLiveTimeoutSeconds { get; set; } = 30;
@@ -53,6 +55,7 @@ namespace Server.Medius
         public IReadOnlyList<RT_MSG_SERVER_PLUGIN_TO_APP> HandleMany(bool enabled, int applicationId,
             RT_MSG_CLIENT_APP_TO_PLUGIN envelope, DateTime now)
         {
+            PortalTicketRefusal = null;
             if (!enabled || !MagPluginRouting.IsSelectedApplication(applicationId) || !envelope.IsValid || envelope.PluginId != 0)
                 return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();
             if (!MagMessageCodec.TryParseClientForApplication(envelope.Payload, applicationId, out var message))
@@ -74,8 +77,13 @@ namespace Server.Medius
                     {
                         var outcome = PortalTickets.Authenticate(_portalTicket, request, this, now);
                         PortalTicketStatus = outcome.Reason.Code();
+                        PortalTicketRefusal = outcome.RefusalLog();
                         ObserveActivity(now);
-                        if (!outcome.Accepted) return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();
+                        if (!outcome.Accepted)
+                        {
+                            var refusal = MagPortalTicketPolicy.RefusalReply(request, outcome);
+                            return refusal == null ? Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>() : Reply(applicationId, refusal);
+                        }
                         AuthenticatedAccount = outcome.Account; PortalAccountId = outcome.AccountId;
                         State = SessionState.LocalDevelopmentAuthenticated;
                         return Reply(applicationId, request is MagRetailNpAuthenticateRequest
