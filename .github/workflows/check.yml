@@ -4,6 +4,9 @@ name: Public source checks
 # trigger here would only run the same checks twice.
 on:
   pull_request:
+    # closed starts an empty run whose only effect is to cancel this PR's
+    # queued or running checks through the concurrency group below.
+    types: [opened, synchronize, reopened, closed]
   workflow_call:
     inputs:
       ref:
@@ -14,11 +17,65 @@ on:
         description: Check only the Helm chart for a chart component release
         type: boolean
         default: false
+      checks:
+        description: >-
+          Space-separated checks to run (boundary python gameplay horizon
+          registry portal chart release), or all
+        type: string
+        default: all
 permissions:
   contents: read
+# A new push to a PR, or closing it, cancels that PR's stale run. Callers get a
+# group of their own per call and are never cancelled from here.
+concurrency:
+  group: >-
+    ${{ github.event_name == 'pull_request'
+    && format('{0}-pr-{1}', github.workflow, github.event.pull_request.number)
+    || format('{0}-call-{1}-{2}-{3}', github.workflow, github.run_id, github.run_attempt, inputs.chart_only) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
+  # Pull requests run only the checks their changed paths need; see
+  # .github/scripts/select-checks.sh. Callers name their checks.
+  changes:
+    if: github.event.action != 'closed'
+    runs-on: mag-recomp-server
+    timeout-minutes: 10
+    outputs:
+      boundary: ${{ steps.select.outputs.boundary }}
+      python: ${{ steps.select.outputs.python }}
+      gameplay: ${{ steps.select.outputs.gameplay }}
+      horizon: ${{ steps.select.outputs.horizon }}
+      registry: ${{ steps.select.outputs.registry }}
+      portal: ${{ steps.select.outputs.portal }}
+      chart: ${{ steps.select.outputs.chart }}
+      release: ${{ steps.select.outputs.release }}
+    steps:
+      # The workflow's own commit, so the selector matches this workflow file.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Select checks
+        id: select
+        env:
+          CHECKS: ${{ inputs.chart_only && 'chart release' || inputs.checks || 'all' }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            # The PR merge commit's first parent is the base branch: these are the PR's changes.
+            if paths="$(git diff --name-only HEAD^1 HEAD)"; then
+              printf '%s\n' "$paths" | .github/scripts/select-checks.sh changed > "$RUNNER_TEMP/checks"
+            else
+              .github/scripts/select-checks.sh list all > "$RUNNER_TEMP/checks"
+            fi
+          else
+            # shellcheck disable=SC2086 # CHECKS is a word list
+            .github/scripts/select-checks.sh list $CHECKS > "$RUNNER_TEMP/checks"
+          fi
+          cat "$RUNNER_TEMP/checks" >> "$GITHUB_OUTPUT"
+          { echo '### Selected checks'; sed 's/^/* /' "$RUNNER_TEMP/checks"; } >> "$GITHUB_STEP_SUMMARY"
   boundary:
-    if: inputs.chart_only != true
+    needs: changes
+    if: needs.changes.outputs.boundary == 'true'
     runs-on: mag-recomp-server
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -26,17 +83,21 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
       - uses: ./.github/actions/self-hosted-linux
+      - run: python3 tools/check_public_tree.py
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        if: needs.changes.outputs.python == 'true'
         with:
           version: v3.19.0
       - name: Prepare Python checks
+        if: needs.changes.outputs.python == 'true'
         run: |
           python3 -m venv "$RUNNER_TEMP/check-venv"
           "$RUNNER_TEMP/check-venv/bin/python" -m pip install PyYAML==6.0.3
-      - run: '"$RUNNER_TEMP/check-venv/bin/python" -m unittest discover -s tests -v'
-      - run: python3 tools/check_public_tree.py
+      - if: needs.changes.outputs.python == 'true'
+        run: '"$RUNNER_TEMP/check-venv/bin/python" -m unittest discover -s tests -v'
   gameplay:
-    if: inputs.chart_only != true
+    needs: changes
+    if: needs.changes.outputs.gameplay == 'true'
     runs-on: mag-recomp-server
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -52,18 +113,22 @@ jobs:
       - run: cargo +1.99.0 test --locked --manifest-path gameplay/Cargo.toml
       - run: cargo +1.99.0 build --locked --manifest-path gameplay/Cargo.toml --bins --examples
   horizon:
-    if: inputs.chart_only != true
+    needs: changes
+    if: needs.changes.outputs.horizon == 'true' || needs.changes.outputs.registry == 'true'
     runs-on: mag-recomp-server
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
-      - run: docker build --target check horizon
+      - if: needs.changes.outputs.horizon == 'true'
+        run: docker build --target check horizon
       - name: Check configured worlds against independent Rust workers
+        if: needs.changes.outputs.registry == 'true'
         run: docker build --target check --file tests/Dockerfile.world-registry .
   portal:
-    if: inputs.chart_only != true
+    needs: changes
+    if: needs.changes.outputs.portal == 'true'
     runs-on: mag-recomp-server
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -96,6 +161,8 @@ jobs:
       - run: cargo +1.99.0 clippy --locked --manifest-path portal/Cargo.toml --all-targets -- -D warnings
       - run: cargo +1.99.0 test --locked --manifest-path portal/Cargo.toml
   chart:
+    needs: changes
+    if: needs.changes.outputs.chart == 'true'
     runs-on: mag-recomp-server
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -119,6 +186,8 @@ jobs:
           "$RUNNER_TEMP/chart-venv/bin/python" -m unittest discover -s tests -p test_data_bundle.py -v
       - run: python3 tools/check_public_tree.py
   release-routing:
+    needs: changes
+    if: needs.changes.outputs.release == 'true'
     runs-on: mag-recomp-server
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -31,38 +31,104 @@ class MainImagesTests(unittest.TestCase):
         self.assertEqual(set(spec['on']), {'push', 'workflow_dispatch'})
         self.assertEqual(spec['on']['push']['branches'], ['main'])
         self.assertEqual(spec['permissions'], {})
-        self.assertEqual(spec['concurrency']['cancel-in-progress'], 'false')
         jobs = spec['jobs']
-        self.assertEqual(jobs['checks']['if'], "github.ref == 'refs/heads/main'")
+        self.assertEqual(jobs['plan']['if'], "github.ref == 'refs/heads/main'")
+        self.assertEqual(jobs['checks']['needs'], 'plan')
         self.assertEqual(jobs['checks']['uses'], './.github/workflows/check.yml')
         self.assertEqual(jobs['checks']['with']['ref'], '${{ github.sha }}')
-        self.assertEqual(jobs['build-images']['needs'], 'checks')
-        self.assertEqual(jobs['promote-main']['needs'], 'build-images')
+        self.assertEqual(jobs['checks']['with']['checks'], '${{ needs.plan.outputs.checks }}')
+        self.assertEqual(jobs['build-images']['needs'], ['plan', 'checks'])
+        self.assertEqual(jobs['promote-main']['needs'], ['plan', 'checks', 'build-images'])
+        promote = jobs['promote-main']['if']
+        self.assertIn('!cancelled()', promote)
+        self.assertIn("needs.checks.result == 'success'", promote)
+        self.assertNotIn('always()', promote)
+        self.assertEqual(jobs['plan']['permissions'], {'contents': 'read', 'packages': 'read'})
         self.assertEqual(jobs['checks']['permissions'], {'contents': 'read'})
         for name in ('build-images', 'promote-main'):
             self.assertEqual(jobs[name]['permissions'], {'contents': 'read', 'packages': 'write'})
 
-    def test_pending_main_is_not_displaced_by_old_retry_or_other_branch(self):
+    def test_newest_main_cancels_older_runs_but_reruns_cannot_displace_it(self):
         concurrency = workflow()['concurrency']
-        self.assertEqual(concurrency.get('queue', 'single'), 'max')
+        self.assertEqual(concurrency['cancel-in-progress'], 'true')
         self.assertIn('${{ github.ref }}', concurrency['group'])
+        # A rerun of an old commit gets its own group instead of cancelling current main.
+        self.assertIn("github.run_attempt != '1' && '-rerun'", concurrency['group'])
 
-    def test_builds_every_component_from_the_same_commit_without_release_tags(self):
+    def test_builds_only_changed_components_from_the_same_commit_without_release_tags(self):
         job = workflow()['jobs']['build-images']
-        self.assertEqual(job['strategy']['matrix']['include'], [
-            {'context': 'horizon', 'suffix': 'medius'},
-            {'context': 'gameplay', 'suffix': 'game'},
-            {'context': 'portal', 'suffix': 'portal'},
-        ])
+        self.assertEqual(job['if'], "needs.plan.outputs.build == 'true'")
+        self.assertEqual(job['strategy']['matrix'], '${{ fromJSON(needs.plan.outputs.matrix) }}')
         checkout = next(s for s in job['steps'] if s.get('uses', '').startswith('actions/checkout@'))
         self.assertEqual(checkout['with']['ref'], '${{ github.sha }}')
         build = next(s for s in job['steps'] if s.get('uses', '').startswith('docker/build-push-action@'))
         self.assertEqual(build['with']['push'], 'true')
         self.assertEqual(build['with']['platforms'], 'linux/amd64')
-        self.assertEqual(build['with']['tags'], '${{ steps.source.outputs.image }}:sha-${{ github.sha }}')
+        self.assertEqual(build['with']['tags'].splitlines(), [
+            '${{ steps.source.outputs.image }}:sha-${{ github.sha }}',
+            '${{ steps.source.outputs.image }}:tree-${{ matrix.tree }}'])
         self.assertIn('org.opencontainers.image.revision=${{ github.sha }}', build['with']['labels'])
-        self.assertNotIn('main', build['with']['tags'])
+        self.assertNotIn(':main', build['with']['tags'])
         self.assertNotIn('latest', build['with']['tags'])
+
+    def run_plan(self, existing=(), diff='', event='push', before='b' * 40, fetch_fails=False, rebuild='false'):
+        step = next(s for s in workflow()['jobs']['plan']['steps'] if s.get('id') == 'plan')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / 'output'
+            summary = root / 'summary.md'
+            git = root / 'git'
+            git.write_text('#!/usr/bin/env python3\nimport os, sys\n'
+                           'a = sys.argv[1:]\n'
+                           'if a[0] == "fetch": sys.exit(1 if os.environ["TEST_FETCH_FAIL"] == "1" else 0)\n'
+                           'if a[0] == "diff": print(os.environ["TEST_DIFF"], end=""); sys.exit(0)\n'
+                           'if a[0] == "rev-parse": print(a[1].split(":")[1] + "-tree"); sys.exit(0)\n'
+                           'sys.exit(3)\n')
+            docker = root / 'docker'
+            docker.write_text('#!/usr/bin/env python3\nimport os, sys\n'
+                              'ref = sys.argv[-1]\n'
+                              'sys.exit(0 if ref in os.environ["TEST_EXISTING"].split() else 1)\n')
+            git.chmod(0o700)
+            docker.chmod(0o700)
+            env = {**os.environ, 'PATH': str(root) + os.pathsep + os.environ['PATH'],
+                   'GITHUB_EVENT_NAME': event, 'GITHUB_REPOSITORY_OWNER': 'Example',
+                   'GITHUB_OUTPUT': str(output), 'GITHUB_STEP_SUMMARY': str(summary),
+                   'BEFORE': before, 'REBUILD': rebuild, 'TEST_DIFF': diff,
+                   'TEST_FETCH_FAIL': '1' if fetch_fails else '0',
+                   'TEST_EXISTING': ' '.join('ghcr.io/example/mag-recomp-server-' + e for e in existing)}
+            result = subprocess.run(['bash', '-e', '-c', step['run']], cwd=ROOT,
+                                    env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            values = dict(line.split('=', 1) for line in output.read_text().splitlines())
+            return values, set(values['checks'].split()), json.loads(values['matrix'])['include']
+
+    ALL_BUILT = ('medius:tree-horizon-tree', 'game:tree-gameplay-tree', 'portal:tree-portal-tree')
+
+    def test_portal_only_merge_builds_and_checks_only_the_portal(self):
+        values, checks, include = self.run_plan(existing=self.ALL_BUILT[:2], diff='portal/src/main.rs\n')
+        self.assertEqual(include, [{'context': 'portal', 'suffix': 'portal', 'tree': 'portal-tree'}])
+        self.assertEqual(checks, {'boundary', 'portal'})
+        self.assertEqual(values['build'], 'true')
+        self.assertEqual((values['medius_tree'], values['game_tree'], values['portal_tree']),
+                         ('horizon-tree', 'gameplay-tree', 'portal-tree'))
+
+    def test_docs_only_merge_builds_nothing_and_runs_the_boundary(self):
+        values, checks, include = self.run_plan(existing=self.ALL_BUILT, diff='docs/releasing.md\n')
+        self.assertEqual((values['build'], include, checks), ('false', [], {'boundary'}))
+
+    def test_cancelled_commit_components_are_still_built_and_checked(self):
+        # The previous commit changed gameplay but its run was cancelled: its tree has no image.
+        _, checks, include = self.run_plan(existing=self.ALL_BUILT[::2], diff='portal/README.md\n')
+        self.assertEqual([i['suffix'] for i in include], ['game'])
+        self.assertEqual(checks, {'boundary', 'gameplay', 'registry', 'portal'})
+
+    def test_dispatch_unknown_diff_or_rebuild_checks_or_builds_everything(self):
+        for kwargs in ({'event': 'workflow_dispatch'}, {'fetch_fails': True}, {'before': ''}):
+            _, checks, include = self.run_plan(existing=self.ALL_BUILT, **kwargs)
+            self.assertIn('all', checks, kwargs)
+            self.assertEqual(include, [], kwargs)
+        _, _, include = self.run_plan(existing=self.ALL_BUILT, diff='docs/a.md\n', rebuild='true')
+        self.assertEqual([i['suffix'] for i in include], ['medius', 'game', 'portal'])
 
     def test_main_test_values_render_fresh_images_and_clear_existing_digest_pins(self):
         with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml') as pinned:
@@ -103,6 +169,7 @@ class MainImagesTests(unittest.TestCase):
                    'GITHUB_SHA': SHA, 'GITHUB_REPOSITORY': 'Example/mag-recomp-server',
                    'GITHUB_REPOSITORY_OWNER': 'Example', 'GITHUB_STEP_SUMMARY': str(summary),
                    'TEST_COMMAND_LOG': str(record), 'TEST_MAIN_SHA': current_sha,
+                   'MEDIUS_TREE': 'm' * 40, 'GAME_TREE': 'g' * 40, 'PORTAL_TREE': 'p' * 40,
                    'TEST_GH_FAIL': '1' if gh_fails else '0'}
             result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', step['run']],
                                     env=env, capture_output=True, text=True, timeout=5)
@@ -113,15 +180,11 @@ class MainImagesTests(unittest.TestCase):
         result, calls, summary = self.run_promotion()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(calls, [
-            ['buildx', 'imagetools', 'create', '--prefer-index=false', '--tag',
-             'ghcr.io/example/mag-recomp-server-medius:main',
-             'ghcr.io/example/mag-recomp-server-medius:sha-' + SHA],
-            ['buildx', 'imagetools', 'create', '--prefer-index=false', '--tag',
-             'ghcr.io/example/mag-recomp-server-game:main',
-             'ghcr.io/example/mag-recomp-server-game:sha-' + SHA],
-            ['buildx', 'imagetools', 'create', '--prefer-index=false', '--tag',
-             'ghcr.io/example/mag-recomp-server-portal:main',
-             'ghcr.io/example/mag-recomp-server-portal:sha-' + SHA],
+            ['buildx', 'imagetools', 'create', '--prefer-index=false',
+             '--tag', 'ghcr.io/example/mag-recomp-server-' + suffix + ':sha-' + SHA,
+             '--tag', 'ghcr.io/example/mag-recomp-server-' + suffix + ':main',
+             'ghcr.io/example/mag-recomp-server-' + suffix + ':tree-' + tree * 40]
+            for suffix, tree in (('medius', 'm'), ('game', 'g'), ('portal', 'p'))
         ])
         self.assertIn(SHA, summary)
 
