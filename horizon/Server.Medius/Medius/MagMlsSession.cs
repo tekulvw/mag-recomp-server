@@ -199,11 +199,30 @@ namespace Server.Medius
         }
         // Retail clans are not implemented, so every account is in none. The Community screen asks for
         // the player's clan list before it shows anything (Friends included) and accepts "no results"
-        // as success. Other clan requests stay unanswered and are reported with their bytes.
+        // as success, then asks for clan invitations (none) and, at lobby entry, sends type 0x14 (acknowledged).
+        // Other clan requests stay unanswered and are reported with their bytes.
         private IReadOnlyList<RT_MSG_SERVER_PLUGIN_TO_APP> HandleClan(byte[] payload, byte clanType, DateTime now)
         {
             if (State != SessionState.Ready)
             { LastRefusal = $"clan-type={clanType:x2}-before-ready"; return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>(); }
+            if (clanType == MagRetailClanCodec.GetInvitationsType)
+            {
+                // The Community refresh waits for this answer; with none it times out and hides Friends.
+                if (!MagRetailClanCodec.TryParseGetInvitationsRequest(payload, ApplicationId, out var invitationsRequestId, out var invitationsAccountId))
+                { LastRefusal = "malformed-clan-invitations-request"; ObserveActivity(now); return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>(); }
+                StorageStatus = invitationsAccountId == AccountId ? "clan-invitations-none"
+                    : $"clan-invitations-none-other-account={invitationsAccountId}/session={AccountId}";
+                ObserveActivity(now);
+                return new[] { MagPluginRouting.ToMlsClient(MagRetailClanCodec.SerializeNoInvitationsResponse(invitationsRequestId), ApplicationId) };
+            }
+            if (clanType == MagRetailClanCodec.LobbyEntryType)
+            {
+                if (!MagRetailClanCodec.TryParseLobbyEntryRequest(payload, ApplicationId, out var lobbyRequestId))
+                { LastRefusal = "malformed-clan-14-request"; ObserveActivity(now); return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>(); }
+                StorageStatus = "clan-14-ack";
+                ObserveActivity(now);
+                return new[] { MagPluginRouting.ToMlsClient(MagRetailClanCodec.SerializeLobbyEntryAck(lobbyRequestId), ApplicationId) };
+            }
             if (clanType != MagRetailClanCodec.GetClanListType)
             { LastRefusal = $"unhandled-clan-type={clanType:x2}"; ObserveActivity(now); return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>(); }
             if (!MagRetailClanCodec.TryParseGetClanListRequest(payload, ApplicationId, out var requestId, out var accountId))
