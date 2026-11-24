@@ -1308,6 +1308,12 @@ pub struct Engine<W: Write> {
     minimum_players_per_team: [usize; 2],
     maximum_players: usize,
     match_started: bool,
+    /// The limits above came from an accepted `configure_match`, not the
+    /// singleton development default.
+    match_configured: bool,
+    /// Served bridge workers refuse admission until `configure_match` has been
+    /// accepted. In-process harnesses keep the singleton default.
+    require_match_configuration: bool,
     /// Wall time of the request being handled, for records made outside a plan.
     last_wall_secs: u64,
     world_epoch: Option<Duration>,
@@ -1667,6 +1673,12 @@ impl<W: Write> Engine<W> {
     pub(crate) fn development_dummy_enabled(&self) -> bool {
         self.development_dummy && self.wire_profile.catalog_item_ids_valid()
     }
+    /// Refuse `reserve`/`reserve_party` with `match_not_configured` until a
+    /// `configure_match` is accepted. The served bridge enables this so a
+    /// restarted worker can never admit a player under the singleton default.
+    pub fn require_match_configuration(&mut self) {
+        self.require_match_configuration = true;
+    }
     /// Explicit local target; never admitted as a fake connected client.
     pub fn with_development_dummy(mut self) -> Self {
         self.development_dummy = true;
@@ -1745,6 +1757,15 @@ impl<W: Write> Engine<W> {
                 },
                 code,
             );
+        }
+        if self.require_match_configuration
+            && !self.match_configured
+            && matches!(
+                &request,
+                Request::Reserve { .. } | Request::ReserveParty { .. }
+            )
+        {
+            return Response::error(request_id, "match_not_configured");
         }
         if let Some(result) = self.handle_party_request(&request, now, wall_secs) {
             return match result {
@@ -1995,6 +2016,20 @@ impl<W: Write> Engine<W> {
                 }
                 self.validate_team_quorum(minimum_players_per_team, maximum_players)?;
                 if self.active.is_some() || !self.peers.is_empty() {
+                    // A reconnecting legacy Horizon re-sends its configuration.
+                    // The same limits on a configured worker are confirmed without
+                    // touching the running match; anything else stays locked.
+                    // Profile formations always configure an empty world.
+                    if self.match_configured
+                        && self.match_profiles.is_none()
+                        && self.wire_profile.application_id() == application_id
+                        && self.minimum_players == minimum_players
+                        && self.minimum_players_per_team == minimum_players_per_team
+                        && self.maximum_players == maximum_players
+                    {
+                        self.record(json!({"op":"match_configuration_confirmed","application_id":application_id,"minimum_players":minimum_players,"minimum_players_per_team":minimum_players_per_team,"maximum_players":maximum_players}),wall_secs)?;
+                        return Ok(Vec::new());
+                    }
                     return Err("match_configuration_locked");
                 }
                 let profile = self.wire_profiles.profile(application_id)?;
@@ -2013,6 +2048,7 @@ impl<W: Write> Engine<W> {
                 self.wire_profile = profile;
                 self.maximum_players = maximum_players;
                 self.match_started = self.starts_without_quorum();
+                self.match_configured = true;
                 Ok(Vec::new())
             }
             Request::Reserve {

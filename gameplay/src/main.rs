@@ -1977,6 +1977,8 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             );
             return Ok(());
         }
+        // Served workers wait for Horizon's configure_match before admission.
+        engine.require_match_configuration();
         let engine = Arc::new(Mutex::new(engine));
         let listener = TcpListener::bind(bind)?;
         let started = Instant::now();

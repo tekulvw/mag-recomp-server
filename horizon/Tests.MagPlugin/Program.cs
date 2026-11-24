@@ -61,6 +61,7 @@ Test("operator Training level raises new completions to an earned-equivalent min
 Test("unsupported join requests name their rejection", JoinRejectionChecks.Run);
 Test("refused gameplay admission names its release reason", AdmissionFailureChecks.Run);
 Test("rejected gameplay release cannot hold admission forever", RejectedReleaseChecks.Run);
+Test("restarted legacy gameplay worker is reconfigured before admission", LeadershipProgressionChecks.LegacyWorkerRestartReconfigures);
 
 Test("committed loadout selection persistence", LoadoutSelectionChecks.Run);
 

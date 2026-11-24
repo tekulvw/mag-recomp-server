@@ -31,6 +31,19 @@ allocation, squad bindings and capacity, and refuses incompatible configurations
 before Horizon opens queues. Nonzero team minima require automatic team assignment
 and cannot be combined with the single-player development dummy.
 
+A gameplay process starts in a one-player development default until it accepts
+`configure_match`. A served worker (`--bind`) therefore refuses `reserve` and
+`reserve_party` with `match_not_configured` until then; in-process harnesses keep
+the default. Without faction profiles, Horizon configures the worker at startup and
+again on every world-stream reconnection before that stream may reopen admission,
+so a worker restarted on its own gets the real limits back. A worker already
+configured with the same limits confirms them even while players are reserved;
+different limits stay `match_configuration_locked`. Horizon keeps admission closed
+and retries every second while configuration is refused, and treats a
+`match_not_configured` admission refusal as a restart: it closes admission,
+reconnects the world stream and reconfigures. Each accepted configuration logs
+`Configured gameplay worker: max=… min=…`.
+
 Only current, claimed human reservations that have completed initial object
 publication and report Ready count. The pending initial Ready is evaluated by the
 same rule when choosing the initial GameState phase. Expired, backlogged, unclaimed

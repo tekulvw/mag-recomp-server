@@ -205,6 +205,8 @@ impl<W: Write> Engine<W> {
             minimum_players_per_team: [0; 2],
             maximum_players: 1,
             match_started: true,
+            match_configured: false,
+            require_match_configuration: false,
             last_wall_secs: 0,
             world_epoch: None,
             bot_registry: Default::default(),
