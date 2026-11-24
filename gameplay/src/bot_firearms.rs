@@ -193,6 +193,10 @@ impl State {
     pub(super) fn equipment_matches(&self, key: EquipmentKey) -> bool {
         self.equipment == Some(key)
     }
+    /// Object index of the enemy this weapon currently holds, if any.
+    pub(super) fn target_index(&self) -> Option<u16> {
+        self.target.as_ref().map(|life| life.id)
+    }
     fn bind(
         &mut self,
         key: EquipmentKey,
@@ -278,15 +282,25 @@ pub(super) fn safe_for_supply_observation(bot: &WorldBot) -> bool {
 }
 
 fn safe_for_phase(bot: &WorldBot, allow_owned_walk: bool) -> bool {
+    safe_for(bot, allow_owned_walk, false)
+}
+
+/// A route paused by a perception reaction is still relocating (and may be
+/// an operator's approach), but its body stands still and may fire.
+pub(super) fn safe_while_held(bot: &WorldBot) -> bool {
+    safe_for(bot, false, true)
+}
+
+fn safe_for(bot: &WorldBot, allow_owned_walk: bool, held: bool) -> bool {
     let r = bot.target.runtime.unwrap();
     bot.health > 0
         && !matches!(r.phase, BotPhase::Dead)
-        && (allow_owned_walk || !matches!(r.phase, BotPhase::Relocating))
+        && (allow_owned_walk || held || !matches!(r.phase, BotPhase::Relocating))
         && r.physics_motion
             .is_some_and(|m| m.grounded && m.slide_velocity == [0.; 2])
-        && !r.navmesh_state.movement.sprinting()
+        && (held || !r.navmesh_state.movement.sprinting())
         && !r.navmesh_state.on_player
-        && !bot.task.operator
+        && (held || !bot.task.operator)
         && !bot.task.recovering
         && !bot.drop_committed
         && bot.drop_waiting.is_none()
@@ -552,6 +566,7 @@ impl<W: Write> Engine<W> {
             });
         }
         let mut messages = Vec::new();
+        let perception_holds = self.bot_perception.held_ids();
         let mut rays = policy.max_rays_per_tick;
         let mut work = policy.geometry_work_per_tick;
         let map = self.map_name().to_owned();
@@ -576,7 +591,8 @@ impl<W: Write> Engine<W> {
                 continue;
             };
             let bot = &self.bot_registry.bots[&id];
-            if !safe_for_supply_observation(bot) {
+            let paused = perception_holds.contains(&id) && safe_while_held(bot);
+            if !safe_for_supply_observation(bot) && !paused {
                 let state = &mut self.bot_registry.bots.get_mut(&id).unwrap().firearm;
                 if let Some(profile) = state.recoil_profile {
                     let dt = state
@@ -759,6 +775,23 @@ impl<W: Write> Engine<W> {
             if state.target.is_none() {
                 state.recoil.tick(recoil_profile, dt, false, 0., 0.);
             }
+            // Without a target, face whatever perception last noticed.
+            let attending = state
+                .target
+                .is_none()
+                .then(|| self.bot_perception.attention(id, now))
+                .flatten();
+            if let Some(point) = attending {
+                let facing =
+                    f64::from(self.bot_registry.bots[&id].yaw) * std::f64::consts::TAU / 1024.;
+                let wanted = (point[0] - from[0]).atan2(point[2] - from[2]);
+                state.yaw = turn(
+                    facing,
+                    wanted,
+                    policy.turn_degrees_per_second.to_radians() * dt,
+                )
+                .0;
+            }
             if let Some(target) = state
                 .target
                 .as_ref()
@@ -767,10 +800,11 @@ impl<W: Write> Engine<W> {
             {
                 threat = bot_resupply::Threat::Enemy;
                 let to = torso(target.feet);
-                let moving = matches!(
-                    self.bot_registry.bots[&id].target.runtime.unwrap().phase,
-                    BotPhase::Relocating
-                );
+                let moving = !paused
+                    && matches!(
+                        self.bot_registry.bots[&id].target.runtime.unwrap().phase,
+                        BotPhase::Relocating
+                    );
                 let held = matches!(
                     schedule.initial_fire_mode,
                     retail_combat::RetailFireMode::Auto
@@ -886,7 +920,9 @@ impl<W: Write> Engine<W> {
             let publish = pitch_changed
                 || reload_changed
                 || shot.is_some()
-                || (state.target.is_some() && yaw != self.bot_registry.bots[&id].yaw);
+                || ((state.target.is_some() || attending.is_some())
+                    && yaw != self.bot_registry.bots[&id].yaw);
+            let fired_path = shot.as_ref().map(|(_, _, _, end)| *end);
             let mut receipts = Vec::new();
             if let Some(reason) = blocked
                 && state
@@ -1107,6 +1143,18 @@ impl<W: Write> Engine<W> {
                         damage_revision,
                     },
                 );
+            }
+            if let Some(end) = fired_path {
+                // The other team hears the shot; its path past them is a near miss.
+                let kind =
+                    crate::bot_perception::bot_firearm_kind(&items, &self.bot_registry.bots[&id]);
+                self.bot_perception.push(crate::bot_perception::Sound {
+                    kind,
+                    team: me.team,
+                    source: id,
+                    origin: from,
+                    path_end: Some([0, 1, 2].map(|i| from[i] + (end[i] - from[i]) * 1.25)),
+                });
             }
             let bot = self.bot_registry.bots.get_mut(&id).unwrap();
             bot.firearm = state;
