@@ -301,6 +301,12 @@ fn fenced_requests_keep_the_existing_strict_schema() {
         &identity,
         Some("worker_identity_mismatch"),
     );
+    reply(
+        worker.request(&with_fence(configure(), &identity)),
+        &json!("configure"),
+        &identity,
+        None,
+    );
     assert_eq!(
         worker.request(&with_fence(reserve(), &identity))["ok"],
         true
@@ -369,8 +375,17 @@ fn workers_with_colliding_indices_and_restarted_worker_have_separate_state() {
         &identity_a,
         None,
     );
+    // A reconnecting Horizon re-sends the same limits: confirmed, not locked.
     reply(
         second.request(&with_fence(configure(), &identity_b)),
+        &json!("configure"),
+        &identity_b,
+        None,
+    );
+    let mut changed = configure();
+    changed["maximum_players"] = json!(2);
+    reply(
+        second.request(&with_fence(changed, &identity_b)),
         &json!("configure"),
         &identity_b,
         Some("match_configuration_locked"),
@@ -415,6 +430,40 @@ fn workers_with_colliding_indices_and_restarted_worker_have_separate_state() {
         replacement.request(&with_fence(reserve(), &replacement_id)),
         &json!("reserve"),
         &replacement_id,
+        None,
+    );
+}
+
+#[test]
+fn served_worker_refuses_admission_until_match_is_configured() {
+    // A restarted worker must not admit anyone under the singleton default.
+    let legacy = Worker::spawn(None);
+    assert_eq!(legacy.hello()["ok"], true);
+    let refused = legacy.request(&reserve());
+    assert_eq!(refused["ok"], false, "{refused}");
+    assert_eq!(refused["error"], "match_not_configured", "{refused}");
+    assert_eq!(legacy.request(&configure())["ok"], true);
+    let admitted = legacy.request(&reserve());
+    assert_eq!(admitted["ok"], true, "{admitted}");
+
+    let worker = Worker::spawn(Some("arena-A"));
+    let identity = worker.identity("arena-A");
+    reply(
+        worker.request(&with_fence(reserve(), &identity)),
+        &json!("reserve"),
+        &identity,
+        Some("match_not_configured"),
+    );
+    reply(
+        worker.request(&with_fence(configure(), &identity)),
+        &json!("configure"),
+        &identity,
+        None,
+    );
+    reply(
+        worker.request(&with_fence(reserve(), &identity)),
+        &json!("reserve"),
+        &identity,
         None,
     );
 }

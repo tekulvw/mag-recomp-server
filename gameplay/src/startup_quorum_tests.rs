@@ -288,3 +288,31 @@ fn startup_quorum_real_ready_events_start_once_and_late_join_keeps_the_epoch() {
     assert_eq!(starts.len(), 1);
     assert_eq!(starts[0]["ready_players_per_team"], json!([1, 1]));
 }
+#[test]
+fn served_engine_refuses_admission_until_configured_then_confirms_identical_limits() {
+    // A restarted bridge worker starts in the singleton default. It must not
+    // admit anyone until Horizon's configuration has been accepted.
+    let mut engine = engine();
+    engine.require_match_configuration();
+    let refused = reserve_identity(&mut engine, 0, 1, "synthetic-reservation-0000");
+    assert_eq!(refused.error.as_deref(), Some("match_not_configured"));
+    assert!(engine.active.is_none() && engine.peers.is_empty());
+    assert!(configure_quorum(&mut engine, 1, [0, 0]).ok);
+    reserve(&mut engine, 0);
+    reserve(&mut engine, 1);
+    // A reconnecting Horizon re-sends the same limits to a live match.
+    let confirmed = configure_quorum(&mut engine, 1, [0, 0]);
+    assert!(confirmed.ok, "{:?}", confirmed.error);
+    assert_eq!((engine.minimum_players, engine.maximum_players), (1, 16));
+    assert_eq!(
+        configure_quorum(&mut engine, 2, [0, 0]).error.as_deref(),
+        Some("match_configuration_locked"),
+        "different limits must not reconfigure a live match"
+    );
+}
+#[test]
+fn in_process_engine_keeps_the_unconfigured_singleton_default() {
+    let mut engine = engine();
+    assert!(!engine.match_configured);
+    reserve(&mut engine, 0);
+}
