@@ -240,5 +240,12 @@ checksum of everything Medius cannot reload live.
 {{- with ($root.Values.worldRegistry | default dict).partyInviteSeconds -}}
 {{- $_ := set $registry "party_invite_seconds" (int .) -}}
 {{- end -}}
+{{- with ($root.Values.worldRegistry | default dict).workerRestartAdoption -}}
+{{- $adoption := dict -}}
+{{- if hasKey . "enabled" -}}{{- $_ := set $adoption "enabled" .enabled -}}{{- end -}}
+{{- if hasKey . "maxAdoptions" -}}{{- $_ := set $adoption "max_adoptions" (int .maxAdoptions) -}}{{- end -}}
+{{- if hasKey . "windowSeconds" -}}{{- $_ := set $adoption "window_seconds" (int .windowSeconds) -}}{{- end -}}
+{{- $_ := set $registry "worker_restart_adoption" $adoption -}}
+{{- end -}}
 {{- toPrettyJson $registry -}}
 {{- end -}}

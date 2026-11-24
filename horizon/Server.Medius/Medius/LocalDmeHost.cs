@@ -261,6 +261,7 @@ namespace Server.Medius
             _supportsAssistRewards = hello.Capabilities.Contains("assist_rewards_v1", StringComparer.Ordinal);
             _supportsWorldStreamResume = hello.SupportsWorldStreamResume;
             _supportsEventReplay = hello.SupportsEventReplay;
+            WorkerContract = MagWorkerContract.From(hello);
         }
         public static void RequireLoadoutSelectionCapability(GameplayBridgeResponse hello)
         {
@@ -556,6 +557,7 @@ namespace Server.Medius
             foreach (var delivery in deliveries) delivery.client.EnqueueTcp(delivery.message.ToScertMessage());
             foreach (var r in completed) r.TerminalMatchId = reply.MatchTerminal.MatchId;
             if (_independentMatchCohorts && completed.Any(r => r.Client.DmeWorld == AdmissionWorld)) _admissionTerminal = true;
+            NoteReceipts(reply);
             return true;
         }
         async Task RunWorldStreamAsync()
@@ -864,6 +866,7 @@ namespace Server.Medius
                     string status = _loadoutSelections.Settle(action, DateTime.UtcNow, IsCurrentLoadoutOwner,
                         selection => _store.SaveLastUsedLoadoutForAccount(selection.AccountId, selection.CharacterId, selection.InventoryIndex, selection.LayoutRevision));
                     if (status == null) { retry = true; continue; }
+                    lock (_gate) _receipts.Settle(GameplayReceiptLedger.SelectionKey(action));
                     var ack = await _bridge.RequestLoadoutSelectionSettlementAsync(new { v = 2, request_id = Id(), op = "loadout_selection_settled",
                         reservation_id = action.ReservationId, world_id = action.WorldId, player_id = action.PlayerId,
                         selection_id = action.SelectionId, revision = action.Revision, status });
@@ -934,6 +937,7 @@ namespace Server.Medius
                         finally { _rewardSettlement.Release(); }
                         if (result.Result != MagNetResult.Success)
                         { retry = true; Logger.Warn($"Gameplay reward not committed: player={owner.Client.DmeId} reason={result.Reason}"); break; }
+                        lock (_gate) _receipts.Settle(GameplayReceiptLedger.RewardKey(reward));
                         // Publish the latest account record, not an older receipt snapshot.
                         // A missed notification is also repaired by the next0238 query.
                         Action<MagCharacterRecord> notify = null;

@@ -782,6 +782,25 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 3600
+        },
+        "workerRestartAdoption": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "maxAdoptions": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "windowSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 86400
+            }
+          }
         }
       }
     },

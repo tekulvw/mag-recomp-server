@@ -34,8 +34,10 @@ if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(RealRegistryWo
 {
     Test("configured registry real workers", RealRegistryWorkerChecks.Run);
     Test("configured registry real workers grouped", RealRegistryWorkerChecks.RunParties);
+    Test("configured registry real workers restart adoption", RealRegistryWorkerChecks.RunRestart);
 }
 Test("registry DME host world and lease isolation", RegistryDmeHostChecks.Run);
+Test("configured registry restarted worker adoption", RegistryAdoptionChecks.Run);
 Test("bundled server NEWS formatting and bounds", ServerNewsChecks.Formatting);
 Test("bundled server NEWS and EULA wire responses", ServerNewsChecks.Run);
 

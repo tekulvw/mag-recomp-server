@@ -29,11 +29,19 @@ internal static class RealRegistryWorkerChecks
         LeadershipProgressionChecks.RealRegistryParties(binary, catalogs);
     }
 
+    public static void RunRestart()
+    {
+        string binary = Path.GetFullPath(Environment.GetEnvironmentVariable(BinaryVariable));
+        string catalogs = Path.GetFullPath(Environment.GetEnvironmentVariable(CatalogsVariable));
+        LeadershipProgressionChecks.RealRegistryRestart(binary, catalogs);
+    }
+
     internal sealed class Worker : IAsyncDisposable
     {
         private readonly Process _process;
         private readonly Task<string> _errors;
         private readonly string _journal;
+        private int _disposed;
         public string Id { get; }
         public int Port { get; private set; }
 
@@ -45,9 +53,12 @@ internal static class RealRegistryWorkerChecks
             _errors = process.StandardError.ReadToEndAsync();
         }
 
-        public static async Task<Worker> StartAsync(string id, string directory, string binary, string catalogs, bool parties = false)
+        /// <summary>Start an owned worker. <paramref name="port"/> rebinds a known endpoint, as a restarted
+        /// worker does; <paramref name="instance"/> keeps each process's journal separate.</summary>
+        public static async Task<Worker> StartAsync(string id, string directory, string binary, string catalogs, bool parties = false,
+            int port = 0, string instance = null)
         {
-            string workingDirectory = Directory.CreateDirectory(Path.Combine(directory, id)).FullName;
+            string workingDirectory = Directory.CreateDirectory(Path.Combine(directory, instance ?? id)).FullName;
             string journal = Path.Combine(workingDirectory, "worker.jsonl");
             var start = new ProcessStartInfo(binary)
             {
@@ -56,7 +67,7 @@ internal static class RealRegistryWorkerChecks
                 RedirectStandardOutput = true,
                 RedirectStandardError = true
             };
-            foreach (string arg in new[] { "--worker-id", id, "--bind", "127.0.0.1:0", "--log", journal, "--application-id", "20231" })
+            foreach (string arg in new[] { "--worker-id", id, "--bind", $"127.0.0.1:{port}", "--log", journal, "--application-id", "20231" })
                 start.ArgumentList.Add(arg);
             foreach (var (option, file) in new[]
             {
@@ -82,7 +93,7 @@ internal static class RealRegistryWorkerChecks
                     if (message?["event"]?.GetValue<string>() == "listening")
                     {
                         var endpoint = IPEndPoint.Parse(message["address"].GetValue<string>());
-                        if (!endpoint.Address.Equals(IPAddress.Loopback) || endpoint.Port == 0)
+                        if (!endpoint.Address.Equals(IPAddress.Loopback) || endpoint.Port == 0 || (port != 0 && endpoint.Port != port))
                             throw new IOException("The owned synthetic worker did not bind an ephemeral loopback endpoint.");
                         worker.Port = endpoint.Port;
                         return worker;
@@ -125,8 +136,12 @@ internal static class RealRegistryWorkerChecks
             return lines.SkipLast(1).Select(line => JsonNode.Parse(line).AsObject()).ToArray();
         }
 
+        /// <summary>Kill the process abruptly, as a crash would. Idempotent.</summary>
+        public Task KillAsync() => DisposeAsync().AsTask();
+
         public async ValueTask DisposeAsync()
         {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
             using (_process)
             {
                 if (!_process.HasExited)

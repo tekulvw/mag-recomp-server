@@ -305,6 +305,15 @@ internal static partial class LeadershipProgressionChecks
         public Func<JsonObject, bool> RefuseParty;
         readonly ConcurrentDictionary<string, string[]> _partyReservations = new(StringComparer.Ordinal);
         public volatile string IncarnationId = "fixture-1";
+        // Restart simulation (all off by default). Fence answers a request fenced for another
+        // incarnation as the real worker does; Offline closes every connection unanswered, like a
+        // stopped process; BreakStreams ends open world streams without changing the incarnation.
+        public volatile bool Fence;
+        public volatile bool Offline;
+        public volatile bool WithholdPolledRewards;
+        public volatile int ProfileTeamCapacity = 4;
+        private CancellationTokenSource _streams = new();
+        public void BreakStreams() => Interlocked.Exchange(ref _streams, new CancellationTokenSource()).Cancel();
 
         private static readonly JsonObject[] Profiles = (from byte attacker in new byte[] { 0, 1, 2 }
             from byte defender in new byte[] { 0, 1, 2 }
@@ -348,15 +357,29 @@ internal static partial class LeadershipProgressionChecks
             {
                 try
                 {
-                    var request = JsonNode.Parse(await reader.ReadLineAsync(_stop.Token))!.AsObject();
+                    if (Offline) return;
+                    var line = await reader.ReadLineAsync(_stop.Token);
+                    if (line == null || Offline) return;
+                    var request = JsonNode.Parse(line)!.AsObject();
                     Requests.Enqueue(request);
                     var response = CohortReply();
                     string op = request["op"]!.GetValue<string>();
+                    string incarnation = IncarnationId;
+                    var streams = Volatile.Read(ref _streams);
                     async Task ReplyAsync(JsonObject reply)
                     {
                         reply["request_id"] = request["request_id"]!.DeepClone();
-                        reply["worker_identity"] ??= new JsonObject { ["worker_id"] = _workerId, ["incarnation_id"] = IncarnationId };
+                        reply["worker_identity"] ??= new JsonObject { ["worker_id"] = _workerId, ["incarnation_id"] = incarnation };
                         await writer.WriteLineAsync(reply.ToJsonString().AsMemory(), _stop.Token);
+                    }
+                    if (Fence && (request["worker_identity"] is JsonObject fence
+                        ? fence["incarnation_id"]?.GetValue<string>() != incarnation || fence["worker_id"]?.GetValue<string>() != _workerId
+                        : op != "hello"))
+                    {
+                        response["ok"] = false;
+                        response["error"] = request.ContainsKey("worker_identity") ? "worker_identity_mismatch" : "worker_identity_required";
+                        await ReplyAsync(response);
+                        return;
                     }
                     switch (op)
                     {
@@ -364,6 +387,7 @@ internal static partial class LeadershipProgressionChecks
                             response["capabilities"] = new JsonArray("committed_loadout_selection_v1", "active_loadout_refresh_v1",
                                 "match_profiles_v1", "independent_match_cohorts_v1", "worker_registry_v1");
                             response["match_profiles"] = new JsonArray(Profiles.Select(p => p.DeepClone()).ToArray());
+                            foreach (var profile in response["match_profiles"]!.AsArray()) profile!["team_capacity"] = ProfileTeamCapacity;
                             if (SupportsBotFill)
                             {
                                 response["capabilities"]!.AsArray().Add("bot_fill_v1");
@@ -379,7 +403,7 @@ internal static partial class LeadershipProgressionChecks
                                     profile["squad_counts"] = new JsonArray(2, 2);
                                 }
                             }
-                            if (PendingReward is JsonNode reward) response["rewards"] = new JsonArray(reward.DeepClone());
+                            if (PendingReward is JsonNode reward && !WithholdPolledRewards) response["rewards"] = new JsonArray(reward.DeepClone());
                             break;
                         case "progression_committed":
                             PendingReward = null;
@@ -432,18 +456,19 @@ internal static partial class LeadershipProgressionChecks
                     }
                     await ReplyAsync(response);
                     if (op == "subscribe_world")
-                        await StreamFramesAsync(ReplyAsync);
+                        await StreamFramesAsync(ReplyAsync, streams.Token);
                 }
                 catch (OperationCanceledException) when (_stop.IsCancellationRequested) { }
             }
         }
 
         private volatile JsonNode PendingReward;
-        private async Task StreamFramesAsync(Func<JsonObject, Task> reply)
+        private async Task StreamFramesAsync(Func<JsonObject, Task> reply, CancellationToken streams)
         {
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(_stop.Token, streams);
             using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(500));
-            var pulse = timer.WaitForNextTickAsync(_stop.Token).AsTask();
-            var ready = _frames.Reader.WaitToReadAsync(_stop.Token).AsTask();
+            var pulse = timer.WaitForNextTickAsync(linked.Token).AsTask();
+            var ready = _frames.Reader.WaitToReadAsync(linked.Token).AsTask();
             try
             {
                 while (true)
@@ -456,17 +481,18 @@ internal static partial class LeadershipProgressionChecks
                             if (frame["rewards"]?[0] is JsonNode reward) PendingReward = reward.DeepClone();
                             await reply(frame);
                         }
-                        ready = _frames.Reader.WaitToReadAsync(_stop.Token).AsTask();
+                        ready = _frames.Reader.WaitToReadAsync(linked.Token).AsTask();
                     }
                     else
                     {
                         if (!await pulse) return;
                         if (!PauseHeartbeat) await reply(CohortReply());
-                        pulse = timer.WaitForNextTickAsync(_stop.Token).AsTask();
+                        pulse = timer.WaitForNextTickAsync(linked.Token).AsTask();
                     }
                 }
             }
             catch (IOException) { } // The host may close this fixture subscription on shutdown or a fenced incarnation.
+            catch (OperationCanceledException) when (streams.IsCancellationRequested && !_stop.IsCancellationRequested) { } // BreakStreams.
         }
 
         public async ValueTask DisposeAsync()
