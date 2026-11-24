@@ -36,6 +36,8 @@ pub struct BotPopulation {
     #[serde(default)]
     pub healing: crate::bot_healing::Policy,
     #[serde(default)]
+    pub perception: crate::bot_perception::Policy,
+    #[serde(default)]
     pub regional_collision: Option<RegionalCollision>,
     #[serde(default)]
     pub regional_team: Option<u8>,
@@ -79,6 +81,7 @@ impl BotPopulation {
         }
         self.firearms.validate()?;
         self.healing.validate()?;
+        self.perception.validate()?;
         if let Some(policy) = &self.objective_policy {
             policy.validate()?;
         }
@@ -1333,6 +1336,7 @@ impl<W: Write> Engine<W> {
             .regional_collision
             .clone();
         let respawn_delays = self.match_profile().spawn_wave_ms;
+        let perception_holds = self.bot_perception.held_ids();
         let ids: Vec<_> = self.bot_registry.bots.keys().copied().collect();
         for id in ids {
             // Capture after previous candidates have updated Character state.
@@ -1471,6 +1475,17 @@ impl<W: Write> Engine<W> {
                 }
             }
             if bot.resupply.is_none()
+                && matches!(bot.target.runtime.unwrap().phase, BotPhase::Relocating)
+                && perception_holds.contains(&id)
+            {
+                // Reacting to a threat: keep the route, but do not walk it.
+                // Waiting by choice is neither an objective nor a traffic stall.
+                bot.target.hold_for_perception(now)?;
+                bot.task.hold_progress(now);
+                if let Some(progress) = bot.traffic_progress.as_mut() {
+                    progress.at = now;
+                }
+            } else if bot.resupply.is_none()
                 && matches!(bot.target.runtime.unwrap().phase, BotPhase::Relocating)
             {
                 let movement = bot.target.movement_step_with_drop_admission(

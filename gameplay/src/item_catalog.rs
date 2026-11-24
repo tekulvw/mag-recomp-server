@@ -1018,6 +1018,11 @@ impl ItemCatalog {
             })
     }
 
+    /// Authored category of a qualified retail firearm, when it is known.
+    pub(crate) fn retail_firearm_category(&self, weapon_id: u16) -> Option<&str> {
+        self.qualified_retail_firearm_weapon(weapon_id)?["category"].as_str()
+    }
+
     fn qualified_retail_firearm_weapon(&self, weapon_id: u16) -> Option<&Value> {
         let source_sha256 = self.retail_item_source_sha256.as_deref()?;
         let combat = self.retail_combat().ok()?;

@@ -355,6 +355,11 @@ impl Task {
         self.progress_at = now;
     }
 
+    /// A route paused by a perception reaction is waiting, not stalled.
+    pub(super) fn hold_progress(&mut self, now: Duration) {
+        self.progress_at = now;
+    }
+
     fn finish_segment(&mut self, now: Duration) {
         self.goal = None;
         self.retry_at = now;

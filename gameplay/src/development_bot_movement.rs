@@ -1273,12 +1273,31 @@ impl Target {
         );
         if now
             .saturating_sub(runtime.since)
-            .saturating_sub(runtime.navmesh_state.drop_wait)
+            .saturating_sub(runtime.navmesh_state.paused())
             >= deadline
         {
             runtime.phase = BotPhase::Complete;
             self.pending_move = None;
         }
+    }
+    /// Pause an ordinary route in place while the bot reacts to a threat. The
+    /// paused interval is never simulated later and does not count against
+    /// the move deadline; the body stops sprinting and recovers stamina.
+    pub(super) fn hold_for_perception(&mut self, now: Duration) -> Result<(), &'static str> {
+        let Some(runtime) = self.runtime.as_mut() else {
+            return Ok(());
+        };
+        if self.pending_move.is_none() {
+            return Ok(());
+        }
+        let held = now.saturating_sub(runtime.last_update);
+        runtime.navmesh_state.perception_wait += held;
+        runtime.navmesh_state.movement.advance(
+            retail_movement::MovementIntent::Idle,
+            held.as_secs_f64().min(1.),
+        )?;
+        runtime.last_update = now;
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1312,7 +1331,7 @@ impl Target {
             return Ok(None);
         }
         let wall_elapsed = now.saturating_sub(runtime.since).as_millis();
-        let mut elapsed = wall_elapsed.saturating_sub(runtime.navmesh_state.drop_wait.as_millis());
+        let mut elapsed = wall_elapsed.saturating_sub(runtime.navmesh_state.paused().as_millis());
         let mut finished = elapsed >= u128::from(pending.movement.duration_ms);
         let fraction = (elapsed as f32 / pending.movement.duration_ms as f32).min(1.0);
         let from = pending.from;
@@ -1367,7 +1386,7 @@ impl Target {
                     - runtime
                         .last_update
                         .saturating_sub(runtime.since)
-                        .saturating_sub(runtime.navmesh_state.drop_wait)
+                        .saturating_sub(runtime.navmesh_state.paused())
                         .as_secs_f64())
                 .max(0.0)
                 .min(dt);
@@ -1671,12 +1690,19 @@ pub(super) struct NavmeshRuntime {
     pub on_player: bool,
     pub avoid_left: bool,
     pub drop_wait: Duration,
+    /// Time an ordinary route spent paused by a perception reaction.
+    pub perception_wait: Duration,
     pub navigation_aborted: bool,
     airborne_settle_seconds: f64,
 }
 impl NavmeshRuntime {
+    /// Held time excluded from a move's deadline.
+    fn paused(&self) -> Duration {
+        self.drop_wait + self.perception_wait
+    }
     fn for_new_move(mut self) -> Self {
         self.drop_wait = Duration::ZERO;
+        self.perception_wait = Duration::ZERO;
         self.navigation_aborted = false;
         self.airborne_settle_seconds = 0.;
         self

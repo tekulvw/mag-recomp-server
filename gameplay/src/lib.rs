@@ -48,6 +48,9 @@ pub mod bot_healing;
 pub mod bot_names;
 pub mod bot_navigation;
 mod bot_objectives;
+mod bot_perception;
+#[cfg(test)]
+mod bot_perception_tests;
 pub mod bot_physics;
 mod bot_regional_collision;
 pub mod bot_registry;
@@ -1355,6 +1358,7 @@ pub struct Engine<W: Write> {
     last_wall_secs: u64,
     world_epoch: Option<Duration>,
     bot_registry: bot_registry::BotRegistry,
+    bot_perception: bot_perception::World,
     bot_names: bot_names::Catalog,
     world_tick_enabled: bool,
     last_world_tick: Option<Duration>,
