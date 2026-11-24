@@ -229,6 +229,7 @@ mod smoke_sabotage_tests;
 pub mod smoke_volume_replication;
 pub mod spawn_catalog;
 mod spawn_progression;
+pub mod static_world_frags;
 mod structural_repair_authority;
 pub mod structure_catalog;
 pub mod structures;
@@ -1393,6 +1394,8 @@ pub struct Engine<W: Write> {
     flash_grenades: Option<std::sync::Arc<flash_grenades::Catalog>>,
     hospital_rocket_ground: Option<std::sync::Arc<hospital_rocket_ground::Catalog>>,
     frag_character_blast: bool,
+    /// Sabotage frag Character blast against the static map world.
+    static_world_frag_blast: bool,
     projectile_contacts: Option<std::sync::Arc<domination_projectile_collision::ContactBindings>>,
     acquisition_gameplay: Option<acquisition_gameplay_engine::Runtime>,
     squad_orders: Option<squad_order_engine::Runtime>,

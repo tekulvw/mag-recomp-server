@@ -857,7 +857,7 @@ impl<W: Write> Engine<W> {
                 .ok_or("domination_structural_blast_bot_pose_missing")?;
             (runtime.physical_position().map(|value| value as f32), 0)
         };
-        position[1] += [2.0, 0.8, 0.3, 1.8]
+        position[1] += CHARACTER_BLAST_ANCHOR_HEIGHT_M
             .get(usize::from(stance))
             .ok_or("domination_structural_blast_unqualified_stance")?;
         Ok(Some((target, position)))
@@ -1407,6 +1407,9 @@ pub(crate) fn native_command_falloff(
     };
     Ok((outer_scale - inner_scale).mul_add(fraction, inner_scale))
 }
+
+/// Height of a Character's blast anchor above its feet, by stance.
+pub(crate) const CHARACTER_BLAST_ANCHOR_HEIGHT_M: [f32; 4] = [2.0, 0.8, 0.3, 1.8];
 
 fn separation(origin: [f32; 3], point: [f32; 3]) -> Result<([f32; 3], f32), &'static str> {
     let displacement: [f32; 3] = std::array::from_fn(|axis| point[axis] - origin[axis]);

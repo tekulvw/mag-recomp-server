@@ -114,7 +114,7 @@ pub(super) fn object_update<W: Write>(
         "smoke_terminals":plan.audit.smoke_terminals,
         "flash_terminals":plan.audit.flash_terminals,
         "grenade_blast_checks":plan.audit.grenade_blast_checks,
-        "grenade_visibility_policy":if ctx.engine.frag_character_blast {"current_body_stance_material_ray"} else if ctx.engine.development_grenade_radius {"disk_triangles_three_body_samples"} else {"unknown_no_damage"},
+        "grenade_visibility_policy":if ctx.engine.frag_character_blast {"current_body_stance_material_ray"} else if ctx.engine.static_frag_world().is_some() {"static_world_stance_anchor_ray"} else if ctx.engine.development_grenade_radius {"disk_triangles_three_body_samples"} else {"unknown_no_damage"},
         "initial_objectives":plan.replication.objective_delta.is_some(),"objective_count":plan.replication.objective_count,
         "initial_emplacement":plan.replication.emplacement_creation.is_some(),
         "assigned_objective":plan.replication.objective_target,
@@ -745,7 +745,7 @@ fn plan_grenade_blasts<W: Write>(
     });
     let queue_limit = blast_visibility::MAX_BLAST_TARGETS
         * usize::from(projectile::projectile_slot_count(ctx.engine.wire_profile));
-    if ctx.engine.frag_character_blast && admitted_owner_blast && detonated {
+    if ctx.engine.frag_character_blast_enabled() && admitted_owner_blast && detonated {
         // Freeze the accepted motion candidate before applying any blast
         // damage to the same Ground runtime.
         let frame = crate::character_frag_damage::FragFrame {
@@ -910,7 +910,7 @@ fn plan_grenade_blasts<W: Write>(
         }
     }
 
-    if !ctx.engine.frag_character_blast
+    if !ctx.engine.frag_character_blast_enabled()
         && ctx.engine.development_grenade_radius
         && body_supported
         && plan.rejection.is_none()
@@ -1171,7 +1171,7 @@ fn plan_update_reply<W: Write>(
     } else if active.ready_for_updates
         && (active.pending_damage.is_some()
             || (!grenade_queue.is_empty()
-                && (!ctx.engine.frag_character_blast
+                && (!ctx.engine.frag_character_blast_enabled()
                     || (ctx.accepted_owner_route && ctx.engine.round_combat_allowed(now)))))
         && history_available
     {

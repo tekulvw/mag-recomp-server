@@ -3,8 +3,9 @@ use crate::{
     Active, CharacterLife, Engine, FragTargetAllocation, PendingDamage, PendingDamageSource,
     acquisition_character_effects, armor,
     blast_visibility::MAX_BLAST_TARGETS,
-    damage,
-    domination_structural_world::{CharacterBlastShape, OnFootBlastPose},
+    collision, damage,
+    domination_structural_world::{BlastCollision, CharacterBlastShape, OnFootBlastPose},
+    dynamic_collision,
     dynamic_collision_runtime::OwnerCollisionView,
     leadership_runtime::LeadershipPlan,
     projectile::{ProjectileTerminal, ProjectileTerminalReason},
@@ -16,6 +17,12 @@ pub(crate) struct FragFrame<'a> {
     pub(crate) pose: OnFootBlastPose,
     pub(crate) ground: Option<&'a crate::acquisition_ground_runtime::Runtime>,
     pub(crate) leadership: &'a LeadershipPlan,
+}
+
+/// The collision a frag blast is tested against.
+enum Scene<'a> {
+    Represented(BlastCollision<'a>, dynamic_collision::Snapshot),
+    Static(&'a collision::CollisionWorld),
 }
 
 #[derive(Default)]
@@ -39,23 +46,30 @@ impl<W: Write> Engine<W> {
         if terminals.peek().is_none() {
             return Ok(FragDamagePlan::default());
         }
-        let collision = if let Some(runtime) = &self.acquisition_gameplay {
-            runtime
-                .blast_collision()
-                .ok_or("acquisition_frag_character_blast_requires_structural")?
+        // Sabotage has only the static map world; the other modes test their
+        // represented bodies, layers and materials.
+        let scene = if let Some(world) = self.static_frag_world() {
+            Scene::Static(world)
         } else {
-            self.domination_gameplay
-                .as_ref()
-                .ok_or("frag_character_blast_world_required")?
-                .frag_blast_collision()
+            let collision = if let Some(runtime) = &self.acquisition_gameplay {
+                runtime
+                    .blast_collision()
+                    .ok_or("acquisition_frag_character_blast_requires_structural")?
+            } else {
+                self.domination_gameplay
+                    .as_ref()
+                    .ok_or("frag_character_blast_world_required")?
+                    .frag_blast_collision()
+            };
+            let snapshot = self.owner_collision_snapshot(
+                collision.filter_rows[6],
+                OwnerCollisionView {
+                    active_position: frame.pose.position,
+                    ground: frame.ground,
+                },
+            )?;
+            Scene::Represented(collision, snapshot)
         };
-        let snapshot = self.owner_collision_snapshot(
-            collision.filter_rows[6],
-            OwnerCollisionView {
-                active_position: frame.pose.position,
-                ground: frame.ground,
-            },
-        )?;
         let catalog = self.item_catalog.retail_combat()?;
         let rules = self.item_catalog.character_blast_rules();
         let mut plan = FragDamagePlan::default();
@@ -66,17 +80,28 @@ impl<W: Write> Engine<W> {
             let frag = catalog
                 .grenade_for_damage(terminal.item_id)
                 .map_err(|_| "frag_character_blast_item_unavailable")?;
-            let shape = CharacterBlastShape {
-                origin: origin.map(f64::from),
-                half_radius_m: frag.half_radius as f32,
-                outer_radius_m: frag.full_radius as f32,
-                material_penetration: frag
-                    .material_penetration
-                    .ok_or("frag_character_blast_material_required")?
-                    as f32,
+            let observations = match &scene {
+                Scene::Represented(collision, snapshot) => {
+                    let shape = CharacterBlastShape {
+                        origin: origin.map(f64::from),
+                        half_radius_m: frag.half_radius as f32,
+                        outer_radius_m: frag.full_radius as f32,
+                        material_penetration: frag
+                            .material_penetration
+                            .ok_or("frag_character_blast_material_required")?
+                            as f32,
+                    };
+                    self.collect_character_blast(world, shape, *collision, snapshot, frame.pose)?
+                }
+                Scene::Static(scene) => self.collect_static_frag_blast(
+                    scene,
+                    world,
+                    origin.map(f64::from),
+                    frag.half_radius as f32,
+                    frag.full_radius as f32,
+                    frame.pose,
+                )?,
             };
-            let observations =
-                self.collect_character_blast(world, shape, collision, &snapshot, frame.pose)?;
             if observations.len() > MAX_BLAST_TARGETS {
                 return Err("invalid_blast_roster");
             }

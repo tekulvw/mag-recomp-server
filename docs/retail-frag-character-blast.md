@@ -73,6 +73,35 @@ Admitted postterminal damage grace leaves the frozen round counters unchanged.
 Existing thrower rewards, assists, death notices and final results retain their
 previous scope.
 
+## Sabotage
+
+Sabotage has no gameplay configuration or represented projectile scene: no
+dynamic body catalog, collision filter rows or material bindings. Its frags use
+the static map world instead. The worker turns this on for a direct retail
+Sabotage launch (no match profiles or Acquisition setup) that loads
+`--collision-world` for its map, `--character-damage-rules` and retail combat
+metadata with grenade damage authority. The `listening` and
+`--validate-catalogs` output report `static_world_frag_blast` with the qualified
+frag items, or the reason it is off. Owner updates then report the grenade
+visibility policy `static_world_stance_anchor_ray` instead of
+`unknown_no_damage`.
+
+Admission, the authored fuse and the owner's reported terminal position are
+unchanged. At detonation, every living on-foot human and registered bot in the
+world whose stance anchor lies inside the authored outer radius is a candidate,
+including the thrower. The event's own Character uses its accepted same-event
+pose; others use their latest tracked position and owner stance. A candidate
+takes the authored dose with the native falloff unless a static triangle crosses
+the straight line from the blast to its anchor. Any crossing is cover: the
+world has no materials to penetrate, so authored material penetration is
+neither required nor applied. Body overlap at the outer edge is not modelled;
+the anchor distance alone decides range.
+
+The dose enters the same ordinary frag queue as the other modes, with the same
+armour, friendly-fire multiplier, provenance, incapacitation, statistics and
+reward handling. Vehicles, objectives and mounted Characters take no frag damage
+in Sabotage.
+
 Blocked-ray native fallback, exposed mounted targets, native projectile physics
 and presentation-specific weapon indices require separate qualification.
 Synthetic checks and scripted original-data Engine replays establish source
