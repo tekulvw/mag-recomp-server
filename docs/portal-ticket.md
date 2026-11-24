@@ -35,19 +35,32 @@ saying which check failed to the client:
 2. The key ID names a configured key, and the signature verifies with it. Signatures in either
    `s` form are valid; the portal emits low `s`.
 3. `issued at` is no more than 60 seconds in the future, `expires at` is in the future, and the
-   lifetime (`expires at − issued at`) is at most 3600 seconds.
+   lifetime (`expires at − issued at`) is at most 43200 seconds (12 hours).
 4. The audience equals the verifier's own configured host name. One portal can issue tickets for
    several game servers (such as `play.magtest.online` and a LAN test server,
    `test.magtest.online`); the audience keeps a ticket for one from being accepted by another.
 5. The account ID is not 0 and the name follows the rule above.
 6. The nonce has been accepted fewer times than the verifier's reuse limit, and remembered until
    its ticket expires. The game reuses one ticket for several sign-ins (MAPS, MAS and statistics
-   login), so a verifier may allow a ticket a small, fixed number of uses instead of one. Medius
-   allows 3 per service and never lets a ticket open a second live session for an account that is
-   already signed in there.
+   login) and for every reconnect until it fetches a new one, so a verifier may allow a ticket a
+   fixed number of uses instead of one. Medius allows 32 per service and never lets a ticket open
+   a second live session for an account that is already signed in there.
 
 The player name keeps the case the player chose. Servers that key accounts by lowercase name
 lowercase it after verification.
+
+## Lifetime
+
+The portal signs tickets for `PORTAL_TICKET_LIFETIME_SECONDS`: 600 by default, at most 43200
+(12 hours). The live portal uses 12 hours. A launcher fetches one ticket when it starts the game,
+and the game keeps sending those bytes, including when it reconnects after the server dropped it;
+a ticket that expires mid-session turns that reconnect into a refused sign-in.
+
+The trade-off: a ticket is a bearer credential until it expires, so a leaked one can sign in as
+its account for up to 12 hours. Two things limit that. A ticket never opens a second live session
+for an account that is already signed in on the same service, and each service accepts it at most
+32 times. A portal ban (`ban <name>`) stops new tickets at once but does not revoke tickets already
+issued: they keep working until they expire, so a ban takes full effect within the lifetime.
 
 ## Audiences
 
@@ -100,15 +113,26 @@ What Medius does with a ticket:
   The RSA words must be zero, as for the development sign-in. Any inconsistency discards the
   partial ticket.
 - It applies the six rules above. A session gets three failed attempts; after that its NP
-  authenticate messages are ignored until it reconnects. A rejected ticket gets no reply, as a
-  rejected development name does.
+  authenticate messages are ignored until it reconnects.
+- A refused ticket gets a failure reply: the NP authenticate reply with its success bit clear,
+  echoing the request's transaction. The client reads that bit, so it ends the sign-in at once
+  instead of waiting for a reply until it gives up. The reply does not say which rule failed. No
+  reply is sent for a chunk that is not the last of its ticket (the client is still sending; its
+  last chunk is answered), or after the session's three failed attempts. With tickets off, a
+  rejected development name still gets no reply.
 - Reuse: the game sends one ticket to MAPS (retail message 0x0034) and the same cached bytes to
-  MAS and the statistics login, so strict single use would lock players out. Each Medius process
-  counts the uses of every nonce and accepts a ticket at most 3 times within its lifetime
-  (`ticket=replayed` after that). MAPS and MAS run as separate processes, so the count is per
-  service. Nonces are kept in memory until their ticket expires, at most 65536 at a time; when
-  that many live nonces are held, new tickets are refused rather than old nonces forgotten. A
-  restart forgets the counts; the short ticket lifetime bounds that window.
+  MAS and the statistics login, and again whenever it reconnects, so strict single use would lock
+  players out. Each Medius process counts the uses of every nonce and accepts a ticket at most 32
+  times within its lifetime (`ticket=replayed` after that). MAPS and MAS run as separate
+  processes, so the count is per service. The count only stops unbounded reuse; the one live
+  session per account rule below is what keeps a shared ticket from signing in a second player.
+- Nonces are kept in memory until their ticket expires, at most 65536 at a time per service (about
+  3 MB). A launch fetches one ticket, so a few thousand players a day use a small part of that.
+  One account may hold at most 128 unexpired nonces (a fresh ticket every six minutes for 12
+  hours); past that its new tickets are refused (`ticket=replay_cache_full`) until its old ones
+  expire, while other accounts are unaffected, so it would take 512 accounts to fill the cache.
+  When it is full of unexpired nonces, new tickets are refused rather than old nonces forgotten.
+  Expired nonces are swept at least once a minute. A restart forgets the counts.
 - One live session per account: a ticket is refused (`ticket=account_signed_in`) while another
   session on the same service holds its account, signed in, connected and not idle past the
   application's client timeout. A disconnect, or that timeout, frees the account for the next
@@ -119,9 +143,13 @@ What Medius does with a ticket:
   are keyed, so a player who claims their existing name keeps their characters. The portal
   account ID stays on the session (`PortalAccountId`) for later use. A character's NP ID must
   still be all zero or carry an online ID equal to that name, ignoring case.
-- Logs carry only the reason class (`ticket=accepted`, `ticket=expired`, `ticket=replayed`, …)
-  in the session state, and the retail no-reply log prints `payload=redacted` for NP
-  authenticate messages. Ticket bytes are never logged.
+- Logs carry the reason class (`ticket=accepted`, `ticket=expired`, `ticket=replayed`, …) in
+  the session state, and the retail no-reply log prints `payload=redacted` for NP authenticate
+  messages. Every refusal also logs a warning for staff, such as
+  `MAG Maps app=20231 portal ticket refused: reason=expired account=alpha account_id=42
+  issued_at=2026-11-23T08:00:00Z expires_at=2026-11-23T08:10:00Z age_s=7260`. The account and
+  times appear only when the portal's signature verified; a forged or garbled ticket logs only
+  its reason. Ticket bytes and nonces are never logged.
 
 Rolling out:
 
@@ -133,4 +161,4 @@ Rolling out:
    sign in. Switching back to `off` restores the development sign-in.
 4. To rotate, publish the new key on the portal, add it next to the old one here, restart, let
    the portal sign with it, then remove the old key after the last old tickets have expired
-   (at most an hour).
+   (at most the portal's ticket lifetime, 12 hours on live).

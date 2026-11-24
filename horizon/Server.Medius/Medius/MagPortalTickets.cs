@@ -142,7 +142,11 @@ namespace Server.Medius
     {
         public const int SignatureBytes = 64;
         public const int MaximumSkewSeconds = 60;
-        public const int MaximumLifetimeSeconds = 3600;
+        /// <summary>
+        /// 12 hours, as the portal allows: a launcher reconnects with the ticket it fetched at launch,
+        /// so a short lifetime turns a dropped connection into a refused sign-in.
+        /// </summary>
+        public const int MaximumLifetimeSeconds = 43200;
         private static readonly byte[] Magic = Encoding.ASCII.GetBytes("MAGT");
         private readonly IReadOnlyDictionary<byte, byte[]> _keys;
         private readonly byte[] _audience;
@@ -156,9 +160,19 @@ namespace Server.Medius
             _audience = Encoding.ASCII.GetBytes(audience);
         }
 
-        public MagPortalTicketReason Verify(byte[] bytes, long nowUnixSeconds, out MagPortalTicket ticket)
+        public MagPortalTicketReason Verify(byte[] bytes, long nowUnixSeconds, out MagPortalTicket ticket) =>
+            Verify(bytes, nowUnixSeconds, out ticket, out _);
+
+        /// <summary>
+        /// As <see cref="Verify(byte[], long, out MagPortalTicket)"/>; <paramref name="signed"/> also
+        /// holds the fields of a ticket whose signature verified when a later check refuses it, for
+        /// staff logs only. Its <see cref="MagPortalTicket.PlayerName"/> is null unless the name
+        /// follows the name rule.
+        /// </summary>
+        public MagPortalTicketReason Verify(byte[] bytes, long nowUnixSeconds, out MagPortalTicket ticket, out MagPortalTicket signed)
         {
             ticket = null;
+            signed = null;
             // 1. Exact length, magic, version and field length ranges.
             if (bytes == null || bytes.Length < 43) return MagPortalTicketReason.Malformed;
             int audienceLength = bytes[42];
@@ -171,17 +185,28 @@ namespace Server.Medius
 
             // 2. Known key and a valid signature (either s form) over the signed prefix.
             if (!_keys.TryGetValue(bytes[5], out var spki)) return MagPortalTicketReason.UnknownKey;
-            bool signed;
+            bool valid;
             using (var ecdsa = ECDsa.Create())
             {
                 ecdsa.ImportSubjectPublicKeyInfo(spki, out _);
-                signed = ecdsa.VerifyData(bytes.AsSpan(0, signedLength), bytes.AsSpan(signedLength, SignatureBytes),
+                valid = ecdsa.VerifyData(bytes.AsSpan(0, signedLength), bytes.AsSpan(signedLength, SignatureBytes),
                     HashAlgorithmName.SHA256, DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
             }
-            if (!signed) return MagPortalTicketReason.BadSignature;
+            if (!valid) return MagPortalTicketReason.BadSignature;
+
+            // The portal signed these fields; checks 3 to 5 decide whether they are acceptable now.
+            ulong issued = ReadUInt64(bytes, 6), expires = ReadUInt64(bytes, 14);
+            uint accountId = (uint)(bytes[22] << 24 | bytes[23] << 16 | bytes[24] << 8 | bytes[25]);
+            var name = bytes.AsSpan(44 + audienceLength, nameLength);
+            bool nameValid = IsLetter(name[0]) && name.ToArray().All(c => IsLetter(c) || c >= '0' && c <= '9' || c == '-' || c == '_');
+            signed = new MagPortalTicket
+            {
+                KeyId = bytes[5], IssuedAt = (long)Math.Min(issued, long.MaxValue), ExpiresAt = (long)Math.Min(expires, long.MaxValue),
+                AccountId = accountId, Nonce = bytes.AsSpan(26, 16).ToArray(), Audience = Encoding.ASCII.GetString(bytes, 43, audienceLength),
+                PlayerName = nameValid ? Encoding.ASCII.GetString(name) : null
+            };
 
             // 3. Time window.
-            ulong issued = ReadUInt64(bytes, 6), expires = ReadUInt64(bytes, 14);
             if (issued > long.MaxValue || expires > long.MaxValue || expires <= issued || expires - issued > MaximumLifetimeSeconds)
                 return MagPortalTicketReason.BadLifetime;
             if ((long)issued > nowUnixSeconds + MaximumSkewSeconds) return MagPortalTicketReason.NotYetValid;
@@ -191,17 +216,9 @@ namespace Server.Medius
             if (!bytes.AsSpan(43, audienceLength).SequenceEqual(_audience)) return MagPortalTicketReason.WrongAudience;
 
             // 5. Account ID and name rule.
-            uint accountId = (uint)(bytes[22] << 24 | bytes[23] << 16 | bytes[24] << 8 | bytes[25]);
-            var name = bytes.AsSpan(44 + audienceLength, nameLength);
-            if (accountId == 0 || !IsLetter(name[0]) || !name.ToArray().All(c => IsLetter(c) || c >= '0' && c <= '9' || c == '-' || c == '_'))
-                return MagPortalTicketReason.BadIdentity;
+            if (accountId == 0 || !nameValid) return MagPortalTicketReason.BadIdentity;
 
-            ticket = new MagPortalTicket
-            {
-                KeyId = bytes[5], IssuedAt = (long)issued, ExpiresAt = (long)expires, AccountId = accountId,
-                Nonce = bytes.AsSpan(26, 16).ToArray(), Audience = Encoding.ASCII.GetString(bytes, 43, audienceLength),
-                PlayerName = Encoding.ASCII.GetString(name)
-            };
+            ticket = signed;
             return MagPortalTicketReason.Accepted;
         }
 
@@ -216,19 +233,47 @@ namespace Server.Medius
 
     /// <summary>
     /// Uses of accepted nonces, each kept until its ticket expires. The game reuses one ticket for
-    /// several sign-ins (MAPS, MAS, statistics), so a nonce may be used <see cref="MaximumUses"/>
-    /// times. Process-local and thread-safe; MAPS and MAS run as separate processes, so the limit
-    /// applies per service. When full of unexpired nonces it refuses new tickets rather than
-    /// forgetting old ones.
+    /// several sign-ins, so a nonce may be used <see cref="MaximumUses"/> times. Process-local and
+    /// thread-safe; MAPS and MAS run as separate processes, so the limits apply per service.
+    /// Memory is bounded by the capacity: when full of unexpired nonces it refuses new tickets
+    /// rather than forgetting old ones, and one account can hold only
+    /// <see cref="MaximumNoncesPerAccount"/> of them, so no single account can fill it.
     /// </summary>
     public sealed class MagPortalNonceCache
     {
-        public const int MaximumUses = 3;
-        private readonly object _gate = new object();
-        private readonly Dictionary<(ulong, ulong), (long Expiry, int Uses)> _entries = new Dictionary<(ulong, ulong), (long, int)>();
-        private readonly int _capacity;
+        /// <summary>
+        /// Sign-ins one ticket may open on one service. The game sends the ticket it fetched at launch
+        /// to MAPS, MAS and the statistics login, and again on every reconnect, for up to the 12-hour
+        /// ticket lifetime. This count only stops unbounded reuse: the main protection against a
+        /// shared or leaked ticket is that it never opens a second live session for an account that
+        /// is already signed in (<see cref="MagPortalLiveSessions"/>).
+        /// </summary>
+        public const int MaximumUses = 32;
 
-        public MagPortalNonceCache(int capacity = 65536)
+        /// <summary>
+        /// Nonces held at once, at about 50 bytes each (some 3 MB when full). Every launch fetches one
+        /// ticket, so a few thousand tickets in a 12-hour window leave room to spare.
+        /// </summary>
+        public const int DefaultCapacity = 65536;
+
+        /// <summary>
+        /// Unexpired nonces one account may hold: a fresh ticket every six minutes for 12 hours. Above
+        /// it, that account's new tickets are refused until its old ones expire; other accounts are
+        /// unaffected. It takes 512 accounts doing this to fill <see cref="DefaultCapacity"/>.
+        /// </summary>
+        public const int MaximumNoncesPerAccount = 128;
+
+        /// <summary>Expired nonces are swept at least this often, and at most once a second.</summary>
+        public const int SweepIntervalSeconds = 60;
+
+        private readonly object _gate = new object();
+        private readonly Dictionary<(ulong, ulong), (long Expiry, int Uses, uint Account)> _entries =
+            new Dictionary<(ulong, ulong), (long, int, uint)>();
+        private readonly Dictionary<uint, int> _perAccount = new Dictionary<uint, int>();
+        private readonly int _capacity;
+        private long _lastSweep = long.MinValue;
+
+        public MagPortalNonceCache(int capacity = DefaultCapacity)
         {
             if (capacity < 1) throw new ArgumentOutOfRangeException(nameof(capacity));
             _capacity = capacity;
@@ -236,27 +281,51 @@ namespace Server.Medius
 
         public int Count { get { lock (_gate) return _entries.Count; } }
 
-        /// <summary>Spends one use of the nonce; Replayed once it has been used <see cref="MaximumUses"/> times.</summary>
-        public MagPortalTicketReason TryUse(byte[] nonce, long expiresAt, long nowUnixSeconds)
+        /// <summary>Nonces held for <paramref name="accountId"/>, including expired ones not yet swept.</summary>
+        public int CountFor(uint accountId) { lock (_gate) return _perAccount.TryGetValue(accountId, out int n) ? n : 0; }
+
+        /// <summary>
+        /// Spends one use of the nonce: Replayed once it has been used <see cref="MaximumUses"/> times,
+        /// ReplayCacheFull when a new nonce does not fit.
+        /// </summary>
+        public MagPortalTicketReason TryUse(byte[] nonce, uint accountId, long expiresAt, long nowUnixSeconds)
         {
             if (nonce == null || nonce.Length != 16) throw new ArgumentException("A nonce is 16 bytes.", nameof(nonce));
             var key = (BitConverter.ToUInt64(nonce, 0), BitConverter.ToUInt64(nonce, 8));
             lock (_gate)
             {
-                if (_entries.TryGetValue(key, out var kept) && kept.Expiry > nowUnixSeconds)
+                if (_entries.TryGetValue(key, out var kept))
                 {
-                    if (kept.Uses >= MaximumUses) return MagPortalTicketReason.Replayed;
-                    _entries[key] = (Math.Max(kept.Expiry, expiresAt), kept.Uses + 1);
-                    return MagPortalTicketReason.Accepted;
+                    if (kept.Expiry > nowUnixSeconds)
+                    {
+                        if (kept.Uses >= MaximumUses) return MagPortalTicketReason.Replayed;
+                        _entries[key] = (Math.Max(kept.Expiry, expiresAt), kept.Uses + 1, kept.Account);
+                        return MagPortalTicketReason.Accepted;
+                    }
+                    Remove(key, kept.Account);
                 }
-                if (_entries.Count >= _capacity)
-                {
-                    foreach (var stale in _entries.Where(kv => kv.Value.Expiry <= nowUnixSeconds).Select(kv => kv.Key).ToArray()) _entries.Remove(stale);
-                    if (_entries.Count >= _capacity) return MagPortalTicketReason.ReplayCacheFull;
-                }
-                _entries[key] = (expiresAt, 1);
+                bool crowded = _entries.Count >= _capacity || CountLocked(accountId) >= MaximumNoncesPerAccount;
+                if (nowUnixSeconds > _lastSweep && (crowded || nowUnixSeconds >= _lastSweep + SweepIntervalSeconds)) Sweep(nowUnixSeconds);
+                if (_entries.Count >= _capacity || CountLocked(accountId) >= MaximumNoncesPerAccount) return MagPortalTicketReason.ReplayCacheFull;
+                _entries[key] = (expiresAt, 1, accountId);
+                _perAccount[accountId] = CountLocked(accountId) + 1;
                 return MagPortalTicketReason.Accepted;
             }
+        }
+
+        private int CountLocked(uint accountId) => _perAccount.TryGetValue(accountId, out int n) ? n : 0;
+
+        private void Remove((ulong, ulong) key, uint accountId)
+        {
+            _entries.Remove(key);
+            int left = CountLocked(accountId) - 1;
+            if (left > 0) _perAccount[accountId] = left; else _perAccount.Remove(accountId);
+        }
+
+        private void Sweep(long nowUnixSeconds)
+        {
+            _lastSweep = nowUnixSeconds;
+            foreach (var stale in _entries.Where(kv => kv.Value.Expiry <= nowUnixSeconds).ToArray()) Remove(stale.Key, stale.Value.Account);
         }
     }
 
@@ -341,9 +410,42 @@ namespace Server.Medius
     {
         public MagPortalTicketReason Reason { get; internal set; }
         public bool Accepted => Reason == MagPortalTicketReason.Accepted;
+        /// <summary>True when the exchange ended without a sign-in (not accepted, not waiting for chunks).</summary>
+        public bool Refused => Reason != MagPortalTicketReason.Accepted && Reason != MagPortalTicketReason.Pending;
         /// <summary>Lowercase player name: the key of existing local characters.</summary>
         public string Account { get; internal set; }
         public uint AccountId { get; internal set; }
+        /// <summary>
+        /// For a refused ticket whose signature verified: its signed fields, for staff logs. Null when
+        /// the ticket was accepted, or refused before its signature could be trusted.
+        /// </summary>
+        public MagPortalTicket RefusedTicket { get; internal set; }
+        /// <summary>The verifier's clock, Unix seconds, when the ticket was checked; 0 before that.</summary>
+        public long CheckedAt { get; internal set; }
+
+        /// <summary>
+        /// One log line naming why a ticket was refused and, when the portal signed it, whose it was
+        /// and when it expires. Never carries ticket bytes or the nonce. Null unless <see cref="Refused"/>.
+        /// </summary>
+        public string RefusalLog()
+        {
+            if (!Refused) return null;
+            var line = new StringBuilder("portal ticket refused: reason=").Append(Reason.Code());
+            var t = RefusedTicket;
+            if (t != null)
+            {
+                line.Append(" account=").Append(t.PlayerName == null ? "invalid-name" : t.PlayerName.ToLowerInvariant())
+                    .Append(" account_id=").Append(t.AccountId.ToString(CultureInfo.InvariantCulture))
+                    .Append(" issued_at=").Append(Iso(t.IssuedAt)).Append(" expires_at=").Append(Iso(t.ExpiresAt))
+                    .Append(" age_s=").Append((CheckedAt - t.IssuedAt).ToString(CultureInfo.InvariantCulture));
+            }
+            return line.ToString();
+        }
+
+        private static string Iso(long unixSeconds) =>
+            unixSeconds >= 0 && unixSeconds <= 253402300799
+                ? DateTime.UnixEpoch.AddSeconds(unixSeconds).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture)
+                : unixSeconds.ToString(CultureInfo.InvariantCulture);
     }
 
     /// <summary>Required-mode sign-in: reassemble, verify, then spend the nonce.</summary>
@@ -388,25 +490,42 @@ namespace Server.Medius
             if (reason == MagPortalTicketReason.Pending) return new MagPortalAuthentication { Reason = reason };
             if (reason != MagPortalTicketReason.Accepted) return Fail(assembly, reason, true);
             long now = UnixSeconds(_clock());
-            reason = _verifier.Verify(bytes, now, out var ticket);
-            if (reason != MagPortalTicketReason.Accepted) return Fail(assembly, reason, true);
+            reason = _verifier.Verify(bytes, now, out var ticket, out var signed);
+            if (reason != MagPortalTicketReason.Accepted) return Fail(assembly, reason, true, signed, now);
             string account = ticket.PlayerName.ToLowerInvariant();
             // Claim first so a refused second session spends none of the ticket's uses.
-            if (owner != null && !Sessions.TryClaim(account, owner, sessionNow)) return Fail(assembly, MagPortalTicketReason.AccountSignedIn, true);
-            reason = Nonces.TryUse(ticket.Nonce, ticket.ExpiresAt, now);
+            if (owner != null && !Sessions.TryClaim(account, owner, sessionNow)) return Fail(assembly, MagPortalTicketReason.AccountSignedIn, true, ticket, now);
+            reason = Nonces.TryUse(ticket.Nonce, ticket.AccountId, ticket.ExpiresAt, now);
             if (reason != MagPortalTicketReason.Accepted)
             {
                 if (owner != null) Sessions.Release(owner);
-                return Fail(assembly, reason, true);
+                return Fail(assembly, reason, true, ticket, now);
             }
-            return new MagPortalAuthentication { Reason = reason, Account = account, AccountId = ticket.AccountId };
+            return new MagPortalAuthentication { Reason = reason, Account = account, AccountId = ticket.AccountId, CheckedAt = now };
         }
 
-        private static MagPortalAuthentication Fail(MagPortalTicketAssembly assembly, MagPortalTicketReason reason, bool count)
+        /// <summary>
+        /// The reply to an NP authenticate message that did not sign in: a well-formed failure (the
+        /// success bit clear), so the client ends its sign-in at once instead of waiting for a reply
+        /// that never comes. Null when no reply is due: while chunks are still arriving, for a
+        /// non-final chunk, and once a session has used up its attempts (those are ignored).
+        /// </summary>
+        public static MagNpAuthenticateResponse RefusalReply(MagNpAuthenticateRequest request, MagPortalAuthentication outcome)
+        {
+            if (request == null || outcome == null || !outcome.Refused || !request.LastMessage ||
+                outcome.Reason == MagPortalTicketReason.TooManyAttempts) return null;
+            MagNpAuthenticateResponse reply = request is MagRetailNpAuthenticateRequest ? new MagRetailNpAuthenticateResponse() : new MagNpAuthenticateResponse();
+            reply.TransactionId = request.TransactionId;
+            reply.Success = false;
+            return reply;
+        }
+
+        private static MagPortalAuthentication Fail(MagPortalTicketAssembly assembly, MagPortalTicketReason reason, bool count,
+            MagPortalTicket signed = null, long checkedAt = 0)
         {
             assembly.Reset();
             if (count) assembly.Failures++;
-            return new MagPortalAuthentication { Reason = reason };
+            return new MagPortalAuthentication { Reason = reason, RefusedTicket = signed, CheckedAt = checkedAt };
         }
 
         internal static long UnixSeconds(DateTime time)
