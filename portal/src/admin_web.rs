@@ -367,6 +367,7 @@ struct UserPage {
     can_act: bool,
     devices: Vec<DeviceView>,
     game_href: Option<String>,
+    social: crate::social::Counts,
 }
 
 async fn user_page(State(state): Shared, headers: HeaderMap, Path(id): Path<i32>) -> PageResult {
@@ -391,6 +392,7 @@ async fn user_page(State(state): Shared, headers: HeaderMap, Path(id): Path<i32>
             last_used: d.last_used_at.map(when).unwrap_or_else(|| "never".into()),
         })
         .collect();
+    let social = crate::social::counts(&state.pool, id).await?;
     let ban = account.banned_at.map(|at| {
         format!(
             "since {}: {}",
@@ -424,6 +426,7 @@ async fn user_page(State(state): Shared, headers: HeaderMap, Path(id): Path<i32>
                 state.settings.game_admin.as_ref(),
                 account.player_name.as_deref(),
             ),
+            social,
         },
     ))
 }
