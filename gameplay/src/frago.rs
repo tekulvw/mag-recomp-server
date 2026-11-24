@@ -200,6 +200,21 @@ impl<W: Write> Engine<W> {
                     .as_ref()
                     .and_then(|r| r.squad_assignment(squad))
             })
+            .or_else(|| self.sabotage_assignment(squad))
+    }
+    /// Sabotage's current primary is its first available authored objective;
+    /// the tag is the held leader's manual order, if squad orders are configured.
+    fn sabotage_assignment(&self, squad: u16) -> Option<acquisition_objective_runtime::Assignment> {
+        if !self.sabotage_squad_assignments() {
+            return None;
+        }
+        Some(acquisition_objective_runtime::Assignment {
+            primary_index: self.initial_objective_index(squad).ok()?,
+            tagged_object: self
+                .squad_orders
+                .as_ref()
+                .map_or(u32::MAX, |runtime| runtime.state.manual_tag(squad)),
+        })
     }
     /// Native callbacks may own a detached world, including its current assignment.
     pub(crate) fn frago_objective_reward(
