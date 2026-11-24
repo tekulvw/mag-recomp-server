@@ -728,6 +728,14 @@ class ChartTests(unittest.TestCase):
             self.assertIn(worker['worker_host'], services)
         self.assertNotIn('party_invite_seconds', json.loads(next(
             d for d in render(self.worker_values()) if d['metadata']['name'] == f'{name}-world-registry')['data']['world-registry.json']))
+        def rendered_registry(**registry_values):
+            return json.loads(next(d for d in render(self.worker_values(worldRegistry=registry_values))
+                                   if d['metadata']['name'] == f'{name}-world-registry')['data']['world-registry.json'])
+        self.assertNotIn('worker_restart_adoption', rendered_registry())
+        self.assertNotIn('worker_restart_adoption', rendered_registry(workerRestartAdoption={}))
+        self.assertEqual(rendered_registry(workerRestartAdoption={'enabled': False})['worker_restart_adoption'], {'enabled': False})
+        self.assertEqual(rendered_registry(workerRestartAdoption={'maxAdoptions': 5, 'windowSeconds': 900})['worker_restart_adoption'],
+                         {'max_adoptions': 5, 'window_seconds': 900})
         wait = init['wait-for-workers']
         self.assertEqual(wait['command'], ['python3', '/scripts/wait_for_workers.py'])
         self.assertEqual(wait['args'], ['300'] + [f'{name}-gameplay-{s}:31000' for s in ('sabotage', 'acq', 'domination')])
@@ -811,7 +819,9 @@ class ChartTests(unittest.TestCase):
         # Without a store to inherit, each worker must name its own bucket and Secret.
         error = render({'gameplayWorkers': workers[:2]}, ok=False)
         self.assertIn('s3.bucket', error)
-        for invalid_registry in ({'partyInviteSeconds': 0}, {'partyInviteSeconds': 301}, {'workerWaitSeconds': -1}, {'other': 1}):
+        for invalid_registry in ({'partyInviteSeconds': 0}, {'partyInviteSeconds': 301}, {'workerWaitSeconds': -1}, {'other': 1},
+                                 {'workerRestartAdoption': {'enabled': 'no'}}, {'workerRestartAdoption': {'maxAdoptions': 0}},
+                                 {'workerRestartAdoption': {'windowSeconds': 86401}}, {'workerRestartAdoption': {'other': 1}}):
             render(self.worker_values(worldRegistry=invalid_registry), ok=False)
 
     def test_wait_for_workers_script(self):

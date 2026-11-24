@@ -44,7 +44,28 @@ internal static class ConfiguredRegistryChecks
         try {config.ValidateDrainReload(MagWorldRegistryConfig.Parse(drain.ToJsonString()));throw new Exception("Structural live reload accepted");} catch(ArgumentException) { }
         try {MagWorldRegistryConfig.Parse(original.ToJsonString().Replace("\"application_id\":20231","\"application_id\":20231,\"application_id\":20231"));throw new Exception("Duplicate property accepted");} catch(ArgumentException) { }
         AdvertisedAddress();
+        AdoptionPolicy();
         Placement();
+    }
+    static void AdoptionPolicy()
+    {
+        Check(MagWorldRegistryConfig.Parse(Configuration().ToJsonString()).Adoption==MagWorkerAdoptionPolicy.Default &&
+            MagWorkerAdoptionPolicy.Default==new MagWorkerAdoptionPolicy(true,3,TimeSpan.FromMinutes(10)),"Restart adoption default changed");
+        MagWorkerAdoptionPolicy Read(JsonObject adoption) {var value=Configuration();value["worker_restart_adoption"]=adoption;return MagWorldRegistryConfig.Parse(value.ToJsonString()).Adoption;}
+        Check(Read(new JsonObject{["enabled"]=false})==MagWorkerAdoptionPolicy.Default with {Enabled=false},"Restart adoption switch was not read");
+        Check(Read(new JsonObject{["max_adoptions"]=5,["window_seconds"]=60})==new MagWorkerAdoptionPolicy(true,5,TimeSpan.FromSeconds(60)),"Adoption limit was not read");
+        Check(Read(new JsonObject())==MagWorkerAdoptionPolicy.Default,"An empty adoption object changed the defaults");
+        foreach(var bad in new JsonNode[]{new JsonObject{["enabled"]="no"},new JsonObject{["max_adoptions"]=0},new JsonObject{["max_adoptions"]=101},
+            new JsonObject{["window_seconds"]=0},new JsonObject{["window_seconds"]=86401},new JsonObject{["unknown"]=1},JsonValue.Create(true),new JsonArray()})
+        {var value=Configuration();value["worker_restart_adoption"]=bad;Refused(value);}
+        var duplicate=Configuration();duplicate["worker_restart_adoption"]=new JsonObject{["enabled"]=true};
+        try {MagWorldRegistryConfig.Parse(duplicate.ToJsonString().Replace("\"enabled\":true","\"enabled\":true,\"enabled\":false"));throw new Exception("Duplicate adoption member accepted");} catch(ArgumentException) { }
+        // The policy is structural: a drain reload cannot change it.
+        var current=MagWorldRegistryConfig.Parse(Configuration().ToJsonString());
+        var off=Configuration();off["worker_restart_adoption"]=new JsonObject{["enabled"]=false};
+        try {current.ValidateDrainReload(MagWorldRegistryConfig.Parse(off.ToJsonString()));throw new Exception("Adoption policy changed by drain reload");} catch(ArgumentException) { }
+        var same=Configuration();same["worker_restart_adoption"]=new JsonObject{["max_adoptions"]=3};
+        current.ValidateDrainReload(MagWorldRegistryConfig.Parse(same.ToJsonString()));
     }
     static void AdvertisedAddress()
     {

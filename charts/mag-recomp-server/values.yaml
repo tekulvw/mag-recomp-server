@@ -145,9 +145,12 @@ worldRegistry:
   # Optional private-party invite window (1-300 s); null leaves party matchmaking off. Workers
   # also need --party-reservations in extraArgs.
   partyInviteSeconds: null
-  # The Medius Pod waits up to this long for every worker Service before starting, because Medius
-  # does not adopt a worker it could not reach at startup. 0 skips the wait.
+  # The Medius Pod waits up to this long for every worker Service before starting, so every world
+  # opens together. A worker it could not reach is started later by restart adoption. 0 skips the wait.
   workerWaitSeconds: 300
+  # Restart adoption (docs/configured-world-registry.md): {enabled, maxAdoptions, windowSeconds}.
+  # Empty keeps Medius's defaults: on, at most 3 adoptions per world in 600 s.
+  workerRestartAdoption: {}
 resources:
   gameplay:
     requests: {cpu: 250m, memory: 256Mi}

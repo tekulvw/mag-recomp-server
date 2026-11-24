@@ -34,6 +34,7 @@ if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(RealRegistryWo
 {
     Test("configured registry real workers", RealRegistryWorkerChecks.Run);
     Test("configured registry real workers grouped", RealRegistryWorkerChecks.RunParties);
+    Test("configured registry real workers restart adoption", RealRegistryWorkerChecks.RunRestart);
 }
 Test("registry DME host world and lease isolation", RegistryDmeHostChecks.Run);
 Test("DME port capacity configuration and leases", DmePortCapacityChecks.Budget);
@@ -41,6 +42,7 @@ Test("DME port capacity bounds placement and keeps parties whole", DmePortCapaci
 Test("DME port capacity refuses standalone admission and frees ports on release", DmePortCapacityChecks.Admission);
 Test("DME port capacity holds registry players until transports release", DmePortCapacityChecks.Registry);
 Test("DME port capacity admits a party as a unit or refuses it", DmePortCapacityChecks.Parties);
+Test("configured registry restarted worker adoption", RegistryAdoptionChecks.Run);
 Test("bundled server NEWS formatting and bounds", ServerNewsChecks.Formatting);
 Test("bundled server NEWS and EULA wire responses", ServerNewsChecks.Run);
 

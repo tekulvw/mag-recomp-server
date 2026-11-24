@@ -18,8 +18,15 @@ namespace Server.Medius
         public ushort ClientTcpPort { get; }
         public IReadOnlyList<MagConfiguredWorker> Workers { get; }
         public int? PartyInviteSeconds { get; }
-        MagWorldRegistryConfig(int application, IPAddress address, ushort port, MagConfiguredWorker[] workers, int? partyInviteSeconds)
-        { ApplicationId = application; ClientAddress = address; ClientTcpPort = port; Workers = Array.AsReadOnly(workers); PartyInviteSeconds = partyInviteSeconds; }
+        /// <summary>Restart adoption (see docs/configured-world-registry.md). Defaults to
+        /// <see cref="MagWorkerAdoptionPolicy.Default"/> when <c>worker_restart_adoption</c> is absent.</summary>
+        public MagWorkerAdoptionPolicy Adoption { get; }
+        MagWorldRegistryConfig(int application, IPAddress address, ushort port, MagConfiguredWorker[] workers, int? partyInviteSeconds,
+            MagWorkerAdoptionPolicy adoption)
+        {
+            ApplicationId = application; ClientAddress = address; ClientTcpPort = port; Workers = Array.AsReadOnly(workers);
+            PartyInviteSeconds = partyInviteSeconds; Adoption = adoption;
+        }
 
         /// <summary>A <c>client_address</c> of exactly this text takes the address from MAG_ADVERTISE_IPV4,
         /// so a deployment that keeps that variable current needs no second copy in the file.</summary>
@@ -42,10 +49,14 @@ namespace Server.Medius
             {
                 using var doc = JsonDocument.Parse(json);
                 var root = doc.RootElement;
-                bool parties = root.TryGetProperty("party_invite_seconds", out _);
-                if (parties) Exact(root, "format", "application_id", "client_address", "client_tcp_port", "workers", "party_invite_seconds");
-                else Exact(root, "format", "application_id", "client_address", "client_tcp_port", "workers");
+                bool parties = root.ValueKind == JsonValueKind.Object && root.TryGetProperty("party_invite_seconds", out _);
+                bool adoptionSet = root.ValueKind == JsonValueKind.Object && root.TryGetProperty("worker_restart_adoption", out _);
+                var fields = new List<string> { "format", "application_id", "client_address", "client_tcp_port", "workers" };
+                if (parties) fields.Add("party_invite_seconds");
+                if (adoptionSet) fields.Add("worker_restart_adoption");
+                Exact(root, fields.ToArray());
                 int? inviteSeconds = parties ? Integer(root, "party_invite_seconds", 1, 300) : null;
+                var adoption = adoptionSet ? ParseAdoption(root.GetProperty("worker_restart_adoption")) : MagWorkerAdoptionPolicy.Default;
                 if (root.GetProperty("format").GetString() != "mag_world_registry_v1" ||
                     Integer(root, "application_id", 20231, 20231) != 20231) throw Invalid();
                 string address = Text(root, "client_address");
@@ -79,14 +90,14 @@ namespace Server.Medius
                     if (drain.ValueKind != JsonValueKind.True && drain.ValueKind != JsonValueKind.False) throw Invalid();
                     workers.Add(new MagConfiguredWorker(id, host, workerPort, policy.MinimumPlayers, maximum, Array.AsReadOnly(teams), drain.GetBoolean()));
                 }
-                return new MagWorldRegistryConfig(20231, network.Address, (ushort)port, workers.ToArray(), inviteSeconds);
+                return new MagWorldRegistryConfig(20231, network.Address, (ushort)port, workers.ToArray(), inviteSeconds, adoption);
             }
             catch (Exception error) when (error is JsonException || error is InvalidOperationException || error is FormatException || error is OverflowException)
             { throw Invalid(); }
         }
         public void ValidateDrainReload(MagWorldRegistryConfig next)
         {
-            if (next == null || ApplicationId != next.ApplicationId || !ClientAddress.Equals(next.ClientAddress) || ClientTcpPort != next.ClientTcpPort || PartyInviteSeconds != next.PartyInviteSeconds || Workers.Count != next.Workers.Count) throw Invalid();
+            if (next == null || ApplicationId != next.ApplicationId || !ClientAddress.Equals(next.ClientAddress) || ClientTcpPort != next.ClientTcpPort || PartyInviteSeconds != next.PartyInviteSeconds || Adoption != next.Adoption || Workers.Count != next.Workers.Count) throw Invalid();
             foreach (var worker in Workers)
             {
                 var other = next.Workers.SingleOrDefault(w => w.WorkerId == worker.WorkerId);
@@ -94,6 +105,24 @@ namespace Server.Medius
                     worker.MinimumPlayers != other.MinimumPlayers || worker.MaximumPlayers != other.MaximumPlayers ||
                     !worker.MinimumPlayersPerTeam.SequenceEqual(other.MinimumPlayersPerTeam)) throw Invalid();
             }
+        }
+        // Every member is optional; unknown and duplicate members are rejected.
+        static MagWorkerAdoptionPolicy ParseAdoption(JsonElement value)
+        {
+            if (value.ValueKind != JsonValueKind.Object) throw Invalid();
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var field in value.EnumerateObject())
+                if (!names.Add(field.Name) || field.Name is not ("enabled" or "max_adoptions" or "window_seconds")) throw Invalid();
+            var policy = MagWorkerAdoptionPolicy.Default;
+            if (names.Contains("enabled"))
+            {
+                var enabled = value.GetProperty("enabled");
+                if (enabled.ValueKind != JsonValueKind.True && enabled.ValueKind != JsonValueKind.False) throw Invalid();
+                policy = policy with { Enabled = enabled.GetBoolean() };
+            }
+            if (names.Contains("max_adoptions")) policy = policy with { MaximumAdoptions = Integer(value, "max_adoptions", 1, 100) };
+            if (names.Contains("window_seconds")) policy = policy with { Window = TimeSpan.FromSeconds(Integer(value, "window_seconds", 1, 86400)) };
+            return policy;
         }
         static string Text(JsonElement value, string field) => value.GetProperty(field).ValueKind == JsonValueKind.String ? value.GetProperty(field).GetString() : throw Invalid();
         static int Integer(JsonElement value, string field, int low, int high) => value.GetProperty(field).TryGetInt32(out int n) && n >= low && n <= high ? n : throw Invalid();

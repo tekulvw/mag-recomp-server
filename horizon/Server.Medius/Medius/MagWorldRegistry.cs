@@ -22,7 +22,9 @@ namespace Server.Medius
             public MagConfiguredWorker Config;
             public GameplayBridge Bridge;
             public LocalDmeHost Host;
-            public bool Faulted;
+            public volatile bool Faulted;
+            // Set once this slot's incarnation was written off; a replacement slot takes its index.
+            public volatile bool WrittenOff;
         }
         static readonly IInternalLogger Logger = InternalLoggerFactory.GetInstance<MagWorldRegistry>();
         readonly MagWorldRegistryConfig _config;
@@ -50,15 +52,17 @@ namespace Server.Medius
             if (config.PartyInviteSeconds is int seconds) _parties = new MagPartyDirectory(TimeSpan.FromSeconds(seconds));
             _drainingWorkers = config.Workers.Where(w=>w.Draining).Select(w=>w.WorkerId).ToHashSet(StringComparer.Ordinal);
             _manager = new Server.Dme.MediusManager(config.ApplicationId) { LocalOnly = true };
-            _slots = config.Workers.Select(row => {
-                var bridge = new GameplayBridge(row.WorkerHost, row.WorkerPort, row.WorkerId);
-                var options = new LocalDmeHostOptions(config.ApplicationId, 0, row.MinimumPlayers, row.MaximumPlayers,
-                    row.MinimumPlayersPerTeam.ToArray(), new[] { 0, 1, 2 }, config.ClientAddress, config.ClientTcpPort, row.WorkerId);
-                var host = new LocalDmeHost(bridge, store, options, progressionGate:_progressionGate, portBudget:_portBudget);
-                host.DurableProgressionCommitted += RefreshProgressionOwners;
-                host.SetDrainPolicy(()=>System.Threading.Volatile.Read(ref _drainingWorkers).Contains(row.WorkerId));
-                return new Slot { Config = row, Bridge = bridge, Host = host };
-            }).ToArray();
+            _slots = config.Workers.Select(row => CreateSlot(row, new GameplayBridge(row.WorkerHost, row.WorkerPort, row.WorkerId))).ToArray();
+            _entries = config.Workers.Select(row => new AdoptionEntry(row.WorkerId)).ToArray();
+        }
+        Slot CreateSlot(MagConfiguredWorker row, GameplayBridge bridge)
+        {
+            var options = new LocalDmeHostOptions(_config.ApplicationId, 0, row.MinimumPlayers, row.MaximumPlayers,
+                row.MinimumPlayersPerTeam.ToArray(), new[] { 0, 1, 2 }, _config.ClientAddress, _config.ClientTcpPort, row.WorkerId);
+            var host = new LocalDmeHost(bridge, _store, options, progressionGate:_progressionGate, portBudget:_portBudget);
+            host.DurableProgressionCommitted += RefreshProgressionOwners;
+            host.SetDrainPolicy(()=>System.Threading.Volatile.Read(ref _drainingWorkers).Contains(row.WorkerId));
+            return new Slot { Config = row, Bridge = bridge, Host = host };
         }
         void RefreshProgressionOwners(string account,uint character) {
             foreach(var slot in _slots) slot.Host.QueueProgressionRefresh(account,character);
@@ -72,7 +76,7 @@ namespace Server.Medius
         public IReadOnlyList<MagRegisteredWorld> Worlds => Array.AsReadOnly(_slots.Select(slot => {
             var state = slot.Host.GetPlacement();
             return new MagRegisteredWorld(slot.Config.WorkerId, slot.Bridge.WorkerIdentity?.IncarnationId,
-                slot.Host.World?.WorldId, state.Ready && !slot.Faulted, state.Draining || slot.Faulted, state.LiveCount, state.PendingQueueCount);
+                slot.WrittenOff || slot.Host.World?.Destroyed != false ? null : slot.Host.World.WorldId, state.Ready && !slot.Faulted, state.Draining || slot.Faulted, state.LiveCount, state.PendingQueueCount);
         }).ToArray());
 
         /// <summary>Initialize worker worlds without opening the shared DME listener.</summary>
@@ -80,6 +84,8 @@ namespace Server.Medius
         {
             lock (_gate) { if (_initialized || _disposed) throw new InvalidOperationException("Registry already initialized or disposed."); _initialized = true; }
             await Task.WhenAll(_slots.Select(InitializeSlotAsync));
+            for (int i = 0; i < _slots.Length; i++)
+                if (!_slots[i].Faulted && _slots[i].Host.WorkerContract is MagWorkerContract contract) _entries[i].Contract = contract;
             if (!_slots.Any(s => s.Host.GetPlacement().Ready))
             { await DisposeAsync(); throw new IOException("No configured gameplay worker is ready."); }
             if (PartyMembershipEnabled && !_slots.Any(s => !s.Faulted && s.Host.GetPlacement() is { Ready: true } placement &&
@@ -114,6 +120,7 @@ namespace Server.Medius
             ReloadDrainPolicy();
             if (_transportStarted) await _ownedTransport.HandleIncomingMessages();
             await Task.WhenAll(_slots.Where(s => !s.Faulted).Select(TickSlotAsync));
+            SuperviseWorkers();
             PrunePartySessions();
             SendQueueNotices(); StartPlacement();
             if (_transportStarted) {
@@ -144,8 +151,9 @@ namespace Server.Medius
             IReadOnlySet<string> policy=next.Workers.Where(w=>w.Draining).Select(w=>w.WorkerId).ToHashSet(StringComparer.Ordinal);
             System.Threading.Volatile.Write(ref _drainingWorkers,policy);
         }
+        // A disposed host's world ID is freed and may be issued again to an adopted world.
         Slot Owner(DmeClient client) => client?.DmeWorld == null ? null :
-            _slots.SingleOrDefault(s => s.Host.World?.WorldId == client.DmeWorld.WorldId);
+            _slots.SingleOrDefault(s => !s.WrittenOff && s.Host.World is { Destroyed: false } world && world.WorldId == client.DmeWorld.WorldId);
         public bool TryBind(DmeClient client, RT_MSG_CLIENT_CONNECT_TCP_AUX_UDP connect) => Owner(client)?.Host.TryBind(client, connect) == true;
         public bool CanUse(DmeClient client) => Owner(client)?.Host.CanUse(client) == true;
         public void Connected(DmeClient client) => Owner(client)?.Host.Connected(client);
@@ -183,7 +191,8 @@ namespace Server.Medius
             {
                 if (_disposed) return; _disposed = true;
                 var tickets=_humans.Snapshot();
-                pending=tickets.Select(e=>e.Value.Preparation).Where(t=>t!=null).Append(_placementWorker).ToArray();
+                pending=tickets.Select(e=>e.Value.Preparation).Where(t=>t!=null).Append(_placementWorker)
+                    .Concat(_entries.Select(e=>e.Supervision)).ToArray();
                 foreach(var entry in tickets) {System.Threading.Volatile.Write(ref entry.Value.Cancelled,1);_humans.Remove(entry);}
                 foreach(var entry in _acknowledged.Values)System.Threading.Volatile.Write(ref entry.Cancelled,1);
                 _acknowledged.Clear();
