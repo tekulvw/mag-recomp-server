@@ -24,7 +24,7 @@ namespace RT.Models.MAG
         {
             if (TryParseForApplication(payload, applicationId, out message) && (message is MagRetailPartyInvite || message is MagRetailPartyInviteResponse ||
                 message is MagRetailPartyLeave || message is MagRetailPartyOpenInvite || message is MagRetailPartyRejoinRequest || message is MagRetailCancelJoinRequest || message is MagTrainingCompletedRequest || message is MagKeepAlive || message is MagJoinGameRequest || message is MagServerStatusRequest || message is MagHello || message is MagProtocolInfo || message is MagAccountLoginRequest || message is MagCharacterDataRequest ||
-                message is MagNpAuthenticateRequest || message is MagUniverseListRequest || message is MagRetailPatchRequest ||
+                message is MagNpAuthenticateRequest || message is MagUniverseListRequest || message is MagRetailPatchRequest || message is MagRetailAccountLogoutRequest ||
                 message is MagNewsEulaRequest || message is MagCharacterListRequest || message is MagCreateCharacterRequest || message is MagLoadoutUpdateRequest || message is MagRetailLoadoutDeleteRequest || message is MagPurchaseSkillRequest || message is MagRetailNominationsUpdate)) return true;
             message = null;
             return false;
@@ -43,8 +43,8 @@ namespace RT.Models.MAG
                 int itemBits = LoadoutItemBits(applicationId);
                 var reader = new MagBitReader(payload);
                 ushort messageType = reader.ReadUInt16();
-                // Retail0031 is logout, not prototype NP auth. Never fall back for conflicting IDs.
-                MagMessage parsed = applicationId == 20231 && ((messageType >= 0x0011 && messageType <= 0x0015) || (messageType >= 0x001a && messageType <= 0x0027) || (messageType >= 0x002b && messageType <= 0x002f) || (messageType >= 0x0031 && messageType <= 0x0038) || messageType == 0x01f5 || messageType == 0x01f6)
+                // Retail0030/0031 are account logout, not prototype NP auth. Never fall back for conflicting IDs.
+                MagMessage parsed = applicationId == 20231 && ((messageType >= 0x0011 && messageType <= 0x0015) || (messageType >= 0x001a && messageType <= 0x0027) || (messageType >= 0x002b && messageType <= 0x0038) || messageType == 0x01f5 || messageType == 0x01f6)
                     ? messageType switch
                     {
                         0x0012 => new MagRetailJoinGameRequest(),
@@ -64,6 +64,8 @@ namespace RT.Models.MAG
                         0x002d => new MagTrainingCompletedRequest(),
                         0x002e => new MagRetailAccountLoginRequest(),
                         0x002f => new MagRetailAccountLoginResponse(),
+                        0x0030 => new MagRetailAccountLogoutRequest(),
+                        0x0031 => new MagRetailAccountLogoutResponse(),
                         0x01f5 => new MagRetailPatchRequest(),
                         0x01f6 => new MagRetailNoPatchResponse(),
                         0x0034 => new MagRetailNpAuthenticateRequest(),
@@ -132,6 +134,9 @@ namespace RT.Models.MAG
                         break;
                     case MagRetailLoadoutDeleteResponse delete:
                         delete.Success = reader.ReadBoolean();
+                        break;
+                    case MagRetailAccountLogoutResponse logout:
+                        logout.Success = reader.ReadBoolean();
                         break;
                     case MagRetailNominationsUpdate nominations:
                         nominations.Nominations = reader.ReadByte();
@@ -293,7 +298,7 @@ namespace RT.Models.MAG
         // Legacy callers retain prototype behavior; the explicit retail summary type carries its profile.
         // Shared full-record/update types must use the application's explicit serializer at session boundaries.
         public static byte[] Serialize(MagMessage message) =>
-            SerializeForApplication(message, message is MagRetailPartyMessage || message is MagTrainingCompletedRequest || message is MagRetailCharacterListResponse || message is MagRetailAccountLoginRequest || message is MagRetailAccountLoginResponse || message is MagRetailJoinGameRequest || message is MagRetailJoinGameResponse || message is MagRetailLoadoutDeleteRequest or MagRetailLoadoutDeleteResponse ? 20231 : 20230);
+            SerializeForApplication(message, message is MagRetailPartyMessage || message is MagTrainingCompletedRequest || message is MagRetailCharacterListResponse || message is MagRetailAccountLoginRequest || message is MagRetailAccountLoginResponse || message is MagRetailJoinGameRequest || message is MagRetailJoinGameResponse || message is MagRetailLoadoutDeleteRequest or MagRetailLoadoutDeleteResponse || message is MagRetailAccountLogoutRequest or MagRetailAccountLogoutResponse ? 20231 : 20230);
 
         public static byte[] SerializeForApplication(MagMessage message, int applicationId)
         {
@@ -315,6 +320,8 @@ namespace RT.Models.MAG
                 throw new ArgumentException("Party messages are retail-only.", nameof(message));
             if (message is (MagRetailLoadoutDeleteRequest or MagRetailLoadoutDeleteResponse) && applicationId != 20231)
                 throw new ArgumentException("Loadout delete messages are retail-only.", nameof(message));
+            if (message is (MagRetailAccountLogoutRequest or MagRetailAccountLogoutResponse) && applicationId != 20231)
+                throw new ArgumentException("Account logout messages are retail-only.", nameof(message));
             var writer = new MagBitWriter();
             writer.WriteUInt16(message.MessageType);
             if (message is MagPluginClientMessage common) WriteHeader(writer, common);
@@ -325,6 +332,10 @@ namespace RT.Models.MAG
                 case MagGamePluginGreeting _:
                 case MagRetailGamePluginGreeting _:
                 case MagServerStatusRequest _:
+                case MagRetailAccountLogoutRequest _:
+                    break;
+                case MagRetailAccountLogoutResponse logout:
+                    writer.WriteBoolean(logout.Success);
                     break;
                 case MagPurchaseSkillRequest purchase:
                     writer.WriteByte(unchecked((byte)purchase.SkillId));
