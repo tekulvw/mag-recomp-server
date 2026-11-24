@@ -119,20 +119,59 @@ jobs:
       - run: cargo +1.99.0 clippy --locked --manifest-path gameplay/Cargo.toml --all-targets -- -D warnings
       - run: cargo +1.99.0 test --locked --manifest-path gameplay/Cargo.toml
       - run: cargo +1.99.0 build --locked --manifest-path gameplay/Cargo.toml --bins --examples
+  # The two Docker checks run as separate jobs, in parallel. Each reads the layer
+  # cache that main writes to GHCR (main-images.yml) and never writes one: the
+  # packages are public, so no login or package permission is needed, and a
+  # missing cache only makes the build cold. Nothing is exported; the stages run
+  # for their tests.
   horizon:
     needs: changes
-    if: needs.changes.outputs.horizon == 'true' || needs.changes.outputs.registry == 'true'
+    if: needs.changes.outputs.horizon == 'true'
     runs-on: mag-recomp-server
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
-      - if: needs.changes.outputs.horizon == 'true'
-        run: docker build --target check horizon
+      - name: Resolve the layer cache
+        id: cache
+        run: |
+          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          # The check stage is part of every Medius image build, so main's image cache covers it.
+          echo "ref=ghcr.io/$owner/mag-recomp-server-medius:buildcache" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Run the synthetic Horizon tests
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ./horizon
+          target: check
+          platforms: linux/amd64
+          outputs: type=cacheonly
+          cache-from: type=registry,ref=${{ steps.cache.outputs.ref }}
+  registry:
+    needs: changes
+    if: needs.changes.outputs.registry == 'true'
+    runs-on: mag-recomp-server
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - name: Resolve the layer cache
+        id: cache
+        run: |
+          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          echo "ref=ghcr.io/$owner/mag-recomp-server-game:buildcache-world-registry" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Check configured worlds against independent Rust workers
-        if: needs.changes.outputs.registry == 'true'
-        run: docker build --target check --file tests/Dockerfile.world-registry .
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: tests/Dockerfile.world-registry
+          target: check
+          platforms: linux/amd64
+          outputs: type=cacheonly
+          cache-from: type=registry,ref=${{ steps.cache.outputs.ref }}
   portal:
     needs: changes
     if: needs.changes.outputs.portal == 'true'
@@ -146,12 +185,21 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
+      # The shared runner image (arc-runner-mag) ships PostgreSQL; install it only where it is missing.
+      - name: Look for an installed PostgreSQL server
+        id: postgres
+        run: |
+          if ls /usr/lib/postgresql/*/bin/initdb > /dev/null 2>&1; then
+            echo "packages=" >> "$GITHUB_OUTPUT"
+          else
+            echo "packages=postgresql" >> "$GITHUB_OUTPUT"
+          fi
       # Natively, with the dependency build cached between runs: the Docker check stage compiled
       # every dependency three times from scratch and exported a multi-GB image nothing used.
       - uses: ./.github/actions/self-hosted-linux
         with:
           rust: 'true'
-          packages: postgresql
+          packages: ${{ steps.postgres.outputs.packages }}
       - run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
       # Only main saves. Pull requests restore main's dependency build; a PR-scoped copy (~550 MB)
       # is usable only by that PR's own reruns and pushes main's entries out of the 10 GB cache.

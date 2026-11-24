@@ -221,6 +221,24 @@ stable, restore the selected stable tags/digests in your operator values and
 roll the test deployment again. Authenticate to GHCR first if the packages are
 private. This workflow never deploys either channel automatically.
 
+## CI layer caches
+
+Docker layer caches live in GHCR, as `buildcache` tags in the public component
+packages, not in the Actions cache:
+
+| Cache | Written by | Read by |
+| --- | --- | --- |
+| `mag-recomp-server-medius:buildcache` | `build-images` (main) | Medius releases and the `horizon` check, whose stage is part of the Medius build |
+| `mag-recomp-server-game:buildcache` | `build-images` (main) | gameplay releases |
+| `mag-recomp-server-portal:buildcache` | `build-images` (main) | portal releases |
+| `mag-recomp-server-game:buildcache-world-registry` | `check-caches` (main, after checks pass) | the `registry` check |
+
+Only `Main container images` runs on `main` write caches (`mode=max`). Pull
+requests, including those from forks, and releases only read them, anonymously
+because the packages are public; a missing or unreadable cache makes a build
+cold, never wrong. These tags are build caches, not images: do not pull or
+deploy them.
+
 ## OCI Helm chart
 
 The chart is published to `ghcr.io/tekulvw/charts/mag-recomp-server` with the
