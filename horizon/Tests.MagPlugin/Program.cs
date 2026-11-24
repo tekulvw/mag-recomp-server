@@ -110,6 +110,8 @@ Test("account-bound NP identity creation and persistence", NpIdentityChecks.Run)
 Test("MLS answers lobby player-card character data for any character", LeadershipProgressionChecks.PlayerCardLookup);
 Test("retail account logout wire", LeadershipProgressionChecks.AccountLogoutWire);
 Test("MLS acknowledges the launcher logout and keeps the next login", LeadershipProgressionChecks.AccountLogoutKeepsNextLogin);
+Test("retail MLS replies carry a non-zero plugin id the client echoes", LeadershipProgressionChecks.MlsPluginId);
+Test("retail MLS answers the clan list with no clans", LeadershipProgressionChecks.RetailClanList);
 Test("linked characters display their online ID, not the stored login key", LeadershipProgressionChecks.PlayerCardDisplayName);
 Test("gameplay admission carries the display name", LeadershipProgressionChecks.PlayerCardAdmissionName);
 Test("portal ticket vectors from the portal", PortalTicketChecks.Vectors);

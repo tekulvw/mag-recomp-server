@@ -65,7 +65,7 @@ internal static partial class LeadershipProgressionChecks
 
             // The launcher's logout gets exactly one 0031 success carrying its transaction id.
             var replies = launcher.HandleMany(CardEnvelope(new MagRetailAccountLogoutRequest { TransactionId = 0x5150 }, 20231), now);
-            Check(replies.Count == 1 && replies[0].PluginId == 0 && replies[0].Payload.Length == 71, "Logout was not answered with one reply");
+            Check(replies.Count == 1 && replies[0].PluginId == MagPluginRouting.RetailMlsPluginId && replies[0].Payload.Length == 71, "Logout was not answered with one reply");
             Check(MagMessageCodec.TryParseForApplication(replies[0].Payload, 20231, out var parsed) &&
                 parsed is MagRetailAccountLogoutResponse { Success: true, TransactionId: 0x5150 }, "Logout reply is not a 0031 success for the request");
             Check(launcher.StorageStatus == "account-logout-acknowledged", "Logout acknowledgement is not visible in the MLS status");
