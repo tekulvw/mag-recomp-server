@@ -173,9 +173,11 @@ ghcr.io/tekulvw/mag-recomp-server-game:main
 ghcr.io/tekulvw/mag-recomp-server-portal:main
 ```
 
-A newer push to `main` cancels the older run, so only the newest commit builds;
-because images are keyed by tree, a component changed only in a cancelled
-commit is built by the next run. Promotion checks the repository's current main
+Runs never cancel each other: a running run finishes, and a newer push replaces
+only a run still waiting, so at most the running commit and the newest commit
+build. Because images are keyed by tree, the waiting run reuses what the
+finished run built, and a component changed only in a replaced commit is built
+by the next run. Promotion checks the repository's current main
 SHA, and reruns use a separate concurrency group, so rerunning an old workflow
 cannot cancel current main or move `main` back to an older commit. If checks
 or any build fails, the existing `main` aliases remain on the previous

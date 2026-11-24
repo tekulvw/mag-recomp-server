@@ -99,6 +99,13 @@ jobs:
     needs: changes
     if: needs.changes.outputs.gameplay == 'true'
     runs-on: mag-recomp-server
+    # Every job starts from an empty target/: incremental state is never reused, and full
+    # debug info only slows codegen and the linking of every test binary. Line tables keep
+    # file:line in panic backtraces. No dependency cache here: the crate's three dependencies
+    # build in seconds, and a cache would drop the crate itself and its navmesh build script.
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -130,6 +137,10 @@ jobs:
     needs: changes
     if: needs.changes.outputs.portal == 'true'
     runs-on: mag-recomp-server
+    # As for gameplay: no incremental state or full debug info in a fresh, cached target/.
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -142,9 +153,12 @@ jobs:
           rust: 'true'
           packages: postgresql
       - run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
+      # Only main saves. Pull requests restore main's dependency build; a PR-scoped copy (~550 MB)
+      # is usable only by that PR's own reruns and pushes main's entries out of the 10 GB cache.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: portal -> target
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Start a throwaway PostgreSQL
         run: |
           pg="$(ls -d /usr/lib/postgresql/*/bin | sort -V | tail -n1)"

@@ -12,14 +12,17 @@ on:
 
 permissions: {}
 
-# Only the newest main commit builds: a new push cancels the older run. Images
-# are keyed by their source tree, so a commit whose run was cancelled is built
-# by the next run that needs it. Reruns get their own group, so retrying an old
-# run cannot cancel or displace current main, and promotion checks that its
-# commit is still current main before it moves any alias.
+# One run at a time, and at most one waiting: a new push replaces the waiting
+# run, never the running one. Cancelling the running run threw its checks,
+# builds and caches away whenever main moved faster than a run finished, so
+# bursts of merges published nothing. Images are keyed by their source tree, so
+# the waiting run reuses whatever the finished run built, and a commit whose
+# waiting run was replaced is built by the next run that needs it. Reruns get
+# their own group, so retrying an old run cannot displace current main, and
+# promotion checks that its commit is still current main before it moves any alias.
 concurrency:
   group: main-container-images-${{ github.ref }}${{ github.run_attempt != '1' && '-rerun' || '' }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   plan:

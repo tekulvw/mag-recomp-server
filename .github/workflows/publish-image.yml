@@ -66,3 +66,6 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Reuse layers main-images.yml cached for this component (base images, toolchain
+          # packages, and every layer whose inputs match). Read only: releases add no cache entries.
+          cache-from: type=gha,scope=main-${{ inputs.image_suffix }}
