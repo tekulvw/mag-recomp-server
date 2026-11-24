@@ -249,6 +249,7 @@ impl<W: Write> Engine<W> {
             projectile_cleanup: Default::default(),
             projectile_publications: Vec::new(),
             grenade_remaining: 0,
+            gear5_grenade_remaining: 0,
             flash_yaw: None,
             static_resupply: Vec::new(),
             observed_primary: None,

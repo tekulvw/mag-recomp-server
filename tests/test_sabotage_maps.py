@@ -237,5 +237,66 @@ class DynamicExclusionTests(unittest.TestCase):
         self.assertEqual(region['provenance'][-2:], lines)
 
 
+class UnshippedExclusionTests(unittest.TestCase):
+    CLV = '/levels/invented/invented.clv'
+
+    @staticmethod
+    def record(offset, token):
+        return dict(name=f'0x{offset:08x}', instance_properties_offset=offset - 64,
+                    definition_class='StaticObjectProperties', collision_offset=offset,
+                    placement=dict(token=token, sha256='e' * 64))
+
+    def archives(self, shared_extra=b''):
+        from archive import Psarc
+        level = archive({self.CLV: b'clv' + bytes.fromhex('33333333') + bytes.fromhex('44444444'),
+                         '/levels/invented/a.zrb': b'zrb' + bytes.fromhex('11111111')})
+        shared = archive({'/shared/b.zrb': b'zrb' + shared_extra})
+        return [('level', 'a' * 64, Psarc(level), self.CLV), ('shared.psarc', 'b' * 64, Psarc(shared), None)]
+
+    def test_resource_found_only_in_the_referencing_clv_is_excluded(self):
+        records = [self.record(0x100, '11111111'), self.record(0x200, '33333333'),
+                   self.record(0x300, '33333333')]
+        kept, excluded = retail_compiled.unshipped_exclusions(records, {'11111111': ['pack']}, self.archives())
+        self.assertEqual([r['collision_offset'] for r in kept], [0x100])
+        self.assertEqual([r['instance_id'] for r in excluded], ['compiled:200', 'compiled:300'])
+        row = excluded[0]
+        self.assertEqual((row['resource_token'], row['instance_name'], row['record_sha256']),
+                         ('33333333', '0x00000200', 'e' * 64))
+        self.assertEqual(row['searched_archive_sha256'], ['a' * 64, 'b' * 64])
+        self.assertEqual(row['reason'], retail_compiled.UNSHIPPED_REASON)
+
+    def test_resource_present_in_any_other_member_stays_unresolved(self):
+        records = [self.record(0x200, '33333333'), self.record(0x400, '44444444')]
+        kept, excluded = retail_compiled.unshipped_exclusions(
+            records, {}, self.archives(shared_extra=bytes.fromhex('44444444')))
+        self.assertEqual([r['collision_offset'] for r in kept], [0x400])
+        self.assertEqual([r['collision_offset'] for r in excluded], [0x200])
+
+    def test_unreferenced_member_hits_are_reported_per_archive(self):
+        hits = retail_compiled.token_occurrences(self.archives(shared_extra=bytes.fromhex('33333333')),
+                                                 ['33333333', '11111111'])
+        self.assertEqual(hits['33333333'], ['shared.psarc:/shared/b.zrb'])
+        self.assertEqual(hits['11111111'], ['level:/levels/invented/a.zrb'])
+
+    def test_exclusions_are_recorded_in_provenance(self):
+        self.assertEqual(retail_compiled.unshipped_provenance([]), [])
+        _, excluded = retail_compiled.unshipped_exclusions(
+            [self.record(0x200, '33333333')], {}, self.archives())
+        lines = retail_compiled.unshipped_provenance(excluded)
+        self.assertIn('1 compiled instances', lines[0])
+        for text in ('33333333', 'a' * 64, 'b' * 64):
+            self.assertIn(text, lines[0])
+        for text in ('compiled:200', '33333333', 'e' * 64, 'no shipped archive'):
+            self.assertIn(text, lines[1])
+        region = retail_compiled.static_region([0., 0., 0.], [10., 10., 10.], ['source'] + lines)
+        self.assertEqual(region['provenance'][-2:], lines)
+
+    def test_option_requires_a_shipped_archive(self):
+        result = subprocess.run([sys.executable, str(ROOT / 'tools/collision/retail_compiled.py'), '--help'],
+                                capture_output=True, text=True, check=True)
+        self.assertIn('--exclude-unshipped-resources', result.stdout)
+        self.assertIn('--shipped-archive', result.stdout)
+
+
 if __name__ == '__main__':
     unittest.main()

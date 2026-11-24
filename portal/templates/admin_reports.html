@@ -26,15 +26,19 @@
     <option value="">Any platform</option>
     {% for p in platforms %}<option value="{{ p }}"{% if platform == **p %} selected{% endif %}>{{ p }}</option>{% endfor %}
   </select>
+  <select name="comment" aria-label="Comment">
+    <option value="">With or without a comment</option>
+    <option value="yes"{% if has_comment %} selected{% endif %}>With a comment</option>
+  </select>
   <button>Filter</button>
 </form>
 {% if rows.is_empty() %}<p class="quiet">No reports match.</p>{% else %}
 <div class="table-scroll">
 <table>
-  <thead><tr><th>Received</th><th>Player</th><th>Trigger</th><th>Platform</th><th>Version</th><th>Logs</th><th></th></tr></thead>
+  <thead><tr><th>Received</th><th>Player</th><th>Trigger</th><th>Platform</th><th>Version</th><th>Logs</th><th>Comment</th><th></th></tr></thead>
   <tbody>
   {% for r in rows %}
-  <tr><td>{{ r.received }}</td><td><a href="/admin/users/{{ r.account_id }}">{% if r.player.is_empty() %}account {{ r.account_id }}{% else %}{{ r.player }}{% endif %}</a></td><td>{{ r.trigger }}</td><td>{{ r.platform }}</td><td>{{ r.version }}</td><td>{{ r.logs }}</td><td><a href="/admin/reports/{{ r.id }}">Details</a></td></tr>
+  <tr><td>{{ r.received }}</td><td><a href="/admin/users/{{ r.account_id }}">{% if r.player.is_empty() %}account {{ r.account_id }}{% else %}{{ r.player }}{% endif %}</a></td><td>{{ r.trigger }}</td><td>{{ r.platform }}</td><td>{{ r.version }}</td><td>{{ r.logs }}</td><td>{% if r.comment.is_empty() %}<span class="quiet">none</span>{% else %}{{ r.comment }}{% endif %}</td><td><a href="/admin/reports/{{ r.id }}">Details</a></td></tr>
   {% endfor %}
   </tbody>
 </table>

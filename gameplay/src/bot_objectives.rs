@@ -508,7 +508,7 @@ fn supported_operator(
     let (up, down) = range.support_window(point(raw));
     supported_interval(world, map, raw, up, down, body)
 }
-fn supported_interval(
+pub(crate) fn supported_interval(
     world: Option<&collision::CollisionWorld>,
     map: &str,
     raw: replication::CharacterPosition,

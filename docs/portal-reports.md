@@ -29,9 +29,17 @@ as for tickets) and `Content-Type: application/json`. The body is at most 4 MiB.
 | `report_id` | A UUID version 4 the launcher generates; the idempotency key. Any case; stored lowercase. |
 | `trigger` | `crash`, `launch_error`, `halt`, `slow_frames`, `audio` or `manual`. |
 | `client` | Required JSON object with `version` (a string of 1 to 64 characters) and `platform` (`macos`, `linux` or `windows`); any other fields are free-form. At most 16 KiB serialized. |
-| `session` | Optional JSON object (or `null`), free-form, such as `start`, `end` (RFC 3339), `server`, `exit_code`, `duration_s`. At most 4 KiB serialized. |
+| `session` | Optional JSON object (or `null`), free-form, such as `start`, `end` (RFC 3339), `server`, `exit_code`, `duration_s` and `user_comment` (below). At most 12 KiB serialized. |
 | `metrics` | Optional JSON object (or `null`), free-form, such as a frame-time histogram, slow-frame counts, p50/p95/p99, hitches, audio underruns and drift. At most 64 KiB serialized. |
 | `logs` | Optional map of log name to `{"encoding": "gzip+base64", "data": "<base64>"}`. Names match `^[a-z0-9][a-z0-9._-]{0,63}$`; at most 8 logs; each decoded log at most 2 MiB and all of them together at most 3 MiB; each must start with the gzip magic bytes `1f 8b`. |
+
+`session.user_comment` is the player's own words on a `manual` report: a UTF-8 string the launcher
+has already redacted, at most 1000 characters (Unicode scalar values). A longer one is refused with
+`400 invalid_report` and the detail `user_comment too long`, checked before the size of `session`.
+The 12 KiB cap on `session` holds the longest comment in any characters (at most 6002 bytes
+serialized, when every character is escaped as `\u00XX`) with more than 4 KiB left for the other
+fields. Staff tools show a comment only when it is a string with something besides white space in
+it; any other value is kept as free-form JSON and shown only in the session JSON.
 
 Any other top-level field, or another field inside a log entry, is refused. `client`, `session` and
 `metrics` are stored as given (JSONB), with sizes measured on their serialized form. Logs are stored
@@ -113,10 +121,12 @@ staff) removes its reports' logs and, with the account, their rows.
 ### Admin panel
 
 `/admin/reports` (moderators and up) shows the last 14 days' counts per trigger and platform and the
-newest 100 reports, filtered by player name, trigger and platform. Each report's page shows its
-metadata, metrics, session and client JSON. Only admins and owners can download a log; the download
-is the log decompressed (at most 64 MiB) as `text/plain` attachment, through a form carrying the
-session's CSRF token, and goes to the audit log as `download report log`.
+newest 100 reports, filtered by player name, trigger, platform and whether they carry a player
+comment, with the first 60 characters of each comment on one line. Each report's page shows its
+metadata, the whole comment (line breaks kept), and its metrics, session and client JSON. Only
+admins and owners can download a log; the download is the log decompressed (at most 64 MiB) as
+`text/plain` attachment, through a form carrying the session's CSRF token, and goes to the audit log
+as `download report log`.
 
 ### Operator commands
 
@@ -125,10 +135,12 @@ Run with `DATABASE_URL` set. `log` and `delete` also need the report store setti
 
 | Command | Effect |
 | --- | --- |
-| `mag-portal admin reports list [--account NAME] [--trigger T] [--platform P] [--since RFC3339 \| --days N] [--limit N]` | Reports, newest first (default 50): ID, time, player and account, trigger, platform, version, log count and size. |
-| `mag-portal admin reports show <report_id>` | Metadata and the client, session and metrics JSON. |
+| `mag-portal admin reports list [--account NAME] [--trigger T] [--platform P] [--since RFC3339 \| --days N] [--has-comment] [--limit N]` | Reports, newest first (default 50): ID, time, player and account, trigger, platform, version, log count and size, and the first 60 characters of the player comment on one line (`-` for none). `--has-comment` lists only reports with one. |
+| `mag-portal admin reports show <report_id>` | Metadata, the whole player comment (each line indented two spaces, or `comment none`) and the client, session and metrics JSON. |
 | `mag-portal admin reports log <report_id> <name>` | One log, decompressed (at most 64 MiB), to stdout. Audit-logged as `read report log`. |
 | `mag-portal admin reports stats [--days N]` | Counts per UTC day, trigger and platform (default 14 days). |
 | `mag-portal admin reports delete <report_id>` | Deletes the report and its logs. Audit-logged as `delete report`. |
 
-The commands write the audit log as `operator (command line)`.
+The panel and these commands leave out of a comment its control characters (other than line breaks
+and tabs in the whole comment) and the invisible marks that reorder text, so it cannot drive a
+terminal or disguise itself. The commands write the audit log as `operator (command line)`.

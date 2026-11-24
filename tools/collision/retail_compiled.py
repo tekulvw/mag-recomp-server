@@ -4,7 +4,9 @@
 Static export by default. Parent attachments require an explicit, source-bound
 reference-pose export; those outputs never certify a physics region. As an
 explicit alternative, animated instances attached to parents can be excluded as
-dynamic collision; each exclusion is recorded in the world provenance.
+dynamic collision, and records whose collision resource no shipped archive
+contains can be excluded as unshipped; each exclusion is recorded in the world
+provenance.
 """
 import argparse
 import collections
@@ -23,6 +25,10 @@ from retail_placement import verify_placement
 ANIMATED_CLASS = 'AnimatedObjectProperties'
 DYNAMIC_REASON = ('animated instance attached to a parent; its collision moves with the parent and is '
                   'dynamic, outside initial compiled static geometry')
+
+
+UNSHIPPED_REASON = ('compiled record references a collision resource whose token occurs in no shipped '
+                    'archive outside the referencing level CLV; there is no geometry to place')
 
 
 def has_parent(bound_packs):
@@ -70,6 +76,70 @@ def exclusion_provenance(excluded):
             f"resource member SHA256 {','.join(row['resource_member_sha256'])}, "
             f"packfile SHA256 {','.join(row['packfile_sha256'])}, "
             f"parents {','.join(row['parent_tokens'])}, reason: {row['reason']}")
+    return lines
+
+
+def token_occurrences(archives, tokens):
+    """Members of each archive whose bytes contain any candidate resource token.
+
+    ``archives`` holds ``(label, sha256, Psarc, referencing_member)`` rows; a hit in
+    the referencing member (the level CLV that names the resource) is expected
+    and ignored. Every member is read, so an unreadable member is refused rather
+    than treated as absent.
+    """
+    needles = {token: bytes.fromhex(token) for token in tokens}
+    hits = collections.defaultdict(list)
+    for label, digest, archive, referencing in archives:
+        for index, name in enumerate(archive.names, 1):
+            data = archive.extract(index)
+            if name == referencing:
+                continue
+            for token, needle in needles.items():
+                if needle in data:
+                    hits[token].append(f'{label}:{name}')
+    return hits
+
+
+def unshipped_exclusions(records, packs, archives):
+    """Split compiled records whose resource no shipped archive contains.
+
+    A record is excluded only when its resource token is unbound in the level
+    manifest and its bytes occur in no member of any searched archive except the
+    referencing CLV. A token present anywhere else (for example an unconverted
+    resource) stays unresolved, so the export still refuses it.
+    """
+    candidates = sorted({r['placement']['token'] for r in records if r['placement']['token'] not in packs})
+    hits = token_occurrences(archives, candidates)
+    searched = sorted({digest for _, digest, _, _ in archives})
+    kept, excluded = [], []
+    for record in records:
+        token = record['placement']['token']
+        if token in packs or hits.get(token):
+            kept.append(record)
+            continue
+        excluded.append(dict(
+            instance_id=f"compiled:{record['collision_offset']:x}", instance_name=record['name'],
+            instance_properties_offset=record['instance_properties_offset'],
+            collision_offset=record['collision_offset'], record_sha256=record['placement']['sha256'],
+            definition_class=record.get('definition_class'), resource_token=token,
+            searched_archive_sha256=searched, reason=UNSHIPPED_REASON))
+    return kept, excluded
+
+
+def unshipped_provenance(excluded):
+    """Provenance lines naming every compiled instance excluded as unshipped."""
+    if not excluded:
+        return []
+    tokens = sorted({row['resource_token'] for row in excluded})
+    lines = [f'Unshipped exclusions: {len(excluded)} compiled instances reference collision resources '
+             f'{",".join(tokens)} found in no searched archive '
+             f'(SHA256 {",".join(excluded[0]["searched_archive_sha256"])}) outside the referencing CLV; '
+             'they are omitted with no geometry.']
+    for row in excluded:
+        lines.append(
+            f"Unshipped exclusion {row['instance_id']}: instance {row['instance_name']}, "
+            f"class {row['definition_class']}, resource {row['resource_token']}, "
+            f"record SHA256 {row['record_sha256']}, reason: {row['reason']}")
     return lines
 
 
@@ -197,6 +267,15 @@ def export(args):
             packs[binding['resource_name_token']].append(pack)
             member_sha256[binding['resource_name_token']].add(member['sha256'])
     require(terrain_token in packs and all(p['resource_binding']['physics_type_raw'] == 1 for p in packs[terrain_token]), 'terrain binding absent')
+    unshipped = []
+    if getattr(args, 'exclude_unshipped_resources', False):
+        shipped = getattr(args, 'shipped_archive', None) or []
+        require(shipped, '--exclude-unshipped-resources requires at least one --shipped-archive')
+        searched = [('level', sha(archive_bytes), archive, join['source']['clv_member'])]
+        for path in shipped:
+            data = path.read_bytes()
+            searched.append((path.name, sha(data), Psarc(data), None))
+        records, unshipped = unshipped_exclusions(records, packs, searched)
     excluded = []
     if getattr(args, 'exclude_animated_parented', False):
         require(not getattr(args, 'reference_pose', False),
@@ -262,6 +341,9 @@ def export(args):
     if excluded:
         unknowns.append('Excluded animated parent-attached collision is absent; its current pose and '
                         'blocking are not represented and need dynamic collision support.')
+    if unshipped:
+        unknowns.append('Excluded unshipped-resource instances are absent; the shipped game has no geometry '
+                        'for them, and whether the original runtime creates any collision there is unknown.')
     if resolver is not None:
         scope = 'compiled_reference_pose'
         unknowns[0] = 'scope=compiled_reference_pose; parent attachments use frozen compiled poses, not current animation.'
@@ -271,6 +353,7 @@ def export(args):
                   f'Externally supplied placement proof SHA256 {sha(placement_bytes)}',
                   'Final compiled collision matrices; no authored Euler/SnapToTerrain or second scale application.']
     provenance.extend(exclusion_provenance(excluded))
+    provenance.extend(unshipped_provenance(unshipped))
     regions = []
     if args.physics_region_min is not None or args.physics_region_max is not None:
         require(args.physics_region_min is not None and args.physics_region_max is not None, 'require both region bounds')
@@ -290,6 +373,8 @@ def export(args):
                   geometry_files={k: list(v[0]) for k, v in cache.items()}, unknowns=unknowns)
     if excluded:
         report['dynamic_exclusions'] = excluded
+    if unshipped:
+        report['unshipped_exclusions'] = unshipped
     if resolver is not None:
         report['parent_resolution'] = resolver.report()
     args.output.mkdir(parents=True)
@@ -318,6 +403,12 @@ def main():
     parser.add_argument('--exclude-animated-parented', action='store_true',
                         help='Omit animated parent-attached compiled instances as dynamic collision, '
                              'recording each exclusion; a physics region may then be declared')
+    parser.add_argument('--exclude-unshipped-resources', action='store_true',
+                        help='Omit compiled instances whose collision resource token occurs in no shipped '
+                             'archive outside the referencing CLV, recording each exclusion')
+    parser.add_argument('--shipped-archive', type=Path, action='append',
+                        help='Further shipped archive searched for unshipped resources (repeatable; '
+                             'the level archive is always searched)')
     parser.add_argument('--physics-region-min', type=lambda s: [float(v) for v in s.split(',')])
     parser.add_argument('--physics-region-max', type=lambda s: [float(v) for v in s.split(',')])
     export(parser.parse_args())

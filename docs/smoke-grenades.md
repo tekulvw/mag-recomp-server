@@ -30,14 +30,23 @@ Keep the generated resource files and proof private.
 
 To enable the source capability, set `smoke_grenades` to the generated rules
 path in an Acquisition configuration, or `core.smoke_grenades` in a Domination
-configuration. Paths are relative to the containing configuration file. The
-catalog must match the loaded retail item, binding, bootstrap, archive and
-executable provenance. Omit the property to leave support off. Ordinary frag
-configuration remains separate. `--validate-catalogs` reports whether configured
-smoke profiles were validated, without opening listeners.
+configuration. Paths are relative to the containing configuration file. A
+direct Sabotage or Suppression worker (no Acquisition configuration and no
+`--match-profiles`) takes `--smoke-grenade-rules /absolute/SMOKE.json` instead,
+together with `--objective-catalog`, whose source image identifies the
+executable the rules were projected from. In the Helm chart, put the file in
+the data bundle and add both flags to `data.gameplayExtraArgs`. The catalog
+must match the loaded retail item, binding, bootstrap, archive and executable
+provenance. Omit the property or flag to leave support off; a smoke throw is
+then refused like any other unconfigured item, so no peer sees it. Ordinary
+frag configuration remains separate. `--validate-catalogs` reports whether
+configured smoke profiles were validated, without opening listeners.
 
-The server accepts the normal authenticated gear-4 launch for the equipped item
-and consumes its finite inventory once. Accepted owner state 2 or 4 latches the
+A saved kit can hold a throwable in either equipment gear, 4 or 5, and the
+launch request names the gear it was thrown from. The server accepts the
+normal authenticated launch from either gear for the item equipped there, and
+consumes that gear's finite inventory once. Each gear keeps its own count,
+seeded from its own item at spawn and refilled by static supply. Accepted owner state 2 or 4 latches the
 terminal; the authored fuse and a reported terminal position gate volume
 creation. Peer presentation receives state 2. The thrower already executed the
 local Timer/Volume effect, and does not receive that visual trigger again; it

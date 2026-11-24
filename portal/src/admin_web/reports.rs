@@ -45,6 +45,7 @@ struct ReportView {
     platform: String,
     version: String,
     logs: usize,
+    comment: String,
 }
 
 #[derive(Template)]
@@ -61,6 +62,7 @@ struct ListPage {
     account: String,
     trigger: String,
     platform: String,
+    has_comment: bool,
     rows: Vec<ReportView>,
 }
 
@@ -69,6 +71,8 @@ struct ListQuery {
     account: Option<String>,
     trigger: Option<String>,
     platform: Option<String>,
+    /// `yes`: only reports with a player comment.
+    comment: Option<String>,
 }
 
 /// A filter value from the query: trimmed, empty means none.
@@ -114,6 +118,7 @@ async fn list_page(
         trigger: chosen(query.trigger, Some(&TRIGGERS)),
         platform: chosen(query.platform, Some(&PLATFORMS)),
         since: None,
+        has_comment: query.comment.as_deref() == Some("yes"),
     };
     let days = days_view(reports::stats(&state.pool, STATS_DAYS).await?);
     let rows = reports::list(&state.pool, &filter, LIST_LIMIT)
@@ -123,6 +128,11 @@ async fn list_page(
             received: when(r.received_at),
             player: r.player_name.unwrap_or_default(),
             logs: r.log_names.len(),
+            comment: r
+                .user_comment
+                .as_deref()
+                .map(|c| reports::comment_preview(c, reports::COMMENT_PREVIEW))
+                .unwrap_or_default(),
             id: r.id,
             account_id: r.account_id,
             trigger: r.trigger,
@@ -150,6 +160,7 @@ async fn list_page(
             account: filter.account.unwrap_or_default(),
             trigger: filter.trigger.unwrap_or_default(),
             platform: filter.platform.unwrap_or_default(),
+            has_comment: filter.has_comment,
             rows,
         },
     ))
@@ -172,6 +183,7 @@ struct ReportPage {
     version: String,
     log_names: Vec<String>,
     log_bytes: i64,
+    comment: Option<String>,
     client: String,
     session: Option<String>,
     metrics: Option<String>,
@@ -226,6 +238,7 @@ async fn report_page(
             version: r.client_version,
             log_names: r.log_names,
             log_bytes: r.log_bytes,
+            comment: r.user_comment.as_deref().map(reports::comment_text),
             client: pretty(&d.client),
             session: d.session.as_deref().map(pretty),
             metrics: d.metrics.as_deref().map(pretty),

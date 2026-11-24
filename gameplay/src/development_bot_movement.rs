@@ -2447,6 +2447,9 @@ impl NavigationMove {
             receipt["corridor_polygons"] = json!(route.corridor_refs.len());
             receipt["query_us"] = json!(route.query_us);
             receipt["projected_goal"] = json!(route.projected_goal);
+            if route.stages > 0 {
+                receipt["route_stages"] = json!(route.stages);
+            }
         }
         receipt
     }

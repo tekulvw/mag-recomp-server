@@ -191,7 +191,8 @@ struct CombatChanges {
     projectile_cleanup: [Option<ProjectileCleanup>; projectile::MAX_PROJECTILE_SLOTS],
     projectile_publications: Vec<ProjectilePublication>,
     smoke_volumes: smoke_runtime::State,
-    new_grenade_remaining: Option<u8>,
+    /// Equipment gear and its remaining throws after an accepted launch.
+    new_grenade_remaining: Option<(u8, u8)>,
     static_resupply: Option<human_static_resupply::Change>,
     new_grenade_damage: Option<std::collections::VecDeque<PendingDamage>>,
     queued_fall: Option<PendingDamage>,
@@ -1099,8 +1100,8 @@ impl<W: Write> Engine<W> {
         {
             active.static_resupply.clear();
         }
-        if let Some(remaining) = plan.combat.new_grenade_remaining {
-            active.grenade_remaining = remaining;
+        if let Some((gear, remaining)) = plan.combat.new_grenade_remaining {
+            active.set_grenade_count(gear, remaining);
         }
         if let Some(witness) = plan.session.flash_yaw {
             active.flash_yaw = Some(witness);
@@ -1163,41 +1164,24 @@ impl<W: Write> Engine<W> {
                         last_user_data: 0,
                     };
                     active.next_heal_allowed = Duration::ZERO;
-                    active.grenade_remaining = plan
+                    let kit = plan
                         .session
                         .new_spawned_loadout
                         .clone()
-                        .or_else(|| active.equipped_loadout())
-                        .and_then(|kit| {
-                            kit.inventories
-                                .get(usize::from(kit.handle.inventory_index))
-                                .and_then(|i| i.slots[4])
-                        })
-                        .and_then(|id| {
-                            self.smoke_grenades
-                                .as_deref()
-                                .and_then(|catalog| {
-                                    catalog.variant(active.reservation.character.faction, id)
-                                })
-                                .map(|variant| variant.parameters())
-                                .or_else(|| {
-                                    self.gas_grenades
-                                        .as_deref()
-                                        .and_then(|catalog| {
-                                            catalog
-                                                .variant(active.reservation.character.faction, id)
-                                        })
-                                        .map(|variant| variant.parameters())
-                                })
-                                .or_else(|| {
-                                    self.flash_grenades
-                                        .as_deref()?
-                                        .variant(active.reservation.character.faction, id)
-                                        .map(|v| v.parameters())
-                                })
-                                .or_else(|| self.item_catalog.grenade(id).ok())
-                        })
-                        .map_or(0, |p| p.initial_count);
+                        .or_else(|| active.equipped_loadout());
+                    let counts = resources::initial_grenade_counts(
+                        resources::ThrowCatalogs {
+                            items: &self.item_catalog,
+                            smoke: self.smoke_grenades.as_deref(),
+                            gas: self.gas_grenades.as_deref(),
+                            flash: self.flash_grenades.as_deref(),
+                        },
+                        active.reservation.character.faction,
+                        kit.as_ref(),
+                    );
+                    for (gear, count) in GRENADE_GEARS.into_iter().zip(counts) {
+                        active.set_grenade_count(gear, count);
+                    }
                 }
             }
             if !life.is_alive() || plan.replication.spawn_delta.is_some() {

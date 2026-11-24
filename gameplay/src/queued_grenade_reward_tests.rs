@@ -2093,6 +2093,33 @@ fn ordinary_frag_death_leaves_already_terminal_counter_frozen_during_damage_grac
     assert!(engine.pending_reward_batch().is_empty());
 }
 #[test]
+fn firearm_kill_during_terminal_damage_grace_is_applied_without_changing_the_frozen_counter() {
+    // The result is final while the round's ending window still allows
+    // combat. A lethal bullet then must not refuse the whole event: Horizon
+    // treats a refused event as a desynchronised client and drops it.
+    let (mut engine, target) = firearm_fixture(false);
+    engine.match_terminal = Some(crate::match_flow::MatchTerminal {
+        world_id: 1,
+        match_id: "synthetic-ended-match".into(),
+        reason: "defender_victory".into(),
+        reservation_ids: vec![engine.active.as_ref().unwrap().reservation.id.clone()],
+    });
+    engine.round.outcome = Some(crate::match_flow::Outcome {
+        winner: 0,
+        major: false,
+        deadline: Duration::from_secs(10),
+        finalized: false,
+    });
+    let hit = crate::human_kill_reward_tests::native_hit(0x0380_0000 | u32::from(target), 17);
+    dispatch(&mut engine, &hit, 1000).unwrap();
+    assert_eq!(engine.bot_registry.bots[&target].health, 0);
+    assert_eq!(
+        engine.bot_registry.bots[&target].firearm_kd,
+        Default::default()
+    );
+    assert!(engine.pending_reward_batch().is_empty());
+}
+#[test]
 fn friendly_queued_grenade_preserves_friendly_kill_statistics_without_enemy_xp() {
     let (mut engine, target) = fixture();
     let source_team = engine.active.as_ref().unwrap().team();
