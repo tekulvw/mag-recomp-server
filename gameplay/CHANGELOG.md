@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.11.1...gameplay-v0.12.0) (2026-11-24)
+
+
+### Features
+
+* **gameplay:** configure smoke grenades with one worker flag for every mode ([#254](https://github.com/tekulvw/mag-recomp-server/issues/254)) ([1a7719d](https://github.com/tekulvw/mag-recomp-server/commit/1a7719dc360f83e5a16f1ec52895132a9ae8d8f7))
+
 ## [0.11.1](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.11.0...gameplay-v0.11.1) (2026-11-24)
 
 

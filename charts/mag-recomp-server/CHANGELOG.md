@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.11.0](https://github.com/tekulvw/mag-recomp-server/compare/chart-v0.10.0...chart-v0.11.0) (2026-11-24)
+
+
+### Features
+
+* **medius:** adopt a restarted registry worker without restarting Medius ([#255](https://github.com/tekulvw/mag-recomp-server/issues/255)) ([983b5b9](https://github.com/tekulvw/mag-recomp-server/commit/983b5b9681afe336ca78dbf0df5caa4903b8bfa7))
+* **medius:** stop admitting players beyond the forwarded DME ports ([#253](https://github.com/tekulvw/mag-recomp-server/issues/253)) ([ff401f1](https://github.com/tekulvw/mag-recomp-server/commit/ff401f1353e3b8454b933d9a503a6d522f77e92d))
+
 ## [0.10.0](https://github.com/tekulvw/mag-recomp-server/compare/chart-v0.9.0...chart-v0.10.0) (2026-11-24)
 
 
