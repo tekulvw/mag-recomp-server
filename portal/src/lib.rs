@@ -14,6 +14,8 @@ pub mod oidc;
 pub mod ratelimit;
 pub mod report_store;
 pub mod reports;
+pub mod social;
+pub mod social_web;
 pub mod staff;
 pub mod ticket;
 pub mod tokens;

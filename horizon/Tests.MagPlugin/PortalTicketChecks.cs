@@ -171,8 +171,11 @@ internal static class PortalTicketChecks
         Check(Verify(Ticket(one).Concat(new byte[] { 0 }).ToArray()) == MagPortalTicketReason.Malformed, "Trailing byte accepted");
         var emptyAudience = Sign(one, Unsigned(1, now, now + 60, 9, Nonce(200), "", "Bravo"));
         Check(Verify(emptyAudience) == MagPortalTicketReason.Malformed, "Empty audience accepted");
-        Check(Verify(Ticket(one, issued: now - 100, expires: now - 100 + 3601)) == MagPortalTicketReason.BadLifetime, "Lifetime over 3600 s accepted");
-        Check(Verify(Ticket(one, issued: now - 100, expires: now - 100 + 3600)) == MagPortalTicketReason.Accepted, "Lifetime of exactly 3600 s rejected");
+        Check(MagPortalTicketVerifier.MaximumLifetimeSeconds == 12 * 3600, "Ticket lifetime is not 12 hours");
+        Check(Verify(Ticket(one, issued: now - 100, expires: now - 100 + 43201)) == MagPortalTicketReason.BadLifetime, "Lifetime over 12 h accepted");
+        Check(Verify(Ticket(one, issued: now - 100, expires: now - 100 + 43200)) == MagPortalTicketReason.Accepted, "Lifetime of exactly 12 h rejected");
+        Check(Verify(Ticket(one, issued: now - 43199, expires: now + 1)) == MagPortalTicketReason.Accepted, "12 h ticket rejected in its last second");
+        Check(Verify(Ticket(one, issued: now - 43200, expires: now)) == MagPortalTicketReason.Expired, "12 h ticket accepted at its expiry");
         Check(Verify(Ticket(one, issued: now + 5, expires: now + 5)) == MagPortalTicketReason.BadLifetime, "Expiry equal to issue accepted");
         Check(Verify(Ticket(one, issued: now + 60, expires: now + 600)) == MagPortalTicketReason.Accepted, "60 s future skew rejected");
         Check(Verify(Ticket(one, issued: now + 61, expires: now + 600)) == MagPortalTicketReason.NotYetValid, "61 s future skew accepted");
@@ -259,10 +262,18 @@ internal static class PortalTicketChecks
         byte[] Ticket(byte seed, long expires) => Sign(key, Unsigned(1, now, expires, 5, Nonce(seed), "game.example.test", "Delta"));
         var policy = new MagPortalTicketPolicy(settings, () => At(now));
         var ticket = Ticket(1, now + 600);
-        // The game reuses one ticket for several sign-ins: three uses per service, never a fourth.
+        // The game reuses one ticket for its sign-ins and reconnects: 32 uses per service, never more.
+        Check(MagPortalNonceCache.MaximumUses == 32, "Use limit is not 32");
         for (int use = 1; use <= MagPortalNonceCache.MaximumUses; use++)
             Check(Send(policy, ticket).Accepted, "Use " + use + " rejected");
-        Check(Send(policy, ticket).Reason == MagPortalTicketReason.Replayed, "Fourth use accepted");
+        Check(Send(policy, ticket).Reason == MagPortalTicketReason.Replayed, "Use past the limit accepted");
+        // A 12-hour ticket keeps its uses for its whole life, and its nonce is remembered that long.
+        var longPolicy = new MagPortalTicketPolicy(settings, () => At(now + 43199));
+        Check(Send(longPolicy, Ticket(2, now + 43200)).Accepted, "12 h ticket rejected near its end");
+        var spent = Ticket(3, now + 43200);
+        for (int use = 1; use <= MagPortalNonceCache.MaximumUses; use++) Check(Send(policy, spent).Accepted, "12 h ticket use " + use + " rejected");
+        var nearEnd = new MagPortalTicketPolicy(settings, () => At(now + 43199), policy.Nonces);
+        Check(Send(nearEnd, spent).Reason == MagPortalTicketReason.Replayed, "12 h ticket's nonce forgotten before it expired");
         Check(Send(policy, Ticket(1, now + 300)).Reason == MagPortalTicketReason.Replayed, "Nonce reuse in a new ticket accepted");
         Check(Send(new MagPortalTicketPolicy(settings, () => At(now)), ticket).Accepted, "Nonces leaked between independent caches");
 
@@ -274,10 +285,33 @@ internal static class PortalTicketChecks
         var later = Ticket(42, now + 600);
         Check(Send(small, later).Accepted && small.Nonces.Count == 1, "Expired nonce not purged");
 
+        // One account cannot fill the cache: past its share its own new tickets are refused until they
+        // expire, other accounts still sign in, and the cache never grows past its capacity.
+        var cache = new MagPortalNonceCache(MagPortalNonceCache.MaximumNoncesPerAccount + 2);
+        byte[] Unique(int i) => BitConverter.GetBytes((long)i).Concat(BitConverter.GetBytes(~(long)i)).ToArray();
+        for (int i = 0; i < MagPortalNonceCache.MaximumNoncesPerAccount; i++)
+            Check(cache.TryUse(Unique(i), 7, now + 43200, now) == MagPortalTicketReason.Accepted, "Account share refused early at " + i);
+        Check(cache.TryUse(Unique(100000), 7, now + 43200, now) == MagPortalTicketReason.ReplayCacheFull, "Account held more than its share");
+        Check(cache.CountFor(7) == MagPortalNonceCache.MaximumNoncesPerAccount, "Refused nonce counted for its account");
+        Check(cache.TryUse(Unique(100001), 8, now + 43200, now) == MagPortalTicketReason.Accepted &&
+            cache.TryUse(Unique(100002), 9, now + 600, now) == MagPortalTicketReason.Accepted, "Another account refused while one is at its share");
+        Check(cache.TryUse(Unique(100003), 10, now + 43200, now) == MagPortalTicketReason.ReplayCacheFull &&
+            cache.Count == MagPortalNonceCache.MaximumNoncesPerAccount + 2, "Cache grew past its capacity");
+        // Account 9's nonce expires; the next sign-in after that sweeps it out and takes its place.
+        Check(cache.TryUse(Unique(100004), 10, now + 43200, now + 601) == MagPortalTicketReason.Accepted &&
+            cache.CountFor(9) == 0 && cache.Count == MagPortalNonceCache.MaximumNoncesPerAccount + 2, "Expired nonce not swept when full");
+        // At expiry the account's share comes back.
+        Check(cache.TryUse(Unique(100005), 7, now + 2 * 43200, now + 43200) == MagPortalTicketReason.Accepted &&
+            cache.CountFor(7) == 1, "Account share not returned after its tickets expired");
+        Check(MagPortalNonceCache.DefaultCapacity / MagPortalNonceCache.MaximumNoncesPerAccount >= 512, "Too few accounts fill the default cache");
+
         // Thread-safe: exactly the use limit of many concurrent uses of a nonce wins.
-        var cache = new MagPortalNonceCache();
+        var shared = new MagPortalNonceCache();
         int accepted = 0;
-        Parallel.For(0, 64, _ => { if (cache.TryUse(Nonce(90), now + 600, now) == MagPortalTicketReason.Accepted) Interlocked.Increment(ref accepted); });
+        Parallel.For(0, 4 * MagPortalNonceCache.MaximumUses, _ =>
+        {
+            if (shared.TryUse(Nonce(90), 5, now + 600, now) == MagPortalTicketReason.Accepted) Interlocked.Increment(ref accepted);
+        });
         Check(accepted == MagPortalNonceCache.MaximumUses, "Concurrent nonce use accepted " + accepted + " times");
     }
 
@@ -312,9 +346,10 @@ internal static class PortalTicketChecks
         policy.Sessions.Release(first);
         var third = new Owner();
         Check(Use(ticket, third).Accepted, "Account not freed after its session ended");
+        for (int use = 4; use <= MagPortalNonceCache.MaximumUses; use++) Check(Use(ticket, third).Accepted, "Holder's use " + use + " rejected");
         third.Live = false;
         var fourth = new Owner();
-        Check(Use(ticket, fourth).Reason == MagPortalTicketReason.Replayed, "Fourth use of the ticket accepted");
+        Check(Use(ticket, fourth).Reason == MagPortalTicketReason.Replayed, "Use of the ticket past its limit accepted");
         Check(Use(Ticket(4, "Foxtrot"), fourth).Accepted, "Idle session kept its account");
         Check(Use(Ticket(5, "Foxtrot"), new Owner()).Reason == MagPortalTicketReason.AccountSignedIn, "Refused claim released the holder");
     }
@@ -378,6 +413,12 @@ internal static class PortalTicketChecks
         replies.Count == 1 && MagMessageCodec.TryParseForApplication(replies[0].Payload, app, out var parsed) &&
         parsed is MagNpAuthenticateResponse response && response.Success;
 
+    /// <summary>One well-formed failure reply of the request's own message type, echoing its transaction.</summary>
+    static bool Refused(IReadOnlyList<RT_MSG_SERVER_PLUGIN_TO_APP> replies, int app, int transactionId = 0) =>
+        replies.Count == 1 && MagMessageCodec.TryParseForApplication(replies[0].Payload, app, out var parsed) &&
+        parsed is MagNpAuthenticateResponse response && !response.Success && response.TransactionId == transactionId &&
+        (app == 20231) == (response is MagRetailNpAuthenticateResponse);
+
     static MagNpAuthenticateRequest Plain(int app)
     {
         var plain = Chunk(Encoding.ASCII.GetBytes("Synthetic"), 9, true, app == 20231);
@@ -415,23 +456,29 @@ internal static class PortalTicketChecks
                     "Off mode development sign-in changed");
                 var disabled = Mas(false, null);
                 Check(Wire(e => disabled.HandleMany(true, app, e, clock), Plain(app), app).Count == 0 &&
-                    disabled.State == MagMasSession.SessionState.ProtocolAcknowledged, "Off mode signed in without development auth");
+                    disabled.State == MagMasSession.SessionState.ProtocolAcknowledged && disabled.PortalTicketRefusal == null,
+                    "Off mode signed in without development auth, or answered the refusal");
 
                 // Required: the plain name is refused even with development auth on; a ticket signs in.
                 var policy = new MagPortalTicketPolicy(settings, () => clock);
                 var mas = Mas(true, policy);
-                Check(Wire(e => mas.HandleMany(true, app, e, clock), Plain(app), app).Count == 0 &&
+                Check(Refused(Wire(e => mas.HandleMany(true, app, e, clock), Plain(app), app), app) &&
                     mas.State == MagMasSession.SessionState.ProtocolAcknowledged && mas.AuthenticatedAccount == null &&
-                    mas.PortalTicketStatus == "malformed", "Required mode accepted the plain development name");
+                    mas.PortalTicketStatus == "malformed" && mas.PortalTicketRefusal == "portal ticket refused: reason=malformed",
+                    "Required mode accepted the plain development name");
                 var ticket = Ticket();
                 Check(Wire(e => mas.HandleMany(true, app, e, clock), Chunk(ticket[..60], ticket.Length, false, retail), app).Count == 0 &&
-                    mas.PortalTicketStatus == "pending", "First wire chunk answered");
+                    mas.PortalTicketStatus == "pending" && mas.PortalTicketRefusal == null, "First wire chunk answered");
                 Check(Succeeded(Wire(e => mas.HandleMany(true, app, e, clock), Chunk(ticket[60..], ticket.Length, true, retail), app), app) &&
                     mas.State == MagMasSession.SessionState.LocalDevelopmentAuthenticated && mas.AuthenticatedAccount == "echo_ranger-07" &&
                     mas.PortalAccountId == 1234 && mas.PortalTicketStatus == "accepted", "Required mode ticket sign-in");
                 var second = Mas(false, policy);
-                Check(Wire(e => second.HandleMany(true, app, e, clock), Chunk(ticket, ticket.Length, true, retail), app).Count == 0 &&
-                    second.PortalTicketStatus == "account_signed_in" && second.AuthenticatedAccount == null, "Ticket opened a second live MAS session");
+                var signedInRequest = Chunk(ticket, ticket.Length, true, retail);
+                signedInRequest.TransactionId = 41;
+                Check(Refused(Wire(e => second.HandleMany(true, app, e, clock), signedInRequest, app), app, 41) &&
+                    second.PortalTicketStatus == "account_signed_in" && second.AuthenticatedAccount == null &&
+                    second.PortalTicketRefusal.StartsWith("portal ticket refused: reason=account_signed_in account=echo_ranger-07 account_id=1234 "),
+                    "Ticket opened a second live MAS session");
                 mas.EndPortalSession();
                 Check(Succeeded(Wire(e => second.HandleMany(true, app, e, clock), Chunk(ticket, ticket.Length, true, retail), app), app) &&
                     second.AuthenticatedAccount == "echo_ranger-07", "Account not freed after the first MAS session ended");
@@ -477,8 +524,40 @@ internal static class PortalTicketChecks
                 var maps = new MagMapsSession { DevelopmentAuthEnabled = true, PortalTickets = new MagPortalTicketPolicy(settings, () => clock) };
                 Wire(e => maps.HandleMany(true, app, e, clock), new MagHello(), app);
                 if (!retail) Wire(e => maps.HandleMany(true, app, e, clock), new MagUniverseListRequest(), app);
-                Check(Wire(e => maps.HandleMany(true, app, e, clock), Plain(app), app).Count == 0 && maps.AuthenticatedAccount == null,
+                Check(Refused(Wire(e => maps.HandleMany(true, app, e, clock), Plain(app), app), app) && maps.AuthenticatedAccount == null,
                     "MAPS required mode accepted the plain name");
+                // An expired ticket: a failure reply right away, and a staff log naming the account and its expiry.
+                var expired = Sign(key, Unsigned(1, now - 700, now - 100, 1234, Nonce(250), "game.example.test", "Echo_Ranger-07"));
+                var expiredRequest = Chunk(expired, expired.Length, true, retail);
+                expiredRequest.TransactionId = 7;
+                Check(Refused(Wire(e => maps.HandleMany(true, app, e, clock), expiredRequest, app), app, 7) &&
+                    maps.PortalTicketStatus == "expired" && maps.AuthenticatedAccount == null, "MAPS expired ticket not refused with a reply");
+                string expiredAt = DateTime.UnixEpoch.AddSeconds(now - 100).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'");
+                string issuedAt = DateTime.UnixEpoch.AddSeconds(now - 700).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'");
+                long age = (long)(clock - At(now - 700)).TotalSeconds;
+                Check(maps.PortalTicketRefusal == "portal ticket refused: reason=expired account=echo_ranger-07 account_id=1234 issued_at=" +
+                    issuedAt + " expires_at=" + expiredAt + " age_s=" + age, "Expired refusal log: " + maps.PortalTicketRefusal);
+                Check(!maps.PortalTicketRefusal.Contains(Convert.ToHexString(Nonce(250)), StringComparison.OrdinalIgnoreCase) &&
+                    !maps.PortalTicketRefusal.Contains(Convert.ToBase64String(expired)), "Refusal log carries ticket bytes");
+                // An unverified signature names no account; the log line is cleared by the next message.
+                using (var stranger = ECDsa.Create(ECCurve.NamedCurves.nistP256))
+                {
+                    var forged = Sign(stranger, Unsigned(1, now, now + 600, 1234, Nonce(251), "game.example.test", "Echo_Ranger-07"));
+                    Check(Refused(Wire(e => maps.HandleMany(true, app, e, clock), Chunk(forged, forged.Length, true, retail), app), app) &&
+                        maps.PortalTicketRefusal == "portal ticket refused: reason=bad_signature", "Forged ticket log: " + maps.PortalTicketRefusal);
+                }
+                // Three failures used up the session's attempts: further tickets are ignored without a reply.
+                var ignored = Ticket();
+                Check(Wire(e => maps.HandleMany(true, app, e, clock), Chunk(ignored, ignored.Length, true, retail), app).Count == 0 &&
+                    maps.PortalTicketStatus == "too_many_attempts" && maps.AuthenticatedAccount == null, "Attempts past the limit answered");
+                maps = new MagMapsSession { DevelopmentAuthEnabled = true, PortalTickets = maps.PortalTickets };
+                Wire(e => maps.HandleMany(true, app, e, clock), new MagHello(), app);
+                if (!retail) Wire(e => maps.HandleMany(true, app, e, clock), new MagUniverseListRequest(), app);
+                // A bad non-final chunk gets no reply: the client is still sending, and its final chunk is answered.
+                var partial = Ticket();
+                Check(Wire(e => maps.HandleMany(true, app, e, clock), Chunk(partial[..40], partial.Length + 1, false, retail), app).Count == 0, "First chunk answered");
+                Check(Wire(e => maps.HandleMany(true, app, e, clock), Chunk(partial[40..], partial.Length, false, retail), app).Count == 0 &&
+                    maps.PortalTicketStatus == "bad_chunk", "Bad non-final chunk answered");
                 var mapsTicket = Ticket();
                 Check(Succeeded(Wire(e => maps.HandleMany(true, app, e, clock), Chunk(mapsTicket, mapsTicket.Length, true, retail), app), app) &&
                     maps.AuthenticatedAccount == "echo_ranger-07" && maps.PortalAccountId == 1234, "MAPS ticket sign-in");

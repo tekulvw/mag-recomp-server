@@ -162,7 +162,7 @@ fn rocket_death_full_notice_fifo_defers_entire_terminal_then_health_precedes_not
     lethal_target(&mut engine);
     launch(&mut engine, 3, 64, 1000);
     let victim = engine.peers.get_mut("synthetic-rocket-target").unwrap();
-    for _ in 0..128 {
+    for _ in 0..crate::match_flow::MAX_PENDING_NOTIFICATIONS {
         victim
             .pending_notifications
             .push_back(match_flow::Publication::Application(vec![9]));
@@ -180,7 +180,7 @@ fn rocket_death_full_notice_fifo_defers_entire_terminal_then_health_precedes_not
         engine.peers["synthetic-rocket-target"]
             .pending_notifications
             .len(),
-        128
+        crate::match_flow::MAX_PENDING_NOTIFICATIONS
     );
     assert!(audit(&engine, "infantry_rocket_terminal").is_empty());
     assert!(state(&engine).slots[3].as_ref().unwrap().cleanup.is_none());

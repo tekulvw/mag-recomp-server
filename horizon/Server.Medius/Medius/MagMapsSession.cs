@@ -23,6 +23,8 @@ namespace Server.Medius
         /// <summary>Portal account ID of a ticket-authenticated session; 0 otherwise.</summary>
         public uint PortalAccountId { get; private set; }
         public string PortalTicketStatus { get; private set; } = "inactive";
+        /// <summary>Staff log line when the last message refused a portal ticket; null otherwise.</summary>
+        public string PortalTicketRefusal { get; private set; }
         private readonly MagPortalTicketAssembly _portalTicket = new MagPortalTicketAssembly();
         /// <summary>Idle limit for portal account liveness; MAS.cs sets the application's client timeout.</summary>
         public int PortalLiveTimeoutSeconds { get; set; } = 30;
@@ -53,6 +55,7 @@ namespace Server.Medius
         public IReadOnlyList<RT_MSG_SERVER_PLUGIN_TO_APP> HandleMany(bool enabled, int applicationId,
             RT_MSG_CLIENT_APP_TO_PLUGIN envelope, DateTime now)
         {
+            PortalTicketRefusal = null;
             if (!enabled || !MagPluginRouting.IsSelectedApplication(applicationId) || !envelope.IsValid || envelope.PluginId != 0)
                 return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();
             if (!MagMessageCodec.TryParseClientForApplication(envelope.Payload, applicationId, out var message))
@@ -73,7 +76,7 @@ namespace Server.Medius
                         ? new MagRetailMapsHelloResponse { Success = true, Online = true, FactionMask = 7, AuxiliaryString = string.Empty, AuxiliaryValue = 0 }
                         : new MagMapsHelloResponse { Success = true, Online = true, FactionMask = 7 });
                 case MagRetailNpAuthenticateRequest request when PortalTickets != null && State == SessionState.HelloSent:
-                    if (!PortalAuthenticate(request, now)) return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();
+                    if (!PortalAuthenticate(request, now, out var retailRefusal)) return Refuse(applicationId, retailRefusal);
                     State = SessionState.WaitingForUniverse;
                     return Reply(applicationId, new MagRetailNpAuthenticateResponse { TransactionId = request.TransactionId, Success = true });
                 case MagRetailNpAuthenticateRequest request when PortalTickets == null && DevelopmentAuthEnabled &&
@@ -91,7 +94,7 @@ namespace Server.Medius
                     ObserveActivity(now);
                     return Reply(applicationId, UniverseResponse(request.TransactionId, false));
                 case MagNpAuthenticateRequest request when PortalTickets != null && State == SessionState.WaitingForAuthentication:
-                    if (!PortalAuthenticate(request, now)) return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();
+                    if (!PortalAuthenticate(request, now, out var refusal)) return Refuse(applicationId, refusal);
                     State = SessionState.LocalDevelopmentAuthenticated;
                     return Reply(applicationId, new MagNpAuthenticateResponse { TransactionId = request.TransactionId, Success = true });
                 case MagNpAuthenticateRequest request when PortalTickets == null && DevelopmentAuthEnabled &&
@@ -140,15 +143,20 @@ namespace Server.Medius
             return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();
         }
 
-        private bool PortalAuthenticate(MagNpAuthenticateRequest request, DateTime now)
+        private bool PortalAuthenticate(MagNpAuthenticateRequest request, DateTime now, out MagNpAuthenticateResponse refusal)
         {
             var outcome = PortalTickets.Authenticate(_portalTicket, request, this, now);
             PortalTicketStatus = outcome.Reason.Code();
+            PortalTicketRefusal = outcome.RefusalLog();
+            refusal = MagPortalTicketPolicy.RefusalReply(request, outcome);
             ObserveActivity(now);
             if (!outcome.Accepted) return false;
             AuthenticatedAccount = outcome.Account; PortalAccountId = outcome.AccountId;
             return true;
         }
+
+        private static IReadOnlyList<RT_MSG_SERVER_PLUGIN_TO_APP> Refuse(int applicationId, MagNpAuthenticateResponse refusal) =>
+            refusal == null ? Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>() : Reply(applicationId, refusal);
 
         private static MagUniverseListResponse UniverseResponse(int transactionId, bool retail)
         {

@@ -90,6 +90,27 @@ internal static class FactionMatchmakingChecks
             "One human must not form a new match");
         Check(MagFactionMatchmaking.Select(new[] { Human("same-a", 0, 0), Human("same-b", 0, 1) },
             Profiles(), 1, 64, new[] { 0, 0 }, n => 0) == null, "Same-faction queue formed an opposing match");
+        // Profiles the worker fills with bots may start from one human, in any mode,
+        // as attacker or defender; the operator's configured minima still apply.
+        var botFilled = Profiles().Select(p => p with { BotFillTotal = 64 }).ToArray();
+        foreach (int mode in new[] { 0, 1, 2 })
+        foreach (byte faction in new byte[] { 0, 1, 2 })
+        {
+            var solo = MagFactionMatchmaking.Select(new[] { Human("solo", faction, 0, mode) }, botFilled, 1, 64, new[] { 0, 0 }, n => 0);
+            Check(solo != null && solo.Profile.GameType == mode && solo.Profile.BotFill &&
+                (solo.Profile.AttackingFaction == faction || solo.Profile.DefendingFaction == faction) &&
+                solo.Players.Single().TicketId == "solo", "One human did not form a bot-filled match");
+        }
+        Check(MagFactionMatchmaking.Select(single, botFilled, 2, 64, new[] { 0, 0 }, n => 0) == null,
+            "A configured two-human minimum was ignored for a bot-filled profile");
+        Check(MagFactionMatchmaking.Select(single, botFilled, 1, 64, new[] { 1, 1 }, n => 0) == null,
+            "Configured per-side minima were ignored for a bot-filled profile");
+        Check(MagFactionMatchmaking.Select(new[] { Human("solo", 1, 0, 2) }, Profiles().Concat(botFilled.Where(p => p.GameType == 2)
+                .Select(p => p with { ProfileId = p.ProfileId + "-bots" })).ToArray(), 1, 64, new[] { 0, 0 }, n => 0)?.Profile.BotFill == true,
+            "A one-human formation chose a profile without bot fill");
+        Check(MagFactionMatchmaking.FormationMinimum(Profile(0, 1), 1) == 2 &&
+            MagFactionMatchmaking.FormationMinima(Profile(0, 1), new[] { 0, 0 }).SequenceEqual(new[] { 1, 1 }),
+            "Profiles without bot fill lost the two-human floor");
         var late = MagFactionMatchmaking.ForProfile(single, Profile(0, 1), 1, 64, new[] { 0, 0 });
         Check(late != null && late.Players.Single().TicketId == "late", "Fixed profile must allow one defender late join");
         Check(MagFactionMatchmaking.ForProfile(new[] { Human("late-attacker", 0, 0) }, Profile(0, 1),
@@ -105,6 +126,7 @@ internal static class FactionMatchmakingChecks
             Throws<ArgumentException>(() => MagFactionMatchmaking.Select(new[] { bad }, Profiles(), 2, 64, new[] { 1, 1 }, n => 0));
         foreach (var bad in new[] { Profile(0, 0), Profile(3, 1), Profile(0, 1, mode: 3),
             Profile(0, 1, maximum: 65), Profile(0, 1, team: 33), Profile(0, 1, team: 0),
+            Profile(0, 1) with { BotFillTotal = 1 }, Profile(0, 1, maximum: 8) with { BotFillTotal = 9 },
             new MagMatchProfile(" ", 0, 0, 1, 64, 32) })
             Throws<ArgumentException>(() => MagFactionMatchmaking.Select(pair, new[] { bad }, 2, 64, new[] { 1, 1 }, n => 0));
         Throws<ArgumentException>(() => MagFactionMatchmaking.Select(pair, new[] { Profile(0, 1), Profile(0, 1) },

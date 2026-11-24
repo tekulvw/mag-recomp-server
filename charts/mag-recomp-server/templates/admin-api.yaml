@@ -44,13 +44,19 @@ spec:
     # Service carries (including ports added outside this chart). Needs NetworkPolicy endPort
     # support: Kubernetes 1.25 or later and a CNI that implements it.
     {{- $port := int .port }}
+    {{- $udpPorts := include "mag.extraUdpPorts" $ | fromJsonArray }}
     - ports:
         {{- range $protocol := list "TCP" "UDP" }}
+        {{- if and (eq $protocol "UDP") (has (float64 $port) $udpPorts) }}
+        # The admin API is TCP only; the same UDP port carries game traffic (network.udpPortRange).
+        - {protocol: UDP, port: 1, endPort: 65535}
+        {{- else }}
         {{- if gt $port 1 }}
         - {protocol: {{ $protocol }}, port: 1, endPort: {{ sub $port 1 }}}
         {{- end }}
         {{- if lt $port 65535 }}
         - {protocol: {{ $protocol }}, port: {{ add $port 1 }}, endPort: 65535}
+        {{- end }}
         {{- end }}
         {{- end }}
     # The admin port admits only pods in the selected namespaces.

@@ -71,6 +71,20 @@ namespace Server.Medius
         // configure_match. A worker that restarts alone loses it (see ConfigureGameplayAsync).
         bool _gameplayConfigured;
         CancellationTokenSource _worldSubscription;
+        // world_stream_resume_v1: the last frame routed from the worker's numbered
+        // stream. While _worldStreamResuming, a broken stream keeps its reservations
+        // and resubscribes after that frame until the grace period ends.
+        bool _supportsWorldStreamResume;
+        bool _supportsEventReplay;
+        GameplayWorldStreamPosition _worldStreamPosition;
+        bool _worldStreamResuming;
+        long _worldStreamGapStarted;
+        TimeSpan _worldStreamResumeGrace = WorldStreamResumeGrace;
+        /// <summary>Longest world-stream gap that keeps players while it resumes.</summary>
+        public static readonly TimeSpan WorldStreamResumeGrace = TimeSpan.FromSeconds(20);
+        /// <summary>Attempts for one client event when the worker can replay its reply.</summary>
+        public const int EventAttempts = 3;
+        static readonly TimeSpan EventRetryDelay = TimeSpan.FromMilliseconds(250);
         bool _supportsFragoKillBonus;
         bool _supportsFragoActionBonus;
         bool _supportsFragoObjectiveBonus;
@@ -223,6 +237,8 @@ namespace Server.Medius
             {
                 _gameplayConfigured = false;
                 _worldStreamHealthy = false;
+                // A restarted worker cannot replay this stream.
+                _worldStreamPosition = null;
                 subscription = _worldSubscription;
             }
             Logger.Warn("Gameplay worker reports match_not_configured; closing admission and reconnecting its world stream to reconfigure");
@@ -232,6 +248,7 @@ namespace Server.Medius
         void InitializeGameplayHello(GameplayBridgeResponse hello)
         {
             _supportsPartyReservations = hello?.SupportsPartyReservations == true;
+            _supportsPartyLateEntry = hello?.SupportsPartyLateEntry == true;
             RequireLoadoutSelectionCapability(hello);
             _supportsLoadoutLayoutChanges = hello.SupportsLoadoutLayoutChanges;
             InitializeFactionMatchmaking(hello);
@@ -242,6 +259,8 @@ namespace Server.Medius
             _supportsExtendedObjectiveRewards = hello.Capabilities.Contains("extended_objective_rewards_v1", StringComparer.Ordinal);
             _supportsRepairRewards = hello.Capabilities.Contains("repair_rewards_v1", StringComparer.Ordinal);
             _supportsAssistRewards = hello.Capabilities.Contains("assist_rewards_v1", StringComparer.Ordinal);
+            _supportsWorldStreamResume = hello.SupportsWorldStreamResume;
+            _supportsEventReplay = hello.SupportsEventReplay;
         }
         public static void RequireLoadoutSelectionCapability(GameplayBridgeResponse hello)
         {
@@ -544,6 +563,7 @@ namespace Server.Medius
             var cancellation = _worldStreamCancellation.Token;
             while (!cancellation.IsCancellationRequested)
             {
+                await ReleaseExpiredWorldStreamGapAsync();
                 // Each (re)connection may reach a new worker process. Legacy matches
                 // configure it before the stream can mark admission ready.
                 bool configured;
@@ -555,10 +575,17 @@ namespace Server.Medius
                     continue;
                 }
                 using var subscription = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-                lock (_gate) _worldSubscription = subscription;
+                bool positions; GameplayWorldStreamPosition resumeAfter;
+                lock (_gate)
+                {
+                    _worldSubscription = subscription;
+                    positions = _supportsWorldStreamResume && !InRegistry;
+                    resumeAfter = positions && _worldStreamResuming ? _worldStreamPosition : null;
+                }
+                bool acknowledged = false;
                 try
                 {
-                    await _bridge.SubscribeWorldAsync((uint)World.WorldId, Id(), async reply =>
+                    await _bridge.SubscribeWorldAsync((uint)World.WorldId, Id(), positions, resumeAfter, async reply =>
                     {
                         lock (_gate)
                         {
@@ -567,39 +594,118 @@ namespace Server.Medius
                                 throw new IOException("Gameplay worker lost its match configuration.");
                             if (InRegistry && _worldStreamHealthy && !HasWorldStreamLease)
                                 throw new IOException("Gameplay world stream lease expired.");
+                            bool first = !acknowledged; acknowledged = true;
+                            AdvanceWorldStream(reply, first, resumeAfter);
                             if (!Route(reply)) throw new InvalidDataException("World stream recipient mismatch.");
                             _lastWorldFrameTimestamp = _timeProvider.GetTimestamp();
                             _worldStreamHealthy = true;
+                            if (_worldStreamResuming)
+                            {
+                                _worldStreamResuming = false;
+                                Logger.Warn($"Gameplay world stream resumed: after={resumeAfter?.Sequence.ToString() ?? "none"} gap_ms={(long)_timeProvider.GetElapsedTime(_worldStreamGapStarted).TotalMilliseconds}; kept {_reservations.Count} reservations");
+                            }
                             _firstWorldStream.TrySetResult(true);
                         }
                         await ObserveReceiptsAsync(reply, true);
                     }, subscription.Token);
                 }
                 catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { break; }
+                catch (GameplayWorldResumeRefusedException)
+                {
+                    // Another worker process, or frames it no longer holds: the
+                    // retained sessions cannot continue without a replication gap.
+                    await ReleaseWorldStreamReservationsAsync("worker could not replay the missed frames");
+                }
                 catch (Exception error) when (error is IOException || error is InvalidDataException || error is System.Net.Sockets.SocketException || error is OperationCanceledException)
                 {
-                    Reservation[] affected;
+                    bool retained; int count;
                     lock (_gate)
                     {
                         _worldStreamHealthy = false;
                         // The next connection may reach a restarted worker.
                         _gameplayConfigured = false;
-                        affected = _reservations.Values.ToArray();
-                        foreach (var reservation in affected) { reservation.Invalidated = true; reservation.ReleaseReason = "world_stream_gap"; }
+                        if (positions && !acknowledged && error is InvalidDataException)
+                        {
+                            // A worker without positions refuses the request outright
+                            // (for example after a rollback); stop asking for them.
+                            _supportsWorldStreamResume = false;
+                        }
+                        retained = RetainThroughWorldStreamGap(error);
+                        count = _reservations.Count;
                     }
                     if (InRegistry && error is GameplayWorkerIdentityException)
                         _firstWorldStream.TrySetException(error);
-                    Logger.Warn($"Gameplay world stream interrupted: failure={error.GetType().Name}; releasing {affected.Length} affected reservations");
-                    // A successful socket write does not prove client receipt. We
-                    // deliberately end affected sessions instead of resuming after
-                    // an unknown replication gap. Fresh joins use fresh identities.
-                    await ReleaseReservationsAsync(affected);
+                    if (retained)
+                        Logger.Warn($"Gameplay world stream interrupted: failure={error.GetType().Name}; keeping {count} reservations while it resumes after frame {_worldStreamPosition?.Sequence}");
+                    else
+                        await ReleaseWorldStreamReservationsAsync($"failure={error.GetType().Name}");
                     if (InRegistry && _bridge.HasWorkerIdentityFault) break;
                 }
                 finally { lock (_gate) if (_worldSubscription == subscription) _worldSubscription = null; }
                 try { await Task.Delay(TimeSpan.FromSeconds(1), cancellation); }
                 catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { break; }
             }
+        }
+        /// <summary>Check a frame's position. Called with _gate held. The first reply of a
+        /// subscription is its acknowledgement, which names the position the next frame
+        /// follows; every later frame must be exactly the next one.</summary>
+        void AdvanceWorldStream(GameplayBridgeResponse reply, bool acknowledgement, GameplayWorldStreamPosition resumeAfter)
+        {
+            var position = reply.WorldStream;
+            if (acknowledgement)
+            {
+                if (resumeAfter != null && position != resumeAfter)
+                    throw new InvalidDataException("World stream resumed at another position.");
+                _worldStreamPosition = position;
+                return;
+            }
+            if (_worldStreamPosition == null)
+            {
+                if (position != null) throw new InvalidDataException("World stream position without an acknowledgement.");
+                return;
+            }
+            if (position == null || position.Epoch != _worldStreamPosition.Epoch || position.Sequence != _worldStreamPosition.Sequence + 1)
+                throw new InvalidDataException("World stream sequence gap.");
+            _worldStreamPosition = position;
+        }
+        /// <summary>Decide whether a broken stream keeps its reservations. Called with _gate
+        /// held. Only a transport break of a numbered stream can resume, and only within the
+        /// grace period; data and identity faults, and a restarted worker, release at once.</summary>
+        bool RetainThroughWorldStreamGap(Exception error)
+        {
+            bool resumable = !InRegistry && !_disposed && _supportsWorldStreamResume && _worldStreamPosition != null &&
+                !(error is InvalidDataException) && !(error is GameplayWorkerIdentityException);
+            if (resumable && !_worldStreamResuming)
+            {
+                _worldStreamResuming = true;
+                _worldStreamGapStarted = _timeProvider.GetTimestamp();
+            }
+            else if (resumable && _timeProvider.GetElapsedTime(_worldStreamGapStarted) >= _worldStreamResumeGrace)
+                resumable = false;
+            return resumable;
+        }
+        async Task ReleaseExpiredWorldStreamGapAsync()
+        {
+            bool expired;
+            lock (_gate) expired = _worldStreamResuming && _timeProvider.GetElapsedTime(_worldStreamGapStarted) >= _worldStreamResumeGrace;
+            if (expired) await ReleaseWorldStreamReservationsAsync("resume grace expired");
+        }
+        async Task ReleaseWorldStreamReservationsAsync(string cause)
+        {
+            Reservation[] affected;
+            lock (_gate)
+            {
+                _worldStreamHealthy = false;
+                _worldStreamResuming = false;
+                _worldStreamPosition = null;
+                affected = _reservations.Values.ToArray();
+                foreach (var reservation in affected) { reservation.Invalidated = true; reservation.ReleaseReason = "world_stream_gap"; }
+            }
+            Logger.Warn($"Gameplay world stream interrupted: {cause}; releasing {affected.Length} affected reservations");
+            // A successful socket write does not prove client receipt. Without a
+            // replay we end affected sessions instead of resuming after an unknown
+            // replication gap. Fresh joins use fresh identities.
+            await ReleaseReservationsAsync(affected);
         }
         async Task RunEvents(ChannelReader<(Reservation reservation, object message)> reader, bool resultsOnly)
         {
@@ -615,7 +721,7 @@ namespace Server.Medius
                     }
                 }
                 var elapsed = Stopwatch.StartNew();
-                var reply = await _bridge.RequestEventAsync(item.message);
+                var reply = await RequestEventWithReplayAsync(item.reservation, item.message);
                 lock (_gate)
                 {
                     var reservation = item.reservation; var client = reservation.Client;
@@ -626,7 +732,7 @@ namespace Server.Medius
                     if (reply == null || reply.IsTransientFailure)
                     {
                         _rewardRetry = true; _selectionRetry = true;
-                        Logger.Warn($"Gameplay bridge event unanswered: player={client.DmeId} failure={reply?.Failure.ToString() ?? "Unavailable"} elapsed_ms={elapsed.ElapsedMilliseconds}; retaining authenticated reservation without retry");
+                        Logger.Warn($"Gameplay bridge event unanswered: player={client.DmeId} failure={reply?.Failure.ToString() ?? "Unavailable"} elapsed_ms={elapsed.ElapsedMilliseconds}; retaining authenticated reservation without further retry");
                         continue;
                     }
                     // Peer damage/life was committed by Rust even if the sender left
@@ -641,6 +747,22 @@ namespace Server.Medius
                 }
                 await ObserveReceiptsAsync(reply, true);
             }
+        }
+        /// <summary>Send one client event. A worker with event_replay_v1 applies an event ID
+        /// once and answers repeats with the same reply, so an unanswered event is sent
+        /// again with its original ID, in order, before any later event of this queue.
+        /// Without that capability a repeat could apply an uncertain shot twice.</summary>
+        async Task<GameplayBridgeResponse> RequestEventWithReplayAsync(Reservation reservation, object message)
+        {
+            var reply = await _bridge.RequestEventAsync(message);
+            for (int attempt = 2; attempt <= EventAttempts && (reply == null || reply.IsTransientFailure); attempt++)
+            {
+                lock (_gate) if (!_supportsEventReplay || _disposed || !Current(reservation) || reservation.Invalidated) break;
+                Logger.Warn($"Gameplay bridge event unanswered: failure={reply?.Failure.ToString() ?? "Unavailable"}; resending it with the same request ID (attempt {attempt} of {EventAttempts})");
+                await Task.Delay(EventRetryDelay);
+                reply = await _bridge.RequestEventAsync(message);
+            }
+            return reply;
         }
         bool IsCurrentRefreshOwner(GameplayLoadoutRefreshTarget target)
         {

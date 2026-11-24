@@ -21,7 +21,8 @@ namespace Server.Medius
     public sealed record LocalDmeWorkerPlacement(bool Ready, bool Draining, bool CanForm,
         IReadOnlyList<MagMatchProfile> Profiles, MagMatchStartupPolicy StartupPolicy,
         IReadOnlyList<int> MinimumPlayersPerTeam, MagMatchProfile CurrentProfile,
-        IReadOnlyList<int> LiveTeamCounts, int LiveCount, IReadOnlyList<int> PendingTeamCounts, int PendingQueueCount);
+        IReadOnlyList<int> LiveTeamCounts, int LiveCount, IReadOnlyList<int> PendingTeamCounts, int PendingQueueCount,
+        bool AcceptsLateParties = false);
 
     public sealed partial class LocalDmeHost
     {
@@ -40,8 +41,10 @@ namespace Server.Medius
         bool Draining => _operatorDraining || (InRegistry && (_bridge.HasWorkerIdentityFault || _readDrainPolicy?.Invoke() == true));
         bool HasWorldStreamLease => _worldStreamHealthy && (!InRegistry ||
             (!_bridge.HasWorkerIdentityFault && _timeProvider.GetElapsedTime(_lastWorldFrameTimestamp) < WorldStreamLease));
-        bool ReadyForGameplay => _ready && !_disposed && HasWorldStreamLease;
-        bool ReadyForAdmission => ReadyForGameplay && !Draining;
+        // A legacy stream that is resuming keeps its sessions usable (client events
+        // still reach the worker) but admits no one until frames flow again.
+        bool ReadyForGameplay => _ready && !_disposed && (HasWorldStreamLease || (_worldStreamResuming && !InRegistry));
+        bool ReadyForAdmission => _ready && !_disposed && HasWorldStreamLease && !Draining;
 
         public void SetDraining(bool draining)
         {
@@ -127,10 +130,11 @@ namespace Server.Medius
                 bool ready = ReadyForGameplay;
                 bool draining = Draining;
                 return new LocalDmeWorkerPlacement(ready, draining, CanStageRegistryFormation(ready && !draining),
-                    _matchProfiles, _formationStartup ?? _startupPolicy,
-                    Array.AsReadOnly(_formationTeamMinima ?? new[] { 0, 0 }),
+                    _matchProfiles, (_formationStartup == null ? null : PlacementStartup) ?? _startupPolicy,
+                    Array.AsReadOnly((_formationTeamMinima == null ? null : PlacementTeamMinima) ?? new[] { 0, 0 }),
                     live > 0 && _formationConfigured ? _formedProfile : null,
-                    Array.AsReadOnly(liveCounts), live, Array.AsReadOnly(pendingCounts), pending.Count);
+                    Array.AsReadOnly(liveCounts), live, Array.AsReadOnly(pendingCounts), pending.Count,
+                    ready && !draining && LatePartyOpen());
             }
         }
 

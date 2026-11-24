@@ -31,6 +31,11 @@ static class MatchProfileBridgeChecks
         Check(GameplayBridgeResponseCodec.TryParse(Reply(Array.Empty<object>(),dominationSelection),"synthetic",false,out var dominationAck)
             && LocalDmeHost.MatchesFormationAcknowledgement(dominationAck,selected.formation_id,expected with {GameType=2}),
             "Domination selection rejected");
+        var filled=new {profile_id=profile.profile_id,game_type=0,attacking_faction=1,defending_faction=0,maximum_players=64,team_capacity=32,bot_fill_total=64};
+        Check(GameplayBridgeResponseCodec.TryParse(Reply(new[]{filled}),"synthetic",true,out var filledHello) &&
+            filledHello.MatchProfiles[0].BotFillTotal==64 && hello.MatchProfiles[0].BotFillTotal==null,"Bot fill total was not typed per profile");
+        foreach(int total in new[]{1,65})
+            Check(!GameplayBridgeResponseCodec.TryParse(Reply(new[]{filled with {bot_fill_total=total}}),"synthetic",true,out _),"Out-of-range bot fill accepted");
         var bad=new {profile_id="bad",game_type=0,attacking_faction=0,defending_faction=0,maximum_players=64,team_capacity=32};
         Check(!GameplayBridgeResponseCodec.TryParse(Reply(new[]{bad}),"synthetic",true,out _),"Same faction accepted");
     }

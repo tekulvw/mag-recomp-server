@@ -251,7 +251,7 @@ impl<W: Write> Engine<W> {
                         .contains(&a.squad_catalog.squad_index())
             })
         {
-            if human.pending_notifications.len() >= 128 {
+            if human.pending_notifications.len() >= crate::match_flow::MAX_PENDING_NOTIFICATIONS {
                 human.replication_backlogged = true;
             } else {
                 human
@@ -276,7 +276,8 @@ impl CharacterEffectNotice {
     pub(crate) fn commit<W: Write>(self, engine: &mut Engine<W>) {
         for actor in engine.active.iter_mut().chain(engine.peers.values_mut()) {
             if self.recipients.contains(&actor.reservation.id) {
-                if actor.pending_notifications.len() >= 128 {
+                if actor.pending_notifications.len() >= crate::match_flow::MAX_PENDING_NOTIFICATIONS
+                {
                     actor.replication_backlogged = true;
                 } else {
                     actor

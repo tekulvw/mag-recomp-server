@@ -144,7 +144,10 @@ fn hospital_redeploy_failed_record_and_full_reliable_queue_keep_seats_and_grants
         add_peer(&mut engine, 1, 6, 12);
         if full_queue {
             let peer = engine.peers.values_mut().next().unwrap();
-            peer.pending_shared = std::collections::VecDeque::from(vec![vec![0]; 128]);
+            peer.pending_shared = std::collections::VecDeque::from(vec![
+                    vec![0];
+                    crate::multiplayer::MAX_SHARED_QUEUE
+                ]);
         } else {
             engine.max_log = engine.written;
         }
@@ -206,7 +209,10 @@ fn refused_hospital_redeploy_history_budget_keeps_current_ownership() {
 
 #[test]
 fn hospital_redeploy_reserves_owner_ordered_health_and_mandatory_ownership_together() {
-    for queued in [126, 127] {
+    for queued in [
+        crate::multiplayer::MAX_SHARED_QUEUE - 2,
+        crate::multiplayer::MAX_SHARED_QUEUE - 1,
+    ] {
         let mut engine = fixture();
         hospital_turrets::tests::enable_synthetic_hospital_turrets(&mut engine);
         request(&mut engine, 0x0216, 5, 0, 1000).unwrap();
@@ -216,16 +222,22 @@ fn hospital_redeploy_reserves_owner_ordered_health_and_mandatory_ownership_toget
         request(&mut engine, 0x0215, 0, 0, 1100).unwrap();
         let actor = engine.active.as_ref().unwrap();
         assert!(!actor.replication_backlogged, "queue {queued}");
-        if queued == 126 {
+        if queued == crate::multiplayer::MAX_SHARED_QUEUE - 2 {
             assert!(matches!(actor.life, CharacterLife::AwaitingRespawn { .. }));
-            assert_eq!(actor.ordinary_shared_len(), 128);
+            assert_eq!(
+                actor.ordinary_shared_len(),
+                crate::multiplayer::MAX_SHARED_QUEUE
+            );
             assert_eq!(
                 ownership(actor, engine.wire_profile),
                 [(5, 0x105, u16::MAX)]
             );
         } else {
             assert!(actor.life.is_alive());
-            assert_eq!(actor.ordinary_shared_len(), 127);
+            assert_eq!(
+                actor.ordinary_shared_len(),
+                crate::multiplayer::MAX_SHARED_QUEUE - 1
+            );
             assert!(ownership(actor, engine.wire_profile).is_empty());
             assert!(
                 engine.bunker_world.as_ref().unwrap().hospital_turrets[&5].grant_matches(actor)

@@ -8,6 +8,7 @@
   <dt>Email</dt><dd>{{ email }}</dd>
   <dt>Signed in with</dt><dd>{% if provider == "service" %}nothing: service account · <a href="/admin/service-accounts">tokens</a>{% else %}{{ provider }}{% endif %}</dd>
   <dt>Joined</dt><dd>{{ created }}</dd>
+  <dt>Friends</dt><dd>{{ social.friends }} (requests: {{ social.incoming }} in, {{ social.outgoing }} out; blocks: {{ social.blocks }})</dd>
   <dt>Staff role</dt><dd>{% if let Some(r) = target_role %}{{ r }}{% else %}none{% endif %}</dd>
   <dt>Status</dt><dd>{% if let Some(b) = ban %}<strong>banned</strong> {{ b }}{% else %}active{% endif %}</dd>
   {% if let Some(g) = game_href %}<dt>Game character</dt><dd><a href="{{ g }}">View on the game server</a></dd>{% endif %}

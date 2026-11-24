@@ -151,7 +151,7 @@ namespace Server.Medius
                         }
                         int appMessageId = plugin.Payload.Length >= 2 ? (plugin.Payload[0] << 8) | plugin.Payload[1] : -1;
                         IReadOnlyList<RT_MSG_SERVER_PLUGIN_TO_APP> replies;
-                        string sessionState;
+                        string sessionState, refusal;
                         if (pluginService == MagPluginService.Mas)
                         {
                             data.MagMasSession.DevelopmentAuthEnabled = Program.Settings.EnableMagDevelopmentAuth;
@@ -165,6 +165,7 @@ namespace Server.Medius
                             replies = data.MagMasSession.HandleMany(true, data.ApplicationId, plugin, Utils.GetHighPrecisionUtcTime());
                             sessionState = data.MagMasSession.State + "/" + data.MagMasSession.StorageStatus;
                             if (Program.PortalTickets != null) sessionState += "/ticket=" + data.MagMasSession.PortalTicketStatus;
+                            refusal = data.MagMasSession.PortalTicketRefusal;
                         }
                         else
                         {
@@ -176,7 +177,9 @@ namespace Server.Medius
                             replies = data.MagMapsSession.HandleMany(true, data.ApplicationId, plugin, Utils.GetHighPrecisionUtcTime());
                             sessionState = data.MagMapsSession.State + "/" + data.MagMapsSession.StorageStatus;
                             if (Program.PortalTickets != null) sessionState += "/ticket=" + data.MagMapsSession.PortalTicketStatus;
+                            refusal = data.MagMapsSession.PortalTicketRefusal;
                         }
+                        if (refusal != null) Logger.Warn($"MAG {pluginService} app={data.ApplicationId} {refusal}");
                         // Portal tickets are bearer credentials until they expire: never log their bytes.
                         if (data.ApplicationId == 20231 && replies.Count == 0)
                             Logger.Info($"RETAIL MAG no-reply app=20231 plugin={plugin.PluginId} length={plugin.Payload.Length} payload={(Program.PortalTickets != null && MagPortalTicketPolicy.IsTicketMessage(data.ApplicationId, appMessageId) ? "redacted" : BitConverter.ToString(plugin.Payload).Replace("-", "").ToLowerInvariant())}");

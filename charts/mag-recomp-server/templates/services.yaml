@@ -1,16 +1,22 @@
+{{- $pods := dict "root" . }}
+{{- $_ := include "mag.pods" $pods }}
+{{- range $pod := $pods.pods }}
+{{- if ne $pod.component "medius" }}
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "mag.name" . }}-gameplay
-  labels: {{ include "mag.labels" . | nindent 4 }}
+  name: {{ include "mag.name" $ }}-{{ $pod.component }}
+  labels: {{ include "mag.labels" $ | nindent 4 }}
 spec:
   type: ClusterIP
   selector:
-    app.kubernetes.io/instance: {{ .Release.Name }}
-    app.kubernetes.io/component: gameplay
+    app.kubernetes.io/instance: {{ $.Release.Name }}
+    app.kubernetes.io/component: {{ $pod.component }}
   ports:
     - {name: bridge, port: 31000, targetPort: bridge, protocol: TCP}
 ---
+{{- end }}
+{{- end }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -35,3 +41,6 @@ spec:
     - {name: maps-proxy, port: 10476, targetPort: maps-proxy, protocol: TCP}
     - {name: game-tcp, port: 10473, targetPort: game-tcp, protocol: TCP}
     - {name: game-udp, port: 10474, targetPort: game-udp, protocol: UDP}
+    {{- range $port := include "mag.extraUdpPorts" . | fromJsonArray }}
+    - {name: {{ printf "game-udp-%d" (int $port) }}, port: {{ int $port }}, targetPort: {{ int $port }}, protocol: UDP}
+    {{- end }}

@@ -9,7 +9,11 @@ using Server.Medius;
 
 internal static class RegistryDmeHostChecks
 {
-    public static void Run() => LeadershipProgressionChecks.RegistryHostIsolation();
+    public static void Run()
+    {
+        LeadershipProgressionChecks.RegistryHostIsolation();
+        LeadershipProgressionChecks.RegistryBotFillStart();
+    }
 }
 
 internal static partial class LeadershipProgressionChecks
@@ -187,6 +191,86 @@ internal static partial class LeadershipProgressionChecks
             new(20231, 2, 2, 8, new[] { 1, 1 }, new[] { 0, opposingFaction }, IPAddress.Parse("192.0.2.9"), 12073, name);
     });
 
+    /// <summary>A worker advertising bot fill forms from one queued human; an
+    /// otherwise identical worker without it still waits for both sides.</summary>
+    public static void RegistryBotFillStart() => WithDirectory(directory =>
+    {
+        var store = new LocalCharacterStore(Path.Combine(directory, "characters.json")) { ProgressionCatalog = Load(directory, LegacyCatalog()) };
+        foreach (var account in new[] { "solo-alpha", "solo-bravo" })
+        {
+            var create = new MagCreateCharacterRequest { AccountName = account, Faction = 0, UniverseId = 26, NpId = new byte[36] };
+            Check(store.CreateForAccount(create, account).Result == MagNetResult.Success, "Synthetic solo character creation failed");
+        }
+        Run().GetAwaiter().GetResult();
+
+        async Task Run()
+        {
+            var manager = new Server.Dme.MediusManager(20231) { LocalOnly = true };
+            await using var botWorker = new RegistryWorker("bots") { SupportsBotFill = true };
+            await using var plainWorker = new RegistryWorker("plain");
+            await using var bots = new LocalDmeHost(botWorker.Client, store, SoloOptions("bots"));
+            await using var plain = new LocalDmeHost(plainWorker.Client, store, SoloOptions("plain"));
+            await Task.WhenAll(bots.StartInRegistryAsync(manager), plain.StartInRegistryAsync(manager));
+
+            var botPlacement = bots.GetPlacement();
+            var plainPlacement = plain.GetPlacement();
+            Check(botPlacement.Profiles.All(p => p.BotFillTotal == 8) && botPlacement.StartupPolicy.MinimumPlayers == 1 &&
+                botPlacement.MinimumPlayersPerTeam.SequenceEqual(new[] { 0, 0 }),
+                "A bot-filled worker did not keep the operator's one-human startup policy");
+            Check(plainPlacement.Profiles.All(p => !p.BotFill) && plainPlacement.StartupPolicy.MinimumPlayers == 2 &&
+                plainPlacement.MinimumPlayersPerTeam.SequenceEqual(new[] { 1, 1 }),
+                "A worker without bot fill lost its two-human, one-per-side floor");
+
+            // Pure placement sends a lone human to the worker that fills with bots.
+            MagWorldPlacementState State(string id, LocalDmeWorkerPlacement s) => new(id, s.Ready, s.Draining,
+                s.StartupPolicy.MinimumPlayers, s.StartupPolicy.MaximumPlayers, s.MinimumPlayersPerTeam.ToArray(), s.Profiles,
+                s.CurrentProfile, s.LiveTeamCounts, s.PendingTeamCounts, s.LiveCount, s.PendingTeamCounts.Sum(), s.CanForm);
+            var lone = new[] { new MagQueuedHuman("solo", 2, 0, 0) };
+            var plan = MagWorldPlacement.PlanNext(lone, new[] { State("plain", plainPlacement), State("bots", botPlacement) }, n => 0);
+            Check(plan != null && plan.WorkerId == "bots" && plan.NewFormation && plan.Players.Count == 1,
+                "One human did not form a new match on the bot-filled worker");
+            Check(MagWorldPlacement.PlanNext(lone, new[] { State("plain", plainPlacement) }, n => 0) == null,
+                "One human formed a match on a worker without bot fill");
+
+            MagMlsSession Session(string account)
+            {
+                var settings = Server.Medius.Program.Settings;
+                int previous = settings.MagApplicationId;
+                settings.MagApplicationId = 20231;
+                try { return MakeSession(store, 20231, account, store.ReadForAccount(account).Single().Id); }
+                finally { settings.MagApplicationId = previous; }
+            }
+            int transaction = 0;
+            Task<MagJoinGameResponse> Queue(LocalDmeHost host, MagMlsSession session)
+            {
+                var reply = new TaskCompletionSource<MagJoinGameResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
+                host.QueueJoin(session, new MagRetailJoinGameRequest { TransactionId = ++transaction, Preference = 1, Value = 2 },
+                    m => { if (m is MagJoinGameResponse response) reply.TrySetResult(response); }, () => true);
+                return reply.Task;
+            }
+
+            Check(bots.TryStageRegistryFormation("profile-0-1"), "Bot-filled worker declined a one-human formation");
+            var solo = Queue(bots, Session("solo-alpha"));
+            await bots.TickWorldAsync();
+            var admitted = await solo.WaitAsync(AdmissionTimeout);
+            var configure = botWorker.Requests.Single(r => r["op"]!.GetValue<string>() == "configure_match");
+            Check(admitted.Result == 0 && botWorker.SelectedProfile == "profile-0-1" && botWorker.Reservations.Count == 1 &&
+                configure["minimum_players"]!.GetValue<int>() == 1 &&
+                configure["minimum_players_per_team"]!.AsArray().Select(n => n!.GetValue<int>()).SequenceEqual(new[] { 0, 0 }),
+                "A lone human was not admitted under a one-human bot-filled quorum");
+
+            Check(plain.TryStageRegistryFormation("profile-0-1"), "Plain worker declined a staged formation");
+            var waiting = Queue(plain, Session("solo-bravo"));
+            await plain.TickWorldAsync();
+            var refused = await waiting.WaitAsync(AdmissionTimeout);
+            Check(refused.Result == 6 && plainWorker.Reservations.IsEmpty,
+                "A worker without bot fill admitted one human to a new formation");
+        }
+
+        static LocalDmeHostOptions SoloOptions(string name) =>
+            new(20231, 2, 1, 8, new[] { 0, 0 }, new[] { 0, 1 }, IPAddress.Parse("192.0.2.9"), 12073, name);
+    });
+
     private static async Task WaitForRegistryHostAsync(Func<bool> ready)
     {
         using var deadline = new CancellationTokenSource(AdmissionTimeout);
@@ -214,6 +298,8 @@ internal static partial class LeadershipProgressionChecks
         public string SelectedProfile { get; private set; }
         public volatile bool PauseHeartbeat;
         public bool SupportsParties;
+        public bool SupportsLateParties;
+        public bool SupportsBotFill;
         public Func<JsonObject, Task> BeforePartyReply;
         public volatile bool DropNextPartyReply;
         public Func<JsonObject, bool> RefuseParty;
@@ -278,9 +364,15 @@ internal static partial class LeadershipProgressionChecks
                             response["capabilities"] = new JsonArray("committed_loadout_selection_v1", "active_loadout_refresh_v1",
                                 "match_profiles_v1", "independent_match_cohorts_v1", "worker_registry_v1");
                             response["match_profiles"] = new JsonArray(Profiles.Select(p => p.DeepClone()).ToArray());
+                            if (SupportsBotFill)
+                            {
+                                response["capabilities"]!.AsArray().Add("bot_fill_v1");
+                                foreach (var profile in response["match_profiles"]!.AsArray()) profile["bot_fill_total"] = 8;
+                            }
                             if (SupportsParties)
                             {
                                 response["capabilities"]!.AsArray().Add("party_reservation_v1");
+                                if (SupportsLateParties) response["capabilities"]!.AsArray().Add("party_late_entry_v1");
                                 foreach (var profile in response["match_profiles"]!.AsArray())
                                 {
                                     profile["squad_capacity"] = 2;

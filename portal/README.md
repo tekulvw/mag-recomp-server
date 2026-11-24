@@ -2,10 +2,12 @@
 
 The player accounts website for a MAG replacement server (magtest.online). Players sign
 in with Google, claim a player name and link their launcher. The launcher trades its
-device token for short-lived **game tickets**, which the game server verifies with the
+device token for expiring **game tickets**, which the game server verifies with the
 portal's public key. See the [design](../docs/superpowers/specs/2026-11-22-portal-design.md)
 and the [ticket format](../docs/portal-ticket.md). Launchers also send performance and error
-reports with their logs: see [launcher reports](../docs/portal-reports.md).
+reports with their logs: see [launcher reports](../docs/portal-reports.md). Players keep a
+friends list (requests, blocks) at `/friends`, and game clients relay presence through the
+portal: see [friends and presence](../docs/portal-social.md).
 
 The site is server-rendered HTML with no JavaScript. It stores accounts in PostgreSQL and
 never passes Google tokens on to the game or the game server.
@@ -58,7 +60,7 @@ holds ticket test vectors for other verifiers; regenerate them with
 | `PORTAL_TICKET_AUDIENCE` | yes | The game server's host name, such as `play.magtest.online`. Tickets are valid only there. It is the default audience: launchers that name none get it. |
 | `PORTAL_TICKET_EXTRA_AUDIENCES` | no | More game server host names, comma-separated, such as `test.magtest.online`, held to the same rule. A launcher may ask for a ticket for any of them (see "Get a ticket"). |
 | `PORTAL_TICKET_KEY_ID` | no | Key ID written into tickets (default 1). Change it when rotating keys. |
-| `PORTAL_TICKET_LIFETIME_SECONDS` | no | Ticket lifetime, 60 to 3600 (default 600). |
+| `PORTAL_TICKET_LIFETIME_SECONDS` | no | Ticket lifetime, 60 to 43200 (default 600). The live portal uses 43200 (12 hours) so a game can reconnect with its launch ticket; see [Lifetime](../docs/portal-ticket.md#lifetime) for the trade-off. |
 | `PORTAL_FONT_DIR` | no | Folder of the web fonts listed in `fonts.txt`, served at `/fonts/`. The image sets it; without it pages use system fonts. |
 | `PORTAL_OWNER_EMAILS` | no | Comma-separated Google emails with the owner role in the admin panel. Owners cannot be changed from the site. |
 | `PORTAL_CLIENT_IP_HEADER` | no | Header the trusted proxy appends the client address to (`x-forwarded-for`); the last entry is used. Without it, rate limits use the connecting address, which behind a proxy is the proxy. |
@@ -124,6 +126,10 @@ keep working. The response's `audience` says which one the ticket is for:
 error report with gzip'd logs. [Launcher reports](../docs/portal-reports.md) has the body, limits and
 responses (`201` stored, `200` already stored, `400 invalid_report`, `409 report_id_conflict`,
 `413 too_large`, `429 rate_limited` with `Retry-After`, `503 reports_disabled`).
+
+**Friends and presence** — `GET /api/v1/social`, `PUT /api/v1/social/presence` and the request,
+friend, block and lookup calls under `/api/v1/social` with `Authorization: Bearer mgd_…`.
+[Friends and presence](../docs/portal-social.md) has the contract and limits.
 
 **Verifying keys** — `GET /api/v1/ticket-keys` returns `{"keys":[{"id":1,"alg":"ES256","spki":"<base64 DER>"}]}`.
 

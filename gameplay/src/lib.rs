@@ -149,6 +149,7 @@ pub fn drop_passages_exclusive(
     bot_traffic_flow::passages_exclusive(a, b, entry_buffer_m)
 }
 mod acquisition_frag_ground;
+pub mod async_log;
 mod ballistic_projectile_motion;
 pub mod character_damage_rules;
 mod character_frag_damage;
@@ -195,6 +196,8 @@ pub mod objective_catalog;
 pub mod objective_control;
 pub mod objective_range;
 pub mod owner_update;
+#[cfg(test)]
+mod party_late_entry_tests;
 pub mod party_reservation;
 pub mod player_tracking;
 pub mod progression;
@@ -208,6 +211,8 @@ pub mod protocol;
 pub mod replication;
 pub mod retail_armory;
 pub mod retail_combat;
+#[cfg(test)]
+mod retail_firearm_coverage_tests;
 pub mod retail_melee;
 pub mod rotating_log;
 mod score_clock;
@@ -230,6 +235,7 @@ pub mod underbarrel_launchers;
 pub mod vehicle_exit;
 pub mod wire_profile;
 pub mod worker_identity;
+pub mod world_stream;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::io::{self, Read, Write};
@@ -597,7 +603,7 @@ impl Request {
         }
     }
 }
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutboundMessage {
     pub reservation_id: String,
@@ -606,7 +612,7 @@ pub struct OutboundMessage {
     pub plugin_id: u8,
     pub payload_hex: String,
 }
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Response {
     pub v: u8,
@@ -634,6 +640,9 @@ pub struct Response {
     pub party_reservation: Option<party_reservation::Reply>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_identity: Option<worker_identity::WorkerIdentity>,
+    /// Served world-stream frame position, sent only to subscribers that ask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub world_stream: Option<world_stream::Position>,
 }
 impl Response {
     pub fn success(request_id: String) -> Self {
@@ -651,6 +660,7 @@ impl Response {
             selected_match: None,
             party_reservation: None,
             worker_identity: None,
+            world_stream: None,
         }
     }
 
@@ -1874,8 +1884,12 @@ impl<W: Write> Engine<W> {
             .as_ref()
             .map_or_else(Vec::new, |registry| {
                 capabilities.push(match_profiles::CAPABILITY.into());
+                if registry.has_bot_fill() {
+                    capabilities.push(match_profiles::BOT_FILL_CAPABILITY.into());
+                }
                 if self.party_reservations.enabled() {
                     capabilities.push(party_reservation::CAPABILITY.into());
+                    capabilities.push(party_reservation::LATE_ENTRY_CAPABILITY.into());
                     registry.party_summaries()
                 } else {
                     registry.summaries()
@@ -1998,7 +2012,11 @@ impl<W: Write> Engine<W> {
                 application_id,
                 ..
             } => {
+                // A selected bot-filled profile may start with one human; bots
+                // fill both sides. Every other profile keeps one human per side.
+                let bot_filled = self.selected_match.is_some() && self.bot_registry.enabled();
                 if self.match_profiles.is_some()
+                    && !bot_filled
                     && (minimum_players < 2 || minimum_players_per_team.contains(&0))
                 {
                     return Err("match_profiles_require_two_human_sides");

@@ -10,14 +10,16 @@ Set `images.medius.tag` and `images.gameplay.tag` explicitly when selecting othe
 
 | Component | Placement | Network | Persistent state |
 | --- | --- | --- | --- |
-| Gameplay | One Pod | Private ClusterIP TCP 31000 | None; read-only catalogs |
-| Main Medius + local DME | One container in the Medius Pod | TCP 10475 auth, 10478 lobby, 10477 proxy, external 10473 to container 10073; UDP 10474 | Account PVC read/write |
+| Gameplay | One Pod, or one Pod per entry in `gameplayWorkers` | Private ClusterIP TCP 31000 per Pod | None; read-only catalogs |
+| Main Medius + local DME | One container in the Medius Pod | TCP 10475 auth, 10478 lobby, 10477 proxy, external 10473 to container 10073; UDP 10474 (or `network.udpPortRange`) | Account PVC read/write |
 | MAPS | Second container in the same Medius Pod, same image | TCP `network.mapsPort` (retail default 10073) to auth 10471, 10472 lobby, 10476 proxy | Same account PVC read-only |
 | Optional DNS | Separate Pod, disabled by default | TCP/UDP 53 to container port 1053 | None |
 
-Medius and MAPS have separate `/config/main` and `/config/maps` directories in a writable `emptyDir`, with separate listener ports. The main role enables MAS, account login, character data and local DME. MAPS enables the plugin adapter and reads the same character store. Both load the same stable operator-supplied RSA keys. The source server's `MAG_ADVERTISE_IPV4`, `MAG_AUTH_DNS`, `MAG_AUTH_PORT`, `MAG_LOBBY_PORT` and `MAG_GAME_TCP_PORT` environment settings are provided by the chart. DME binds internally on TCP 10073 and UDP 10474; the Service maps the external TCP port. The advertised address must be reachable by the client and match the LoadBalancer address or the address actually routed to it.
+Medius and MAPS have separate `/config/main` and `/config/maps` directories in a writable `emptyDir`, with separate listener ports. The main role enables MAS, account login, character data and local DME. MAPS enables the plugin adapter and reads the same character store. Both load the same stable operator-supplied RSA keys. The source server's `MAG_ADVERTISE_IPV4`, `MAG_AUTH_DNS`, `MAG_AUTH_PORT`, `MAG_LOBBY_PORT` and `MAG_GAME_TCP_PORT` environment settings are provided by the chart. DME binds internally on TCP 10073 and UDP 10474; the Service maps the external TCP port.
 
-The supported deployment is exactly one gameplay Pod and one Medius Pod, using `Recreate` updates. `replicaCount` values other than one are rejected. Horizontal scaling and rolling overlap would need additional coordination for session state, listeners and the account writer.
+The integrated DME gives each connected human their own UDP port: the lowest free port from 10474 upward, shared across every world and released on disconnect. The start is fixed at 10474 and the DME has no upper limit or setting for it, so a client whose port is not forwarded cannot exchange game traffic. The chart forwards only UDP 10474 by default. Set `network.udpPortRange.end` (start stays 10474, at most 256 ports) to cover the most humans connected at once across all worlds; the chart adds each port to the Medius Service and container as `game-udp-<port>`, so the Service needs no manual patching. For example, `{start: 10474, end: 10505}` forwards 32 ports. When the admin API is enabled with its port inside that range, its NetworkPolicy keeps UDP open on that port; only TCP is restricted. The advertised address must be reachable by the client and match the LoadBalancer address or the address actually routed to it.
+
+The supported deployment is one Medius Pod and either one gameplay Pod or the configured gameplay workers below, each using `Recreate` updates. `replicaCount` values other than one are rejected. Horizontal scaling and rolling overlap would need additional coordination for session state, listeners and the account writer.
 
 ## Supply private inputs
 
@@ -114,6 +116,55 @@ data:
 Legacy-specific optional inputs can still be passed through `data.gameplayExtraArgs` when its chart-managed flags are not overridden. Both profiles require compatible source data and a separately authorized deployment; changing the profile does not migrate accounts.
 
 Catalog mounts are read-only in application containers. Logs and temporary files use writable `emptyDir` volumes. Gameplay refuses events it cannot record, so a full event log stops the game server. Set `logs.rotation.segmentBytes` (at least 65536) to split the event log, and tick telemetry when enabled, into numbered segments at record boundaries, and `logs.rotation.retentionSeconds` to delete closed segments older than that. Retention bounds disk use by age only; size it so the expected log rate over the retention period stays well under `logs.sizeLimit`. Rotation needs a gameplay image that supports `--log-segment-bytes`; it is off by default. Gameplay creates a unique event-log directory on each container start because the server rejects reuse of an existing event-log path. The applications run as UID/GID 10001, drop Linux capabilities, use the runtime-default seccomp profile, and do not receive a service-account token. Application root filesystems remain writable for compatibility with Horizon's startup writes. The optional DNS image uses a read-only root filesystem and adds only the `NET_BIND_SERVICE` capability to its otherwise empty capability set, because the upstream image marks its binary with that file capability and cannot execute with it removed from the bounding set. It still runs without privilege escalation on port 1053.
+
+## Configured gameplay workers
+
+`gameplayWorkers` runs 2 to 16 gameplay workers behind one Medius [configured world registry](../../docs/configured-world-registry.md), for example one worker per mode. Leave it empty (the default) for the single gameplay Deployment; the chart then renders exactly as before. Each entry gets its own Deployment and ClusterIP Service `<release>-mag-recomp-server-gameplay-<name>` on bridge port 31000, its own S3 data bundle unpacked into its own `emptyDir`, and `--worker-id <id> --match-profiles /data/<matchProfiles>`. It needs retail application 20231, gameplay images that support `--worker-id` and `--match-profiles`, and a Medius image that supports the registry's `$MAG_ADVERTISE_IPV4` client address (newer than Medius 0.7.1). The default `images` pins predate the registry, so set both explicitly.
+
+```yaml
+network:
+  udpPortRange: {start: 10474, end: 10505}
+data:
+  mode: s3 # Medius keeps its own bundle for progression, skills and armory.
+  s3:
+    endpoint: https://objects.example.invalid
+    bucket: private-runtime
+    key: medius/catalogs-v1.tar.gz
+    sha256: REPLACE_WITH_THE_MEDIUS_BUNDLE_SHA256
+    existingSecret: mag-object-store
+gameplayWorkers:
+  - id: sabotage
+    matchProfiles: sabotage/match-profiles.json
+    data:
+      s3: {key: workers/sabotage-v1.tar.gz, sha256: REPLACE_WITH_ITS_SHA256}
+  - id: acquisition
+    matchProfiles: acquisition/match-profiles.json
+    data:
+      s3: {key: workers/acquisition-v1.tar.gz, sha256: REPLACE_WITH_ITS_SHA256}
+    maximumPlayers: 16
+  - id: domination
+    matchProfiles: domination/match-profiles.json
+    data:
+      s3: {key: workers/domination-v1.tar.gz, sha256: REPLACE_WITH_ITS_SHA256}
+      files: {spawns: domination/spawns.json} # Overrides data.files for this bundle only.
+    navigation:
+      s3: {key: navigation/domination-v1.tar.gz, sha256: REPLACE_WITH_ITS_SHA256}
+      emptyDirSizeLimit: 4Gi
+    emptyDirSizeLimit: 12Gi
+    resources: {requests: {cpu: "2", memory: 2Gi}, limits: {memory: 4Gi}}
+```
+
+A worker bundle needs its own `key` and `sha256`. Its endpoint, region, bucket, Secret and `forcePathStyle` default to `data.s3`, and its `versionId` never inherits. Gameplay file names default to `data.files`; a worker's `data.files` overrides them for its bundle. `data.gameplayExtraArgs` is not used; put a worker's optional flags, such as `--party-reservations`, in its `extraArgs`, which reject the chart-managed flags including `--worker-id` and `--match-profiles`. The optional `navigation` bundle is fetched and verified the same way into its own `emptyDir` (size `navigation.emptyDirSizeLimit`, default `data.emptyDirSizeLimit`) and mounted read-only at `navigation.mountPath` (default `/navigation`), where the worker's match profiles can name it by absolute path. `resources`, `nodeSelector`, `tolerations`, `affinity` and `emptyDirSizeLimit` default to the top-level values. `name` changes only the resource suffix; `id` stays the worker identity.
+
+The chart renders the registry into the ConfigMap `<release>-mag-recomp-server-world-registry`, mounts it read-only into the main Medius container and sets `MAG_WORLD_REGISTRY` with `MAG_LOCAL_DME=1`. Each worker row takes `minimumPlayers` (default 2), `maximumPlayers` (default `runtime.maximumPlayers`), `minimumPlayersPerTeam` (default `[1, 1]`) and `draining` (default false); Medius applies its own floors to these values. `worldRegistry.partyInviteSeconds` enables private parties. The registry's `client_address` is the literal `$MAG_ADVERTISE_IPV4`, which Medius replaces with its `MAG_ADVERTISE_IPV4` environment value, so a process that keeps that variable current on the Medius Deployment also keeps the registry current.
+
+Medius builds each world once, when it starts, and never adopts a worker that was unreachable then or that restarted later: that world stays unavailable until Medius restarts, while the other worlds continue. The chart couples the rollouts so this does not happen during upgrades:
+
+- The Medius Pod carries a checksum of every rendered worker Deployment, so any change that restarts a worker also restarts Medius. A change to a worker's registry row other than `draining` restarts Medius alone.
+- `draining` is excluded from those checksums. Kubernetes updates the mounted registry file in place (typically within a minute) and Medius reloads drain flags each second without restarting.
+- The `wait-for-workers` init container holds Medius until every worker Service accepts a TCP connection, for up to `worldRegistry.workerWaitSeconds` (default 300; 0 disables it). It opens and closes one connection per worker, which the worker logs as an incomplete request. After the limit Medius starts with the workers it can reach.
+
+A worker restart outside Helm (a crash, OOM kill, eviction or node drain) is not coupled: restart Medius afterwards, for example with `kubectl rollout restart deployment/<release>-mag-recomp-server-medius`. Restarting Medius disconnects every world, so drain first when there is time. A crashed worker's unsent rewards are not recovered.
 
 ## Optional portal game tickets
 

@@ -210,6 +210,98 @@ internal static class LoadoutPreferenceStoreChecks
         }
     }
 
+    // Invented retail catalogs: faction-local wire ids (1024 + n) whose ownership index is n.
+    static (MagLoadoutCatalog Armory, MagSkillCatalog Skills) RetailSkillCatalogs(string directory)
+    {
+        object Item(int bit, string name, int? ammo) => new {
+            wire_id = 1024 + bit, name, authored_ref = "synthetic:" + bit, available_bit = bit, factions = new[] { 0, 1, 2 }, primary_ammo = ammo };
+        var starter = Enumerable.Repeat<short?>(null, 22).ToArray();
+        starter[0] = 1025;
+        string armory = Path.Combine(directory, "retail-armory.json");
+        File.WriteAllText(armory, JsonSerializer.Serialize(new {
+            schema_version = 1, application_id = 20231,
+            source_sha256 = new { synthetic = new string('b', 64) },
+            items = new[] {
+                Item(1, "Example starter rifle", 7), Item(2, "Example bought rifle", 9), Item(4, "Example bought sight", null),
+                Item(5, "Example cap", null), Item(6, "Example reserve rifle", 5), Item(7, "Example locked sight", null)
+            },
+            factions = Enumerable.Range(0, 3).Select(faction => new {
+                faction, available_item_bits = faction == 0 ? new[] { 1 } : Array.Empty<int>(), skill_ids = new[] { 0 },
+                loadouts = Enumerable.Range(0, 5).Select(_ => new { update_id = 1, items = starter })
+            })
+        }));
+        object Faction(bool available, params string[] tokens) => new {
+            Available = available,
+            Equipment = tokens.Select((token, index) => (token, index)).ToDictionary(pair => "Reward" + pair.index, pair => new { element = pair.token })
+        };
+        object Skill(int cost, int tier, params string[] tokens) => new { MagCharacterSkill = new {
+            Cost = cost, Tier = tier, Category = "kSkillCategoryExample",
+            Green = Faction(true, tokens), Black = Faction(false), Red = Faction(false)
+        } };
+        object Thresholds() => new { Tier2_PrereqPoints = 0, Tier3_PrereqPoints = 0, Tier4_PrereqPoints = 0, Tier5_PrereqPoints = 0 };
+        string skills = Path.Combine(directory, "retail-skills.json");
+        File.WriteAllText(skills, JsonSerializer.Serialize(new {
+            schema_version = 2, application_id = 20231,
+            equipment_token_item_ids = new Dictionary<string, int[]> {
+                ["starter_rifle"] = new[] { 1 }, ["bought_rifle"] = new[] { 2 }, ["bought_sight"] = new[] { 4 }, ["locked_sight"] = new[] { 7 }
+            },
+            table = new {
+                Tiers = new { ExampleTier = new { MagCharacterSkillTier = new {
+                    Category = "kSkillCategoryExample", Green = Thresholds(), Black = Thresholds(), Red = Thresholds() } } },
+                Skills = new Dictionary<string, object> {
+                    ["MagCharacterSkill0"] = Skill(0, 0, "starter_rifle"),
+                    ["MagCharacterSkill3"] = Skill(2, 1, "bought_rifle", "bought_sight"),
+                    ["MagCharacterSkill5"] = Skill(1, 1, "locked_sight")
+                }
+            }
+        }));
+        return (MagLoadoutCatalog.LoadRetail(armory), MagSkillCatalog.LoadForApplication(skills, 20231));
+    }
+
+    public static void RetailSkillPurchaseOwnsItsEquipment()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "mag-synthetic-skill-kit-" + Guid.NewGuid());
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var (armory, skills) = RetailSkillCatalogs(directory);
+            string path = Path.Combine(directory, "characters.json");
+            var fixture = Fixture();
+            var owner = fixture["characters"]![0]!.AsObject();
+            owner.Remove("loadouts"); owner.Remove("lastUsedLoadout"); owner.Remove("ownedSkills");
+            owner["unlockedItems"] = JsonSerializer.SerializeToNode(new uint[24]);
+            File.WriteAllText(path, fixture.ToJsonString());
+            var store = new LocalCharacterStore(path) { LoadoutCatalog = armory, SkillCatalog = skills };
+            MagLoadout Kit(params (int Slot, short Item)[] items)
+            {
+                var kit = new MagLoadout { UpdateId = 2 };
+                foreach (var (slot, item) in items) kit.Items[slot] = item;
+                return kit;
+            }
+            void Refused(LocalCharacterStore target, MagLoadout kit, string reason)
+            {
+                byte[] before = File.ReadAllBytes(path);
+                var outcome = target.SaveLoadoutForAccount("alpha", 1, 1, kit);
+                Check(outcome.Result != MagNetResult.Success && outcome.Reason == reason, "Wrong loadout refusal: " + outcome.Reason);
+                Check(before.SequenceEqual(File.ReadAllBytes(path)), "Refused loadout rewrote the store");
+            }
+            var bought = Kit((0, 1026), (10, 1029), (14, 1028));
+            Refused(store, bought, "loadout-item-not-owned:slot=0:item=1026");
+            Check(store.PurchaseSkillForAccount("alpha", 1, 3).Reason == "skill-purchase-committed", "Synthetic skill purchase failed");
+            var unlocked = store.ReadForAccount("alpha").Single().UnlockedItems;
+            Check(unlocked[0] == ((1u << 2) | (1u << 4)), "Purchase did not set the equipment ownership indices");
+            Check(store.SaveLoadoutForAccount("alpha", 1, 1, bought).Result == MagNetResult.Success,
+                "A kit using purchased equipment and never-awarded apparel was refused");
+            var saved = store.ReadForAccount("alpha").Single().Loadouts[1].Items;
+            Check(saved[0] == 1026 && saved[10] == 1029 && saved[14] == 1028, "Purchased kit was not saved");
+            Refused(store, Kit((0, 1026), (14, 1028), (15, 1031)), "loadout-item-not-owned:slot=15:item=1031");
+            Refused(store, Kit((0, 1026), (1, 1030)), "loadout-item-not-owned:slot=1:item=1030");
+            var withoutSkills = new LocalCharacterStore(path) { LoadoutCatalog = armory };
+            Refused(withoutSkills, Kit((0, 1026), (10, 1029)), "loadout-item-not-owned:slot=10:item=1029");
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
     public static void Run()
     {
         string directory = Path.Combine(Path.GetTempPath(), "mag-synthetic-kit-store-" + Guid.NewGuid());
@@ -241,7 +333,7 @@ internal static class LoadoutPreferenceStoreChecks
             }
             Refused(_ => { }, "alpha", 2, 2, "character-not-owned");
             Refused(_ => { }, "alpha", 1, 5, "invalid-last-used-loadout");
-            Refused(doc => doc["characters"]![0]!["unlockedItems"]![0] = 0, "alpha", 1, 2, "loadout-item-not-owned");
+            Refused(doc => doc["characters"]![0]!["unlockedItems"]![0] = 0, "alpha", 1, 2, "loadout-item-not-owned:slot=0:item=2");
             Refused(doc => doc["characters"]![0]!["loadouts"]![2]!["items"]![0] = -1, "alpha", 1, 2, "selected-loadout-primary-required");
             Refused(doc => doc["characters"]![0]!["loadouts"]![2]!["items"]![0] = 3, "alpha", 1, 2, "invalid-faction-loadout");
 

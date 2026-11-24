@@ -280,7 +280,9 @@ impl Variant {
         let namespace = format!("FactionItemList{}:", self.faction + 1);
         if !host.starts_with(&namespace)
             || !attachment.starts_with(&namespace)
-            || items.retail_firearm_attachment(0, self.host_item_id, self.attachment_item_id)
+            || items
+                .retail_firearm_attachment(0, self.host_item_id, self.attachment_item_id)
+                .ok()
                 != Some(BulletAttachmentKind::Launcher)
             || (stock
                 && items.bootstrap_loadout(self.faction, 0).is_some_and(|kit| {

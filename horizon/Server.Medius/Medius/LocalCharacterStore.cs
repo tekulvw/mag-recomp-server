@@ -397,8 +397,8 @@ namespace Server.Medius
             if (character == null) return Outcome(MagNetResult.Error, "character-not-owned");
             if (!catalog.ValidForFaction(replacement.ToLoadout(), character.Faction))
                 return Outcome(MagNetResult.Error, "invalid-faction-loadout");
-            if (!HasLoadoutOwnership(character, catalog, replacement.Items))
-                return Outcome(MagNetResult.Error, "loadout-item-not-owned");
+            if (FindUnownedLoadoutSlot(character, catalog, replacement.Items) is int unowned)
+                return Outcome(MagNetResult.Error, NotOwned(replacement.Items, unowned));
             if (character.Loadouts == null || character.Loadouts.All(row => row.Items.All(id => id == -1)))
             {
                 // A populated kit1 alone leaves kit0 absent and triggers native InitializeLoadouts,
@@ -444,8 +444,8 @@ namespace Server.Medius
             if (preferred > loadoutIndex) preferred--;
             else if (preferred == loadoutIndex) preferred = 0;
             if (!catalog.HasValidPrimary(rows[preferred].ToLoadout())) preferred = 0;
-            if (!HasLoadoutOwnership(character, catalog, rows[preferred].Items))
-                return Outcome(MagNetResult.Error, "loadout-item-not-owned");
+            if (FindUnownedLoadoutSlot(character, catalog, rows[preferred].Items) is int unowned)
+                return Outcome(MagNetResult.Error, NotOwned(rows[preferred].Items, unowned));
             character.Loadouts = rows;
             character.LastUsedLoadout = preferred;
             character.LoadoutLayoutRevision++;
@@ -491,26 +491,39 @@ namespace Server.Medius
             if (rows.Any(row => !catalog.ValidForFaction(row, character.Faction))) return Outcome(MagNetResult.Error, "invalid-faction-loadout");
             if (!catalog.HasValidPrimary(rows[0])) return Outcome(MagNetResult.Error, "primary-loadout-required");
             if (!catalog.HasValidPrimary(rows[loadoutIndex])) return Outcome(MagNetResult.Error, "selected-loadout-primary-required");
-            if (!HasLoadoutOwnership(character, catalog, rows[loadoutIndex].Items))
-                return Outcome(MagNetResult.Error, "loadout-item-not-owned");
+            if (FindUnownedLoadoutSlot(character, catalog, rows[loadoutIndex].Items) is int unowned)
+                return Outcome(MagNetResult.Error, NotOwned(rows[loadoutIndex].Items, unowned));
             character.LastUsedLoadout = loadoutIndex;
             Commit(path, all);
             return Outcome(MagNetResult.Success, "last-used-loadout-committed");
         }
-        private bool HasLoadoutOwnership(StoredCharacter character, MagLoadoutCatalog catalog, short[] items)
+        // Returns the first slot whose item the character does not own, or null when every item is owned.
+        private int? FindUnownedLoadoutSlot(StoredCharacter character, MagLoadoutCatalog catalog, short[] items)
         {
-            if (catalog.ApplicationId != 20231 && SkillCatalog == null) return true;
+            if (catalog.ApplicationId != 20231 && SkillCatalog == null) return null;
             var available = character.ToRecord().AvailableItems;
             for (int slot = 0; slot < items.Length; slot++)
             {
                 short id = items[slot];
                 if (id < 0 || (catalog.ApplicationId != 20231 && !SkillCatalog.RequiresPurchaseOwnership(id))) continue;
                 if (catalog.ApplicationId == 20231 && catalog.IsStarterDefaultItem(character.Faction, slot, id)) continue;
-                if (!catalog.TryOwnershipOrdinal(id, out int ordinal) || (available[ordinal >> 5] & (1u << (ordinal & 31))) == 0)
-                    return false;
+                if (!catalog.TryOwnershipOrdinal(id, out int ordinal)) return slot;
+                if ((available[ordinal >> 5] & (1u << (ordinal & 31))) != 0) continue;
+                if (catalog.ApplicationId == 20231 && IsNeverAwardedEquipment(character.Faction, catalog, id, ordinal)) continue;
+                return slot;
             }
-            return true;
+            return null;
         }
+        // Retail grants ownership only through creation grants and skill awards. Authored starter kits
+        // also equip apparel, uniforms and other gear that no grant or skill ever awards, so ownership
+        // cannot gate those items: no character could ever own them. Magazine weapons stay gated, and
+        // without a retail skill catalog nothing can be shown to be outside every award.
+        private bool IsNeverAwardedEquipment(byte faction, MagLoadoutCatalog catalog, short id, int ordinal) =>
+            SkillCatalog?.ApplicationId == 20231 && !catalog.IsMagazineWeapon(id) &&
+            !catalog.GrantsOrdinal(faction, ordinal) && !SkillCatalog.CanAward(faction, ordinal);
+        private static string NotOwned(short[] items, int slot) =>
+            "loadout-item-not-owned:slot=" + slot.ToString(System.Globalization.CultureInfo.InvariantCulture) +
+            ":item=" + items[slot].ToString(System.Globalization.CultureInfo.InvariantCulture);
         private static bool ValidRewardKey(string value) => !string.IsNullOrEmpty(value) && value.Length <= 256 && value.All(c => c >= 33 && c <= 126);
         private static string MatchProgressKey(string account, uint characterId, string matchKey) => account + ":" + characterId.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":" + matchKey;
         private static bool ValidKindUnits(string kind, int units) => MagProgressionCatalog.ValidKindUnits(kind, units);

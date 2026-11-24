@@ -62,6 +62,8 @@ Test("unsupported join requests name their rejection", JoinRejectionChecks.Run);
 Test("refused gameplay admission names its release reason", AdmissionFailureChecks.Run);
 Test("rejected gameplay release cannot hold admission forever", RejectedReleaseChecks.Run);
 Test("restarted legacy gameplay worker is reconfigured before admission", LeadershipProgressionChecks.LegacyWorkerRestartReconfigures);
+Test("gameplay bridge deadlines outlast short worker stalls", BridgeDeadlineChecks.Run);
+Test("world stream resumes on the same worker and releases on a restart", LeadershipProgressionChecks.WorldStreamResumeKeepsPlayers);
 
 Test("committed loadout selection persistence", LoadoutSelectionChecks.Run);
 
@@ -100,6 +102,7 @@ Test("leadership reconnect admission serializes reward settlement", LeadershipPr
 Test("leadership commit failure, retry, and overflow", LeadershipProgressionChecks.FailedCommit);
 Test("selected kit ownership and complete store preservation", LoadoutPreferenceStoreChecks.Run);
 Test("retail saved loadout delete commits and compacts the owned layout", LoadoutPreferenceStoreChecks.DeleteThroughMls);
+Test("retail skill purchase owns its equipment for loadout saves", LoadoutPreferenceStoreChecks.RetailSkillPurchaseOwnsItsEquipment);
 Test("account-bound NP identity creation and persistence", NpIdentityChecks.Run);
 Test("MLS answers lobby player-card character data for any character", LeadershipProgressionChecks.PlayerCardLookup);
 Test("linked characters display their online ID, not the stored login key", LeadershipProgressionChecks.PlayerCardDisplayName);

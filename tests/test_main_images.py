@@ -76,7 +76,9 @@ class MainImagesTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         containers = [c for d in yaml.safe_load_all(result.stdout) if d['kind'] == 'Deployment'
                       for c in d['spec']['template']['spec']['containers']]
-        self.assertEqual(len(containers), 3)
+        # Medius and MAPS, plus one gameplay container per configured worker (or the single one).
+        workers = yaml.safe_load((ROOT / 'charts/mag-recomp-server/ci-values.yaml').read_text()).get('gameplayWorkers') or [None]
+        self.assertEqual(len(containers), 2 + len(workers))
         for container in containers:
             self.assertEqual(container['imagePullPolicy'], 'Always')
             suffix = 'game' if container['name'] == 'gameplay' else 'medius'
