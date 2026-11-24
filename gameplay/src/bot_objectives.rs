@@ -1546,6 +1546,41 @@ impl<W: Write> Engine<W> {
         receipts.push(json!({"op":"bot_traffic_yield","timestamp_ms":now.as_millis()as u64,"object_index":id,"requester":requester,"action":if resume{"resume"}else{"stage"},"result":result}));
         Ok(())
     }
+    /// The spot where a queued bot stands, as its own holding spot. The queue
+    /// froze it on its walking route to the launch, so the spot is on the
+    /// launch's floor and behind the ledge; it is only used when the bot is
+    /// settled on the navmesh. The caller applies the usual protected, lane and
+    /// spacing checks.
+    fn holding_in_place(
+        &self,
+        id: u16,
+        passage: development_bot_movement::DropPassage,
+        policy: &ObjectivePolicy,
+    ) -> Option<replication::CharacterPosition> {
+        let r = self.bot_registry.bots[&id].target.runtime?;
+        let mesh = self.navmesh_world.as_ref()?;
+        let here = r.physical_position();
+        let component = mesh.component_id(here).ok()?;
+        let launch = passage.launch;
+        let forward = [
+            passage.landing[0] - launch[0],
+            passage.landing[2] - launch[2],
+        ];
+        let length = forward[0].hypot(forward[1]);
+        let beyond = length > 0.01
+            && ((here[0] - launch[0]) * forward[0] + (here[2] - launch[2]) * forward[1]) / length
+                > 0.5 * policy.drop_holding_grid_m;
+        (matches!(r.phase, BotPhase::Complete)
+            && r.physics_motion.is_some_and(|m| m.grounded)
+            && !r.navmesh_state.on_player
+            && !r.navmesh_state.navigation_aborted
+            && !beyond
+            && mesh
+                .component_id(launch)
+                .ok()
+                .is_none_or(|launch| launch == component))
+        .then_some(r.position)
+    }
     /// Queue staging around a launch: walk the candidate ring from `attempt`,
     /// rejecting with cheap static checks (in front of the ledge, support
     /// outside the launch floor's vertical window, a different navmesh
@@ -1763,9 +1798,11 @@ impl<W: Write> Engine<W> {
             return Ok(());
         }
         let attempt = b.drop_holding_attempt;
+        let misses = b.drop_holding_misses;
         let role_sprint = self.bot_registry.config.as_ref().unwrap().slots[b.slot].sprint;
         let map = self.map_name().to_owned();
         let mut skipped = 0;
+        let mut in_place = false;
         let goal = if prepare {
             Ok(position(passage.launch))
         } else if resume && !physical_exit {
@@ -1778,7 +1815,21 @@ impl<W: Write> Engine<W> {
                 id, passage, attempt, &map, policy, actors, &lanes, &protected, started,
             );
             skipped = scanned;
-            goal
+            match goal {
+                // A whole ring around the launch without a usable spot: on a
+                // narrow ledge or a layered platform the ring falls off the
+                // launch's floor. Wait where the queue froze this bot instead.
+                Err(reason) if misses + 1 + scanned >= policy.drop_holding_candidate_limit => {
+                    match self.holding_in_place(id, passage, policy) {
+                        Some(here) => {
+                            in_place = true;
+                            Ok(here)
+                        }
+                        None => Err(reason),
+                    }
+                }
+                goal => goal,
+            }
         } else {
             let origin = if physical_exit || local_rejoin {
                 point(b.target.runtime.unwrap().position)
@@ -1886,6 +1937,14 @@ impl<W: Write> Engine<W> {
                 {
                     return Err("holding_occupied");
                 }
+            }
+            if in_place {
+                // Already standing on the spot: no route query is needed.
+                let bot = self.bot_registry.bots.get_mut(&id).unwrap();
+                bot.drop_holding_goal = Some(goal);
+                bot.holding_retry_at = now;
+                bot.drop_approach_ready = false;
+                return Ok(goal);
             }
             if started.elapsed().as_micros() >= u128::from(policy.planning_slice_us) {
                 return Err("bot_planning_slice_yield");
@@ -2160,11 +2219,15 @@ impl<W: Write> Engine<W> {
                 .holding_retry_at = now + Duration::from_millis(policy.retry_ms[0]);
         }
         if !matches!(result, Err("bot_planning_slice_yield")) && (!resume || physical_exit) {
-            self.bot_registry
-                .bots
-                .get_mut(&id)
-                .unwrap()
-                .drop_holding_attempt += 1 + skipped;
+            let b = self.bot_registry.bots.get_mut(&id).unwrap();
+            b.drop_holding_attempt += 1 + skipped;
+            if !physical_exit && !local_rejoin {
+                b.drop_holding_misses = if result.is_ok() {
+                    0
+                } else {
+                    misses + 1 + skipped
+                };
+            }
         }
         if prepare && result.is_err() && !matches!(result, Err("bot_planning_slice_yield")) {
             let b = self.bot_registry.bots.get_mut(&id).unwrap();
@@ -2203,7 +2266,7 @@ impl<W: Write> Engine<W> {
                 );
             }
         }
-        receipts.push(json!({"op":"bot_drop_holding","timestamp_ms":now.as_millis()as u64,"object_index":id,"drop_id":passage.id,"action":if prepare{"prepare"}else if retreat{if preentry_retreat{"preentry_retreat"}else{"abort_retreat"}}else if egress{"egress"}else if reroute{"reroute"}else if resume{"resume"}else{"stage"},"result":result,"selected_next_drop":self.bot_registry.bots[&id].target.next_registry_drop(policy.drop_entry_buffer_m).map(|p|p.id)}));
+        receipts.push(json!({"op":"bot_drop_holding","timestamp_ms":now.as_millis()as u64,"object_index":id,"drop_id":passage.id,"action":if prepare{"prepare"}else if retreat{if preentry_retreat{"preentry_retreat"}else{"abort_retreat"}}else if egress{"egress"}else if reroute{"reroute"}else if resume{"resume"}else if in_place{"stage_in_place"}else{"stage"},"result":result,"selected_next_drop":self.bot_registry.bots[&id].target.next_registry_drop(policy.drop_entry_buffer_m).map(|p|p.id)}));
         Ok(())
     }
     pub(super) fn tick_bot_objectives(
@@ -3061,3 +3124,6 @@ mod public_synthetic_policy_tests {
         assert!(!policy.interactions_enabled);
     }
 }
+#[cfg(test)]
+#[path = "bot_drop_holding_tests.rs"]
+mod drop_holding_tests;

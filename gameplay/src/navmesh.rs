@@ -14,6 +14,9 @@ mod reference;
 pub mod regional;
 pub use movement_profile::MovementProfile;
 #[cfg(test)]
+#[path = "navmesh_goal_tests.rs"]
+mod goal_tests;
+#[cfg(test)]
 #[path = "navmesh_movement_profile_tests.rs"]
 mod movement_profile_tests;
 #[cfg(test)]
@@ -891,7 +894,7 @@ impl NavMesh {
             )
         };
         if ok == 0 || !(0..=128).contains(&count) {
-            return err("navmesh_goal_candidate_limit");
+            return err("navmesh_goal_query_failed");
         }
         let results: Vec<_> = (0..count as usize)
             .map(|i| {
