@@ -56,7 +56,8 @@ namespace Server.Medius
             RT_MSG_CLIENT_APP_TO_PLUGIN envelope, DateTime now)
         {
             PortalTicketRefusal = null;
-            if (!enabled || !MagPluginRouting.IsSelectedApplication(applicationId) || !envelope.IsValid || envelope.PluginId != 0)
+            if (!enabled || !MagPluginRouting.IsSelectedApplication(applicationId) || !envelope.IsValid ||
+                !MagPluginRouting.IsClientPluginId(applicationId, envelope.PluginId))
                 return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();
             if (!MagMessageCodec.TryParseClientForApplication(envelope.Payload, applicationId, out var message))
             {
