@@ -158,6 +158,9 @@ pub(super) struct WorldBot {
     pub(super) drop_queue_passage: Option<DropPassage>,
     pub(super) drop_holding_goal: Option<replication::CharacterPosition>,
     pub(super) drop_holding_attempt: usize,
+    /// Holding candidates checked without finding a spot since this ticket
+    /// was issued; a full ring of misses lets the waiter hold where it stands.
+    pub(super) drop_holding_misses: usize,
     pub(super) holding_retry_at: Duration,
     /// (holding goal, last position with progress, when) while walking to it.
     pub(super) holding_progress: Option<HoldingProgress>,
@@ -1093,6 +1096,7 @@ impl<W: Write> Engine<W> {
                 bot.holding_retry_at = Duration::ZERO;
                 bot.drop_approach_ready = false;
                 bot.drop_holding_attempt = 0;
+                bot.drop_holding_misses = 0;
                 self.bot_registry.reservations.remove(&id);
                 bot.target.pending_move = None;
             }
@@ -1758,6 +1762,7 @@ impl<W: Write> Engine<W> {
                 b.drop_resume_failure_at = None;
                 b.drop_queue_approach.clear();
                 b.holding_retry_at = Duration::ZERO;
+                b.drop_holding_misses = 0;
                 b.drop_approach_ready = false;
                 continue;
             }
@@ -2279,6 +2284,7 @@ impl<W: Write> Engine<W> {
                 }
                 b.drop_queue_approach.clear();
                 b.holding_retry_at = Duration::ZERO;
+                b.drop_holding_misses = 0;
                 b.drop_approach_ready = false;
                 if let Some(route) = b.target.registry_route()
                     && let Some(end) = route
@@ -2981,6 +2987,7 @@ impl<W: Write> Engine<W> {
                     drop_queue_passage: None,
                     drop_holding_goal: None,
                     drop_holding_attempt: 0,
+                    drop_holding_misses: 0,
                     holding_retry_at: Duration::ZERO,
                     holding_progress: None,
                     drop_resume: false,
@@ -3591,6 +3598,7 @@ impl BotRegistry {
         bot.holding_retry_at = now;
         bot.drop_approach_ready = false;
         bot.drop_holding_attempt = 0;
+        bot.drop_holding_misses = 0;
         self.reservations.insert(
             id,
             (

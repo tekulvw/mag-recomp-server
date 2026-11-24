@@ -1054,14 +1054,20 @@ impl Target {
             return Err("bot_ground_recovery_goal_not_local_mesh");
         }
         let body = mesh.body();
-        let navigation =
-            match NavigationMove::plan(Some(world), map, runtime.position, &movement, body) {
-                Ok(route) => route,
-                Err("bot_navigation_unreachable") => NavigationMove::supported_recovery_prefix(
-                    world, map, initial, &movement, maximum_m, body,
-                )?,
-                Err(e) => return Err(e),
-            };
+        let navigation = match NavigationMove::plan_local(
+            Some(world),
+            map,
+            runtime.position,
+            &movement,
+            body,
+            maximum_m,
+        ) {
+            Ok(route) => route,
+            Err("bot_navigation_unreachable") => NavigationMove::supported_recovery_prefix(
+                world, map, initial, &movement, maximum_m, body,
+            )?,
+            Err(e) => return Err(e),
+        };
         if navigation.length > maximum_m {
             return Err("bot_ground_recovery_route_too_long");
         }
@@ -2206,8 +2212,36 @@ impl NavigationMove {
         movement: &BotMove,
         body: bot_physics::Body,
     ) -> Result<Self, &'static str> {
-        let extent =
-            f64::from(NAVIGATION_LIMITS.radius_cells) * NAVIGATION_LIMITS.cell_size + body.radius;
+        Self::plan_with_limits(world, map_name, start, movement, body, NAVIGATION_LIMITS)
+    }
+    /// A grid search no wider than a route of at most `maximum` metres can
+    /// reach. A longer route is refused anyway, so the default 64-cell search
+    /// would only spend collision queries on cells that cannot be used.
+    fn plan_local(
+        world: Option<&collision::CollisionWorld>,
+        map_name: &str,
+        start: replication::CharacterPosition,
+        movement: &BotMove,
+        body: bot_physics::Body,
+        maximum: f64,
+    ) -> Result<Self, &'static str> {
+        let radius = (maximum / NAVIGATION_LIMITS.cell_size).ceil() as i32 + 2;
+        let limits = bot_navigation::Limits {
+            radius_cells: radius.min(NAVIGATION_LIMITS.radius_cells),
+            max_expansions: ((2 * radius + 1) * (2 * radius + 1)) as usize,
+            ..NAVIGATION_LIMITS
+        };
+        Self::plan_with_limits(world, map_name, start, movement, body, limits)
+    }
+    fn plan_with_limits(
+        world: Option<&collision::CollisionWorld>,
+        map_name: &str,
+        start: replication::CharacterPosition,
+        movement: &BotMove,
+        body: bot_physics::Body,
+        limits: bot_navigation::Limits,
+    ) -> Result<Self, &'static str> {
+        let extent = f64::from(limits.radius_cells) * limits.cell_size + body.radius;
         let bounds = bot_navigation::PlanningBounds {
             min_xz: [
                 (f64::from(start.x) - extent).max(0.0),
@@ -2220,13 +2254,9 @@ impl NavigationMove {
         };
         let query = bot_navigation::WorldNavigation::new(world, map_name, body, bounds, 16.0, 16.0)
             .map_err(navigation_error)?;
-        let route = bot_navigation::plan_route(
-            &query,
-            point(start),
-            point(movement.destination),
-            NAVIGATION_LIMITS,
-        )
-        .map_err(navigation_error)?;
+        let route =
+            bot_navigation::plan_route(&query, point(start), point(movement.destination), limits)
+                .map_err(navigation_error)?;
         for p in &route.waypoints {
             character_position(*p)
                 .validate()

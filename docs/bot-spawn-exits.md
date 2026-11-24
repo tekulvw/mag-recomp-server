@@ -75,6 +75,22 @@ less than 0.5 m of progress for `drop_holding_progress_stall_ms` (default
 rules prevent two waiters that must swap sides in a one-body corridor from
 blocking each other until the full stall, repeatedly.
 
+On a narrow ledge or a layered platform the whole ring of
+`drop_holding_candidate_limit` spots can fall off the launch's floor. Once a
+ticket has spent a full ring without a spot, the bot holds where the queue
+froze it (`bot_drop_holding` with `action: "stage_in_place"`), if it is
+grounded on the launch's navmesh component, behind the ledge, and clear of
+protected boxes, approach lanes and other waiters' spots. It stands on its own
+route to the launch, so no route query is needed; waiters behind it form a
+single file along that route.
+
+Navmesh goal projection visits every polygon in its goal box. Layered floors
+can put more than 512 polygons in a 5 m box; a fixed buffer used to fail such
+goals (`navmesh_goal_candidate_limit`) or silently lose the nearest polygon.
+Ground recovery back onto the navmesh searches only the cells a route of its
+`maximum_m` can reach, so an unreachable target no longer costs a full 64-cell
+grid search.
+
 When at least `wave_backlog` grounded bots are waiting for a first route or a
 staging spot, the planner uses `wave_route_queries_per_tick`,
 `wave_candidate_checks_per_tick` and `wave_planning_slice_us` (each only ever
