@@ -17,7 +17,7 @@ python3 tools/extraction/extract-retail-maps.py --disc DISC --game-archive GAME 
 python3 tools/extraction/extract-retail-domination.py --disc DISC --game-archive GAME --output DOMINATION_METADATA
 python3 tools/extraction/extract-retail-spawns.py --disc DISC --game-archive GAME --output SPAWN_METADATA_DIRECTORY
 python3 tools/extraction/build-retail-spawn-catalog.py --disc DISC --game-archive GAME --map MAP_NAME --active TEAM/PLATOON/SQUAD --output SPAWNS
-python3 tools/extraction/project-retail-sabotage-objectives.py --disc DISC --game-archive GAME --output OBJECTIVE_METADATA
+python3 tools/extraction/project-retail-sabotage-objectives.py --disc DISC --game-archive GAME [--map SABOTAGE_MAP] --output OBJECTIVE_METADATA
 python3 tools/extraction/extract-retail-objective-volumes.py --disc DISC [--game-archive GAME] --output OBJECTIVE_VOLUMES
 python3 tools/extraction/project-retail-abilities.py --rules RULES --output ABILITIES
 python3 tools/extraction/extract-retail-mediation-profile.py --elf RETAIL_ELF --output MEDIATION_PROFILE
@@ -25,7 +25,7 @@ python3 tools/extraction/extract-retail-mediation-profile.py --elf RETAIL_ELF --
 
 `DISC` contains `PS3_GAME/USRDIR/run/mag/ps3/levels/*.psarc`; `GAME` is the externally decrypted global `game.psarc`. `ITEMS` contains namespace-qualified authored identities. It is **not** a complete numeric runtime item binding: retail faction lists restart their local ordinals. The runtime needs qualified numeric bindings and appropriate bootstrap data for those features. Those upstream binding/bootstrap steps remain gaps in this release.
 
-The spawn builder supports Suppression and SVER Sabotage entry. Pass the exact authored map name and an explicit team/platoon/squad selection. It preserves authored coordinates before terrain snapping and marks runtime indices unverified. Objectives remain disabled in its match policy. The all-map metadata extractor does not turn authored bunker exit candidates into grounded, collision-safe exits. Unknown objective fields stay typed/raw rather than acquiring guessed meanings. The objective metadata projector inventories a bounded subset of script calls/conditions without executing Lua or reconstructing general branch semantics.
+The spawn builder supports Suppression and the three retail Sabotage maps. The archive's map configuration supplies each defender: `mag_cosmodrome_final` (SVER), `mag_kennicott_final` (Valor) and `mag_remote_comms_final` (Raven). Each map therefore has two attacker profiles, and together they cover all six ordered faction pairs. Pass the exact authored map name, an explicit team/platoon/squad selection and `--attacking-faction`. Only the legacy Cosmodrome profile defaults its attacker to Valor. Authored objective counts are pinned per Sabotage map, and a changed count is refused. It preserves authored coordinates before terrain snapping and marks runtime indices unverified. Objectives remain disabled in its match policy. The all-map metadata extractor does not turn authored bunker exit candidates into grounded, collision-safe exits. Unknown objective fields stay typed/raw rather than acquiring guessed meanings. The objective metadata projector inventories a bounded subset of script calls/conditions without executing Lua or reconstructing general branch semantics. `--map` selects one of the three Sabotage maps (default `mag_cosmodrome_final`). Each map pins its level archive and CLV hashes, its configured defender and its authored objective, control, list, platoon, trigger and forward-spawn counts. Live objective slot bindings remain a separate per-map capture: `project-retail-objective-runtime.py` refuses a map without its own qualified `TOKEN_SLOT_BINDINGS`.
 
 The objective volume extractor reads every level archive and emits each objective trigger's authored oriented box; see [objective trigger volumes](objective-trigger-volumes.md) for the box semantics and what remains unestablished.
 
@@ -68,7 +68,7 @@ python3 tools/collision/instance_linkage.py --archive LEVEL_PSARC --map MAP_NAME
 
 The converter writes `coverage.json`, per-map manifests under `maps/retail-bcus98110-01.00/`, and neutral geometry under `geometry/`. It scans bounded ZRB/HSX/HKX/HKT members, validates declared packfile/resource ownership and preserves unsupported cases in reports. It emits no raw resource copies. Shared `main.psarc` resources are outside this map-only conversion. The instance reader writes a compressed JSON join from complete CLV instance records and native resource headers; identifiers remain opaque where names are unavailable.
 
-This first stage is **resource-local conversion**, not a collision world. Retail terrain/compiled adapters currently support the original Cosmodrome map and require independently established placement evidence. They read original resource members directly from `LEVEL_PSARC`; there is no hidden dependency on retained raw-member files or an unpublished manifest augmentation:
+This first stage is **resource-local conversion**, not a collision world. The terrain adapter supports only the original Cosmodrome map. The compiled adapter accepts any retail map through `--map-name`. It requires a terrain proof naming that map and independently established placement evidence. Without `--terrain-token`, it uses the map manifest's single bound type1 terrain resource and refuses a manifest with no terrain resource or more than one. Compiled records whose collision is attached to a parent otherwise require `--reference-pose` and `--parent-proof`, and such output cannot declare a physics region. As an explicit alternative, `--exclude-animated-parented` omits compiled instances whose authored definition class is `AnimatedObjectProperties` and whose collision resource is parent-attached. Their collision moves with the parent, so the adapter treats it as dynamic collision outside the initial static scope. The adapter lists every exclusion with its instance id and name, resource token, resource member and packfile SHA256s, parent tokens and reason. The list goes in the world provenance, the region provenance, `unknowns` and `assembly.json` (`dynamic_exclusions`). A world built this way may declare a physics region, because that region's static claim names what it leaves out. Parented collision on any other class is still refused, and the option cannot be combined with `--reference-pose`. When a map has nothing to exclude, the option leaves the output byte-identical. They read original resource members directly from `LEVEL_PSARC`; there is no hidden dependency on retained raw-member files or an unpublished manifest augmentation:
 
 ```sh
 python3 tools/collision/retail_terrain.py --archive LEVEL_PSARC --terrain-proof TERRAIN_PROOF --retail-elf RETAIL_ELF --map-manifest MAP_RESOURCE_MANIFEST --catalog COLLISION_CATALOG --output TERRAIN_WORLD_DIRECTORY
@@ -88,6 +88,21 @@ cargo run --manifest-path gameplay/Cargo.toml --bin mag-navmesh -- bake --input 
 
 The preparation tool preserves winding and all faces, rounds vertices to f32, computes a domain-separated geometry hash, and refuses invalid bounds, degenerate triangles or unverified coverage. Baking needs the Rust/C++ toolchain and vendored Recast/Detour described in the build instructions. It produces a local `.mag-nav` JSON artifact accepted by `--navmesh-world`; it does not need a running game or server. The runtime independently binds the navmesh to the collision-world hash. No retail geometry/navmesh is distributed.
 
+A world without its own verified region can take its coverage from a hash-bound [coverage sidecar](collision-coverage-sidecar.md); see [whole-map runtime navigation](#whole-map-runtime-navigation).
+
+### Runtime navmesh layouts
+
+`mag-navmesh bake` picks the tile layout from the bake bounds. The grid uses 51.2 m tiles.
+
+| Format | Movement profile | Tiles | Polygons per tile | Detour bytes | Bundle version |
+|---|---|---|---|---|---|
+| `mag_navmesh_world_v2` | 45 degrees | 256 | 16,384 | 32 MiB | 1 |
+| `mag_navmesh_world_v3` | projected | 256 | 16,384 | 32 MiB | 3 |
+| `mag_navmesh_world_v4` | 45 degrees | 512 | 8,192 | 128 MiB | 5 |
+| `mag_navmesh_world_v5` | projected | 512 | 8,192 | 128 MiB | 7 |
+
+When the grid has at most 256 tiles (an 819.2 m square), the bake writes the 256-tile formats, byte for byte as before. A larger grid uses the wide formats. `--layout wide` forces the wide layout for a smaller grid. With 32-bit Detour polygon references, 512 tiles leave room for 8,192 polygons per tile while keeping the 10 salt bits Detour needs. The wide layout bakes each tile from the faces that overlap it, which yields the same tile bytes. It also refuses bounds taller than 409.55 m, the Recast span height limit at 0.05 m cells. Older artifacts (`mag_navmesh_world_v1` to `v3`) load unchanged, and the loader checks each format against its own tile, polygon and byte limits. A serialized artifact stores Detour bytes as a JSON number array, about 3.5 characters per byte. Loaders accept artifact files up to 513 MiB. A loaded mesh keeps only Detour's checked copy of the tiles.
+
 ### Optional retail movement slope profile
 
 The supported application 20231 retail build provides an explicit movement slope profile. Project it from your own exact retail ELF and game archive; the tool verifies the ELF, archive and character-settings member hashes before emitting the external JSON:
@@ -97,11 +112,34 @@ python3 tools/navmesh/project-retail-movement-profile.py --elf RETAIL_ELF --game
 python3 tools/navmesh/project-retail-movement-profile.py --elf RETAIL_ELF --game-archive GAME_PSARC --output MOVEMENT_JSON --check
 ```
 
-Pass `--movement-profile MOVEMENT_JSON` explicitly to `mag-navmesh bake`, `query`, `inspect`, or `component`. Reference `bake-reference`, `inspect-reference` and `query-reference` accept the same option. Use the same projected file for baking and loading. Profiled runtime artifacts use `mag_navmesh_world_v3`; profiled reference bundles use `mag_navmesh_reference_v2`. Their manifests bind the profile hash, and their binary containers have separate versions. Missing or different rules, a legacy artifact paired with the new rules, or a profiled artifact paired with legacy drop certificates are rejected.
+Pass `--movement-profile MOVEMENT_JSON` explicitly to `mag-navmesh bake`, `query`, `inspect`, or `component`. Reference `bake-reference`, `inspect-reference` and `query-reference` accept the same option. Use the same projected file for baking and loading. Profiled runtime artifacts use `mag_navmesh_world_v3`, or `mag_navmesh_world_v5` for the wide layout; profiled reference bundles use `mag_navmesh_reference_v2`. Their manifests bind the profile hash, and their binary containers have separate versions. Missing or different rules, a legacy artifact paired with the new rules, or a profiled artifact paired with legacy drop certificates are rejected.
 
 For a direct gameplay worker, add `--movement-profile /absolute/MOVEMENT_JSON` alongside `--application-id 20231`, `--collision-world` and `--navmesh-world`. A match-profile registry instead accepts a `movement_profile` path beside that profile's `navmesh_world`; registry paths follow its existing resolution rules. The selected runtime mesh supplies the bot body's slope policy throughout its physical lifecycle. This changes only the ascent/no-slide slope; the replacement runner retains its existing dimensions, step height, gravity and speed.
 
 Omitting the option preserves the existing 45-degree bakes and runtime behavior. The explicit profile does not qualify collision coverage or convert a reference bundle into a gameplay mesh. Runtime static coverage and current-body admission remain separate requirements. Movement profiles, collision worlds and generated navigation data remain external to the source distribution.
+
+### Whole-map runtime navigation
+
+Bots can use a whole map when the operator asserts its coverage in a [coverage sidecar](collision-coverage-sidecar.md). The reviewed world file stays unchanged. The flow is: prepare the coverage sidecar, prepare the bake input with it, bake, then certify drops and spawn exits against the same world and sidecar. For each map:
+
+```sh
+world=WORLD_JSON
+world_sha256=$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$world")
+python3 tools/navmesh/make-coverage-sidecar.py --world "$world" --expected-world-sha256 "$world_sha256" \
+  --whole-world --operator-assertion "REVIEW STATEMENT" --output COVERAGE_JSON
+python3 tools/navmesh/prepare.py --world "$world" --expected-world-sha256 "$world_sha256" \
+  --collision-coverage COVERAGE_JSON --output PREP_DIRECTORY
+cargo build --release --locked --manifest-path gameplay/Cargo.toml --bin mag-navmesh
+gameplay/target/release/mag-navmesh bake --input PREP_DIRECTORY/input.json --output MESH_JSON
+gameplay/target/release/mag-navmesh inspect --mesh MESH_JSON
+gameplay/target/release/mag-navmesh add-drop --mesh MESH_JSON --collision-world "$world" \
+  --collision-coverage COVERAGE_JSON --launch X,Y,Z --landing X,Y,Z --speed SPEED --id ID --output MESH_WITH_DROP_JSON
+gameplay/target/release/mag-navmesh search-spawn-exits --mesh MESH_WITH_DROP_JSON --collision-world "$world" \
+  --collision-coverage COVERAGE_JSON --parameters SEARCH_JSON --fall-damage-rules FALL_JSON --health 400 \
+  --output EXITS_DIRECTORY
+```
+
+`prepare.py` reports `runtime_grid_tiles` and `runtime_layout` in its manifest and refuses bounds over 512 tiles. The bake prints the chosen format. Bake bounds default to the first verified region: the world's own region, else the sidecar's. `search-spawn-exits` extends the drop links already in the mesh, so add each seed drop first. Drop links need the 45-degree formats (`v2`/`v4`); a profiled mesh refuses them. At runtime, pass the same sidecar with `--collision-coverage` or a match profile's `collision_coverage`.
 
 ### Offline whole-map reference navigation
 
@@ -117,7 +155,7 @@ gameplay/target/release/mag-navmesh query-reference --mesh REFERENCE_DIRECTORY -
 
 The output is a new directory containing `manifest.json` and `detour.bin`. Inspection verifies the binary hash and tile layout and reports the occupied tile count and largest tile polygon count. The reference grid supports up to 512 tiles at 51.2 m per side, 8,192 polygons per tile, and 192 MiB of binary tiles. Queries report the reference route format and retain disconnected and partial results. Keep the source world and its preparation receipt with the bundle so its scope can be verified independently.
 
-The reference bundle is an offline route-planning artifact. It describes the baked static geometry and its represented transforms. Gameplay movement and certified drops require the separate runtime mesh and a verified physics region. Dynamic obstacles, moving bodies, and objective sequences require their own current-state checks.
+The reference bundle is an offline route-planning artifact. It describes the baked static geometry and its represented transforms. Gameplay movement and certified drops require the separate runtime mesh and a verified physics region, from the world or a coverage sidecar. Dynamic obstacles, moving bodies, and objective sequences require their own current-state checks.
 
 A reference query reports a disconnected goal when the full goal search finds no candidate in the start component and no loaded edge can cross the component labels. For a selected goal in the same component, the existing 16,384-node search can try the same endpoints in reverse once if the initial search runs out of nodes. The retry must reach both endpoints and produce a valid forward corridor. A query can still return a partial corridor or exhaust its search budget.
 

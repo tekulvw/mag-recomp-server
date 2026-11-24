@@ -133,6 +133,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     let mut telemetry_path: Option<PathBuf> = None;
     let mut tick_budget_us = None;
     let mut collision_path: Option<PathBuf> = None;
+    let mut collision_coverage_path: Option<PathBuf> = None;
     let mut navmesh_path: Option<PathBuf> = None;
     let mut regional_walk_path: Option<PathBuf> = None;
     let mut movement_profile_path: Option<PathBuf> = None;
@@ -501,6 +502,13 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                         .into(),
                 );
             }
+            "--collision-coverage" => {
+                collision_coverage_path = Some(
+                    args.next()
+                        .ok_or_else(|| io::Error::other("--collision-coverage requires a path"))?
+                        .into(),
+                );
+            }
             "--collision-query" => {
                 let start = args.next().ok_or_else(|| {
                     io::Error::other("--collision-query requires START END as x,y,z")
@@ -565,7 +573,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             }
             _ => {
                 return Err(io::Error::other(
-                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--match-profiles /absolute/MATCH_PROFILES.json] [--party-reservations] [--active-abilities /absolute/ACTIVE_ABILITIES.json] [--squad-orders /absolute/ORDERS.json] [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--dynamic-bodies /absolute/BODIES.json] [--static-partition /absolute/PARTITION.json] [--acquisition-gameplay /absolute/GAMEPLAY.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--firearm-assist-rules /absolute/ASSISTS.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--worker-id ID] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json] [--navmesh-world MESH.mag-nav] [--regional-walk-coverage /absolute/COVERAGE.json] [--movement-profile /absolute/MOVEMENT.json] [--bot-fill-total N --bot-population POPULATION.json] [--bot-names /absolute/NAMES.json] [--bot-resupply-catalog /absolute/SUPPLY.json] [--bot-resupply-approach-policy /absolute/APPROACH.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS] [--log-segment-bytes BYTES [--log-retention-s SECONDS]]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
+                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--match-profiles /absolute/MATCH_PROFILES.json] [--party-reservations] [--active-abilities /absolute/ACTIVE_ABILITIES.json] [--squad-orders /absolute/ORDERS.json] [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--dynamic-bodies /absolute/BODIES.json] [--static-partition /absolute/PARTITION.json] [--acquisition-gameplay /absolute/GAMEPLAY.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--firearm-assist-rules /absolute/ASSISTS.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--worker-id ID] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json [--collision-coverage COVERAGE.json]] [--navmesh-world MESH.mag-nav] [--regional-walk-coverage /absolute/COVERAGE.json] [--movement-profile /absolute/MOVEMENT.json] [--bot-fill-total N --bot-population POPULATION.json] [--bot-names /absolute/NAMES.json] [--bot-resupply-catalog /absolute/SUPPLY.json] [--bot-resupply-approach-policy /absolute/APPROACH.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS] [--log-segment-bytes BYTES [--log-retention-s SECONDS]]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
                 ));
             }
         }
@@ -623,10 +631,12 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                 "--match-profiles requires --application-id 20231",
             ));
         }
+        // Bot populations and resupply providers are map-bound; profiles carry
+        // their own. `--bot-fill-total` and `--bot-names` remain worker-wide
+        // defaults for profiles that do not set their own.
         if bot_population_path.is_some()
             || bot_resupply_catalog_path.is_some()
             || bot_resupply_approach_policy_path.is_some()
-            || bot_fill_total != 0
             || development_dummy
             || structure_path.is_some()
             || bunker_path.is_some()
@@ -634,7 +644,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             || collision_query.is_some()
         {
             return Err(io::Error::other(
-                "--match-profiles does not support global bunker arguments, bots, dummy or collision-query",
+                "--match-profiles does not support global bunker arguments, global bot population or resupply (configure bots in each profile), dummy or collision-query",
             ));
         }
     }
@@ -667,12 +677,33 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     }
     // Geometry is loaded before opening logs/listeners. A bad file cannot
     // silently fall back to an empty collision world or accept a reservation.
+    if collision_coverage_path.is_some() && match_profiles_path.is_some() {
+        return Err(io::Error::other(
+            "configure collision coverage inside each match profile",
+        ));
+    }
     let collision_world = collision_path
         .as_ref()
         .map(|path| {
             CollisionWorld::load(path, CollisionLimits::default()).map_err(io::Error::other)
         })
         .transpose()?;
+    // A coverage sidecar must name this exact world; the world bytes stay unchanged.
+    let collision_world = match (&collision_coverage_path, collision_world) {
+        (Some(_), None) => {
+            return Err(io::Error::other(
+                "--collision-coverage requires --collision-world",
+            ));
+        }
+        (Some(path), Some(world)) => Some(
+            world
+                .with_coverage_sidecar(mag_gameplay::collision_coverage::CoverageSidecar::load(
+                    path,
+                )?)
+                .map_err(io::Error::other)?,
+        ),
+        (None, world) => world,
+    };
     let navmesh_world = if let Some(path) = navmesh_path {
         let world = collision_world
             .as_ref()
@@ -822,7 +853,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     }
     // Validate once before listening; the installed catalog resolves ordinary retail hits.
     let mut retail_combat_catalog = None;
-    let retail_metadata = match &retail_metadata_path {
+    let mut retail_metadata = match &retail_metadata_path {
         Some(path) => {
             if !path.is_absolute() {
                 return Err(io::Error::other(
@@ -941,7 +972,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         ));
     }
     let collision_info = collision_world.as_ref().map(|world| serde_json::json!({
-        "source":collision_path,"metadata":world.metadata(),"stats":world.stats(),"bullet_authority":"audit_only","grenade_policy":"disk_triangles_three_body_samples","grenade_radius_enabled":development_grenade_radius,"active_map_name":catalog.map_name(),"map_matches_active":world.metadata().map_name == catalog.map_name()}));
+        "source":collision_path,"metadata":world.metadata(),"coverage_sidecar":world.coverage_sidecar().map(|sidecar| serde_json::json!({"source":collision_coverage_path,"sha256":sidecar.source_sha256(),"basis":sidecar.basis(),"regions":sidecar.regions()})),"stats":world.stats(),"bullet_authority":"audit_only","grenade_policy":"disk_triangles_three_body_samples","grenade_radius_enabled":development_grenade_radius,"active_map_name":catalog.map_name(),"map_matches_active":world.metadata().map_name == catalog.map_name()}));
     let objective_catalog = objective_path
         .as_ref()
         .map(mag_gameplay::objective_catalog::ObjectiveCatalog::load)
@@ -1058,6 +1089,16 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         .map_err(io::Error::other)?;
     if let Some(combat) = retail_combat_catalog {
         item_catalog = item_catalog.with_retail_combat(combat);
+        // Character firearms beyond the projected rows come from the loaded
+        // item catalog; record which ones did and did not qualify.
+        if let (Some(info), Ok(combat)) = (retail_metadata.as_mut(), item_catalog.retail_combat()) {
+            info["item_catalog_bullets"] = serde_json::json!(combat.derived_bullet_ids());
+            info["item_catalog_bullet_skips"] = item_catalog
+                .derived_bullet_skips()
+                .iter()
+                .map(|skip| serde_json::json!({"item":skip.item_id,"reason":skip.reason}))
+                .collect();
+        }
     }
     if let Some(path) = &retail_armory_path {
         if !path.is_absolute() {
@@ -1571,7 +1612,8 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         .transpose()?
         .unwrap_or_default();
     let bot_names_count = bot_names.len();
-    if bot_fill_total > bot_names_count {
+    // Profile workers validate name capacity per profile (a row may bring its own names).
+    if match_profiles_path.is_none() && bot_fill_total > bot_names_count {
         return Err(io::Error::other(
             "bot names have insufficient capacity for --bot-fill-total",
         ));
@@ -1752,6 +1794,20 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                 .validate_dynamic_bodies(catalog, bindings)
                 .map_err(io::Error::other)?;
         }
+        if bot_fill_total > 0 {
+            registry
+                .set_default_bot_fill_total(bot_fill_total)
+                .map_err(io::Error::other)?;
+        }
+        // Each profile's bots are checked against its own world before any log opens.
+        registry
+            .validate_bots(&mag_gameplay::match_profiles::BotValidationInputs {
+                items: &item_catalog,
+                wire_profiles: &wire_profiles,
+                names: &bot_names,
+                fall_damage_rules: fall_rules.as_ref(),
+            })
+            .map_err(io::Error::other)?;
     }
     let mut resources = match application_id {
         Some(id) => {
@@ -1779,7 +1835,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         }
         println!(
             "{}",
-            serde_json::json!({"event":"catalogs_validated","application_id":application_id,"skill_application_id":skill_catalog.application_id(),"bunkers":bunker_info,"fall_damage_enabled":fall_rules.is_some(),"incapacitation_enabled":incapacitation_rules.is_some(),"character_damage_rules_enabled":character_damage_rules.is_some(),"firearm_assists_enabled":firearm_assist_rules.is_some(),"bot_resupply_validated":bot_resupply_catalog.is_some(),"bot_resupply_approach_validated":bot_resupply_approach_policy.is_some(),"bot_resupply_drop_validated":bot_resupply_approach_policy.as_ref().is_some_and(|policy|policy.allowed_drop_id().is_some()),"dynamic_body_catalog_validated":dynamic_bodies.is_some(),"static_partitions_validated":static_partitions.len(),"acquisition_gameplay_validated":acquisition_setup.is_some(),"acquisition_apc_crew_validated":ground_vehicles.as_ref().is_some_and(|ground|ground.has_acquisition_apc_crew()) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_acquisition_apc_crew()),"squad_orders_validated":squad_orders.is_some(),"active_abilities_validated":active_abilities.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_active_abilities()),"domination_gameplay_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_domination_gameplay()),"guided_launchers_validated":guided_launchers.is_some() ||match_profiles.as_ref().is_some_and(|p|p.has_guided_launchers()),"infantry_rockets_validated":infantry_rockets.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_infantry_rockets()),"flash_grenades_validated":flash_grenades.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_flash_grenades()),"gas_grenades_validated":gas_grenades.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_gas_grenades()),"smoke_grenades_validated":smoke_grenades.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_smoke_grenades()),"underbarrel_launchers_validated":underbarrel_launchers.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_underbarrel_launchers()),"hospital_rockets_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rockets()),"hospital_rocket_ground_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rocket_ground()),"hospital_rocket_helo_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rocket_helo()),"frag_character_blast_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.frag_character_blast) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_frag_character_blast()),"human_static_resupply_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.has_human_static_resupply()) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_human_static_resupply()),"frag_ground_areas_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.has_frag_ground_areas()) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_frag_ground_areas()),"frag_helo_areas_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_frag_helo_areas()),"hospital_blast_areas_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_blast_areas()),"projectile_contacts_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.has_projectile_contacts()) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_projectile_contacts()),"scope":"schema_and_profile_validation_not_client_acceptance"})
+            serde_json::json!({"event":"catalogs_validated","application_id":application_id,"skill_application_id":skill_catalog.application_id(),"bunkers":bunker_info,"fall_damage_enabled":fall_rules.is_some(),"incapacitation_enabled":incapacitation_rules.is_some(),"character_damage_rules_enabled":character_damage_rules.is_some(),"firearm_assists_enabled":firearm_assist_rules.is_some(),"bot_resupply_validated":bot_resupply_catalog.is_some(),"bot_resupply_approach_validated":bot_resupply_approach_policy.is_some(),"bot_resupply_drop_validated":bot_resupply_approach_policy.as_ref().is_some_and(|policy|policy.allowed_drop_id().is_some()),"profile_bot_fill_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_bot_fill()),"dynamic_body_catalog_validated":dynamic_bodies.is_some(),"static_partitions_validated":static_partitions.len(),"acquisition_gameplay_validated":acquisition_setup.is_some(),"acquisition_apc_crew_validated":ground_vehicles.as_ref().is_some_and(|ground|ground.has_acquisition_apc_crew()) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_acquisition_apc_crew()),"squad_orders_validated":squad_orders.is_some(),"active_abilities_validated":active_abilities.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_active_abilities()),"domination_gameplay_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_domination_gameplay()),"guided_launchers_validated":guided_launchers.is_some() ||match_profiles.as_ref().is_some_and(|p|p.has_guided_launchers()),"infantry_rockets_validated":infantry_rockets.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_infantry_rockets()),"flash_grenades_validated":flash_grenades.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_flash_grenades()),"gas_grenades_validated":gas_grenades.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_gas_grenades()),"smoke_grenades_validated":smoke_grenades.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_smoke_grenades()),"underbarrel_launchers_validated":underbarrel_launchers.is_some() || match_profiles.as_ref().is_some_and(|profiles|profiles.has_underbarrel_launchers()),"hospital_rockets_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rockets()),"hospital_rocket_ground_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rocket_ground()),"hospital_rocket_helo_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_rocket_helo()),"frag_character_blast_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.frag_character_blast) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_frag_character_blast()),"human_static_resupply_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.has_human_static_resupply()) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_human_static_resupply()),"frag_ground_areas_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.has_frag_ground_areas()) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_frag_ground_areas()),"frag_helo_areas_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_frag_helo_areas()),"hospital_blast_areas_validated":match_profiles.as_ref().is_some_and(|profiles|profiles.has_hospital_blast_areas()),"projectile_contacts_validated":acquisition_setup.as_ref().is_some_and(|setup|setup.has_projectile_contacts()) || match_profiles.as_ref().is_some_and(|profiles|profiles.has_projectile_contacts()),"scope":"schema_and_profile_validation_not_client_acceptance"})
         );
         return Ok(());
     }
@@ -1909,7 +1965,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         if let Some(rules) = squad_orders {
             engine = engine.with_squad_orders(rules).map_err(io::Error::other)?;
         }
-        if bot_fill_total > 0 {
+        if bot_fill_total > 0 && match_profiles_path.is_none() {
             let path = bot_population_path
                 .as_ref()
                 .ok_or_else(|| io::Error::other("--bot-fill-total requires --bot-population"))?;
@@ -2944,6 +3000,79 @@ mod runtime_profile_tests {
     }
 
     #[test]
+    fn collision_coverage_sidecar_is_hash_bound_before_opening_log() {
+        let files = SyntheticCatalogs::new();
+        let mut spawns = files.read("spawns.json");
+        spawns["match_profile"]["game_type"] = serde_json::json!(1);
+        files.write("spawns.json", &spawns);
+        let map = spawns["maps"][0]["name"].clone();
+        files.write(
+            "world.json",
+            &serde_json::json!({
+                "format":"mag_collision_world","schema_version":1,"coordinate_space":"world",
+                "metadata":{"map_name":map,"build":"fixture",
+                    "coverage":"provisional","provenance":["synthetic"],"unknowns":[]},
+                "instances":[]
+            }),
+        );
+        let world_sha256 =
+            mag_gameplay::navmesh::sha256(&std::fs::read(files.0.join("world.json")).unwrap());
+        let sidecar = |world_sha256: &str| {
+            serde_json::json!({
+                "format":"mag_collision_coverage_v1","map_name":map,"world_sha256":world_sha256,
+                "basis":"operator_assertion","provenance":["synthetic"],
+                "physics_regions":[{"min":[-10.,-3.,-10.],"max":[10.,3.,10.],
+                    "ground_verified":true,"obstacles_verified":true,"provenance":["synthetic"]}]
+            })
+        };
+        files.write("coverage.json", &sidecar(&world_sha256));
+        files.write("foreign.json", &sidecar(&"f".repeat(64)));
+        let log = files.0.join("should-not-exist.jsonl");
+        let mut args = files.runtime_args();
+        args.extend([
+            "--acquisition-gameplay".into(),
+            files.0.join("gameplay.json").display().to_string(),
+            "--log".into(),
+            log.display().to_string(),
+        ]);
+        let with = |extra: &[&str]| {
+            let mut args = args.clone();
+            for name in extra {
+                args.push(if name.ends_with(".json") {
+                    files.0.join(name).display().to_string()
+                } else {
+                    name.to_string()
+                });
+            }
+            run(args).unwrap_err().to_string()
+        };
+        assert_eq!(
+            with(&["--collision-coverage", "coverage.json"]),
+            "--collision-coverage requires --collision-world"
+        );
+        assert_eq!(
+            with(&[
+                "--collision-world",
+                "world.json",
+                "--collision-coverage",
+                "foreign.json"
+            ]),
+            "collision_coverage_world_mismatch"
+        );
+        // The matching sidecar is accepted and startup proceeds to the next input.
+        assert_eq!(
+            with(&[
+                "--collision-world",
+                "world.json",
+                "--collision-coverage",
+                "coverage.json"
+            ]),
+            "acquisition_gameplay_requires_character_damage_rules"
+        );
+        assert!(!log.exists());
+    }
+
+    #[test]
     fn static_partition_cli_is_explicit_bounded_and_map_checked_before_logs() {
         let files = SyntheticCatalogs::new();
         let mut spawns = files.read("spawns.json");
@@ -3111,7 +3240,6 @@ mod runtime_profile_tests {
         for flags in [
             vec!["--bot-population", "/synthetic/missing.json"],
             vec!["--bot-resupply-approach-policy", "/synthetic/missing.json"],
-            vec!["--bot-fill-total", "1"],
             vec!["--development-dummy"],
             vec!["--leadership-passives", "/synthetic/missing.json"],
             vec!["--bunker-catalog", "/synthetic/missing.json"],
@@ -3125,6 +3253,42 @@ mod runtime_profile_tests {
             args.extend(flags.into_iter().map(str::to_owned));
             assert!(run(args).is_err());
         }
+    }
+
+    #[test]
+    fn registry_profile_bots_are_validated_per_profile_before_logs() {
+        std::thread::Builder::new()
+            .stack_size(1024 * 1024)
+            .spawn(|| {
+                let files = SyntheticCatalogs::new();
+                let manifest = synthetic_match_profile(&files);
+                let mut args = files.args();
+                args.extend(["--match-profiles".into(), manifest.display().to_string()]);
+                // A worker-wide fill total needs at least one profile population.
+                let mut defaulted = args.clone();
+                defaulted.extend(["--bot-fill-total".into(), "2".into()]);
+                assert!(
+                    run(defaulted)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("bot_fill_total_requires_profile_bot_population")
+                );
+                // A population authored for another map is refused, naming its profile.
+                files.write("profile-bots.json", &serde_json::json!({
+                    "format":"mag_bot_population_v1","map_name":"synthetic_other","firearms":{"enabled":false},
+                    "slots":[{"team":0,"position":{"x":10.,"y":2.,"z":12.}},{"team":1,"position":{"x":14.,"y":2.,"z":12.}}]}));
+                files.write("profiles.json", &serde_json::json!({"format":"mag_match_profiles_v1","profiles":[{
+                    "profile_id":"synthetic-profile","spawn_catalog":files.0.join("profile-spawns.json"),
+                    "bot_population":files.0.join("profile-bots.json"),"bot_fill_total":2}]}));
+                let error = run(args).unwrap_err().to_string();
+                assert!(
+                    error.contains("match profile synthetic-profile: bot_population_map_profile_mismatch"),
+                    "{error}"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

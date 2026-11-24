@@ -10,9 +10,13 @@ metadata:
 data:
   init_config.py: |
 {{ .Files.Get "files/init_config.py" | indent 4 }}
-  {{- if eq .Values.data.mode "s3" }}
+  {{- if or (eq .Values.data.mode "s3") .Values.gameplayWorkers }}
   data_bundle.py: |
 {{ required "chart is missing files/data_bundle.py" (.Files.Get "files/data_bundle.py") | indent 4 }}
+  {{- end }}
+  {{- if .Values.gameplayWorkers }}
+  wait_for_workers.py: |
+{{ required "chart is missing files/wait_for_workers.py" (.Files.Get "files/wait_for_workers.py") | indent 4 }}
   {{- end }}
 ---
 apiVersion: v1

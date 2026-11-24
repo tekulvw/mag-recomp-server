@@ -96,7 +96,10 @@ impl TicketIssuer {
             bail!("the ticket audience must be a lowercase host name of at most 63 characters");
         }
         if !(60..=ticket::MAX_LIFETIME_SECONDS).contains(&lifetime_seconds) {
-            bail!("the ticket lifetime must be 60 to 3600 seconds");
+            bail!(
+                "the ticket lifetime must be 60 to {} seconds",
+                ticket::MAX_LIFETIME_SECONDS
+            );
         }
         Ok(Self {
             key,
@@ -230,6 +233,34 @@ mod tests {
         assert_eq!(t.resolve_audience(Some("other.example.test")), None);
         assert!(issuer().with_extra_audiences(&["Bad".into()]).is_err());
         assert_eq!(issuer().resolve_audience(Some("test.example.test")), None);
+    }
+
+    #[test]
+    fn lifetime_range() {
+        let key = || SigningKey::from_slice(&Sha256::digest(b"config test key")).unwrap();
+        for ok in [60, 600, 3600, 43_200] {
+            assert!(
+                TicketIssuer::new(key(), 1, "play.example.test", ok).is_ok(),
+                "{ok}"
+            );
+        }
+        for bad in [0, 59, 43_201] {
+            let err = TicketIssuer::new(key(), 1, "play.example.test", bad)
+                .err()
+                .unwrap_or_else(|| panic!("{bad} accepted"));
+            assert!(err.to_string().contains("60 to 43200 seconds"), "{err}");
+        }
+        // A twelve-hour ticket is signed, verifies until its last second and expires on time.
+        let t = TicketIssuer::new(key(), 1, "play.example.test", 43_200).unwrap();
+        let mut keys = ticket::VerifyingKeys::default();
+        keys.insert(1, *t.key.verifying_key());
+        let (bytes, expires_at) = t.issue("play.example.test", 7, "Alpha", 1_000).unwrap();
+        assert_eq!(expires_at, 44_200);
+        assert!(ticket::verify(&bytes, &keys, "play.example.test", 44_199).is_ok());
+        assert_eq!(
+            ticket::verify(&bytes, &keys, "play.example.test", 44_200),
+            Err(TicketError::Expired)
+        );
     }
 
     #[test]

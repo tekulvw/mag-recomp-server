@@ -22,7 +22,9 @@ include the field `fire_mode`. Existing on-foot audit readers can still use
 the legacy `magazine` alias.
 
 Owners can add independently qualified ordinary rifles to the explicit
-`bullets` selection for `tools/extraction/project-retail-combat.py`. The
-server reads mode rows from the loaded item source, so the projected combat
-metadata format needs no additional fire-mode list. This admission check
+`bullets` selection for `tools/extraction/project-retail-combat.py`. Firearms
+that are not projected get bullet rows built from the same item source; see
+[retail-firearm-coverage.md](retail-firearm-coverage.md). The server reads mode
+rows from the loaded item source, so the projected combat metadata format needs
+no additional fire-mode list. This admission check
 continues to use client-reported hits and observed ammunition.

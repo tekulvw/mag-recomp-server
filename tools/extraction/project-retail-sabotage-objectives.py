@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Project original Syr Darya objective/control metadata; never execute original Lua.
+"""Project original Sabotage objective/control metadata; never execute original Lua.
+
+Supports the three retail Sabotage maps listed in SABOTAGE_MAPS. Each map pins
+its level archive/CLV identity, configured defender and authored cardinalities.
 
 No native resources, runtime object identities or general Lua interpretation are
 supplied. Typed CLV fields retain raw bytes/offsets for unresolved semantics.
@@ -17,10 +20,41 @@ import sys
 TOOLS = Path(__file__).resolve().parent
 GAME_SHA = 'b49c9435be729832029ad7019874d478080dc9764ebde1809b2851d353bc769f'
 MAP = 'mag_cosmodrome_final'
+# Identity pins and authored cardinalities per supported retail Sabotage map.
+# `records` counts ScriptObjectProperties, SquadObjectiveListPropTable and
+# PlatoonProperties tables; `controls` counts ObjectiveControl bindings.
+SABOTAGE_MAPS = {
+    'mag_cosmodrome_final': dict(
+        owner_faction_enum='FactionTypeRed',
+        level_sha256='8157f5abc55ddd2ca9eaad3379e87ae909d0b8f7c9b08fa04f1f1e2d8018d96e',
+        clv_sha256='d336caea88351dda5f3204a34e64fdde8eabdf0532b3133e2338cdd150488f4b',
+        objectives=13, records=(4, 8, 2), controls=1, triggers=3, forward_spawns=4),
+    'mag_kennicott_final': dict(
+        owner_faction_enum='FactionTypeGreen',
+        level_sha256='399a38f568f4cd4c9c1d787b8ebbe857506b807638dc19f7e2e893ef051332ec',
+        clv_sha256='f17814c8eea43f636541059c8eb910d3707ced53ff9d1cc87d0ad83300825b56',
+        objectives=13, records=(4, 8, 2), controls=1, triggers=3, forward_spawns=4),
+    'mag_remote_comms_final': dict(
+        owner_faction_enum='FactionTypeBlack',
+        level_sha256='f066f00a74a58d36a531526f4216538300362d5f358a0f40c6b75f2edc226313',
+        clv_sha256='71f5dd11198a5d8d34055276a0fa031f8b8e833f2b8a6c6b9edb9fc4f3a1c888',
+        objectives=13, records=(4, 8, 2), controls=1, triggers=3, forward_spawns=4),
+}
+
+
+def map_profile(map_name):
+    """Return the pinned identity/cardinality profile and member paths for one map."""
+    require(map_name in SABOTAGE_MAPS, 'Unsupported retail Sabotage map: ' + str(map_name))
+    profile = dict(SABOTAGE_MAPS[map_name], map=map_name,
+                   level='PS3_GAME/USRDIR/run/mag/ps3/levels/' + map_name + '.psarc',
+                   clv='/run/mag/ps3/levels/' + map_name + '/' + map_name + '.clv')
+    return profile
+
+
 LEVEL = 'PS3_GAME/USRDIR/run/mag/ps3/levels/' + MAP + '.psarc'
-LEVEL_SHA = '8157f5abc55ddd2ca9eaad3379e87ae909d0b8f7c9b08fa04f1f1e2d8018d96e'
+LEVEL_SHA = SABOTAGE_MAPS[MAP]['level_sha256']
 CLV = '/run/mag/ps3/levels/' + MAP + '/' + MAP + '.clv'
-CLV_SHA = 'd336caea88351dda5f3204a34e64fdde8eabdf0532b3133e2338cdd150488f4b'
+CLV_SHA = SABOTAGE_MAPS[MAP]['clv_sha256']
 MEMBERS = {
     'scripts/objective_control/gametype_64.lua': '39ad009271454fec6352822201aa58dac14e4c2900c82ac2a3a8a4f2d71b16b9',
     'scripts/objective_control/gametype_timer_control.lua': '1a1f6cf1af260faeadac6e76f9b917ee51b96b0627b5d615cd14f0f9b9430faf',
@@ -149,7 +183,14 @@ def script_facts(raw):
             'interpretation_scope': 'Literal signatures, comparisons and standalone calls only. Call order is source order; branch scopes and generalized Lua semantics are not implemented.'}
 
 
-def project(disc, game_archive):
+def cardinality(profile, key, actual, message):
+    """Compare an authored count with the selected map's pinned expectation."""
+    require(actual == profile[key], message)
+
+
+def project(disc, game_archive, map_name=MAP):
+    profile = map_profile(map_name)
+    level, clv_member = profile['level'], profile['clv']
     x = runpy.run_path(str(TOOLS / 'extract-retail-spawns.py'))
     maps = runpy.run_path(str(TOOLS / 'extract-retail-maps.py'))
     helpers = runpy.run_path(str(TOOLS / 'retail_map_helpers.py'))
@@ -158,15 +199,15 @@ def project(disc, game_archive):
         path = '/run/mag/ps3/' + relative
         return game.extract(game.names.index(path) + 1)
     settings = member('settings/gameproperties.zpr')
-    configured = [m for m in x['catalog_settings'](settings.decode()) if m['map'] == MAP]
+    configured = [m for m in x['catalog_settings'](settings.decode()) if m['map'] == map_name]
     require(len(configured) == 1 and configured[0]['mode_enum'] == 'GameType64'
-            and configured[0]['owner_faction_enum'] == 'FactionTypeRed',
+            and configured[0]['owner_faction_enum'] == profile['owner_faction_enum'],
             'Unexpected configured Sabotage map identity')
-    archive = x['Psarc'](checked((disc / LEVEL).read_bytes(), LEVEL_SHA, LEVEL))
-    raw = checked(archive.extract(archive.names.index(CLV) + 1), CLV_SHA, CLV)
+    archive = x['Psarc'](checked((disc / level).read_bytes(), profile['level_sha256'], level))
+    raw = checked(archive.extract(archive.names.index(clv_member) + 1), profile['clv_sha256'], clv_member)
     graph = maps['objective_graph'](raw, helpers)
-    require(len(graph['definitions']) == len(graph['instances']) == 13,
-            'Unexpected objective cardinality')
+    require(len(graph['definitions']) == len(graph['instances']), 'Unexpected objective cardinality')
+    cardinality(profile, 'objectives', len(graph['instances']), 'Unexpected objective cardinality')
     clv = x['retail_clv'](raw)
     instances = clv.tables('InstanceProperties')
     records = {}
@@ -184,7 +225,8 @@ def project(disc, game_archive):
                 row['squad_spawn_references'] = clv.squad_references(table)
             rows.append(row)
         records[classname] = rows
-    require([len(records[c]) for c in records] == [4, 8, 2], 'Unexpected control/list/platoon counts')
+    cardinality(profile, 'records', tuple(len(records[c]) for c in records),
+                'Unexpected control/list/platoon counts')
     resources = []
     for path, expected in MEMBERS.items():
         data = checked(member(path), expected, path)
@@ -210,10 +252,10 @@ def project(disc, game_archive):
                          'bindings': [{'parameter': name, **values(param['fields'])}
                                       for name, param in zip(names, params)],
                          'basis': 'Original function parameter names joined to ordered authored CLV arguments; no Lua execution or generalized state-machine interpretation.'})
-    require(len(controls) == 1, 'Missing original control argument binding')
+    cardinality(profile, 'controls', len(controls), 'Missing original control argument binding')
     triggers = []
     forward = []
-    spawn = x['extract_map'](disc / LEVEL, configured[0])
+    spawn = x['extract_map'](disc / level, configured[0])
     by_token = {p['name_token']: p for p in spawn['points']}
     for definition in graph['definitions']:
         field = definition['fields']
@@ -230,12 +272,13 @@ def project(disc, game_archive):
                     'Unexpected forward-spawn policy')
             forward.append({'objective_instance_token': inst['name_token'], 'spawn': p,
                             'runtime_policy': 'Unsupported inactive authored LALO; metadata only, not selectable or activated by this projection.'})
-    require(len(triggers) == 3 and len(forward) == 4, 'Unexpected authored objective links')
+    require(len(triggers) == profile['triggers'] and len(forward) == profile['forward_spawns'],
+            'Unexpected authored objective links')
     return {'schema_version': 1, 'format': 'mag_retail_sabotage_objective_metadata',
             'application_id': 20231, 'map': configured[0], 'runtime_indices_verified': False,
-            'source': {'game_archive_sha256': GAME_SHA, 'level_archive': LEVEL,
-                       'level_archive_sha256': LEVEL_SHA, 'clv_member': CLV,
-                       'clv_sha256': CLV_SHA, 'settings_member': '/run/mag/ps3/settings/gameproperties.zpr',
+            'source': {'game_archive_sha256': GAME_SHA, 'level_archive': level,
+                       'level_archive_sha256': profile['level_sha256'], 'clv_member': clv_member,
+                       'clv_sha256': profile['clv_sha256'], 'settings_member': '/run/mag/ps3/settings/gameproperties.zpr',
                        'settings_sha256': sha(settings),
                        'projector': 'tools/extraction/project-retail-sabotage-objectives.py',
                        'readers': ['tools/extraction/extract-retail-spawns.py',
@@ -260,6 +303,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--disc', type=Path, required=True)
     parser.add_argument('--game-archive', type=Path, required=True)
+    parser.add_argument('--map', default=MAP, choices=tuple(SABOTAGE_MAPS),
+                        help='Retail Sabotage map; defaults to ' + MAP)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--check', action='store_true', help='Require byte-identical existing output; write nothing')
     args = parser.parse_args()
@@ -268,7 +313,7 @@ def main():
         require(output != args.game_archive.resolve() and not output.is_relative_to(args.disc.resolve()),
                 'Output cannot replace original assets')
         require(args.check or not args.output.exists(), 'Output already exists; use --check')
-        result = project(args.disc, args.game_archive)
+        result = project(args.disc, args.game_archive, args.map)
         encoded = (json.dumps(result, indent=2, allow_nan=False) + '\n').encode()
         if args.check:
             require(args.output.read_bytes() == encoded, 'Objective projection differs')

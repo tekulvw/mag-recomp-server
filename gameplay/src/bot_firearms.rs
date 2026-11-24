@@ -357,7 +357,7 @@ fn visible(
         return Err("perception_budget");
     }
     *rays -= 1;
-    if !world.metadata().physics_regions.iter().any(|r| {
+    if !world.verified_physics_regions().any(|r| {
         r.obstacles_verified
             && (0..3).all(|i| from[i].min(to[i]) >= r.min[i] && from[i].max(to[i]) <= r.max[i])
     }) {

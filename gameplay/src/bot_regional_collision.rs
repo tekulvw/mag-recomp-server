@@ -88,14 +88,7 @@ impl RegionalCollision {
                 .map(ground_vehicles::Catalog::raw_sha256)
                 != Some(self.ground_sha256.as_str())
             || dynamic.catalog.fingerprint() != self.dynamic_catalog_sha256
-            || (walking.is_none()
-                && !world.metadata().physics_regions.iter().any(|region| {
-                    region.ground_verified
-                        && region.obstacles_verified
-                        && !region.provenance.is_empty()
-                        && (0..3)
-                            .all(|i| region.min[i] <= self.min[i] && region.max[i] >= self.max[i])
-                }))
+            || (walking.is_none() && !world.covers_box(self.min, self.max))
         {
             return Err("bot_regional_source_mismatch");
         }

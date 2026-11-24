@@ -57,7 +57,7 @@ fn combat_fixture_items(
     )
 }
 
-fn synthetic_blast_rules() -> blast_rules::CharacterBlastRules {
+pub(crate) fn synthetic_blast_rules() -> blast_rules::CharacterBlastRules {
     blast_rules::CharacterBlastRules {
         armor_rating_reduction: 0.0,
         armor_prevention_reduction: 0.0,
@@ -66,7 +66,7 @@ fn synthetic_blast_rules() -> blast_rules::CharacterBlastRules {
     }
 }
 
-fn combat_fixture_documents(
+pub(crate) fn combat_fixture_documents(
     grenade: bool,
     vehicle_hp: f32,
     grenade_vehicle_hp: f32,
@@ -164,7 +164,7 @@ fn combat_fixture_documents(
     (raw, metadata)
 }
 
-fn finish_combat_fixture(
+pub(crate) fn finish_combat_fixture(
     items: item_catalog::ItemCatalog,
     metadata: &Value,
 ) -> Arc<item_catalog::ItemCatalog> {
@@ -482,7 +482,7 @@ pub(crate) fn configured_fixture(engine: Engine<Vec<u8>>) -> Engine<Vec<u8>> {
         .squad_catalog = Arc::new(engine.spawn_catalog.as_ref().unwrap().for_squad(0).unwrap());
     engine
 }
-fn victim(engine: &Engine<Vec<u8>>) -> &Active {
+pub(crate) fn victim(engine: &Engine<Vec<u8>>) -> &Active {
     &engine.peers["synthetic-reservation-0000"]
 }
 fn kills(engine: &Engine<Vec<u8>>) -> Vec<progression::RewardEvent> {
@@ -1178,6 +1178,12 @@ fn native_ordinary_hits_accept_qualified_optional_attachments() {
         ("kWepCategoryMachineGun", "kAttachTypeForwardGrip", 17),
         ("kWepCategorySubMachineGun", "kAttachTypeSuppressor", 16),
         ("kWepCategorySniperRifle", "kAttachTypeForwardGrip", 17),
+        // Any listed damage-neutral attachment in its own slot keeps the host
+        // bullet, whatever the host firearm's category.
+        ("kWepCategorySubMachineGun", "kAttachTypeForwardGrip", 17),
+        ("kWepCategoryShotgun", "kAttachTypeSuppressor", 16),
+        ("kWepCategoryShotgun", "kAttachTypeSight", 15),
+        ("kWepCategoryMachineGun", "kAttachTypeSight", 15),
     ] {
         let mut engine =
             primary_attachment_hit_fixture(Some(slot), PrimaryAttachment::Optional, category, kind);
@@ -1195,14 +1201,14 @@ fn native_ordinary_hits_reject_wrong_optional_roles_or_missing_required_bipod() 
     use PrimaryAttachment::*;
     for (category, kind, slot, attachment) in [
         (
-            "kWepCategorySubMachineGun",
-            "kAttachTypeForwardGrip",
+            "kWepCategoryShotgun",
+            "kAttachTypeSuppressor",
             Some(17),
             Optional,
         ),
         (
             "kWepCategoryShotgun",
-            "kAttachTypeSuppressor",
+            "kAttachTypeSight",
             Some(16),
             Optional,
         ),
@@ -1289,7 +1295,9 @@ fn native_machine_gun_hit_rejects_unqualified_attachments() {
                 .unwrap()
                 .lines()
                 .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-                .any(|entry| entry["gameplay_denial"] == "unsupported_bullet_attachment"),
+                .any(|entry| entry["gameplay_denial"]
+                    .as_str()
+                    .is_some_and(|code| code.starts_with("unsupported_bullet_attachment"))),
             "{slot} {attachment:?}"
         );
     }
@@ -1318,7 +1326,9 @@ fn native_machine_gun_hit_does_not_admit_a_bipod_for_a_mounted_actor() {
             .unwrap()
             .lines()
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .any(|entry| entry["gameplay_denial"] == "unsupported_bullet_attachment")
+            .any(|entry| entry["gameplay_denial"]
+                .as_str()
+                .is_some_and(|code| code.starts_with("unsupported_bullet_attachment")))
     );
 }
 
@@ -1352,7 +1362,7 @@ fn assert_unqualified_assault_attachments_denied(kind: &str, allowed: usize, oth
     for (slot, attachment, category, mounted) in [
         (15, Compatible, "kWepCategoryAssaultRifle", false),
         (other, Compatible, "kWepCategoryAssaultRifle", false),
-        (allowed, Compatible, "kWepCategoryShotgun", false),
+        (allowed, Compatible, "kWepCategorySideArm", false),
         (allowed, Compatible, "kWepCategoryAssaultRifle", true),
         (allowed, Incompatible, "kWepCategoryAssaultRifle", false),
         (allowed, Replacement, "kWepCategoryAssaultRifle", false),
@@ -1387,7 +1397,9 @@ fn assert_unqualified_assault_attachments_denied(kind: &str, allowed: usize, oth
                 .unwrap()
                 .lines()
                 .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-                .any(|entry| entry["gameplay_denial"] == "unsupported_bullet_attachment"),
+                .any(|entry| entry["gameplay_denial"]
+                    .as_str()
+                    .is_some_and(|code| code.starts_with("unsupported_bullet_attachment"))),
             "{slot} {attachment:?} {category} mounted={mounted}"
         );
     }
@@ -1506,7 +1518,9 @@ fn native_sidearm_hit_keeps_unqualified_attachments_denied() {
                 .unwrap()
                 .lines()
                 .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-                .any(|entry| entry["gameplay_denial"] == "unsupported_bullet_attachment"),
+                .any(|entry| entry["gameplay_denial"]
+                    .as_str()
+                    .is_some_and(|code| code.starts_with("unsupported_bullet_attachment"))),
             "gear={gear} slot={slot} host={category} {attachment:?} mounted={mounted}",
         );
     }
@@ -1578,7 +1592,9 @@ fn native_rifle_hit_keeps_unqualified_underbarrel_launchers_denied() {
                 .unwrap()
                 .lines()
                 .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-                .any(|entry| entry["gameplay_denial"] == "unsupported_bullet_attachment")
+                .any(|entry| entry["gameplay_denial"]
+                    .as_str()
+                    .is_some_and(|code| code.starts_with("unsupported_bullet_attachment")))
         );
     }
 }

@@ -202,6 +202,24 @@
               10473
             ]
           }
+        },
+        "udpPortRange": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "start": {
+              "const": 10474
+            },
+            "end": {
+              "type": "integer",
+              "minimum": 10474,
+              "maximum": 10729
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ]
         }
       },
       "required": [
@@ -541,6 +559,231 @@
           }
         }
       ]
+    },
+    "gameplayWorkers": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$"
+              },
+              {
+                "const": ""
+              }
+            ]
+          },
+          "matchProfiles": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/-]*$",
+            "not": {
+              "pattern": "(^|/)\\.\\.(/|$)"
+            }
+          },
+          "data": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "revision": {
+                "type": "string"
+              },
+              "s3": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "endpoint": {
+                    "type": "string",
+                    "pattern": "^$|^https?://[^\\s]+$"
+                  },
+                  "region": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "bucket": {
+                    "type": "string"
+                  },
+                  "key": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "versionId": {
+                    "type": "string"
+                  },
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[a-fA-F0-9]{64}$"
+                  },
+                  "existingSecret": {
+                    "type": "string"
+                  },
+                  "forcePathStyle": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "key",
+                  "sha256"
+                ]
+              },
+              "files": {
+                "$ref": "#/properties/data/properties/files"
+              }
+            },
+            "required": [
+              "s3"
+            ]
+          },
+          "emptyDirSizeLimit": {
+            "type": "string",
+            "minLength": 1
+          },
+          "navigation": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "revision": {
+                "type": "string"
+              },
+              "s3": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "endpoint": {
+                    "type": "string",
+                    "pattern": "^$|^https?://[^\\s]+$"
+                  },
+                  "region": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "bucket": {
+                    "type": "string"
+                  },
+                  "key": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "versionId": {
+                    "type": "string"
+                  },
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[a-fA-F0-9]{64}$"
+                  },
+                  "existingSecret": {
+                    "type": "string"
+                  },
+                  "forcePathStyle": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "key",
+                  "sha256"
+                ]
+              },
+              "emptyDirSizeLimit": {
+                "type": "string",
+                "minLength": 1
+              },
+              "mountPath": {
+                "type": "string",
+                "pattern": "^/[a-z0-9][a-z0-9_-]*(/[a-z0-9][a-z0-9_-]*)*$",
+                "not": {
+                  "pattern": "^/(data|logs|tmp|download|work|catalogs|scripts|proc|sys|dev|etc|usr|bin|lib|run)(/|$)"
+                }
+              }
+            },
+            "required": [
+              "s3"
+            ]
+          },
+          "extraArgs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "minimumPlayers": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 64
+          },
+          "maximumPlayers": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 64
+          },
+          "minimumPlayersPerTeam": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 32
+            },
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "draining": {
+            "type": "boolean"
+          },
+          "resources": {
+            "type": "object"
+          },
+          "nodeSelector": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "tolerations": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "affinity": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "id",
+          "matchProfiles",
+          "data"
+        ]
+      }
+    },
+    "worldRegistry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "partyInviteSeconds": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 300
+            }
+          ]
+        },
+        "workerWaitSeconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600
+        }
+      }
     },
     "resources": {
       "type": "object",

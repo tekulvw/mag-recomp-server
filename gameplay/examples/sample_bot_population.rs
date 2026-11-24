@@ -4,6 +4,7 @@
 use mag_gameplay::{
     bot_physics::{Body, WorldTerrain},
     collision::{CollisionLimits, CollisionWorld},
+    collision_coverage::CoverageSidecar,
     navmesh::{self, Artifact, NavMesh, Status},
 };
 use serde_json::{Value, json};
@@ -47,10 +48,15 @@ fn obj(p: Point) -> Value {
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let a: Vec<String> = std::env::args().skip(1).collect();
-    if a.len() != 8 {
-        return Err("usage: sample_bot_population WORLD MESH TEAM0_ANCHOR TEAM0_GOAL TEAM1_ANCHOR OUTPUT EVIDENCE FALL_RULES".into());
+    if !(8..=9).contains(&a.len()) {
+        return Err("usage: sample_bot_population WORLD MESH TEAM0_ANCHOR TEAM0_GOAL TEAM1_ANCHOR OUTPUT EVIDENCE FALL_RULES [COVERAGE_SIDECAR]".into());
     }
     let world = CollisionWorld::load(&a[0], CollisionLimits::default())?;
+    // An optional sidecar must name this exact world (docs/collision-coverage-sidecar.md).
+    let world = match a.get(8) {
+        Some(path) => world.with_coverage_sidecar(CoverageSidecar::load(path)?)?,
+        None => world,
+    };
     let hash = navmesh::sha256(&fs::read(&a[0])?);
     let artifact: Artifact = serde_json::from_slice(&fs::read(&a[1])?)?;
     let mesh = NavMesh::load(artifact, &hash, &world.metadata().map_name)?;

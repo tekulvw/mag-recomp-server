@@ -32,6 +32,12 @@ network:
   mapsPort: 10073
   annotations: {}
   externalTrafficPolicy: Cluster
+  # UDP game ports on the Medius Service and Pod. The integrated DME gives each connected human
+  # the next free UDP port from 10474 upward, across every world, and has no upper limit, so
+  # make the range at least as large as the most humans connected at once.
+  udpPortRange:
+    start: 10474
+    end: 10474
 runtime:
   # Existing Secret with medius-keys.json; never put RSA material in Helm values.
   existingSecret: ""
@@ -102,6 +108,43 @@ data:
   # Optional gameplay flags, e.g. collision inputs. Chart-managed flags cannot be overridden.
   # Retail structure/bunker inputs are unsupported and rejected. Use /data/<path>.
   gameplayExtraArgs: []
+# Optional configured world registry (docs/configured-world-registry.md): 2-16 gameplay workers,
+# each with its own Deployment, ClusterIP Service (bridge 31000), data bundle and --worker-id,
+# placed by one Medius. Empty keeps the single gameplay Deployment. Needs retail 20231 and
+# application images that support --worker-id, --match-profiles and registry client_address
+# "$MAG_ADVERTISE_IPV4". See the chart README, "Configured gameplay workers".
+gameplayWorkers: []
+#  - id: sabotage                # --worker-id and, unless name is set, the resource suffix
+#    name: ""                    # optional resource suffix: <release>-mag-recomp-server-gameplay-<name>
+#    matchProfiles: sabotage/match-profiles.json   # --match-profiles /data/<path>
+#    data:
+#      revision: "1"
+#      # Only key and sha256 are required; endpoint, region, bucket, existingSecret and
+#      # forcePathStyle default to data.s3. versionId never inherits.
+#      s3: {key: workers/sabotage.tar.gz, sha256: <64 hex>}
+#      files: {}                 # overrides of data.files for this worker's bundle
+#    emptyDirSizeLimit: 8Gi      # default data.emptyDirSizeLimit
+#    navigation:                 # optional second bundle, unpacked read-only at mountPath
+#      s3: {key: navigation/sabotage.tar.gz, sha256: <64 hex>}
+#      revision: "1"
+#      emptyDirSizeLimit: 4Gi
+#      mountPath: /navigation
+#    extraArgs: []               # worker gameplay flags; data.gameplayExtraArgs is not used
+#    minimumPlayers: 2           # registry minimum_players
+#    maximumPlayers: 8           # default runtime.maximumPlayers
+#    minimumPlayersPerTeam: [1, 1]
+#    draining: false             # reloaded live without restarting Medius
+#    resources: {}               # default resources.gameplay
+#    nodeSelector: {}            # each scheduling key defaults to the top-level value
+#    tolerations: []
+#    affinity: {}
+worldRegistry:
+  # Optional private-party invite window (1-300 s); null leaves party matchmaking off. Workers
+  # also need --party-reservations in extraArgs.
+  partyInviteSeconds: null
+  # The Medius Pod waits up to this long for every worker Service before starting, because Medius
+  # does not adopt a worker it could not reach at startup. 0 skips the wait.
+  workerWaitSeconds: 300
 resources:
   gameplay:
     requests: {cpu: 250m, memory: 256Mi}

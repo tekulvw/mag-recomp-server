@@ -2,7 +2,7 @@
 
 The player accounts website for a MAG replacement server (magtest.online). Players sign
 in with Google, claim a player name and link their launcher. The launcher trades its
-device token for short-lived **game tickets**, which the game server verifies with the
+device token for expiring **game tickets**, which the game server verifies with the
 portal's public key. See the [design](../docs/superpowers/specs/2026-11-22-portal-design.md)
 and the [ticket format](../docs/portal-ticket.md). Launchers also send performance and error
 reports with their logs: see [launcher reports](../docs/portal-reports.md).
@@ -58,7 +58,7 @@ holds ticket test vectors for other verifiers; regenerate them with
 | `PORTAL_TICKET_AUDIENCE` | yes | The game server's host name, such as `play.magtest.online`. Tickets are valid only there. It is the default audience: launchers that name none get it. |
 | `PORTAL_TICKET_EXTRA_AUDIENCES` | no | More game server host names, comma-separated, such as `test.magtest.online`, held to the same rule. A launcher may ask for a ticket for any of them (see "Get a ticket"). |
 | `PORTAL_TICKET_KEY_ID` | no | Key ID written into tickets (default 1). Change it when rotating keys. |
-| `PORTAL_TICKET_LIFETIME_SECONDS` | no | Ticket lifetime, 60 to 3600 (default 600). |
+| `PORTAL_TICKET_LIFETIME_SECONDS` | no | Ticket lifetime, 60 to 43200 (default 600). The live portal uses 43200 (12 hours) so a game can reconnect with its launch ticket; see [Lifetime](../docs/portal-ticket.md#lifetime) for the trade-off. |
 | `PORTAL_FONT_DIR` | no | Folder of the web fonts listed in `fonts.txt`, served at `/fonts/`. The image sets it; without it pages use system fonts. |
 | `PORTAL_OWNER_EMAILS` | no | Comma-separated Google emails with the owner role in the admin panel. Owners cannot be changed from the site. |
 | `PORTAL_CLIENT_IP_HEADER` | no | Header the trusted proxy appends the client address to (`x-forwarded-for`); the last entry is used. Without it, rate limits use the connecting address, which behind a proxy is the proxy. |

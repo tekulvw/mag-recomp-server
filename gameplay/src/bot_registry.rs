@@ -495,6 +495,16 @@ impl BotRegistry {
     pub(crate) fn enabled(&self) -> bool {
         self.config.is_some()
     }
+
+    /// A fresh world-owned registry for a population already validated against
+    /// the world it will run in (a selected match profile).
+    pub(crate) fn for_validated_population(config: BotPopulation, total: usize) -> Self {
+        Self {
+            config: Some(config),
+            total,
+            ..Default::default()
+        }
+    }
 }
 impl WorldBot {
     pub(super) fn has_supply_action(&self) -> bool {
@@ -2593,7 +2603,7 @@ impl<W: Write> Engine<W> {
         }
         Ok(())
     }
-    fn reconcile_bot_population(
+    pub(crate) fn reconcile_bot_population(
         &mut self,
         now: Duration,
         wall: u64,
@@ -2965,7 +2975,8 @@ impl<W: Write> Engine<W> {
 pub(crate) mod identity_tests {
     use super::*;
     use crate::resources::tests::{retail_items, wire_profiles};
-    pub(crate) fn engine(prefix: &str) -> Engine<Vec<u8>> {
+    /// Synthetic retail items with bootstrap loadouts for all three factions.
+    pub(crate) fn bootstrap_items() -> item_catalog::ItemCatalog {
         let mut proof = json!({"verified_binding":{"validated":true,"positions_compared":667,"blank_positions_compared":25,"blank_zero_empirically_verified":true}});
         for name in [
             "original_retail_elf_sha256",
@@ -2983,10 +2994,13 @@ pub(crate) mod identity_tests {
         let rows:Vec<_>=(0..5).map(|i|json!({"update_id":1,"items":if i<3 {kit.clone()} else {vec![None;22]},"primary_ammo":if i<3 {7}else{0}})).collect();
         let bootstrap=crate::bootstrap_loadouts::BootstrapLoadouts::from_json(&json!({"schema_version":1,"application_id":20231,"provenance":proof,
             "factions":(0..3).map(|f|json!({"faction":f,"class_ref":"CharacterClassInfo0","loadouts":rows})).collect::<Vec<_>>()}).to_string()).unwrap();
-        let items = std::sync::Arc::try_unwrap(retail_items())
+        std::sync::Arc::try_unwrap(retail_items())
             .ok()
             .unwrap()
-            .with_bootstrap_loadouts(bootstrap);
+            .with_bootstrap_loadouts(bootstrap)
+    }
+    pub(crate) fn engine(prefix: &str) -> Engine<Vec<u8>> {
+        let items = bootstrap_items();
         let names=crate::bot_names::Catalog::from_json(&serde_json::to_vec(&json!({"entries":[{"name":format!("{prefix} Alpha")},{"name":format!("{prefix} Bravo")}]})).unwrap()).unwrap();
         let spawns:spawn_catalog::SpawnCatalog=serde_json::from_value(json!({
             "format":"mag_spawn_catalog","schema_version":1,"source":"SYNTHETIC identity test",

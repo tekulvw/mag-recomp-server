@@ -233,6 +233,7 @@ pub(crate) struct MaterialRayHit {
 pub struct CollisionWorld {
     source_sha256: String,
     bot_regional_guard: Option<std::sync::Arc<crate::bot_physics::RegionalGuard>>,
+    coverage_sidecar: Option<std::sync::Arc<crate::collision_coverage::CoverageSidecar>>,
     metadata: WorldMetadata,
     // Geometry is immutable after BVH construction. Preloaded profiles share
     // these buffers instead of duplicating map geometry on each selection.
@@ -660,6 +661,7 @@ impl CollisionWorld {
         Ok(Self {
             source_sha256,
             bot_regional_guard: None,
+            coverage_sidecar: None,
             metadata,
             instance_ids: instance_ids.into(),
             static_properties: static_properties.into(),
@@ -691,6 +693,40 @@ impl CollisionWorld {
     }
     pub(crate) fn bot_regional_guard(&self) -> Option<&crate::bot_physics::RegionalGuard> {
         self.bot_regional_guard.as_deref()
+    }
+    /// Share immutable geometry with a sidecar bound to this world's exact
+    /// bytes and map. The disk metadata and source hash stay unchanged.
+    pub fn with_coverage_sidecar(
+        &self,
+        sidecar: crate::collision_coverage::CoverageSidecar,
+    ) -> Result<Self, &'static str> {
+        if self.coverage_sidecar.is_some() {
+            return Err("collision_coverage_already_attached");
+        }
+        if sidecar.world_sha256() != self.source_sha256
+            || sidecar.map_name() != self.metadata.map_name
+        {
+            return Err("collision_coverage_world_mismatch");
+        }
+        let mut world = self.clone();
+        world.coverage_sidecar = Some(std::sync::Arc::new(sidecar));
+        Ok(world)
+    }
+    pub fn coverage_sidecar(&self) -> Option<&crate::collision_coverage::CoverageSidecar> {
+        self.coverage_sidecar.as_deref()
+    }
+    /// Regions that authorize bot navigation: the world's own regions, then any
+    /// attached sidecar's. Static world casts use only `metadata().physics_regions`.
+    pub fn verified_physics_regions(&self) -> impl Iterator<Item = &PhysicsRegion> {
+        self.metadata.physics_regions.iter().chain(
+            self.coverage_sidecar
+                .iter()
+                .flat_map(|sidecar| sidecar.regions()),
+        )
+    }
+    /// One ground- and obstacle-verified navigation region contains the box.
+    pub fn covers_box(&self, min: Vec3, max: Vec3) -> bool {
+        crate::collision_coverage::regions_cover(self.verified_physics_regions(), min, max)
     }
     /// Fingerprint of the validated disk input, cached once at load.
     pub fn source_sha256(&self) -> &str {

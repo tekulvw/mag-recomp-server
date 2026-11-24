@@ -30,8 +30,11 @@ namespace Server.Medius
             {
                 bool hasSquad = row.TryGetProperty("squad_capacity", out var squadCapacity);
                 bool hasCounts = row.TryGetProperty("squad_counts", out var squadCounts);
+                bool hasBots = row.TryGetProperty("bot_fill_total", out var botFill);
                 var required = new[] { "profile_id", "game_type", "attacking_faction", "defending_faction", "maximum_players", "team_capacity" };
-                if(hasCounts!=hasSquad||!Fields(row,hasSquad ? required.Concat(new[]{"squad_capacity","squad_counts"}).ToArray() : required)||
+                var fields = (hasSquad ? required.Concat(new[]{"squad_capacity","squad_counts"}) : required)
+                    .Concat(hasBots ? new[]{"bot_fill_total"} : Array.Empty<string>()).ToArray();
+                if(hasCounts!=hasSquad||!Fields(row,fields)||
                     !Pair(row,out var mode,out var attacker,out var defender))return false;
                 var id=row.GetProperty("profile_id").GetString();
                 if(!Id(id)||!ids.Add(id)||!row.GetProperty("maximum_players").TryGetInt32(out var maximum)||
@@ -46,7 +49,13 @@ namespace Server.Medius
                     counts = squadCounts.EnumerateArray().Select(count => count.TryGetInt32(out int n) ? n : 0).ToArray();
                     if (counts.Any(count => count < 1 || count > 32)) return false;
                 }
-                list.Add(new MagMatchProfile(id,mode,attacker,defender,maximum,team,squad,counts == null ? null : Array.AsReadOnly(counts)));
+                int? bots = null;
+                if (hasBots)
+                {
+                    if (!botFill.TryGetInt32(out int total) || total < 2 || total > maximum) return false;
+                    bots = total;
+                }
+                list.Add(new MagMatchProfile(id,mode,attacker,defender,maximum,team,squad,counts == null ? null : Array.AsReadOnly(counts),bots));
             }
             result=list.AsReadOnly();return true;
         }

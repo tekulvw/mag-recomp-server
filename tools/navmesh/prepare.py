@@ -16,6 +16,16 @@ import struct
 import sys
 
 GEOMETRY_DOMAIN = b'MAG-NAV-GEOMETRY-v1\0'
+COVERAGE_FORMAT = 'mag_collision_coverage_v1'
+COVERAGE_KEYS = {'format', 'map_name', 'world_sha256', 'basis', 'provenance', 'physics_regions'}
+COVERAGE_BASES = {'operator_assertion', 'source_verified'}
+REGION_KEYS = {'min', 'max', 'ground_verified', 'obstacles_verified', 'provenance'}
+MAX_COVERAGE_BYTES = 64 * 1024
+MAX_COVERAGE_REGIONS = 64
+MAX_COVERAGE_COORDINATE = 100_000
+TILE_WIDTH_M = 51.2
+RUNTIME_TILES = 256
+WIDE_RUNTIME_TILES = 512
 
 
 def require(value, message):
@@ -33,7 +43,47 @@ def bounds_valid(value):
             and all(value['min'][i] < value['max'][i] for i in range(3)))
 
 
-def prepare(world, world_sha256, bounds=None, *, reference=False):
+def text_list(value):
+    return isinstance(value, list) and value and all(isinstance(v, str) and v.strip() for v in value)
+
+
+def coverage_region(value):
+    return (isinstance(value, dict) and set(value) == REGION_KEYS and bounds_valid(value)
+            and all(abs(v) <= MAX_COVERAGE_COORDINATE for k in ('min', 'max') for v in value[k])
+            and type(value['ground_verified']) is bool and type(value['obstacles_verified']) is bool
+            and text_list(value['provenance']))
+
+
+def validate_coverage_sidecar(sidecar, world_sha256, map_name):
+    """Check a mag_collision_coverage_v1 document and its binding to one world.
+
+    Returns the sidecar's physics regions. The gameplay loader repeats every check.
+    """
+    require(isinstance(sidecar, dict) and set(sidecar) == COVERAGE_KEYS
+            and sidecar['format'] == COVERAGE_FORMAT and sidecar['basis'] in COVERAGE_BASES
+            and isinstance(sidecar['map_name'], str) and sidecar['map_name'].strip()
+            and len(sidecar['map_name']) <= 128 and sha_value(sidecar['world_sha256'])
+            and text_list(sidecar['provenance'])
+            and isinstance(sidecar['physics_regions'], list)
+            and 0 < len(sidecar['physics_regions']) <= MAX_COVERAGE_REGIONS
+            and all(map(coverage_region, sidecar['physics_regions'])), 'invalid collision coverage sidecar')
+    require(sidecar['world_sha256'] == world_sha256 and sidecar['map_name'] == map_name,
+            'collision coverage world mismatch')
+    return copy.deepcopy(sidecar['physics_regions'])
+
+
+def f32(value):
+    return struct.unpack('<f', struct.pack('<f', value))[0]
+
+
+def grid_tiles(bounds):
+    """Tiles in the runtime's 51.2 m grid, in the native baker's f32 arithmetic."""
+    width = f32(TILE_WIDTH_M)
+    axis = [math.ceil(f32(f32(f32(bounds['max'][i]) - f32(bounds['min'][i])) / width)) for i in (0, 2)]
+    return axis[0] * axis[1]
+
+
+def prepare(world, world_sha256, bounds=None, *, reference=False, coverage=None):
     require(isinstance(world, dict) and world.get('format') == 'mag_collision_world'
             and type(world.get('schema_version')) is int and world['schema_version'] == 1
             and world.get('coordinate_space') == 'world', 'expected neutral world-space schema1')
@@ -41,6 +91,10 @@ def prepare(world, world_sha256, bounds=None, *, reference=False):
     metadata = world['metadata']
     require(isinstance(metadata.get('map_name'), str) and metadata['map_name'], 'missing map identity')
     regions = metadata.get('physics_regions', [])
+    if coverage is not None:
+        # The sidecar's regions join the world's own; the world bytes stay unchanged.
+        require(not reference, 'reference preparation never claims coverage')
+        regions = regions + validate_coverage_sidecar(coverage, world_sha256, metadata['map_name'])
     if reference:
         require(bounds is None, 'reference bounds derive from all source geometry')
     else:
@@ -106,6 +160,12 @@ def prepare(world, world_sha256, bounds=None, *, reference=False):
     if reference:
         report['scope'] = 'offline_reference_geometry_only'
         report['runtime_movement_authority'] = False
+    else:
+        tiles = grid_tiles(bounds)
+        require(tiles <= WIDE_RUNTIME_TILES, 'bake bounds exceed the 512-tile runtime grid')
+        report['runtime_grid_tiles'] = tiles
+        report['runtime_layout'] = 'tiled_256' if tiles <= RUNTIME_TILES else 'wide_512'
+        report['coverage_sidecar_regions'] = 0 if coverage is None else len(coverage['physics_regions'])
     return value, report
 
 
@@ -149,6 +209,8 @@ def main():
     parser.add_argument('--output', required=True, type=Path, help='New private output directory')
     scopes = parser.add_mutually_exclusive_group()
     scopes.add_argument('--regional-walk-coverage', type=Path)
+    scopes.add_argument('--collision-coverage', type=Path,
+                        help='mag_collision_coverage_v1 sidecar bound to this world; its regions join the world\'s')
     scopes.add_argument('--reference', action='store_true',
                         help='Prepare full geometry for offline reference baking without certifying movement')
     args = parser.parse_args()
@@ -164,7 +226,15 @@ def main():
         value, report = prepare_regional(json.loads(raw), digest, json.loads(cap), hashlib.sha256(cap).hexdigest())
         mesh = value['mesh']
     else:
-        value, report = prepare(json.loads(raw), digest, reference=args.reference)
+        coverage = coverage_sha256 = None
+        if args.collision_coverage:
+            path = args.collision_coverage
+            require(path.is_file() and path.stat().st_size <= MAX_COVERAGE_BYTES, 'collision coverage size')
+            cap = path.read_bytes()
+            coverage, coverage_sha256 = json.loads(cap), hashlib.sha256(cap).hexdigest()
+        value, report = prepare(json.loads(raw), digest, reference=args.reference, coverage=coverage)
+        if coverage is not None:
+            report['coverage_sidecar_sha256'] = coverage_sha256
         mesh = value
     encoded = (json.dumps(value, separators=(',', ':'), allow_nan=False)+'\n').encode()
     report.update(format='mag_navmesh_prep_manifest_v1', source_world=str(args.world.resolve()),

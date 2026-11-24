@@ -60,6 +60,7 @@ mod bot_traffic_flow;
 pub mod bullet_hit;
 mod bunker_seats;
 pub mod collision;
+pub mod collision_coverage;
 mod convex_penetration;
 pub mod correction_ack;
 pub mod damage;
@@ -208,6 +209,8 @@ pub mod protocol;
 pub mod replication;
 pub mod retail_armory;
 pub mod retail_combat;
+#[cfg(test)]
+mod retail_firearm_coverage_tests;
 pub mod retail_melee;
 pub mod rotating_log;
 mod score_clock;
@@ -1874,6 +1877,9 @@ impl<W: Write> Engine<W> {
             .as_ref()
             .map_or_else(Vec::new, |registry| {
                 capabilities.push(match_profiles::CAPABILITY.into());
+                if registry.has_bot_fill() {
+                    capabilities.push(match_profiles::BOT_FILL_CAPABILITY.into());
+                }
                 if self.party_reservations.enabled() {
                     capabilities.push(party_reservation::CAPABILITY.into());
                     registry.party_summaries()
@@ -1998,7 +2004,11 @@ impl<W: Write> Engine<W> {
                 application_id,
                 ..
             } => {
+                // A selected bot-filled profile may start with one human; bots
+                // fill both sides. Every other profile keeps one human per side.
+                let bot_filled = self.selected_match.is_some() && self.bot_registry.enabled();
                 if self.match_profiles.is_some()
+                    && !bot_filled
                     && (minimum_players < 2 || minimum_players_per_team.contains(&0))
                 {
                     return Err("match_profiles_require_two_human_sides");
