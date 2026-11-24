@@ -648,19 +648,23 @@ static bool reverse_reference_route(MagNav* h, const dtQueryFilter& filter,
 // batches, so there is no result cap: layered floors and narrow ledges can
 // put more polygons in one goal box than a fixed buffer holds, and a
 // truncated set can silently lose the nearest polygon or fail the query.
+// With a positive `height` the region is instead a vertical column: within
+// `radius` horizontally and `height` vertically of the goal.
 class GoalPolygons : public dtPolyQuery {
 public:
     struct Hit { dtPolyRef ref; float p[3]; float distance; };
-    GoalPolygons(const dtNavMeshQuery* query,const float* goal,float radius):query(query),goal(goal),limit(radius*radius+.0001f) {}
+    GoalPolygons(const dtNavMeshQuery* query,const float* goal,float radius,float height=0):query(query),goal(goal),limit(radius*radius+.0001f),height(height) {}
     void process(const dtMeshTile*,dtPoly**,dtPolyRef* refs,int count) override {
         for(int i=0;i<count;++i){Hit hit{};hit.ref=refs[i];
             if(dtStatusFailed(query->closestPointOnPoly(hit.ref,goal,hit.p,nullptr)))continue;
             for(int k=0;k<3;++k)hit.distance+=(hit.p[k]-goal[k])*(hit.p[k]-goal[k]);
-            if(hit.distance<=limit)hits.push_back(hit);}
+            const float dx=hit.p[0]-goal[0],dz=hit.p[2]-goal[2];
+            const bool inside=height>0 ? dx*dx+dz*dz<=limit && std::fabs(hit.p[1]-goal[1])<=height+.0001f : hit.distance<=limit;
+            if(inside)hits.push_back(hit);}
     }
     std::vector<Hit> hits;
 private:
-    const dtNavMeshQuery* query;const float* goal;float limit;
+    const dtNavMeshQuery* query;const float* goal;float limit;float height;
 };
 // status:0 complete,1 partial,2 disconnected,3 out of nodes,4 invalid start,5 invalid goal,6 query failure.
 // `nodes` reports search nodes used and `stages` the corridor pieces of a staged route (0 when direct).
@@ -725,13 +729,10 @@ int mag_nav_component_id(MagNav* h,const float* position) {
     if(std::hypot(p[0]-position[0],p[2]-position[2])>.15f)return -1;
     return h->component.at(ref);
 }
-// The nearest point of each walking component within `radius` of the goal,
-// in the order Detour first reaches each component. More than 128 components
-// keep the 128 nearest, still in that order.
-int mag_nav_goals(MagNav* h,const float* goal,float radius,int* components,float* points,int* count) {
-    *count=0;dtQueryFilter f;f.setIncludeFlags(1);const float e[3]={radius,radius,radius};
-    GoalPolygons q(h->query,goal,radius);
-    if(dtStatusFailed(h->query->queryPolygons(goal,e,&f,&q)))return 0;
+// The nearest point of each walking component among `q`'s hits, in the order
+// Detour first reaches each component. More than 128 components keep the 128
+// nearest, still in that order.
+static void nearest_per_component(const MagNav* h,const GoalPolygons& q,int* components,float* points,int* count) {
     std::map<int,size_t> slot;std::vector<const GoalPolygons::Hit*> nearest;std::vector<int> found;
     for(const GoalPolygons::Hit& hit:q.hits){const int component=h->component.at(hit.ref);
         const auto known=slot.emplace(component,nearest.size());
@@ -744,6 +745,22 @@ int mag_nav_goals(MagNav* h,const float* goal,float radius,int* components,float
         keep.resize(128);std::sort(keep.begin(),keep.end());
     }
     for(const size_t i:keep){components[*count]=found[i];rcVcopy(points+3**count,nearest[i]->p);++*count;}
+}
+// Goal candidates within `radius` of the goal.
+int mag_nav_goals(MagNav* h,const float* goal,float radius,int* components,float* points,int* count) {
+    *count=0;dtQueryFilter f;f.setIncludeFlags(1);const float e[3]={radius,radius,radius};
+    GoalPolygons q(h->query,goal,radius);
+    if(dtStatusFailed(h->query->queryPolygons(goal,e,&f,&q)))return 0;
+    nearest_per_component(h,q,components,points,count);
+    return 1;
+}
+// Goal candidates in a vertical column: every floor within `radius`
+// horizontally and `height` above or below the goal.
+int mag_nav_column_goals(MagNav* h,const float* goal,float radius,float height,int* components,float* points,int* count) {
+    *count=0;dtQueryFilter f;f.setIncludeFlags(1);const float e[3]={radius,height,radius};
+    GoalPolygons q(h->query,goal,radius,height);
+    if(dtStatusFailed(h->query->queryPolygons(goal,e,&f,&q)))return 0;
+    nearest_per_component(h,q,components,points,count);
     return 1;
 }
 // Offline diagnostics only: exact closest point in the start's static component.

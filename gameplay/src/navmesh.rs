@@ -314,6 +314,15 @@ unsafe extern "C" {
         points: *mut f32,
         count: *mut c_int,
     ) -> c_int;
+    fn mag_nav_column_goals(
+        handle: *mut std::ffi::c_void,
+        goal: *const f32,
+        radius: f32,
+        height: f32,
+        components: *mut c_int,
+        points: *mut f32,
+        count: *mut c_int,
+    ) -> c_int;
     fn mag_nav_contains(
         handle: *mut std::ffi::c_void,
         p: *const f32,
@@ -871,10 +880,42 @@ impl NavMesh {
         self.goals(goal, radius)
     }
 
+    /// The nearest point of each walking component on every floor within
+    /// `radius` horizontally and `height` vertically of `goal`: the floors a
+    /// raw point above or below layered geometry could stand on.
+    pub fn column_candidates(
+        &self,
+        goal: Point,
+        radius: f64,
+        height: f64,
+    ) -> Result<Vec<(i32, Point)>, Error> {
+        if !valid_point(goal)
+            || !radius.is_finite()
+            || !(0.05..=5.).contains(&radius)
+            || !height.is_finite()
+            || !(0.05..=32.).contains(&height)
+        {
+            return err("navmesh_invalid_request");
+        }
+        self.goal_query(goal, |h, g, ids, points, count| unsafe {
+            mag_nav_column_goals(h, g, radius as f32, height as f32, ids, points, count)
+        })
+    }
+
     fn goals(&self, goal: Point, radius: f64) -> Result<Vec<(i32, Point)>, Error> {
         if !valid_point(goal) || !radius.is_finite() || !(0.05..=5.).contains(&radius) {
             return err("navmesh_invalid_request");
         }
+        self.goal_query(goal, |h, g, ids, points, count| unsafe {
+            mag_nav_goals(h, g, radius as f32, ids, points, count)
+        })
+    }
+
+    fn goal_query(
+        &self,
+        goal: Point,
+        query: impl FnOnce(*mut std::ffi::c_void, *const f32, *mut c_int, *mut f32, *mut c_int) -> c_int,
+    ) -> Result<Vec<(i32, Point)>, Error> {
         let h = self
             .native
             .lock()
@@ -883,16 +924,13 @@ impl NavMesh {
         let mut ids = [0; 128];
         let mut points = [0f32; 384];
         let mut count = 0;
-        let ok = unsafe {
-            mag_nav_goals(
-                h.0,
-                g.as_ptr(),
-                radius as f32,
-                ids.as_mut_ptr(),
-                points.as_mut_ptr(),
-                &mut count,
-            )
-        };
+        let ok = query(
+            h.0,
+            g.as_ptr(),
+            ids.as_mut_ptr(),
+            points.as_mut_ptr(),
+            &mut count,
+        );
         if ok == 0 || !(0..=128).contains(&count) {
             return err("navmesh_goal_query_failed");
         }
