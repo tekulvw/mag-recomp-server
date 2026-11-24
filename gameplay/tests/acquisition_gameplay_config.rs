@@ -60,3 +60,16 @@ fn portable_acquisition_paths_require_a_declaring_file() {
         Err(error) => panic!("portable configuration rejected: {error}"),
     }
 }
+
+#[test]
+fn retired_smoke_field_points_operators_to_the_worker_flag() {
+    for value in [json!("smoke.json"), json!("")] {
+        let mut config = configuration();
+        config["smoke_grenades"] = value;
+        let error = Configuration::from_json(&config.to_string())
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("--smoke-grenade-rules"), "{error}");
+    }
+}

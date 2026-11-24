@@ -175,7 +175,6 @@ struct Loaded {
     guided_launcher_source: Option<Arc<[u8]>>,
     infantry_rockets: Option<Arc<crate::infantry_rockets::Catalog>>,
     guided_launchers: Option<Arc<crate::guided_launchers::Catalog>>,
-    smoke_grenade_source: Option<Arc<[u8]>>,
     gas_grenade_source: Option<Arc<[u8]>>,
     flash_grenade_source: Option<Arc<[u8]>>,
     smoke_grenades: Option<Arc<crate::smoke_grenades::Catalog>>,
@@ -190,6 +189,8 @@ struct Loaded {
 pub struct Registry {
     profiles: BTreeMap<String, Loaded>,
     default_bot_fill_total: Option<usize>,
+    /// The worker's `--smoke-grenade-rules`, bound to every profile.
+    smoke_grenade_rules: Option<Arc<[u8]>>,
 }
 impl Registry {
     pub fn validate_dynamic_bodies(
@@ -466,7 +467,6 @@ impl Registry {
                 acquisition_apc_turret_source,
                 acquisition_rocket_source,
                 acquisition_guided_source,
-                acquisition_smoke_source,
                 acquisition_gas_source,
                 acquisition_flash_source,
                 acquisition_underbarrel_source,
@@ -508,7 +508,6 @@ impl Registry {
                     config.apc_turret_source()?.map(Arc::from),
                     config.infantry_rocket_source()?.map(Arc::from),
                     config.guided_launcher_source()?.map(Arc::from),
-                    config.smoke_grenade_source()?.map(Arc::from),
                     config.gas_grenade_source()?.map(Arc::from),
                     config.flash_grenade_source()?.map(Arc::from),
                     config.underbarrel_launcher_source()?.map(Arc::from),
@@ -524,7 +523,7 @@ impl Registry {
                         "acquisition_gameplay_configuration_required"
                     }));
                 }
-                (None, None, None, None, None, None, None, None, None)
+                (None, None, None, None, None, None, None, None)
             };
             let damage = source
                 .character_damage_rules
@@ -548,7 +547,6 @@ impl Registry {
                 hospital_rocket_source,
                 infantry_rocket_source,
                 guided_launcher_source,
-                smoke_grenade_source,
                 gas_grenade_source,
                 flash_grenade_source,
                 underbarrel_launcher_source,
@@ -596,7 +594,6 @@ impl Registry {
                     rocket_source,
                     config.infantry_rocket_source()?.map(Arc::from),
                     config.guided_launcher_source()?.map(Arc::from),
-                    config.smoke_grenade_source()?.map(Arc::from),
                     config.gas_grenade_source()?.map(Arc::from),
                     config.flash_grenade_source()?.map(Arc::from),
                     config.underbarrel_launcher_source()?.map(Arc::from),
@@ -609,7 +606,6 @@ impl Registry {
                     None,
                     acquisition_rocket_source,
                     acquisition_guided_source,
-                    acquisition_smoke_source,
                     acquisition_gas_source,
                     acquisition_flash_source,
                     acquisition_underbarrel_source,
@@ -683,7 +679,6 @@ impl Registry {
                     guided_launcher_source,
                     infantry_rockets: None,
                     guided_launchers: None,
-                    smoke_grenade_source,
                     gas_grenade_source,
                     flash_grenade_source,
                     smoke_grenades: None,
@@ -700,6 +695,7 @@ impl Registry {
         Ok(Self {
             profiles,
             default_bot_fill_total: None,
+            smoke_grenade_rules: None,
         })
     }
 
@@ -745,33 +741,13 @@ impl Registry {
         }
         Ok(())
     }
-    /// Apply the worker-wide `--smoke-grenade-rules` to every Sabotage
-    /// profile. Acquisition and Domination profiles keep the rules their own
-    /// gameplay configuration names, so no profile receives two sources.
-    pub fn set_sabotage_smoke_grenade_rules(
-        &mut self,
-        source: Arc<[u8]>,
-    ) -> Result<(), &'static str> {
-        let sabotage = |profile: &Loaded| {
-            profile.summary.game_type == 0
-                && profile.acquisition.is_none()
-                && profile.domination.is_none()
-        };
-        if !self.profiles.values().any(sabotage) {
-            return Err("smoke_grenade_rules_require_sabotage_profile");
-        }
-        if self
-            .profiles
-            .values()
-            .any(|profile| sabotage(profile) && profile.smoke_grenade_source.is_some())
-        {
+    /// Use the worker's `--smoke-grenade-rules` for every profile. Each
+    /// profile binds them to its own objective catalog when bound.
+    pub fn set_smoke_grenade_rules(&mut self, source: Arc<[u8]>) -> Result<(), &'static str> {
+        if self.smoke_grenade_rules.is_some() {
             return Err("smoke_grenade_source_conflict");
         }
-        for profile in self.profiles.values_mut() {
-            if sabotage(profile) {
-                profile.smoke_grenade_source = Some(Arc::clone(&source));
-            }
-        }
+        self.smoke_grenade_rules = Some(source);
         Ok(())
     }
 
@@ -779,10 +755,10 @@ impl Registry {
         &mut self,
         items: &item_catalog::ItemCatalog,
     ) -> Result<(), &'static str> {
+        let Some(source) = self.smoke_grenade_rules.as_ref() else {
+            return Ok(());
+        };
         for profile in self.profiles.values_mut() {
-            let Some(source) = profile.smoke_grenade_source.as_ref() else {
-                continue;
-            };
             if !matches!(
                 (
                     profile.summary.game_type,
@@ -2923,7 +2899,6 @@ mod tests {
                 guided_launcher_source: None,
                 infantry_rockets: None,
                 guided_launchers: None,
-                smoke_grenade_source: None,
                 gas_grenade_source: None,
                 flash_grenade_source: None,
                 smoke_grenades: None,
@@ -4043,9 +4018,9 @@ mod tests {
         );
     }
 
-    /// A Sabotage row whose objective catalog names `elf`, beside a plain
-    /// game-type-1 row with no gameplay configuration.
-    fn smoke_registry(files: &Files, elf: &str) -> Registry {
+    /// A Sabotage row whose objective catalog names `elf`, optionally beside a
+    /// plain game-type-1 row that has no gameplay configuration.
+    fn smoke_registry(files: &Files, elf: &str, plain_acquisition: bool) -> Registry {
         let spawns = files.write("smoke-sabotage-spawns.json", json!({
             "format":"mag_spawn_catalog","schema_version":1,"source":"SYNTHETIC smoke registry",
             "active":{"map_name":"synthetic_home_1","squad_index":0,"default_spawn":0,"available":[0]},
@@ -4076,151 +4051,200 @@ mod tests {
             "objects": [{"token": "0x76543210", "object_index": 117, "initial_state": 1}],
             "squads": squads
         }));
+        let mut rows = vec![
+            json!({"profile_id":"sabotage","spawn_catalog":spawns,"objective_catalog":objectives}),
+        ];
+        if plain_acquisition {
+            rows.push(json!({"profile_id":"acquisition","spawn_catalog":files.spawns(1, 0, 1)}));
+        }
         Registry::load(files.write(
             "smoke-manifest.json",
-            json!({"format":"mag_match_profiles_v1","profiles":[
-                {"profile_id":"sabotage","spawn_catalog":spawns,"objective_catalog":objectives},
-                {"profile_id":"acquisition","spawn_catalog":files.spawns(1, 0, 1)}
-            ]}),
+            json!({"format":"mag_match_profiles_v1","profiles":rows}),
         ))
         .unwrap()
     }
 
+    /// The Acquisition fixture row, plus a Domination row built from the
+    /// synthetic Domination world, both bound to the retail executable.
+    fn add_smoke_gameplay_profiles<W: Write>(engine: &mut Engine<W>, elf: &str) {
+        add_gameplay_profile(engine);
+        let fixture = crate::domination_gameplay_engine::tests::structural_repair::repair_fixture();
+        let profiles = &mut engine.match_profiles.as_mut().unwrap().profiles;
+        let mut domination = profiles.remove("acquisition-world").unwrap();
+        domination.summary.profile_id = "domination-world".into();
+        domination.summary.game_type = 2;
+        domination.acquisition = None;
+        domination.objectives = fixture.objective_catalog.clone();
+        domination.domination = fixture.domination_gameplay.clone();
+        profiles.insert("domination-world".into(), domination);
+        add_gameplay_profile(engine);
+        for profile in engine
+            .match_profiles
+            .as_mut()
+            .unwrap()
+            .profiles
+            .values_mut()
+        {
+            profile.objectives = profile
+                .objectives
+                .take()
+                .map(|catalog| catalog.with_source_image(elf));
+        }
+    }
+
     #[test]
-    fn registry_sabotage_profiles_take_worker_smoke_rules_on_selection() {
+    fn one_worker_smoke_flag_reaches_every_mode_on_selection() {
         use crate::smoke_grenades::tests::{
             SYNTHETIC_ELF, synthetic_item_id, synthetic_rules_and_items,
         };
         let files = Files::new();
         let (rules, items) = synthetic_rules_and_items();
-        let mut registry = smoke_registry(&files, SYNTHETIC_ELF);
-        registry
-            .set_sabotage_smoke_grenade_rules(Arc::from(rules))
+        let mut engine = base_engine(&files, Vec::new(), 100_000)
+            .with_match_profiles(smoke_registry(&files, SYNTHETIC_ELF, false))
             .unwrap();
-        let mut engine = base_engine(&files, Vec::new(), 100_000);
-        engine.item_catalog = Arc::new(items);
-        let mut engine = engine.with_match_profiles(registry).unwrap();
-        let registry = engine.match_profiles.as_ref().unwrap();
-        assert!(registry.has_smoke_grenades());
-        assert!(registry.profiles["sabotage"].smoke_grenades.is_some());
-        assert!(registry.profiles["acquisition"].smoke_grenades.is_none());
-
-        assert!(select(&mut engine, "smoke-sabotage", "sabotage").ok);
-        assert_eq!(engine.match_profile().game_type, 0);
-        for faction in 0..3 {
-            let throw = engine
-                .grenade_parameters(faction, synthetic_item_id(faction))
-                .expect("the Sabotage world throws the stock smoke");
-            assert_eq!(
+        add_smoke_gameplay_profiles(&mut engine, SYNTHETIC_ELF);
+        let registry = engine.match_profiles.as_mut().unwrap();
+        registry.set_smoke_grenade_rules(Arc::from(rules)).unwrap();
+        registry.bind_smoke_grenades(&items).unwrap();
+        let bound: BTreeMap<_, _> = registry
+            .profiles
+            .iter()
+            .map(|(id, profile)| {
                 (
-                    throw.fuse_ms,
-                    throw.authored_lifetime_ms,
-                    throw.initial_count
-                ),
-                (2000, 9000, 2)
-            );
-            assert_eq!(throw.damage.character, 0.0);
-        }
-        let selected = engine.smoke_grenades.clone().unwrap();
-        // The fixed-profile gate accepts the same capability in this world.
-        assert!(
-            base_engine(&files, Vec::new(), 100_000)
-                .with_smoke_grenades(Arc::clone(&selected))
-                .is_ok()
+                    id.clone(),
+                    Arc::clone(profile.smoke_grenades.as_ref().unwrap()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            bound.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["acquisition-world", "domination-world", "sabotage"]
         );
 
-        assert!(select(&mut engine, "plain-acquisition", "acquisition").ok);
-        assert!(engine.smoke_grenades.is_none());
-        assert!(select(&mut engine, "smoke-sabotage-again", "sabotage").ok);
-        assert!(Arc::ptr_eq(
-            engine.smoke_grenades.as_ref().unwrap(),
-            &selected
-        ));
-    }
-
-    #[test]
-    fn worker_smoke_rules_leave_acquisition_and_domination_sources_alone() {
-        let files = Files::new();
-        let mut engine = engine(&files, Vec::new(), 100_000);
-        add_gameplay_profile(&mut engine);
-        let registry = engine.match_profiles.as_mut().unwrap();
-        let own: Arc<[u8]> = Arc::from(&b"acquisition configuration rules"[..]);
-        registry
-            .profiles
-            .get_mut("acquisition-world")
-            .unwrap()
-            .smoke_grenade_source = Some(Arc::clone(&own));
-        registry
-            .profiles
-            .get_mut("p-1-2-0")
-            .unwrap()
-            .summary
-            .game_type = 2;
-        let worker: Arc<[u8]> = Arc::from(&b"worker rules"[..]);
-        registry
-            .set_sabotage_smoke_grenade_rules(Arc::clone(&worker))
-            .unwrap();
-        for (id, profile) in &registry.profiles {
-            let source = profile.smoke_grenade_source.as_ref();
-            match (profile.summary.game_type, id.as_str()) {
-                (_, "acquisition-world") => assert!(Arc::ptr_eq(source.unwrap(), &own)),
-                (0, _) => assert!(Arc::ptr_eq(source.unwrap(), &worker), "{id}"),
-                _ => assert!(source.is_none(), "{id}"),
+        for (formation, profile, mode) in [
+            ("smoke-sabotage", "sabotage", 0),
+            ("smoke-acquisition", "acquisition-world", 1),
+            ("smoke-sabotage-again", "sabotage", 0),
+        ] {
+            let selected = select(&mut engine, formation, profile);
+            assert!(selected.ok, "{profile}: {:?}", selected.error);
+            assert_eq!(engine.match_profile().game_type, mode);
+            assert!(Arc::ptr_eq(
+                engine.smoke_grenades.as_ref().unwrap(),
+                &bound[profile]
+            ));
+            for faction in 0..3 {
+                let throw = engine
+                    .grenade_parameters(faction, synthetic_item_id(faction))
+                    .expect("every mode throws the stock smoke");
+                assert_eq!(
+                    (
+                        throw.fuse_ms,
+                        throw.authored_lifetime_ms,
+                        throw.initial_count
+                    ),
+                    (2000, 9000, 2)
+                );
+                assert_eq!(throw.damage.character, 0.0);
             }
         }
-        // A second worker-wide source is a conflict, not a replacement.
-        assert_eq!(
-            registry.set_sabotage_smoke_grenade_rules(Arc::from(&b"other"[..])),
-            Err("smoke_grenade_source_conflict")
+        // The same install gate a fixed worker uses accepts each mode's catalog.
+        let domination =
+            crate::domination_gameplay_engine::tests::structural_repair::repair_fixture();
+        assert_eq!(domination.match_profile().game_type, 2);
+        assert!(
+            domination
+                .with_smoke_grenades(Arc::clone(&bound["domination-world"]))
+                .is_ok()
         );
-        assert!(Arc::ptr_eq(
-            registry.profiles["p-0-0-1"]
-                .smoke_grenade_source
-                .as_ref()
-                .unwrap(),
-            &worker
-        ));
+        assert!(
+            base_engine(&files, Vec::new(), 100_000)
+                .with_smoke_grenades(Arc::clone(&bound["sabotage"]))
+                .is_ok()
+        );
     }
 
     #[test]
-    fn worker_smoke_rules_refuse_registries_they_cannot_bind() {
+    fn worker_smoke_flag_binds_through_the_registry_install() {
+        use crate::smoke_grenades::tests::{SYNTHETIC_ELF, synthetic_rules_and_items};
+        let files = Files::new();
+        let (rules, items) = synthetic_rules_and_items();
+        let mut registry = smoke_registry(&files, SYNTHETIC_ELF, false);
+        registry.set_smoke_grenade_rules(Arc::from(rules)).unwrap();
+        let mut engine = base_engine(&files, Vec::new(), 100_000);
+        engine.item_catalog = Arc::new(items);
+        let engine = engine.with_match_profiles(registry).unwrap();
+        assert!(engine.match_profiles.as_ref().unwrap().has_smoke_grenades());
+        // Without the flag no profile has smoke, whatever its mode.
+        let mut engine = engine_without_smoke(&files);
+        add_smoke_gameplay_profiles(&mut engine, SYNTHETIC_ELF);
+        let registry = engine.match_profiles.as_mut().unwrap();
+        registry
+            .bind_smoke_grenades(&synthetic_rules_and_items().1)
+            .unwrap();
+        assert!(!registry.has_smoke_grenades());
+    }
+
+    fn engine_without_smoke(files: &Files) -> Engine<Vec<u8>> {
+        base_engine(files, Vec::new(), 100_000)
+            .with_match_profiles(smoke_registry(
+                files,
+                crate::smoke_grenades::tests::SYNTHETIC_ELF,
+                false,
+            ))
+            .unwrap()
+    }
+
+    #[test]
+    fn worker_smoke_flag_refuses_profiles_it_cannot_bind() {
         use crate::smoke_grenades::tests::{SYNTHETIC_ELF, synthetic_rules_and_items};
         let files = Files::new();
         let (rules, items) = synthetic_rules_and_items();
         let rules: Arc<[u8]> = Arc::from(rules);
 
-        let acquisition_only = Registry::load(files.write(
-            "acquisition-only.json",
-            json!({"format":"mag_match_profiles_v1","profiles":[
-                {"profile_id":"acquisition","spawn_catalog":files.spawns(1, 0, 1)}]}),
-        ))
-        .unwrap();
-        let mut registry = acquisition_only;
+        // One worker-wide source; a second is a conflict, not a replacement.
+        let mut registry = smoke_registry(&files, SYNTHETIC_ELF, false);
+        registry
+            .set_smoke_grenade_rules(Arc::clone(&rules))
+            .unwrap();
         assert_eq!(
-            registry.set_sabotage_smoke_grenade_rules(Arc::clone(&rules)),
-            Err("smoke_grenade_rules_require_sabotage_profile")
+            registry.set_smoke_grenade_rules(Arc::from(&b"other"[..])),
+            Err("smoke_grenade_source_conflict")
         );
+        assert!(Arc::ptr_eq(
+            registry.smoke_grenade_rules.as_ref().unwrap(),
+            &rules
+        ));
 
-        // Every Sabotage row binds to its own objective catalog's executable.
+        // Every profile binds to its own objective catalog's executable.
         let mut registry = files.registry();
         registry
-            .set_sabotage_smoke_grenade_rules(Arc::clone(&rules))
+            .set_smoke_grenade_rules(Arc::clone(&rules))
             .unwrap();
         assert_eq!(
             registry.bind_smoke_grenades(&items),
             Err("smoke_grenade_objectives_required")
         );
-        let mut registry = smoke_registry(&files, &"3".repeat(64));
+        // A game-type-1 row without Acquisition gameplay cannot carry smoke.
+        let mut registry = smoke_registry(&files, SYNTHETIC_ELF, true);
         registry
-            .set_sabotage_smoke_grenade_rules(Arc::clone(&rules))
+            .set_smoke_grenade_rules(Arc::clone(&rules))
+            .unwrap();
+        assert_eq!(
+            registry.bind_smoke_grenades(&items),
+            Err("smoke_grenade_mode_required")
+        );
+        let mut registry = smoke_registry(&files, &"3".repeat(64), false);
+        registry
+            .set_smoke_grenade_rules(Arc::clone(&rules))
             .unwrap();
         assert_eq!(
             registry.bind_smoke_grenades(&items),
             Err("smoke_grenade_source_mismatch")
         );
-        let mut registry = smoke_registry(&files, SYNTHETIC_ELF);
+        let mut registry = smoke_registry(&files, SYNTHETIC_ELF, false);
         registry
-            .set_sabotage_smoke_grenade_rules(Arc::from(&b"{}"[..]))
+            .set_smoke_grenade_rules(Arc::from(&b"{}"[..]))
             .unwrap();
         assert_eq!(
             registry.bind_smoke_grenades(&items),
@@ -4231,8 +4255,8 @@ mod tests {
         // A base world carrying fixed-profile smoke cannot become a registry.
         let catalog =
             crate::smoke_grenades::Catalog::from_bytes(&rules, &items, SYNTHETIC_ELF).unwrap();
-        let mut registry = smoke_registry(&files, SYNTHETIC_ELF);
-        registry.set_sabotage_smoke_grenade_rules(rules).unwrap();
+        let mut registry = smoke_registry(&files, SYNTHETIC_ELF, false);
+        registry.set_smoke_grenade_rules(rules).unwrap();
         let mut fixed = base_engine(&files, Vec::new(), 100_000);
         fixed.item_catalog = Arc::new(items);
         let fixed = fixed.with_smoke_grenades(Arc::new(catalog)).unwrap();

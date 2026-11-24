@@ -23,6 +23,7 @@ use std::{
 };
 
 const MAX_BYTES: usize = 65_536;
+const RETIRED_SMOKE_FIELD: &str = "the Acquisition configuration no longer accepts smoke_grenades; pass the rules to the worker with --smoke-grenade-rules";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -49,7 +50,8 @@ pub struct Configuration {
     projectile_contacts: Option<PathBuf>,
     infantry_rockets: Option<PathBuf>,
     guided_launchers: Option<PathBuf>,
-    smoke_grenades: Option<PathBuf>,
+    /// Retired: smoke rules come only from the worker's `--smoke-grenade-rules`.
+    smoke_grenades: Option<serde::de::IgnoredAny>,
     gas_grenades: Option<PathBuf>,
     flash_grenades: Option<PathBuf>,
     underbarrel_launchers: Option<PathBuf>,
@@ -202,14 +204,6 @@ impl Configuration {
         if let Some(source) = &mut result.frag_ground_areas {
             *source = directory.join(&*source);
         }
-        if let Some(source) = &mut result.smoke_grenades {
-            if source.as_os_str().is_empty() {
-                return Err(io::Error::other(
-                    "empty_acquisition_smoke_grenade_source_path",
-                ));
-            }
-            *source = directory.join(&*source);
-        }
         if let Some(source) = &mut result.gas_grenades {
             if source.as_os_str().is_empty() {
                 return Err(io::Error::other(
@@ -269,7 +263,11 @@ impl Configuration {
         if text.len() > MAX_BYTES {
             return Err(io::Error::other("acquisition_configuration_too_large"));
         }
-        Ok(serde_json::from_str(text)?)
+        let config: Self = serde_json::from_str(text)?;
+        if config.smoke_grenades.is_some() {
+            return Err(io::Error::other(RETIRED_SMOKE_FIELD));
+        }
+        Ok(config)
     }
 
     fn validate(&self) -> Result<(), &'static str> {
@@ -407,22 +405,6 @@ impl Configuration {
                     .read_to_end(&mut raw)?;
                 if raw.len() > 1 << 20 {
                     return Err(io::Error::other("invalid_guided_launcher_rules"));
-                }
-                Ok(raw)
-            })
-            .transpose()
-    }
-
-    pub fn smoke_grenade_source(&self) -> io::Result<Option<Vec<u8>>> {
-        self.smoke_grenades
-            .as_ref()
-            .map(|path| {
-                let mut raw = Vec::new();
-                File::open(path)?
-                    .take((1 << 20) + 1)
-                    .read_to_end(&mut raw)?;
-                if raw.len() > 1 << 20 {
-                    return Err(io::Error::other("invalid_smoke_grenade_rules"));
                 }
                 Ok(raw)
             })

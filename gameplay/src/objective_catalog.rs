@@ -567,6 +567,12 @@ impl ObjectiveCatalog {
     pub fn source(&self) -> &ObjectiveSource {
         &self.source
     }
+    /// Rebind an invented catalog to another executable identity.
+    #[cfg(test)]
+    pub(crate) fn with_source_image(mut self, sha256: &str) -> Self {
+        self.source.source_image_sha256 = sha256.into();
+        self
+    }
     pub fn object_count(&self) -> usize {
         self.objects.len()
     }

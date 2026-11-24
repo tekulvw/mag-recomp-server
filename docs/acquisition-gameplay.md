@@ -133,6 +133,10 @@ vehicle state8 with the configured inert timer, and applies the source objective
 award once. The A/B awards in the qualified profiles are600/400 against1000
 defending points. Timer expiry moves the delivered vehicle to inert7.
 
+Smoke grenades are not part of this configuration. Pass the worker's
+`--smoke-grenade-rules` flag instead (see [smoke grenades](smoke-grenades.md)).
+A configuration that still sets `smoke_grenades` is refused at startup.
+
 Authenticated firearm reports and grenade detonations use source equipment and
 vehicle armor. Fractional HP persists across hits. Critical vehicles decay using
 the configured rate. Destruction applies ordinary occupant damage, then the

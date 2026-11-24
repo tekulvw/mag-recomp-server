@@ -148,6 +148,10 @@ schema version 1, and these explicit source paths:
   grid index/pixels. The hospital collision receipt includes operational bodies
   as well as destroyed hulks.
 
+Smoke grenades are not part of this configuration. Pass the worker's
+`--smoke-grenade-rules` flag instead (see [smoke grenades](smoke-grenades.md)).
+A configuration that still sets `core.smoke_grenades` is refused at startup.
+
 Nested backend paths resolve relative to the configuration file. Top-level
 registry paths remain absolute. Sources are checked before the selected spawn
 catalog is promoted or any world is installed.

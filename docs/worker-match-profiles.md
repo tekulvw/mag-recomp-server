@@ -73,10 +73,10 @@ character damage rules retain their existing exact spawn-source hash checks.
 Item catalogs, bootstrap equipment, combat/skill data and the map-independent
 falling/incapacitation rules remain global. Bootstrap faction coverage is checked
 for every loaded profile. The worker-wide `--smoke-grenade-rules` flag gives
-every Sabotage row [smoke grenades](smoke-grenades.md), bound to that row's own
-objective catalog. Startup refuses it when a Sabotage row has no objective
-catalog or the registry has no Sabotage row. Acquisition and Domination rows
-keep the smoke rules their gameplay configuration names. Registry workers can use native election with `--leadership-passives` and
+every row [smoke grenades](smoke-grenades.md), whatever its mode, bound to that
+row's own objective catalog. Startup refuses it when a row has no objective
+catalog, or when an Acquisition or Domination row has no gameplay
+configuration. Gameplay configurations no longer name smoke rules. Registry workers can use native election with `--leadership-passives` and
 `--leadership-role-policy`. Schema 2 enables squad vacancy filling. Schema 3
 also enables platoon vacancy filling using its separately projected weights.
 A platoon promotion can vacate a squad leadership slot, which the worker
