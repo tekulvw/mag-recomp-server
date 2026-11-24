@@ -73,6 +73,87 @@ class MainImagesTests(unittest.TestCase):
         self.assertNotIn(':main', build['with']['tags'])
         self.assertNotIn('latest', build['with']['tags'])
 
+    def test_main_writes_registry_layer_caches_and_nothing_uses_the_actions_cache(self):
+        build = next(s for s in workflow()['jobs']['build-images']['steps']
+                     if s.get('uses', '').startswith('docker/build-push-action@'))
+        cache = '${{ steps.source.outputs.image }}:buildcache'
+        self.assertEqual(build['with']['cache-from'], 'type=registry,ref=' + cache)
+        self.assertEqual(build['with']['cache-to'], 'type=registry,ref=' + cache + ',mode=max,ignore-error=true')
+        for name in ('main-images.yml', 'check.yml', 'publish-image.yml', 'release-please.yml', 'runner-image.yml'):
+            self.assertNotIn('type=gha', (ROOT / '.github/workflows' / name).read_text(), name)
+
+    def test_configured_world_cache_is_refreshed_only_from_checked_main(self):
+        job = workflow()['jobs']['check-caches']
+        self.assertEqual(job['needs'], ['plan', 'checks'])
+        self.assertIn("' registry '", job['if'])
+        self.assertIn("' all '", job['if'])
+        self.assertEqual(job['permissions'], {'contents': 'read', 'packages': 'write'})
+        build = next(s for s in job['steps'] if s.get('uses', '').startswith('docker/build-push-action@'))
+        self.assertEqual(build['with']['file'], 'tests/Dockerfile.world-registry')
+        self.assertEqual(build['with']['outputs'], 'type=cacheonly')
+        self.assertIn(',mode=max', build['with']['cache-to'])
+        # Promotion never waits for a cache refresh.
+        self.assertNotIn('check-caches', workflow()['jobs']['promote-main']['needs'])
+
+    def test_pull_request_docker_checks_only_read_main_caches(self):
+        spec = yaml.load((ROOT / '.github/workflows/check.yml').read_text(), Loader=yaml.BaseLoader)
+        self.assertEqual(spec['permissions'], {'contents': 'read'})
+        for name, cache in (('horizon', 'mag-recomp-server-medius:buildcache'),
+                            ('registry', 'mag-recomp-server-game:buildcache-world-registry')):
+            job = spec['jobs'][name]
+            self.assertEqual(job['if'], f"needs.changes.outputs.{name} == 'true'")
+            self.assertNotIn('permissions', job)
+            self.assertFalse(any(s.get('uses', '').startswith('docker/login-action@') for s in job['steps']))
+            resolve = next(s for s in job['steps'] if s.get('id') == 'cache')
+            self.assertIn(cache, resolve['run'])
+            build = next(s for s in job['steps'] if s.get('uses', '').startswith('docker/build-push-action@'))
+            self.assertEqual(build['with']['target'], 'check')
+            self.assertEqual(build['with']['outputs'], 'type=cacheonly')
+            self.assertEqual(build['with']['cache-from'], 'type=registry,ref=${{ steps.cache.outputs.ref }}')
+            self.assertNotIn('cache-to', build['with'])
+        # main-images.yml writes the caches check.yml reads.
+        self.assertIn('mag-recomp-server-game:buildcache-world-registry',
+                      next(s for s in workflow()['jobs']['check-caches']['steps'] if s.get('id') == 'cache')['run'])
+
+    def test_releases_read_main_caches_without_writing(self):
+        spec = yaml.load((ROOT / '.github/workflows/publish-image.yml').read_text(), Loader=yaml.BaseLoader)
+        build = next(s for s in spec['jobs']['publish']['steps'] if s.get('uses', '').startswith('docker/build-push-action@'))
+        self.assertEqual(build['with']['cache-from'], 'type=registry,ref=${{ steps.source.outputs.image }}:buildcache')
+        self.assertNotIn('cache-to', build['with'])
+
+    def test_runner_image_builds_from_main_with_a_runner_version_and_run_number_tag(self):
+        spec = yaml.load((ROOT / '.github/workflows/runner-image.yml').read_text(), Loader=yaml.BaseLoader)
+        self.assertEqual(set(spec['on']), {'pull_request', 'push', 'workflow_dispatch'})
+        self.assertEqual(spec['on']['push']['branches'], ['main'])
+        paths = {'images/runner/**', '.github/workflows/runner-image.yml'}
+        self.assertEqual(set(spec['on']['push']['paths']), paths)
+        self.assertEqual(set(spec['on']['pull_request']['paths']), paths)
+        self.assertEqual(spec['permissions'], {})
+        # Pull requests build the image with a read-only token and publish nothing.
+        test = spec['jobs']['test']
+        self.assertEqual(test['if'], "github.event_name == 'pull_request'")
+        self.assertEqual(test['permissions'], {'contents': 'read'})
+        build = next(s for s in test['steps'] if s.get('uses', '').startswith('docker/build-push-action@'))
+        self.assertEqual(build['with']['outputs'], 'type=cacheonly')
+        self.assertNotIn('push', build['with'])
+        job = spec['jobs']['publish']
+        self.assertEqual(job['if'], "github.event_name != 'pull_request' && github.ref == 'refs/heads/main'")
+        self.assertEqual(job['permissions'], {'contents': 'read', 'packages': 'write'})
+        step = next(s for s in job['steps'] if s.get('id') == 'source')
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'output'
+            env = {**os.environ, 'GITHUB_REPOSITORY_OWNER': 'Example', 'GITHUB_RUN_NUMBER': '7',
+                   'GITHUB_OUTPUT': str(output)}
+            result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', step['run']], cwd=ROOT,
+                                    env=env, capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            values = dict(line.split('=', 1) for line in output.read_text().splitlines())
+        self.assertEqual(values['image'], 'ghcr.io/example/mag-recomp-server-runner')
+        self.assertRegex(values['tag'], r'^\d+\.\d+\.\d+-7$')
+        # The base is pinned by digest, so a rebuild changes only what images/runner changes.
+        self.assertRegex((ROOT / 'images/runner/Dockerfile').read_text(),
+                         r'(?m)^ARG BASE_IMAGE=ghcr\.io/[^:@\s]+:[^@\s]+@sha256:[0-9a-f]{64}$')
+
     def run_plan(self, existing=(), diff='', event='push', before='b' * 40, fetch_fails=False, rebuild='false'):
         step = next(s for s in workflow()['jobs']['plan']['steps'] if s.get('id') == 'plan')
         with tempfile.TemporaryDirectory() as directory:

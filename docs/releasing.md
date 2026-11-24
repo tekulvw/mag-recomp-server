@@ -221,6 +221,32 @@ stable, restore the selected stable tags/digests in your operator values and
 roll the test deployment again. Authenticate to GHCR first if the packages are
 private. This workflow never deploys either channel automatically.
 
+## CI layer caches and runner image
+
+Docker layer caches live in GHCR, as `buildcache` tags in the public component
+packages, not in the Actions cache:
+
+| Cache | Written by | Read by |
+| --- | --- | --- |
+| `mag-recomp-server-medius:buildcache` | `build-images` (main) | Medius releases and the `horizon` check, whose stage is part of the Medius build |
+| `mag-recomp-server-game:buildcache` | `build-images` (main) | gameplay releases |
+| `mag-recomp-server-portal:buildcache` | `build-images` (main) | portal releases |
+| `mag-recomp-server-game:buildcache-world-registry` | `check-caches` (main, after checks pass) | the `registry` check |
+
+Only `Main container images` runs on `main` write caches (`mode=max`). Pull
+requests, including those from forks, and releases only read them, anonymously
+because the packages are public; a missing or unreadable cache makes a build
+cold, never wrong. These tags are build caches, not images: do not pull or
+deploy them.
+
+The `Runner image` workflow builds `ghcr.io/tekulvw/mag-recomp-server-runner`
+from [images/runner](../images/runner/Dockerfile) on `main` (pull requests only
+build it) and prints the digest to pin. The self-hosted `mag-recomp-server`
+runner scale set, configured outside this repository, runs its pods from a
+pinned digest; workflows never pull it, and every job still installs what it
+needs when it runs elsewhere. The package must be public for the cluster to
+pull it.
+
 ## OCI Helm chart
 
 The chart is published to `ghcr.io/tekulvw/charts/mag-recomp-server` with the
