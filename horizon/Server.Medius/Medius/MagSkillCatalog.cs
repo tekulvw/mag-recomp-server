@@ -24,6 +24,9 @@ namespace Server.Medius
         private readonly Dictionary<int, Skill> _skills = new Dictionary<int, Skill>();
         private readonly Dictionary<string, int[][]> _tiers = new Dictionary<string, int[][]>(StringComparer.Ordinal);
         private readonly HashSet<int> _purchaseEquipment = new HashSet<int>();
+        // Ownership indices that some skill available to each faction can award, including
+        // zero-cost creation skills. Anything outside this set is never awarded by a skill.
+        private readonly HashSet<int>[] _awardable = { new HashSet<int>(), new HashSet<int>(), new HashSet<int>() };
         public int ApplicationId { get; private set; }
         private MagSkillCatalog() { }
         public static MagSkillCatalog Load(string path) => LoadForApplication(path, 20230);
@@ -114,6 +117,7 @@ namespace Server.Medius
                             }
                         }
                         skill.Equipment[faction] = equipmentIds.OrderBy(value => value).ToArray();
+                        if (skill.Available[faction]) result._awardable[faction].UnionWith(equipmentIds);
                     }
                     result._skills.Add(id, skill);
                 }
@@ -124,6 +128,8 @@ namespace Server.Medius
             { throw new InvalidDataException("Invalid skill catalog JSON/schema.", e); }
         }
         public bool RequiresPurchaseOwnership(int itemId) => _purchaseEquipment.Contains(itemId);
+        /// <summary>True when a skill available to <paramref name="faction"/> can set this ownership index.</summary>
+        public bool CanAward(byte faction, int ordinal) => faction <= 2 && _awardable[faction].Contains(ordinal);
         internal bool TryPurchase(byte faction, int skillId, byte points, uint[] ownedSkills, out byte cost, out int[] equipment, out string reason)
         {
             cost = 0; equipment = Array.Empty<int>(); reason = "invalid-skill";
