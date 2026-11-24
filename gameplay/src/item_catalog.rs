@@ -37,7 +37,23 @@ pub enum BulletAttachmentKind {
     Bipod,
     ForwardGrip,
     Launcher,
+    Sight,
     Suppressor,
+}
+/// Weapon categories a character fires as ordinary hitscan firearms.
+pub(crate) const CHARACTER_FIREARM_CATEGORIES: [&str; 6] = [
+    "kWepCategoryAssaultRifle",
+    "kWepCategoryMachineGun",
+    "kWepCategoryShotgun",
+    "kWepCategorySideArm",
+    "kWepCategorySniperRifle",
+    "kWepCategorySubMachineGun",
+];
+/// Why an item-catalog firearm did not become a derived bullet row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SkippedRetailFirearm {
+    pub item_id: u16,
+    pub reason: &'static str,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BodyParameters {
@@ -113,6 +129,7 @@ pub struct ItemCatalog {
     bootstrap_loadouts: Option<crate::bootstrap_loadouts::BootstrapLoadouts>,
     retail_combat: Option<crate::retail_combat::RetailCombatCatalog>,
     retail_armory: Option<crate::retail_armory::RetailArmory>,
+    derived_bullet_skips: Vec<SkippedRetailFirearm>,
     bullets: BTreeMap<u16, BulletParameters>,
     vehicle_bullets: BTreeMap<u16, TargetDamageParameters>,
     bullet_attachments: BTreeMap<(u16, u16), BulletAttachmentKind>,
@@ -329,6 +346,7 @@ impl ItemCatalog {
             bootstrap_loadouts: None,
             retail_combat: None,
             retail_armory: None,
+            derived_bullet_skips: Vec::new(),
             bullets: BTreeMap::new(),
             vehicle_bullets: BTreeMap::new(),
             bullet_attachments: BTreeMap::new(),
@@ -644,6 +662,7 @@ impl ItemCatalog {
             bootstrap_loadouts: None,
             retail_combat: None,
             retail_armory: None,
+            derived_bullet_skips: Vec::new(),
             bullets,
             vehicle_bullets,
             bullet_attachments,
@@ -662,10 +681,163 @@ impl ItemCatalog {
     }
     pub fn with_retail_combat(
         mut self,
-        catalog: crate::retail_combat::RetailCombatCatalog,
+        mut catalog: crate::retail_combat::RetailCombatCatalog,
     ) -> Self {
+        self.derived_bullet_skips = self.derive_retail_firearm_bullets(&mut catalog);
         self.retail_combat = Some(catalog);
         self
+    }
+    /// Item-catalog firearms that were left without a bullet row, and why.
+    pub fn derived_bullet_skips(&self) -> &[SkippedRetailFirearm] {
+        &self.derived_bullet_skips
+    }
+    /// Build ordinary character bullet rows for every retail firearm item whose
+    /// authored weapon and hitscan ammunition are complete. The combat metadata
+    /// must describe this exact item catalog. Rows it already projects win.
+    fn derive_retail_firearm_bullets(
+        &self,
+        combat: &mut crate::retail_combat::RetailCombatCatalog,
+    ) -> Vec<SkippedRetailFirearm> {
+        let Some(source) = self.retail_item_source_sha256.as_deref() else {
+            return Vec::new();
+        };
+        if combat.provenance()["catalog_sha256"].as_str() != Some(source) {
+            return Vec::new();
+        }
+        let mut skipped = Vec::new();
+        for (&item_id, reference) in &self.retail_item_refs {
+            let Some(category) = self.raw["items"][reference]["definition"]["name"]
+                .as_str()
+                .filter(|_| {
+                    self.raw["items"][reference]["item_type"].as_str() == Some("kWeapon")
+                        && self.raw["items"][reference]["definition"]["group"].as_str()
+                            == Some("weapons")
+                })
+                .and_then(|name| {
+                    self.raw["definitions"]["weapons"][name]["parameters"]["category"].as_str()
+                })
+            else {
+                continue;
+            };
+            if !CHARACTER_FIREARM_CATEGORIES.contains(&category)
+                || combat.bullets().contains_key(&item_id)
+            {
+                continue;
+            }
+            let outcome = self
+                .derived_bullet_row(reference)
+                .and_then(|row| combat.insert_derived_bullet(item_id, row));
+            if let Err(reason) = outcome {
+                skipped.push(SkippedRetailFirearm { item_id, reason });
+            }
+        }
+        skipped
+    }
+    fn derived_bullet_row(
+        &self,
+        reference: &str,
+    ) -> Result<crate::retail_combat::RetailBulletMetadata, &'static str> {
+        use crate::retail_combat::{
+            AuthoredDamage, RetailAmmoMetadata, RetailBulletMetadata, RetailFireMode,
+            RetailFirearmSchedule,
+        };
+        let item = &self.raw["items"][reference];
+        let name = item["name"].as_str().ok_or("derived_bullet_unnamed_item")?;
+        if item["definition"]["name"].as_str() != Some(name) {
+            return Err("derived_bullet_unresolved_definition");
+        }
+        let weapon = &self.raw["definitions"]["weapons"][name];
+        let p = &weapon["parameters"];
+        let ammo_name = p["ammo_name"]
+            .as_str()
+            .ok_or("derived_bullet_missing_ammo")?;
+        let ammo = &self.raw["definitions"]["hitscan_ammo"][ammo_name];
+        let token = ammo["native_token_u32"]
+            .as_u64()
+            .and_then(|v| u32::try_from(v).ok())
+            .filter(|v| *v != 0)
+            .ok_or("derived_bullet_missing_ammo")?;
+        let values = &ammo["parameters"]["damage"];
+        let value = |key: &str| {
+            values[key]
+                .as_f64()
+                .filter(|v| v.is_finite())
+                .ok_or("derived_bullet_invalid_damage")
+        };
+        let float = |key: &str| {
+            p[key]
+                .as_f64()
+                .filter(|v| v.is_finite())
+                .ok_or("derived_bullet_invalid_range")
+        };
+        let count = |key: &str| {
+            p[key]
+                .as_u64()
+                .and_then(|v| u32::try_from(v).ok())
+                .ok_or("derived_bullet_invalid_magazine_or_range")
+        };
+        let mode = p["initial_fire_mode"].as_str();
+        let seconds = |key: &str| {
+            p["fire_mode"][key]
+                .as_f64()
+                .filter(|v| v.is_finite() && *v > 0.0 && *v <= 60.0)
+        };
+        let initial_fire_mode = match mode {
+            Some("kAuto") => Some(RetailFireMode::Auto),
+            Some("kSemiAuto") => Some(RetailFireMode::SemiAuto),
+            _ => None,
+        };
+        // Like the projector: a missing or unusual schedule leaves the row
+        // usable for client-reported hits but never for autonomous fire.
+        let firearm = match (
+            initial_fire_mode,
+            p["infinite_ammo"].as_bool(),
+            seconds("refire_time"),
+            seconds("reload_time"),
+        ) {
+            (Some(initial_fire_mode), Some(infinite_ammo), Some(refire), Some(reload)) => {
+                Some(RetailFirearmSchedule {
+                    initial_fire_mode,
+                    refire_seconds: refire,
+                    reload_seconds: reload,
+                    infinite_ammo,
+                })
+            }
+            _ => None,
+        };
+        Ok(RetailBulletMetadata {
+            authored_ref: reference.to_owned(),
+            name: name.to_owned(),
+            definition: serde_json::json!({"group": "weapons", "name": name}),
+            source: weapon.get("source").cloned().unwrap_or(Value::Null),
+            item_source: item.get("source").cloned().unwrap_or(Value::Null),
+            usage: Default::default(),
+            ammo: RetailAmmoMetadata {
+                group: "hitscan_ammo".into(),
+                name: ammo_name.to_owned(),
+                source: ammo.get("source").cloned().unwrap_or(Value::Null),
+                ammo_token_candidate: token,
+                ammo_token_verified_for_retail: false,
+            },
+            damage: AuthoredDamage {
+                character: value("character")?,
+                character_armor_pierce: value("characterAPierce")?,
+                character_armor_reduction: value("characterARedux")?,
+                vehicle: value("vehicle")?,
+                vehicle_armor_pierce: value("vehicleAPierce")?,
+                vehicle_armor_reduction: value("vehicleARedux")?,
+                objective: value("objective")?,
+                objective_armor_pierce: value("objectiveAPierce")?,
+                objective_armor_reduction: value("objectiveARedux")?,
+                mine: value("mine")?,
+            },
+            effective_range: float("effective_range")?,
+            max_range: float("max_range")?,
+            magazine_capacity: count("magazine_capacity")?,
+            initial_magazine_count: count("initial_magazine_count")?,
+            firearm,
+            derived_from_item_catalog: false,
+        })
     }
     pub fn retail_combat(
         &self,
@@ -845,93 +1017,129 @@ impl ItemCatalog {
         Some(weapon)
     }
 
+    /// Ordinary gear 1 holds a sidearm; gear 0 holds any other character firearm.
+    pub(crate) fn retail_firearm_gear_role(
+        &self,
+        gear: u8,
+        weapon_id: u16,
+    ) -> Result<(), &'static str> {
+        let category = self
+            .qualified_retail_firearm_weapon(weapon_id)
+            .and_then(|weapon| weapon["category"].as_str())
+            .ok_or("unsupported_retail_bullet_weapon")?;
+        let fits = match gear {
+            0 => {
+                category != "kWepCategorySideArm"
+                    && CHARACTER_FIREARM_CATEGORIES.contains(&category)
+            }
+            1 => category == "kWepCategorySideArm",
+            _ => false,
+        };
+        fits.then_some(()).ok_or("unsupported_bullet_weapon_gear")
+    }
+
+    /// Classify one equipped attachment of a qualified retail firearm.
+    ///
+    /// Authored attachments describe sights, muzzle devices, grips, bipods and
+    /// underbarrel launchers. None of them carries damage, range or ammunition
+    /// values; a launcher names its own weapon, which fires through the separate
+    /// projectile path. An accepted attachment therefore never changes the
+    /// host's bullet. The attachment must resolve to an authored attachment of
+    /// the host's role. It must appear in the host's authored attachment list,
+    /// or be a damage-neutral attachment authored for the host's faction (the
+    /// item list offers some sights and grips that no weapon list names).
     pub(crate) fn retail_firearm_attachment(
         &self,
         gear: u8,
         weapon_id: u16,
         attachment_id: u16,
-    ) -> Option<BulletAttachmentKind> {
-        let source_sha256 = self.retail_item_source_sha256.as_deref()?;
-        let combat = self.retail_combat().ok()?;
-        let bullet = combat.bullet_metadata(weapon_id)?;
-        let weapon = self.weapon_parameters(weapon_id).ok()?;
-        let attachment = self.item(attachment_id).ok()?;
-        let name = attachment["name"].as_str()?;
-        if combat.provenance()["catalog_sha256"].as_str() != Some(source_sha256)
-            || self.retail_authored_ref(weapon_id) != Some(bullet.authored_ref.as_str())
-            || weapon["id"].as_str() != Some(bullet.name.as_str())
-            || attachment["item_type"].as_str() != Some("kAttachmentItem")
+    ) -> Result<BulletAttachmentKind, &'static str> {
+        let weapon = self
+            .qualified_retail_firearm_weapon(weapon_id)
+            .ok_or("unsupported_bullet_attachment_host")?;
+        let unresolved = "unsupported_bullet_attachment_unresolved";
+        let attachment = self.item(attachment_id).map_err(|_| unresolved)?;
+        let name = attachment["name"].as_str().ok_or(unresolved)?;
+        if attachment["item_type"].as_str() != Some("kAttachmentItem")
             || attachment["definition"]["group"].as_str() != Some("attachments")
             || attachment["definition"]["name"].as_str() != Some(name)
         {
-            return None;
+            return Err(unresolved);
         }
         let parameters = &self.raw["definitions"]["attachments"][name]["parameters"];
-        let compatible = weapon["attachment_list"]
-            .as_object()?
-            .values()
-            .any(|row| row["WeaponAttachment"]["name"].as_str() == Some(name));
-        if !compatible || parameters["id"].as_str() != Some(name) {
-            return None;
+        if parameters["id"].as_str() != Some(name) {
+            return Err(unresolved);
         }
-        let replacement = parameters["weapon_name"].as_str()?;
-        let role = (
-            gear,
-            weapon["category"].as_str()?,
-            parameters["attachment_type"].as_str()?,
-        );
-        if role == (0, "kWepCategoryAssaultRifle", "kAttachTypeLauncher") {
-            return (replacement == name
+        let category = weapon["category"].as_str().ok_or(unresolved)?;
+        let host_role = match gear {
+            0 => {
+                category != "kWepCategorySideArm"
+                    && CHARACTER_FIREARM_CATEGORIES.contains(&category)
+            }
+            1 => category == "kWepCategorySideArm",
+            _ => false,
+        };
+        if !host_role {
+            return Err("unsupported_bullet_attachment_host_role");
+        }
+        let listed = weapon["attachment_list"].as_object().is_some_and(|list| {
+            list.values()
+                .any(|row| row["WeaponAttachment"]["name"].as_str() == Some(name))
+        });
+        let replacement = parameters["weapon_name"]
+            .as_str()
+            .ok_or("unsupported_bullet_attachment_replacement")?;
+        let primary_role = match parameters.get("character_attachment_type") {
+            None => true,
+            Some(role) => role.as_str() == Some("kCharAttachTypePrimary"),
+        };
+        let kind = parameters["attachment_type"].as_str();
+        if kind == Some("kAttachTypeLauncher") {
+            let qualified = gear == 0
+                && category == "kWepCategoryAssaultRifle"
+                && listed
+                && replacement == name
                 && parameters["character_attachment_type"].as_str()
                     == Some("kCharAttachTypePrimary")
-                && self.separate_underbarrel_launcher(weapon, replacement))
-            .then_some(BulletAttachmentKind::Launcher);
+                && self.separate_underbarrel_launcher(weapon, replacement);
+            return qualified
+                .then_some(BulletAttachmentKind::Launcher)
+                .ok_or("unsupported_bullet_attachment_launcher");
         }
         if !replacement.is_empty() {
-            return None;
+            return Err("unsupported_bullet_attachment_replacement");
         }
-        match role {
-            (0, "kWepCategoryAssaultRifle", "kAttachTypeSuppressor")
-            | (1, "kWepCategorySideArm", "kAttachTypeSuppressor") => {
-                Some(BulletAttachmentKind::Suppressor)
-            }
-            (0, "kWepCategoryAssaultRifle", "kAttachTypeForwardGrip") => {
-                Some(BulletAttachmentKind::ForwardGrip)
-            }
-            (0, "kWepCategoryMachineGun", "kAttachTypeBipod") => Some(BulletAttachmentKind::Bipod),
-            (0, category, kind)
-                if parameters["character_attachment_type"].as_str()
-                    == Some("kCharAttachTypePrimary") =>
-            {
-                match (category, kind) {
-                    (
-                        "kWepCategorySniperRifle" | "kWepCategorySubMachineGun",
-                        "kAttachTypeSuppressor",
-                    ) => Some(BulletAttachmentKind::Suppressor),
-                    ("kWepCategoryAssaultRifle", "kAttachTypeBipod") => {
-                        Some(BulletAttachmentKind::Bipod)
-                    }
-                    ("kWepCategoryMachineGun", "kAttachTypeForwardGrip") => {
-                        Some(BulletAttachmentKind::ForwardGrip)
-                    }
-                    ("kWepCategorySniperRifle", "kAttachTypeBipod" | "kAttachTypeForwardGrip") => {
-                        let required = match weapon.get("required_underbarrel_attachment") {
-                            Some(value) => value.as_str()?,
-                            None => "",
-                        };
-                        if kind == "kAttachTypeBipod" && (required.is_empty() || required == name) {
-                            Some(BulletAttachmentKind::Bipod)
-                        } else if kind == "kAttachTypeForwardGrip" && required.is_empty() {
-                            Some(BulletAttachmentKind::ForwardGrip)
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
-                }
-            }
-            _ => None,
+        let kind = match kind {
+            Some("kAttachTypeSight") => BulletAttachmentKind::Sight,
+            Some("kAttachTypeSuppressor") => BulletAttachmentKind::Suppressor,
+            Some("kAttachTypeForwardGrip") => BulletAttachmentKind::ForwardGrip,
+            Some("kAttachTypeBipod") => BulletAttachmentKind::Bipod,
+            _ => return Err("unsupported_bullet_attachment_type"),
+        };
+        if !primary_role {
+            return Err("unsupported_bullet_attachment_role");
         }
+        let same_faction = parameters["faction"].as_str().is_some_and(|faction| {
+            faction == "FactionTypeAll" || weapon["faction"].as_str() == Some(faction)
+        });
+        if !listed && !same_faction {
+            return Err("unsupported_bullet_attachment_incompatible");
+        }
+        if matches!(
+            kind,
+            BulletAttachmentKind::Bipod | BulletAttachmentKind::ForwardGrip
+        ) {
+            let required = match weapon.get("required_underbarrel_attachment") {
+                Some(value) => value
+                    .as_str()
+                    .ok_or("unsupported_bullet_attachment_required_underbarrel")?,
+                None => "",
+            };
+            if !required.is_empty() && required != name {
+                return Err("unsupported_bullet_attachment_required_underbarrel");
+            }
+        }
+        Ok(kind)
     }
     fn separate_underbarrel_launcher(&self, host: &Value, name: &str) -> bool {
         let launcher = &self.raw["definitions"]["weapons"][name]["parameters"];
@@ -1162,6 +1370,7 @@ pub(crate) mod bunker_test_items {
             bootstrap_loadouts: None,
             retail_combat: None,
             retail_armory: None,
+            derived_bullet_skips: Vec::new(),
             bullets: BTreeMap::from([(
                 13,
                 BulletParameters {

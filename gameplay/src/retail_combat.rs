@@ -128,6 +128,10 @@ authored_profile!(RetailBulletMetadata {
     initial_magazine_count: u32,
     #[serde(default)]
     firearm: Option<RetailFirearmSchedule>,
+    /// Set only by the server when it builds a character firearm row from the
+    /// loaded item catalog (never read from the metadata document).
+    #[serde(skip)]
+    derived_from_item_catalog: bool,
 });
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -385,6 +389,57 @@ impl RetailCombatCatalog {
             .bullets
             .get(&item_id)
             .filter(|bullet| bullet.usage == usage)
+    }
+    /// Character firearm rows the server built from the loaded item catalog,
+    /// in addition to the rows the metadata document projects.
+    pub fn derived_bullet_ids(&self) -> Vec<u16> {
+        self.0
+            .bullets
+            .iter()
+            .filter(|(_, row)| row.derived_from_item_catalog)
+            .map(|(id, _)| *id)
+            .collect()
+    }
+    /// Add one character firearm row built from the item catalog. Rows the
+    /// metadata document already describes, under any combat group, win.
+    pub(crate) fn insert_derived_bullet(
+        &mut self,
+        item_id: u16,
+        mut row: RetailBulletMetadata,
+    ) -> Result<(), &'static str> {
+        let metadata = &self.0;
+        let claimed = metadata.bullets.contains_key(&item_id)
+            || metadata.melee.contains_key(&item_id)
+            || metadata.grenades.contains_key(&item_id)
+            || metadata.armor.contains_key(&item_id)
+            || metadata.healing.contains_key(&item_id);
+        let reference_claimed = metadata
+            .bullets
+            .values()
+            .map(|p| &p.authored_ref)
+            .chain(metadata.melee.values().map(|p| &p.authored_ref))
+            .chain(metadata.grenades.values().map(|p| &p.authored_ref))
+            .chain(metadata.armor.values().map(|p| &p.authored_ref))
+            .chain(metadata.healing.values().map(|p| &p.authored_ref))
+            .any(|reference| *reference == row.authored_ref);
+        if claimed || reference_claimed {
+            return Err("derived_bullet_identity_claimed");
+        }
+        if row.usage != RetailBulletUsage::Character || row.ammo.ammo_token_verified_for_retail {
+            return Err("derived_bullet_not_character_firearm");
+        }
+        ammo(&row.ammo, "hitscan_ammo").map_err(|_| "derived_bullet_invalid_ammo")?;
+        damage(&row.damage).map_err(|_| "derived_bullet_invalid_damage")?;
+        ranges(row.effective_range, row.max_range).map_err(|_| "derived_bullet_invalid_range")?;
+        if row.max_range <= 0.0
+            || !(1..=255).contains(&row.magazine_capacity)
+            || !(1..=255).contains(&row.initial_magazine_count)
+        {
+            return Err("derived_bullet_invalid_magazine_or_range");
+        }
+        row.derived_from_item_catalog = true;
+        self.0.bullets.insert(item_id, row);
+        Ok(())
     }
     pub(crate) fn is_mounted_bullet(&self, item_id: u16) -> bool {
         self.0
@@ -911,38 +966,41 @@ impl RetailBulletProfile {
                 .zip(weapon)
                 .is_some_and(|(items, weapon)| items.retail_sniper_requires_underbarrel(weapon))
         {
-            return Err("unsupported_bullet_attachment");
+            return Err("unsupported_bullet_attachment_required_underbarrel_missing");
         }
         for &slot in attachments {
             let Some(attachment) = inventory.slots[slot] else {
                 continue;
             };
-            // The launcher initializes underbarrel row 17. Ordinary gear 0
-            // still selects host ammo, just as for non-replacement attachments.
-            let kind = items.zip(weapon).and_then(|(items, weapon)| {
-                items.retail_firearm_attachment(gear, weapon, attachment)
-            });
-            if !matches!(
-                (gear, slot, kind),
-                (0, 16, Some(BulletAttachmentKind::Suppressor))
-                    | (1, 20, Some(BulletAttachmentKind::Suppressor))
-                    | (
-                        0,
-                        17,
-                        Some(
-                            BulletAttachmentKind::Bipod
-                                | BulletAttachmentKind::ForwardGrip
-                                | BulletAttachmentKind::Launcher
-                        )
-                    )
-            ) {
-                return Err("unsupported_bullet_attachment");
+            // Only on-foot hits carry the item catalog; a mounted actor keeps
+            // the earlier refusal of any populated attachment slot.
+            let (Some(items), Some(weapon)) = (items, weapon) else {
+                return Err("unsupported_bullet_attachment_while_mounted");
+            };
+            // No authored attachment carries damage or range values; only a
+            // separate underbarrel launcher has its own weapon (and its own
+            // projectile path). Every accepted kind keeps the host's bullet.
+            let kind = items.retail_firearm_attachment(gear, weapon, attachment)?;
+            use BulletAttachmentKind::*;
+            let fits = match (gear, slot) {
+                (0, 15) | (1, 19) => kind == Sight,
+                (0, 16) | (1, 20) => kind == Suppressor,
+                (0, 17) => matches!(kind, Bipod | ForwardGrip | Launcher),
+                _ => false,
+            };
+            if !fits {
+                return Err("unsupported_bullet_attachment_slot");
             }
         }
         let item_id = weapon.ok_or("missing_bullet_weapon")?;
         let p = catalog
             .bullet_for_damage(item_id)
             .map_err(|_| "unsupported_retail_bullet_weapon")?;
+        if p.derived_from_item_catalog
+            && let Some(items) = items
+        {
+            items.retail_firearm_gear_role(gear, item_id)?;
+        }
         Ok(Self::from_metadata(item_id, p))
     }
     pub(crate) fn from_hospital_primary(
