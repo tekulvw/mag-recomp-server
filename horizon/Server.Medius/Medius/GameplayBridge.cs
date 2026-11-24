@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Diagnostics;
+using System.Net;
 using System.Net.Sockets;
 using System.Text.Json;
 using System.Threading;
@@ -9,6 +11,22 @@ namespace Server.Medius {
  // One bounded JSONL request per connection. Never include credentials in diagnostics.
  public sealed class GameplayBridge {
   readonly string _host; readonly int _port;
+  // Bridge deadlines. Ordinary control requests keep two seconds. An event may
+  // wait out a short gameplay world-lock or storage stall instead of losing its
+  // reply. World frames include a heartbeat every second; the read deadline only
+  // detects a worker that stopped producing them, because a gap releases every
+  // player. Live engine stalls of two to four seconds ended matches at 2/3 s.
+  public static readonly TimeSpan RequestDeadline=TimeSpan.FromSeconds(2);
+  public static readonly TimeSpan EventDeadline=TimeSpan.FromSeconds(6);
+  public static readonly TimeSpan WorldFrameDeadline=TimeSpan.FromSeconds(12);
+  // Each request opens a new connection. Resolving the worker's service name for
+  // every one sent several requests per second through the cluster resolver,
+  // and a lost lookup took the resolver's five-second retry. Keep the answer
+  // briefly and resolve again after any connection failure.
+  public static readonly TimeSpan AddressLifetime=TimeSpan.FromSeconds(30);
+  sealed record ResolvedAddresses(IPAddress[] Addresses,long ExpiresAt);
+  Func<string,CancellationToken,Task<IPAddress[]>> _resolve=(host,token)=>Dns.GetHostAddressesAsync(host,token);
+  ResolvedAddresses _addresses;
   readonly string _expectedWorkerId;
   GameplayWorkerIdentity _workerIdentity;
   int _workerIdentityFault;
@@ -23,21 +41,29 @@ namespace Server.Medius {
   public async Task<bool> RequestAsync(object request) => (await ExchangeAsync(request,false))?.Ok == true;
   public Task<GameplayBridgeResponse> RequestHelloAsync(object request) => ExchangeAsync(request,true);
   public Task<GameplayBridgeResponse> RequestLoadoutSelectionSettlementAsync(object request) => ExchangeAsync(request,true);
-  public Task<GameplayBridgeResponse> RequestEventAsync(object request) => ExchangeAsync(request,true);
+  public Task<GameplayBridgeResponse> RequestEventAsync(object request) => ExchangeAsync(request,true,EventDeadline);
   public Task<GameplayBridgeResponse> RequestProgressionAsync(object request) => ExchangeAsync(request,true);
   public Task<GameplayBridgeResponse> RequestProgressionRefreshAsync(object request) => ExchangeAsync(request,true);
   public Task<GameplayBridgeResponse> RequestReleaseAsync(object request) => ExchangeAsync(request,true);
   // This connection owns only unsolicited world ticks. Ordinary requests retain
   // their existing request/reply path and are never replayed after a timeout.
-  public async Task SubscribeWorldAsync(uint worldId,string requestId,Func<GameplayBridgeResponse,Task> receive,CancellationToken cancellationToken) {
+  public Task SubscribeWorldAsync(uint worldId,string requestId,Func<GameplayBridgeResponse,Task> receive,CancellationToken cancellationToken)=>
+   SubscribeWorldAsync(worldId,requestId,false,null,receive,cancellationToken);
+  /// <summary>Subscribe to world frames. With <paramref name="positions"/> (world_stream_resume_v1)
+  /// every frame carries its position; <paramref name="resumeAfter"/> asks the same worker process
+  /// to replay the frames after that position first. A worker that cannot (another process, or
+  /// frames no longer retained) refuses with <see cref="GameplayWorldResumeRefusedException"/>.</summary>
+  public async Task SubscribeWorldAsync(uint worldId,string requestId,bool positions,GameplayWorldStreamPosition resumeAfter,Func<GameplayBridgeResponse,Task> receive,CancellationToken cancellationToken) {
    if(string.IsNullOrEmpty(requestId)||receive==null)throw new ArgumentException("Invalid world subscription.");
    var identity=WorkerIdentity;
    if(_expectedWorkerId!=null&&(identity==null||HasWorkerIdentityFault))throw new GameplayWorkerIdentityException();
-   var request=new {v=2,request_id=requestId,op="subscribe_world",world_id=worldId};
+   var request=new Dictionary<string,object>{["v"]=2,["request_id"]=requestId,["op"]="subscribe_world",["world_id"]=worldId};
+   if(positions||resumeAfter!=null)request["positions"]=true;
+   if(resumeAfter!=null)request["resume"]=new Dictionary<string,object>{["epoch"]=resumeAfter.Epoch,["after"]=resumeAfter.Sequence};
    var body=identity==null?JsonSerializer.SerializeToUtf8Bytes(request):AttachWorkerIdentity(JsonSerializer.SerializeToElement(request),identity);
    using var socket=new TcpClient();
    using(var connect=CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)) {
-    connect.CancelAfter(TimeSpan.FromSeconds(2));await socket.ConnectAsync(_host,_port,connect.Token);
+    connect.CancelAfter(RequestDeadline);await ConnectAsync(socket,connect.Token);
    }
    using var stream=socket.GetStream();
    await stream.WriteAsync(body,cancellationToken);await stream.WriteAsync(new byte[]{10},cancellationToken);
@@ -45,7 +71,7 @@ namespace Server.Medius {
    // that sends partial bytes forever cannot keep a stale world marked ready.
    var buffer=new byte[8192];int offset=0,available=0;
    while(true) {
-    using var deadline=CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);deadline.CancelAfter(TimeSpan.FromSeconds(3));
+    using var deadline=CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);deadline.CancelAfter(WorldFrameDeadline);
     using var line=new MemoryStream();
     while(true) {
      if(offset==available) {
@@ -60,7 +86,12 @@ namespace Server.Medius {
     }
     if(!GameplayBridgeResponseCodec.TryParse(line.ToArray(),requestId,true,out var reply))throw new InvalidDataException("Invalid gameplay world stream response.");
     if(identity!=null&&!VerifyWorkerReply(reply,false))throw new GameplayWorkerIdentityException();
-    if(!reply.Ok)throw new InvalidDataException("Invalid gameplay world stream response.");
+    if(!reply.Ok) {
+     if(reply.Error=="world_resume_unavailable")throw new GameplayWorldResumeRefusedException();
+     // The previous subscription has not been retired yet; try again shortly.
+     if(reply.Error=="world_subscription_exists")throw new IOException("Gameplay world subscription is still held.");
+     throw new InvalidDataException("Invalid gameplay world stream response.");
+    }
     cancellationToken.ThrowIfCancellationRequested();await receive(reply);
    }
   }
@@ -96,10 +127,32 @@ namespace Server.Medius {
    }
    return !HasWorkerIdentityFault;
   }
-  async Task<GameplayBridgeResponse> ExchangeAsync(object request,bool eventReply) {
+  /// <summary>Connect to a cached address of the worker. A failed connection
+  /// forgets the cached answer, so a moved Service or worker is found again.</summary>
+  async Task ConnectAsync(TcpClient socket,CancellationToken token) {
+   var entry=await AddressesAsync(token);
+   try { await socket.ConnectAsync(entry.Addresses,_port,token); }
+   catch(Exception error) when(error is SocketException||error is OperationCanceledException) {
+    Interlocked.CompareExchange(ref _addresses,null,entry);
+    throw;
+   }
+  }
+  async Task<ResolvedAddresses> AddressesAsync(CancellationToken token) {
+   if(IPAddress.TryParse(_host,out var literal))return new ResolvedAddresses(new[]{literal},long.MaxValue);
+   var cached=Volatile.Read(ref _addresses);
+   if(cached!=null&&Environment.TickCount64<cached.ExpiresAt)return cached;
+   // The deadline bounds the wait even where the platform resolver cannot be cancelled.
+   var resolved=await _resolve(_host,token).WaitAsync(token);
+   if(resolved==null||resolved.Length==0)throw new SocketException((int)SocketError.HostNotFound);
+   var entry=new ResolvedAddresses(resolved,Environment.TickCount64+(long)AddressLifetime.TotalMilliseconds);
+   Volatile.Write(ref _addresses,entry);
+   return entry;
+  }
+  Task<GameplayBridgeResponse> ExchangeAsync(object request,bool eventReply)=>ExchangeAsync(request,eventReply,RequestDeadline);
+  async Task<GameplayBridgeResponse> ExchangeAsync(object request,bool eventReply,TimeSpan timeout) {
    var elapsed=Stopwatch.StartNew();
    GameplayBridgeResponse Failed(GameplayBridgeFailure failure)=>GameplayBridgeResponse.Failed(failure,elapsed.ElapsedMilliseconds);
-   using var deadline=new CancellationTokenSource(TimeSpan.FromSeconds(2));
+   using var deadline=new CancellationTokenSource(timeout);
    try {
     var body=JsonSerializer.SerializeToUtf8Bytes(request); if(body.Length>65536) return Failed(GameplayBridgeFailure.InvalidRequest);
     using var sent=JsonDocument.Parse(body);var root=sent.RootElement;
@@ -114,7 +167,7 @@ namespace Server.Medius {
      if(identity!=null)body=AttachWorkerIdentity(root,identity);
      if(body.Length>65536)return Failed(GameplayBridgeFailure.InvalidRequest);
     }
-    using var socket=new TcpClient(); await socket.ConnectAsync(_host,_port,deadline.Token); using var stream=socket.GetStream();
+    using var socket=new TcpClient(); await ConnectAsync(socket,deadline.Token); using var stream=socket.GetStream();
     await stream.WriteAsync(body,deadline.Token); await stream.WriteAsync(new byte[]{10},deadline.Token);
     using var line=new MemoryStream(); var one=new byte[1];
     while(true) { if(await stream.ReadAsync(one,deadline.Token)!=1) return Failed(GameplayBridgeFailure.Unavailable); if(one[0]==10) break; if(line.Length==GameplayBridgeResponseCodec.MaximumResponseBytes) return Failed(GameplayBridgeFailure.MalformedResponse); line.WriteByte(one[0]); }
@@ -125,5 +178,10 @@ namespace Server.Medius {
    catch(Exception e) when(e is IOException || e is SocketException) { return Failed(GameplayBridgeFailure.Unavailable); }
    catch(Exception e) when(e is JsonException || e is InvalidOperationException || e is FormatException) { return Failed(GameplayBridgeFailure.InvalidRequest); }
   }
+ }
+ /// <summary>The worker cannot replay the requested frames: it is another process, or
+ /// the frames are no longer retained. Sessions that depended on them must end.</summary>
+ public sealed class GameplayWorldResumeRefusedException : IOException {
+  public GameplayWorldResumeRefusedException() : base("Gameplay world stream cannot resume.") {}
  }
 }

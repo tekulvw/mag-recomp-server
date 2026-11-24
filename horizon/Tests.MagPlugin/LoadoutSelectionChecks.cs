@@ -79,7 +79,9 @@ internal static class LoadoutSelectionChecks
         catch (IOException) { }
         var caps = Reply(); caps["capabilities"] = new JsonArray("committed_loadout_selection_v1", "committed_loadout_selection_v1");
         Check(!Parse(caps, out _), "Duplicate capabilities admitted");
-        caps["capabilities"] = new JsonArray(Enumerable.Range(0, 17).Select(n => (JsonNode)JsonValue.Create("cap_" + n)).ToArray());
+        caps["capabilities"] = new JsonArray(Enumerable.Range(0, 32).Select(n => (JsonNode)JsonValue.Create("cap_" + n)).ToArray());
+        Check(Parse(caps, out _), "Thirty-two capabilities refused");
+        caps["capabilities"] = new JsonArray(Enumerable.Range(0, 33).Select(n => (JsonNode)JsonValue.Create("cap_" + n)).ToArray());
         Check(!Parse(caps, out _), "Unbounded capabilities admitted");
         caps["capabilities"] = new JsonArray("future_capability");
         Check(Parse(caps, out var future) && future.Capabilities.Single() == "future_capability" && !future.SupportsCommittedLoadoutSelections,

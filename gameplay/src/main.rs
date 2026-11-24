@@ -1,6 +1,7 @@
 use mag_gameplay::collision::{CollisionLimits, CollisionWorld};
 use mag_gameplay::telemetry::{TickRecorder, TickSample};
 use mag_gameplay::worker_identity::{WORKER_ID_ERROR, WorkerIdentity};
+use mag_gameplay::world_stream::{self, EventReplies, Journal, ResumeFrom};
 use mag_gameplay::{
     Engine, EngineResources, IO_DEADLINE, MAX_LOG, Request, Response, parse_request, read_line,
 };
@@ -1853,7 +1854,10 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             .as_ref()
             .map(|path| open_log(path, rotation).map(|writer| TickRecorder::start(writer, max_log)))
             .transpose()?;
-        let writer = open_log(&path, rotation)?;
+        // Storage stalls must not hold the world lock; see async_log.
+        let writer: LogWriter = Box::new(mag_gameplay::async_log::AsyncLogWriter::start(open_log(
+            &path, rotation,
+        )?));
         let mut engine =
             Engine::from_resources(writer, max_log, resources).with_skill_catalog(skill_catalog);
         if let Some(vehicles) = ground_vehicles {
@@ -2040,9 +2044,11 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         let started = Instant::now();
         let active = Arc::new(AtomicUsize::new(0));
         let subscriber: SharedSubscriber = Arc::new(Mutex::new(None));
+        let journal = Arc::new(Mutex::new(Journal::new(world_stream::new_epoch()?)));
         spawn_world_scheduler(
             Arc::clone(&engine),
             Arc::clone(&subscriber),
+            Arc::clone(&journal),
             started,
             telemetry.clone(),
             tick_budget_us,
@@ -2058,6 +2064,8 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             tick_budget_us,
             subscriber,
             worker_identity,
+            journal,
+            event_replies: Mutex::new(EventReplies::default()),
         });
         for connection in listener.incoming() {
             let stream = connection?;
@@ -2129,6 +2137,8 @@ struct ConnectionContext {
     tick_budget_us: Option<u64>,
     subscriber: SharedSubscriber,
     worker_identity: Option<WorkerIdentity>,
+    journal: Arc<Mutex<Journal>>,
+    event_replies: Mutex<EventReplies>,
 }
 
 fn serve(
@@ -2143,6 +2153,8 @@ fn serve(
         tick_budget_us,
         subscriber,
         worker_identity,
+        journal,
+        event_replies,
     } = context;
     let worker_identity = worker_identity.as_ref();
     let line = read_line(&mut stream, IO_DEADLINE)
@@ -2169,11 +2181,14 @@ fn serve(
             &line,
             engine,
             Arc::clone(subscriber),
+            journal,
             slot,
             worker_identity,
         );
     }
-    let response = match parse_request(&line) {
+    let parsed = parse_request(&line);
+    let hello = matches!(parsed, Ok(Request::Hello { .. }));
+    let mut response = match parsed {
         Ok(Request::Hello { request_id, .. }) if worker_identity.is_some() => match engine.lock() {
             Ok(engine) => engine.describe_worker(request_id, fenced),
             Err(_) => Response::error(request_id, "engine_unavailable"),
@@ -2192,7 +2207,13 @@ fn serve(
                 Ok(mut engine) => {
                     let wait_us = waiting.elapsed().as_micros() as u64;
                     let processing = Instant::now();
-                    let response = engine.handle(request, started.elapsed(), wall);
+                    let event_id = match &request {
+                        Request::Event { request_id, .. } => Some(request_id.clone()),
+                        _ => None,
+                    };
+                    let response = handle_once(event_replies, event_id, || {
+                        engine.handle(request, started.elapsed(), wall)
+                    });
                     (response, wait_us, processing.elapsed().as_micros() as u64)
                 }
                 Err(_) => (
@@ -2216,7 +2237,38 @@ fn serve(
         }
         Err(error) => Response::error(error.request_id, error.code),
     };
+    if hello && response.ok {
+        // Served-worker bridge features; in-process engines do not offer them.
+        // Horizon accepts at most 32 capabilities; a full discovery reply with
+        // these two and worker_registry_v1 lists 16.
+        response.capabilities.extend([
+            world_stream::CAPABILITY.to_owned(),
+            world_stream::EVENT_REPLAY_CAPABILITY.to_owned(),
+        ]);
+    }
     write_response(&mut stream, response, worker_identity)
+}
+
+/// Apply a request; an event whose ID was already applied is answered with its
+/// original reply instead. Horizon retries an unanswered event with the same
+/// ID, and the engine lock serialises the check with the application.
+fn handle_once(
+    replies: &Mutex<EventReplies>,
+    event_id: Option<String>,
+    apply: impl FnOnce() -> Response,
+) -> Response {
+    if let Some(id) = &event_id
+        && let Some(reply) = replies.lock().ok().and_then(|replies| replies.get(id))
+    {
+        return reply;
+    }
+    let response = apply();
+    if let Some(id) = event_id
+        && let Ok(mut replies) = replies.lock()
+    {
+        replies.insert(id, response.clone());
+    }
+    response
 }
 
 fn parse_point(value: &str) -> io::Result<[f64; 3]> {
@@ -2249,6 +2301,8 @@ struct WorldSubscriber {
     world_id: u32,
     request_id: String,
     sender: SyncSender<Response>,
+    /// The subscriber asked for frame positions (world_stream_resume_v1).
+    positions: bool,
 }
 type SharedSubscriber = Arc<Mutex<Option<WorldSubscriber>>>;
 
@@ -2259,6 +2313,10 @@ struct SubscribeWorld {
     v: u8,
     request_id: String,
     world_id: u32,
+    #[serde(default)]
+    positions: bool,
+    #[serde(default)]
+    resume: Option<ResumeFrom>,
 }
 fn write_response(
     stream: &mut TcpStream,
@@ -2281,6 +2339,7 @@ fn serve_subscription(
     line: &[u8],
     engine: &Mutex<Engine<LogWriter>>,
     shared: SharedSubscriber,
+    journal: &Mutex<Journal>,
     slot: ConnectionSlot,
     worker_identity: Option<&WorkerIdentity>,
 ) -> Result<(), ConnectionFailure> {
@@ -2301,10 +2360,9 @@ fn serve_subscription(
             worker_identity,
         );
     };
-    let (sender, receiver) = mpsc::sync_channel(32);
     static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
-    {
+    let receiver = {
         let Some(mut guard) = vacant_subscriber_slot(&shared)? else {
             return write_response(
                 &mut stream,
@@ -2325,21 +2383,79 @@ fn serve_subscription(
                 worker_identity,
             );
         }
+        let receiver = match register_subscriber(&mut guard, journal, request, generation) {
+            Ok(receiver) => receiver,
+            Err((request_id, code)) => {
+                drop(engine);
+                drop(guard);
+                return write_response(
+                    &mut stream,
+                    Response::error(request_id, code),
+                    worker_identity,
+                );
+            }
+        };
         engine.enable_world_ticks();
-        // Queue the acknowledgement before exposing the sender to the scheduler.
-        sender
-            .send(Response::success(request.request_id.clone()))
-            .unwrap();
-        *guard = Some(WorldSubscriber {
-            generation,
-            world_id: request.world_id,
-            request_id: request.request_id,
-            sender,
-        });
-    }
+        receiver
+    };
     // Persistent subscriptions have their own single slot, separate from request workers.
     drop(slot);
-    forward_subscription(stream, shared, generation, receiver, worker_identity)
+    forward_subscription(
+        stream,
+        shared,
+        generation,
+        receiver,
+        worker_identity,
+        WORLD_FRAME_DEADLINE,
+    )
+}
+
+/// Fill the vacant subscriber slot. The acknowledgement and any replay are
+/// queued before the scheduler can see the subscriber, and the scheduler
+/// appends and delivers each frame under the subscriber lock the caller holds,
+/// so every frame after the resume point is either replayed or sent live.
+fn register_subscriber(
+    slot: &mut Option<WorldSubscriber>,
+    journal: &Mutex<Journal>,
+    request: SubscribeWorld,
+    generation: u64,
+) -> Result<mpsc::Receiver<Response>, (String, &'static str)> {
+    let positions = request.positions || request.resume.is_some();
+    let (acknowledged, replay) = {
+        let Ok(journal) = journal.lock() else {
+            return Err((request.request_id, "engine_unavailable"));
+        };
+        match &request.resume {
+            Some(from) => match journal.replay(from) {
+                Ok(frames) => (
+                    Some(world_stream::Position {
+                        epoch: from.epoch.clone(),
+                        sequence: from.after,
+                    }),
+                    frames,
+                ),
+                Err(code) => return Err((request.request_id, code)),
+            },
+            None => (positions.then(|| journal.position()), Vec::new()),
+        }
+    };
+    let (sender, receiver) = mpsc::sync_channel(WORLD_FRAME_QUEUE + replay.len());
+    // The acknowledgement names the position the next frame follows.
+    let mut acknowledgement = Response::success(request.request_id.clone());
+    acknowledgement.world_stream = acknowledged;
+    sender.send(acknowledgement).unwrap();
+    for mut frame in replay {
+        frame.request_id = request.request_id.clone();
+        sender.send(frame).unwrap();
+    }
+    *slot = Some(WorldSubscriber {
+        generation,
+        world_id: request.world_id,
+        request_id: request.request_id,
+        sender,
+        positions,
+    });
+    Ok(receiver)
 }
 
 // Keep the occupancy check and registration under the same lock: a new
@@ -2354,12 +2470,24 @@ fn vacant_subscriber_slot(
     Ok(if guard.is_none() { Some(guard) } else { None })
 }
 
+/// Longest silence a subscription tolerates before ending itself. The scheduler
+/// sends a heartbeat every second; this bound only detects a worker that has
+/// stopped producing frames. A brief world-lock or storage stall must not end
+/// the stream, because Horizon releases every player on a stream gap.
+const WORLD_FRAME_DEADLINE: Duration = Duration::from_secs(10);
+/// Frames buffered for a subscriber that reads slowly, for example while
+/// Horizon commits a reward to durable storage. A full queue ends the stream
+/// and releases every player, so hold about as long as the frame deadline
+/// (20 frames per second) rather than the former 1.6 seconds.
+const WORLD_FRAME_QUEUE: usize = 256;
+
 fn forward_subscription(
     mut stream: TcpStream,
     shared: SharedSubscriber,
     generation: u64,
     receiver: mpsc::Receiver<Response>,
     worker_identity: Option<&WorkerIdentity>,
+    frame_timeout: Duration,
 ) -> Result<(), ConnectionFailure> {
     let _owner = SubscriptionOwner {
         shared: Arc::clone(&shared),
@@ -2372,7 +2500,7 @@ fn forward_subscription(
     stream
         .set_read_timeout(Some(Duration::from_millis(1)))
         .map_err(|error| ConnectionFailure::io(ConnectionStage::ReadRequest, error))?;
-    let mut frame_deadline = Instant::now() + Duration::from_secs(2);
+    let mut frame_deadline = Instant::now() + frame_timeout;
     loop {
         if shared
             .lock()
@@ -2417,7 +2545,7 @@ fn forward_subscription(
         match receiver.recv_timeout(remaining.min(Duration::from_millis(100))) {
             Ok(response) => {
                 write_response(&mut stream, response, worker_identity)?;
-                frame_deadline = Instant::now() + Duration::from_secs(2);
+                frame_deadline = Instant::now() + frame_timeout;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -2449,6 +2577,7 @@ impl Drop for SubscriptionOwner {
 fn spawn_world_scheduler(
     engine: Arc<Mutex<Engine<LogWriter>>>,
     subscriber: SharedSubscriber,
+    journal: Arc<Mutex<Journal>>,
     started: Instant,
     telemetry: Option<TickRecorder>,
     budget: Option<u64>,
@@ -2466,16 +2595,10 @@ fn spawn_world_scheduler(
                 deadline = now + interval;
             }
             let target = subscriber.lock().ok().and_then(|s| {
-                s.as_ref().map(|s| {
-                    (
-                        s.generation,
-                        s.world_id,
-                        s.request_id.clone(),
-                        s.sender.clone(),
-                    )
-                })
+                s.as_ref()
+                    .map(|s| (s.generation, s.world_id, s.request_id.clone()))
             });
-            let Some((generation, world_id, request_id, sender)) = target else {
+            let Some((generation, world_id, request_id)) = target else {
                 continue;
             };
             let wall = SystemTime::now()
@@ -2517,18 +2640,35 @@ fn spawn_world_scheduler(
                 continue;
             }
             heartbeat = Instant::now();
-            if let Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) =
-                sender.try_send(response)
-            {
-                // Closing the stream is an explicit gap; Horizon releases affected sessions.
-                if let Ok(mut guard) = subscriber.lock()
-                    && guard.as_ref().is_some_and(|s| s.generation == generation)
-                {
-                    *guard = None;
-                }
-            }
+            publish_frame(&subscriber, &journal, response);
         }
     });
+}
+
+/// Number a produced frame and deliver it to the current subscriber. A frame
+/// whose subscriber ended while the world ticked stays in the journal for the
+/// next subscription to resume from, instead of being lost with the old queue.
+fn publish_frame(subscriber: &SharedSubscriber, journal: &Mutex<Journal>, frame: Response) {
+    let Ok(mut guard) = subscriber.lock() else {
+        return;
+    };
+    let mut frame = match journal.lock() {
+        Ok(mut journal) => journal.append(frame),
+        Err(_) => frame,
+    };
+    let Some(current) = guard.as_ref() else {
+        return;
+    };
+    frame.request_id = current.request_id.clone();
+    if !current.positions {
+        frame.world_stream = None;
+    }
+    if let Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) =
+        current.sender.try_send(frame)
+    {
+        // Closing the stream is an explicit gap; Horizon resumes or releases.
+        *guard = None;
+    }
 }
 
 #[cfg(test)]
@@ -2564,6 +2704,7 @@ mod subscription_tests {
             world_id: 1,
             request_id: "synthetic-world-stream".into(),
             sender: sender.clone(),
+            positions: false,
         });
         (sender, receiver)
     }
@@ -2589,7 +2730,14 @@ mod subscription_tests {
         });
         let worker_shared = Arc::clone(&shared);
         let worker = std::thread::spawn(move || {
-            forward_subscription(server, worker_shared, 1, receiver, None)
+            forward_subscription(
+                server,
+                worker_shared,
+                1,
+                receiver,
+                None,
+                WORLD_FRAME_DEADLINE,
+            )
         });
         // FIN leaves the peer's read side open: all tiny heartbeats can still
         // write successfully. Only checking writes/queue timeouts misses it.
@@ -2615,7 +2763,14 @@ mod subscription_tests {
         sender.send(response()).unwrap();
         let worker_shared = Arc::clone(&shared);
         let worker = std::thread::spawn(move || {
-            forward_subscription(server, worker_shared, 2, receiver, None)
+            forward_subscription(
+                server,
+                worker_shared,
+                2,
+                receiver,
+                None,
+                WORLD_FRAME_DEADLINE,
+            )
         });
         let line = mag_gameplay::read_line(&mut replacement, Duration::from_secs(1)).unwrap();
         let reply: Response = serde_json::from_slice(&line).unwrap();
@@ -2626,6 +2781,166 @@ mod subscription_tests {
         assert!(shared.lock().unwrap().is_none());
     }
 
+    fn subscribe(
+        shared: &SharedSubscriber,
+        journal: &Mutex<Journal>,
+        request_id: &str,
+        positions: bool,
+        resume: Option<ResumeFrom>,
+        generation: u64,
+    ) -> Result<mpsc::Receiver<Response>, (String, &'static str)> {
+        let mut guard = vacant_subscriber_slot(shared)
+            .ok()
+            .flatten()
+            .expect("vacant subscriber");
+        let request = SubscribeWorld {
+            op: "subscribe_world".into(),
+            v: mag_gameplay::BRIDGE_VERSION,
+            request_id: request_id.into(),
+            world_id: 1,
+            positions,
+            resume,
+        };
+        register_subscriber(&mut guard, journal, request, generation)
+    }
+
+    fn frame(payload: &str) -> Response {
+        let mut frame = Response::success("synthetic-tick".into());
+        frame.messages.push(mag_gameplay::OutboundMessage {
+            reservation_id: "synthetic-reservation-0001".into(),
+            world_id: 1,
+            player_id: 1,
+            plugin_id: 1,
+            payload_hex: payload.into(),
+        });
+        frame
+    }
+
+    fn position(response: &Response) -> u64 {
+        response.world_stream.as_ref().expect("position").sequence
+    }
+
+    #[test]
+    fn resumed_subscriber_receives_the_frames_its_broken_stream_lost() {
+        let shared: SharedSubscriber = Arc::new(Mutex::new(None));
+        let journal = Mutex::new(Journal::new("synthetic-epoch".into()));
+        let first = subscribe(&shared, &journal, "synthetic-first", true, None, 1).unwrap();
+        let ack = first.recv().unwrap();
+        assert_eq!(position(&ack), 0);
+        assert_eq!(ack.world_stream.as_ref().unwrap().epoch, "synthetic-epoch");
+        for payload in ["01", "02", "03"] {
+            publish_frame(&shared, &journal, frame(payload));
+        }
+        let delivered: Vec<_> = (0..3).map(|_| first.recv().unwrap()).collect();
+        assert_eq!(
+            delivered.iter().map(position).collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        assert!(delivered.iter().all(|f| f.request_id == "synthetic-first"));
+
+        // The stream breaks: Horizon handled frames through 2, frame 3 was in
+        // flight, and a tick that began before the break produces 4 and 5.
+        drop(first);
+        publish_frame(&shared, &journal, frame("04"));
+        assert!(
+            shared.lock().unwrap().is_none(),
+            "a dead queue keeps its owner"
+        );
+        publish_frame(&shared, &journal, frame("05"));
+
+        let resume = |epoch: &str, after| {
+            Some(ResumeFrom {
+                epoch: epoch.into(),
+                after,
+            })
+        };
+        assert_eq!(
+            subscribe(
+                &shared,
+                &journal,
+                "synthetic-restart",
+                true,
+                resume("synthetic-other", 2),
+                2
+            )
+            .err(),
+            Some(("synthetic-restart".into(), world_stream::RESUME_UNAVAILABLE))
+        );
+        assert!(
+            shared.lock().unwrap().is_none(),
+            "a refused resume took the slot"
+        );
+
+        let second = subscribe(
+            &shared,
+            &journal,
+            "synthetic-second",
+            true,
+            resume("synthetic-epoch", 2),
+            3,
+        )
+        .unwrap();
+        let ack = second.recv().unwrap();
+        assert!(ack.ok);
+        assert_eq!(position(&ack), 2);
+        publish_frame(&shared, &journal, frame("06"));
+        let resumed: Vec<_> = (0..4).map(|_| second.recv().unwrap()).collect();
+        assert_eq!(
+            resumed.iter().map(position).collect::<Vec<_>>(),
+            [3, 4, 5, 6]
+        );
+        assert_eq!(
+            resumed
+                .iter()
+                .map(|f| f.messages[0].payload_hex.as_str())
+                .collect::<Vec<_>>(),
+            ["03", "04", "05", "06"]
+        );
+        assert!(resumed.iter().all(|f| f.request_id == "synthetic-second"));
+    }
+
+    #[test]
+    fn subscribers_without_positions_keep_the_previous_frames() {
+        let shared: SharedSubscriber = Arc::new(Mutex::new(None));
+        let journal = Mutex::new(Journal::new("synthetic-epoch".into()));
+        let legacy = subscribe(&shared, &journal, "synthetic-legacy", false, None, 1).unwrap();
+        assert!(legacy.recv().unwrap().world_stream.is_none());
+        publish_frame(&shared, &journal, frame("01"));
+        let delivered = legacy.recv().unwrap();
+        assert!(delivered.world_stream.is_none());
+        assert_eq!(delivered.request_id, "synthetic-legacy");
+        let encoded = serde_json::to_value(&delivered).unwrap();
+        assert!(encoded.get("world_stream").is_none());
+    }
+
+    #[test]
+    fn a_retried_event_is_applied_once_and_answered_alike() {
+        let replies = Mutex::new(EventReplies::default());
+        let mut applied = 0;
+        let mut apply = |payload: &str| {
+            handle_once(&replies, Some("synthetic-event".into()), || {
+                applied += 1;
+                frame(payload)
+            })
+        };
+        let first = apply("01");
+        let retry = apply("02");
+        assert_eq!(first.messages[0].payload_hex, "01");
+        assert_eq!(retry.messages[0].payload_hex, "01");
+        let other = handle_once(&replies, Some("synthetic-other".into()), || frame("03"));
+        assert_eq!(other.messages[0].payload_hex, "03");
+        let mut controls = 0;
+        for _ in 0..2 {
+            handle_once(&replies, None, || {
+                controls += 1;
+                frame("04")
+            });
+        }
+        assert_eq!(controls, 2, "only events are deduplicated");
+        drop(apply);
+        assert_eq!(applied, 1);
+    }
+
     #[test]
     fn idle_read_timeout_keeps_the_active_subscription_exclusive() {
         let (client, server) = sockets();
@@ -2633,7 +2948,14 @@ mod subscription_tests {
         let (_sender, receiver) = register(&shared, 1);
         let worker_shared = Arc::clone(&shared);
         let worker = std::thread::spawn(move || {
-            forward_subscription(server, worker_shared, 1, receiver, None)
+            forward_subscription(
+                server,
+                worker_shared,
+                1,
+                receiver,
+                None,
+                WORLD_FRAME_DEADLINE,
+            )
         });
         std::thread::sleep(Duration::from_millis(250));
         assert!(vacant_subscriber_slot(&shared).ok().flatten().is_none());
@@ -2648,13 +2970,45 @@ mod subscription_tests {
         let shared = Arc::new(Mutex::new(None));
         let (_sender, receiver) = register(&shared, 1);
         let began = Instant::now();
-        let failure = forward_subscription(server, Arc::clone(&shared), 1, receiver, None)
+        let timeout = Duration::from_millis(400);
+        let failure = forward_subscription(server, Arc::clone(&shared), 1, receiver, None, timeout)
             .err()
             .unwrap();
-        assert!(began.elapsed() >= Duration::from_secs(2));
-        assert!(began.elapsed() < Duration::from_secs(3));
+        assert!(began.elapsed() >= timeout);
+        assert!(began.elapsed() < timeout + Duration::from_secs(1));
         assert_eq!(failure.kind, io::ErrorKind::ConnectionAborted);
         assert!(shared.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_stall_shorter_than_the_frame_deadline_keeps_the_subscription() {
+        // Live engine stalls of two to four seconds ended the stream and
+        // released every player; the deadline must outlast such a stall.
+        assert!(WORLD_FRAME_DEADLINE >= Duration::from_secs(10));
+        // A reader that pauses for a durable reward commit keeps its stream:
+        // ten seconds of 50 ms frames fit the queue.
+        const { assert!(WORLD_FRAME_QUEUE >= 200) };
+        let (mut client, server) = sockets();
+        let shared = Arc::new(Mutex::new(None));
+        let (sender, receiver) = register(&shared, 1);
+        let worker_shared = Arc::clone(&shared);
+        let timeout = Duration::from_millis(900);
+        let worker = std::thread::spawn(move || {
+            forward_subscription(server, worker_shared, 1, receiver, None, timeout)
+        });
+        // Frames arrive with gaps shorter than the deadline.
+        for _ in 0..4 {
+            std::thread::sleep(Duration::from_millis(500));
+            sender.send(response()).unwrap();
+            let line = mag_gameplay::read_line(&mut client, Duration::from_secs(1)).unwrap();
+            assert!(serde_json::from_slice::<Response>(&line).unwrap().ok);
+        }
+        assert!(
+            shared.lock().unwrap().is_some(),
+            "a short stall ended the stream"
+        );
+        client.shutdown(Shutdown::Write).unwrap();
+        assert!(worker.join().unwrap().is_err());
     }
 
     #[test]
@@ -2663,9 +3017,16 @@ mod subscription_tests {
         let shared = Arc::new(Mutex::new(None));
         let (_sender, receiver) = register(&shared, 1);
         client.write_all(b"x").unwrap();
-        let failure = forward_subscription(server, Arc::clone(&shared), 1, receiver, None)
-            .err()
-            .unwrap();
+        let failure = forward_subscription(
+            server,
+            Arc::clone(&shared),
+            1,
+            receiver,
+            None,
+            WORLD_FRAME_DEADLINE,
+        )
+        .err()
+        .unwrap();
         assert_eq!(failure.kind, io::ErrorKind::InvalidData);
         assert_eq!(failure.diagnostic()["category"], "invalid_framing");
         assert!(shared.lock().unwrap().is_none());

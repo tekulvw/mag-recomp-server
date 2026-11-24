@@ -3,7 +3,11 @@ use super::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-pub(super) const MAX_PENDING_NOTIFICATIONS: usize = 128;
+/// Per-recipient reliable notification bound. Notifications drain only after a
+/// recipient's shared FIFO is empty, so a client that has just deployed into a
+/// 64-bot match can collect a burst of kill and score notices while its bot
+/// bootstrap drains. 128 evicted such joiners within seconds on live matches.
+pub(super) const MAX_PENDING_NOTIFICATIONS: usize = 512;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -490,7 +494,7 @@ pub(crate) fn queue_round_publications(
         use protocol::ScoreChangeReason::{Initial, PrimaryObjective, TimedBleed};
         let score_changed = recipient.round_scores != Some(scores)
             || matches!(publication,ScorePublication::NativeScoreRate {before_bleed} if recipient.round_scores!=Some(before_bleed));
-        if score_changed && recipient.pending_notifications.len() + 4 > 128 {
+        if score_changed && recipient.pending_notifications.len() + 4 > MAX_PENDING_NOTIFICATIONS {
             continue;
         }
         match (publication, recipient.round_scores) {
@@ -529,7 +533,7 @@ pub(crate) fn queue_round_publications(
         recipient.last_clock_points = scores[0];
         if let Some(end) = &outcome {
             if !recipient.end_announced {
-                if recipient.pending_notifications.len() + 2 > 128 {
+                if recipient.pending_notifications.len() + 2 > MAX_PENDING_NOTIFICATIONS {
                     continue;
                 }
                 recipient.queue_round(Publication::Replication(
@@ -551,7 +555,9 @@ pub(crate) fn queue_round_publications(
                 recipient.end_announced = true;
             }
             if rewards_settled && !recipient.results_announced {
-                if recipient.pending_notifications.len() + final_stats.len() + 1 > 128 {
+                if recipient.pending_notifications.len() + final_stats.len() + 1
+                    > MAX_PENDING_NOTIFICATIONS
+                {
                     continue;
                 }
                 for stats in &final_stats {
@@ -563,7 +569,7 @@ pub(crate) fn queue_round_publications(
                 recipient.results_announced = true;
             }
             if end.finalized && recipient.results_announced && !recipient.postgame_announced {
-                if recipient.pending_notifications.len() >= 128 {
+                if recipient.pending_notifications.len() >= MAX_PENDING_NOTIFICATIONS {
                     continue;
                 }
                 recipient.queue_round(Publication::Replication(

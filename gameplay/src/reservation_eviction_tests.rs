@@ -134,3 +134,41 @@ fn unknown_release_record_failure_does_not_acknowledge_or_tombstone() {
         Some("reservation_id_retired")
     );
 }
+
+// A client that has just deployed into a 64-bot match drains its bootstrap
+// while bots keep publishing and notices wait behind the shared FIFO. Live
+// matches evicted such joiners at the former 128-entry bounds.
+#[test]
+fn joiner_burst_above_the_former_bound_is_kept_and_eviction_names_its_queue() {
+    let mut engine = engine();
+    reserve(&mut engine, 0);
+    reserve(&mut engine, 1);
+    let joiner = actors(&mut engine)
+        .find(|a| a.reservation.player == 1)
+        .unwrap();
+    for _ in 0..200 {
+        joiner.queue_shared(vec![0]);
+        joiner.queue_round(match_flow::Publication::Application(vec![0]));
+    }
+    assert!(
+        !joiner.replication_backlogged,
+        "a 200-entry burst evicted the joiner"
+    );
+    const { assert!(multiplayer::MAX_SHARED_QUEUE >= 512) };
+    const { assert!(match_flow::MAX_PENDING_NOTIFICATIONS >= 512) };
+
+    for _ in 0..multiplayer::MAX_SHARED_QUEUE {
+        joiner.queue_shared(vec![0]);
+    }
+    assert!(joiner.replication_backlogged);
+    let refused = evicted_event(&mut engine, 1, Duration::from_secs(1));
+    assert!(!refused.ok);
+    assert!(present(&mut engine, 0), "the other human keeps the world");
+    let eviction = String::from_utf8_lossy(&engine.writer)
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|record| record["op"] == "replication_backlog_released")
+        .expect("eviction record");
+    assert_eq!(eviction["pending_shared"], multiplayer::MAX_SHARED_QUEUE);
+    assert_eq!(eviction["pending_notifications"], 200);
+}
