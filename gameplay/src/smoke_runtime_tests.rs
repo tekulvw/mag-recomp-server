@@ -392,28 +392,49 @@ fn smoke_runtime_full_late_join_bootstrap_preserves_ordinary_queue_budget() {
     assert_eq!(actor.ordinary_shared_len(), 63);
     assert_eq!(actor.pending_shared.len(), 159);
 
-    for _ in 0..65 {
+    for _ in 0..(crate::multiplayer::MAX_SHARED_QUEUE - 63) {
         actor.queue_shared(ordinary.clone());
     }
     assert!(!actor.replication_backlogged);
-    assert_eq!(actor.ordinary_shared_len(), 128);
-    assert_eq!(actor.pending_shared.len(), 224);
+    assert_eq!(
+        actor.ordinary_shared_len(),
+        crate::multiplayer::MAX_SHARED_QUEUE
+    );
+    assert_eq!(
+        actor.pending_shared.len(),
+        crate::multiplayer::MAX_SHARED_QUEUE + 96
+    );
     actor.queue_shared(ordinary);
     assert!(actor.replication_backlogged);
-    assert_eq!(actor.pending_shared.len(), 224);
+    assert_eq!(
+        actor.pending_shared.len(),
+        crate::multiplayer::MAX_SHARED_QUEUE + 96
+    );
 
-    // Pop the prior prefix and part of the reserved segment. All 65 ordinary
-    // suffix packets must remain, and protected frames consume no capacity.
+    // Pop the prior prefix and part of the reserved segment. Every ordinary
+    // suffix packet must remain, and protected frames consume no capacity.
     for _ in 0..(63 + 35) {
         actor.pop_shared();
     }
-    assert_eq!(actor.ordinary_shared_len(), 65);
-    assert_eq!(actor.pending_shared.len(), 126);
+    assert_eq!(
+        actor.ordinary_shared_len(),
+        crate::multiplayer::MAX_SHARED_QUEUE - 63
+    );
+    assert_eq!(
+        actor.pending_shared.len(),
+        crate::multiplayer::MAX_SHARED_QUEUE - 2
+    );
     for _ in 0..61 {
         actor.pop_shared();
     }
-    assert_eq!(actor.ordinary_shared_len(), 65);
-    assert_eq!(actor.pending_shared.len(), 65);
+    assert_eq!(
+        actor.ordinary_shared_len(),
+        crate::multiplayer::MAX_SHARED_QUEUE - 63
+    );
+    assert_eq!(
+        actor.pending_shared.len(),
+        crate::multiplayer::MAX_SHARED_QUEUE - 63
+    );
 }
 
 fn gas_fixture() -> Engine<Vec<u8>> {

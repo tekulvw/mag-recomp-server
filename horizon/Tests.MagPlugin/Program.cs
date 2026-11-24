@@ -62,6 +62,7 @@ Test("unsupported join requests name their rejection", JoinRejectionChecks.Run);
 Test("refused gameplay admission names its release reason", AdmissionFailureChecks.Run);
 Test("rejected gameplay release cannot hold admission forever", RejectedReleaseChecks.Run);
 Test("restarted legacy gameplay worker is reconfigured before admission", LeadershipProgressionChecks.LegacyWorkerRestartReconfigures);
+Test("gameplay bridge deadlines outlast short worker stalls", BridgeDeadlineChecks.Run);
 
 Test("committed loadout selection persistence", LoadoutSelectionChecks.Run);
 

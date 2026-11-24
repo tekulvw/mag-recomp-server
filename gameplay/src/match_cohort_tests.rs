@@ -412,7 +412,7 @@ fn full_result_fifo_defers_postgame_instead_of_marking_it_delivered() {
     assert_eq!(a.reservation.player, 1);
     a.pending_notifications.clear();
     a.pending_shared.clear();
-    for _ in 0..128 {
+    for _ in 0..crate::match_flow::MAX_PENDING_NOTIFICATIONS {
         a.pending_notifications
             .push_back(crate::match_flow::Publication::Application(
                 protocol::CharacterStatsComplete.encode(),

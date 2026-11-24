@@ -2,7 +2,10 @@
 use super::*;
 use replication::multiplayer::*;
 
-pub(super) const MAX_SHARED_QUEUE: usize = 128;
+/// Per-recipient reliable shared-frame bound. A joiner receives its world
+/// bootstrap while 64 bots keep publishing; 128 frames evicted joiners on live
+/// matches, so allow a larger burst (frames are at most 1397 bytes).
+pub(super) const MAX_SHARED_QUEUE: usize = 512;
 
 impl Active {
     /// Reliable packets cannot be discarded or coalesced without traced ACK rules.
@@ -1004,12 +1007,18 @@ impl<W: Write> Engine<W> {
                 .get(&id)
                 .or_else(|| self.active.as_ref().filter(|a| a.reservation.id == id))
                 .unwrap();
-            let op = if actor.replication_backlogged {
-                "replication_backlog_released"
+            if actor.replication_backlogged {
+                // Name the full queue so a live eviction can be attributed.
+                self.record(
+                    json!({"op":"replication_backlog_released","reservation_id":id,
+                        "pending_shared":actor.ordinary_shared_len(),
+                        "pending_notifications":actor.pending_notifications.len(),
+                        "ready_for_updates":actor.ready_for_updates}),
+                    wall,
+                )?;
             } else {
-                "expired"
-            };
-            self.record(json!({"op":op,"reservation_id":id}), wall)?;
+                self.record(json!({"op":"expired","reservation_id":id}), wall)?;
+            }
             // Horizon learns of this eviction only through its next bridge call.
             // Retiring the identity makes its later release replay as acknowledged
             // instead of failing as an identity mismatch while other peers remain,

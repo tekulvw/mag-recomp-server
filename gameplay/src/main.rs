@@ -1797,7 +1797,10 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             .as_ref()
             .map(|path| open_log(path, rotation).map(|writer| TickRecorder::start(writer, max_log)))
             .transpose()?;
-        let writer = open_log(&path, rotation)?;
+        // Storage stalls must not hold the world lock; see async_log.
+        let writer: LogWriter = Box::new(mag_gameplay::async_log::AsyncLogWriter::start(open_log(
+            &path, rotation,
+        )?));
         let mut engine =
             Engine::from_resources(writer, max_log, resources).with_skill_catalog(skill_catalog);
         if let Some(vehicles) = ground_vehicles {
@@ -2245,7 +2248,7 @@ fn serve_subscription(
             worker_identity,
         );
     };
-    let (sender, receiver) = mpsc::sync_channel(32);
+    let (sender, receiver) = mpsc::sync_channel(WORLD_FRAME_QUEUE);
     static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
     {
@@ -2283,7 +2286,14 @@ fn serve_subscription(
     }
     // Persistent subscriptions have their own single slot, separate from request workers.
     drop(slot);
-    forward_subscription(stream, shared, generation, receiver, worker_identity)
+    forward_subscription(
+        stream,
+        shared,
+        generation,
+        receiver,
+        worker_identity,
+        WORLD_FRAME_DEADLINE,
+    )
 }
 
 // Keep the occupancy check and registration under the same lock: a new
@@ -2298,12 +2308,24 @@ fn vacant_subscriber_slot(
     Ok(if guard.is_none() { Some(guard) } else { None })
 }
 
+/// Longest silence a subscription tolerates before ending itself. The scheduler
+/// sends a heartbeat every second; this bound only detects a worker that has
+/// stopped producing frames. A brief world-lock or storage stall must not end
+/// the stream, because Horizon releases every player on a stream gap.
+const WORLD_FRAME_DEADLINE: Duration = Duration::from_secs(10);
+/// Frames buffered for a subscriber that reads slowly, for example while
+/// Horizon commits a reward to durable storage. A full queue ends the stream
+/// and releases every player, so hold about as long as the frame deadline
+/// (20 frames per second) rather than the former 1.6 seconds.
+const WORLD_FRAME_QUEUE: usize = 256;
+
 fn forward_subscription(
     mut stream: TcpStream,
     shared: SharedSubscriber,
     generation: u64,
     receiver: mpsc::Receiver<Response>,
     worker_identity: Option<&WorkerIdentity>,
+    frame_timeout: Duration,
 ) -> Result<(), ConnectionFailure> {
     let _owner = SubscriptionOwner {
         shared: Arc::clone(&shared),
@@ -2316,7 +2338,7 @@ fn forward_subscription(
     stream
         .set_read_timeout(Some(Duration::from_millis(1)))
         .map_err(|error| ConnectionFailure::io(ConnectionStage::ReadRequest, error))?;
-    let mut frame_deadline = Instant::now() + Duration::from_secs(2);
+    let mut frame_deadline = Instant::now() + frame_timeout;
     loop {
         if shared
             .lock()
@@ -2361,7 +2383,7 @@ fn forward_subscription(
         match receiver.recv_timeout(remaining.min(Duration::from_millis(100))) {
             Ok(response) => {
                 write_response(&mut stream, response, worker_identity)?;
-                frame_deadline = Instant::now() + Duration::from_secs(2);
+                frame_deadline = Instant::now() + frame_timeout;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -2533,7 +2555,14 @@ mod subscription_tests {
         });
         let worker_shared = Arc::clone(&shared);
         let worker = std::thread::spawn(move || {
-            forward_subscription(server, worker_shared, 1, receiver, None)
+            forward_subscription(
+                server,
+                worker_shared,
+                1,
+                receiver,
+                None,
+                WORLD_FRAME_DEADLINE,
+            )
         });
         // FIN leaves the peer's read side open: all tiny heartbeats can still
         // write successfully. Only checking writes/queue timeouts misses it.
@@ -2559,7 +2588,14 @@ mod subscription_tests {
         sender.send(response()).unwrap();
         let worker_shared = Arc::clone(&shared);
         let worker = std::thread::spawn(move || {
-            forward_subscription(server, worker_shared, 2, receiver, None)
+            forward_subscription(
+                server,
+                worker_shared,
+                2,
+                receiver,
+                None,
+                WORLD_FRAME_DEADLINE,
+            )
         });
         let line = mag_gameplay::read_line(&mut replacement, Duration::from_secs(1)).unwrap();
         let reply: Response = serde_json::from_slice(&line).unwrap();
@@ -2577,7 +2613,14 @@ mod subscription_tests {
         let (_sender, receiver) = register(&shared, 1);
         let worker_shared = Arc::clone(&shared);
         let worker = std::thread::spawn(move || {
-            forward_subscription(server, worker_shared, 1, receiver, None)
+            forward_subscription(
+                server,
+                worker_shared,
+                1,
+                receiver,
+                None,
+                WORLD_FRAME_DEADLINE,
+            )
         });
         std::thread::sleep(Duration::from_millis(250));
         assert!(vacant_subscriber_slot(&shared).ok().flatten().is_none());
@@ -2592,13 +2635,45 @@ mod subscription_tests {
         let shared = Arc::new(Mutex::new(None));
         let (_sender, receiver) = register(&shared, 1);
         let began = Instant::now();
-        let failure = forward_subscription(server, Arc::clone(&shared), 1, receiver, None)
+        let timeout = Duration::from_millis(400);
+        let failure = forward_subscription(server, Arc::clone(&shared), 1, receiver, None, timeout)
             .err()
             .unwrap();
-        assert!(began.elapsed() >= Duration::from_secs(2));
-        assert!(began.elapsed() < Duration::from_secs(3));
+        assert!(began.elapsed() >= timeout);
+        assert!(began.elapsed() < timeout + Duration::from_secs(1));
         assert_eq!(failure.kind, io::ErrorKind::ConnectionAborted);
         assert!(shared.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_stall_shorter_than_the_frame_deadline_keeps_the_subscription() {
+        // Live engine stalls of two to four seconds ended the stream and
+        // released every player; the deadline must outlast such a stall.
+        assert!(WORLD_FRAME_DEADLINE >= Duration::from_secs(10));
+        // A reader that pauses for a durable reward commit keeps its stream:
+        // ten seconds of 50 ms frames fit the queue.
+        const { assert!(WORLD_FRAME_QUEUE >= 200) };
+        let (mut client, server) = sockets();
+        let shared = Arc::new(Mutex::new(None));
+        let (sender, receiver) = register(&shared, 1);
+        let worker_shared = Arc::clone(&shared);
+        let timeout = Duration::from_millis(900);
+        let worker = std::thread::spawn(move || {
+            forward_subscription(server, worker_shared, 1, receiver, None, timeout)
+        });
+        // Frames arrive with gaps shorter than the deadline.
+        for _ in 0..4 {
+            std::thread::sleep(Duration::from_millis(500));
+            sender.send(response()).unwrap();
+            let line = mag_gameplay::read_line(&mut client, Duration::from_secs(1)).unwrap();
+            assert!(serde_json::from_slice::<Response>(&line).unwrap().ok);
+        }
+        assert!(
+            shared.lock().unwrap().is_some(),
+            "a short stall ended the stream"
+        );
+        client.shutdown(Shutdown::Write).unwrap();
+        assert!(worker.join().unwrap().is_err());
     }
 
     #[test]
@@ -2607,9 +2682,16 @@ mod subscription_tests {
         let shared = Arc::new(Mutex::new(None));
         let (_sender, receiver) = register(&shared, 1);
         client.write_all(b"x").unwrap();
-        let failure = forward_subscription(server, Arc::clone(&shared), 1, receiver, None)
-            .err()
-            .unwrap();
+        let failure = forward_subscription(
+            server,
+            Arc::clone(&shared),
+            1,
+            receiver,
+            None,
+            WORLD_FRAME_DEADLINE,
+        )
+        .err()
+        .unwrap();
         assert_eq!(failure.kind, io::ErrorKind::InvalidData);
         assert_eq!(failure.diagnostic()["category"], "invalid_framing");
         assert!(shared.lock().unwrap().is_none());

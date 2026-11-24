@@ -65,6 +65,22 @@ segments, so retention gaps are visible. Retention bounds disk use by age, not
 size: choose it so the expected log rate over that period fits the log volume.
 Both flags are rejected with `--validate-catalogs` and `--collision-query`.
 
+A served worker writes the event log from its own thread, so a slow disk never
+holds the world lock that ticks and bridge requests share. Up to 32 MiB of
+records wait in memory; beyond that, records are dropped rather than stalling
+the match, each drop leaves a gap in the record sequence numbers, and stderr
+reports `{"event":"event_log_records_dropped","dropped":N,"dropped_total":T}`
+once the writer catches up. A storage error still stops gameplay from accepting
+actions, one record later than a direct write would.
+
+The bridge tolerates short worker stalls: event requests wait up to 6 seconds
+and control requests 2 seconds, and Medius ends the world stream only after 12
+seconds without a frame (gameplay sends a heartbeat every second and ends a
+subscription after 10 silent seconds). A world-stream gap still releases every
+player. A recipient whose reliable shared or notification queue exceeds 512
+entries is evicted with `replication_backlog_released`, which records both queue
+lengths.
+
 Do not combine the validator with `--collision-query`; diagnostic queries are a
 separate command. When an explicit application selects an optional collision
 world, its map must match the selected spawn catalog in both offline validation

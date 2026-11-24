@@ -436,12 +436,15 @@ mod tests {
         assert!(!dispatch(&mut engine, refresh(90, 3)).ok);
         actor_mut(&mut engine, PEER).pending_shared.clear();
         let owner = actor_mut(&mut engine, OWNER);
-        for _ in 0..128 {
+        for _ in 0..crate::match_flow::MAX_PENDING_NOTIFICATIONS {
             owner.queue_round(Publication::Application(Vec::new()));
         }
         assert!(!dispatch(&mut engine, refresh(90, 3)).ok);
         let owner = actor_mut(&mut engine, OWNER);
-        assert_eq!(owner.pending_notifications.len(), 128);
+        assert_eq!(
+            owner.pending_notifications.len(),
+            crate::match_flow::MAX_PENDING_NOTIFICATIONS
+        );
         assert!(!owner.replication_backlogged);
         owner.pending_notifications.clear();
         engine.max_log = engine.written;
