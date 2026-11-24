@@ -887,6 +887,22 @@ impl ItemCatalog {
     pub(crate) fn retail_authored_ref(&self, item_id: u16) -> Option<&str> {
         self.retail_item_refs.get(&item_id).map(String::as_str)
     }
+    /// Every retail wire item ID with its authored reference, in ID order.
+    pub(crate) fn retail_item_refs(&self) -> impl Iterator<Item = (u16, &str)> {
+        self.retail_item_refs
+            .iter()
+            .map(|(&id, reference)| (id, reference.as_str()))
+    }
+    /// The loaded combat metadata names this exact item catalog file, so rows
+    /// may be derived from its authored definitions.
+    pub(crate) fn retail_combat_describes_items(&self) -> bool {
+        self.retail_item_source_sha256
+            .as_deref()
+            .zip(self.retail_combat.as_ref())
+            .is_some_and(|(source, combat)| {
+                combat.provenance()["catalog_sha256"].as_str() == Some(source)
+            })
+    }
     fn item(&self, id: u16) -> Result<&Value, &'static str> {
         let retail = self.application_id() == 20231;
         if id >= if retail { 4096 } else { 1024 } {

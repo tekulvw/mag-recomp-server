@@ -92,3 +92,9 @@ Each refusal has its own code, beginning with `unsupported_bullet_attachment`:
 A refused ordinary firearm Hit records a `refused_equipment` field in its audit.
 This field holds the gear, the weapon item and the populated attachment slots,
 so missing coverage can be seen in the event log.
+
+## Rocket launchers
+
+Gear-3 rocket launchers fire through the separate launcher runtime, not
+ordinary Hits. In Sabotage their rows are derived from the item catalog in the
+same way; see [stock infantry launchers](infantry-rocket-runtime.md#sabotage).
