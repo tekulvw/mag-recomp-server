@@ -8,6 +8,8 @@ COPY gameplay/vendor/ vendor/
 COPY gameplay/data/synthetic-bot-objective-policy.json gameplay/data/synthetic-wire-profiles.json gameplay/data/synthetic-movement-metadata.json data/
 COPY gameplay/tests/support/synthetic_runtime_catalogs.rs tests/support/
 COPY tests/registry_fixture.rs examples/
+# A throwaway debug worker: no incremental state or full debug info to write and link.
+ENV CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=line-tables-only
 RUN cargo build --locked --bin mag-gameplay \
     && MAG_REGISTRY_TEST_CATALOGS=/opt/mag-registry-catalogs cargo run --locked --example registry_fixture
 

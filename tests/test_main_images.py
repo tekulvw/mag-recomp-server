@@ -48,9 +48,11 @@ class MainImagesTests(unittest.TestCase):
         for name in ('build-images', 'promote-main'):
             self.assertEqual(jobs[name]['permissions'], {'contents': 'read', 'packages': 'write'})
 
-    def test_newest_main_cancels_older_runs_but_reruns_cannot_displace_it(self):
+    def test_running_main_finishes_and_only_the_newest_waits_but_reruns_cannot_displace_it(self):
         concurrency = workflow()['concurrency']
-        self.assertEqual(concurrency['cancel-in-progress'], 'true')
+        # A running build is never cancelled; GitHub keeps one waiting run, the newest.
+        self.assertEqual(concurrency['cancel-in-progress'], 'false')
+        self.assertNotIn('queue', concurrency)
         self.assertIn('${{ github.ref }}', concurrency['group'])
         # A rerun of an old commit gets its own group instead of cancelling current main.
         self.assertIn("github.run_attempt != '1' && '-rerun'", concurrency['group'])
