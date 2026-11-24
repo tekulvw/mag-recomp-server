@@ -27,6 +27,15 @@ def static_region(lower, upper, provenance):
                             'Dynamic/entity-created/moving collision is outside this capability; terrain holes remain query failures.'] + provenance)
 
 
+def manifest_terrain_token(manifest):
+    """Return the map manifest's single bound type1 terrain resource token."""
+    tokens = {pack['resource_binding']['resource_name_token']
+              for member in manifest['resource_members'] for pack in member['packfiles']
+              if pack.get('resource_binding', {}).get('physics_type_raw') == 1}
+    require(len(tokens) == 1, 'map manifest must bind exactly one type1 terrain resource')
+    return tokens.pop()
+
+
 def compiled_records(join, clv):
     records = []
     counts = collections.Counter()
@@ -82,14 +91,18 @@ def load_meshes(pack, catalog, cache):
 def export(args):
     require(not args.output.exists(), 'refusing existing output')
     map_name = getattr(args, 'map_name', None) or MAP
-    terrain_token = getattr(args, 'terrain_token', None) or TERRAIN
-    require(len(terrain_token) == 8 and all(c in '0123456789abcdef' for c in terrain_token),
-            'terrain token must be eight lowercase hexadecimal digits')
+    terrain_token = getattr(args, 'terrain_token', None)
     terrain_proof = native_proof(args.terrain_proof, args.retail_elf, map_name=map_name)
     placement_proof = verify_placement(args.placement_proof, args.retail_elf)
     manifest_bytes = args.map_manifest.read_bytes()
     manifest = json.loads(manifest_bytes)
     require(manifest['build'] == 'retail-bcus98110-01.00' and manifest['map'] == map_name, 'wrong retail map')
+    if terrain_token is None:
+        # The existing target keeps its pinned token; other maps take the
+        # manifest's single source-bound type1 terrain resource.
+        terrain_token = TERRAIN if map_name == MAP else manifest_terrain_token(manifest)
+    require(len(terrain_token) == 8 and all(c in '0123456789abcdef' for c in terrain_token),
+            'terrain token must be eight lowercase hexadecimal digits')
     join_bytes = args.instance_join.read_bytes()
     join = json.loads(gzip.decompress(join_bytes))
     require(join['build'] == manifest['build'] and join['map'] == map_name, 'wrong instance join')
@@ -230,7 +243,8 @@ def main():
     parser.add_argument('--catalog', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--map-name', help='Retail map identity; defaults to the existing export target')
-    parser.add_argument('--terrain-token', help='Source-bound type1 terrain token, eight lowercase hex digits')
+    parser.add_argument('--terrain-token', help='Source-bound type1 terrain token, eight lowercase hex digits; '
+                        'defaults to the map manifest\'s single type1 terrain resource')
     parser.add_argument('--reference-pose', action='store_true', help='Allow frozen compiled parent poses without verified physics regions')
     parser.add_argument('--parent-proof', type=Path, help='Externally reviewed, ELF-bound retail parent witness')
     parser.add_argument('--physics-region-min', type=lambda s: [float(v) for v in s.split(',')])

@@ -22,6 +22,13 @@ KINDS = {0: 'insertion', 1: 'alternate'}
 SQUADS = {'Alpha': 0, 'Bravo': 1, 'Charlie': 2, 'Delta': 3}
 OPPOSING_MODES = {'GameType64': 0, 'GameType128': 1, 'GameType256': 2}
 MODES = {**OPPOSING_MODES, 'GameTypeFactionExercise': 3}
+# Authored (definitions, direct instances) objective cardinality pinned for each
+# supported retail Sabotage map; the configured defender comes from the archive.
+SABOTAGE_OBJECTIVES = {
+    'mag_cosmodrome_final': (13, 13),
+    'mag_kennicott_final': (13, 13),
+    'mag_remote_comms_final': (13, 13),
+}
 
 
 def sha(data):
@@ -215,9 +222,9 @@ def build(disc, game_archive, map_name, active_team, active_platoon, active_squa
               'note': 'Authored pre-terrain-snap coordinates; retail runtime pool indices unverified'}
     if opposing:
         graph = points['objectives']
-        if (sabotage and map_name == 'mag_cosmodrome_final'
-                and (len(graph['definitions']) != 13 or len(graph['instances']) != 13)):
-            raise SystemExit('Original Syr Darya objective cardinality changed')
+        expected = SABOTAGE_OBJECTIVES.get(map_name) if sabotage else None
+        if expected is not None and (len(graph['definitions']), len(graph['instances'])) != expected:
+            raise SystemExit('Original Sabotage objective cardinality changed')
         source.update(unsupported_spawn_links=unsupported_links, authored_objectives={
             'definitions': len(graph['definitions']), 'direct_instances': len(graph['instances']),
             'catalog': 'gameplay/data/retail-maps.json', 'map': map_name,

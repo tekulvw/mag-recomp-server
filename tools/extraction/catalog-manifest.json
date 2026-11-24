@@ -481,32 +481,32 @@
     {
       "output": "retail-sver-sab-objectives.json",
       "status": "direct",
-      "command": "project-retail-sabotage-objectives.py --disc DISC --game-archive GAME --output OUTPUT",
+      "command": "project-retail-sabotage-objectives.py --disc DISC --game-archive GAME [--map SABOTAGE_MAP] --output OUTPUT",
       "inputs": "Original retail disc and game archive",
       "dependencies": [
         "Python 3.11+ standard library"
       ],
-      "limitations": "Bounded script fact inventory, not a Lua interpreter or runtime object-ID assignment."
+      "limitations": "One of the three retail Sabotage maps per run; bounded script fact inventory, not a Lua interpreter or runtime object-ID assignment."
     },
     {
       "output": "retail-sver-sab-spawns.json",
       "status": "direct",
-      "command": "build-retail-spawn-catalog.py --disc DISC --game-archive GAME --map MAP --active TEAM/PLATOON/SQUAD --output OUTPUT",
+      "command": "build-retail-spawn-catalog.py --disc DISC --game-archive GAME --map MAP --active TEAM/PLATOON/SQUAD [--attacking-faction FACTION] --output OUTPUT",
       "inputs": "Original retail disc and game archive; explicit selection policy",
       "dependencies": [
         "Python 3.11+ standard library"
       ],
-      "limitations": "Only Suppression and SVER Sabotage entry supported; authored pre-snap coordinates; objectives disabled."
+      "limitations": "Suppression plus Sabotage entry on the three retail Sabotage maps; opposing modes need an explicit attacker except legacy Cosmodrome; authored pre-snap coordinates; objectives disabled."
     },
     {
       "output": "retail-sver-sup-spawns.json",
       "status": "direct",
-      "command": "build-retail-spawn-catalog.py --disc DISC --game-archive GAME --map MAP --active TEAM/PLATOON/SQUAD --output OUTPUT",
+      "command": "build-retail-spawn-catalog.py --disc DISC --game-archive GAME --map MAP --active TEAM/PLATOON/SQUAD [--attacking-faction FACTION] --output OUTPUT",
       "inputs": "Original retail disc and game archive; explicit selection policy",
       "dependencies": [
         "Python 3.11+ standard library"
       ],
-      "limitations": "Only Suppression and SVER Sabotage entry supported; authored pre-snap coordinates; objectives disabled."
+      "limitations": "Suppression plus Sabotage entry on the three retail Sabotage maps; opposing modes need an explicit attacker except legacy Cosmodrome; authored pre-snap coordinates; objectives disabled."
     },
     {
       "output": "retail-v1-mediation-profile.json",
