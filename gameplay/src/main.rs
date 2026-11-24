@@ -683,7 +683,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                 "--smoke-grenade-rules requires an absolute path",
             ));
         }
-        if match_profiles_path.is_some() || acquisition_gameplay_path.is_some() {
+        if acquisition_gameplay_path.is_some() {
             return Err(io::Error::other(
                 "configure smoke grenades inside the Acquisition or Domination configuration",
             ));
@@ -693,7 +693,9 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                 "--smoke-grenade-rules requires a retail gameplay worker",
             ));
         }
-        if objective_path.is_none() {
+        // A registry worker binds the rules to each Sabotage profile's own
+        // objective catalog; a direct worker binds them to its base catalog.
+        if match_profiles_path.is_none() && objective_path.is_none() {
             return Err(io::Error::other(
                 "--smoke-grenade-rules requires --objective-catalog",
             ));
@@ -1184,10 +1186,12 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                 .map_err(io::Error::other)?;
         }
     }
-    // Acquisition carries its own smoke rules; a direct Sabotage or
-    // Suppression worker names them on the command line.
-    let smoke_grenade_source = match &smoke_grenade_rules_path {
-        Some(path) => {
+    // Acquisition and Domination carry their own smoke rules. A direct
+    // Sabotage or Suppression worker names them on the command line, and a
+    // registry worker applies the same flag to its Sabotage profiles below.
+    let mut smoke_grenade_rules = smoke_grenade_rules_path
+        .as_ref()
+        .map(|path| {
             let mut raw = Vec::new();
             std::fs::File::open(path)?
                 .take((1 << 20) + 1)
@@ -1195,13 +1199,20 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             if raw.len() > 1 << 20 {
                 return Err(io::Error::other("invalid_smoke_grenade_rules"));
             }
-            Some(raw)
+            Ok::<_, io::Error>(raw)
+        })
+        .transpose()?;
+    let smoke_grenade_source = if match_profiles_path.is_some() {
+        None
+    } else {
+        match smoke_grenade_rules.take() {
+            Some(raw) => Some(raw),
+            None => acquisition_config
+                .as_ref()
+                .map(|config| config.smoke_grenade_source())
+                .transpose()?
+                .flatten(),
         }
-        None => acquisition_config
-            .as_ref()
-            .map(|config| config.smoke_grenade_source())
-            .transpose()?
-            .flatten(),
     };
     let smoke_grenades = smoke_grenade_source
         .map(|source| {
@@ -1721,6 +1732,11 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         .as_ref()
         .map(mag_gameplay::match_profiles::Registry::load)
         .transpose()?;
+    if let (Some(registry), Some(raw)) = (&mut match_profiles, smoke_grenade_rules.take()) {
+        registry
+            .set_sabotage_smoke_grenade_rules(Arc::from(raw))
+            .map_err(io::Error::other)?;
+    }
     let native_leadership = leadership
         .as_ref()
         .is_some_and(|(_, policy)| policy.supports_match_profiles());
@@ -3620,6 +3636,60 @@ mod runtime_profile_tests {
                         .unwrap_err()
                         .to_string()
                         .contains("--spawn-catalog")
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn registry_smoke_rules_reach_sabotage_rows_and_stay_out_of_other_modes() {
+        std::thread::Builder::new()
+            .stack_size(1024 * 1024)
+            .spawn(|| {
+                let files = SyntheticCatalogs::new();
+                let manifest = synthetic_match_profile(&files);
+                files.write("smoke.json", &serde_json::json!({}));
+                let smoke = files.0.join("smoke.json").display().to_string();
+                let mut args = files.args();
+                args.extend([
+                    "--match-profiles".into(),
+                    manifest.display().to_string(),
+                    "--smoke-grenade-rules".into(),
+                    smoke,
+                ]);
+                // No base --objective-catalog: the Sabotage row binds the rules
+                // to its own objective catalog, which this row lacks.
+                let error = run(args.clone()).unwrap_err().to_string();
+                assert!(
+                    error.contains("smoke_grenade_objectives_required"),
+                    "{error}"
+                );
+                let mut relative = args.clone();
+                *relative.last_mut().unwrap() = "smoke.json".into();
+                assert!(
+                    run(relative)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("--smoke-grenade-rules requires an absolute path")
+                );
+                let mut acquisition = args.clone();
+                acquisition.extend([
+                    "--acquisition-gameplay".into(),
+                    files.0.join("acquisition.json").display().to_string(),
+                ]);
+                assert!(run(acquisition).unwrap_err().to_string().contains(
+                    "configure smoke grenades inside the Acquisition or Domination configuration"
+                ));
+                // A registry with no Sabotage row has nothing to apply them to.
+                let mut spawns = files.read("profile-spawns.json");
+                spawns["match_profile"]["game_type"] = serde_json::json!(1);
+                files.write("profile-spawns.json", &spawns);
+                let error = run(args).unwrap_err().to_string();
+                assert!(
+                    error.contains("smoke_grenade_rules_require_sabotage_profile"),
+                    "{error}"
                 );
             })
             .unwrap()

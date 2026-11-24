@@ -35,12 +35,26 @@ direct Sabotage or Suppression worker (no Acquisition configuration and no
 `--match-profiles`) takes `--smoke-grenade-rules /absolute/SMOKE.json` instead,
 together with `--objective-catalog`, whose source image identifies the
 executable the rules were projected from. In the Helm chart, put the file in
-the data bundle and add both flags to `data.gameplayExtraArgs`. The catalog
-must match the loaded retail item, binding, bootstrap, archive and executable
-provenance. Omit the property or flag to leave support off; a smoke throw is
-then refused like any other unconfigured item, so no peer sees it. Ordinary
-frag configuration remains separate. `--validate-catalogs` reports whether
-configured smoke profiles were validated, without opening listeners.
+the data bundle and add both flags to `data.gameplayExtraArgs`.
+
+A [match-profile registry worker](worker-match-profiles.md) takes the same
+`--smoke-grenade-rules /absolute/SMOKE.json` flag for its Sabotage profiles.
+The rules are map-independent, like the falling and incapacitation rules, so
+one worker-wide file serves every Sabotage row. Each row binds the rules to its
+own objective catalog's source image, so no base `--objective-catalog` is
+needed, and startup refuses a Sabotage row without one. Startup also refuses
+the flag when the registry has no Sabotage row. Acquisition and Domination rows
+ignore the flag and keep the rules their own gameplay configuration names; no
+row receives both. Selecting a Sabotage row installs the same capability a
+direct worker uses, and selecting any other row removes it. In the Helm chart,
+put the file in that worker's bundle and add the flag to the worker's
+`extraArgs`.
+
+The catalog must match the loaded retail item, binding, bootstrap, archive and
+executable provenance. Omit the property or flag to leave support off; a smoke
+throw is then refused like any other unconfigured item, so no peer sees it.
+Ordinary frag configuration remains separate. `--validate-catalogs` reports
+whether configured smoke profiles were validated, without opening listeners.
 
 A saved kit can hold a throwable in either equipment gear, 4 or 5, and the
 launch request names the gear it was thrown from. The server accepts the

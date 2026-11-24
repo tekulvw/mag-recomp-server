@@ -745,6 +745,36 @@ impl Registry {
         }
         Ok(())
     }
+    /// Apply the worker-wide `--smoke-grenade-rules` to every Sabotage
+    /// profile. Acquisition and Domination profiles keep the rules their own
+    /// gameplay configuration names, so no profile receives two sources.
+    pub fn set_sabotage_smoke_grenade_rules(
+        &mut self,
+        source: Arc<[u8]>,
+    ) -> Result<(), &'static str> {
+        let sabotage = |profile: &Loaded| {
+            profile.summary.game_type == 0
+                && profile.acquisition.is_none()
+                && profile.domination.is_none()
+        };
+        if !self.profiles.values().any(sabotage) {
+            return Err("smoke_grenade_rules_require_sabotage_profile");
+        }
+        if self
+            .profiles
+            .values()
+            .any(|profile| sabotage(profile) && profile.smoke_grenade_source.is_some())
+        {
+            return Err("smoke_grenade_source_conflict");
+        }
+        for profile in self.profiles.values_mut() {
+            if sabotage(profile) {
+                profile.smoke_grenade_source = Some(Arc::clone(&source));
+            }
+        }
+        Ok(())
+    }
+
     pub fn bind_smoke_grenades(
         &mut self,
         items: &item_catalog::ItemCatalog,
@@ -759,7 +789,7 @@ impl Registry {
                     &profile.acquisition,
                     &profile.domination
                 ),
-                (1, Some(_), None) | (2, None, Some(_))
+                (0, None, None) | (1, Some(_), None) | (2, None, Some(_))
             ) {
                 return Err("smoke_grenade_mode_required");
             }
@@ -1474,6 +1504,7 @@ impl<W: Write> Engine<W> {
             || self.acquisition_gameplay.is_some()
             || self.domination_round.is_some()
             || self.domination_gameplay.is_some()
+            || self.smoke_grenades.is_some()
         {
             return Err("match_profiles_require_idle_explicit_retail_engine");
         }
@@ -4009,6 +4040,205 @@ mod tests {
                 json!({"format":"mag_match_profiles_v1","profiles":[wrong]})
             ))
             .is_err()
+        );
+    }
+
+    /// A Sabotage row whose objective catalog names `elf`, beside a plain
+    /// game-type-1 row with no gameplay configuration.
+    fn smoke_registry(files: &Files, elf: &str) -> Registry {
+        let spawns = files.write("smoke-sabotage-spawns.json", json!({
+            "format":"mag_spawn_catalog","schema_version":1,"source":"SYNTHETIC smoke registry",
+            "active":{"map_name":"synthetic_home_1","squad_index":0,"default_spawn":0,"available":[0]},
+            "match_profile":{"game_type":0,"auto_assign_teams":true,"team_capacity":1,"squad_capacity":1,"attacking_faction":0,"has_bunkers":false,"has_objectives":true},
+            "maps":[{"name":"synthetic_home_1","owner_faction":1,"spawn_count":1,
+                "locations":[{"index":0,"token":7,"kind":"on_foot","position":{"x":2.,"y":0.,"z":2.}}],
+                "squads":[{"index":0,"team":0,"platoon":0,"squad":0,"faction":null,"available":[0],"default_spawn":0},
+                {"index":16,"team":1,"platoon":0,"squad":0,"faction":1,"available":[0],"default_spawn":0}]}]
+        }));
+        let squads: Vec<_> = (0..8)
+            .map(|slot| {
+                json!({
+                    "team": slot / 4, "squad_index": slot / 4 * 16 + slot % 4,
+                    "initial_objective_index": 117,
+                    "authored_objectives": [{"object_index": 117, "order": 1}]
+                })
+            })
+            .collect();
+        let objectives = files.write("smoke-sabotage-objectives.json", json!({
+            "schema_version": 1, "format": "mag_retail_objective_catalog",
+            "application_id": 20231, "protocol": crate::protocol::ProtocolInfo::RETAIL_PROTOCOL,
+            "game_type": 0, "map_name": "synthetic_home_1", "entity_family": 12, "network_type": 12,
+            "source": {
+                "authored_catalog_sha256": "0".repeat(64), "binding_capture_sha256": "1".repeat(64),
+                "startup_proof_sha256": "2".repeat(64), "source_image_sha256": elf,
+                "capture_qualification": "bounded_concurrent_token_slot_capture"
+            },
+            "objects": [{"token": "0x76543210", "object_index": 117, "initial_state": 1}],
+            "squads": squads
+        }));
+        Registry::load(files.write(
+            "smoke-manifest.json",
+            json!({"format":"mag_match_profiles_v1","profiles":[
+                {"profile_id":"sabotage","spawn_catalog":spawns,"objective_catalog":objectives},
+                {"profile_id":"acquisition","spawn_catalog":files.spawns(1, 0, 1)}
+            ]}),
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn registry_sabotage_profiles_take_worker_smoke_rules_on_selection() {
+        use crate::smoke_grenades::tests::{
+            SYNTHETIC_ELF, synthetic_item_id, synthetic_rules_and_items,
+        };
+        let files = Files::new();
+        let (rules, items) = synthetic_rules_and_items();
+        let mut registry = smoke_registry(&files, SYNTHETIC_ELF);
+        registry
+            .set_sabotage_smoke_grenade_rules(Arc::from(rules))
+            .unwrap();
+        let mut engine = base_engine(&files, Vec::new(), 100_000);
+        engine.item_catalog = Arc::new(items);
+        let mut engine = engine.with_match_profiles(registry).unwrap();
+        let registry = engine.match_profiles.as_ref().unwrap();
+        assert!(registry.has_smoke_grenades());
+        assert!(registry.profiles["sabotage"].smoke_grenades.is_some());
+        assert!(registry.profiles["acquisition"].smoke_grenades.is_none());
+
+        assert!(select(&mut engine, "smoke-sabotage", "sabotage").ok);
+        assert_eq!(engine.match_profile().game_type, 0);
+        for faction in 0..3 {
+            let throw = engine
+                .grenade_parameters(faction, synthetic_item_id(faction))
+                .expect("the Sabotage world throws the stock smoke");
+            assert_eq!(
+                (
+                    throw.fuse_ms,
+                    throw.authored_lifetime_ms,
+                    throw.initial_count
+                ),
+                (2000, 9000, 2)
+            );
+            assert_eq!(throw.damage.character, 0.0);
+        }
+        let selected = engine.smoke_grenades.clone().unwrap();
+        // The fixed-profile gate accepts the same capability in this world.
+        assert!(
+            base_engine(&files, Vec::new(), 100_000)
+                .with_smoke_grenades(Arc::clone(&selected))
+                .is_ok()
+        );
+
+        assert!(select(&mut engine, "plain-acquisition", "acquisition").ok);
+        assert!(engine.smoke_grenades.is_none());
+        assert!(select(&mut engine, "smoke-sabotage-again", "sabotage").ok);
+        assert!(Arc::ptr_eq(
+            engine.smoke_grenades.as_ref().unwrap(),
+            &selected
+        ));
+    }
+
+    #[test]
+    fn worker_smoke_rules_leave_acquisition_and_domination_sources_alone() {
+        let files = Files::new();
+        let mut engine = engine(&files, Vec::new(), 100_000);
+        add_gameplay_profile(&mut engine);
+        let registry = engine.match_profiles.as_mut().unwrap();
+        let own: Arc<[u8]> = Arc::from(&b"acquisition configuration rules"[..]);
+        registry
+            .profiles
+            .get_mut("acquisition-world")
+            .unwrap()
+            .smoke_grenade_source = Some(Arc::clone(&own));
+        registry
+            .profiles
+            .get_mut("p-1-2-0")
+            .unwrap()
+            .summary
+            .game_type = 2;
+        let worker: Arc<[u8]> = Arc::from(&b"worker rules"[..]);
+        registry
+            .set_sabotage_smoke_grenade_rules(Arc::clone(&worker))
+            .unwrap();
+        for (id, profile) in &registry.profiles {
+            let source = profile.smoke_grenade_source.as_ref();
+            match (profile.summary.game_type, id.as_str()) {
+                (_, "acquisition-world") => assert!(Arc::ptr_eq(source.unwrap(), &own)),
+                (0, _) => assert!(Arc::ptr_eq(source.unwrap(), &worker), "{id}"),
+                _ => assert!(source.is_none(), "{id}"),
+            }
+        }
+        // A second worker-wide source is a conflict, not a replacement.
+        assert_eq!(
+            registry.set_sabotage_smoke_grenade_rules(Arc::from(&b"other"[..])),
+            Err("smoke_grenade_source_conflict")
+        );
+        assert!(Arc::ptr_eq(
+            registry.profiles["p-0-0-1"]
+                .smoke_grenade_source
+                .as_ref()
+                .unwrap(),
+            &worker
+        ));
+    }
+
+    #[test]
+    fn worker_smoke_rules_refuse_registries_they_cannot_bind() {
+        use crate::smoke_grenades::tests::{SYNTHETIC_ELF, synthetic_rules_and_items};
+        let files = Files::new();
+        let (rules, items) = synthetic_rules_and_items();
+        let rules: Arc<[u8]> = Arc::from(rules);
+
+        let acquisition_only = Registry::load(files.write(
+            "acquisition-only.json",
+            json!({"format":"mag_match_profiles_v1","profiles":[
+                {"profile_id":"acquisition","spawn_catalog":files.spawns(1, 0, 1)}]}),
+        ))
+        .unwrap();
+        let mut registry = acquisition_only;
+        assert_eq!(
+            registry.set_sabotage_smoke_grenade_rules(Arc::clone(&rules)),
+            Err("smoke_grenade_rules_require_sabotage_profile")
+        );
+
+        // Every Sabotage row binds to its own objective catalog's executable.
+        let mut registry = files.registry();
+        registry
+            .set_sabotage_smoke_grenade_rules(Arc::clone(&rules))
+            .unwrap();
+        assert_eq!(
+            registry.bind_smoke_grenades(&items),
+            Err("smoke_grenade_objectives_required")
+        );
+        let mut registry = smoke_registry(&files, &"3".repeat(64));
+        registry
+            .set_sabotage_smoke_grenade_rules(Arc::clone(&rules))
+            .unwrap();
+        assert_eq!(
+            registry.bind_smoke_grenades(&items),
+            Err("smoke_grenade_source_mismatch")
+        );
+        let mut registry = smoke_registry(&files, SYNTHETIC_ELF);
+        registry
+            .set_sabotage_smoke_grenade_rules(Arc::from(&b"{}"[..]))
+            .unwrap();
+        assert_eq!(
+            registry.bind_smoke_grenades(&items),
+            Err("invalid_smoke_grenade_rules")
+        );
+        assert!(!registry.has_smoke_grenades());
+
+        // A base world carrying fixed-profile smoke cannot become a registry.
+        let catalog =
+            crate::smoke_grenades::Catalog::from_bytes(&rules, &items, SYNTHETIC_ELF).unwrap();
+        let mut registry = smoke_registry(&files, SYNTHETIC_ELF);
+        registry.set_sabotage_smoke_grenade_rules(rules).unwrap();
+        let mut fixed = base_engine(&files, Vec::new(), 100_000);
+        fixed.item_catalog = Arc::new(items);
+        let fixed = fixed.with_smoke_grenades(Arc::new(catalog)).unwrap();
+        assert_eq!(
+            fixed.with_match_profiles(registry).err(),
+            Some("match_profiles_require_idle_explicit_retail_engine")
         );
     }
 }
