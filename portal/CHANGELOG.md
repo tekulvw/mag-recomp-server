@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0](https://github.com/tekulvw/mag-recomp-server/compare/portal-v0.3.0...portal-v0.4.0) (2026-11-24)
+
+
+### Features
+
+* **medius:** accept 12-hour portal tickets and answer refusals ([#216](https://github.com/tekulvw/mag-recomp-server/issues/216)) ([aa91046](https://github.com/tekulvw/mag-recomp-server/commit/aa910468f686374be412b44627cefb6e7a627953))
+* **portal:** add friends, friend requests, blocks and a presence relay ([#220](https://github.com/tekulvw/mag-recomp-server/issues/220)) ([c45427b](https://github.com/tekulvw/mag-recomp-server/commit/c45427be75230c553d5e3379432f902b9e3f1434))
+
 ## [0.3.0](https://github.com/tekulvw/mag-recomp-server/compare/portal-v0.2.0...portal-v0.3.0) (2026-11-23)
 
 
