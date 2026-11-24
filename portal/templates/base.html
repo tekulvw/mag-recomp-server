@@ -13,6 +13,7 @@
   {% if let Some(csrf) = nav_csrf %}
   <nav aria-label="Site">
     <a href="/#play">How to play</a>
+    <a href="/friends">Friends</a>
     <a href="/account">Account</a>
     <form method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="link">Sign out</button></form>
   </nav>

@@ -758,7 +758,7 @@ pub async fn mint_service_token(
     Ok(row.map(|(device_id,)| MintedToken { device_id, token }))
 }
 
-/// Drops expired sign-in flows, sessions and link codes.
+/// Drops expired sign-in flows, sessions, link codes and presence.
 pub async fn cleanup(pool: &PgPool) -> sqlx::Result<u64> {
     let mut removed = 0;
     for sql in [
@@ -768,5 +768,6 @@ pub async fn cleanup(pool: &PgPool) -> sqlx::Result<u64> {
     ] {
         removed += sqlx::query(sql).execute(pool).await?.rows_affected();
     }
+    removed += crate::social::purge_presence(pool).await?;
     Ok(removed)
 }

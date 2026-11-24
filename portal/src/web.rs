@@ -42,12 +42,21 @@ pub struct AppState {
     pub reports: Option<Arc<crate::reports::Reports>>,
 }
 
-/// Per-address limits on the requests that create rows or carry large bodies.
+/// Per-address limits on the requests that create rows or carry large bodies, and per-account
+/// limits on the social API (docs/portal-social.md).
 pub struct Limits {
     pub link_start: RateLimiter,
     pub sign_in: RateLimiter,
     /// Report uploads, before the per-account allowance.
     pub reports: RateLimiter,
+    /// `PUT /api/v1/social/presence`, per account.
+    pub presence: RateLimiter<i32>,
+    /// Friend requests, answers, removals and blocks (API and Friends page), per account.
+    pub social_changes: RateLimiter<i32>,
+    /// `GET /api/v1/social` and the Friends page, per account.
+    pub social_reads: RateLimiter<i32>,
+    /// `GET /api/v1/social/lookup`, per account.
+    pub lookup: RateLimiter<i32>,
 }
 
 impl Default for Limits {
@@ -57,6 +66,10 @@ impl Default for Limits {
             link_start: RateLimiter::new(10, minute),
             sign_in: RateLimiter::new(30, minute),
             reports: RateLimiter::new(60, minute),
+            presence: RateLimiter::new(60, minute),
+            social_changes: RateLimiter::new(30, minute),
+            social_reads: RateLimiter::new(120, minute),
+            lookup: RateLimiter::new(30, minute),
         }
     }
 }
@@ -120,6 +133,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             )),
         )
         .merge(crate::admin_web::routes())
+        .merge(crate::social_web::routes())
         .layer(axum::middleware::map_response(security_headers))
         .with_state(state)
 }
@@ -183,6 +197,7 @@ struct PrivacyPage {
     nav_csrf: Option<String>,
     contact: Option<String>,
     report_days: i64,
+    presence_seconds: i64,
 }
 
 #[derive(Template)]
@@ -384,6 +399,7 @@ async fn privacy(State(state): Shared, headers: HeaderMap) -> PageResult {
             nav_csrf,
             contact: state.settings.operator_contact.clone(),
             report_days: state.reports.as_ref().map_or(30, |r| r.retention_days),
+            presence_seconds: crate::social::PRESENCE_TTL_SECONDS,
         },
     ))
 }
@@ -809,7 +825,7 @@ struct CodeQuery {
 }
 
 /// Signed in, named and not banned; otherwise the page to show instead.
-async fn link_session(
+pub(crate) async fn link_session(
     state: &AppState,
     headers: &HeaderMap,
     next: &str,
@@ -828,7 +844,7 @@ async fn link_session(
         return Err(Box::new(message(
             StatusCode::FORBIDDEN,
             "Account banned",
-            "This account is banned, so it cannot link a launcher.",
+            "This account is banned, so it cannot link a launcher or use friends.",
             Some(("/account", "Your account")),
         )));
     }
@@ -957,7 +973,7 @@ async fn link_decide(
 
 // ---- Launcher API ----
 
-fn api_error(status: StatusCode, error: &str) -> Response {
+pub(crate) fn api_error(status: StatusCode, error: &str) -> Response {
     (status, Json(json!({ "error": error }))).into_response()
 }
 
@@ -1065,7 +1081,7 @@ async fn api_device_token(
     })
 }
 
-fn bearer(headers: &HeaderMap) -> Option<&str> {
+pub(crate) fn bearer(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(header::AUTHORIZATION)?
         .to_str()

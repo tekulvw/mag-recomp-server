@@ -5,7 +5,9 @@ in with Google, claim a player name and link their launcher. The launcher trades
 device token for short-lived **game tickets**, which the game server verifies with the
 portal's public key. See the [design](../docs/superpowers/specs/2026-11-22-portal-design.md)
 and the [ticket format](../docs/portal-ticket.md). Launchers also send performance and error
-reports with their logs: see [launcher reports](../docs/portal-reports.md).
+reports with their logs: see [launcher reports](../docs/portal-reports.md). Players keep a
+friends list (requests, blocks) at `/friends`, and game clients relay presence through the
+portal: see [friends and presence](../docs/portal-social.md).
 
 The site is server-rendered HTML with no JavaScript. It stores accounts in PostgreSQL and
 never passes Google tokens on to the game or the game server.
@@ -124,6 +126,10 @@ keep working. The response's `audience` says which one the ticket is for:
 error report with gzip'd logs. [Launcher reports](../docs/portal-reports.md) has the body, limits and
 responses (`201` stored, `200` already stored, `400 invalid_report`, `409 report_id_conflict`,
 `413 too_large`, `429 rate_limited` with `Retry-After`, `503 reports_disabled`).
+
+**Friends and presence** — `GET /api/v1/social`, `PUT /api/v1/social/presence` and the request,
+friend, block and lookup calls under `/api/v1/social` with `Authorization: Bearer mgd_…`.
+[Friends and presence](../docs/portal-social.md) has the contract and limits.
 
 **Verifying keys** — `GET /api/v1/ticket-keys` returns `{"keys":[{"id":1,"alg":"ES256","spki":"<base64 DER>"}]}`.
 

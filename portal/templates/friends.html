@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}Friends{% endblock %}
+{% block content %}
+<h1>Friends</h1>
+<p>Friends you add here show up in the game's friends list, with what they are doing while they play. Both of you must agree: send a request, and they accept it here or in the game. As <strong>{{ player_name }}</strong>, your status is shown only to your friends.</p>
+{% if let Some((text, bad)) = notice %}
+<p class="{% if *bad %}alert{% else %}ok{% endif %}">{{ text }}</p>
+{% endif %}
+
+<form method="post" action="/friends/add" class="row">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>Player name<input name="name" value="{{ value }}" maxlength="15" autocomplete="off" required></label>
+  <button>Send request</button>
+</form>
+
+{% if !incoming.is_empty() %}
+<h2>Requests for you</h2>
+<table>
+  <thead><tr><th>Player</th><th></th></tr></thead>
+  <tbody>
+  {% for name in incoming %}
+  <tr><td>{{ name }}</td>
+    <td><div class="row">
+      <form method="post" action="/friends/{{ name }}/accept"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Accept</button></form>
+      <form method="post" action="/friends/{{ name }}/decline"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">Decline</button></form>
+      <form method="post" action="/friends/{{ name }}/block"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="link">Block</button></form>
+    </div></td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2>Your friends · {{ friends.len() }}/{{ max_friends }}</h2>
+{% if friends.is_empty() %}
+<p class="quiet">None yet.</p>
+{% else %}
+<p class="quiet">{{ online }} playing now.</p>
+<table>
+  <thead><tr><th>Player</th><th>Status</th><th></th></tr></thead>
+  <tbody>
+  {% for f in friends %}
+  <tr><td>{{ f.name }}</td>
+    <td>{% if f.online %}<span class="status-on">online</span>{% else %}<span class="quiet">offline</span>{% endif %}</td>
+    <td><div class="row">
+      <form method="post" action="/friends/{{ f.name }}/remove"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="link">Remove</button></form>
+      <form method="post" action="/friends/{{ f.name }}/block"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="link">Block</button></form>
+    </div></td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if !outgoing.is_empty() %}
+<h2>Waiting for an answer</h2>
+<table>
+  <thead><tr><th>Player</th><th></th></tr></thead>
+  <tbody>
+  {% for name in outgoing %}
+  <tr><td>{{ name }}</td>
+    <td><form method="post" action="/friends/{{ name }}/cancel"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="link">Cancel request</button></form></td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2>Blocked players</h2>
+<p>A player you block cannot be your friend and cannot see your status, and their requests never reach you. They are not told.</p>
+{% if !blocked.is_empty() %}
+<table>
+  <thead><tr><th>Player</th><th></th></tr></thead>
+  <tbody>
+  {% for name in blocked %}
+  <tr><td>{{ name }}</td>
+    <td><form method="post" action="/friends/{{ name }}/unblock"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="link">Unblock</button></form></td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+<form method="post" action="/friends/block" class="row">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>Player name<input name="name" maxlength="15" autocomplete="off" required></label>
+  <button class="secondary">Block</button>
+</form>
+{% endblock %}

@@ -95,6 +95,8 @@ button.link:hover { background: none; color: var(--accent-hi); }
 
 .alert { padding: 12px 16px; border: 1px solid var(--danger); border-left-width: 4px; background: rgba(240, 113, 103, 0.08); color: var(--fg); }
 ul.alert { padding-left: 32px; }
+.ok { padding: 12px 16px; border: 1px solid var(--signal); border-left-width: 4px; background: rgba(91, 200, 232, 0.08); color: var(--fg); }
+.status-on { color: var(--signal); font: 13px var(--mono); letter-spacing: 0.08em; text-transform: uppercase; }
 
 /* Forms */
 .stack { display: grid; gap: 14px; max-width: 26rem; }
