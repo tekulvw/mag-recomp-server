@@ -12,6 +12,11 @@ For Sabotage and Acquisition:
 1. Queue authenticated human intent before allocating a DME client or reservation.
 2. Wait for the configured total minimum and at least one human on each selected
    side. Larger configured per-side minima remain effective. Bots do not count.
+   Exception: a profile the worker fills with bots (`bot_fill_v1`, see
+   [bot-filled profiles](worker-match-profiles.md#bot-filled-profiles)) uses the
+   operator's configured minima without that floor. With a configured minimum
+   of one and per-side minima `[0, 0]`, one human starts the match in their own
+   faction, as attacker or defender, and bots fill both sides.
 3. Prioritize the longest-waiting eligible faction, randomly choose an eligible
    opponent, then independently draw a feasible attacker/defender orientation.
    Map/profile counts do not weight faction selection. Other factions stay queued.
@@ -54,8 +59,9 @@ Use a retail0/1/3 base configuration when selecting a64-player Horizon maximum.
 Profiles must supply all needed resource bindings. The current all-map projection
 is entry groundwork and leaves unproved spawn identities and unsupported vehicle
 types unavailable. Arulkum APC-backed insertion remains required. Registry mode
-currently refuses the old global bot-population, bunker, leadership and dummy
-extras rather than carrying stale map-specific state into another profile.
+refuses the old global bot-population, bunker, leadership and dummy extras rather
+than carrying stale map-specific state into another profile. Bots are instead
+configured per profile and validated against that profile's own world.
 Native queued join/cancel, map loading and gameplay acceptance remain live checks.
 Passing source tests does not change services, release pins or the maintainer's
 manual release decision after live-match review.

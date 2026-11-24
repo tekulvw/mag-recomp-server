@@ -33,6 +33,11 @@ namespace Server.Medius
         Task _matchmakingWorker=Task.CompletedTask;
         MagMatchStartupPolicy _formationStartup;
         int[] _formationTeamMinima;
+        // The operator's minima without the two-human floor. Only profiles the
+        // worker fills with bots (bot_fill_v1) form under these.
+        MagMatchStartupPolicy _botFillStartup;
+        int[] _botFillTeamMinima;
+        bool _anyBotFill;
         MagMatchProfile _formedProfile;
         string _formationId;
         bool _formationConfigured;
@@ -51,21 +56,32 @@ namespace Server.Medius
                 for(byte a=0;a<3;a++)for(byte d=0;d<3;d++)if(a!=d &&
                     !hello.MatchProfiles.Any(p=>p.GameType==mode&&p.AttackingFaction==a&&p.DefendingFaction==d))
                     throw new IOException("Faction matchmaking requires every ordered faction pair for each advertised mode.");
+            if(hello.MatchProfiles.Any(p=>p.BotFill)&&!hello.SupportsBotFill)
+                throw new IOException("Bot-filled match profiles require the bot_fill_v1 capability.");
             var configured=_options.MinimumPlayersPerTeam?.ToArray()??new[]{1,1};
             if(configured.Length!=2||configured.Any(n=>n<0))throw new IOException("Matchmaking requires two nonnegative human team minima.");
-            _formationTeamMinima=configured.Select(n=>Math.Max(1,n)).ToArray();
+            _formationTeamMinima=MagFactionMatchmaking.FormationMinima(null,configured);
             _formationStartup=new MagMatchStartupPolicy(Math.Max(2,_minimumPlayers),_maximumPlayers,_formationTeamMinima);
+            _botFillTeamMinima=configured.ToArray();
+            _botFillStartup=new MagMatchStartupPolicy(Math.Max(1,_minimumPlayers),_maximumPlayers,_botFillTeamMinima);
             var profiles = hello.MatchProfiles;
             if (InRegistry)
             {
                 profiles = Array.AsReadOnly(profiles.Where(profile =>
                     _allowedFactions.Contains(profile.AttackingFaction) && _allowedFactions.Contains(profile.DefendingFaction) &&
-                    profile.MaximumPlayers >= _formationStartup.MinimumPlayers &&
-                    _formationTeamMinima.All(minimum => minimum <= profile.TeamCapacity) &&
-                    (long)profile.TeamCapacity * 2 >= _formationStartup.MinimumPlayers).ToArray());
+                    profile.MaximumPlayers >= StartupFor(profile).MinimumPlayers &&
+                    MinimaFor(profile).All(minimum => minimum <= profile.TeamCapacity) &&
+                    (long)profile.TeamCapacity * 2 >= StartupFor(profile).MinimumPlayers).ToArray());
             }
+            _anyBotFill = profiles.Any(profile => profile.BotFill);
             _matchProfiles = _supportsPartyReservations ? profiles : Array.AsReadOnly(profiles.Select(profile => profile with { SquadCapacity = null, SquadCounts = null }).ToArray());
         }
+        MagMatchStartupPolicy StartupFor(MagMatchProfile profile) => profile?.BotFill == true ? _botFillStartup : _formationStartup;
+        int[] MinimaFor(MagMatchProfile profile) => profile?.BotFill == true ? _botFillTeamMinima : _formationTeamMinima;
+        // Placement planning applies the per-profile floor itself, so a worker
+        // with bot-filled profiles reports the operator's unfloored minima.
+        MagMatchStartupPolicy PlacementStartup => _anyBotFill ? _botFillStartup : _formationStartup;
+        int[] PlacementTeamMinima => _anyBotFill ? _botFillTeamMinima : _formationTeamMinima;
         bool RequestedModeIsCurrent(uint mode)
         {
             lock (_gate) return UsesFactionMatchmaking
@@ -167,7 +183,7 @@ namespace Server.Medius
         {
             if(!UsesFactionMatchmaking)return;
             PurgeHumanQueue();
-            status.MinimumPlayers=Enumerable.Repeat((uint)_formationStartup.MinimumPlayers,4).ToArray();
+            status.MinimumPlayers=Enumerable.Repeat((uint)PlacementStartup.MinimumPlayers,4).ToArray();
             foreach(var ticket in _humanQueue.Snapshot())if(!_reservations.Values.Any(r=>IsLiveCohort(r)&&r.Accepted&&
                 r.Account==ticket.Value.Account&&r.CharacterId==ticket.Value.Character))
                 status.QueueSizes[ticket.Human.GameType*3+ticket.Human.Faction] += (uint)ticket.Human.Size;
@@ -256,7 +272,7 @@ namespace Server.Medius
                     {
                         if (InRegistry) return;
                         var selection=MagFactionMatchmaking.Select(_humanQueue.Snapshot().Select(e=>e.Human).ToArray(),
-                            _matchProfiles,_formationStartup.MinimumPlayers,_maximumPlayers,_formationTeamMinima,RandomNumberGenerator.GetInt32);
+                            _matchProfiles,PlacementStartup.MinimumPlayers,_maximumPlayers,PlacementTeamMinima,RandomNumberGenerator.GetInt32);
                         if(selection==null)return;
                         if(!AdvanceTerminalCohort())return;
                         _formedProfile=selection.Profile;_formationId=Id();
@@ -279,7 +295,7 @@ namespace Server.Medius
                         return; // An uncertain selection is retried with the SAME formation identity.
                     }
                     lock(_gate)if(!ReadyForAdmission||_matchmakingCancellation.IsCancellationRequested)return;
-                    var startup=_formationStartup.WithProfileMaximum(profile.MaximumPlayers);
+                    var startup=StartupFor(profile).WithProfileMaximum(profile.MaximumPlayers);
                     if(!await _bridge.RequestAsync(startup.ConfigureRequest(Id(),_applicationId)))
                     {lock(_gate)_nextFormationAttempt=DateTime.UtcNow.AddSeconds(1);return;}
                     lock(_gate){if(!ReadyForAdmission||_matchmakingCancellation.IsCancellationRequested)return;_formationAdmissionEpoch = reply.SelectedMatch.AdmissionEpoch; _formationConfigured=true;}
@@ -294,7 +310,7 @@ namespace Server.Medius
                     else if(!_reservations.Values.Any(IsLiveCohort))
                     {
                         var selection=MagFactionMatchmaking.ForProfile(_humanQueue.Snapshot().Select(e=>e.Human).ToArray(),profile,
-                            _formationStartup.MinimumPlayers,_maximumPlayers,_formationTeamMinima);
+                            StartupFor(profile).MinimumPlayers,_maximumPlayers,MinimaFor(profile));
                         if (selection == null)
                         {
                             if (!InRegistry) { ResetFormation(); return; }

@@ -23,7 +23,14 @@ internal static class ConfiguredRegistryChecks
         foreach(var field in new[]{"worker_id","worker_host","worker_port","minimum_players","maximum_players","minimum_players_per_team","draining"}) {var bad=Configuration();bad["workers"]![0]!.AsObject().Remove(field);Refused(bad);}
         var duplicate=Configuration();duplicate["workers"]![1]!["worker_id"]="first";Refused(duplicate);
         duplicate=Configuration();duplicate["workers"]![1]!["worker_port"]=31001;Refused(duplicate);
-        var wrong=Configuration();wrong["workers"]![0]!["minimum_players_per_team"]=new JsonArray(0,1);Refused(wrong);
+        // One human may start a bot-filled worker: minimum 1 and zero team minima are valid.
+        var solo=Configuration();solo["workers"]![0]!["minimum_players"]=1;solo["workers"]![0]!["minimum_players_per_team"]=new JsonArray(0,0);
+        var soloConfig=MagWorldRegistryConfig.Parse(solo.ToJsonString());
+        Check(soloConfig.Workers[0].MinimumPlayers==1 && soloConfig.Workers[0].MinimumPlayersPerTeam.SequenceEqual(new[]{0,0}),"One-human registry minima were not loaded");
+        var wrong=Configuration();wrong["workers"]![0]!["minimum_players"]=0;Refused(wrong);
+        wrong=Configuration();wrong["workers"]![0]!["minimum_players_per_team"]=new JsonArray(-1,1);Refused(wrong);
+        wrong=Configuration();wrong["workers"]![0]!["minimum_players_per_team"]=new JsonArray(33,0);Refused(wrong);
+        wrong=Configuration();wrong["workers"]![0]!["minimum_players_per_team"]=new JsonArray(2,1);Refused(wrong);
         wrong=Configuration();wrong["client_address"]="0.0.0.0";Refused(wrong);
         wrong=Configuration();wrong["workers"]![0]!["worker_host"]="https://worker";Refused(wrong);
         wrong=Configuration();wrong["unexpected"]=true;Refused(wrong);
@@ -50,5 +57,12 @@ internal static class ConfiguredRegistryChecks
         plan=MagWorldPlacement.PlanNext(humans,new[]{World("full",current:live,counts:new[]{1,1,0}),World("idle")},n=>0);
         Check(plan!=null && plan.WorkerId=="idle" && plan.NewFormation,"Full world blocked a second independent match");
         Check(MagWorldPlacement.PlanNext(humans.Take(1).ToArray(),new[]{World("idle")},n=>0)==null,"One faction formed a new match");
+        // A worker that fills its profiles with bots forms from the lone oldest human.
+        var solo=new MagWorldPlacementState("bots",true,false,1,2,new[]{0,0},
+            new[]{new MagMatchProfile("a-b",1,0,1,2,1,BotFillTotal:2),new MagMatchProfile("a-c",1,0,2,2,1,BotFillTotal:2),
+                new MagMatchProfile("b-c",1,1,2,2,1,BotFillTotal:2)},null,new[]{0,0,0},new[]{0,0,0},0,0,true);
+        plan=MagWorldPlacement.PlanNext(humans.Take(1).ToArray(),new[]{World("idle"),solo},n=>0);
+        Check(plan!=null && plan.WorkerId=="bots" && plan.NewFormation && plan.Players.Single().TicketId=="oldest" &&
+            (plan.Profile.AttackingFaction==2 || plan.Profile.DefendingFaction==2),"Bot-filled worker did not start a one-human match");
     }
 }
