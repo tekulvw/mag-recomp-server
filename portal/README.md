@@ -80,6 +80,7 @@ holds ticket test vectors for other verifiers; regenerate them with
 | `PORTAL_REPORT_DIR` | for `dir` | Existing, writable folder for report logs. |
 | `PORTAL_REPORT_RETENTION_DAYS` | no | Days reports (rows and logs) are kept (default 30); purged hourly. |
 | `PORTAL_LISTEN` | no | Listen address (default `0.0.0.0:8080`). Serve it behind a TLS-terminating proxy. |
+| `PORTAL_DB_ACQUIRE_TIMEOUT_SECONDS` | no | Seconds a request waits for a database connection, 1 to 60 (default 3). After it, API requests answer `503 busy` and pages a "Busy" page, both with `Retry-After`. |
 | `RUST_LOG` | no | Log filter (default `info`). |
 
 Session and flow cookies use the `__Host-` prefix, so the site must be served over HTTPS at
@@ -88,6 +89,9 @@ the root of its own host name. `/healthz` returns 200 while the database answers
 ## Launcher API
 
 All bodies are JSON. Errors are `{"error": "<code>"}`; a body that is not the expected JSON gets `400 invalid_request`.
+Any call may answer `503 busy` with `Retry-After: 2` while the database is unavailable (no free
+connection within `PORTAL_DB_ACQUIRE_TIMEOUT_SECONDS`, a lost connection, or a failover), and
+`500 server_error` when the portal fails otherwise; retry both later.
 
 **Start a link** — `POST /api/v1/device/start`, body `{"client": "MAG launcher (Windows)"}`
 (optional, at most 64 characters, shown to the player):

@@ -3528,3 +3528,135 @@ async fn reports_in_an_s3_bucket(_: PgPoolOptions, connect: PgConnectOptions) {
     std::fs::remove_dir_all(&keys).unwrap();
     test_db.close().await;
 }
+
+/// A pool whose database never answers: the address accepts connections (into the listen
+/// backlog) but nothing reads them, so every acquire runs out its timeout.
+async fn silent_database() -> (tokio::net::TcpListener, PgPool) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .acquire_timeout(std::time::Duration::from_millis(300))
+        .connect_lazy_with(
+            PgConnectOptions::new()
+                .host("127.0.0.1")
+                .port(port)
+                .username("portal")
+                .database("portal"),
+        );
+    (listener, pool)
+}
+
+#[tokio::test]
+async fn unavailable_database_answers_busy() {
+    let (_listener, pool) = silent_database().await;
+    let h = harness(pool).await;
+    let started = std::time::Instant::now();
+
+    // The launcher API answers a retryable 503 busy in JSON, after the pool's timeout.
+    let token = format!("{}unknown", db::DEVICE_TOKEN_PREFIX);
+    let r = h
+        .http
+        .post(format!("{}/api/v1/ticket", h.base))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(r.headers()["retry-after"], "2");
+    assert_eq!(r.json::<Value>().await.unwrap(), json!({ "error": "busy" }));
+    let r = h
+        .http
+        .get(format!("{}/api/v1/social", h.base))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(r.headers()["retry-after"], "2");
+    assert_eq!(r.json::<Value>().await.unwrap()["error"], "busy");
+
+    // Pages keep the error page, as 503 with Retry-After.
+    let r = h.get("/account", Some("mgs_unknown")).await;
+    assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(r.headers()["retry-after"], "2");
+    assert!(
+        r.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/html")
+    );
+    assert!(r.text().await.unwrap().contains("Busy"));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "each request waits only the pool's acquire timeout"
+    );
+}
+
+/// Makes new connections to the test's database read-only, as during a failover, and returns
+/// a pool of such connections.
+async fn read_only_pool(pool: &PgPool, connect: PgConnectOptions) -> PgPool {
+    sqlx::query(
+        "DO $$ BEGIN EXECUTE format('ALTER DATABASE %I SET default_transaction_read_only = on', \
+         current_database()); END $$",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(connect)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test]
+async fn tickets_while_the_database_is_read_only(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect.clone()).await;
+    let (_, token) = service_with_token(&pool, "PlayerLinux").await;
+    let read_only = read_only_pool(&pool, connect).await;
+    let h = harness(read_only.clone()).await;
+
+    // Recording the device's use fails, but the ticket is still issued.
+    let (status, issued) = h.ticket(&token).await;
+    assert_eq!(status, StatusCode::OK, "{issued}");
+    assert_eq!(issued["player_name"], "PlayerLinux");
+    verify_issued(&h, &issued, AUDIENCE).await.unwrap();
+    let (last_used,): (Option<time::OffsetDateTime>,) =
+        sqlx::query_as("SELECT last_used_at FROM devices")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(last_used, None);
+
+    // Calls that must write answer a retryable 503 busy instead of failing.
+    let r = h
+        .http
+        .put(format!("{}/api/v1/social/presence", h.base))
+        .bearer_auth(&token)
+        .json(&json!({ "data_b64": STANDARD.encode([1u8, 2]), "state": "online" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(r.headers()["retry-after"], "2");
+    assert_eq!(r.json::<Value>().await.unwrap(), json!({ "error": "busy" }));
+    read_only.close().await;
+    test_db.close().await;
+}
+
+#[sqlx::test]
+async fn api_failures_answer_json(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
+    let h = harness(pool).await;
+    let (_, token) = service_with_token(&h.pool, "PlayerLinux").await;
+    // A failure that is not the database being unavailable stays a 500, in JSON for the API.
+    sqlx::query("ALTER TABLE devices RENAME TO devices_elsewhere")
+        .execute(&h.pool)
+        .await
+        .unwrap();
+    let (status, body) = h.ticket(&token).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body, json!({ "error": "server_error" }));
+    test_db.close().await;
+}

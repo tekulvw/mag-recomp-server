@@ -61,6 +61,7 @@ All bodies are JSON.
 | 429 | `{"error": "rate_limited"}` with `Retry-After: <seconds>` | Over the account's allowance, or over 60 report requests a minute from one address. Keep the report and retry after that many seconds. |
 | 500 | `{"error": "server_error"}` | The report could not be stored (the log store failed). Retry later with the same `report_id`. |
 | 503 | `{"error": "reports_disabled"}` | The server does not take reports (`PORTAL_REPORTS=off`). |
+| 503 | `{"error": "busy"}` with `Retry-After: <seconds>` | The portal's database is unavailable for a moment. Keep the report and retry after that many seconds; it is not the report's fault. |
 
 The body size is checked first, then the switch, the per-address limit, the token, the ban, the
 body's contents, the `report_id` and finally the account's allowance.

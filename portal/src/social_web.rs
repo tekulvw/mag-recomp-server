@@ -21,8 +21,8 @@ use crate::db::{self, Session};
 use crate::ratelimit::RateLimiter;
 use crate::social::{self, AcceptOutcome, BlockOutcome, Peer, RequestOutcome};
 use crate::web::{
-    AppState, PageResult, Shared, api_error, bearer, csrf_failed, csrf_ok, link_session, message,
-    page,
+    AppError, AppState, PageResult, Shared, api_error, bearer, csrf_failed, csrf_ok, link_session,
+    message, page,
 };
 
 /// Presence bodies are a base64 blob of at most 1 KiB plus a little JSON.
@@ -56,13 +56,11 @@ pub fn routes() -> Router<Arc<AppState>> {
 /// An early API answer: an error, or a failure already logged. Boxed because responses are large.
 struct ApiFail(Box<Response>);
 
+/// A database error goes the way of every failed request: the router logs it with its route and
+/// answers `503 busy` or `500 server_error` (see `web::failed_requests`).
 impl From<sqlx::Error> for ApiFail {
     fn from(e: sqlx::Error) -> Self {
-        tracing::error!(error = %e, "social request failed");
-        Self(Box::new(api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "server_error",
-        )))
+        Self(Box::new(AppError::from(e).into_response()))
     }
 }
 
