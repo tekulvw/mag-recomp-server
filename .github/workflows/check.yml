@@ -149,7 +149,11 @@ jobs:
         run: |
           pg="$(ls -d /usr/lib/postgresql/*/bin | sort -V | tail -n1)"
           data="$RUNNER_TEMP/portal-pg"
-          start="'$pg/initdb' -D '$data' -U portal --auth=trust >/dev/null && '$pg/pg_ctl' -D '$data' -w -l '$RUNNER_TEMP/portal-pg.log' -o '-k $RUNNER_TEMP -c listen_addresses=127.0.0.1 -p 55432' start"
+          # Durability is pointless for a database thrown away with the job; without fsync the
+          # checkpoints behind every test's CREATE/DROP DATABASE stop waiting on a busy disk.
+          opts="-k $RUNNER_TEMP -c listen_addresses=127.0.0.1 -p 55432 -c max_connections=200"
+          opts="$opts -c fsync=off -c synchronous_commit=off -c full_page_writes=off"
+          start="'$pg/initdb' -D '$data' -U portal --auth=trust >/dev/null && '$pg/pg_ctl' -D '$data' -w -l '$RUNNER_TEMP/portal-pg.log' -o '$opts' start"
           if [ "$(id -u)" = 0 ]; then
             # initdb refuses to run as root.
             mkdir -p "$data" && chown postgres "$data" "$RUNNER_TEMP" && su postgres -c "$start"

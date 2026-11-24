@@ -37,3 +37,4 @@ opt-level = 2
 
 [dev-dependencies]
 rsa = "0.10"
+tokio = { version = "1.54.1", features = ["sync"] }
