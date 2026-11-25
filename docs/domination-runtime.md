@@ -209,13 +209,16 @@ to it fall back to their category-zero point, and the availability change and
 new squad spawns are published (`domination_hospital_spawns_retired`). The FSP
 activation that restores the hospital, or a round reset, reactivates the point.
 
-A due life whose selected spawn is no longer operational starts at the squad's
-HQ point instead of being refused every wave. That covers a destroyed hospital,
-an APC insertion whose vehicle is destroyed, absent or full, and a point the
-squad lost. The HQ point is the squad's
-authored default, else its current default, else another on-foot point of the
-squad. With no such point the selection stands and its refusal is reported as
-before.
+A due life is never refused or held back because its hospital or APC cannot
+seat it; helicopter boarding keeps its own refusals for now. Seating fails when
+the hospital is destroyed, belongs to the other side or has reached its
+occupancy. When that happens, the life starts on foot in the same wave at the
+squad's alternate insertion, if the squad may use one other than the selected
+point. Otherwise it starts on foot at the selected point's own position. The
+receipt records the change as `spawn_fallback`, and the rule matches
+[apc-insertion.md](apc-insertion.md#when-the-apc-cannot-seat-a-new-life). A
+selection the squad lost is replaced, when the life starts, by the squad's first
+usable point that is not destroyed.
 
 The optional aircraft scope is `core_with_helo_insertion`. It requires a complete
 `core.helo` object containing `fleet`, `models`, `paths`, `damage` and an explicit

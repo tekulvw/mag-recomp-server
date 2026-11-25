@@ -123,7 +123,7 @@ pub(super) fn object_update<W: Write>(
         "bot_script":plan.audit.bot_script,
         "development_target_spawned":plan.combat.dummy_health.is_some() && plan.audit.bot_script.as_ref().is_none_or(|r|r["phase"]=="spawn" || r["phase"]=="respawn"),
         "team_wave_deadline_ms":plan.session.published_wave_deadline.map(|d|d.as_millis() as u32),
-        "spawn_point_index":plan.audit.spawned_point,"spawn_mounted_seat":plan.session.new_mounted_seat.flatten(),"spawn_mounted_bunker":plan.session.new_mounted_bunker,
+        "spawn_point_index":plan.audit.spawned_point,"spawn_fallback":plan.audit.spawn_fallback.map(|(selected, used, reason)| json!({"selected":selected,"used":used,"reason":reason})),"spawn_mounted_seat":plan.session.new_mounted_seat.flatten(),"spawn_mounted_bunker":plan.session.new_mounted_bunker,
         "spawn_ground_vehicle_index":plan.session.new_ground_seat.flatten().map(|s|s.vehicle_index),
         "spawn_ground_passenger_seat":plan.session.new_ground_seat.flatten().map(|s|s.seat),
         "life_generation":if plan.replication.spawn_delta.is_some(){active.life.next_generation()}else{None},
