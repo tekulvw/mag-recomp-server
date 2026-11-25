@@ -445,34 +445,34 @@ fn engine(slots: &[(u8, u16, f32, f32)], can_deactivate: bool) -> Engine<Vec<u8>
         .reconcile_bot_population(Duration::ZERO, 1, &mut Default::default())
         .unwrap();
     assert_eq!(engine.bot_registry.bots.len(), slots.len());
-    // Settle every body on the floor, as the first movement tick would.
+    // These duty fixtures start every bot at its own slot. (Each slot has its
+    // own authored point here, so defending lives would otherwise all choose
+    // the points nearest their objective; bot_spawn_selection_tests covers
+    // that choice.) Settle every body on the floor, as the first movement
+    // tick would.
     let body = bot_physics::Body::default();
     let terrain =
         bot_physics::WorldTerrain::new(engine.collision_world.as_ref(), engine.map_name()).unwrap();
+    let homes = engine.bot_registry.config.as_ref().unwrap().slots.clone();
     let settled: Vec<_> = engine
         .bot_registry
         .bots
         .iter()
         .map(|(&id, b)| {
-            let p = b.target.runtime.unwrap().position;
+            let p = homes[b.slot].position;
             let start = terrain
                 .start_motion([p.x.into(), 0.5, p.z.into()], body)
                 .unwrap();
-            (id, terrain.advance(start, [0.; 3], 1., body).unwrap())
+            (id, p, terrain.advance(start, [0.; 3], 1., body).unwrap())
         })
         .collect();
-    for (id, motion) in settled {
+    for (id, home, motion) in settled {
         assert!(motion.grounded && !motion.blocked);
-        let r = engine
-            .bot_registry
-            .bots
-            .get_mut(&id)
-            .unwrap()
-            .target
-            .runtime
-            .as_mut()
-            .unwrap();
+        let target = &mut engine.bot_registry.bots.get_mut(&id).unwrap().target;
+        target.position = home;
+        let r = target.runtime.as_mut().unwrap();
         r.physics_motion = Some(motion);
+        r.position = home;
         r.position.y = motion.position[1] as f32;
     }
     engine
