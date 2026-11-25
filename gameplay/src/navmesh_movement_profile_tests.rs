@@ -269,7 +269,9 @@ fn a_profiled_mesh_accepts_drops_certified_with_its_own_body() {
     let (world, input) = ledge();
     let sha = world.source_sha256().to_owned();
     let rules = MovementProfile::synthetic(54.);
-    let (launch, landing) = ([7.3, 2., 5.], [10.5, 0., 5.]);
+    // Feet a hair above the ledge, as a ground sample places them; a body
+    // started exactly in the plane reads as blocked.
+    let (launch, landing) = ([7.3, 2.02, 5.], [10.5, 0., 5.]);
     let legacy = bake(input).unwrap();
     let profiled = bake_with_movement_profile(ledge().1, &rules).unwrap();
     let legacy_body = NavMesh::load(legacy.clone(), &sha, "synthetic")
