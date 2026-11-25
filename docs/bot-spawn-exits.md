@@ -31,10 +31,14 @@ full pooling of crossing approaches.
 
 While a bot is still in its spawn (the start component of a route that needs
 a drop), the first drop is chosen by how soon the bot is out: the walk to the
-launch, the passage's queue penalty and the flight. The remaining distance to
-the goal counts only with weight `spawn_exit_goal_weight` (default `0`, the
-fastest exit; `1` restores choosing by the whole route). Later drops and
-ground routes always use the whole route. Reconsideration of a queued bot
+launch, the passage's queue penalty and the flight. Everything after that
+first passage (later walks and drops, and the remaining distance to the goal)
+counts only with weight `spawn_exit_goal_weight` (default `0`, the fastest
+exit; `1` restores choosing by the whole route), and breaks ties between exits
+of equal cost. An exit onto a ledge that needs a further drop is therefore
+ranked by its own cost, not by the rest of the route, so a busy exit hands its
+wave to every other exit of the spawn in turn. Later drops and ground routes
+always use the whole route. Reconsideration of a queued bot
 compares candidate routes the same way, so a bot is not pulled back to a
 congested exit just because its landing is nearer the objective.
 

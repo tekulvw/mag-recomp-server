@@ -100,9 +100,23 @@ impl DropLink {
 struct Label {
     node: usize,
     hp: u16,
-    cost: u64,
+    /// Cost of the first passage out of the start component: the walk to its
+    /// launch, its queue penalty and its flight (millimetres).
+    first: u64,
+    /// Cost of everything after that first passage (millimetres).
+    rest: u64,
     parent: Option<usize>,
     via: Option<usize>,
+}
+/// Ordering key of a label: the exit cost plus the weighted remainder, then
+/// the remainder itself, so a zero weight still breaks ties by the remainder.
+fn label_key(first: u64, rest: u64, weight_milli: u64) -> (u64, u64) {
+    (
+        first
+            .saturating_mul(1000)
+            .saturating_add(rest.saturating_mul(weight_milli)),
+        rest,
+    )
 }
 #[allow(clippy::too_many_arguments)]
 fn choose_links_with_costs(
@@ -124,16 +138,22 @@ fn choose_links_with_costs(
     {
         return err("navmesh_invalid_drop_cost");
     }
+    // Leaving the start component (a spawn) is ranked by how soon the bot is
+    // out: approach, queue penalty and flight of the first passage. Everything
+    // after it (later walks, later passages and the remaining distance to the
+    // goal) counts with `exit_goal_weight`; 1 ranks whole routes.
+    let weight_milli = (exit_goal_weight * 1000.).round() as u64;
     let mut labels = vec![Label {
         node: links.len(),
         hp,
-        cost: 0,
+        first: 0,
+        rest: 0,
         parent: None,
         via: None,
     }];
-    let mut queue = BinaryHeap::from([Reverse((0u16, 0u64, 0usize))]);
+    let mut queue = BinaryHeap::from([Reverse((0u16, (0u64, 0u64), 0usize))]);
     let mut best = BTreeMap::new();
-    best.insert((links.len(), hp), 0u64);
+    best.insert((links.len(), hp), (0u64, 0u64));
     while let Some(Reverse((_, _, index))) = queue.pop() {
         let label = labels[index].clone();
         let (component, position) = if label.node == links.len() {
@@ -168,46 +188,45 @@ fn choose_links_with_costs(
             }
             let length = (position[0] - link.launch[0]).hypot(position[2] - link.launch[2])
                 + (link.launch[0] - link.landing[0]).hypot(link.launch[2] - link.landing[2]);
-            let cost = label.cost
-                + ((length + penalties.get(&link.id).copied().unwrap_or(0.)) * 1000.).ceil() as u64;
-            if best.get(&(edge, remaining)).is_some_and(|old| *old <= cost) {
+            let step =
+                ((length + penalties.get(&link.id).copied().unwrap_or(0.)) * 1000.).ceil() as u64;
+            let (first, rest) = if label.node == links.len() {
+                (step, 0)
+            } else {
+                (label.first, label.rest.saturating_add(step))
+            };
+            let key = label_key(first, rest, weight_milli);
+            if best.get(&(edge, remaining)).is_some_and(|old| *old <= key) {
                 continue;
             }
             // A cheaper label with at least this much HP dominates this candidate.
             if best
                 .range((edge, remaining)..=(edge, u16::MAX))
-                .any(|(_, old)| *old <= cost)
+                .any(|(_, old)| *old <= key)
             {
                 continue;
             }
             if labels.len() >= 4096 {
                 return err("navmesh_drop_search_limit");
             }
-            best.insert((edge, remaining), cost);
+            best.insert((edge, remaining), key);
             let next = labels.len();
             labels.push(Label {
                 node: edge,
                 hp: remaining,
-                cost,
+                first,
+                rest,
                 parent: Some(index),
                 via: Some(edge),
             });
-            // Leaving the start component (a spawn) is ranked by how soon the
-            // bot is out: approach, queue penalty and flight. The remaining
-            // distance to the goal only counts with the configured weight.
-            let weight = if label.node == links.len() {
-                exit_goal_weight
-            } else {
-                1.
-            };
-            let suffix = weight
-                * goals
-                    .iter()
-                    .map(|(_, goal)| (link.landing[0] - goal[0]).hypot(link.landing[2] - goal[2]))
-                    .fold(f64::INFINITY, f64::min);
+            let suffix = goals
+                .iter()
+                .map(|(_, goal)| (link.landing[0] - goal[0]).hypot(link.landing[2] - goal[2]))
+                .fold(f64::INFINITY, f64::min);
+            let suffix = (suffix * 1000.).ceil() as u64;
             queue.push(Reverse((
                 hp - remaining,
-                cost.saturating_add((suffix * 1000.).ceil() as u64),
+                label_key(first, rest.saturating_add(suffix), weight_milli),
                 next,
             )));
         }
@@ -447,5 +466,56 @@ mod exit_weight_tests {
             choose_links_with_costs(&links, start, &goals, &rules, 400, &free, None, 1.5).is_err(),
             "weights outside 0..=1 are rejected"
         );
+    }
+
+    #[test]
+    fn an_exit_onto_a_ledge_counts_only_its_own_cost_when_leaving_a_spawn() {
+        // SYNTHETIC rules: no drop here is high enough to hurt.
+        let rules = Rules {
+            schema_version: 1,
+            source_build: "synthetic".into(),
+            application_id: 20231,
+            min_height: 50.,
+            damage_factor: 1.,
+            minimum_damage_exclusive: 0.,
+            jump_fall_state: 0,
+            damage_type: 5,
+            damage_source_type: 1,
+        };
+        // From the spawn (component 1) the nearest exits (1 and 3) land on a
+        // ledge (component 3) with one more drop (2) down to the goal floor
+        // (component 2); exit 4 is a longer walk straight down to the floor.
+        let ledge_exit = link(1, [3., 10., 0.], [5., 8., 0.]);
+        let ledge_exit_b = link(3, [0., 10., 3.], [0., 8., 5.]);
+        let ledge_drop = link(2, [9., 8., 0.], [12., 0., 0.]);
+        let floor_exit = link(4, [0., 10., -25.], [0., 0., -29.]);
+        let links = [
+            (1, 3, &ledge_exit),
+            (3, 2, &ledge_drop),
+            (1, 2, &floor_exit),
+            (1, 3, &ledge_exit_b),
+        ];
+        let start = (1, [0., 10., 0.]);
+        let goals = [(2, [60., 0., 0.])];
+        let choose = |weight, penalties: &BTreeMap<u32, f64>| {
+            choose_links_with_costs(&links, start, &goals, &rules, 400, penalties, None, weight)
+                .unwrap()
+                .iter()
+                .map(|&i| links[i].2.id)
+                .collect::<Vec<_>>()
+        };
+        let free = BTreeMap::new();
+        assert_eq!(
+            choose(0., &free),
+            [1, 2],
+            "exit-first leaves by the nearest exit even though it lands on a ledge"
+        );
+        // Queues spread a wave over every exit: the other ledge exit next,
+        // then the far floor exit once both near ones are busy.
+        assert_eq!(choose(0., &BTreeMap::from([(1, 10.)])), [3, 2]);
+        assert_eq!(choose(0., &BTreeMap::from([(1, 40.), (3, 40.)])), [4]);
+        // Whole-route weighting still ranks the complete route.
+        assert_eq!(choose(1., &free), [1, 2]);
+        assert_eq!(choose(1., &BTreeMap::from([(1, 40.), (3, 40.)])), [4]);
     }
 }
