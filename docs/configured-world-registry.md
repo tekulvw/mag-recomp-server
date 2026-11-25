@@ -121,8 +121,12 @@ profile's fill total thereafter. Horizon prepares every selected
 party before releasing any descriptors for that formation. The worker
 acknowledges cohort, formation, profile, world, admission epoch, squad and
 ordered reservation IDs. Horizon revalidates all owners before exposing
-their DME tokens and then continues with ordinary solo admission. An
-uncertain reply is reconciled by the same cohort identity. A prepublication
+their DME tokens and then continues with ordinary solo admission. A
+`reserve_party` that never left Horizon is sent again unchanged. One the
+worker did not answer is released by its exact cohort, then reserved again
+under a new cohort and new reservation IDs, within the
+[gameplay admission](gameplay-admission.md) attempt limit and deadline; a
+party whose attempts all fail returns to the queue. A prepublication
 failure rolls back the attempted cohorts and ordinary per-person transport
 lifecycle applies after publication.
 

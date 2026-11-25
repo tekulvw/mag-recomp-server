@@ -37,6 +37,13 @@ When every attempt goes unanswered, the reply depends on how the player joined:
 | Queued: faction matchmaking or the [configured registry](configured-world-registry.md) | `6` | The ticket returns to the queue. The player keeps receiving waiting updates and can cancel. The queue offers the ticket to a world again. |
 | Direct legacy join | `2` | The ordinary failure. |
 
+A queued party follows the same rules with `reserve_party`. Each party gets its
+own attempt limit, and each exchange gets the same deadline. A sent but unanswered
+cohort is released by `release_party`. That release also fences a cohort the
+worker never recorded. The party is then reserved again under a new cohort and new
+reservation IDs. If every attempt fails, the party's members get no reply. The
+party returns to the queue, and its formation partners return to the queue too.
+
 No reply has been recovered that moves the retail client from its queue screen
 back to the lobby. A direct join that gets `2` therefore still leaves the client
 in its queue. The retries make that outcome rare, but they cannot remove it.
@@ -60,3 +67,6 @@ by up to one deadline. Raising the deadline does not replace the retries.
   retrying`: a sent reserve went unanswered. Horizon released it and is trying again.
 - `Gameplay admission unanswered after N attempt(s): ... result=6|2`: every attempt
   failed, and the join got the reply described above.
+- `Retail party admission not delivered`, `Retail party admission retrying` and
+  `Retail party admission unanswered after N attempt(s)`: the same three cases for
+  a party.

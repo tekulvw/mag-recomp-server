@@ -19,6 +19,7 @@ internal static partial class LeadershipProgressionChecks
             VerifyOpposingParties(directory, true).GetAwaiter().GetResult();
             VerifyOpposingParties(directory, false, twoOnFirstSide: true).GetAwaiter().GetResult();
             VerifyMissingForwardedParty(directory).GetAwaiter().GetResult();
+            VerifyUnansweredPartyRequeues(directory).GetAwaiter().GetResult();
             VerifyLatePartyEntry(directory, true).GetAwaiter().GetResult();
             VerifyLatePartyEntry(directory, false).GetAwaiter().GetResult();
         }
@@ -102,9 +103,27 @@ internal static partial class LeadershipProgressionChecks
             else
             {
                 await Until(() => Success(leaderMessages) && Success(memberMessages) && Success(soloMessages));
-                var attempts = worker.Requests.Where(r => r["op"]!.GetValue<string>() == "reserve_party").ToArray();
-                Check(attempts.Length == 2 && attempts[0]["cohort_id"]!.ToJsonString() == attempts[1]["cohort_id"]!.ToJsonString() &&
-                    attempts[0]["members"]!.ToJsonString() == attempts[1]["members"]!.ToJsonString(), "Uncertain party retry changed its immutable payload");
+                // The first reply was lost after the worker recorded it. Horizon released
+                // that exact cohort, then reserved again under a new cohort and new IDs.
+                var calls = worker.Requests.Where(r => r["op"]!.GetValue<string>() is "reserve_party" or "release_party").ToArray();
+                var attempts = calls.Where(r => r["op"]!.GetValue<string>() == "reserve_party").ToArray();
+                Check(attempts.Length == 2 && attempts[0]["cohort_id"]!.ToJsonString() != attempts[1]["cohort_id"]!.ToJsonString(),
+                    "An unanswered party reserve was not retried under a new cohort");
+                int releasedAt = Array.FindIndex(calls, r => r["op"]!.GetValue<string>() == "release_party" &&
+                    r["cohort_id"]!.ToJsonString() == attempts[0]["cohort_id"]!.ToJsonString());
+                Check(releasedAt >= 0 && releasedAt < Array.IndexOf(calls, attempts[1]),
+                    "The unanswered party cohort was not released before the retry");
+                JsonNode WithoutIds(JsonObject attempt)
+                {
+                    var copy = attempt["members"]!.DeepClone();
+                    foreach (var entry in copy.AsArray()) entry!.AsObject().Remove("reservation_id");
+                    return copy;
+                }
+                Check(WithoutIds(attempts[0]).ToJsonString() == WithoutIds(attempts[1]).ToJsonString() &&
+                    attempts[0]["members"]!.AsArray().Select(m => m!["reservation_id"]!.GetValue<string>())
+                        .Intersect(attempts[1]["members"]!.AsArray().Select(m => m!["reservation_id"]!.GetValue<string>())).Count() == 0,
+                    "The party retry changed its members or reused released reservation IDs");
+                members = attempts[1]["members"]!.AsArray();
                 var replies = new[] { leaderMessages, memberMessages, soloMessages }
                     .Select(queue => queue.OfType<MagJoinGameResponse>().Single(r => r.Result == 0)).ToArray();
                 Check(replies.All(reply => reply.WorldId == replies[0].WorldId) &&
@@ -287,6 +306,74 @@ internal static partial class LeadershipProgressionChecks
                 registry.Worlds[0].ReservedPlayers == 1 && registry.Worlds[1].ReservedPlayers == 2,
                 "A worker without late entry admitted a party into its running match");
         }
+    }
+
+    // A worker that never answers reserve_party: each attempt's cohort is released
+    // before the next, the attempts stop at the admission limit, and the party goes
+    // back to the queue. Nobody receives a failure; once the worker answers again,
+    // the requeued party is admitted.
+    static async Task VerifyUnansweredPartyRequeues(string directory)
+    {
+        var store = new LocalCharacterStore(Path.Combine(directory, "unanswered-party.json"));
+        foreach (var (account, faction) in new[] { ("alpha", (byte)0), ("bravo", (byte)0), ("charlie", (byte)1) })
+            Check(store.CreateForAccount(new MagCreateCharacterRequest
+                { AccountName = account, Faction = faction, UniverseId = 26, NpId = new byte[36] }, account).Result
+                == MagNetResult.Success, "Unanswered party fixture character creation");
+        await using var worker = new RegistryWorker("first") { SupportsParties = true, DropPartyReplies = int.MaxValue };
+        await using var spare = new RegistryWorker("second");
+        JsonObject Worker(string id, int port) => new() { ["worker_id"] = id, ["worker_host"] = "127.0.0.1",
+            ["worker_port"] = port, ["minimum_players"] = 3, ["maximum_players"] = 3,
+            ["minimum_players_per_team"] = new JsonArray(1, 1), ["draining"] = false };
+        var config = new JsonObject { ["format"] = "mag_world_registry_v1", ["application_id"] = 20231,
+            ["client_address"] = "192.0.2.9", ["client_tcp_port"] = 12073, ["party_invite_seconds"] = 30,
+            ["workers"] = new JsonArray(Worker("first", worker.Port), Worker("second", spare.Port)) };
+        await using var registry = new MagWorldRegistry(MagWorldRegistryConfig.Parse(config.ToJsonString()), store);
+        await registry.InitializeAsync();
+        MagMlsSession Session(string account) => MakeSession(store, 20231, account, store.ReadForAccount(account).Single().Id);
+        var leader = Session("alpha"); var member = Session("bravo"); var solo = Session("charlie");
+        var leaderMessages = new ConcurrentQueue<MagMessage>();
+        var memberMessages = new ConcurrentQueue<MagMessage>();
+        var soloMessages = new ConcurrentQueue<MagMessage>();
+        registry.RegisterPartySession(leader, () => true, leaderMessages.Enqueue, null);
+        registry.RegisterPartySession(member, () => true, memberMessages.Enqueue, null);
+        Check(registry.RoutePartyMembership(leader, new MagRetailPartyInvite { Inviter = leader.AccountId, Invitee = member.AccountId }),
+            "Unanswered party invite refused");
+        uint partyId = memberMessages.OfType<MagRetailPartyInvite>().Single().PartyId;
+        Check(registry.RoutePartyMembership(member, new MagRetailPartyInviteResponse
+            { PartyId = partyId, Inviter = leader.AccountId, Responder = member.AccountId }), "Unanswered party answer refused");
+        registry.QueueJoin(leader, new MagRetailJoinGameRequest { TransactionId = 2, Preference = 1, Value = 2, PartyId = partyId },
+            leaderMessages.Enqueue, () => true);
+        registry.QueueJoin(solo, new MagRetailJoinGameRequest { TransactionId = 3, Preference = 1, Value = 2 },
+            soloMessages.Enqueue, () => true);
+
+        async Task Until(Func<bool> condition)
+        {
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            while (!condition()) { await registry.TickAsync(); await Task.Delay(20, deadline.Token); }
+        }
+        JsonObject[] Calls(string op) => worker.Requests.Where(r => r["op"]!.GetValue<string>() == op).ToArray();
+        string Cohort(JsonObject call) => call["cohort_id"]!.GetValue<string>();
+        bool Answered(ConcurrentQueue<MagMessage> queue) => queue.OfType<MagJoinGameResponse>().Any();
+        int limit = GameplayAdmissionPolicy.DefaultAttempts;
+
+        // Wait until the first admission's attempts are spent and its last cohort is released.
+        await Until(() => Calls("reserve_party").Length >= limit &&
+            Calls("release_party").Select(Cohort).Contains(Cohort(Calls("reserve_party")[limit - 1])));
+        var first = Calls("reserve_party").Take(limit).ToArray();
+        Check(first.Select(Cohort).Distinct().Count() == limit,
+            "An unanswered party reserve was retried under the same cohort");
+        Check(first.All(call => Calls("release_party").Select(Cohort).Contains(Cohort(call))),
+            "An unanswered party cohort was left on the worker");
+        Check(!Answered(leaderMessages) && !Answered(memberMessages) && !Answered(soloMessages),
+            "An unanswered party admission sent a join reply instead of returning to the queue");
+        Check(registry.Worlds.All(world => world.ReservedPlayers == 0), "An unanswered party admission kept a seat");
+
+        Interlocked.Exchange(ref worker.DropPartyReplies, 0);
+        bool Success(ConcurrentQueue<MagMessage> queue) => queue.OfType<MagJoinGameResponse>().Any(r => r.Result == 0);
+        await Until(() => Success(leaderMessages) && Success(memberMessages) && Success(soloMessages));
+        Check(new[] { leaderMessages, memberMessages, soloMessages }.All(queue =>
+            queue.OfType<MagJoinGameResponse>().All(reply => reply.Result == 0)),
+            "A requeued party or its formation partner received a failure before admission");
     }
 
     static async Task VerifyMissingForwardedParty(string directory)
