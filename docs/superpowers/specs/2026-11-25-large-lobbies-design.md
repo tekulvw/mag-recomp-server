@@ -9,21 +9,26 @@ Live Acquisition and Domination matches should be retail size:
 - **Acquisition:** 128 characters, which is 2 sides × 2 platoons × 4 squads × 8.
 - **Domination:** 256 characters, which is 2 × 4 × 4 × 8.
 
-Each server keeps at most **32 humans**, and bots fill every other seat. Today
+Each server keeps at most **32 humans**, at most 16 per side, and bots fill
+every other seat. Today
 every match is capped at 64 characters: 32 per side, 4 per squad in
 Acquisition and Domination. The docs call authored 128-player Acquisition "a
 separate milestone" (`docs/faction-matchmaking.md:56-57`, `docs/acquisition.md:23`).
 
 ## Goals
 
-- Run one Acquisition world at 128 characters and one Domination world at 256,
-  with up to 32 humans and bots in every other seat.
-- Use the retail squad size of 8. The squad addresses the client already
-  understands stay unchanged.
+- Run one Acquisition world at 128 characters first, then one Domination world
+  at 256, each with up to 32 humans (at most 16 per side) and bots in every
+  other seat.
+- Use the retail squad size of 8, including for the 64-player Acquisition and
+  Domination profiles. The squad addresses the client already understands stay
+  unchanged.
 - Keep every bot-filled world inside one 50 ms tick at p99 on the live node,
   with headroom.
 - Keep per-human downstream bandwidth bounded and measured.
-- Keep 64-player profiles and Sabotage unchanged unless a profile opts in.
+- Keep Sabotage and the 64-player profiles' world size unchanged. The 64-player
+  Acquisition and Domination profiles move from 4 to 8 per squad (Decision 7).
+- Keep each 32-human world's upstream within the 1 Gbps budget.
 
 ## Non-goals
 
@@ -279,7 +284,7 @@ Horizon. This is rejected:
 Recommended.**
 
 - Profiles carry world capacity (128 or 256, team 64 or 128, squad 8) and a
-  separate human capacity (≤ 32 per world, ≤ 32 per side).
+  separate human capacity (≤ 32 per world, ≤ 16 per side).
 - Horizon admits humans against the human capacity only. The worker owns world
   size and bots.
 - Replication:
@@ -324,7 +329,8 @@ Each phase is one or more focused PRs from current main. Every PR keeps existing
      Domination with 32 squads.
    - Raise `actor_collision::MAX_BODIES`.
    - Scale `MAX_SHARED_QUEUE` from world size, for example 2 × characters + 256.
-   - Hello profile rows gain `human_capacity` and `human_team_capacity` under a
+   - Hello profile rows gain `human_capacity` (≤ 32) and `human_team_capacity`
+     (≤ 16) under a
      new capability `world_capacity_v1`, and `maximum_players` keeps meaning
      world size. Rows without the capability keep today's meaning.
    - Bots allocate Character indices above the human range, so a late human
@@ -389,13 +395,17 @@ Each phase is one or more focused PRs from current main. Every PR keeps existing
 
 Optional, later, and only with an A/B:
 `perf(gameplay): publish distant bots at a lower update rate`. This is a local
-policy with no retail evidence behind it, so it stays opt-in.
+policy with no retail evidence behind it. It is built only if coalesced updates
+(Phase 2, item 5) prove insufficient on the test server, and it stays opt-in.
 
 ### Phase 4: data and projectors (1 public PR plus private bundles)
 
 10. `feat(tools): project authored squad and team capacity for Acquisition and Domination`
     - `build-retail-spawn-catalog.py` gains `--capacity local64|authored`, and
       the default stays `local64`.
+    - `local64` moves Acquisition and Domination from squad 4 to the retail
+      squad 8 (team 32, so half the squads are used), per Decision 7. This needs
+      the Domination squad-8 validation from item 2.
     - `authored` writes Acquisition team 64 / squad 8 and Domination team
       128 / squad 8, taken from the recorded `authored_maximum_players`.
     - The note in `source` says which policy was used.
@@ -447,12 +457,12 @@ Domination 256 follows once Acquisition 128 has run clean on the test server.
    - The sims say one core is ample. The live core is slower than an M4 Pro, and
      32 humans add event handling.
    - Mitigation: Phase 0 tick telemetry on the test server, and a request of
-     1-1.5 CPU for 256 workers. That fits within the about 4.5 CPU unrequested
-     on talos-2da-doc. Running three mode workers at once needs the user's
-     decision.
+     1-1.5 CPU for each 128 and 256 worker. They may all run at once on
+     talos-2da-doc (Decision 5), within the about 4.5 CPU unrequested there.
 6. **Upstream bandwidth.**
    - Up to about 13-21 Mbit/s for 32 humans in a 256 world, and about half that
-     after coalescing.
+     after coalescing. The budget is 1 Gbps (Decision 6), so this is not a
+     binding limit.
    - Mitigation: Phase 0 per-recipient byte receipts.
 7. **Matchmaking masks.**
    - `ulong` cohort masks would break silently if a world-size team capacity
@@ -541,20 +551,20 @@ Also needed:
 
 Roughly 3-5 weeks of agent work, with test-server time being the long pole.
 
-## Decisions for the user
+## Decisions
 
-1. **Domination 256, or 128 first?** Option C is a lower-risk first step that
-   leaves Character-pool headroom.
-2. **Human cap per side.** Is it 32 per world with no per-side cap below 32, or
-   at most 16 per side, so both factions get humans?
-3. **Coalesced replication.** Is it acceptable to try multi-object bot updates on
-   the test server? It is protocol-legal, but it is new on this client.
-4. **Distant-bot rate tiering.** Is it acceptable as an opt-in policy, given it
-   has no retail evidence?
-5. **Live resources.** May 128 and 256 workers raise CPU requests to 1-1.5 each,
-   and may they run concurrently on talos-2da-doc?
-6. **Upstream bandwidth.** What budget is acceptable for 32 humans in a 256
-   world?
-7. **Squad size 8 for 64-player profiles.** Should 64-player Acquisition and
-   Domination profiles keep 4 per squad, or move to retail 8 too? With 8 they
-   would use half the squads.
+Recorded from the user on 2026-11-24.
+
+1. **Acquisition 128 first, then Domination 256.** Domination 256 follows once
+   Acquisition 128 has run clean on the test server. Option C stays the
+   fallback.
+2. **Human cap.** At most 16 humans per side, so 32 per world.
+3. **Coalesced replication.** Approved: combined per-human bot updates may be
+   tried, opt-in, on the test server first.
+4. **Distant-bot rate tiering.** Only if the coalesced updates prove
+   insufficient, and opt-in.
+5. **Live resources.** The 128 and 256 workers may request 1-1.5 CPU each, and
+   they may all run at once on talos-2da-doc.
+6. **Upstream bandwidth.** The budget is 1 Gbps.
+7. **Squad size 8 for 64-player profiles.** 64-player Acquisition and Domination
+   profiles move to squads of 8, matching retail.
