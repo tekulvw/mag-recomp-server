@@ -535,7 +535,7 @@ impl<W: Write> Engine<W> {
     /// Late-entry fallback when no single squad on the group's side has room
     /// for all of it: keep the group on its side in the fewest squads, filling
     /// the emptiest squad first (the leader's). Bots never count as occupants.
-    fn allocate_split_party(
+    pub(crate) fn allocate_split_party(
         &self,
         faction: u8,
         members: usize,
@@ -556,7 +556,7 @@ impl<W: Write> Engine<W> {
             .chain(self.peers.values())
             .filter(|actor| actor.team() == team)
             .count();
-        if humans + members > policy.team_capacity {
+        if humans + members > self.human_team_capacity() {
             return Err("party_no_room");
         }
         let mut vacancies: Vec<_> = catalog

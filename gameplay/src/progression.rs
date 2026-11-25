@@ -17,7 +17,7 @@ const MAX_ACK_LEVEL_MESSAGES: usize = 127;
 const MAX_REWARD_NOTIFICATIONS: usize = 128;
 // One terminal callback per bounded human, with up to 128 authored objective
 // vector rows (repetitions included) and one result. Wire batches stay at 32.
-const MAX_TERMINAL_REWARDS: usize = crate::MAX_MATCH_PLAYERS * (128 + 1);
+const MAX_TERMINAL_REWARDS: usize = crate::world_capacity::MAX_ADMITTED_HUMANS * (128 + 1);
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProgressionSnapshot {

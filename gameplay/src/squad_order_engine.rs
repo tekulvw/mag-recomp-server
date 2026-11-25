@@ -330,7 +330,7 @@ impl<W: Write> Engine<W> {
                 baseline.insert(squad, snapshot);
             }
             if packets.is_empty()
-                || actor.ordinary_shared_len() + packets.len() > multiplayer::MAX_SHARED_QUEUE
+                || actor.ordinary_shared_len() + packets.len() > actor.shared_queue_limit
             {
                 continue;
             }

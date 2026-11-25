@@ -28,6 +28,19 @@ pub struct Summary {
     /// Total world population (humans plus bots) this profile fills to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bot_fill_total: Option<usize>,
+    /// Humans the world admits, when it is larger than a legacy world; see
+    /// `world_capacity`. Legacy rows omit it: every seat may be human.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_capacity: Option<usize>,
+    /// Humans one side admits, present with `human_capacity`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_team_capacity: Option<usize>,
+}
+impl Summary {
+    /// Humans this profile's world admits.
+    pub fn admitted_humans(&self) -> usize {
+        self.human_capacity.unwrap_or(self.maximum_players)
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -313,8 +326,7 @@ impl Registry {
             if !matches!(policy.game_type, 0..=2)
                 || !policy.auto_assign_teams
                 || (policy.has_bunkers && policy.game_type != 2)
-                || (policy.game_type == 2
-                    && (policy.squad_capacity > 4 || spawns.map_pool().squads.len() != 32))
+                || (policy.game_type == 2 && spawns.map_pool().squads.len() != 32)
                 || policy.attacking_faction == policy.defending_faction
                 || spawns.map_pool().owner_faction != Some(policy.defending_faction)
             {
@@ -347,7 +359,7 @@ impl Registry {
                     .min(policy.team_capacity)
             });
             if capacities != [policy.team_capacity; 2]
-                || policy.team_capacity * 2 > MAX_MATCH_PLAYERS
+                || policy.team_capacity * 2 > world_capacity::MAX_WORLD_CHARACTERS
             {
                 return Err(io::Error::other("match_profile_capacity_mismatch"));
             }
@@ -656,6 +668,10 @@ impl Registry {
                 squad_capacity: None,
                 squad_counts: None,
                 bot_fill_total: None,
+                human_capacity: world_capacity::is_large(policy.team_capacity)
+                    .then(|| world_capacity::human_capacity(policy.team_capacity)),
+                human_team_capacity: world_capacity::is_large(policy.team_capacity)
+                    .then(|| world_capacity::human_team_capacity(policy.team_capacity)),
             };
             profiles.insert(
                 source.profile_id,
@@ -710,6 +726,14 @@ impl Registry {
         }
         self.default_bot_fill_total = Some(total);
         Ok(())
+    }
+
+    /// Whether any profile describes a world above the legacy size, which
+    /// only a Horizon that understands `world_capacity_v1` may accept.
+    pub fn has_large_world(&self) -> bool {
+        self.profiles
+            .values()
+            .any(|profile| profile.summary.human_capacity.is_some())
     }
 
     pub fn has_bot_fill(&self) -> bool {
@@ -1785,7 +1809,7 @@ impl<W: Write> Engine<W> {
             self.minimum_players = 2;
             self.minimum_players_per_team = [1; 2];
         }
-        self.maximum_players = loaded.summary.maximum_players;
+        self.maximum_players = loaded.summary.admitted_humans();
         self.match_started = self.starts_without_quorum();
         self.party_reservations.clear();
         self.selected_match = Some(selected);
@@ -2881,6 +2905,8 @@ mod tests {
                     squad_capacity: None,
                     squad_counts: None,
                     bot_fill_total: None,
+                    human_capacity: None,
+                    human_team_capacity: None,
                     maximum_players: policy.team_capacity * 2,
                 },
                 spawns,
@@ -3180,12 +3206,16 @@ mod tests {
             Registry::load(&manifest).unwrap().summaries()[0].maximum_players,
             16
         );
-        spawn["match_profile"]["squad_capacity"] = json!(5);
+        // Retail eight-member squads; the Squad object holds no more than eight.
+        spawn["match_profile"]["squad_capacity"] = json!(8);
         files.write("domination-spawns.json", spawn.clone());
         assert_eq!(
-            Registry::load(&manifest).err().unwrap().to_string(),
-            "unsupported_match_profile_policy"
+            Registry::load(&manifest).unwrap().summaries()[0].maximum_players,
+            16
         );
+        spawn["match_profile"]["squad_capacity"] = json!(9);
+        files.write("domination-spawns.json", spawn.clone());
+        assert!(Registry::load(&manifest).is_err());
 
         spawn["match_profile"]["team_capacity"] = json!(32);
         spawn["match_profile"]["squad_capacity"] = json!(4);
@@ -3197,6 +3227,145 @@ mod tests {
             Registry::load(&manifest).err().unwrap().to_string(),
             "unsupported_match_profile_policy"
         );
+    }
+
+    /// A world of `team` characters per side over `squads` eight-member
+    /// squads on each side.
+    fn eight_member_spawns(files: &Files, mode: i8, team: usize, squads: usize) -> PathBuf {
+        let mut spawn: Value =
+            serde_json::from_slice(&std::fs::read(files.spawns(mode, 0, 1)).unwrap()).unwrap();
+        spawn["match_profile"]["team_capacity"] = json!(team);
+        spawn["match_profile"]["squad_capacity"] = json!(8);
+        let squads: Vec<_> = (0..2)
+            .flat_map(|side| (0..squads).map(move |k| (side, k)))
+            .map(|(side, k)| {
+                json!({"index":side * 16 + k,"team":side,"platoon":k / 4,"squad":k % 4,
+                    "faction":if side == 0 { None } else { Some(1) },"available":[0],"default_spawn":0})
+            })
+            .collect();
+        spawn["maps"][0]["squads"] = json!(squads);
+        files.write(&format!("eight-{mode}-{team}.json"), spawn)
+    }
+
+    fn hello(engine: &mut Engine<Vec<u8>>) -> Value {
+        let response = engine.handle(
+            Request::Hello {
+                v: BRIDGE_VERSION,
+                request_id: "hello".into(),
+            },
+            Duration::ZERO,
+            1,
+        );
+        assert!(response.ok, "{:?}", response.error);
+        serde_json::to_value(response).unwrap()
+    }
+
+    #[test]
+    fn worlds_above_the_legacy_size_advertise_a_separate_human_cap() {
+        let files = Files::new();
+        let manifest = files.write(
+            "large-profiles.json",
+            json!({"format":"mag_match_profiles_v1","profiles":[
+                {"profile_id":"acquisition-128","spawn_catalog":eight_member_spawns(&files, 1, 64, 8)},
+                {"profile_id":"domination-256","spawn_catalog":eight_member_spawns(&files, 2, 128, 16)},
+                {"profile_id":"domination-64","spawn_catalog":eight_member_spawns(&files, 2, 32, 16)},
+            ]}),
+        );
+        let mut engine = engine(&files, Vec::new(), 100_000);
+        engine.match_profiles = Some(Registry::load(&manifest).unwrap());
+        let hello = hello(&mut engine);
+        assert!(
+            hello["capabilities"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(world_capacity::CAPABILITY))
+        );
+        let row = |id: &str| {
+            hello["match_profiles"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["profile_id"] == id)
+                .unwrap()
+                .clone()
+        };
+        // maximum_players and team_capacity keep meaning the world's size.
+        let acquisition = row("acquisition-128");
+        assert_eq!(
+            [
+                &acquisition["maximum_players"],
+                &acquisition["team_capacity"],
+                &acquisition["human_capacity"],
+                &acquisition["human_team_capacity"]
+            ],
+            [&json!(128), &json!(64), &json!(32), &json!(16)]
+        );
+        let domination = row("domination-256");
+        assert_eq!(
+            [
+                &domination["maximum_players"],
+                &domination["team_capacity"],
+                &domination["human_capacity"],
+                &domination["human_team_capacity"]
+            ],
+            [&json!(256), &json!(128), &json!(32), &json!(16)]
+        );
+        // A legacy-size world, here with retail eight-member Domination squads,
+        // keeps today's row: every seat may be human.
+        let legacy = row("domination-64");
+        assert_eq!(legacy["maximum_players"], 64);
+        assert!(legacy.get("human_capacity").is_none());
+        assert!(legacy.get("human_team_capacity").is_none());
+
+        // Selecting the large world admits humans against the human cap.
+        assert!(select(&mut engine, "formation-large", "acquisition-128").ok);
+        assert_eq!(engine.admission_capacity(), 128);
+        assert_eq!(engine.maximum_players, 32);
+        let configure = |engine: &mut Engine<Vec<u8>>, maximum, teams| {
+            engine.handle(
+                Request::ConfigureMatch {
+                    v: BRIDGE_VERSION,
+                    request_id: "configure".into(),
+                    minimum_players: 2,
+                    minimum_players_per_team: teams,
+                    maximum_players: maximum,
+                    application_id: 20231,
+                },
+                Duration::ZERO,
+                1,
+            )
+        };
+        assert_eq!(
+            configure(&mut engine, 64, [1, 1]).error.as_deref(),
+            Some("invalid_match_limits")
+        );
+        assert_eq!(
+            configure(&mut engine, 32, [17, 1]).error.as_deref(),
+            Some("invalid_team_quorum")
+        );
+        let configured = configure(&mut engine, 32, [1, 1]);
+        assert!(configured.ok, "{:?}", configured.error);
+        assert_eq!(engine.maximum_players, 32);
+        // The legacy world still admits its whole capacity.
+        assert!(select(&mut engine, "formation-legacy", "domination-64").ok);
+        assert_eq!(engine.maximum_players, 64);
+    }
+
+    #[test]
+    fn worlds_beyond_the_character_pool_are_refused() {
+        let files = Files::new();
+        let path = eight_member_spawns(&files, 2, 128, 16);
+        let manifest = files.write(
+            "pool-profiles.json",
+            json!({"format":"mag_match_profiles_v1","profiles":[
+                {"profile_id":"too-large","spawn_catalog":path}
+            ]}),
+        );
+        assert!(Registry::load(&manifest).is_ok());
+        let mut spawn: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        spawn["match_profile"]["team_capacity"] = json!(129);
+        files.write("eight-2-128.json", spawn);
+        assert!(Registry::load(&manifest).is_err());
     }
 
     #[test]
@@ -3213,6 +3382,20 @@ mod tests {
         );
         assert!(response.ok);
         assert!(response.capabilities.contains(&CAPABILITY.to_owned()));
+        // No world above the legacy size: no capability and no human caps.
+        assert!(
+            !response
+                .capabilities
+                .contains(&world_capacity::CAPABILITY.to_owned())
+        );
+        assert!(
+            serde_json::to_value(&response.match_profiles)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row.get("human_capacity").is_none())
+        );
         assert_eq!(response.match_profiles.len(), 12);
         for summary in response.match_profiles {
             let selection = select(

@@ -2,7 +2,9 @@
 use crate::bot_physics::{Body, Point};
 use std::collections::{BTreeMap, BTreeSet};
 const CELL: f64 = 2.;
-const MAX_BODIES: usize = 256;
+/// Every Character in a full client pool (`world_capacity::MAX_WORLD_CHARACTERS`)
+/// plus vehicle and bunker bodies, with room to spare.
+const MAX_BODIES: usize = 2 * crate::world_capacity::MAX_WORLD_CHARACTERS;
 const MAX_CELLS: usize = 256;
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Bounds {
@@ -248,6 +250,22 @@ mod tests {
         g
     }
     #[test]
+    fn a_full_character_pool_and_its_vehicles_fit_the_broad_phase() {
+        let mut g = ActorGrid::default();
+        let at = |id: u16| [f64::from(id % 32) * 3., 0., f64::from(id / 32) * 3.];
+        // Every Character index, then a vehicle body per Character.
+        for id in 0..2 * crate::world_capacity::MAX_WORLD_CHARACTERS as u16 {
+            g.insert(id, Bounds::body(at(id), Body::default())).unwrap();
+        }
+        // Moving a body never needs a new entry; one more body is refused.
+        g.insert(0, Bounds::body([1., 0., 1.], Body::default()))
+            .unwrap();
+        assert_eq!(
+            g.insert(u16::MAX, Bounds::body([1., 0., 1.], Body::default())),
+            Err("actor_collision_body_limit")
+        );
+    }
+    #[test]
     fn swept_human_blocks_tunneling_and_reports_contact() {
         let g = grid([3., 0., 0.]);
         let h = g
@@ -363,9 +381,9 @@ mod tests {
         );
     }
     #[test]
-    fn broad_phase_256_body_capacity_and_crossing_reservations_are_bounded() {
+    fn broad_phase_body_capacity_and_crossing_reservations_are_bounded() {
         let mut grid = ActorGrid::default();
-        for id in 0..256 {
+        for id in 0..MAX_BODIES as u16 {
             grid.insert(
                 id,
                 Bounds::body([f64::from(id) * 4., 0., 0.], Body::default()),
@@ -386,8 +404,11 @@ mod tests {
         );
         assert!(budget >= 5, "far bodies must stay outside candidate work");
         assert!(
-            grid.insert(256, Bounds::body([2000., 0., 0.], Body::default()))
-                .is_err()
+            grid.insert(
+                MAX_BODIES as u16,
+                Bounds::body([2000., 0., 0.], Body::default())
+            )
+            .is_err()
         );
         let mut grid = ActorGrid::default();
         grid.insert_reserved(

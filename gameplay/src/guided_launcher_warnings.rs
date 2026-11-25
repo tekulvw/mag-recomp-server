@@ -412,8 +412,7 @@ impl<W: Write> Engine<W> {
                         && a.allocation_sequence == observer.allocation
                 })
                 .ok_or("stale_guided_warning_observer")?;
-            if actor.ordinary_shared_len().saturating_add(1 + extra)
-                > crate::multiplayer::MAX_SHARED_QUEUE
+            if actor.ordinary_shared_len().saturating_add(1 + extra) > actor.shared_queue_limit
                 || actor.replication_backlogged
             {
                 return Err("guided_warning_publication_budget_exceeded");
