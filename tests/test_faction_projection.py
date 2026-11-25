@@ -63,7 +63,7 @@ class FactionProjectionTests(unittest.TestCase):
     def test_each_faction_defends_its_map_against_each_other_faction_in_both_modes(self):
         # A hard-coded SVER map guard or attacker default must not select the sides.
         for mode, game_type, squad_capacity, count in (
-                ('GameType64', 0, 8, 24), ('GameType128', 1, 4, 48)):
+                ('GameType64', 0, 8, 24), ('GameType128', 1, 8, 48)):
             for owner, defender in (('Valor', 0), ('Raven', 1), ('SVER', 2)):
                 for attacker, attacker_id in (('Valor', 0), ('Raven', 1), ('SVER', 2)):
                     if attacker == owner:
@@ -123,6 +123,24 @@ class FactionProjectionTests(unittest.TestCase):
         self.assertEqual(result['match_profile']['game_type'], 3)
         with self.assertRaises(SystemExit):
             self.project(data, 'Valor')
+
+    def test_authored_capacity_is_refused_outside_acquisition_and_domination(self):
+        suppression = invented('GameTypeFactionExercise', 'SVER')
+        for row in suppression[0]['points']:
+            if row['category'] == 2:
+                row.update(spawn_type_name='SpawnPointBasic', spawn_type=0, category=1, active=False)
+        for data, attacker in ((invented(), 'Raven'), (suppression, None)):
+            # local64 keeps 32 per side in squads of 8 and adds no admission note.
+            with patch.object(API, 'extract', return_value=data):
+                result = API.build(Path('/unused'), Path('/unused'), data[0]['map']['map'],
+                                   1, 0, 0, attacking_faction=attacker, capacity='local64')
+            self.assertEqual((result['match_profile']['team_capacity'],
+                              result['match_profile']['squad_capacity']), (32, 8))
+            self.assertNotIn('admission_policy', json.loads(result['source']))
+            with patch.object(API, 'extract', return_value=data), \
+                    self.assertRaisesRegex(SystemExit, 'only for Acquisition and Domination'):
+                API.build(Path('/unused'), Path('/unused'), data[0]['map']['map'],
+                          1, 0, 0, attacking_faction=attacker, capacity='authored')
 
     def test_non_player_basic_spawn_remains_unavailable_in_sabotage(self):
         data = invented()
