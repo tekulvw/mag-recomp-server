@@ -471,7 +471,8 @@ fn catalog_with_hq() -> spawn_catalog::SpawnCatalog {
         .map(|i| {
             json!({"index":i,"team":i/16,"platoon":i%16/4,"squad":i%4,
             "faction":if i<16 {None} else {Some(0)},
-            "available":if i<16 {vec![0]} else {vec![3,1,2]},"default_spawn":if i<16 {0} else {3}})
+            "available":if i<16 {vec![0]} else if i == 17 {vec![4,3]} else {vec![3,1,2]},
+            "default_spawn":if i<16 {0} else if i == 17 {4} else {3}})
         })
         .collect();
     spawn_catalog::SpawnCatalog::from_json(&json!({
@@ -479,13 +480,14 @@ fn catalog_with_hq() -> spawn_catalog::SpawnCatalog {
         "active":{"map_name":"hospital_test","squad_index":16,"default_spawn":3,"available":[3,1,2]},
         "match_profile":{"game_type":2,"auto_assign_teams":true,"attacking_faction":1,
             "has_bunkers":true,"has_objectives":false,"maximum_points":[111,222]},
-        "maps":[{"name":"hospital_test","owner_faction":0,"spawn_count":4,
+        "maps":[{"name":"hospital_test","owner_faction":0,"spawn_count":5,
             "runtime_indices_verified":true,"runtime_indices_basis":"synthetic",
             "squads":squads,"locations":[
                 {"index":0,"token":100,"kind":"insertion","position":{"x":0.,"y":0.,"z":0.}},
                 {"index":1,"token":101,"kind":"bunker_passenger","position":{"x":0.,"y":0.,"z":0.}},
                 {"index":2,"token":102,"kind":"bunker_passenger","position":{"x":0.,"y":0.,"z":0.}},
                 {"index":3,"token":103,"kind":"insertion","position":{"x":5.,"y":0.,"z":7.}},
+                {"index":4,"token":104,"kind":"vehicle_passenger","position":{"x":9.,"y":0.,"z":9.}},
             ]}],
     }).to_string()).unwrap()
 }
@@ -510,9 +512,13 @@ fn tick_until_alive(engine: &mut Engine<Vec<u8>>) {
 }
 
 fn await_respawn_at(engine: &mut Engine<Vec<u8>>, selected: u16) {
+    await_squad_respawn_at(engine, 16, selected);
+}
+
+fn await_squad_respawn_at(engine: &mut Engine<Vec<u8>>, squad: u16, selected: u16) {
     let spawns = catalog_with_hq();
     let actor = engine.active.as_mut().unwrap();
-    actor.squad_catalog = std::sync::Arc::new(spawns.for_squad(16).unwrap());
+    actor.squad_catalog = std::sync::Arc::new(spawns.for_squad(squad).unwrap());
     actor.squad_spawn = selected;
     actor.selected_spawn = Some(protocol::CharacterSpawnSelection {
         spawn_point_index: selected,
@@ -589,4 +595,19 @@ fn a_hospital_destroyed_by_damage_retires_its_spawn_until_restored() {
     spawns.set_runtime_squad_default(17, 2).unwrap();
     assert!(retire(&mut spawns, &world).is_empty());
     assert!(spawns.for_squad(17).unwrap().alpha(2).is_some());
+}
+
+#[test]
+fn an_apc_insertion_without_its_vehicle_respawns_the_player_on_foot() {
+    // Squad 17's authored default is an APC insertion (point 4). With no
+    // ground vehicle to seat the player, the match-start or respawn wave
+    // starts the life at the squad's on-foot insertion instead of waiting.
+    let mut engine = fixture();
+    engine.ground_vehicles = None;
+    await_squad_respawn_at(&mut engine, 17, 4);
+    tick_until_alive(&mut engine);
+    let actor = engine.active.as_ref().unwrap();
+    assert!(actor.life.is_alive(), "{:?}", actor.life);
+    let at = actor.tracking.sample.unwrap().position;
+    assert_eq!((at.x, at.z), (5., 7.));
 }

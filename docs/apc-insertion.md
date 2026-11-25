@@ -120,3 +120,12 @@ mounted payloads, current-state snapshots, external seat/capacity selection,
 occupied/repeated/invalid/wrong-side mounts, late-join creation ordering, release,
 terminal damage, round reset and evidence-failure rollback. They contain no
 private vehicle properties, native map data, assets or captured packets.
+
+A player whose selected or squad spawn is an APC insertion whose vehicle is
+absent, destroyed, on the other side, without exit candidates or out of free
+passenger seats starts that life at the squad's on-foot HQ point: its authored
+default, else its current default, else another on-foot point of the squad.
+This applies to the match-start wave and to respawns. Without such a point the
+refusal stands. A recipient that has not yet received the vehicle creation batch
+still waits for it. Population bots never use APC insertions; they start at
+their on-foot population slots.
