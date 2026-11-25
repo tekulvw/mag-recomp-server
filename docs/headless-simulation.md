@@ -11,7 +11,8 @@ How it works:
 - The bridge setup Horizon would send is issued in process: `hello`, then
   `select_match_profile` when `MAG_SIM_PROFILE` names a `--match-profiles`
   registry profile (the selection configures the match, as it does live), or
-  `configure_match` for 64 players otherwise.
+  `configure_match` otherwise, for every human seat the loaded spawn catalog
+  admits (64 in a 64-character world, the human cap in a larger one).
 - `MAG_SIM_OBSERVERS` observers (default `1`) are reserved as players
   `0..N`. Each is ready for updates and drains its reliable FIFO and
   notification queue the way a connected client does. Its one-time creation
