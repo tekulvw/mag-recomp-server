@@ -36,8 +36,8 @@ namespace Server.Medius
             var live = _reservations.Values.Where(IsLiveCohort).ToArray();
             int pending = _humanQueue.Snapshot().Sum(ticket => ticket.Human.Size);
             int sidePending = _humanQueue.Snapshot().Where(ticket => ticket.Human.Faction == faction).Sum(ticket => ticket.Human.Size);
-            return live.Length + pending + size <= Math.Min(_maximumPlayers, _formedProfile.MaximumPlayers) &&
-                live.Count(r => r.Faction == faction) + sidePending + size <= _formedProfile.TeamCapacity;
+            return live.Length + pending + size <= Math.Min(_maximumPlayers, _formedProfile.HumanCapacity) &&
+                live.Count(r => r.Faction == faction) + sidePending + size <= _formedProfile.HumanTeamCapacity;
         }
 
         internal bool QueueRegistryParty(MagJoinGameRequest request, MagPartyAdmissionMember[] members,
@@ -142,8 +142,8 @@ namespace Server.Medius
                     if (late && (tickets.Length != 1 || !_reservations.Values.Any(IsLiveCohort) ||
                         _reservations.Values.Any(owner => accounts.Contains(owner.Account, StringComparer.Ordinal)) ||
                         _pendingReleases.Values.Any(pending => accounts.Contains(pending.Reservation.Account, StringComparer.Ordinal)) ||
-                        _reservations.Values.Count(IsLiveCohort) + tickets[0].Human.Size > Math.Min(_maximumPlayers, profile.MaximumPlayers) ||
-                        _reservations.Values.Count(r => IsLiveCohort(r) && r.Faction == tickets[0].Human.Faction) + tickets[0].Human.Size > profile.TeamCapacity))
+                        _reservations.Values.Count(IsLiveCohort) + tickets[0].Human.Size > Math.Min(_maximumPlayers, profile.HumanCapacity) ||
+                        _reservations.Values.Count(r => IsLiveCohort(r) && r.Faction == tickets[0].Human.Faction) + tickets[0].Human.Size > profile.HumanTeamCapacity))
                         return false;
                     // The whole group gets DME ports together or not at all.
                     leases = _portBudget.TryAcquire(accounts.Length);

@@ -124,7 +124,7 @@ impl<W: Write> Engine<W> {
                 .filter(|actor| sees_level(actor))
                 .any(|actor| {
                     actor.replication_backlogged
-                        || actor.ordinary_shared_len() >= multiplayer::MAX_SHARED_QUEUE
+                        || actor.ordinary_shared_len() >= actor.shared_queue_limit
                 });
         if stat_overflow || level_overflow {
             return Err("refresh_progression_publications_full");

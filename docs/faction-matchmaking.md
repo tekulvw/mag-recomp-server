@@ -53,8 +53,7 @@ slot allocators under the same wire world ID; see [cohort lifecycle](match-cohor
 Queue callbacks and cleanup retain their owner/session checks.
 
 The source supports one active DME/Rust world, with queued waiting cohorts.
-This is not concurrent multi-world hosting. Match capacity remains at most64;
-authored128-player Acquisition is a separate milestone. Global legacy
+This is not concurrent multi-world hosting. Global legacy
 `MagAllowedFactions`/`MagGameType` availability applies to fixed operation;
 in registry mode the acknowledged profile matrix controls served modes/factions.
 Use a retail0/1/3 base configuration when selecting a64-player Horizon maximum.
@@ -70,3 +69,30 @@ Passing source tests does not change services, release pins or the maintainer's
 manual release decision after live-match review.
 
 For a shared human queue across explicitly configured independent live worlds, see [Configured independent live worlds](configured-world-registry.md). The single-host path remains the default.
+
+## World size and human capacity
+
+A profile row's `maximum_players` and `team_capacity` are its world size: every
+Character the worker runs, humans and bots. Rows of at most 64 (32 per side)
+keep their original meaning, where every seat may be human, and are handled
+exactly as before.
+
+A worker that advertises `world_capacity_v1` may send larger rows, up to 256
+(128 per side, the retail client's Character pool). Each such row must also
+carry `human_capacity` (at most 32) and `human_team_capacity` (at most 16). The
+codec refuses a row above 64 without the capability or without both caps, and
+refuses the caps without the capability, so an older worker and an older Horizon
+never exchange a large row. As before, one invalid row refuses the whole hello.
+
+Horizon admits humans only against the human caps. New formations, grouped
+cohorts, registry placement, solo late join, late parties and the
+`configure_match` maximum all use them, never world size, so a 128- or
+256-Character world takes at most 16 humans per side and 32 in all. The worker
+owns world size and fills every other seat with bots. The grouped-cohort `ulong`
+masks count humans per side, and refuse a side above 62. The DME port budget
+remains the global human limit across worlds.
+
+A 128- or 256-Character world also needs the worker-to-Horizon bridge throughput
+work before real use: each reply still carries at most 128 messages and 24,000
+bytes shared by every recipient.
+

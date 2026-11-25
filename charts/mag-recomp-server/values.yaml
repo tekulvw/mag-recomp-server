@@ -134,7 +134,11 @@ gameplayWorkers: []
 #      mountPath: /navigation
 #    extraArgs: []               # worker gameplay flags; data.gameplayExtraArgs is not used
 #    minimumPlayers: 2           # registry minimum_players
-#    maximumPlayers: 8           # default runtime.maximumPlayers
+#    maximumPlayers: 8           # registry maximum_players, default runtime.maximumPlayers: the largest
+#                                # world this worker may form (up to 256). Up to 64 it is also the human
+#                                # limit. Above 64 (128 Acquisition, 256 Domination profiles) humans stay
+#                                # within each profile's caps, 32 per world and 16 per side, and the DME
+#                                # port budget.
 #    minimumPlayersPerTeam: [1, 1]
 #    draining: false             # reloaded live without restarting Medius
 #    resources: {}               # default resources.gameplay

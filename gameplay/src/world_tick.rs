@@ -19,29 +19,70 @@ impl<W: Write> Engine<W> {
         }
         self.last_world_tick = Some(now);
         let result = (|| {
-            let mut messages = self.expire_world_peers(now, wall)?;
-            self.tick_incapacitation(now, wall)?;
-            self.tick_acquisition_ground_registration(wall)?;
-            self.tick_bot_perception(now, wall)?;
-            messages.extend(self.tick_bots(now, wall)?);
-            self.advance_strategic_player_waves(now, wall)?;
-            self.queue_team_wave_deadlines(now, wall)?;
-            messages.extend(self.tick_bot_firearms(now, wall)?);
-            messages.extend(self.tick_bot_healing(now, wall)?);
-            messages.extend(self.tick_objectives(now, wall)?);
-            self.tick_leadership_auto_repair(now, wall)?;
-            self.tick_leadership_auto_heal(now, wall)?;
-            self.queue_squad_orders(now, wall)?;
-            self.queue_active_ability_state(now, wall)?;
-            messages.extend(self.tick_hospital_rockets(now, wall)?);
-            messages.extend(self.tick_infantry_rockets(now, wall)?);
-            self.tick_guided_warnings(now, wall)?;
-            messages.extend(self.tick_match_clock(now, wall)?);
-            messages.extend(self.tick_gas_grenades(now, wall)?);
-            self.queue_projectile_publications(now)?;
-            self.tick_human_static_resupply(now, wall)?;
-            let messages = self.drain_shared(messages, wall)?;
-            self.tick_results_cohorts(now, wall, messages)
+            use tick_timing::{Phase, timed};
+            let mut messages = timed!(self, Phase::Peers, self.expire_world_peers(now, wall))?;
+            timed!(self, Phase::Incapacitation, {
+                self.tick_incapacitation(now, wall)?;
+                self.tick_acquisition_ground_registration(wall)
+            })?;
+            timed!(self, Phase::Perception, self.tick_bot_perception(now, wall))?;
+            messages.extend(timed!(self, Phase::Bots, self.tick_bots(now, wall))?);
+            timed!(self, Phase::Waves, {
+                self.advance_strategic_player_waves(now, wall)?;
+                self.queue_team_wave_deadlines(now, wall)
+            })?;
+            messages.extend(timed!(
+                self,
+                Phase::Firearms,
+                self.tick_bot_firearms(now, wall)
+            )?);
+            messages.extend(timed!(
+                self,
+                Phase::Healing,
+                self.tick_bot_healing(now, wall)
+            )?);
+            messages.extend(timed!(
+                self,
+                Phase::Objectives,
+                self.tick_objectives(now, wall)
+            )?);
+            timed!(self, Phase::Support, {
+                self.tick_leadership_auto_repair(now, wall)?;
+                self.tick_leadership_auto_heal(now, wall)?;
+                self.queue_squad_orders(now, wall)?;
+                self.queue_active_ability_state(now, wall)
+            })?;
+            messages.extend(timed!(self, Phase::Projectiles, {
+                let mut rockets = self.tick_hospital_rockets(now, wall)?;
+                rockets.extend(self.tick_infantry_rockets(now, wall)?);
+                Ok::<_, &'static str>(rockets)
+            })?);
+            timed!(
+                self,
+                Phase::Projectiles,
+                self.tick_guided_warnings(now, wall)
+            )?;
+            messages.extend(timed!(
+                self,
+                Phase::MatchClock,
+                self.tick_match_clock(now, wall)
+            )?);
+            messages.extend(timed!(self, Phase::Projectiles, {
+                let gas = self.tick_gas_grenades(now, wall)?;
+                self.queue_projectile_publications(now)?;
+                Ok::<_, &'static str>(gas)
+            })?);
+            timed!(
+                self,
+                Phase::Resupply,
+                self.tick_human_static_resupply(now, wall)
+            )?;
+            let messages = timed!(self, Phase::Drain, self.drain_shared(messages, wall))?;
+            timed!(
+                self,
+                Phase::Results,
+                self.tick_results_cohorts(now, wall, messages)
+            )
         })();
         match result {
             Ok(messages) => self.world_response(request_id, messages),

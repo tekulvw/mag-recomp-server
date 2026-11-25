@@ -35,6 +35,7 @@ if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(RealRegistryWo
     Test("configured registry real workers", RealRegistryWorkerChecks.Run);
     Test("configured registry real workers grouped", RealRegistryWorkerChecks.RunParties);
     Test("configured registry real workers restart adoption", RealRegistryWorkerChecks.RunRestart);
+    Test("configured registry real workers large world", RealRegistryWorkerChecks.RunLargeWorld);
 }
 Test("registry DME host world and lease isolation", RegistryDmeHostChecks.Run);
 Test("DME port capacity configuration and leases", DmePortCapacityChecks.Budget);
@@ -48,6 +49,11 @@ Test("bundled server NEWS and EULA wire responses", ServerNewsChecks.Run);
 
 Test("active Armory loadout refresh", ActiveLoadoutRefreshChecks.Run);
 Test("typed worker match profile bridge", MatchProfileBridgeChecks.Run);
+Test("world capacity codec gates rows above 64 on world_capacity_v1", WorldCapacityChecks.Codec);
+Test("world capacity matchmaking caps humans per side and per world", WorldCapacityChecks.Matchmaking);
+Test("world capacity grouped cohort masks at the human side bound", WorldCapacityChecks.GroupedCohortBound);
+Test("world capacity placement, late join and late parties use human caps", WorldCapacityChecks.Placement);
+Test("world capacity registry rows and host options", WorldCapacityChecks.Registry);
 Test("gameplay worker identity fencing", GameplayWorkerIdentityChecks.Run);
 Test("retail waiting and cancellation wire", QueueWireChecks.Run);
 Test("retail compact party wire", PartyWireChecks.Run);
@@ -116,6 +122,8 @@ Test("retail saved loadout delete commits and compacts the owned layout", Loadou
 Test("retail skill purchase owns its equipment for loadout saves", LoadoutPreferenceStoreChecks.RetailSkillPurchaseOwnsItsEquipment);
 Test("account-bound NP identity creation and persistence", NpIdentityChecks.Run);
 Test("MLS answers lobby player-card character data for any character", LeadershipProgressionChecks.PlayerCardLookup);
+Test("retail player online and game-info wire", LeadershipProgressionChecks.PlayerStatusWire);
+Test("MLS answers a friend card's online and game-info queries and the invite reaches them", LeadershipProgressionChecks.FriendCardStatus);
 Test("retail account logout wire", LeadershipProgressionChecks.AccountLogoutWire);
 Test("MLS acknowledges the launcher logout and keeps the next login", LeadershipProgressionChecks.AccountLogoutKeepsNextLogin);
 Test("retail MLS replies carry a non-zero plugin id the client echoes", LeadershipProgressionChecks.MlsPluginId);

@@ -53,12 +53,15 @@ across profiles and selections.
 The spawn catalog determines the summary, sides and map. Registry mode supports
 Sabotage (`game_type: 0`), Acquisition (`game_type: 1`) and Domination
 (`game_type: 2`) with automatic team assignment, two distinct factions and
-defender-owned map metadata. Domination uses all 32 squad bindings and may supply
+defender-owned map metadata. Domination uses all 32 squad bindings, with up to
+eight members per squad (the retail size), and may supply
 the three per-profile hospital inputs together: `bunker_placement`,
 `bunker_structure` and `bunker_allocation`. Other modes retain their existing
 no-bunker profile restriction.
 Both sides must have enough authored squad capacity for the declared team
-capacity. `maximum_players` is twice that capacity and cannot exceed 64.
+capacity. `maximum_players` is twice that capacity: the world's character
+capacity, humans and bots together. It cannot exceed 256, the client's
+Character pool. See [World capacity and the human cap](#world-capacity-and-the-human-cap).
 All six ordered faction pairs for each mode can be listed; the registry does not
 invent or fill missing pairs.
 
@@ -206,6 +209,56 @@ Standard rows contain:
   "team_capacity": 32
 }
 ```
+
+### World capacity and the human cap
+
+A world's character capacity and the number of humans it admits are separate.
+Rows up to 64 characters (`team_capacity` up to 32) keep their original
+meaning: every seat may be human, and the row is unchanged. A row above 64
+describes a larger world that bots fill. Only such rows add two fields, and a
+worker with at least one of them also advertises `world_capacity_v1`:
+
+```json
+{
+  "profile_id": "synthetic-acquisition-a0-d1",
+  "game_type": 1,
+  "attacking_faction": 0,
+  "defending_faction": 1,
+  "maximum_players": 128,
+  "team_capacity": 64,
+  "human_capacity": 32,
+  "human_team_capacity": 16
+}
+```
+
+`maximum_players` and `team_capacity` still give the world's size. A larger
+world admits at most `human_capacity` humans (32) and `human_team_capacity` per
+side (16). A coordinator that does not understand `world_capacity_v1` must not
+accept such a row. Selecting the row limits admission to the human cap; its
+`configure_match` must use a `maximum_players` no larger than `human_capacity`
+and per-side minima no larger than `human_team_capacity`, or it fails with
+`invalid_match_limits` or `invalid_team_quorum`. Reservations and groups beyond
+a side's human cap fail with `match_full` or `party_no_room`, however many bot
+seats remain.
+
+Horizon places humans on player IDs below the human cap, so humans use
+Character indices 0-31. In a larger world, bots take every other index of the
+256-index pool first, highest first, and borrow the human range only when the
+world fills the whole pool (a 256-character world with fewer than 32 humans).
+A human who joins on a borrowed index makes that bot yield it: the bot is
+removed before the human's character is published, and the bot fill keeps the
+world's total.
+
+Each recipient's reliable shared-frame queue holds up to 512 frames, or
+2 × characters + 256 above that (768 for a 256-character world). One
+bridge reply still carries at most 128 messages and 24,000 payload bytes for
+all recipients together. Frames beyond that stay queued, in order, for later
+replies. The worker counts every such reply and reports them at most once a
+second as `shared_replication_deferred`, with the queued frames, the deepest
+queue and its bound. A recipient whose queue reaches its bound is released as
+before (`replication_backlog_released`). A world above 64 characters with many
+humans needs the bridge throughput work (Phase 2 of the large-lobbies plan)
+before real use.
 
 Before any reservation or client GameInfo, the coordinator must select an idle
 worker profile and require an exact successful acknowledgement:

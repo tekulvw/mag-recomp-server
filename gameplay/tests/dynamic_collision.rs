@@ -91,6 +91,31 @@ fn coverage_is_independent_of_geometry_rows_and_rejects_missing_extra_or_reused_
             .is_err()
     );
 }
+
+#[test]
+fn horizon_world_zero_is_a_live_context_but_incarnation_zero_is_not() {
+    let c = catalog();
+    let t = target(1, 1);
+    let row = || {
+        c.instantiate("invented-vehicle", t, Pose::at([0.; 3]), false)
+            .unwrap()
+    };
+    // Horizon numbers DME worlds from 0: the first live match runs in world 0.
+    let first_world = WorldKey {
+        world_id: 0,
+        incarnation: 1,
+    };
+    let snapshot = Snapshot::capture(first_world, 4, &[t], vec![row()], u32::MAX).unwrap();
+    assert_eq!(snapshot.context(), (first_world, 4));
+    let unset_round = WorldKey {
+        world_id: 0,
+        incarnation: 0,
+    };
+    assert!(matches!(
+        Snapshot::capture(unset_round, 4, &[t], vec![row()], u32::MAX),
+        Err("invalid_dynamic_body_context")
+    ));
+}
 #[test]
 fn capsule_sphere_and_filters_use_current_state_without_dropping_dead_bodies() {
     let c = catalog();

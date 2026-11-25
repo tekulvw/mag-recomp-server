@@ -301,6 +301,10 @@ pub(super) fn safe_while_held(bot: &WorldBot) -> bool {
 
 fn safe_for(bot: &WorldBot, allow_owned_walk: bool, held: bool) -> bool {
     let r = bot.target.runtime.unwrap();
+    // A body standing still while it waits its turn (a drop queue, a holding
+    // spot or a traffic yield) may fight like any standing bot; walking to
+    // those spots or taking a passage may not.
+    let standing = !matches!(r.phase, BotPhase::Relocating);
     bot.health > 0
         && !matches!(r.phase, BotPhase::Dead)
         && (allow_owned_walk || held || !matches!(r.phase, BotPhase::Relocating))
@@ -311,15 +315,15 @@ fn safe_for(bot: &WorldBot, allow_owned_walk: bool, held: bool) -> bool {
         && (held || !bot.task.operator)
         && !bot.task.recovering
         && !bot.drop_committed
-        && bot.drop_waiting.is_none()
+        && (standing || bot.drop_waiting.is_none())
         && bot.drop_permit.is_none()
-        && bot.drop_queue_passage.is_none()
-        && bot.drop_holding_goal.is_none()
+        && (standing || bot.drop_queue_passage.is_none())
+        && (standing || bot.drop_holding_goal.is_none())
         && !bot.drop_resume
         && !bot.drop_egress
         && !bot.drop_retreat
         && !bot.drop_reroute
-        && bot.traffic_yield.is_none()
+        && (standing || bot.traffic_yield.is_none())
 }
 fn torso(feet: [f64; 3]) -> [f64; 3] {
     [
@@ -575,6 +579,7 @@ impl<W: Write> Engine<W> {
         }
         let mut messages = Vec::new();
         let perception_holds = self.bot_perception.held_ids();
+        let perception = self.bot_perception_policy();
         let mut rays = policy.max_rays_per_tick;
         let mut work = policy.geometry_work_per_tick;
         let map = self.map_name().to_owned();
@@ -584,11 +589,26 @@ impl<W: Write> Engine<W> {
                 ids.partition_point(|&id| id < self.bot_registry.firearm_cursor) % ids.len();
             ids.rotate_left(offset);
         }
+        let base_policy = policy;
         for id in ids {
             if rays == 0 || work == 0 {
                 self.bot_registry.firearm_cursor = id;
                 break;
             }
+            // With perception on, the weapon's retail AI usage band sets how
+            // far this bot engages (and its accuracy falloff), so a sniper
+            // reaches farther than a shotgun.
+            let policy = &match &perception {
+                Some(p) => Policy {
+                    max_engagement_distance_m: crate::bot_perception::bot_sight_range(
+                        p,
+                        &items,
+                        &self.bot_registry.bots[&id],
+                    ),
+                    ..base_policy.clone()
+                },
+                None => base_policy.clone(),
+            };
             self.bot_registry.firearm_cursor = id.wrapping_add(1);
             // Each accepted shot updates current health before the next shooter.
             let Some(me) = actors
@@ -702,6 +722,9 @@ impl<W: Write> Engine<W> {
             let from = muzzle(me.feet);
             // An attacker hunting a disarmer looks for that enemy first.
             let priority = self.armed_priority_target(&self.bot_registry.bots[&id]);
+            // Otherwise a new acquisition prefers the enemy perception last
+            // reacted to (for example its attacker); a held target is kept.
+            let preferred = priority.or_else(|| self.bot_perception.threat_enemy(id, now));
             if priority.is_some_and(|p| state.target.as_ref().is_some_and(|t| t.id != p))
                 && now >= state.next_perception
             {
@@ -739,8 +762,8 @@ impl<W: Write> Engine<W> {
                     })
                     .collect();
                 candidates.sort_by(|a, b| {
-                    (Some(b.life.id) == priority)
-                        .cmp(&(Some(a.life.id) == priority))
+                    (Some(b.life.id) == preferred)
+                        .cmp(&(Some(a.life.id) == preferred))
                         .then(length(from, torso(a.feet)).total_cmp(&length(from, torso(b.feet))))
                         .then(a.life.id.cmp(&b.life.id))
                 });
@@ -783,8 +806,18 @@ impl<W: Write> Engine<W> {
                             * std::f64::consts::TAU
                             / 1024.;
                     }
+                    // A bot that has already reacted to a threat (turned toward
+                    // gunfire, or was hit) needs only the shorter primed delay.
+                    let primed = perception
+                        .as_ref()
+                        .filter(|_| {
+                            selected.is_some() && self.bot_perception.attention(id, now).is_some()
+                        })
+                        .map(|p| p.primed_reaction_ms.min(policy.reaction_ms));
                     state.target = selected;
-                    state.acquired = now;
+                    state.acquired = now.saturating_sub(Duration::from_millis(
+                        primed.map_or(0, |primed| policy.reaction_ms - primed),
+                    ));
                 }
             }
             let mut shot = None;
@@ -801,12 +834,13 @@ impl<W: Write> Engine<W> {
                 let facing =
                     f64::from(self.bot_registry.bots[&id].yaw) * std::f64::consts::TAU / 1024.;
                 let wanted = (point[0] - from[0]).atan2(point[2] - from[2]);
-                state.yaw = turn(
-                    facing,
-                    wanted,
-                    policy.turn_degrees_per_second.to_radians() * dt,
-                )
-                .0;
+                let rate = perception
+                    .as_ref()
+                    .map_or(policy.turn_degrees_per_second, |p| {
+                        p.attention_turn_degrees_per_second
+                            .max(policy.turn_degrees_per_second)
+                    });
+                state.yaw = turn(facing, wanted, rate.to_radians() * dt).0;
             }
             if let Some(target) = state
                 .target

@@ -1276,6 +1276,7 @@ impl<W: Write> Engine<W> {
             .retain(|_, (_, until)| *until > now);
         let body = self.bot_movement_body();
         let mut actors = self.actor_grid(now)?;
+        let population = self.tick_timing_start();
         self.reconcile_bot_population(now, wall, &mut actors)?;
         // New recipients get one coherent creation+inventory+current-life snapshot per bot.
         let recipients: Vec<_> = self
@@ -1325,10 +1326,17 @@ impl<W: Write> Engine<W> {
             }
         }
         self.queue_roster(now)?;
-        self.tick_resupply_planning(now, wall)?;
-        self.tick_resupply_drop_interruptions(now, wall)?;
-        self.tick_drop_admissions(now, wall)?;
-        self.tick_bot_objectives(now, wall, &actors)?;
+        self.tick_timing_end(crate::tick_timing::Phase::BotsPopulation, population);
+        crate::tick_timing::timed!(self, crate::tick_timing::Phase::BotsDrops, {
+            self.tick_resupply_planning(now, wall)?;
+            self.tick_resupply_drop_interruptions(now, wall)?;
+            self.tick_drop_admissions(now, wall)
+        })?;
+        crate::tick_timing::timed!(
+            self,
+            crate::tick_timing::Phase::BotsObjectives,
+            self.tick_bot_objectives(now, wall, &actors)
+        )?;
         let mut packets = Vec::new();
         let mut receipts = Vec::new();
         let map = self.map_name().to_string();
@@ -2840,10 +2848,12 @@ impl<W: Write> Engine<W> {
                 }
                 break;
             };
-            let Some(index) = (0..self.admission_capacity() as u16)
-                .rev()
-                .find(|i| !human_ids.contains(i) && !self.bot_registry.bots.contains_key(i))
-            else {
+            // Bots leave the human range for last; see world_capacity.
+            let Some(index) = world_capacity::bot_index_order(
+                self.match_profile().team_capacity,
+                self.admission_capacity(),
+            )
+            .find(|i| !human_ids.contains(i) && !self.bot_registry.bots.contains_key(i)) else {
                 return Err("bot_population_no_free_character_index");
             };
             let squad = replication::SquadAddress::from_index(squad)?;

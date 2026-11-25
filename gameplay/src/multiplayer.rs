@@ -2,17 +2,32 @@
 use super::*;
 use replication::multiplayer::*;
 
-/// Per-recipient reliable shared-frame bound. A joiner receives its world
-/// bootstrap while 64 bots keep publishing; 128 frames evicted joiners on live
-/// matches, so allow a larger burst (frames are at most 1397 bytes).
-pub(super) const MAX_SHARED_QUEUE: usize = 512;
+/// Per-recipient reliable shared-frame bound for legacy worlds. A joiner
+/// receives its world bootstrap while 64 bots keep publishing; 128 frames
+/// evicted joiners on live matches, so allow a larger burst (frames are at most
+/// 1397 bytes). Larger worlds raise each recipient's `shared_queue_limit`; see
+/// `world_capacity::shared_queue_limit`.
+#[cfg(test)]
+pub(super) const MAX_SHARED_QUEUE: usize = world_capacity::LEGACY_SHARED_QUEUE;
+
+/// Replies that left shared frames queued because the bridge reply budget
+/// (messages and payload bytes per reply, shared by every recipient) was full.
+/// The frames stay queued in order and drain in later replies; a recipient
+/// whose queue reaches its bound is released as `replication_backlogged`.
+/// Every deferral is counted; a receipt reports them at most once per second.
+#[derive(Debug, Default)]
+pub(crate) struct SharedDeferral {
+    pub(crate) replies: u64,
+    reported_replies: u64,
+    last_report: Option<u64>,
+}
 
 impl Active {
     /// Reliable packets cannot be discarded or coalesced without traced ACK rules.
     /// Bound memory now; retire this recipient through recorded lifecycle cleanup
     /// on the next request rather than failing the healthy publisher's operation.
     pub(super) fn queue_shared(&mut self, packet: Vec<u8>) {
-        if self.ordinary_shared_len() >= MAX_SHARED_QUEUE {
+        if self.ordinary_shared_len() >= self.shared_queue_limit {
             self.replication_backlogged = true;
         } else if !self.replication_backlogged {
             self.pending_shared.push_back(packet);
@@ -232,7 +247,10 @@ impl<W: Write> Engine<W> {
         minimum: usize,
         maximum: usize,
     ) -> Result<Self, &'static str> {
-        if minimum == 0 || minimum > maximum || maximum > self.admission_capacity() {
+        if minimum == 0
+            || minimum > maximum
+            || maximum > self.human_admission_capacity_for(self.wire_profile.application_id())
+        {
             return Err("invalid_match_limits");
         }
         if self.development_dummy_enabled() && maximum > 1 {
@@ -265,7 +283,7 @@ impl<W: Write> Engine<W> {
                     .filter(|s| usize::from(s.team) == team)
                     .count()
                     * policy.squad_capacity)
-                    .min(policy.team_capacity)
+                    .min(self.human_team_capacity())
             })
         };
         if minimum[0].saturating_add(minimum[1]) > maximum
@@ -1342,6 +1360,18 @@ impl<W: Write> Engine<W> {
                 break;
             }
         }
+        // Whatever the budget left behind, per recipient: (queued, bound).
+        let deferred: Vec<_> = ready
+            .iter()
+            .zip(&offsets)
+            .map(|(actor, offset)| {
+                (
+                    actor.pending_shared.len().saturating_sub(*offset),
+                    actor.shared_queue_limit,
+                )
+            })
+            .filter(|(queued, _)| *queued > 0)
+            .collect();
         let recipients: Vec<_> = planned
             .iter()
             .map(|(id, wire, _)| {
@@ -1393,7 +1423,39 @@ impl<W: Write> Engine<W> {
         }
         self.shared_drain_cursor = next_cursor;
         messages.extend(recipients);
+        if !deferred.is_empty() {
+            self.report_shared_deferral(&deferred, messages.len(), total, limit, wall)?;
+        }
         self.drain_notifications(messages, wall)
+    }
+    /// Count one budget-limited reply and report the running count at most
+    /// once per wall second, with the deepest queue against its bound.
+    fn report_shared_deferral(
+        &mut self,
+        deferred: &[(usize, usize)],
+        messages: usize,
+        bytes: usize,
+        message_limit: usize,
+        wall: u64,
+    ) -> Result<(), &'static str> {
+        let deferral = &mut self.shared_deferral;
+        deferral.replies = deferral.replies.saturating_add(1);
+        if deferral.last_report == Some(wall) {
+            return Ok(());
+        }
+        let since = deferral.replies - deferral.reported_replies;
+        deferral.reported_replies = deferral.replies;
+        deferral.last_report = Some(wall);
+        let replies = deferral.replies;
+        let (deepest, bound) = deferred.iter().copied().max().unwrap_or_default();
+        self.record(
+            json!({"op":"shared_replication_deferred","recipients":deferred.len(),
+                "queued_frames":deferred.iter().map(|(queued, _)| queued).sum::<usize>(),
+                "deepest_queue":deepest,"queue_bound":bound,"messages":messages,
+                "payload_bytes":bytes,"message_limit":message_limit,"byte_limit":24_000,
+                "deferred_replies":since,"deferred_replies_total":replies}),
+            wall,
+        )
     }
     pub(super) fn alpha_passenger_seat(&self, player: u16) -> Option<u8> {
         // The native bunker has distinct physical seats; descending selection

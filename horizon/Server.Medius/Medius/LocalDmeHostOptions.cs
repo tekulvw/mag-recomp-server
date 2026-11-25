@@ -16,10 +16,13 @@ namespace Server.Medius
         public IPAddress AdvertisedAddress { get; }
         public ushort GameTcpPort { get; }
         public string WorkerId { get; }
+        /// <summary>The largest world this host may form. A profile above 64 Characters is offered
+        /// only when it fits; human admission stays within <see cref="StartupPolicy"/>.</summary>
+        public int WorldCapacity { get; }
 
         public LocalDmeHostOptions(int applicationId, int gameType, int minimumPlayers, int maximumPlayers,
             int[] minimumPlayersPerTeam, int[] allowedFactions, IPAddress advertisedAddress, ushort gameTcpPort,
-            string workerId = null)
+            string workerId = null, int? worldCapacity = null)
         {
             if (workerId != null && (applicationId != 20231 || !GameplayWorkerIdentity.IsValidIdentifier(workerId)))
                 throw new ArgumentException("A configured gameplay worker requires a valid identity and retail application 20231.", nameof(workerId));
@@ -41,6 +44,9 @@ namespace Server.Medius
             AdvertisedAddress = advertisedAddress;
             GameTcpPort = gameTcpPort;
             WorkerId = workerId;
+            WorldCapacity = worldCapacity ?? maximumPlayers;
+            if (WorldCapacity < maximumPlayers || WorldCapacity > MagWorldCapacity.MaximumWorldCharacters)
+                throw new ArgumentException("World capacity must cover the human maximum and stay within 256.", nameof(worldCapacity));
         }
 
         internal static LocalDmeHostOptions FromLegacySettings()

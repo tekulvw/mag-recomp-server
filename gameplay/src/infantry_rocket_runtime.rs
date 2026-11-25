@@ -1146,8 +1146,7 @@ impl<W: Write> Engine<W> {
             .filter(|actor| actor.reservation.world == world && actor.initial_objects.is_some())
             .all(|actor| {
                 !actor.replication_backlogged
-                    && actor.ordinary_shared_len().saturating_add(count)
-                        <= multiplayer::MAX_SHARED_QUEUE
+                    && actor.ordinary_shared_len().saturating_add(count) <= actor.shared_queue_limit
             })
     }
 

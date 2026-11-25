@@ -178,7 +178,9 @@ pub mod ground_vehicles;
 pub mod guided_launcher_motion;
 mod guided_launcher_warnings;
 pub mod guided_launchers;
-mod headless_sim;
+pub mod headless_sim;
+#[cfg(test)]
+mod headless_sim_tests;
 pub mod healing;
 mod helo_redeploy;
 mod hospital_blast_areas;
@@ -244,11 +246,15 @@ mod structural_repair_authority;
 pub mod structure_catalog;
 pub mod structures;
 pub mod telemetry;
+pub mod tick_timing;
 pub mod turret;
 pub mod underbarrel_launchers;
 pub mod vehicle_exit;
 pub mod wire_profile;
 pub mod worker_identity;
+pub mod world_capacity;
+#[cfg(test)]
+mod world_capacity_tests;
 pub mod world_stream;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -262,7 +268,6 @@ pub const MAX_PAYLOAD: usize = 16_384;
 pub const MAX_LOG: u64 = 64 * 1024 * 1024;
 pub const IO_DEADLINE: Duration = Duration::from_secs(2);
 pub const ACTIVE_MAP_NAME: &str = "mag_unalaska_final";
-pub(crate) const MAX_MATCH_PLAYERS: usize = 64;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -845,7 +850,7 @@ impl Request {
             } => {
                 if *minimum_players == 0
                     || minimum_players > maximum_players
-                    || *maximum_players > MAX_MATCH_PLAYERS
+                    || *maximum_players > world_capacity::MAX_ADMITTED_HUMANS
                     || minimum_players_per_team.iter().any(|n| n > maximum_players)
                     || minimum_players_per_team[0].saturating_add(minimum_players_per_team[1])
                         > *maximum_players
@@ -883,7 +888,7 @@ impl Request {
                     cohort_id,
                     *admission_epoch,
                 )?;
-                if members.is_empty() || members.len() > MAX_MATCH_PLAYERS {
+                if members.is_empty() || members.len() > world_capacity::MAX_ADMITTED_HUMANS {
                     return Err("invalid_party_member_count");
                 }
                 for member in members {
@@ -1292,6 +1297,8 @@ struct Active {
     /// Health replies must join the FIFO until scheduled health drains.
     ordered_health_pending: bool,
     replication_backlogged: bool,
+    /// Reliable shared-frame bound for this recipient, from the world size.
+    shared_queue_limit: usize,
     objective_delta: Option<Vec<u8>>,
     objective_assigned: bool,
     objective_needs_clear: bool,
@@ -1369,6 +1376,8 @@ pub struct Engine<W: Write> {
     bot_names: bot_names::Catalog,
     world_tick_enabled: bool,
     last_world_tick: Option<Duration>,
+    /// Opt-in per-phase world-tick time (headless diagnostics).
+    tick_timing: Option<tick_timing::TickTiming>,
     automatic_repair: leadership_auto_repair::State,
     automatic_heal: leadership_auto_heal::State,
     match_epoch: Option<Duration>,
@@ -1376,6 +1385,7 @@ pub struct Engine<W: Write> {
     alpha_turret_reporter: Option<(String, u32)>,
     team_waves: [Option<TeamWaveClock>; 2],
     shared_drain_cursor: u16,
+    shared_deferral: multiplayer::SharedDeferral,
     last_published_rosters: std::collections::BTreeMap<u16, ([u16; 8], u16)>,
     sequence: u64,
     written: u64,
@@ -1926,6 +1936,11 @@ impl<W: Write> Engine<W> {
                 if registry.has_bot_fill() {
                     capabilities.push(match_profiles::BOT_FILL_CAPABILITY.into());
                 }
+                // Only rows above the legacy world size carry human caps; a
+                // registry without one keeps its discovery reply unchanged.
+                if registry.has_large_world() {
+                    capabilities.push(world_capacity::CAPABILITY.into());
+                }
                 if self.party_reservations.enabled() {
                     capabilities.push(party_reservation::CAPABILITY.into());
                     capabilities.push(party_reservation::LATE_ENTRY_CAPABILITY.into());
@@ -2068,7 +2083,7 @@ impl<W: Write> Engine<W> {
                 }
                 if minimum_players == 0
                     || minimum_players > maximum_players
-                    || maximum_players > self.admission_capacity_for(application_id)
+                    || maximum_players > self.human_admission_capacity_for(application_id)
                 {
                     return Err("invalid_match_limits");
                 }

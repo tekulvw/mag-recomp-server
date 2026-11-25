@@ -81,11 +81,13 @@ namespace Server.Medius
                     if (!endpoints.Add(host + ":" + workerPort)) throw Invalid();
                     // One human may start a worker whose profiles advertise bot fill; workers
                     // without it still form only with a human on each side (see MagFactionMatchmaking).
-                    int minimum = Integer(row, "minimum_players", 1, 64), maximum = Integer(row, "maximum_players", minimum, 64);
+                    int minimum = Integer(row, "minimum_players", 1, 64), maximum = Integer(row, "maximum_players", minimum, MagWorldCapacity.MaximumWorldCharacters);
                     var teamRows = row.GetProperty("minimum_players_per_team");
                     if (teamRows.ValueKind != JsonValueKind.Array || teamRows.GetArrayLength() != 2) throw Invalid();
                     var teams = teamRows.EnumerateArray().Select(x => x.TryGetInt32(out int n) && n >= 0 && n <= 32 ? n : throw Invalid()).ToArray();
-                    var policy = new MagMatchStartupPolicy(minimum, maximum, teams);
+                    // maximum_players is the largest world this worker may form. Up to 64 it is also the
+                    // human limit, as before; above 64 humans stay within 64 and each profile's own caps.
+                    var policy = new MagMatchStartupPolicy(minimum, Math.Min(maximum, MagWorldCapacity.LegacyWorldCharacters), teams);
                     var drain = row.GetProperty("draining");
                     if (drain.ValueKind != JsonValueKind.True && drain.ValueKind != JsonValueKind.False) throw Invalid();
                     workers.Add(new MagConfiguredWorker(id, host, workerPort, policy.MinimumPlayers, maximum, Array.AsReadOnly(teams), drain.GetBoolean()));

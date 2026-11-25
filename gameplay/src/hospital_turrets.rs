@@ -653,7 +653,7 @@ impl<W: Write> Engine<W> {
             };
             actor.replication_backlogged
                 || actor.ordinary_shared_len() + baseline_slots(actor) + forward_slots + packets
-                    > crate::multiplayer::MAX_SHARED_QUEUE
+                    > actor.shared_queue_limit
         }) {
             return Err("hospital_turret_publication_budget_exceeded");
         }

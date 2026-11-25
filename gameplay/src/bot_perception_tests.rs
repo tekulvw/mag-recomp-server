@@ -446,3 +446,149 @@ fn sixty_four_bots_respect_the_per_tick_sight_budget() {
     // Wall time depends on machine load, so it is reported, never asserted.
     eprintln!("slowest perception tick for 64 bots: {slowest:?}");
 }
+
+/// A bot standing still faces away from a human who hits it from 10 m behind,
+/// without any gunfire the bot can hear: only the damage reveals the attacker.
+fn hit_from_behind(perception: Option<bool>) -> (Vec<Value>, Vec<Value>, u64) {
+    let (mut engine, bot) = fixture("SP Damage");
+    engine.set_bot_perception_override(perception);
+    // Ordinary engagement limits, so the primed reaction is what is measured.
+    let firearms = &mut engine.bot_registry.config.as_mut().unwrap().firearms;
+    firearms.reaction_ms = 800;
+    firearms.turn_degrees_per_second = 90.;
+    let start = position(&engine, bot);
+    place_human(&mut engine, start[0] as f32, start[2] as f32 + 10.);
+    // Facing -Z; the human is at +Z.
+    engine.bot_registry.bots.get_mut(&bot).unwrap().yaw = 512;
+    let mut t = 0;
+    while t < 1000 {
+        tick(&mut engine, t);
+        t += 50;
+    }
+    assert!(records(&engine, "bot_firearm_shot").is_empty(), "unseen");
+    let generation = engine.bot_registry.bots[&bot]
+        .target
+        .runtime
+        .unwrap()
+        .generation;
+    let mut damage = engine.bot_registry.bots[&bot].damage;
+    damage.health_quarter_points = 300;
+    damage.last_attacker = 0x0380_0000;
+    engine
+        .commit_bot_damage(bot, generation, damage, Duration::from_millis(t))
+        .unwrap();
+    let hit = t;
+    while t < hit + 4000 {
+        tick(&mut engine, t);
+        t += 50;
+    }
+    let first = records(&engine, "bot_firearm_shot")
+        .first()
+        .map_or(u64::MAX, |s| s["timestamp_ms"].as_u64().unwrap() - hit);
+    (
+        records(&engine, "bot_perception_interrupt"),
+        records(&engine, "bot_firearm_shot"),
+        first,
+    )
+}
+
+#[test]
+fn a_bot_hit_from_behind_turns_and_returns_fire() {
+    let (interrupts, shots, first) = hit_from_behind(None);
+    // Standing still: nothing to interrupt, but the bot faces its attacker.
+    assert!(interrupts.is_empty(), "{interrupts:?}");
+    assert!(!shots.is_empty(), "the bot returns fire");
+    assert!(shots.iter().all(|s| s["target"] == 0));
+    // Reaction 200 ms, a 180 degree turn at the attention rate (0.75 s), the
+    // primed weapon delay and the final aim stay well under two seconds.
+    assert!(first <= 2000, "first return shot after {first} ms");
+    let (_, shots, _) = hit_from_behind(Some(false));
+    assert!(shots.is_empty(), "without perception damage is not noticed");
+}
+
+#[test]
+fn a_walking_bot_hit_from_behind_stops_to_fight() {
+    let (mut engine, bot) = fixture("SP Damage Walk");
+    let start = position(&engine, bot);
+    place_human(&mut engine, start[0] as f32, start[2] as f32 + 10.);
+    walk(&mut engine, bot, 15.);
+    let mut t = 0;
+    while t < 500 {
+        tick(&mut engine, t);
+        t += 50;
+    }
+    assert!(relocating(&engine, bot));
+    let generation = engine.bot_registry.bots[&bot]
+        .target
+        .runtime
+        .unwrap()
+        .generation;
+    let mut damage = engine.bot_registry.bots[&bot].damage;
+    damage.health_quarter_points = 380;
+    damage.last_attacker = 0x0380_0000;
+    engine
+        .commit_bot_damage(bot, generation, damage, Duration::from_millis(t))
+        .unwrap();
+    let hit = t;
+    while t < hit + 2000 {
+        tick(&mut engine, t);
+        t += 50;
+    }
+    let interrupts = records(&engine, "bot_perception_interrupt");
+    assert_eq!(interrupts.len(), 1, "{interrupts:?}");
+    assert_eq!(interrupts[0]["cause"], "damaged");
+    assert_eq!(interrupts[0]["enemy"], 0);
+    let at = interrupts[0]["timestamp_ms"].as_u64().unwrap() - hit;
+    assert!(at <= 300, "a hit uses the shortest reaction: {at} ms");
+    assert!(!records(&engine, "bot_firearm_shot").is_empty());
+}
+
+#[test]
+fn a_bot_standing_in_a_queue_may_fight_but_not_while_walking_to_it() {
+    let (mut engine, bot) = fixture("SP Queue");
+    let b = engine.bot_registry.bots.get_mut(&bot).unwrap();
+    b.drop_waiting = Some(7);
+    b.drop_holding_goal = b.target.runtime.map(|r| r.position);
+    b.target.runtime.as_mut().unwrap().phase = BotPhase::Complete;
+    assert!(crate::bot_firearms::safe(&engine.bot_registry.bots[&bot]));
+    let b = engine.bot_registry.bots.get_mut(&bot).unwrap();
+    b.target.runtime.as_mut().unwrap().phase = BotPhase::Relocating;
+    assert!(!crate::bot_firearms::safe(&engine.bot_registry.bots[&bot]));
+    // A passage in progress never fights.
+    let b = engine.bot_registry.bots.get_mut(&bot).unwrap();
+    b.target.runtime.as_mut().unwrap().phase = BotPhase::Complete;
+    b.drop_committed = true;
+    assert!(!crate::bot_firearms::safe(&engine.bot_registry.bots[&bot]));
+}
+
+#[test]
+fn a_walking_bot_notices_an_enemy_at_rifle_range_a_little_later_than_a_near_one() {
+    let mut reactions = Vec::new();
+    for ahead in [8f32, 35.] {
+        let (mut engine, bot) = fixture("SP Range");
+        engine
+            .bot_registry
+            .config
+            .as_mut()
+            .unwrap()
+            .perception
+            .max_hold_ms = 20_000;
+        let start = position(&engine, bot);
+        place_human(&mut engine, start[0] as f32 + 1., start[2] as f32 - ahead);
+        walk(&mut engine, bot, 2.);
+        let mut t = 0;
+        while t < 3000 && records(&engine, "bot_perception_interrupt").is_empty() {
+            tick(&mut engine, t);
+            t += 50;
+        }
+        let interrupt = records(&engine, "bot_perception_interrupt");
+        assert_eq!(interrupt.len(), 1, "enemy {ahead} m ahead is seen");
+        assert_eq!(interrupt[0]["cause"], "sight");
+        assert!(interrupt[0]["distance_m"].as_f64().unwrap() <= f64::from(ahead) + 1.);
+        reactions.push(interrupt[0]["timestamp_ms"].as_u64().unwrap());
+    }
+    assert!(
+        reactions[1] > reactions[0],
+        "farther enemies take longer to notice: {reactions:?}"
+    );
+}

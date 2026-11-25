@@ -86,6 +86,7 @@ namespace Server.Medius {
   public bool SupportsBotFill => Capabilities.Contains("bot_fill_v1",StringComparer.Ordinal);
   public bool SupportsWorldStreamResume => Capabilities.Contains("world_stream_resume_v1",StringComparer.Ordinal);
   public bool SupportsEventReplay => Capabilities.Contains("event_replay_v1",StringComparer.Ordinal);
+  public bool SupportsWorldCapacity => Capabilities.Contains(MagWorldCapacity.Capability,StringComparer.Ordinal);
   public GameplayWorldStreamPosition WorldStream {get; internal set;}
   internal GameplayBridgeResponse(bool ok,string error,IReadOnlyList<GameplayBridgeMessage> messages,GameplayBridgeFailure failure=GameplayBridgeFailure.None,IReadOnlyList<GameplayReward> rewards=null,GameplayMatchTerminal matchTerminal=null,IReadOnlyList<GameplayLoadoutSelection> loadoutSelections=null,IReadOnlyList<string> capabilities=null,IReadOnlyList<MagMatchProfile> matchProfiles=null,GameplaySelectedMatch selectedMatch=null,GameplayWorkerIdentity workerIdentity=null,GameplayPartyReservation partyReservation=null){PartyReservation=partyReservation;MatchProfiles=matchProfiles??Array.Empty<MagMatchProfile>();SelectedMatch=selectedMatch;WorkerIdentity=workerIdentity;LoadoutSelections=loadoutSelections??Array.Empty<GameplayLoadoutSelection>();Capabilities=capabilities??Array.Empty<string>();Ok=ok;Error=error;Messages=messages;Failure=failure;Rewards=rewards??Array.Empty<GameplayReward>();MatchTerminal=matchTerminal;}
   internal static GameplayBridgeResponse Failed(GameplayBridgeFailure failure,long elapsed)=>new GameplayBridgeResponse(false,null,Array.Empty<GameplayBridgeMessage>(),failure){ElapsedMilliseconds=elapsed};
@@ -211,7 +212,7 @@ namespace Server.Medius {
      parsedTerminal=new GameplayMatchTerminal(world,terminal.GetProperty("match_id").GetString(),reason,ordered.AsReadOnly());
     }
     IReadOnlyList<MagMatchProfile> parsedProfiles=Array.Empty<MagMatchProfile>();GameplaySelectedMatch parsedMatch=null;
-    if(hasProfiles&&!GameplayMatchProfileCodec.Profiles(profiles,success,out parsedProfiles))return false;
+    if(hasProfiles&&!GameplayMatchProfileCodec.Profiles(profiles,success,capabilityNames.Contains(MagWorldCapacity.Capability),out parsedProfiles))return false;
     if(hasSelectedMatch&&!GameplayMatchProfileCodec.Selection(selectedMatch,success,out parsedMatch))return false;
     GameplayPartyReservation parsedParty=null;
     if(hasParty && party.ValueKind!=JsonValueKind.Null) {

@@ -160,6 +160,23 @@ namespace Server.Medius
                 ObserveActivity(now);
                 return new[] { MagPluginRouting.ToMlsClient(response, ApplicationId) };
             }
+            if (message is MagRetailPlayerOnlineRequest online && State == SessionState.Ready)
+            {
+                // A player card asks whether the account it shows is online and waits for this
+                // answer; every request is answered, offline included, so the card never times out.
+                bool isOnline = online.AccountId != 0 && (online.AccountId == AccountId || _registry.IsAccountOnline(online.AccountId, now));
+                StorageStatus = $"player-online={(isOnline ? "yes" : "no")}/account={online.AccountId}/session={AccountId}";
+                ObserveActivity(now);
+                return new[] { MagPluginRouting.ToMlsClient(new MagRetailPlayerOnlineResponse { AccountId = online.AccountId, Online = isOnline }, ApplicationId) };
+            }
+            if (message is MagRetailPlayerGameInfoRequest gameInfo && State == SessionState.Ready)
+            {
+                // Only the "not in a game" answer is fully specified (the in-game fields include two
+                // values of unknown meaning), so every account is reported as not in a game.
+                StorageStatus = $"player-game-info-not-in-game/account={gameInfo.AccountId}/session={AccountId}";
+                ObserveActivity(now);
+                return new[] { MagPluginRouting.ToMlsClient(MagRetailPlayerGameInfoResponse.NotInGame(gameInfo.AccountId), ApplicationId) };
+            }
             if (State == SessionState.Ready && message is (MagLoadoutUpdateRequest or MagRetailLoadoutDeleteRequest))
             {
                 LoadoutRefreshStatus = "not-scheduled";

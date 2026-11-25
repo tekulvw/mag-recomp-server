@@ -16,7 +16,11 @@ from weapon parameters. Omitted policy fields use these defaults:
 ```
 
 Existing explicit values remain explicit. Updating the executable does not
-replace an operator's earlier reaction, turning or accuracy settings.
+replace an operator's earlier reaction, turning or accuracy settings. While bot
+perception is on, the engagement distance comes from the weapon's AI usage
+band instead of `max_engagement_distance_m`, and a bot that has already
+reacted to a threat uses perception's shorter primed reaction for its first
+shot; see [bot-perception.md](bot-perception.md).
 
 Acquisition requires an enemy inside the horizontal field of view and strictly
 inside both the AI engagement distance and the weapon maximum range. Retention

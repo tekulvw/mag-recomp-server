@@ -20,8 +20,10 @@ namespace Server.Medius
             MinimumPlayers = Math.Max(minimumPlayers, _minimumPerTeam.Sum());
             MaximumPlayers = maximumPlayers;
         }
-        public MagMatchStartupPolicy WithProfileMaximum(int profileMaximum) =>
-            new MagMatchStartupPolicy(MinimumPlayers, Math.Min(MaximumPlayers, profileMaximum), _minimumPerTeam);
+        /// <param name="profileHumans">The profile's human capacity (<see cref="MagMatchProfile.HumanCapacity"/>),
+        /// which is its world size only for rows of at most 64.</param>
+        public MagMatchStartupPolicy WithProfileMaximum(int profileHumans) =>
+            new MagMatchStartupPolicy(MinimumPlayers, Math.Min(MaximumPlayers, profileHumans), _minimumPerTeam);
 
         public object ConfigureRequest(string requestId, int applicationId) => new
         {

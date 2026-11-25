@@ -21,7 +21,9 @@ namespace Server.Medius
                 row.GetProperty("attacking_faction").TryGetByte(out attacker)&&attacker<3&&
                 row.GetProperty("defending_faction").TryGetByte(out defender)&&defender<3&&attacker!=defender;
         }
-        public static bool Profiles(JsonElement rows,bool success,out IReadOnlyList<MagMatchProfile> result)
+        /// <param name="worldCapacity">The worker advertised <c>world_capacity_v1</c>. Only then may a row
+        /// exceed 64 Characters (32 per side) or carry human caps, and every such large row must carry them.</param>
+        public static bool Profiles(JsonElement rows,bool success,bool worldCapacity,out IReadOnlyList<MagMatchProfile> result)
         {
             result=null;
             if(rows.ValueKind!=JsonValueKind.Array||rows.GetArrayLength()>64||(!success&&rows.GetArrayLength()!=0))return false;
@@ -31,14 +33,29 @@ namespace Server.Medius
                 bool hasSquad = row.TryGetProperty("squad_capacity", out var squadCapacity);
                 bool hasCounts = row.TryGetProperty("squad_counts", out var squadCounts);
                 bool hasBots = row.TryGetProperty("bot_fill_total", out var botFill);
+                bool hasHumans = row.TryGetProperty("human_capacity", out var humanCapacity);
+                bool hasTeamHumans = row.TryGetProperty("human_team_capacity", out var humanTeamCapacity);
                 var required = new[] { "profile_id", "game_type", "attacking_faction", "defending_faction", "maximum_players", "team_capacity" };
                 var fields = (hasSquad ? required.Concat(new[]{"squad_capacity","squad_counts"}) : required)
-                    .Concat(hasBots ? new[]{"bot_fill_total"} : Array.Empty<string>()).ToArray();
-                if(hasCounts!=hasSquad||!Fields(row,fields)||
+                    .Concat(hasBots ? new[]{"bot_fill_total"} : Array.Empty<string>())
+                    .Concat(hasHumans ? new[]{"human_capacity","human_team_capacity"} : Array.Empty<string>()).ToArray();
+                if(hasCounts!=hasSquad||hasHumans!=hasTeamHumans||(hasHumans&&!worldCapacity)||!Fields(row,fields)||
                     !Pair(row,out var mode,out var attacker,out var defender))return false;
                 var id=row.GetProperty("profile_id").GetString();
                 if(!Id(id)||!ids.Add(id)||!row.GetProperty("maximum_players").TryGetInt32(out var maximum)||
-                    !row.GetProperty("team_capacity").TryGetInt32(out var team)||team<1||team>32||maximum<2||maximum>64||maximum>team*2)return false;
+                    !row.GetProperty("team_capacity").TryGetInt32(out var team)||team<1||maximum<2||maximum>team*2)return false;
+                // Without world_capacity_v1 a row keeps the original 64/32 bounds. A larger world
+                // must say how many of its seats humans may take.
+                bool large = MagWorldCapacity.IsLarge(maximum, team);
+                if(large&&(!worldCapacity||!hasHumans||maximum>MagWorldCapacity.MaximumWorldCharacters||
+                    team>MagWorldCapacity.MaximumTeamCharacters))return false;
+                int? humans = null, teamHumans = null;
+                if (hasHumans)
+                {
+                    if (!humanCapacity.TryGetInt32(out int total) || !humanTeamCapacity.TryGetInt32(out int side) ||
+                        !MagWorldCapacity.ValidHumanCaps(maximum, team, total, side)) return false;
+                    humans = total; teamHumans = side;
+                }
                 int? squad = null;
                 int[] counts = null;
                 if (hasSquad)
@@ -55,7 +72,7 @@ namespace Server.Medius
                     if (!botFill.TryGetInt32(out int total) || total < 2 || total > maximum) return false;
                     bots = total;
                 }
-                list.Add(new MagMatchProfile(id,mode,attacker,defender,maximum,team,squad,counts == null ? null : Array.AsReadOnly(counts),bots));
+                list.Add(new MagMatchProfile(id,mode,attacker,defender,maximum,team,squad,counts == null ? null : Array.AsReadOnly(counts),bots,humans,teamHumans));
             }
             result=list.AsReadOnly();return true;
         }

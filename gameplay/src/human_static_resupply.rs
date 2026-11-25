@@ -541,7 +541,7 @@ impl<W: Write> Engine<W> {
                 actor.initial_objects.is_some()
                     && (actor.replication_backlogged
                         || actor.ordinary_shared_len().saturating_add(updates.len())
-                            > multiplayer::MAX_SHARED_QUEUE)
+                            > actor.shared_queue_limit)
             })
         {
             return Ok(());

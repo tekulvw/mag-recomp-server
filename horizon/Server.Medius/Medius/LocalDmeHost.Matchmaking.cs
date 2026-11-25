@@ -64,14 +64,18 @@ namespace Server.Medius
             _formationStartup=new MagMatchStartupPolicy(Math.Max(2,_minimumPlayers),_maximumPlayers,_formationTeamMinima);
             _botFillTeamMinima=configured.ToArray();
             _botFillStartup=new MagMatchStartupPolicy(Math.Max(1,_minimumPlayers),_maximumPlayers,_botFillTeamMinima);
-            var profiles = hello.MatchProfiles;
+            // A world above 64 Characters is offered only where the operator allows that size.
+            IReadOnlyList<MagMatchProfile> profiles = Array.AsReadOnly(hello.MatchProfiles.Where(profile =>
+                !profile.LargeWorld || profile.MaximumPlayers <= _options.WorldCapacity).ToArray());
+            if (profiles.Count != hello.MatchProfiles.Count)
+                Logger.Info($"Gameplay world capacity {_options.WorldCapacity}: {hello.MatchProfiles.Count - profiles.Count} larger match profile(s) not offered.");
             if (InRegistry)
             {
                 profiles = Array.AsReadOnly(profiles.Where(profile =>
                     _allowedFactions.Contains(profile.AttackingFaction) && _allowedFactions.Contains(profile.DefendingFaction) &&
-                    profile.MaximumPlayers >= StartupFor(profile).MinimumPlayers &&
-                    MinimaFor(profile).All(minimum => minimum <= profile.TeamCapacity) &&
-                    (long)profile.TeamCapacity * 2 >= StartupFor(profile).MinimumPlayers).ToArray());
+                    profile.HumanCapacity >= StartupFor(profile).MinimumPlayers &&
+                    MinimaFor(profile).All(minimum => minimum <= profile.HumanTeamCapacity) &&
+                    (long)profile.HumanTeamCapacity * 2 >= StartupFor(profile).MinimumPlayers).ToArray());
             }
             _anyBotFill = profiles.Any(profile => profile.BotFill);
             _matchProfiles = _supportsPartyReservations ? profiles : Array.AsReadOnly(profiles.Select(profile => profile with { SquadCapacity = null, SquadCounts = null }).ToArray());
@@ -316,7 +320,7 @@ namespace Server.Medius
                         return; // An uncertain selection is retried with the SAME formation identity.
                     }
                     lock(_gate)if(!ReadyForAdmission||_matchmakingCancellation.IsCancellationRequested)return;
-                    var startup=StartupFor(profile).WithProfileMaximum(profile.MaximumPlayers);
+                    var startup=StartupFor(profile).WithProfileMaximum(profile.HumanCapacity);
                     if(!await _bridge.RequestAsync(startup.ConfigureRequest(Id(),_applicationId)))
                     {lock(_gate)_nextFormationAttempt=DateTime.UtcNow.AddSeconds(1);return;}
                     lock(_gate){if(!ReadyForAdmission||_matchmakingCancellation.IsCancellationRequested)return;_formationAdmissionEpoch = reply.SelectedMatch.AdmissionEpoch; _formationConfigured=true;}
@@ -360,8 +364,8 @@ namespace Server.Medius
                         // existing per-side occupancy before considering a ticket.
                         cohort=_humanQueue.Snapshot().Where(e=>e.Human.Size==1&&e.Human.GameType==profile.GameType&&
                             (e.Human.Faction==profile.AttackingFaction||e.Human.Faction==profile.DefendingFaction)&&
-                            _reservations.Values.Count(r=>IsLiveCohort(r)&&r.Faction==e.Human.Faction)<profile.TeamCapacity)
-                            .Take(_reservations.Values.Count(IsLiveCohort)<Math.Min(_maximumPlayers,profile.MaximumPlayers)&&
+                            _reservations.Values.Count(r=>IsLiveCohort(r)&&r.Faction==e.Human.Faction)<profile.HumanTeamCapacity)
+                            .Take(_reservations.Values.Count(IsLiveCohort)<Math.Min(_maximumPlayers,profile.HumanCapacity)&&
                                 (InRegistry||_portBudget.Available>0)?1:0).ToArray();
                     }
                 }

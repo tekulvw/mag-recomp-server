@@ -191,7 +191,7 @@ impl<'a> Fighter<'a> {
     }
 
     fn current<W: Write>(self, engine: &Engine<W>, world: u32) -> Option<(Actor, u8)> {
-        if usize::from(self.index) >= MAX_MATCH_PLAYERS {
+        if usize::from(self.index) >= crate::world_capacity::MAX_WORLD_CHARACTERS {
             return None;
         }
         if let Some(reservation) = self.reservation {

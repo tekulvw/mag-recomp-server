@@ -13,6 +13,7 @@ internal static class RegistryDmeHostChecks
     {
         LeadershipProgressionChecks.RegistryHostIsolation();
         LeadershipProgressionChecks.RegistryBotFillStart();
+        LeadershipProgressionChecks.RegistryLargeWorldStart();
     }
 }
 
@@ -271,6 +272,62 @@ internal static partial class LeadershipProgressionChecks
             new(20231, 2, 1, 8, new[] { 0, 0 }, new[] { 0, 1 }, IPAddress.Parse("192.0.2.9"), 12073, name);
     });
 
+    /// <summary>A 128-Character world is offered only by a host whose world capacity allows it,
+    /// and configures and admits humans against its human caps, never its world size.</summary>
+    public static void RegistryLargeWorldStart() => WithDirectory(directory =>
+    {
+        var store = new LocalCharacterStore(Path.Combine(directory, "characters.json")) { ProgressionCatalog = Load(directory, LegacyCatalog()) };
+        var create = new MagCreateCharacterRequest { AccountName = "large-alpha", Faction = 0, UniverseId = 26, NpId = new byte[36] };
+        Check(store.CreateForAccount(create, "large-alpha").Result == MagNetResult.Success, "Synthetic large-world character creation failed");
+        Run().GetAwaiter().GetResult();
+
+        async Task Run()
+        {
+            var manager = new Server.Dme.MediusManager(20231) { LocalOnly = true };
+            await using var largeWorker = new RegistryWorker("large") { SupportsBotFill = true, LargeWorld = true };
+            await using var narrowWorker = new RegistryWorker("narrow") { SupportsBotFill = true, LargeWorld = true };
+            await using var large = new LocalDmeHost(largeWorker.Client, store, LargeOptions("large", 128));
+            await using var narrow = new LocalDmeHost(narrowWorker.Client, store, LargeOptions("narrow", 64));
+            await large.StartInRegistryAsync(manager);
+            bool refused = false;
+            try { await narrow.StartInRegistryAsync(manager); } catch (IOException) { refused = true; }
+            Check(refused, "A host limited to 64-Character worlds offered 128-Character profiles");
+
+            var placement = large.GetPlacement();
+            Check(placement.Profiles.Count == 2 && placement.Profiles.All(p => p.MaximumPlayers == 128 && p.TeamCapacity == 64 &&
+                p.HumanCapacity == 32 && p.HumanTeamCapacity == 16 && p.BotFillTotal == 128) &&
+                placement.StartupPolicy.MaximumPlayers == 64,
+                "A 128-Character profile lost its human caps, or the host's human maximum followed world size");
+
+            MagWorldPlacementState State(LocalDmeWorkerPlacement s) => new("large", s.Ready, s.Draining,
+                s.StartupPolicy.MinimumPlayers, s.StartupPolicy.MaximumPlayers, s.MinimumPlayersPerTeam.ToArray(), s.Profiles,
+                s.CurrentProfile, s.LiveTeamCounts, s.PendingTeamCounts, s.LiveCount, s.PendingTeamCounts.Sum(), s.CanForm);
+            var crowd = Enumerable.Range(0, 40).Select(i => new MagQueuedHuman($"crowd-{i:00}", 2, 0, i)).ToArray();
+            var plan = MagWorldPlacement.PlanNext(crowd, new[] { State(placement) }, n => 0);
+            Check(plan != null && plan.NewFormation && plan.Players.Count == 16,
+                "A new 128-Character formation took more than 16 humans on one side");
+
+            var settings = Server.Medius.Program.Settings;
+            int previous = settings.MagApplicationId;
+            settings.MagApplicationId = 20231;
+            MagMlsSession session;
+            try { session = MakeSession(store, 20231, "large-alpha", store.ReadForAccount("large-alpha").Single().Id); }
+            finally { settings.MagApplicationId = previous; }
+            Check(large.TryStageRegistryFormation("profile-0-1"), "The large-world host declined a one-human formation");
+            var reply = new TaskCompletionSource<MagJoinGameResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
+            large.QueueJoin(session, new MagRetailJoinGameRequest { TransactionId = 1, Preference = 1, Value = 2 },
+                m => { if (m is MagJoinGameResponse response) reply.TrySetResult(response); }, () => true);
+            await large.TickWorldAsync();
+            var admitted = await reply.Task.WaitAsync(AdmissionTimeout);
+            var configure = largeWorker.Requests.Single(r => r["op"]!.GetValue<string>() == "configure_match");
+            Check(admitted.Result == 0 && configure["maximum_players"]!.GetValue<int>() == 32,
+                "A 128-Character world was configured with its world size as the human maximum");
+        }
+
+        static LocalDmeHostOptions LargeOptions(string name, int worldCapacity) =>
+            new(20231, 2, 1, 64, new[] { 0, 0 }, new[] { 0, 1 }, IPAddress.Parse("192.0.2.9"), 12073, name, worldCapacity);
+    });
+
     private static async Task WaitForRegistryHostAsync(Func<bool> ready)
     {
         using var deadline = new CancellationTokenSource(AdmissionTimeout);
@@ -312,6 +369,8 @@ internal static partial class LeadershipProgressionChecks
         public volatile bool Offline;
         public volatile bool WithholdPolledRewards;
         public volatile int ProfileTeamCapacity = 4;
+        // Advertise world_capacity_v1 and 128-Character profiles (64 per side) with human caps 32/16.
+        public bool LargeWorld;
         private CancellationTokenSource _streams = new();
         public void BreakStreams() => Interlocked.Exchange(ref _streams, new CancellationTokenSource()).Cancel();
 
@@ -388,10 +447,19 @@ internal static partial class LeadershipProgressionChecks
                                 "match_profiles_v1", "independent_match_cohorts_v1", "worker_registry_v1");
                             response["match_profiles"] = new JsonArray(Profiles.Select(p => p.DeepClone()).ToArray());
                             foreach (var profile in response["match_profiles"]!.AsArray()) profile!["team_capacity"] = ProfileTeamCapacity;
+                            if (LargeWorld)
+                            {
+                                response["capabilities"]!.AsArray().Add("world_capacity_v1");
+                                foreach (var profile in response["match_profiles"]!.AsArray())
+                                {
+                                    profile!["maximum_players"] = 128; profile["team_capacity"] = 64;
+                                    profile["human_capacity"] = 32; profile["human_team_capacity"] = 16;
+                                }
+                            }
                             if (SupportsBotFill)
                             {
                                 response["capabilities"]!.AsArray().Add("bot_fill_v1");
-                                foreach (var profile in response["match_profiles"]!.AsArray()) profile["bot_fill_total"] = 8;
+                                foreach (var profile in response["match_profiles"]!.AsArray()) profile["bot_fill_total"] = LargeWorld ? 128 : 8;
                             }
                             if (SupportsParties)
                             {
