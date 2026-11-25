@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.12.1](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.12.0...gameplay-v0.12.1) (2026-11-25)
+
+
+### Bug Fixes
+
+* **gameplay:** fill bot squads in order instead of spreading them ([#260](https://github.com/tekulvw/mag-recomp-server/issues/260)) ([508c784](https://github.com/tekulvw/mag-recomp-server/commit/508c784fbdeef3d15bdb1c3b9829a41fe9d45415))
+* **gameplay:** let Acquisition players spawn while squad abilities are active ([#259](https://github.com/tekulvw/mag-recomp-server/issues/259)) ([abb83d3](https://github.com/tekulvw/mag-recomp-server/commit/abb83d37abbe585bbe741b5e9d3e4df61c9a855e))
+
 ## [0.12.0](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.11.1...gameplay-v0.12.0) (2026-11-24)
 
 
