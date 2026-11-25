@@ -207,8 +207,10 @@ fn profiled_wide_layout_is_versioned_separately_and_requires_rules() {
 /// so the profiled and legacy bakes differ. Returns the world and the
 /// matching bake input.
 fn ledge() -> (crate::collision::CollisionWorld, BakeInput) {
-    let quads: [[[f64; 3]; 4]; 3] = [
+    let quads: [[[f64; 3]; 4]; 4] = [
+        // The ledge top, its face (facing +x) down to the floor, the floor.
         [[0., 2., 0.], [8., 2., 0.], [8., 2., 10.], [0., 2., 10.]],
+        [[8., 2., 0.], [8., 0., 0.], [8., 0., 10.], [8., 2., 10.]],
         [[8., 0., 0.], [30., 0., 0.], [30., 0., 10.], [8., 0., 10.]],
         [
             [8., 0., 10.],
@@ -277,7 +279,23 @@ fn a_profiled_mesh_accepts_drops_certified_with_its_own_body() {
         NavMesh::load_with_movement_profile(profiled.clone(), &sha, "synthetic", &rules)
             .unwrap()
             .body();
-    let default_link = DropLink::certify(&world, &sha, 1, launch, landing, 4.5).unwrap();
+    let default_link =
+        DropLink::certify(&world, &sha, 1, launch, landing, 4.5).unwrap_or_else(|e| {
+            // Describe the walk off the ledge, so a failure says where it stopped.
+            let terrain = crate::bot_physics::WorldTerrain::new(Some(&world), "synthetic").unwrap();
+            let body = crate::bot_physics::Body::default();
+            let mut motion = terrain.start_motion(launch, body).unwrap();
+            let trace: Vec<String> = (0..40)
+                .map(|_| {
+                    motion = terrain.advance(motion, [4.5, 0., 0.], 0.05, body).unwrap();
+                    format!(
+                        "{:.2?} grounded={} blocked={}",
+                        motion.position, motion.grounded, motion.blocked
+                    )
+                })
+                .collect();
+            panic!("{e:?}: {trace:#?}")
+        });
     let profiled_link =
         DropLink::certify_with_body(&world, &sha, 1, launch, landing, 4.5, profiled_body).unwrap();
     // The default body records nothing, so legacy certificates serialize
