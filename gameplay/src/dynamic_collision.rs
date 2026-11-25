@@ -436,7 +436,9 @@ impl Snapshot {
         rows: Vec<BodySet>,
         row6: u32,
     ) -> Result<Self, &'static str> {
-        if world.world_id == 0 || world.incarnation == 0 || roster.len() > 1024 {
+        // Horizon numbers DME worlds from 0, so world 0 is a live match; only
+        // the per-round incarnation is 1-based.
+        if world.incarnation == 0 || roster.len() > 1024 {
             return Err("invalid_dynamic_body_context");
         }
         let mut expected = BTreeMap::new();
