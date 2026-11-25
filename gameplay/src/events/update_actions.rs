@@ -600,6 +600,9 @@ pub(super) fn plan_respawn<W: Write>(
         None
     };
     let generation = active.life.next_generation();
+    // The authored facing applies only when the character stands at the point itself.
+    let on_foot_at_point =
+        indexed_bunker.is_none() && helo_passenger.is_none() && ground_seat.is_none();
     let mut spawn_position = if let Some(hospital) = &indexed_bunker {
         hospital
             .seat_position(passenger_seat.ok_or("bunker_passenger_seat_required")?)
@@ -635,6 +638,9 @@ pub(super) fn plan_respawn<W: Write>(
     };
     let mut respawn =
         replication::CharacterRespawn::at_position(now.as_millis() as u32, wire_position);
+    if on_foot_at_point && let Some(yaw) = point.yaw {
+        respawn.yaw = yaw;
+    }
     if let Some(pose) = point.parachute {
         respawn.state = replication::CharacterState {
             state: 17,

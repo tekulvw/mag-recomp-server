@@ -928,7 +928,7 @@ impl CharacterRespawn {
             },
             position,
             pitch: 127,
-            yaw: 0, // Facing is explicit local policy pending native transform conversion.
+            yaw: 0, // Callers apply the spawn point's authored facing when the catalog has one.
             damage: CharacterDamage {
                 last_location_and_type: 0,
                 health_quarter_points: 400,

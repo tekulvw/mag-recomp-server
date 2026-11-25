@@ -189,6 +189,23 @@ Use the private bundle workflow in [data-bundles.md](data-bundles.md) to select
 and distribute the exact inputs needed by each service. The bundle tool does
 not infer these distinctions from filenames.
 
+## Spawn facing
+
+A spawn location may carry an optional `yaw`, its authored facing as the wire's
+10-bit packed yaw: `atan2(forward.x, forward.z) / 2π × 1024`, so 0 faces +z and
+256 faces +x. A human who respawns on foot at that point faces it. Hospital
+seats, helo and ground-vehicle seats keep their own poses, and a parachute
+point's `parachute.yaw` still wins. A location without `yaw` keeps the earlier
+fixed facing 0, so existing catalogs behave as before. Values above 1023 fail
+validation (`invalid_spawn_yaw`). Older gameplay releases refuse a catalog that
+has the field.
+
+`tools/extraction/add-spawn-facing.py` adds `yaw` to a projected catalog. It
+matches each location by token against the all-map extraction's authored
+`rotation_xyz` (degrees), composes it as Rx·Ry·Rz and takes the forward of +z.
+That composition matched the client's own SpawnPoint orientations in a
+qualified private capture. The tool changes nothing else in the catalog.
+
 ## Objective-driven forward and parachute spawns
 
 The optional `maps[].forward_spawns` array links an objective's completion to a
