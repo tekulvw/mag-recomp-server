@@ -579,6 +579,86 @@ impl<W: Write> Engine<W> {
             None,
         ))
     }
+    /// Arm one accepted activation directly, for world fixtures that do not
+    /// carry the native leadership election the command event requires.
+    #[cfg(test)]
+    pub(crate) fn arm_command_for_test(
+        &mut self,
+        player: u16,
+        ability: Ability,
+        position: [f32; 3],
+        now: Duration,
+    ) -> Result<(), &'static str> {
+        let actor = self
+            .active
+            .iter()
+            .chain(self.peers.values())
+            .find(|actor| actor.reservation.player == player)
+            .ok_or("command_actor_not_created")?;
+        let squad = actor.squad_catalog.squad_index();
+        let platoon = squad / 4;
+        let side = if actor.team() == 0 {
+            Side::Attacker
+        } else {
+            Side::Defender
+        };
+        let faction = actor.reservation.character.faction;
+        let reservation = actor.reservation.id.clone();
+        let world = actor.reservation.world;
+        let runtime = self
+            .active_abilities
+            .as_mut()
+            .ok_or("command_ability_execution_pending")?;
+        let rules = runtime
+            .setup
+            .effects
+            .iter()
+            .find(|(s, f, a, _)| {
+                (*s == side || ability == Ability::PrecisionStrike)
+                    && *f == faction
+                    && *a == ability
+            })
+            .map(|row| row.3)
+            .ok_or("command_effect_not_implemented")?;
+        let scope = if matches!(ability, Ability::ClusterBomb | Ability::Sensor) {
+            NativeAbilityScope::Squad(squad)
+        } else {
+            NativeAbilityScope::Platoon(platoon)
+        };
+        let now_ms = now.as_millis() as u32;
+        runtime.effects.insert(
+            (scope, ability.code()),
+            Running {
+                effect: Effect::new(ability, side, now_ms, true, position, rules)?,
+                invoker: player,
+                world,
+                reservation,
+                platoon,
+            },
+        );
+        let unit = runtime.units.entry(scope).or_default();
+        unit.data[usize::from(ability.code() - 1)] = Some(NativeAbilityData {
+            position,
+            squad_index: squad,
+            activate_time_ms: now_ms,
+            enabled_at_start: true,
+            target_id: u32::MAX,
+        });
+        unit.active |= native_ability_mask(ability)?;
+        runtime.version += 1;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn command_effect_active_for_test(&self, ability: Ability) -> bool {
+        self.active_abilities.as_ref().is_some_and(|runtime| {
+            runtime
+                .effects
+                .iter()
+                .any(|(key, running)| key.1 == ability.code() && !running.effect.is_complete())
+        })
+    }
+
     fn command_source(&self, running: &Running) -> (u32, Option<crate::structure_damage::Source>) {
         let actor = self.active.iter().chain(self.peers.values()).find(|a| {
             a.reservation.player == running.invoker
@@ -811,195 +891,54 @@ impl<W: Write> Engine<W> {
             if !self.match_started || self.match_terminal.is_some() {
                 return Ok(());
             }
-            let (gas_audit, gas_messages) = runtime.gas.stage(self, native, now, collision)?;
-            result.audit.extend(gas_audit);
-            result.messages.extend(gas_messages);
+            self.stage_command_gas(
+                &mut runtime,
+                native,
+                now,
+                collision,
+                objectives.as_deref_mut(),
+                &mut result,
+            )?;
+            let now_ms = now.as_millis() as u32;
             let keys: Vec<_> = runtime.effects.keys().copied().collect();
             for key in keys {
-                let mut running = runtime.effects[&key].clone();
-                if running.effect.is_complete() {
+                let previous = runtime.effects[&key].clone();
+                if previous.effect.is_complete() {
                     continue;
                 }
-                let unit = runtime
-                    .units
-                    .get(&key.0)
-                    .ok_or("active_ability_unit_missing")?;
-                let data =
-                    unit.data[usize::from(key.1 - 1)].ok_or("active_ability_data_missing")?;
-                let origin = self
-                    .spawn_catalog
-                    .as_ref()
-                    .and_then(|catalog| {
-                        catalog.selected_squad(data.squad_index).and_then(|squad| {
-                            squad
-                                .available
-                                .iter()
-                                .filter_map(|index| catalog.point(*index))
-                                .find(|point| {
-                                    matches!(point.kind, spawn_catalog::SpawnKind::Alternate)
-                                })
-                        })
-                    })
-                    .map(|point| [point.position.x, point.position.y, point.position.z]);
-                let (next, work) = running
-                    .effect
-                    .prepare_tick_with_platoon(now.as_millis() as u32, origin)?;
-                running.effect = next;
-                match work {
-                    Work::ClusterSample(sample) => {
-                        let attacker = self.command_source(&running).0;
-                        if let Some(work) = self.collect_air_strike_blast(
-                            attacker,
-                            sample.xz,
-                            runtime.setup.vertical_bounds,
-                            InstantaneousBlast {
-                                origins: Vec::new(),
-                                damage: sample.blast.damage,
-                                inner_radius: sample.blast.inner_radius,
-                                outer_radius: sample.blast.outer_radius,
-                                material_penetration: 0.,
-                            },
-                            collision,
-                        )? {
-                            let mut commit = self.stage_command_blast(
-                                &mut runtime,
-                                &running,
-                                native,
-                                now,
-                                work,
-                                collision,
-                                ground_policy,
-                                objectives.as_deref_mut(),
-                            )?;
-                            result.audit.append(&mut commit.audit);
-                            result.messages.append(&mut commit.messages);
-                            result.changed_ground.append(&mut commit.changed_ground);
-                            result.helo_doses.append(&mut commit.helo_doses);
+                let mut running = previous.clone();
+                let staged = self.stage_command_effect(
+                    &mut runtime,
+                    key,
+                    &mut running,
+                    &targets,
+                    native,
+                    CommandFrame {
+                        now,
+                        collision,
+                        ground_policy,
+                    },
+                    objectives.as_deref_mut(),
+                    &mut result,
+                );
+                match staged {
+                    Ok(()) => {}
+                    Err(EffectFailure::Contained(error)) => {
+                        // The failed work left no trace. End this activation
+                        // cleanly so a deterministic failure cannot repeat.
+                        running = previous;
+                        running.effect = running.effect.abort(now_ms);
+                        if key.1 == Ability::Sensor.code() {
+                            runtime.clear_surveillance(running.platoon);
                         }
+                        result
+                            .audit
+                            .push(json!({"op":"active_ability_effect_failed",
+                            "timestamp_ms":now_ms,"ability":key.1,"scope":format!("{:?}", key.0),
+                            "invoker":running.invoker,"reservation_id":running.reservation,
+                            "world_id":running.world,"error":error}));
                     }
-                    Work::PrecisionStrike => {
-                        let world = objectives
-                            .as_deref_mut()
-                            .ok_or("precision_objective_world_required")?;
-                        let source = self.command_source(&running).1;
-                        let changed = self.stage_precision_strike(
-                            world,
-                            &runtime.setup.precision_targets,
-                            data.target_id,
-                            source,
-                            running.invoker,
-                            running.world,
-                        )?;
-                        result.audit.push(
-                            json!({"op":"precision_strike_target","target_id":data.target_id,
-                            "source":source.map(|s|s.player),"staged":changed}),
-                        );
-                    }
-                    Work::GuidedArtillery { origin, radius } => {
-                        let attacker = self.command_source(&running).0;
-                        let work = self
-                            .collect_guided_artillery_blast(attacker, origin, radius, collision)?;
-                        let mut commit = self.stage_command_blast(
-                            &mut runtime,
-                            &running,
-                            native,
-                            now,
-                            work,
-                            collision,
-                            ground_policy,
-                            objectives.as_deref_mut(),
-                        )?;
-                        result.audit.append(&mut commit.audit);
-                        result.messages.append(&mut commit.messages);
-                        result.changed_ground.append(&mut commit.changed_ground);
-                        result.helo_doses.append(&mut commit.helo_doses);
-                    }
-                    Work::GasBombardment { volume, bomblet } => {
-                        let attacker = self.command_source(&running).0;
-                        if let Some(volume) = volume {
-                            runtime.gas.register(
-                                volume,
-                                crate::active_ability_gas_world::GasSource {
-                                    allocation: None,
-                                    attacker,
-                                    world: running.world,
-                                    team: u8::from(running.platoon >= 4),
-                                    reservation: running.reservation.clone(),
-                                },
-                                now,
-                            )?;
-                        }
-                        if let Some(sample) = bomblet
-                            && let Some(work) = self.collect_command_bomblet(
-                                attacker,
-                                sample,
-                                runtime.setup.vertical_bounds,
-                                true,
-                                collision,
-                            )?
-                        {
-                            let mut commit = self.stage_command_blast(
-                                &mut runtime,
-                                &running,
-                                native,
-                                now,
-                                work,
-                                collision,
-                                ground_policy,
-                                objectives.as_deref_mut(),
-                            )?;
-                            result.audit.append(&mut commit.audit);
-                            result.messages.append(&mut commit.messages);
-                            result.changed_ground.append(&mut commit.changed_ground);
-                            result.helo_doses.append(&mut commit.helo_doses);
-                        }
-                    }
-                    Work::StrafingRun(sample) => {
-                        let attacker = self.command_source(&running).0;
-                        if let Some(work) = self.collect_command_bomblet(
-                            attacker,
-                            sample,
-                            [-1000., 1000.],
-                            false,
-                            collision,
-                        )? {
-                            let mut commit = self.stage_command_blast(
-                                &mut runtime,
-                                &running,
-                                native,
-                                now,
-                                work,
-                                collision,
-                                ground_policy,
-                                objectives.as_deref_mut(),
-                            )?;
-                            result.audit.append(&mut commit.audit);
-                            result.messages.append(&mut commit.messages);
-                            result.changed_ground.append(&mut commit.changed_ground);
-                            result.helo_doses.append(&mut commit.helo_doses);
-                        }
-                    }
-                    Work::ScanSquad(scan) => {
-                        for target in targets.iter().filter(|t| t.squad == scan.slot) {
-                            if scan
-                                .detector
-                                .detects(scan.origin, target.position, target.speed)
-                            {
-                                runtime.mark(target);
-                            }
-                        }
-                    }
-                    Work::ClearSurveillance => {
-                        for objective in &runtime.setup.objectives {
-                            if objective.platoons.contains(&running.platoon)
-                                && let Some(s) =
-                                    runtime.surveillance.get_mut(&objective.object_index)
-                            {
-                                s.sensor = None;
-                            }
-                        }
-                    }
-                    Work::Idle | Work::Complete => {}
+                    Err(EffectFailure::Fatal(error)) => return Err(error),
                 }
                 if running.effect.is_complete() {
                     runtime.units.entry(key.0).or_default().active &=
@@ -1055,6 +994,376 @@ impl<W: Write> Engine<W> {
         self.active_abilities = Some(runtime);
         outcome?;
         Ok(result)
+    }
+}
+/// Time and world context shared by every command effect in one update.
+#[derive(Clone, Copy)]
+struct CommandFrame<'a, 'b> {
+    now: Duration,
+    collision: BlastCollision<'a>,
+    ground_policy: Option<&'b acquisition_ground_damage::Policy>,
+}
+
+/// A failure inside one command effect's own work is contained. A failure to
+/// restore the world after it is not, and still fails the whole update.
+enum EffectFailure {
+    Contained(&'static str),
+    Fatal(&'static str),
+}
+
+/// Everything one command effect's world work can change, taken before that
+/// work runs. Restoring it discards the work as a unit: character health,
+/// deaths, notices, statistics, rewards and bot state (the fields the
+/// enclosing character transaction already restores), the native protection
+/// map, the ability runtime, the objective world, ground vehicles, bunkers and
+/// the rows staged for the outer record.
+struct EffectSavepoint {
+    characters: crate::acquisition_character_effects::CharacterEffectSavepoint,
+    native: BTreeMap<u32, acquisition_character_effects::NativeState>,
+    runtime: Runtime,
+    objectives: Option<objective_control::ObjectiveWorld>,
+    ground: Option<acquisition_ground_runtime::Runtime>,
+    bunkers: Option<crate::structures::BunkerWorld>,
+    audit: usize,
+    messages: usize,
+    helo_doses: usize,
+    changed_ground: BTreeSet<u16>,
+}
+
+impl EffectSavepoint {
+    fn capture<W: Write>(
+        engine: &Engine<W>,
+        native: &BTreeMap<u32, acquisition_character_effects::NativeState>,
+        runtime: &Runtime,
+        objectives: Option<&objective_control::ObjectiveWorld>,
+        result: &domination_structural_world::DamageCommit,
+    ) -> Self {
+        Self {
+            characters: engine.character_effect_savepoint(),
+            native: native.clone(),
+            runtime: runtime.clone(),
+            objectives: objectives.cloned(),
+            ground: engine.ground_runtime.clone(),
+            bunkers: engine.bunker_world.clone(),
+            audit: result.audit.len(),
+            messages: result.messages.len(),
+            helo_doses: result.helo_doses.len(),
+            changed_ground: result.changed_ground.clone(),
+        }
+    }
+
+    fn restore<W: Write>(
+        self,
+        engine: &mut Engine<W>,
+        native: &mut BTreeMap<u32, acquisition_character_effects::NativeState>,
+        runtime: &mut Runtime,
+        objectives: Option<&mut objective_control::ObjectiveWorld>,
+        result: &mut domination_structural_world::DamageCommit,
+    ) -> Result<(), &'static str> {
+        engine.restore_character_effect_savepoint(self.characters)?;
+        *native = self.native;
+        *runtime = self.runtime;
+        if let (Some(world), Some(saved)) = (objectives, self.objectives) {
+            *world = saved;
+        }
+        engine.ground_runtime = self.ground;
+        engine.bunker_world = self.bunkers;
+        result.audit.truncate(self.audit);
+        result.messages.truncate(self.messages);
+        result.helo_doses.truncate(self.helo_doses);
+        result.changed_ground = self.changed_ground;
+        Ok(())
+    }
+}
+
+impl Runtime {
+    fn clear_surveillance(&mut self, platoon: u16) {
+        for objective in &self.setup.objectives {
+            if objective.platoons.contains(&platoon)
+                && let Some(s) = self.surveillance.get_mut(&objective.object_index)
+            {
+                s.sensor = None;
+            }
+        }
+    }
+}
+
+impl<W: Write> Engine<W> {
+    /// Persistent command gas runs before this update's effects. A failed
+    /// pulse is discarded and every command cloud dissipates, so the same
+    /// cloud cannot fail every later update.
+    fn stage_command_gas(
+        &mut self,
+        runtime: &mut Runtime,
+        native: &mut BTreeMap<u32, acquisition_character_effects::NativeState>,
+        now: Duration,
+        collision: BlastCollision<'_>,
+        objectives: Option<&mut objective_control::ObjectiveWorld>,
+        result: &mut domination_structural_world::DamageCommit,
+    ) -> Result<(), &'static str> {
+        if runtime.gas.is_empty() {
+            return Ok(());
+        }
+        let savepoint =
+            EffectSavepoint::capture(self, native, runtime, objectives.as_deref(), result);
+        match runtime.gas.stage(self, native, now, collision) {
+            Ok((audit, messages)) => {
+                result.audit.extend(audit);
+                result.messages.extend(messages);
+            }
+            Err(error) => {
+                savepoint.restore(self, native, runtime, objectives, result)?;
+                runtime.gas = Default::default();
+                runtime.version += 1;
+                result.audit.push(json!({"op":"active_ability_gas_failed",
+                    "timestamp_ms":now.as_millis() as u32,"error":error}));
+            }
+        }
+        Ok(())
+    }
+
+    /// Prepare and stage one command effect for this update. Its world work
+    /// runs against a savepoint and is discarded as a unit if it fails.
+    #[allow(clippy::too_many_arguments)]
+    fn stage_command_effect(
+        &mut self,
+        runtime: &mut Runtime,
+        key: (NativeAbilityScope, u16),
+        running: &mut Running,
+        targets: &[Target],
+        native: &mut BTreeMap<u32, acquisition_character_effects::NativeState>,
+        frame: CommandFrame<'_, '_>,
+        mut objectives: Option<&mut objective_control::ObjectiveWorld>,
+        result: &mut domination_structural_world::DamageCommit,
+    ) -> Result<(), EffectFailure> {
+        let unit = runtime
+            .units
+            .get(&key.0)
+            .ok_or(EffectFailure::Contained("active_ability_unit_missing"))?;
+        let data = unit.data[usize::from(key.1 - 1)]
+            .ok_or(EffectFailure::Contained("active_ability_data_missing"))?;
+        let origin = self
+            .spawn_catalog
+            .as_ref()
+            .and_then(|catalog| {
+                catalog.selected_squad(data.squad_index).and_then(|squad| {
+                    squad
+                        .available
+                        .iter()
+                        .filter_map(|index| catalog.point(*index))
+                        .find(|point| matches!(point.kind, spawn_catalog::SpawnKind::Alternate))
+                })
+            })
+            .map(|point| [point.position.x, point.position.y, point.position.z]);
+        let (next, work) = running
+            .effect
+            .prepare_tick_with_platoon(frame.now.as_millis() as u32, origin)
+            .map_err(EffectFailure::Contained)?;
+        running.effect = next;
+        let touches_world = !matches!(
+            work,
+            Work::Idle | Work::Complete | Work::ScanSquad(_) | Work::ClearSurveillance
+        );
+        let savepoint = touches_world.then(|| {
+            EffectSavepoint::capture(self, native, runtime, objectives.as_deref(), result)
+        });
+        let staged = self.stage_command_work(
+            runtime,
+            running,
+            data,
+            work,
+            targets,
+            native,
+            frame,
+            objectives.as_deref_mut(),
+            result,
+        );
+        match (staged, savepoint) {
+            (Ok(()), _) => Ok(()),
+            (Err(error), Some(savepoint)) => {
+                savepoint
+                    .restore(self, native, runtime, objectives, result)
+                    .map_err(EffectFailure::Fatal)?;
+                Err(EffectFailure::Contained(error))
+            }
+            (Err(error), None) => Err(EffectFailure::Contained(error)),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn stage_command_work(
+        &mut self,
+        runtime: &mut Runtime,
+        running: &Running,
+        data: NativeAbilityData,
+        work: Work,
+        targets: &[Target],
+        native: &mut BTreeMap<u32, acquisition_character_effects::NativeState>,
+        frame: CommandFrame<'_, '_>,
+        mut objectives: Option<&mut objective_control::ObjectiveWorld>,
+        result: &mut domination_structural_world::DamageCommit,
+    ) -> Result<(), &'static str> {
+        let CommandFrame {
+            now,
+            collision,
+            ground_policy,
+        } = frame;
+        match work {
+            Work::ClusterSample(sample) => {
+                let attacker = self.command_source(running).0;
+                if let Some(work) = self.collect_air_strike_blast(
+                    attacker,
+                    sample.xz,
+                    runtime.setup.vertical_bounds,
+                    InstantaneousBlast {
+                        origins: Vec::new(),
+                        damage: sample.blast.damage,
+                        inner_radius: sample.blast.inner_radius,
+                        outer_radius: sample.blast.outer_radius,
+                        material_penetration: 0.,
+                    },
+                    collision,
+                )? {
+                    let mut commit = self.stage_command_blast(
+                        runtime,
+                        running,
+                        native,
+                        now,
+                        work,
+                        collision,
+                        ground_policy,
+                        objectives.as_deref_mut(),
+                    )?;
+                    result.audit.append(&mut commit.audit);
+                    result.messages.append(&mut commit.messages);
+                    result.changed_ground.append(&mut commit.changed_ground);
+                    result.helo_doses.append(&mut commit.helo_doses);
+                }
+            }
+            Work::PrecisionStrike => {
+                let world = objectives
+                    .as_deref_mut()
+                    .ok_or("precision_objective_world_required")?;
+                let source = self.command_source(running).1;
+                let changed = self.stage_precision_strike(
+                    world,
+                    &runtime.setup.precision_targets,
+                    data.target_id,
+                    source,
+                    running.invoker,
+                    running.world,
+                )?;
+                result.audit.push(
+                    json!({"op":"precision_strike_target","target_id":data.target_id,
+                    "source":source.map(|s|s.player),"staged":changed}),
+                );
+            }
+            Work::GuidedArtillery { origin, radius } => {
+                let attacker = self.command_source(running).0;
+                let work =
+                    self.collect_guided_artillery_blast(attacker, origin, radius, collision)?;
+                let mut commit = self.stage_command_blast(
+                    runtime,
+                    running,
+                    native,
+                    now,
+                    work,
+                    collision,
+                    ground_policy,
+                    objectives.as_deref_mut(),
+                )?;
+                result.audit.append(&mut commit.audit);
+                result.messages.append(&mut commit.messages);
+                result.changed_ground.append(&mut commit.changed_ground);
+                result.helo_doses.append(&mut commit.helo_doses);
+            }
+            Work::GasBombardment { volume, bomblet } => {
+                let attacker = self.command_source(running).0;
+                if let Some(volume) = volume {
+                    runtime.gas.register(
+                        volume,
+                        crate::active_ability_gas_world::GasSource {
+                            allocation: None,
+                            attacker,
+                            world: running.world,
+                            team: u8::from(running.platoon >= 4),
+                            reservation: running.reservation.clone(),
+                        },
+                        now,
+                    )?;
+                }
+                if let Some(sample) = bomblet
+                    && let Some(work) = self.collect_command_bomblet(
+                        attacker,
+                        sample,
+                        runtime.setup.vertical_bounds,
+                        true,
+                        collision,
+                    )?
+                {
+                    let mut commit = self.stage_command_blast(
+                        runtime,
+                        running,
+                        native,
+                        now,
+                        work,
+                        collision,
+                        ground_policy,
+                        objectives.as_deref_mut(),
+                    )?;
+                    result.audit.append(&mut commit.audit);
+                    result.messages.append(&mut commit.messages);
+                    result.changed_ground.append(&mut commit.changed_ground);
+                    result.helo_doses.append(&mut commit.helo_doses);
+                }
+            }
+            Work::StrafingRun(sample) => {
+                let attacker = self.command_source(running).0;
+                if let Some(work) = self.collect_command_bomblet(
+                    attacker,
+                    sample,
+                    [-1000., 1000.],
+                    false,
+                    collision,
+                )? {
+                    let mut commit = self.stage_command_blast(
+                        runtime,
+                        running,
+                        native,
+                        now,
+                        work,
+                        collision,
+                        ground_policy,
+                        objectives,
+                    )?;
+                    result.audit.append(&mut commit.audit);
+                    result.messages.append(&mut commit.messages);
+                    result.changed_ground.append(&mut commit.changed_ground);
+                    result.helo_doses.append(&mut commit.helo_doses);
+                }
+            }
+            Work::ScanSquad(scan) => {
+                for target in targets.iter().filter(|t| t.squad == scan.slot) {
+                    if scan
+                        .detector
+                        .detects(scan.origin, target.position, target.speed)
+                    {
+                        runtime.mark(target);
+                    }
+                }
+            }
+            Work::ClearSurveillance => {
+                for objective in &runtime.setup.objectives {
+                    if objective.platoons.contains(&running.platoon)
+                        && let Some(s) = runtime.surveillance.get_mut(&objective.object_index)
+                    {
+                        s.sensor = None;
+                    }
+                }
+            }
+            Work::Idle | Work::Complete => {}
+        }
+        Ok(())
     }
 }
 pub(crate) fn detection_identity(actor: &Active) -> String {

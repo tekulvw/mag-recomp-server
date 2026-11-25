@@ -15,7 +15,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 const CALLER: u32 = 0x0380_0000;
 
-fn command_engine(rules: EffectRules) -> Engine<Vec<u8>> {
+pub(crate) fn command_engine(rules: EffectRules) -> Engine<Vec<u8>> {
     let mut engine = platoon_engine();
     let setup = Arc::make_mut(&mut engine.active_abilities.as_mut().unwrap().setup);
     for mode in &mut setup.rules.modes {
@@ -115,7 +115,7 @@ fn command_engine(rules: EffectRules) -> Engine<Vec<u8>> {
     engine
 }
 
-fn cast(engine: &mut Engine<Vec<u8>>, ability: Ability) {
+pub(crate) fn cast(engine: &mut Engine<Vec<u8>>, ability: Ability) {
     let mut command = request(16, ability);
     command.position = [100., 3., 100.];
     assert!(activate(engine, command, 0, 20).ok);
@@ -123,7 +123,7 @@ fn cast(engine: &mut Engine<Vec<u8>>, ability: Ability) {
     assert_eq!(decision["decoded"]["accepted"], true, "{decision}");
 }
 
-fn native_states() -> BTreeMap<u32, acquisition_character_effects::NativeState> {
+pub(crate) fn native_states() -> BTreeMap<u32, acquisition_character_effects::NativeState> {
     (CALLER..=CALLER + 1)
         .map(|id| {
             (
@@ -163,13 +163,6 @@ fn platoon_guided_point_query_spends_once_without_character_damage() {
     // No static scene is necessary. The first due callback still needs the
     // dynamic overlap, even though the only actors in this fixture are characters.
     engine.collision_world = None;
-    let resources = engine.dynamic_body_resources.take();
-    commit_tick(&mut engine, &mut native, 26);
-    assert!(matches!(
-        prepare_effect_tick(&mut engine, &native, 27),
-        Err("dynamic_body_resources_unavailable")
-    ));
-    engine.dynamic_body_resources = resources;
     let audit = commit_tick(&mut engine, &mut native, 27);
     assert!(
         audit
@@ -186,6 +179,34 @@ fn platoon_guided_point_query_spends_once_without_character_damage() {
     );
 
     engine.dynamic_body_resources = None;
+    commit_tick(&mut engine, &mut native, 28);
+}
+
+#[test]
+fn platoon_guided_point_query_failure_ends_the_command_without_damage() {
+    let mut engine = command_engine(EffectRules::GuidedArtillery(GuidedArtilleryRules {
+        delay_ms: 5,
+        damage_delay_ms: 2,
+        effective_radius: 8.,
+    }));
+    let mut native = native_states();
+    cast(&mut engine, Ability::GuidedArtillery);
+    engine.dynamic_body_resources = None;
+    commit_tick(&mut engine, &mut native, 26);
+    let audit = commit_tick(&mut engine, &mut native, 27);
+    let failure = audit
+        .iter()
+        .find(|event| event["op"] == "active_ability_effect_failed")
+        .unwrap();
+    assert_eq!(failure["error"], "dynamic_body_resources_unavailable");
+    assert_eq!(failure["ability"], Ability::GuidedArtillery.code());
+    for slot in 0..2 {
+        assert_eq!(
+            actor_mut(&mut engine, slot).life.damage_health(),
+            Some((1, 400))
+        );
+    }
+    assert!(!engine.command_effect_active_for_test(Ability::GuidedArtillery));
     commit_tick(&mut engine, &mut native, 28);
 }
 
@@ -241,7 +262,7 @@ fn platoon_gas_command_registers_a_delayed_chemical_pulse() {
 }
 
 #[test]
-fn platoon_strafe_retries_one_due_impact_after_spatial_rollback() {
+fn platoon_strafe_impact_credits_the_caller_and_a_refused_impact_ends_the_run() {
     let mut engine = command_engine(EffectRules::StrafingRun(StrafingRunRules {
         delay_ms: 5,
         damage_delay_ms: 1,
@@ -267,17 +288,6 @@ fn platoon_strafe_retries_one_due_impact_after_spatial_rollback() {
             .all(|event| event["on_character_hit"].is_null())
     );
 
-    engine.collision_world = Some(strike_floor(engine.map_name(), false));
-    assert!(matches!(
-        prepare_effect_tick(&mut engine, &native, 27),
-        Err("air_strike_static_impact_ray_failed")
-    ));
-    assert_eq!(
-        actor_mut(&mut engine, 0).life.damage_health(),
-        Some((1, 400))
-    );
-
-    engine.collision_world = Some(strike_floor(engine.map_name(), true));
     let impact = prepare_effect_tick(&mut engine, &native, 27).unwrap();
     assert!(
         impact
@@ -300,4 +310,28 @@ fn platoon_strafe_retries_one_due_impact_after_spatial_rollback() {
             .iter()
             .all(|event| event["on_character_hit"].is_null())
     );
+
+    // A later refused impact query ends the run instead of failing every
+    // following world update; nothing of that impact is applied.
+    engine.collision_world = Some(strike_floor(engine.map_name(), false));
+    let health = actor_mut(&mut engine, 0).life.damage_health();
+    let mut audit = Vec::new();
+    let mut now = 28;
+    while engine.command_effect_active_for_test(Ability::StrafingRun) {
+        now += 1;
+        assert!(now < 500);
+        audit.extend(commit_tick(&mut engine, &mut native, now));
+    }
+    let failures: Vec<_> = audit
+        .iter()
+        .filter(|event| event["op"] == "active_ability_effect_failed")
+        .collect();
+    assert_eq!(failures.len(), 1, "{audit:?}");
+    assert_eq!(failures[0]["error"], "air_strike_static_impact_ray_failed");
+    assert!(
+        audit
+            .iter()
+            .all(|event| event["on_character_hit"].is_null())
+    );
+    assert_eq!(actor_mut(&mut engine, 0).life.damage_health(), health);
 }

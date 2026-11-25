@@ -70,6 +70,8 @@ pub mod bullet_hit;
 mod bunker_seats;
 pub mod collision;
 pub mod collision_coverage;
+#[cfg(test)]
+mod command_ability_world_tests;
 mod convex_penetration;
 pub mod correction_ack;
 pub mod damage;
