@@ -1502,6 +1502,20 @@ impl<W: Write> Engine<W> {
         wall: u64,
     ) -> Result<Vec<OutboundMessage>, &'static str> {
         self.commit_domination_mission_start(&mut world.runtime, now, wall)?;
+        // Holds open before this pass. When the pass ends one (the capture
+        // completes, the holder leaves the trigger or a script moves the
+        // objective), the holder gets the native exit handshake, as in
+        // Sabotage and Acquisition; otherwise its client keeps the prompt.
+        let prior_holds: Vec<(u16, (u16, u32, u8))> = self
+            .objective_world
+            .as_ref()
+            .map(|objectives| {
+                objectives
+                    .native_object_indices()
+                    .filter_map(|index| Some((index, objectives.interaction_owner(index)?)))
+                    .collect()
+            })
+            .unwrap_or_default();
         let actors_before: BTreeMap<u16, ObjectiveActor> = self
             .peers
             .values()
@@ -1639,6 +1653,25 @@ impl<W: Write> Engine<W> {
                     .into_values()
                     .collect();
                 provider.prepare_hospital_damage_presence()?;
+                for &(index, hold @ (player, generation, trigger)) in &prior_holds {
+                    if candidate.world.interaction_owner(index) == Some(hold) {
+                        continue;
+                    }
+                    // Bots and replaced lives have no client hold to end.
+                    let exit = provider
+                        .engine
+                        .peers
+                        .values()
+                        .chain(provider.engine.active.iter())
+                        .find(|a| {
+                            a.reservation.player == player
+                                && matches!(a.life, CharacterLife::Alive { generation: g, .. } if g == generation)
+                        })
+                        .map(|holder| {
+                            crate::events::objective_hold_exit(holder, index, player, trigger)
+                        });
+                    provider.messages.extend(exit);
+                }
                 let Provider {
                     state: next_state,
                     bunkers,

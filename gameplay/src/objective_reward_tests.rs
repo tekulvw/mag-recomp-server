@@ -840,3 +840,6 @@ fn precision_cascade_does_not_invent_plant_xp_from_its_wire_actor() {
         "Precision's intermediate Activated is not an OnActivated callback; its final latch is not yet qualified"
     );
 }
+
+#[path = "domination_hold_exit_tests.rs"]
+mod domination_hold_exits;
