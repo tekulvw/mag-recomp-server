@@ -297,6 +297,16 @@ impl Effect {
         self.complete
     }
 
+    /// End this activation without further work after its owner refused the
+    /// current update. A later activation rearms the same instance normally.
+    pub fn abort(&self, now_ms: u32) -> Self {
+        Self {
+            now_ms: now_ms.max(self.now_ms),
+            complete: true,
+            ..*self
+        }
+    }
+
     /// Prepare one native manager update from the retained state. The caller
     /// installs the returned state only after the corresponding work commits.
     pub fn prepare_tick(&self, now_ms: u32) -> Result<(Self, Work), &'static str> {

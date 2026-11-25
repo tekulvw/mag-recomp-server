@@ -183,3 +183,79 @@ fn acquisition_confirmed_respawn_spawns_while_ability_runtime_ticks() {
     let published = published.expect("the team wave deadline stopped publishing");
     assert!(published["recipients"][0]["deadline_ms"].as_u64().unwrap() > spawned_at);
 }
+
+/// The shared command stage under Acquisition's own world update: a cluster
+/// over friendly bots (one dies), the invoker, an enemy and bare ground keeps
+/// every world update, and a refused bomblet ends only its own bombardment.
+#[test]
+fn acquisition_cluster_bombardment_keeps_every_world_update() {
+    use crate::{
+        active_abilities::Ability,
+        command_ability_world_tests::{
+            LEADER, add_bots, arm_world, bombard, place_human, staged_rows,
+        },
+    };
+    for qualified in [true, false] {
+        let (mut engine, mut setup) = acquisition_setup_fixture(None, None, false, 4);
+        let mut abilities = crate::active_ability_engine_tests::setup();
+        abilities.map_name = engine.map_name().to_owned();
+        let (passives, policy) = crate::active_ability_engine_tests::native_leadership();
+        // The invented arena's strike and cover rows admit its layer-9 floor.
+        setup.filter_rows[19] |= 1 | (1 << 9);
+        setup.filter_rows[24] |= 1 | (1 << 9);
+        engine = engine
+            .with_leadership_passives(passives, policy)
+            .unwrap()
+            .with_active_abilities(abilities)
+            .unwrap()
+            .with_acquisition_gameplay(setup)
+            .unwrap();
+        prepare_capture_actor(&mut engine, LEADER, 100);
+        arm_world(&mut engine, &mut [0; 32]);
+        // An unqualified floor refuses every impact query.
+        engine.collision_world = Some(crate::active_ability_engine_tests::strike_floor(
+            engine.map_name(),
+            qualified,
+        ));
+        place_human(&mut engine, LEADER, [100., 1., 100.]);
+        let team = engine.active.as_ref().unwrap().team();
+        let friendly = u16::from(team) * 16 + 1;
+        let enemy = u16::from(1 - team) * 16 + 1;
+        let bots = add_bots(
+            &mut engine,
+            &[
+                (friendly, [101., 1., 101.], 8),
+                (enemy, [102., 1., 98.], 400),
+            ],
+        );
+        engine.enable_world_ticks();
+        let ended = bombard(&mut engine, Ability::ClusterBomb, [100., 1., 100.], 1_000);
+        for now in (ended + 50..=ended + 300).step_by(50) {
+            let reply = engine.tick_world(Duration::from_millis(now), now / 1000, "after".into());
+            assert!(reply.ok, "{:?}", reply.error);
+        }
+        let rows = staged_rows(&engine);
+        let failures: Vec<_> = rows
+            .iter()
+            .filter(|row| row["op"] == "active_ability_effect_failed")
+            .collect();
+        let attacker = 0x0380_0000 | u32::from(LEADER);
+        assert!(
+            rows.iter()
+                .filter(|row| row["on_character_hit"] == true)
+                .all(|row| row["attacker"] == attacker)
+        );
+        if qualified {
+            assert!(failures.is_empty(), "{failures:?}");
+            let dead = &engine.bot_registry.bots[&bots[0]];
+            assert_eq!(dead.health, 0);
+            assert_eq!(dead.damage.last_attacker, attacker);
+            assert!(engine.bot_registry.bots[&bots[1]].health < 400);
+        } else {
+            assert_eq!(failures.len(), 1, "{failures:?}");
+            assert_eq!(failures[0]["error"], "air_strike_static_impact_ray_failed");
+            assert!(rows.iter().all(|row| row["on_character_hit"].is_null()));
+            assert_eq!(engine.bot_registry.bots[&bots[1]].health, 400);
+        }
+    }
+}

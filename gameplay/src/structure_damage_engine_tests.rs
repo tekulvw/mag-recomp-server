@@ -165,19 +165,12 @@ fn timed_cluster_crosses_the_threshold_then_ordinary_objective_ticks_arm_and_com
 }
 
 #[test]
-fn failed_threshold_query_and_record_keep_accumulated_health_and_pending_strike_slot() {
+fn failed_record_keeps_accumulated_health_and_pending_strike_slot() {
     let mut engine = armed_world();
     let first = strike(&mut engine, 47, "Accumulated", false);
     engine
         .record_acquisition_character_effects(first, &mut BTreeMap::new(), 1)
         .unwrap();
-    engine.collision_world = Some(strike_floor(engine.map_name(), false));
-    assert!(matches!(
-        prepare_effect_tick(&mut engine, &BTreeMap::new(), 55),
-        Err("air_strike_static_impact_ray_failed")
-    ));
-    assert_eq!(state(&engine), ObjectiveState::Deactivated);
-    engine.collision_world = Some(strike_floor(engine.map_name(), true));
     let second = strike(&mut engine, 55, "Destroyed", true);
     let written = engine.writer.len();
     let max_log = engine.max_log;

@@ -107,6 +107,10 @@ pub(crate) struct GasWorld {
 pub(crate) struct GasCooldowns(BTreeMap<(u64, u32, u32), Cooldown>);
 
 impl GasWorld {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.clouds.is_empty()
+    }
+
     pub(crate) fn register(
         &mut self,
         volume: GasVolume,

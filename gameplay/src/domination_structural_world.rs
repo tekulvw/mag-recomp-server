@@ -2530,6 +2530,30 @@ impl SequenceCollisionState {
             });
     }
 
+    /// A helicopter hull overlay at a fixed pose, for radial dose routing.
+    pub(crate) fn synthetic_helo(&mut self, index: u16, centre: [f64; 3]) {
+        let payload = json!({
+            "format":"mag_collision_world", "schema_version":1, "coordinate_space":"world",
+            "metadata":{"map_name":"synthetic","build":"synthetic","coverage":"provisional",
+                "provenance":["synthetic"],"unknowns":[]},
+            "instances":[{"id":"helo-hull", "material_index":1,
+                "vertices_xyz":[[-2.,-0.5,-2.],[2.,-0.5,-2.],[0.,0.5,2.]],"triangles":[[0,1,2]]}]
+        });
+        let mesh = collision::CollisionWorld::from_bytes(
+            &serde_json::to_vec(&payload).unwrap(),
+            collision::CollisionLimits::default(),
+        )
+        .unwrap();
+        self.helos.insert(
+            index,
+            SequenceSurface {
+                projectile: None,
+                pose: Pose::at(centre),
+                mesh,
+            },
+        );
+    }
+
     pub(crate) fn synthetic_projectile_hospital(&mut self, index: u16, x: f64, digest: String) {
         let payload = json!({
             "format":"mag_collision_world", "schema_version":1, "coordinate_space":"world",

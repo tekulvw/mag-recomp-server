@@ -994,6 +994,27 @@ impl Candidate {
         Ok(())
     }
 }
+/// A nested rollback point inside one character-effect callback. It holds the
+/// same fields the callback itself restores, so one failed piece of staged
+/// work can be discarded while the rest of the callback commits.
+pub(crate) struct CharacterEffectSavepoint(EffectState);
+impl<W: Write> Engine<W> {
+    pub(crate) fn character_effect_savepoint(&self) -> CharacterEffectSavepoint {
+        CharacterEffectSavepoint(EffectState::capture(self))
+    }
+    /// Reinstall a savepoint taken earlier in the same callback. Staged work
+    /// never adds or removes actors; a changed roster is refused untouched.
+    pub(crate) fn restore_character_effect_savepoint(
+        &mut self,
+        savepoint: CharacterEffectSavepoint,
+    ) -> Result<(), &'static str> {
+        if !savepoint.0.same_actors(self) {
+            return Err("character_effect_savepoint_topology_changed");
+        }
+        savepoint.0.install(self);
+        Ok(())
+    }
+}
 impl<W: Write> Engine<W> {
     /// Run a bounded callback against cloned character-effect authority and
     /// restore the original fields before returning. Queries, corrections and

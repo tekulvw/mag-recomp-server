@@ -330,7 +330,20 @@ impl<W: Write> Provider<'_, W> {
             changed_ground,
             helo_doses,
         } = result?;
-        self.stage_helo_radial(&helo_doses)?;
+        // Command doses on a helicopter are their own entity: a refused dose
+        // set is discarded whole and recorded, and the world update goes on.
+        let (fleet, packets, rows) = (
+            self.state.helo.clone(),
+            self.packets.len(),
+            self.audit.len(),
+        );
+        if let Err(error) = self.stage_helo_radial(&helo_doses) {
+            self.state.helo = fleet;
+            self.packets.truncate(packets);
+            self.audit.truncate(rows);
+            self.audit.push(serde_json::json!({"op":"active_ability_helo_damage_failed",
+                "timestamp_ms":self.now.as_millis() as u32,"doses":helo_doses.len(),"error":error}));
+        }
         if !changed_ground.is_empty() {
             let changes = changed_ground
                 .into_iter()
