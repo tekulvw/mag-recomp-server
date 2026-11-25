@@ -314,7 +314,7 @@ fn queued_hospital_respawn_uses_its_own_body_and_authored_passenger_capacity() {
 }
 
 #[test]
-fn full_hospital_respawn_preserves_pending_actor_position() {
+fn a_full_hospital_without_an_alternate_starts_the_life_on_foot_at_its_point() {
     let mut engine = fixture();
     for seat in 1..=12 {
         let mut actor = fixture().active.take().unwrap();
@@ -351,14 +351,11 @@ fn full_hospital_respawn_preserves_pending_actor_position() {
         .encode_empty_with_profile(engine.wire_profile)
         .unwrap();
     dispatch(&mut engine, &packet, 100).unwrap();
+    // The fixture's defending squads own only hospital points, so the life
+    // starts on foot at the selected hospital point itself, never seated.
     let active = engine.active.as_ref().unwrap();
-    assert_eq!(active.tracking.sample.unwrap().position, original);
-    assert_eq!(active.tracking.sample.unwrap().received_at_ms, 1);
-    assert_eq!(
-        active.pending_spawn_deadline,
-        Some(Duration::from_millis(100))
-    );
-    assert!(matches!(active.life, CharacterLife::AwaitingRespawn { .. }));
+    assert!(active.life.is_alive(), "{:?}", active.life);
+    assert_ne!(active.tracking.sample.unwrap().position, original);
     assert_eq!(active.mounted_bunker, None);
     assert_eq!(active.mounted_seat, None);
 }
@@ -464,23 +461,25 @@ fn indexed_hospital_rejects_legacy_damage_and_critical_decay() {
     assert!(engine.active.as_ref().unwrap().pending_shared.is_empty());
 }
 
-/// The fixture's pool plus an on-foot HQ insertion (point 3) that defending
-/// squads also own; each defending squad is routed to its hospital (1 or 2).
+/// The fixture's pool plus an HQ insertion (point 3) and an alternate
+/// insertion (point 5) that defending squads also own; squad 17 has an APC
+/// insertion (point 4) and the HQ insertion, squad 18 the APC and the
+/// alternate.
 fn catalog_with_hq() -> spawn_catalog::SpawnCatalog {
     let squads: Vec<_> = (0..32)
         .map(|i| {
             json!({"index":i,"team":i/16,"platoon":i%16/4,"squad":i%4,
             "faction":if i<16 {None} else {Some(0)},
-            "available":if i<16 {vec![0]} else if i == 17 {vec![4,3]} else {vec![3,1,2]},
-            "default_spawn":if i<16 {0} else if i == 17 {4} else {3}})
+            "available":match i {0..16 => vec![0], 17 => vec![4,3], 18 => vec![4,5], _ => vec![3,5,1,2]},
+            "default_spawn":match i {0..16 => 0, 17 | 18 => 4, _ => 3}})
         })
         .collect();
     spawn_catalog::SpawnCatalog::from_json(&json!({
         "format":"mag_spawn_catalog","schema_version":1,"source":"synthetic hospital HQ fallback",
-        "active":{"map_name":"hospital_test","squad_index":16,"default_spawn":3,"available":[3,1,2]},
+        "active":{"map_name":"hospital_test","squad_index":16,"default_spawn":3,"available":[3,5,1,2]},
         "match_profile":{"game_type":2,"auto_assign_teams":true,"attacking_faction":1,
             "has_bunkers":true,"has_objectives":false,"maximum_points":[111,222]},
-        "maps":[{"name":"hospital_test","owner_faction":0,"spawn_count":5,
+        "maps":[{"name":"hospital_test","owner_faction":0,"spawn_count":6,
             "runtime_indices_verified":true,"runtime_indices_basis":"synthetic",
             "squads":squads,"locations":[
                 {"index":0,"token":100,"kind":"insertion","position":{"x":0.,"y":0.,"z":0.}},
@@ -488,6 +487,7 @@ fn catalog_with_hq() -> spawn_catalog::SpawnCatalog {
                 {"index":2,"token":102,"kind":"bunker_passenger","position":{"x":0.,"y":0.,"z":0.}},
                 {"index":3,"token":103,"kind":"insertion","position":{"x":5.,"y":0.,"z":7.}},
                 {"index":4,"token":104,"kind":"vehicle_passenger","position":{"x":9.,"y":0.,"z":9.}},
+                {"index":5,"token":105,"kind":"alternate","position":{"x":11.,"y":0.,"z":13.}},
             ]}],
     }).to_string()).unwrap()
 }
@@ -532,7 +532,7 @@ fn await_squad_respawn_at(engine: &mut Engine<Vec<u8>>, squad: u16, selected: u1
 }
 
 #[test]
-fn a_destroyed_selected_hospital_respawns_the_player_at_the_squads_hq_point() {
+fn a_destroyed_selected_hospital_respawns_the_player_at_the_alternate_insertion() {
     let mut engine = fixture();
     await_respawn_at(&mut engine, 2);
     engine
@@ -547,7 +547,7 @@ fn a_destroyed_selected_hospital_respawns_the_player_at_the_squads_hq_point() {
     assert_eq!(actor.mounted_bunker, None);
     assert_eq!(actor.mounted_seat, None);
     let at = actor.tracking.sample.unwrap().position;
-    assert_eq!((at.x, at.z), (5., 7.));
+    assert_eq!((at.x, at.z), (11., 13.));
 }
 
 #[test]
@@ -598,10 +598,32 @@ fn a_hospital_destroyed_by_damage_retires_its_spawn_until_restored() {
 }
 
 #[test]
-fn an_apc_insertion_without_its_vehicle_respawns_the_player_on_foot() {
-    // Squad 17's authored default is an APC insertion (point 4). With no
-    // ground vehicle to seat the player, the match-start or respawn wave
-    // starts the life at the squad's on-foot insertion instead of waiting.
+fn an_apc_insertion_without_its_vehicle_starts_the_life_at_the_alternate_insertion() {
+    // Squad 18 defaults to an APC insertion (point 4). With no ground vehicle
+    // to seat the player, the same wave starts the life on foot at the
+    // squad's alternate insertion (point 5).
+    let mut engine = fixture();
+    engine.ground_vehicles = None;
+    await_squad_respawn_at(&mut engine, 18, 4);
+    tick_until_alive(&mut engine);
+    let actor = engine.active.as_ref().unwrap();
+    assert!(actor.life.is_alive(), "{:?}", actor.life);
+    assert!(actor.ground_seat.is_none());
+    let at = actor.tracking.sample.unwrap().position;
+    assert_eq!((at.x, at.z), (11., 13.));
+    let log = String::from_utf8(engine.writer.clone()).unwrap();
+    assert!(
+        log.contains(
+            r#""spawn_fallback":{"reason":"ground_vehicle_catalog_required","selected":4,"used":5}"#
+        ),
+        "{log}"
+    );
+}
+
+#[test]
+fn an_apc_insertion_without_an_alternate_starts_the_life_on_foot_at_the_vehicle_point() {
+    // Squad 17 has no alternate insertion, so the life starts on foot at the
+    // APC insertion point itself rather than at its other (category 0) point.
     let mut engine = fixture();
     engine.ground_vehicles = None;
     await_squad_respawn_at(&mut engine, 17, 4);
@@ -609,5 +631,26 @@ fn an_apc_insertion_without_its_vehicle_respawns_the_player_on_foot() {
     let actor = engine.active.as_ref().unwrap();
     assert!(actor.life.is_alive(), "{:?}", actor.life);
     let at = actor.tracking.sample.unwrap().position;
-    assert_eq!((at.x, at.z), (5., 7.));
+    assert_eq!((at.x, at.z), (9., 9.));
+}
+
+#[test]
+fn a_full_hospital_starts_the_life_at_the_alternate_insertion() {
+    let mut engine = fixture();
+    for seat in 1..=12 {
+        let mut actor = fixture().active.take().unwrap();
+        actor.reservation.id = format!("synthetic-hospital-passenger-{seat}");
+        actor.reservation.player = u16::from(seat);
+        actor.mounted_bunker = Some(6);
+        actor.mounted_seat = Some(seat);
+        engine.peers.insert(actor.reservation.id.clone(), actor);
+    }
+    await_respawn_at(&mut engine, 2);
+    tick_until_alive(&mut engine);
+    let actor = engine.active.as_ref().unwrap();
+    assert!(actor.life.is_alive(), "{:?}", actor.life);
+    assert_eq!(actor.mounted_bunker, None);
+    assert_eq!(actor.mounted_seat, None);
+    let at = actor.tracking.sample.unwrap().position;
+    assert_eq!((at.x, at.z), (11., 13.));
 }

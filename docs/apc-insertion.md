@@ -121,11 +121,40 @@ occupied/repeated/invalid/wrong-side mounts, late-join creation ordering, releas
 terminal damage, round reset and evidence-failure rollback. They contain no
 private vehicle properties, native map data, assets or captured packets.
 
-A player whose selected or squad spawn is an APC insertion whose vehicle is
-absent, destroyed, on the other side, without exit candidates or out of free
-passenger seats starts that life at the squad's on-foot HQ point: its authored
-default, else its current default, else another on-foot point of the squad.
-This applies to the match-start wave and to respawns. Without such a point the
-refusal stands. A recipient that has not yet received the vehicle creation batch
-still waits for it. Population bots never use APC insertions; they start at
-their on-foot population slots.
+### When the APC cannot seat a new life
+
+This follows the retail character respawn rule.
+
+A life due at an APC insertion is seated only if all of these hold:
+
+- the bound vehicle exists and is operational;
+- it belongs to the player's side;
+- it has exit candidates;
+- its occupancy, crew included, is below its maximum occupancy.
+
+The seat used is the highest-numbered free passenger seat.
+
+Otherwise the life is never refused and never held back. In the same wave it
+starts on foot at the squad's alternate insertion (retail spawn category 1;
+insertion is 0 and forward is 2), provided the squad may use that point and it
+is not the APC point itself. A squad without such an alternate starts the life
+on foot at the APC insertion point's own position. The event receipt records
+the selected point, the point used and the reason as `spawn_fallback`.
+
+This applies to the match-start wave and to every respawn. A recipient that has
+not yet received the vehicle creation batches still waits for them, because the
+client must know about the vehicle before it can be seated in it.
+
+A selection the squad can no longer use (inactive, or lost by the squad) is
+replaced when the life starts by the squad's first usable point in authored
+order. A point whose vehicle or hospital is destroyed is skipped there. Free
+seats are not considered at that step; they are decided only when seating.
+
+Population bots never use APC insertions; they start at their on-foot
+population slots.
+
+Not implemented yet: retail reserves each vehicle's seats (up to eight) for the
+squads whose spawn points name it. A player from another squad may only mount
+while the free seats exceed the reserved seats still unused. Spawning into an
+APC always comes from an associated squad, so this rule only affects manual
+mounting.

@@ -417,6 +417,26 @@ fn apc_engine(faction: u8, manual_mount: bool) -> Engine<Vec<u8>> {
         Catalog::from_json(&value.to_string(), engine.spawn_catalog.as_ref().unwrap()).unwrap();
     engine.with_ground_vehicles(world).unwrap()
 }
+/// One APC bound to point 0; point 1 is every squad's alternate insertion.
+fn apc_engine_with_alternate() -> Engine<Vec<u8>> {
+    let mut engine = acquisition_entry::acquisition()
+        .with_match_limits(1, 64)
+        .unwrap();
+    let mut source = apc_spawn_json(1);
+    source["maps"][0]["locations"][1]["kind"] = json!("alternate");
+    engine.spawn_catalog = Some(spawns(source).unwrap());
+    let mut value = catalog(&engine);
+    value["vehicles"][0]["faction"] = json!(1);
+    value["vehicles"][0]["passenger_seats"] = json!([2, 3, 4, 5, 6, 7, 8, 9]);
+    value["vehicles"][0]["maximum_occupancy"] = json!(8);
+    value["vehicles"][0]["passenger_exit_candidates"] =
+        json!([{"ranking_offset":[1.,0.,0.],"position_offset":[3.,0.,0.]}]);
+    value["passenger_spawns"] =
+        json!([{"spawn_point_index":0,"spawn_point_token":1000,"vehicle_index":0}]);
+    let world =
+        Catalog::from_json(&value.to_string(), engine.spawn_catalog.as_ref().unwrap()).unwrap();
+    engine.with_ground_vehicles(world).unwrap()
+}
 fn spawn_apc(
     engine: &mut Engine<Vec<u8>>,
     player: u16,
@@ -553,15 +573,20 @@ fn apc_seats_descend_have_independent_capacity_and_require_exit_policy() {
             9 - player as u8
         );
     }
+    // A ninth life finds the APC full. These squads have no alternate
+    // insertion, so it starts on foot at the APC point in the same wave.
     spawn_apc(&mut engine, 8, 1, 0, 200);
-    assert!(engine.active.as_ref().unwrap().ground_seat.is_none());
-    assert!(
-        engine
-            .active
-            .as_ref()
-            .unwrap()
-            .pending_spawn_deadline
-            .is_some()
+    let ninth = engine.active.as_ref().unwrap();
+    assert!(ninth.ground_seat.is_none());
+    assert!(ninth.life.is_alive());
+    assert!(ninth.pending_spawn_deadline.is_none());
+    assert_eq!(
+        ninth.tracking.sample.unwrap().position,
+        CharacterPosition {
+            x: 100.,
+            y: 3.,
+            z: 100.
+        }
     );
     spawn_apc(&mut engine, 9, 1, 1, 220);
     assert_eq!(
@@ -579,6 +604,38 @@ fn apc_seats_descend_have_independent_capacity_and_require_exit_policy() {
         json!([{"spawn_point_index":0,"spawn_point_token":1000,"vehicle_index":0}]);
     assert!(
         Catalog::from_json(&value.to_string(), engine.spawn_catalog.as_ref().unwrap()).is_err()
+    );
+}
+
+#[test]
+fn a_full_apc_starts_the_next_life_at_the_alternate_insertion_in_the_same_wave() {
+    let mut engine = apc_engine_with_alternate();
+    for player in 0..8 {
+        spawn_apc(&mut engine, player, 1, 0, 100 + u64::from(player) * 10);
+        assert_eq!(
+            engine.active.as_ref().unwrap().ground_seat.unwrap().seat,
+            9 - player as u8
+        );
+    }
+    spawn_apc(&mut engine, 8, 1, 0, 200);
+    let ninth = engine.active.as_ref().unwrap();
+    assert!(ninth.life.is_alive());
+    assert!(ninth.ground_seat.is_none());
+    assert!(ninth.pending_spawn_deadline.is_none());
+    assert_eq!(
+        ninth.tracking.sample.unwrap().position,
+        CharacterPosition {
+            x: 120.,
+            y: 3.,
+            z: 100.
+        }
+    );
+    let log = String::from_utf8(engine.writer.clone()).unwrap();
+    assert!(
+        log.contains(
+            r#""spawn_fallback":{"reason":"ground_passenger_seats_full","selected":0,"used":1}"#
+        ),
+        "{log}"
     );
 }
 
@@ -1063,9 +1120,11 @@ fn current_ground_passenger_spawn_and_manual_mount_reject_pending_death() {
         .apply_lethal(key, u32::MAX, true)
         .unwrap();
     assert!(ground_seat_event(&mut engine, true, 0x01000000, 8, 0, 104).is_empty());
+    // The dead APC seats nobody; the life starts on foot at its point
+    // (these squads have no alternate insertion).
     spawn_apc(&mut engine, 1, 1, 0, 110);
     assert!(engine.active.as_ref().unwrap().ground_seat.is_none());
-    assert!(!engine.active.as_ref().unwrap().life.is_alive());
+    assert!(engine.active.as_ref().unwrap().life.is_alive());
 }
 
 #[test]

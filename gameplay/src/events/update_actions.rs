@@ -402,87 +402,125 @@ pub(super) fn plan_healing_tick<W: Write>(
     Ok(())
 }
 
-/// Whether a life can start at `index` now: the squad may use the point and
-/// the hospital or vehicle it spawns into still stands.
-fn spawn_point_operational<W: Write>(engine: &Engine<W>, active: &Active, index: u16) -> bool {
-    let Some(point) = active.squad_catalog.alpha(index) else {
-        return false;
-    };
-    let profile = engine.match_profile();
-    match point.kind {
-        spawn_catalog::SpawnKind::BunkerPassenger
-            if profile.game_type == 2 && profile.auto_assign_teams =>
-        {
-            engine
-                .bunker_world
-                .as_ref()
-                .and_then(|world| world.domination_bunker_at_spawn(index))
-                .is_none_or(|hospital| {
-                    hospital.operational
-                        && hospital.team == active.team()
-                        && hospital.faction == active.reservation.character.faction
-                })
-        }
-        // An APC insertion takes a life only while its vehicle exists, stands,
-        // belongs to the player's side, can let passengers out and has a free
-        // passenger seat. (A recipient still awaiting the vehicle creation
-        // batch waits for it in plan_respawn instead.)
-        spawn_catalog::SpawnKind::VehiclePassenger => engine
+/// A point the squad may use whose hospital or vehicle is destroyed. Retail
+/// treats such a point as blocked when a player selects it; free seats are
+/// never considered there.
+fn spawn_point_blocked<W: Write>(engine: &Engine<W>, index: u16) -> bool {
+    match engine
+        .spawn_catalog
+        .as_ref()
+        .and_then(|c| c.point(index))
+        .map(|p| p.kind)
+    {
+        Some(spawn_catalog::SpawnKind::BunkerPassenger) => engine
+            .bunker_world
+            .as_ref()
+            .and_then(|world| world.domination_bunker_at_spawn(index))
+            .is_some_and(|hospital| !hospital.operational),
+        Some(spawn_catalog::SpawnKind::VehiclePassenger) => engine
             .ground_vehicles
             .as_ref()
             .and_then(|world| world.passenger_vehicle(index))
             .and_then(|binding| engine.current_ground_vehicle(binding.index))
-            .is_some_and(|vehicle| {
-                engine.ground_vehicle_is_operational(vehicle.index)
-                    && vehicle.team == active.team()
-                    && vehicle.faction == active.reservation.character.faction
-                    && vehicle.exit_policy().is_some()
-                    && engine.ground_passenger_seat(&vehicle).is_some()
-            }),
-        _ => true,
+            .is_some_and(|vehicle| !engine.ground_vehicle_is_operational(vehicle.index)),
+        _ => false,
     }
 }
 
 /// The point a due life starts at: the player's selection (else the squad's
-/// shared spawn) while it is operational. Once its hospital or vehicle is
-/// destroyed, absent or full, or the squad lost the point, the life starts at
-/// the squad's authored default (its HQ point), else its current default,
-/// else another on-foot point of the squad, instead of being refused every
-/// wave. Only on-foot points serve as the fallback. With no such point the
-/// selection stands, so its own refusal is reported.
+/// shared spawn) while the squad may use it. A selection the squad lost is
+/// replaced by the squad's first point, in authored order, that it may use
+/// and that is not blocked, as retail does when a player selects a blocked
+/// point. Seating into a vehicle or hospital is decided when the life
+/// starts (see `plan_respawn`).
 pub(super) fn respawn_point<W: Write>(engine: &Engine<W>, active: &Active) -> Option<u16> {
     let catalog = active.squad_catalog.as_ref();
     let chosen = active
         .selected_spawn
         .map_or(active.squad_spawn, |s| s.spawn_point_index);
-    if spawn_point_operational(engine, active, chosen) {
+    if catalog.alpha(chosen).is_some() {
         return Some(chosen);
     }
-    let squad = catalog.squad_index();
-    let on_foot = |index: u16| {
-        catalog.alpha(index).is_some_and(|point| {
-            matches!(
-                point.kind,
-                spawn_catalog::SpawnKind::Insertion
-                    | spawn_catalog::SpawnKind::Alternate
-                    | spawn_catalog::SpawnKind::OnFoot
-            )
-        })
-    };
     catalog
-        .selected_squad(squad)
-        .map(|binding| catalog.locally_selectable(squad, binding.default_spawn))
-        .into_iter()
-        .chain([catalog.default_spawn()])
-        .chain(
+        .available_for_squad(catalog.squad_index())
+        .unwrap_or_default()
+        .iter()
+        .copied()
+        .find(|&index| catalog.alpha(index).is_some() && !spawn_point_blocked(engine, index))
+}
+
+/// The squad's alternate insertion (retail spawn category 1) when the squad
+/// may use it and it is not `original`.
+fn alternate_insertion(
+    catalog: &spawn_catalog::SpawnCatalog,
+    original: u16,
+) -> Option<&spawn_catalog::SpawnLocation> {
+    catalog
+        .available_for_squad(catalog.squad_index())?
+        .iter()
+        .filter(|&&index| index != original)
+        .find_map(|&index| {
             catalog
-                .available_for_squad(squad)
-                .unwrap_or_default()
-                .iter()
-                .copied(),
-        )
-        .find(|&index| on_foot(index))
-        .or_else(|| catalog.alpha(chosen).map(|_| chosen))
+                .alpha(index)
+                .filter(|point| matches!(point.kind, spawn_catalog::SpawnKind::Alternate))
+        })
+}
+
+/// The passenger seat an APC insertion seats a new life in: the bound vehicle
+/// must exist, stand, belong to the player's side and let
+/// passengers out, and occupancy (crew included) must be below its maximum;
+/// the highest free passenger seat is used.
+fn ground_spawn_seat<W: Write>(
+    ctx: &PlanningContext<'_, W>,
+    index: u16,
+) -> Result<crate::ground_seats::PassengerSeat, &'static str> {
+    let active = ctx.active;
+    let world = ctx
+        .engine
+        .ground_vehicles
+        .as_ref()
+        .ok_or("ground_vehicle_catalog_required")?;
+    let vehicle = world
+        .passenger_vehicle(index)
+        .and_then(|binding| ctx.engine.current_ground_vehicle(binding.index))
+        .ok_or("passenger_spawn_binding_required")?;
+    if !ctx.engine.ground_vehicle_is_operational(vehicle.index) {
+        return Err("ground_vehicle_not_operational");
+    }
+    if vehicle.team != active.team() || vehicle.faction != active.reservation.character.faction {
+        return Err("passenger_vehicle_side_mismatch");
+    }
+    if vehicle.exit_policy().is_none() {
+        return Err("ground_exit_policy_required");
+    }
+    ctx.engine
+        .ground_passenger_seat(&vehicle)
+        .ok_or("ground_passenger_seats_full")
+}
+
+/// The seat a Domination hospital point seats a new life in, under the same
+/// rules: the hospital stands on the player's side and has room.
+fn hospital_spawn_seat<'a, W: Write>(
+    ctx: &PlanningContext<'a, W>,
+    index: u16,
+) -> Result<(crate::structures::DominationBunker<'a>, u8), &'static str> {
+    let active = ctx.active;
+    let hospital = ctx
+        .engine
+        .bunker_world
+        .as_ref()
+        .and_then(|world| world.domination_bunker_at_spawn(index))
+        .ok_or("bunker_spawn_binding_required")?;
+    if !hospital.operational
+        || hospital.team != active.team()
+        || hospital.faction != active.reservation.character.faction
+    {
+        return Err("bunker_spawn_not_operational_or_wrong_side");
+    }
+    let seat = ctx
+        .engine
+        .bunker_passenger_seat(&hospital, active.reservation.player)?;
+    Ok((hospital, seat))
 }
 
 pub(super) fn plan_respawn<W: Write>(
@@ -531,11 +569,16 @@ pub(super) fn plan_respawn<W: Write>(
         kit.handle.update_id = version;
         kit.primary.inventory_update_id = version;
     }
-    let point = active
+    let mut point = active
         .squad_catalog
         .as_ref()
         .alpha(respawn_point(ctx.engine, active).ok_or("respawn_point_unavailable")?)
         .unwrap();
+    // Retail never refuses or holds a life whose APC or hospital cannot seat
+    // it: the life starts on foot at the squad's alternate insertion in the
+    // same wave, else on foot at the vehicle point itself. (Helicopter
+    // boarding keeps its own refusals for now.)
+    let mut mount_failure = None;
     let mut helo_passenger = None;
     if matches!(point.kind, spawn_catalog::SpawnKind::HeloPassenger) {
         let candidate = ctx
@@ -584,44 +627,30 @@ pub(super) fn plan_respawn<W: Write>(
         }
     }
     let ground_passenger = matches!(point.kind, spawn_catalog::SpawnKind::VehiclePassenger);
+    if ground_passenger && active.is_mounted() {
+        plan.gameplay_denial = Some("must_exit_current_seat");
+        return Ok(());
+    }
+    // A recipient still receiving the vehicle creation batches waits for them
+    // (a replication-order guard, not a seating failure).
+    if ground_passenger
+        && ctx
+            .engine
+            .ground_vehicles
+            .as_ref()
+            .is_some_and(|world| active.ground_vehicle_batch < world.batch_count())
+    {
+        plan.gameplay_denial = Some("ground_vehicle_creation_required");
+        return Ok(());
+    }
     let ground_seat = if ground_passenger {
-        if active.is_mounted() {
-            plan.gameplay_denial = Some("must_exit_current_seat");
-            return Ok(());
+        match ground_spawn_seat(ctx, point.index) {
+            Ok(seat) => Some(seat),
+            Err(reason) => {
+                mount_failure = Some(reason);
+                None
+            }
         }
-        let Some(world) = ctx.engine.ground_vehicles.as_ref() else {
-            plan.gameplay_denial = Some("ground_vehicle_catalog_required");
-            return Ok(());
-        };
-        if active.ground_vehicle_batch < world.batch_count() {
-            plan.gameplay_denial = Some("ground_vehicle_creation_required");
-            return Ok(());
-        }
-        let Some(vehicle) = world
-            .passenger_vehicle(point.index)
-            .and_then(|binding| ctx.engine.current_ground_vehicle(binding.index))
-        else {
-            plan.gameplay_denial = Some("passenger_spawn_binding_required");
-            return Ok(());
-        };
-        if !ctx.engine.ground_vehicle_is_operational(vehicle.index) {
-            plan.gameplay_denial = Some("ground_vehicle_not_operational");
-            return Ok(());
-        }
-        if vehicle.team != active.team() || vehicle.faction != active.reservation.character.faction
-        {
-            plan.gameplay_denial = Some("passenger_vehicle_side_mismatch");
-            return Ok(());
-        }
-        if vehicle.exit_policy().is_none() {
-            plan.gameplay_denial = Some("ground_exit_policy_required");
-            return Ok(());
-        }
-        let Some(seat) = ctx.engine.ground_passenger_seat(&vehicle) else {
-            plan.gameplay_denial = Some("ground_passenger_seats_full");
-            return Ok(());
-        };
-        Some(seat)
     } else {
         None
     };
@@ -630,46 +659,35 @@ pub(super) fn plan_respawn<W: Write>(
         plan.gameplay_denial = Some("parachute_spawn_requires_inventory");
         return Ok(());
     }
-    let indexed_bunker = if bunker
+    let indexed = bunker
         && ctx.engine.match_profile().game_type == 2
-        && ctx.engine.match_profile().auto_assign_teams
-    {
-        let Some(hospital) = ctx
-            .engine
-            .bunker_world
-            .as_ref()
-            .and_then(|world| world.domination_bunker_at_spawn(point.index))
-        else {
-            plan.gameplay_denial = Some("bunker_spawn_binding_required");
-            return Ok(());
-        };
-        if !hospital.operational
-            || hospital.team != active.team()
-            || hospital.faction != active.reservation.character.faction
-        {
-            plan.gameplay_denial = Some("bunker_spawn_not_operational_or_wrong_side");
-            return Ok(());
+        && ctx.engine.match_profile().auto_assign_teams;
+    let mut hospital_seat = None;
+    if indexed {
+        match hospital_spawn_seat(ctx, point.index) {
+            Ok(seated) => hospital_seat = Some(seated),
+            Err(reason) => mount_failure = Some(reason),
         }
-        Some(hospital)
-    } else {
-        None
+    }
+    if let Some(reason) = mount_failure {
+        let original = point.index;
+        if let Some(alternate) = alternate_insertion(active.squad_catalog.as_ref(), original) {
+            point = alternate;
+        }
+        plan.audit.spawn_fallback = Some((original, point.index, reason));
+    }
+    let bunker = bunker && mount_failure.is_none();
+    let (indexed_bunker, hospital_passenger) = match hospital_seat {
+        Some((hospital, seat)) => (Some(hospital), Some(seat)),
+        None => (None, None),
     };
-    if bunker && indexed_bunker.is_none() && ctx.engine.bunker_exit_policy.is_none() {
+    if bunker && !indexed && ctx.engine.bunker_exit_policy.is_none() {
         plan.gameplay_denial = Some("bunker_exit_policy_required");
         return Ok(());
     }
     let passenger_seat = if bunker {
-        Some(if let Some(hospital) = &indexed_bunker {
-            match ctx
-                .engine
-                .bunker_passenger_seat(hospital, active.reservation.player)
-            {
-                Ok(seat) => seat,
-                Err(reason) => {
-                    plan.gameplay_denial = Some(reason);
-                    return Ok(());
-                }
-            }
+        Some(if let Some(seat) = hospital_passenger {
+            seat
         } else {
             ctx.engine
                 .alpha_passenger_seat(active.reservation.player)

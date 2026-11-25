@@ -269,6 +269,8 @@ struct EventAudit {
     applied_damage: Option<Value>,
     falling_damage: Option<fall_damage::FallDamage>,
     spawned_point: Option<u16>,
+    /// (selected point, point used, reason) when a vehicle or hospital could not seat the life.
+    spawn_fallback: Option<(u16, u16, &'static str)>,
 }
 
 fn plan_message<W: Write>(
