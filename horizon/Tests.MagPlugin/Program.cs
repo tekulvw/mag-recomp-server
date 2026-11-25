@@ -116,6 +116,8 @@ Test("retail saved loadout delete commits and compacts the owned layout", Loadou
 Test("retail skill purchase owns its equipment for loadout saves", LoadoutPreferenceStoreChecks.RetailSkillPurchaseOwnsItsEquipment);
 Test("account-bound NP identity creation and persistence", NpIdentityChecks.Run);
 Test("MLS answers lobby player-card character data for any character", LeadershipProgressionChecks.PlayerCardLookup);
+Test("retail player online and game-info wire", LeadershipProgressionChecks.PlayerStatusWire);
+Test("MLS answers a friend card's online and game-info queries and the invite reaches them", LeadershipProgressionChecks.FriendCardStatus);
 Test("retail account logout wire", LeadershipProgressionChecks.AccountLogoutWire);
 Test("MLS acknowledges the launcher logout and keeps the next login", LeadershipProgressionChecks.AccountLogoutKeepsNextLogin);
 Test("retail MLS replies carry a non-zero plugin id the client echoes", LeadershipProgressionChecks.MlsPluginId);
