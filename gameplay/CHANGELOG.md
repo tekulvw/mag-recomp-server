@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.14.2](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.14.1...gameplay-v0.14.2) (2026-11-25)
+
+
+### Bug Fixes
+
+* **gameplay:** settle a resumed objective task already at its destination ([#299](https://github.com/tekulvw/mag-recomp-server/issues/299)) ([ccb02f8](https://github.com/tekulvw/mag-recomp-server/commit/ccb02f8c06803f0201a6a13e0ecfa0ee85d04e1f))
+* **gameplay:** stage long routes whose corridor outgrows 1,024 polygons ([#297](https://github.com/tekulvw/mag-recomp-server/issues/297)) ([8dff3b6](https://github.com/tekulvw/mag-recomp-server/commit/8dff3b64ac39b84c58ecee6540d0e8c910d305f7))
+
 ## [0.14.1](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.14.0...gameplay-v0.14.1) (2026-11-25)
 
 
