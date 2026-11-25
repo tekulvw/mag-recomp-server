@@ -784,6 +784,18 @@ class ChartTests(unittest.TestCase):
         self.assertNotEqual(drained, registry)
         self.assertTrue(json.loads(drained)['workers'][0]['draining'])
 
+    def test_gameplay_worker_world_capacity_above_64(self):
+        """A registry row may describe a 128- or 256-Character world; runtime.maximumPlayers stays at 64."""
+        name = 'test-mag-recomp-server'
+        for maximum in (64, 128, 256):
+            entries = self.workers()
+            entries[2] = {**entries[2], 'maximumPlayers': maximum, 'minimumPlayers': 2, 'minimumPlayersPerTeam': [1, 1]}
+            docs = render(self.worker_values(entries))
+            registry = json.loads(next(d for d in docs if d['metadata']['name'] == f'{name}-world-registry')['data']['world-registry.json'])
+            row = next(w for w in registry['workers'] if w['worker_id'] == 'domination')
+            self.assertEqual((row['maximum_players'], row['minimum_players'], row['minimum_players_per_team']), (maximum, 2, [1, 1]))
+        render({'runtime': {'maximumPlayers': 65}}, ok=False)
+
     def test_gameplay_worker_validation(self):
         workers = self.workers()
         def invalid(changes, index=0, message=None, **extra):
@@ -807,7 +819,7 @@ class ChartTests(unittest.TestCase):
         for changes in ({'matchProfiles': None}, {'matchProfiles': '../profiles.json'}, {'matchProfiles': '/data/profiles.json'},
                         {'data': None}, {'data': {'s3': {'key': 'k'}}}, {'data': {'s3': {'sha256': 'a' * 64}}},
                         {'data': {'s3': {'key': 'k', 'sha256': 'bad'}}}, {'id': 'Upper'}, {'id': 'under_score'}, {'id': ''},
-                        {'minimumPlayers': 0}, {'maximumPlayers': 65}, {'minimumPlayersPerTeam': [1]}, {'minimumPlayersPerTeam': [0, 1]},
+                        {'minimumPlayers': 0}, {'maximumPlayers': 257}, {'maximumPlayers': 0}, {'minimumPlayersPerTeam': [1]}, {'minimumPlayersPerTeam': [0, 1]},
                         {'draining': 'yes'}, {'navigation': {'s3': {'key': 'k', 'sha256': 'a' * 64}, 'mountPath': '/data'}},
                         {'navigation': {'s3': {'key': 'k', 'sha256': 'a' * 64}, 'mountPath': 'relative'}},
                         {'navigation': {'emptyDirSizeLimit': '1Gi'}}, {'unknown': True}):

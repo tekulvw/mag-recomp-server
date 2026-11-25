@@ -4,13 +4,51 @@ using System.Linq;
 
 namespace Server.Medius
 {
+    /// <param name="MaximumPlayers">World size: every Character the worker runs, humans and bots.</param>
+    /// <param name="TeamCapacity">World size per side.</param>
     /// <param name="BotFillTotal">World population the worker fills with bots when it advertises
     /// <c>bot_fill_v1</c>; such a profile may start without a human on each side.</param>
+    /// <param name="AdvertisedHumanCapacity">Humans per world, advertised with <c>world_capacity_v1</c>.
+    /// Absent on rows of at most 64, whose every seat may be human.</param>
+    /// <param name="AdvertisedHumanTeamCapacity">Humans per side, advertised with <c>world_capacity_v1</c>.</param>
     public sealed record MagMatchProfile(string ProfileId, int GameType, byte AttackingFaction,
         byte DefendingFaction, int MaximumPlayers, int TeamCapacity, int? SquadCapacity = null, IReadOnlyList<int> SquadCounts = null,
-        int? BotFillTotal = null)
+        int? BotFillTotal = null, int? AdvertisedHumanCapacity = null, int? AdvertisedHumanTeamCapacity = null)
     {
         public bool BotFill => BotFillTotal.HasValue;
+        /// <summary>A world above the 64 Characters every older worker and Horizon supports.</summary>
+        public bool LargeWorld => MagWorldCapacity.IsLarge(MaximumPlayers, TeamCapacity);
+        /// <summary>Humans this world admits. Placement, late join and parties use this, never world size.</summary>
+        public int HumanCapacity => AdvertisedHumanCapacity ?? MaximumPlayers;
+        /// <summary>Humans one side admits.</summary>
+        public int HumanTeamCapacity => AdvertisedHumanTeamCapacity ?? TeamCapacity;
+    }
+
+    /// <summary>World size and human capacity bounds (the <c>world_capacity_v1</c> contract).</summary>
+    public static class MagWorldCapacity
+    {
+        public const string Capability = "world_capacity_v1";
+        /// <summary>The largest world older workers and Horizons know: 64 Characters, 32 per side.
+        /// Rows up to this size keep their original meaning: every seat may be human.</summary>
+        public const int LegacyWorldCharacters = 64;
+        public const int LegacyTeamCharacters = 32;
+        /// <summary>The retail client's Character pool.</summary>
+        public const int MaximumWorldCharacters = 256;
+        public const int MaximumTeamCharacters = 128;
+        /// <summary>Human caps for a world above 64 Characters.</summary>
+        public const int MaximumHumans = 32;
+        public const int MaximumHumansPerTeam = 16;
+        /// <summary>The largest per-side human count the matchmaking <c>ulong</c> masks count
+        /// correctly (bit <c>n + 1</c> must stay below bit 64).</summary>
+        public const int MaximumMaskedSide = 62;
+
+        public static bool IsLarge(int maximumPlayers, int teamCapacity) =>
+            maximumPlayers > LegacyWorldCharacters || teamCapacity > LegacyTeamCharacters;
+
+        /// <summary>Human caps a row may advertise for its world size.</summary>
+        public static bool ValidHumanCaps(int maximumPlayers, int teamCapacity, int humans, int humansPerTeam) =>
+            humansPerTeam >= 1 && humansPerTeam <= Math.Min(MaximumHumansPerTeam, teamCapacity) &&
+            humans >= humansPerTeam && humans <= Math.Min(Math.Min(MaximumHumans, maximumPlayers), 2 * humansPerTeam);
     }
     public sealed record MagQueuedHuman(string TicketId, int GameType, byte Faction, long Order, int Size = 1);
     public sealed record MagFactionSelection(MagMatchProfile Profile, IReadOnlyList<MagQueuedHuman> Players);
@@ -82,9 +120,9 @@ namespace Server.Medius
         static MagFactionSelection Cohort(MagQueuedHuman[] ordered, MagMatchProfile profile,
             int minimumPlayers, int maximumPlayers, int[] minima)
         {
-            int maximum = Math.Min(maximumPlayers, profile.MaximumPlayers);
+            int maximum = Math.Min(maximumPlayers, profile.HumanCapacity);
             if (minimumPlayers > maximum || (long)minima[0] + minima[1] > maximum ||
-                minima.Any(minimum => minimum > profile.TeamCapacity)) return null;
+                minima.Any(minimum => minimum > profile.HumanTeamCapacity)) return null;
             var eligible = ordered.Where(player => player.GameType == profile.GameType &&
                 (player.Faction == profile.AttackingFaction || player.Faction == profile.DefendingFaction)).ToArray();
             if (eligible.Any(player => player.Size != 1))
@@ -106,7 +144,7 @@ namespace Server.Medius
             {
                 if (selected.Count >= maximum) break;
                 int team = player.Faction == profile.AttackingFaction ? 0 : 1;
-                if (counts[team] >= profile.TeamCapacity || !ids.Add(player.TicketId)) continue;
+                if (counts[team] >= profile.HumanTeamCapacity || !ids.Add(player.TicketId)) continue;
                 selected.Add(player);
                 counts[team]++;
             }
@@ -118,6 +156,11 @@ namespace Server.Medius
         static MagFactionSelection GroupedCohort(MagQueuedHuman[] eligible, MagMatchProfile profile,
             int minimum, int maximum, int[] minima)
         {
+            // The masks count humans per side, never world size. Bit side + 1 must stay
+            // inside the ulong, or the shifts below would silently wrap.
+            int side = profile.HumanTeamCapacity;
+            if (side > MagWorldCapacity.MaximumMaskedSide)
+                throw new InvalidOperationException("Grouped matchmaking masks count at most 62 humans per side.");
             var units = eligible.Where(player => player.Size == 1 || player.Size <= profile.SquadCapacity.GetValueOrDefault()).ToArray();
             int attackingLimit = profile.SquadCounts?[0] ?? 0;
             int defendingLimit = profile.SquadCounts?[1] ?? 0;
@@ -145,11 +188,11 @@ namespace Server.Medius
 
             bool Fits(ulong leftCounts, ulong rightCounts, int a, int d)
             {
-                for (int left = Math.Max(0, minima[0] - a); left <= profile.TeamCapacity - a; left++)
+                for (int left = Math.Max(0, minima[0] - a); left <= side - a; left++)
                 {
                     if ((leftCounts & (1UL << left)) == 0) continue;
                     int low = Math.Max(0, Math.Max(minima[1] - d, minimum - a - d - left));
-                    int high = Math.Min(profile.TeamCapacity - d, maximum - a - d - left);
+                    int high = Math.Min(side - d, maximum - a - d - left);
                     if (high < low) continue;
                     ulong mask = ((1UL << (high + 1)) - 1) ^ ((1UL << low) - 1);
                     if ((rightCounts & mask) != 0) return true;
@@ -200,7 +243,12 @@ namespace Server.Medius
             if (string.IsNullOrWhiteSpace(profile.ProfileId) || profile.GameType < 0 || profile.GameType > 2 ||
                 profile.AttackingFaction > 2 || profile.DefendingFaction > 2 ||
                 profile.AttackingFaction == profile.DefendingFaction || profile.MaximumPlayers < 1 ||
-                profile.MaximumPlayers > 64 || profile.TeamCapacity < 1 || profile.TeamCapacity > 32 ||
+                profile.MaximumPlayers > MagWorldCapacity.MaximumWorldCharacters || profile.TeamCapacity < 1 ||
+                profile.TeamCapacity > MagWorldCapacity.MaximumTeamCharacters ||
+                profile.AdvertisedHumanCapacity.HasValue != profile.AdvertisedHumanTeamCapacity.HasValue ||
+                (profile.LargeWorld && !profile.AdvertisedHumanCapacity.HasValue) ||
+                (profile.AdvertisedHumanCapacity.HasValue && !MagWorldCapacity.ValidHumanCaps(profile.MaximumPlayers,
+                    profile.TeamCapacity, profile.AdvertisedHumanCapacity.Value, profile.AdvertisedHumanTeamCapacity.Value)) ||
                 (profile.SquadCapacity.HasValue && (profile.SquadCapacity < 1 || profile.SquadCapacity > profile.TeamCapacity)) ||
                 (profile.SquadCounts != null && (profile.SquadCounts.Count != 2 || profile.SquadCounts.Any(n => n < 1 || n > 32))) ||
                 (profile.BotFillTotal.HasValue && (profile.BotFillTotal < 2 || profile.BotFillTotal > profile.MaximumPlayers)))
