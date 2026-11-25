@@ -92,6 +92,13 @@ authority and native batch timing. Entering a state is separate from sequence,
 explosion, FSP and controller effects; a completed armed Structural entry marks
 the required authored explosion explicitly.
 
+When an objective tick ends a human's hold, the holder receives the native
+exit notification (ObjectInteraction subtype 5), as Sabotage and Acquisition
+send it. The hold can end because its timer completes, the holder leaves the
+trigger, or a script changes the objective. Without the notification the
+client keeps its "hold to activate" prompt after the capture. Bot holds and
+replaced lives get no notification.
+
 `domination_callbacks::Queue` binds one immutable map and uses the supplied
 network game clock. Zero-delay work is prepared immediately. Positive-delay
 work retains authored insertion order, wrapping u32 deadlines and original
