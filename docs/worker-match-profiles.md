@@ -135,8 +135,12 @@ cannot supply.
 Selecting a profile installs that profile's validated population, names and
 resupply inputs; selecting a profile without bots leaves bots disabled. Bots
 start filling once a human is on foot, keep each team at no more than half of
-the fill total, and yield seats to humans who join later. Domination bots
-fight but do not capture objectives.
+the fill total, and yield seats to humans who join later. Bots pack squads
+rather than spreading over them: they fill squads a human occupies first, then
+the fullest squad with a free bound slot, then the lowest squad index, so
+platoons fill in order. When the population shrinks, the bot in the
+last-filled squad leaves first. Domination bots fight but do not capture
+objectives.
 
 An interactive Domination profile additionally supplies `domination_round` and
 `domination_gameplay`, ground vehicles, character damage rules and collision.

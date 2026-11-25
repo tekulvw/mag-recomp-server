@@ -2654,6 +2654,32 @@ impl<W: Write> Engine<W> {
         }
         Ok(())
     }
+    /// Humans and bots currently holding seats in one squad.
+    fn squad_occupants(&self, squad: u16) -> usize {
+        self.squad_reservation_count(squad) + self.bot_registry.members(squad).count()
+    }
+    /// Bots fill squads in ascending rank: squads a human occupies first, then
+    /// the fullest, then the lowest squad index, so platoons fill in order.
+    fn bot_fill_rank(&self, squad: u16) -> (bool, std::cmp::Reverse<usize>) {
+        (
+            self.squad_reservation_count(squad) == 0,
+            std::cmp::Reverse(self.squad_occupants(squad)),
+        )
+    }
+    /// The bot a shrinking population retires first: the reverse of the fill
+    /// order (the last-filled squad, then its highest character index), so the
+    /// squads that remain stay packed.
+    fn last_filled_bot(&self, team: Option<u8>) -> Option<u16> {
+        self.bot_registry
+            .bots
+            .iter()
+            .filter(|(_, b)| team.is_none_or(|team| b.target.squad.team() == team))
+            .max_by_key(|(id, b)| {
+                let squad = b.target.squad.squad_index();
+                (self.bot_fill_rank(squad), squad, **id)
+            })
+            .map(|(&id, _)| id)
+    }
     pub(crate) fn reconcile_bot_population(
         &mut self,
         now: Duration,
@@ -2708,13 +2734,8 @@ impl<W: Write> Engine<W> {
             };
             let team = if counts(0) > counts(1) { 0 } else { 1 };
             let id = self
-                .bot_registry
-                .bots
-                .iter()
-                .rev()
-                .find(|(_, b)| b.target.squad.team() == team)
-                .or_else(|| self.bot_registry.bots.iter().next_back())
-                .map(|(&id, _)| id)
+                .last_filled_bot(Some(team))
+                .or_else(|| self.last_filled_bot(None))
                 .unwrap();
             self.retire_bot_for_human(id, now, wall)?;
         }
@@ -2733,14 +2754,7 @@ impl<W: Write> Engine<W> {
                     if count <= self.bot_registry.total.div_ceil(2) {
                         break;
                     }
-                    let Some(id) = self
-                        .bot_registry
-                        .bots
-                        .iter()
-                        .rev()
-                        .find(|(_, b)| b.target.squad.team() == team)
-                        .map(|(&id, _)| id)
-                    else {
+                    let Some(id) = self.last_filled_bot(Some(team)) else {
                         break;
                     };
                     self.retire_bot_for_human(id, now, wall)?;
@@ -2787,19 +2801,15 @@ impl<W: Write> Engine<W> {
                 .spawn_catalog
                 .as_ref()
                 .ok_or("spawn_catalog_unavailable")?;
+            // Pack squads in fill order instead of spreading bots over them.
+            let capacity = self.match_profile().squad_capacity;
             let mut squads: Vec<_> = catalog
                 .map_pool()
                 .squads
                 .iter()
                 .filter(|s| s.team == team)
-                .map(|s| {
-                    (
-                        self.squad_reservation_count(s.index)
-                            + self.bot_registry.members(s.index).count(),
-                        s.index,
-                    )
-                })
-                .filter(|(count, _)| *count < self.match_profile().squad_capacity)
+                .filter(|s| self.squad_occupants(s.index) < capacity)
+                .map(|s| (self.bot_fill_rank(s.index), s.index))
                 .collect();
             squads.sort_unstable();
             let selected = squads.into_iter().find_map(|(_, squad)| {
