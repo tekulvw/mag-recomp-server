@@ -446,3 +446,39 @@ fn a_registered_enemy_bot_in_range_takes_the_frag_dose() {
     assert!(expected > 0);
     assert!(dealt.abs_diff(expected) <= 1, "{dealt} vs {expected}");
 }
+
+/// A registry worker's Sabotage profile with its own arena world and
+/// `friendly_fire` rules, selected before two humans are admitted.
+fn registry_sabotage(friendly_fire: f32) -> Engine<Vec<u8>> {
+    use crate::match_profiles::static_world::tests::{ARMED, selected_arena_engine};
+    let engine = selected_arena_engine(frag_items(), friendly_fire, None, ARMED);
+    let mut engine = crate::human_kill_reward_tests::configured_fixture(engine);
+    engine.item_catalog = frag_items();
+    engine.match_started = true;
+    let thrower = engine.active.as_mut().unwrap();
+    arm(thrower);
+    place(thrower, THROWER);
+    place_victim(&mut engine, [100., 3., 103.]);
+    engine
+}
+
+#[test]
+fn a_registry_sabotage_profile_frag_damages_by_its_own_friendly_fire_rule() {
+    let expected = quarter_points(anchor_distance([100., 3., 103.]), 1.);
+    let mut enemy = registry_sabotage(0.5);
+    detonate(&mut enemy);
+    assert_eq!(denials(&enemy), Vec::<String>::new());
+    let dealt = 400 - health(victim(&enemy));
+    assert!(dealt.abs_diff(expected) <= 1, "{dealt} vs {expected}");
+    assert!(events(&enemy).iter().all(|row| {
+        row["decoded"]["grenade_visibility_policy"]
+            .as_str()
+            .is_none_or(|policy| policy == "static_world_stance_anchor_ray")
+    }));
+
+    let mut friendly = registry_sabotage(0.5);
+    same_team(&mut friendly);
+    detonate(&mut friendly);
+    let dealt = 400 - health(victim(&friendly));
+    assert!(dealt.abs_diff(expected / 2) <= 1, "{dealt} vs {expected}");
+}

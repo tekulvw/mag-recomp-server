@@ -86,6 +86,15 @@ frag items, or the reason it is off. Owner updates then report the grenade
 visibility policy `static_world_stance_anchor_ray` instead of
 `unknown_no_damage`.
 
+A `--match-profiles` registry worker qualifies each Sabotage profile the same
+way, from that profile's own `collision_world` and `character_damage_rules` and
+the worker's retail combat metadata. Selecting a qualified profile turns the
+static-world blast on; selecting any other profile turns it off. The per-profile
+status appears under `static_world_frag_blast.per_profile` in `listening` and
+`--validate-catalogs`, and under `character_weapons.frag_blast` in
+`match_profile_selected`. Acquisition and Domination profiles report whether
+their represented scene's `frag_character_blast` opt-in is set.
+
 Admission, the authored fuse and the owner's reported terminal position are
 unchanged. At detonation, every living on-foot human and registered bot in the
 world whose stance anchor lies inside the authored outer radius is a candidate,

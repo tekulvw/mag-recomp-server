@@ -101,6 +101,20 @@ Character and vehicle damage. The startup `listening` event and
 `infantry_rockets` (`static_world_infantry_rockets` when validating), or the reason
 nothing was derived.
 
+A `--match-profiles` registry worker applies the same rule per profile. Every
+Sabotage profile (game type 0, no Acquisition or Domination configuration) that
+names a non-empty `collision_world` for its own map and its own
+`character_damage_rules` derives the same rows from the worker's item catalog,
+under the same provenance check. Selecting that profile installs the rows with
+its world and friendly-fire rules; selecting any other profile clears them. A
+Sabotage profile with a world but no damage rules, or a worker whose item
+catalog fails derivation, keeps the rows off and reports why. In registry mode,
+`listening` and `--validate-catalogs` report `{"per_profile":{PROFILE_ID:STATUS}}`
+under the same keys, where `STATUS` is the direct-launch object, the represented
+Acquisition or Domination rows (`"scene":"represented_projectile_scene"`), or
+`null` when the profile has no launcher. Each `match_profile_selected` record
+carries the selected profile's status under `character_weapons`.
+
 Sabotage loads no represented projectile scene, so its launcher flights use the
 static collision world instead:
 

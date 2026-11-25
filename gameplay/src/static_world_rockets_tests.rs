@@ -426,3 +426,60 @@ fn a_registered_enemy_bot_takes_the_authored_direct_hit() {
         "{dealt} vs {expected} {terminal}"
     );
 }
+
+/// A registry worker's Sabotage profile with its own arena world and
+/// `friendly_fire` rules, selected before two humans are admitted.
+fn registry_sabotage(faction: u8, friendly_fire: f32) -> Engine<Vec<u8>> {
+    use crate::match_profiles::static_world::tests::{ARMED, selected_arena_engine};
+    let items = Arc::new(infantry_rockets::tests::derivable_items(true));
+    let mut engine = selected_arena_engine(items, friendly_fire, None, ARMED);
+    // Selection installed rows derived from the worker's catalog; the shared
+    // human fixture then admits and arms on its own synthetic items.
+    engine.item_catalog = crate::spawn_progression::engine().item_catalog;
+    let mut engine = crate::human_kill_reward_tests::configured_fixture(engine);
+    engine.match_started = true;
+    let actor = engine.active.as_mut().unwrap();
+    actor.reservation.character.faction = faction;
+    equip(actor, Some(variant(faction).item_id));
+    place_victim(&mut engine, [100., 3., 120.], 400);
+    engine
+}
+
+#[test]
+fn a_registry_sabotage_profile_rocket_damages_by_its_own_friendly_fire_rule() {
+    let mut enemy = registry_sabotage(2, 0.5);
+    assert!(
+        !fire(&mut enemy, 1, 1000).is_empty(),
+        "{:?}",
+        denials(&enemy)
+    );
+    assert_eq!(denials(&enemy), Vec::<String>::new());
+    fly(&mut enemy, 1000);
+    let terminal = &records(&enemy, "infantry_rocket_terminal")[0];
+    assert_eq!(terminal["terminal"], "contact", "{terminal}");
+    assert!(
+        terminal["contact"]["obstacle"]
+            .as_str()
+            .unwrap()
+            .contains(CHARACTER_ROOT)
+    );
+    let reach = (body_radius() + variant(2).flight.radius_m) as f32;
+    let expected = (falloff(2, (0.5_f32.powi(2) + reach.powi(2)).sqrt()) * 4.).floor() as u16;
+    let enemy_damage = 400 - victim_health(&enemy);
+    assert!(
+        enemy_damage > 0 && enemy_damage.abs_diff(expected) <= 4,
+        "{enemy_damage} vs {expected}"
+    );
+
+    // The profile's own rules halve a teammate's dose.
+    let mut friendly = registry_sabotage(2, 0.5);
+    let squads = Arc::clone(&victim(&friendly).squad_catalog);
+    friendly.active.as_mut().unwrap().squad_catalog = squads;
+    fire(&mut friendly, 1, 1000);
+    fly(&mut friendly, 1000);
+    let friendly_damage = 400 - victim_health(&friendly);
+    assert!(
+        friendly_damage.abs_diff(enemy_damage / 2) <= 2,
+        "{friendly_damage} vs {enemy_damage}"
+    );
+}
