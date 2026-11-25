@@ -38,6 +38,9 @@ pub const BAKE_CONFIG: &str = "tiled-v2-tile512-border9-cs0.1-ch0.05-height37-cl
 /// polygon references, 9 tile bits and 13 polygon bits leave Detour 10 salt bits.
 pub const WIDE_BAKE_CONFIG: &str = "tiled-v4-tile512-border9-tiles512-polys8192-cs0.1-ch0.05-height37-climb7-radius6-slope45-contour0.5-edge120-region64-merge400-detail0.6-error0.05-nvp6-nodes16384";
 /// Binary cap for the 256-tile runtime formats (v1 to v3).
+/// Polygons, and straight-path points, one route may carry. A direct search
+/// still stops at 1,024; staged routes over long distances use the rest.
+pub const MAX_ROUTE_CORRIDOR: usize = 4096;
 pub const MAX_ARTIFACT_BYTES: u64 = 32 * 1024 * 1024;
 /// Binary cap for the 512-tile wide runtime formats (v4 and v5).
 pub const MAX_WIDE_ARTIFACT_BYTES: u64 = 128 * 1024 * 1024;
@@ -689,8 +692,9 @@ impl NavMesh {
         let g = goal.map(|v| v as f32);
         let mut ps = [0f32; 3];
         let mut pg = [0f32; 3];
-        let mut points = vec![0f32; 3072];
-        let mut refs = vec![0u64; 1024];
+        // A staged route's corridor and straight path hold up to this many.
+        let mut points = vec![0f32; 3 * MAX_ROUTE_CORRIDOR];
+        let mut refs = vec![0u64; MAX_ROUTE_CORRIDOR];
         let mut np = 0;
         let mut nr = 0;
         let mut nodes = 0;
@@ -724,7 +728,8 @@ impl NavMesh {
             5 => Status::InvalidGoal,
             _ => return err("navmesh_query_failed"),
         };
-        if !(0..=1024).contains(&np) || !(0..=1024).contains(&nr) {
+        let limit = MAX_ROUTE_CORRIDOR as c_int;
+        if !(0..=limit).contains(&np) || !(0..=limit).contains(&nr) {
             return err("navmesh_query_failed");
         }
         let waypoints: Vec<Point> = points[..np as usize * 3]
@@ -913,7 +918,7 @@ impl NavMesh {
             || route.status != Status::Complete
             || route.world_sha256 != self.artifact.world_sha256
             || route.corridor_refs.is_empty()
-            || route.corridor_refs.len() > 1024
+            || route.corridor_refs.len() > MAX_ROUTE_CORRIDOR
         {
             return false;
         }

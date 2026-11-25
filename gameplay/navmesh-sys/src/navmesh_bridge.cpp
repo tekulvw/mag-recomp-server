@@ -308,6 +308,10 @@ static void append_without_loops(std::vector<dtPolyRef>& corridor, std::map<dtPo
     }
 }
 static constexpr float StageSpan = 96.f;
+// Polygons a staged route's corridor and straight path may hold. Long routes on
+// finely divided meshes (slopes up to the retail limit add polygons) need more
+// than a direct search's 1,024; the caller's buffers hold this many.
+static constexpr int MaxRouteCorridor = 4096;
 // Search nodes one staged route may use in total, in query pools, including
 // the direct attempt that ran out of nodes first. A piece is only started
 // while a whole pool still fits, so this is a hard bound.
@@ -400,11 +404,12 @@ static int staged_route(MagNav* h, const dtQueryFilter& filter, dtPolyRef start_
     const int budget = StagePools * h->query->getNodePool()->getMaxNodes();
     const int result = staged_corridor(h, filter, start_ref, goal_ref, start, goal, budget, corridor, nodes, stages);
     if (result != 0) return result;
-    if (corridor.size() > 1024) return 1;
-    unsigned char flags[1024];
-    dtPolyRef pointrefs[1024];
+    if (corridor.size() > static_cast<size_t>(MaxRouteCorridor)) return 1;
+    std::vector<unsigned char> flags(MaxRouteCorridor);
+    std::vector<dtPolyRef> pointrefs(MaxRouteCorridor);
     const dtStatus straight = h->query->findStraightPath(start, goal, corridor.data(), static_cast<int>(corridor.size()),
-                                                         points, flags, pointrefs, point_count, 1024, 0);
+                                                         points, flags.data(), pointrefs.data(), point_count,
+                                                         MaxRouteCorridor, 0);
     if (dtStatusFailed(straight)) return 6;
     *ref_count = static_cast<int>(corridor.size());
     for (size_t i = 0; i < corridor.size(); ++i) refs[i] = static_cast<unsigned long long>(corridor[i]);
@@ -703,9 +708,11 @@ int mag_nav_route(MagNav* h,const float* start,const float* goal,float radius,fl
         && dtStatusDetail(status, DT_PARTIAL_RESULT)
         && reverse_reference_route(h, filter, sr, gr, projected_start, projected_goal,
                                    points, point_count, refs, ref_count)) return 0;
-    // A runtime route that ran out of nodes inside one walking component is
-    // retried in stages. If that fails too, the direct partial result stands.
-    if (!h->reference && selected.reachable && dtStatusDetail(status, DT_OUT_OF_NODES)) {
+    // A runtime route that ran out of nodes, or whose path outgrew the direct
+    // search's 1,024 polygons, inside one walking component is retried in
+    // stages. If that fails too, the direct partial result stands.
+    if (!h->reference && selected.reachable
+        && dtStatusDetail(status, DT_OUT_OF_NODES | DT_BUFFER_TOO_SMALL)) {
         if (staged_route(h, filter, sr, gr, projected_start, projected_goal, points, point_count,
                          refs, ref_count, nodes, stages) == 0) return 0;
         *point_count = 0;
