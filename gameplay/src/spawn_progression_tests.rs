@@ -7,7 +7,7 @@ use crate::replication::{
 use crate::spawn_catalog::SpawnCatalog;
 use std::sync::Arc;
 
-fn spawn_json() -> Value {
+pub(crate) fn spawn_json() -> Value {
     let mut locations = vec![
         json!({"index":0,"token":100,"kind":"on_foot","position":{"x":100.,"y":3.,"z":100.}}),
         json!({"index":1,"token":101,"kind":"on_foot","position":{"x":120.,"y":3.,"z":100.}}),
@@ -48,7 +48,7 @@ fn spawns(value: Value) -> std::io::Result<SpawnCatalog> {
     std::fs::remove_file(&path).unwrap();
     catalog
 }
-fn objective_json() -> Value {
+pub(crate) fn objective_json() -> Value {
     let mut objects: Vec<_> = [10, 11]
         .into_iter()
         .map(|index| {

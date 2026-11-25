@@ -204,6 +204,8 @@ pub struct Registry {
     default_bot_fill_total: Option<usize>,
     /// The worker's `--smoke-grenade-rules`, bound to every profile.
     smoke_grenade_rules: Option<Arc<[u8]>>,
+    /// Sabotage launcher and frag doses against each profile's static world.
+    static_world: BTreeMap<String, static_world::Weapons>,
 }
 impl Registry {
     pub fn validate_dynamic_bodies(
@@ -712,6 +714,7 @@ impl Registry {
             profiles,
             default_bot_fill_total: None,
             smoke_grenade_rules: None,
+            static_world: BTreeMap::new(),
         })
     }
 
@@ -1557,6 +1560,7 @@ impl<W: Write> Engine<W> {
         registry.bind_hospital_turrets(&self.item_catalog)?;
         registry.bind_ground_turrets(&self.item_catalog)?;
         registry.bind_infantry_rockets(&self.item_catalog)?;
+        registry.bind_static_world_weapons(&self.item_catalog);
         registry.bind_guided_launchers(&self.item_catalog)?;
         registry.bind_smoke_grenades(&self.item_catalog)?;
         registry.bind_gas_grenades(&self.item_catalog)?;
@@ -1604,6 +1608,7 @@ impl<W: Write> Engine<W> {
             self.underbarrel_launchers = None;
             self.hospital_rocket_ground = None;
             self.frag_character_blast = false;
+            self.static_world_frag_blast = false;
             self.projectile_contacts = None;
             if let Some(leadership) = &mut self.leadership {
                 leadership.clear_held_roles();
@@ -1648,6 +1653,12 @@ impl<W: Write> Engine<W> {
             .get(&profile_id)
             .ok_or("unknown_match_profile")?
             .clone();
+        let static_world = registry
+            .static_world
+            .get(&profile_id)
+            .cloned()
+            .unwrap_or_default();
+        let character_weapons = registry.character_weapon_report(&profile_id);
         if let (Some(resources), Some(vehicles)) = (&self.dynamic_body_resources, &loaded.vehicles)
         {
             resources.validate_vehicles(vehicles)?;
@@ -1716,7 +1727,8 @@ impl<W: Write> Engine<W> {
             )?;
         }
         self.record(
-            json!({"op":"match_profile_selected","selected_match":selected}),
+            json!({"op":"match_profile_selected","selected_match":selected,
+                "character_weapons":character_weapons}),
             wall,
         )?;
         if rollover {
@@ -1761,7 +1773,10 @@ impl<W: Write> Engine<W> {
             _ => None,
         };
         self.hospital_rockets = loaded.hospital_rockets;
-        self.infantry_rockets = loaded.infantry_rockets;
+        // A profile has either represented launcher rows or, in Sabotage,
+        // rows derived for its static world; never both.
+        self.infantry_rockets = loaded.infantry_rockets.or(static_world.rockets());
+        self.static_world_frag_blast = static_world.frags();
         self.guided_launchers = loaded.guided_launchers;
         self.guided_warnings = Default::default();
         self.smoke_grenades = loaded.smoke_grenades;
@@ -1816,6 +1831,9 @@ impl<W: Write> Engine<W> {
         Ok(Vec::new())
     }
 }
+
+#[path = "match_profile_static_world.rs"]
+pub(crate) mod static_world;
 
 #[cfg(test)]
 mod tests {

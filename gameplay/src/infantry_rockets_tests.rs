@@ -12,6 +12,12 @@ struct Fixture {
     combat: Value,
 }
 
+/// Synthetic retail items whose combat metadata names this exact catalog
+/// (`matching_source`) or another one, for item-catalog launcher derivation.
+pub(crate) fn derivable_items(matching_source: bool) -> ItemCatalog {
+    Fixture::new().bound_items(matching_source)
+}
+
 fn item_id(faction: u8) -> u16 {
     (u16::from(faction) + 1) * 1024 + 65
 }
