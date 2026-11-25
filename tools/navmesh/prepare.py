@@ -83,7 +83,39 @@ def grid_tiles(bounds):
     return axis[0] * axis[1]
 
 
-def prepare(world, world_sha256, bounds=None, *, reference=False, coverage=None):
+def find_filter_rows(document):
+    """The 32 retail collision filter rows, given directly or under a 'filter_rows' key."""
+    if isinstance(document, dict):
+        if 'filter_rows' in document:
+            return find_filter_rows(document['filter_rows'])
+        for value in document.values():
+            if isinstance(value, (dict, list)):
+                found = find_filter_rows(value)
+                if found is not None:
+                    return found
+        return None
+    if (isinstance(document, list) and len(document) == 32
+            and all(type(v) is int and 0 <= v < 2**32 for v in document)):
+        return document
+    if isinstance(document, list):
+        for value in document:
+            if isinstance(value, (dict, list)):
+                found = find_filter_rows(value)
+                if found is not None:
+                    return found
+    return None
+
+
+def instance_layer(instance):
+    """Collision layer (low five filter bits), or None for an instance without filter metadata."""
+    collision = instance.get('collision')
+    if not isinstance(collision, dict) or 'filter_info' not in collision:
+        return None
+    require(type(collision['filter_info']) is int and collision['filter_info'] >= 0, 'invalid filter_info')
+    return collision['filter_info'] & 31
+
+
+def prepare(world, world_sha256, bounds=None, *, reference=False, coverage=None, movement_layers=None):
     require(isinstance(world, dict) and world.get('format') == 'mag_collision_world'
             and type(world.get('schema_version')) is int and world['schema_version'] == 1
             and world.get('coordinate_space') == 'world', 'expected neutral world-space schema1')
@@ -105,6 +137,22 @@ def prepare(world, world_sha256, bounds=None, *, reference=False, coverage=None)
                                                for i in range(3)) for r in verified), 'bake bounds exceed verified coverage')
     instances = world['instances']
     require(isinstance(instances, list) and 0 < len(instances) <= 100_000, 'invalid instance count')
+    excluded = {}
+    if movement_layers is not None:
+        # Keep what character movement collides with; instances without filter
+        # metadata stay, as the runtime keeps them solid too.
+        require(not reference and type(movement_layers) is int and 0 <= movement_layers < 2**32,
+                'invalid character movement layers')
+        kept = []
+        for instance in instances:
+            layer = instance_layer(instance)
+            if layer is None or movement_layers >> layer & 1:
+                kept.append(instance)
+            else:
+                entry = excluded.setdefault(str(layer), dict(instances=0, triangles=0))
+                entry['instances'] += 1
+                entry['triangles'] += len(instance['triangles'])
+        instances = kept
     vertices, triangles, names = [], [], set()
     winding = {k: dict(up_45=0, down_45=0, steep=0) for k in ('terrain', 'compiled')}
     max_rounding = 0.0
@@ -151,12 +199,17 @@ def prepare(world, world_sha256, bounds=None, *, reference=False, coverage=None)
     value = dict(format=input_format, map_name=metadata['map_name'], world_sha256=world_sha256,
                  geometry_sha256=digest.hexdigest(), bounds=bounds, physics_regions=copy.deepcopy(regions),
                  vertices=vertices, triangles=triangles)
+    if movement_layers is not None:
+        value['character_movement_layers'] = movement_layers
     report = dict(instances=len(instances), vertices=len(vertices), triangles=len(triangles),
                   winding=winding, max_vertex_f32_rounding_m=max_rounding,
                   source_geometry_bounds=geometry_bounds,
                   geometry_hash_encoding='MAG-NAV-GEOMETRY-v1 NUL;LEu32 vertex_count,triangle_count;LEf32 XYZ;LEu32 triangle indices',
                   coordinate_policy='Native world Y-up; original winding, all faces and instance-local duplicates preserved',
                   metadata=copy.deepcopy(metadata))
+    if movement_layers is not None:
+        report['character_movement_layers'] = movement_layers
+        report['excluded_by_layer'] = excluded
     if reference:
         report['scope'] = 'offline_reference_geometry_only'
         report['runtime_movement_authority'] = False
@@ -213,7 +266,24 @@ def main():
                         help='mag_collision_coverage_v1 sidecar bound to this world; its regions join the world\'s')
     scopes.add_argument('--reference', action='store_true',
                         help='Prepare full geometry for offline reference baking without certifying movement')
+    parser.add_argument('--filter-rows', type=Path,
+                        help='JSON with the 32 retail collision filter rows (a list, or under "filter_rows")')
+    parser.add_argument('--character-layer', type=int,
+                        help='Layer whose filter row is character movement; drops static layers it passes through')
     args = parser.parse_args()
+    require((args.filter_rows is None) == (args.character_layer is None),
+            '--filter-rows and --character-layer go together')
+    movement_layers = rows_sha256 = None
+    if args.filter_rows is not None:
+        require(args.filter_rows.is_file() and args.filter_rows.stat().st_size <= 64 * 1024 * 1024,
+                'filter rows file size')
+        raw_rows = args.filter_rows.read_bytes()
+        rows = find_filter_rows(json.loads(raw_rows))
+        require(rows is not None, 'no 32 filter rows found')
+        require(0 <= args.character_layer < 32, 'character layer outside 0..31')
+        movement_layers, rows_sha256 = rows[args.character_layer], hashlib.sha256(raw_rows).hexdigest()
+        require(not args.regional_walk_coverage and not args.reference,
+                'character movement layers apply to runtime meshes only')
     require(not args.output.exists(), 'refusing existing output directory')
     require(args.world.is_file() and args.world.stat().st_size <= 64*1024*1024, 'world file exceeds existing runtime limit')
     raw = args.world.read_bytes()
@@ -232,9 +302,12 @@ def main():
             require(path.is_file() and path.stat().st_size <= MAX_COVERAGE_BYTES, 'collision coverage size')
             cap = path.read_bytes()
             coverage, coverage_sha256 = json.loads(cap), hashlib.sha256(cap).hexdigest()
-        value, report = prepare(json.loads(raw), digest, reference=args.reference, coverage=coverage)
+        value, report = prepare(json.loads(raw), digest, reference=args.reference, coverage=coverage,
+                                movement_layers=movement_layers)
         if coverage is not None:
             report['coverage_sidecar_sha256'] = coverage_sha256
+        if movement_layers is not None:
+            report.update(filter_rows_sha256=rows_sha256, character_layer=args.character_layer)
         mesh = value
     encoded = (json.dumps(value, separators=(',', ':'), allow_nan=False)+'\n').encode()
     report.update(format='mag_navmesh_prep_manifest_v1', source_world=str(args.world.resolve()),

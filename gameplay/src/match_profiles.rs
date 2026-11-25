@@ -470,6 +470,13 @@ impl Registry {
                     Ok::<_, io::Error>(Arc::new(mesh))
                 })
                 .transpose()?;
+            // Bots move against the same collision layers the mesh was baked from.
+            let collision = match (collision, &navmesh) {
+                (Some(world), Some(mesh)) => Some(
+                    world.with_character_movement_layers(mesh.artifact().character_movement_layers),
+                ),
+                (world, _) => world,
+            };
             let vehicles = source
                 .ground_vehicles
                 .as_ref()

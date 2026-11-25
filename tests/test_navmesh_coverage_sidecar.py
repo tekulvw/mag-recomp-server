@@ -92,6 +92,41 @@ class CoverageSidecarTests(unittest.TestCase):
             prepare(world(870), SHA, coverage=too_wide)
 
 
+class CharacterMovementLayerTests(unittest.TestCase):
+    def setUp(self):
+        self.tools = runpy.run_path(str(PREPARE))
+
+    @staticmethod
+    def layered_world():
+        source = world()
+        floor = source["instances"][0]
+        floor["collision"] = {"filter_info": 9, "convex_radius": 0.0}
+        source["instances"].append({"id": "vehicle-blocker", "vertices_xyz": [[9, 2, 0], [9, 6, 0], [9, 2, 9]],
+                                    "triangles": [[0, 1, 2]], "collision": {"filter_info": 0x10000 | 11}})
+        source["instances"].append({"id": "unlabelled", "vertices_xyz": [[4, 2, 0], [4, 6, 0], [4, 2, 9]],
+                                    "triangles": [[0, 1, 2]]})
+        return source
+
+    def test_rows_choose_which_static_layers_stay_in_the_bake(self):
+        prepare, rows_of = self.tools["prepare"], self.tools["find_filter_rows"]
+        rows = [0] * 32
+        rows[1] = (1 << 9) | (1 << 29)
+        self.assertEqual(rows_of({"setup": {"filter_rows": rows}}), rows)
+        self.assertEqual(rows_of(rows), rows)
+        self.assertIsNone(rows_of({"filter_rows": [1, 2]}))
+        plain, plain_report = prepare(self.layered_world(), SHA, coverage=sidecar())
+        self.assertNotIn("character_movement_layers", plain)
+        self.assertNotIn("excluded_by_layer", plain_report)
+        self.assertEqual(plain_report["triangles"], 3)
+        value, report = prepare(self.layered_world(), SHA, coverage=sidecar(), movement_layers=rows[1])
+        self.assertEqual(value["character_movement_layers"], rows[1])
+        self.assertEqual(report["triangles"], 2)
+        self.assertEqual(report["excluded_by_layer"], {"11": {"instances": 1, "triangles": 1}})
+        self.assertNotEqual(value["geometry_sha256"], plain["geometry_sha256"])
+        with self.assertRaisesRegex(ValueError, "invalid character movement layers"):
+            prepare(self.layered_world(), SHA, reference=True, movement_layers=rows[1])
+
+
 class MakeCoverageSidecarTests(unittest.TestCase):
     def run_tool(self, *args):
         return subprocess.run([sys.executable, "-I", str(MAKE), *map(str, args)],

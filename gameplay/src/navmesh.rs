@@ -121,6 +121,12 @@ pub struct Artifact {
     pub detour_data: Vec<u8>,
     #[serde(default)]
     pub drop_links: Vec<DropLink>,
+    /// Static collision layers character movement collides with, when the
+    /// bake input left out the others (`prepare.py --filter-rows`). Bots
+    /// moving on this mesh use the same layers (`NavMesh::load_into`), so the
+    /// mesh and bot physics agree on which triangles are solid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character_movement_layers: Option<u32>,
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -496,6 +502,7 @@ fn bake_layout(
         detour_sha256: sha256(&bytes),
         detour_data: bytes,
         drop_links: Vec::new(),
+        character_movement_layers: None,
     })
 }
 struct Native(*mut std::ffi::c_void);

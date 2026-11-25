@@ -379,6 +379,7 @@ pub fn run(
         &world.metadata().map_name,
         movement_profile,
     )?;
+    let world = world.with_character_movement_layers(mesh.artifact().character_movement_layers);
     mesh.validate_coverage(&world)?;
     let t = WorldTerrain::new(Some(&world), &world.metadata().map_name).map_err(|e| e.code())?;
     let body = mesh.body();
@@ -648,6 +649,7 @@ pub fn replay_case(
     let hash = navmesh::sha256(&fs::read(world_path)?);
     let art: Artifact = serde_json::from_slice(&fs::read(mesh_path)?)?;
     let mesh = load_mesh(art, &hash, &world.metadata().map_name, movement_profile)?;
+    let world = world.with_character_movement_layers(mesh.artifact().character_movement_layers);
     let l = mesh
         .artifact()
         .drop_links

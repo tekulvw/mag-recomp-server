@@ -372,7 +372,7 @@ impl<'a> WorldTerrain<'a> {
         }
         let hit = self
             .world
-            .raycast_segment_bounded(start, end, budget)
+            .movement_raycast_bounded(start, end, budget)
             .map_err(|_| PhysicsError::QueryFailed)?
             .nearest;
         Ok(hit.map(|h| GroundSample {
@@ -395,7 +395,7 @@ impl<'a> WorldTerrain<'a> {
         let center = |p: Point| [p[0], p[1] + body.height * 0.5, p[2]];
         let mut nearest = self
             .world
-            .sweep_aabb(
+            .movement_sweep_aabb(
                 center(from),
                 center(to),
                 [body.radius, body.height * 0.5, body.radius],
