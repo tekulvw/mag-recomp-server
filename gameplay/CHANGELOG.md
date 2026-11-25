@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.14.1](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.14.0...gameplay-v0.14.1) (2026-11-25)
+
+
+### Bug Fixes
+
+* **gameplay:** start APC insertion lives on foot when the APC cannot seat them ([#290](https://github.com/tekulvw/mag-recomp-server/issues/290)) ([852b375](https://github.com/tekulvw/mag-recomp-server/commit/852b3750430dc143f030c234f1684c449018605b))
+* **gameplay:** start unseatable APC and hospital lives at the alternate insertion ([#292](https://github.com/tekulvw/mag-recomp-server/issues/292)) ([e21d25e](https://github.com/tekulvw/mag-recomp-server/commit/e21d25e908e9b6e5c4da5370a91e18d626d189fc))
+
 ## [0.14.0](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.13.0...gameplay-v0.14.0) (2026-11-25)
 
 
