@@ -36,7 +36,11 @@ impl<W: Write> Engine<W> {
                 Phase::Firearms,
                 self.tick_bot_firearms(now, wall)
             )?);
-            timed!(self, Phase::Healing, self.tick_bot_healing(now, wall))?;
+            messages.extend(timed!(
+                self,
+                Phase::Healing,
+                self.tick_bot_healing(now, wall)
+            )?);
             messages.extend(timed!(
                 self,
                 Phase::Objectives,

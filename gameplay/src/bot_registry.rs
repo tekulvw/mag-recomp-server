@@ -2880,6 +2880,13 @@ impl<W: Write> Engine<W> {
                 .item_catalog
                 .bootstrap_loadout(faction, inventory)
                 .ok_or("missing_retail_target_loadout")?;
+            // Squad medics carry the item that heals others.
+            let loadout = crate::bot_healing::medic_loadout(
+                &self.bot_registry.config.as_ref().unwrap().healing,
+                role_slot,
+                &self.item_catalog,
+                loadout,
+            );
             let generation = self
                 .bot_registry
                 .generations

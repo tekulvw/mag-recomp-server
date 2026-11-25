@@ -193,6 +193,14 @@ impl State {
     pub(super) fn equipment_matches(&self, key: EquipmentKey) -> bool {
         self.equipment == Some(key)
     }
+    #[cfg(test)]
+    pub(crate) fn set_target_for_test(&mut self, id: u16) {
+        self.target = Some(Life {
+            id,
+            generation: 1,
+            reservation: None,
+        });
+    }
     /// Object index of the enemy this weapon currently holds, if any.
     pub(super) fn target_index(&self) -> Option<u16> {
         self.target.as_ref().map(|life| life.id)
