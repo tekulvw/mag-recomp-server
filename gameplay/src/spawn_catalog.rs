@@ -30,6 +30,11 @@ pub struct SpawnLocation {
     #[serde(default = "default_active")]
     pub active: bool,
     pub position: CharacterPosition,
+    /// Authored facing in the wire's packed yaw: atan2(forward.x, forward.z) / 2pi * 1024,
+    /// so 0 faces +z and 256 faces +x. Sent on an on-foot respawn at this point; absent
+    /// keeps the previous fixed facing 0.
+    #[serde(default)]
+    pub yaw: Option<u16>,
     #[serde(default)]
     pub parachute: Option<ParachutePose>,
 }
@@ -305,6 +310,9 @@ impl SpawnCatalog {
                     || p.position.z < 0.0
                 {
                     return Err("invalid_spawn_position");
+                }
+                if p.yaw.is_some_and(|yaw| yaw > 1023) {
+                    return Err("invalid_spawn_yaw");
                 }
                 match (p.kind, p.parachute) {
                     (SpawnKind::Parachute, Some(pose)) => {

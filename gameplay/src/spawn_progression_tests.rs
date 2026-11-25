@@ -115,9 +115,12 @@ fn items() -> Arc<item_catalog::ItemCatalog> {
     Arc::new(catalog.with_retail_armory(armory))
 }
 pub(crate) fn engine() -> Engine<Vec<u8>> {
+    engine_with_spawns(spawn_json())
+}
+fn engine_with_spawns(spawn_value: Value) -> Engine<Vec<u8>> {
     let resources = EngineResources::for_application(
         items(),
-        spawns(spawn_json()).unwrap(),
+        spawns(spawn_value).unwrap(),
         None,
         wire_profile::WireProfileCatalog::embedded(),
         20231,
@@ -693,6 +696,45 @@ fn personal_onfoot_selection_and_inactive_parachute_selection_keep_normal_state(
     owner_update(&mut engine, 200, 0);
     assert_physical(&engine, 1, 0, [120., 3., 100.]);
     assert!(engine.parachute_waves.is_empty());
+}
+
+#[test]
+fn onfoot_respawn_faces_the_authored_point_yaw() {
+    // SYNTHETIC: point 1 faces -z (authored Euler (-180, 0.9, -180) packs to 509).
+    let mut value = spawn_json();
+    value["maps"][0]["locations"][1]["yaw"] = json!(509);
+    let mut engine = engine_with_spawns(value);
+    make_operator(&mut engine);
+    engine.active.as_mut().unwrap().life = CharacterLife::Alive {
+        generation: 1,
+        health_quarter_points: 400,
+    };
+    complete_stage(&mut engine);
+    let actor = engine.active.as_mut().unwrap();
+    actor.life = CharacterLife::AwaitingRespawn { generation: 1 };
+    actor.objective_needs_clear = false;
+    actor.objective_assigned = true;
+    select(&mut engine, 1, 100);
+    queue_respawn(&mut engine, 100);
+    owner_update(&mut engine, 200, 0);
+    assert_physical(&engine, 1, 509, [120., 3., 100.]);
+    assert_eq!(engine.active.as_ref().unwrap().owner_fields.yaw, Some(509));
+}
+
+#[test]
+fn spawn_catalog_rejects_an_out_of_range_yaw() {
+    let mut value = spawn_json();
+    value["maps"][0]["locations"][0]["yaw"] = json!(1024);
+    let error = spawns(value)
+        .err()
+        .expect("out-of-range yaw must be refused");
+    assert!(error.to_string().contains("invalid_spawn_yaw"), "{error}");
+    let mut value = spawn_json();
+    value["maps"][0]["locations"][0]["yaw"] = json!(1023);
+    assert_eq!(
+        spawns(value).unwrap().map_pool().locations[0].yaw,
+        Some(1023)
+    );
 }
 
 #[test]
