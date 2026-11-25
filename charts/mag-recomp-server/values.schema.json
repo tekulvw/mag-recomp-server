@@ -729,7 +729,8 @@
           "maximumPlayers": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 64
+            "maximum": 256,
+            "description": "Largest world this worker may form. Up to 64 it is also the human limit; above 64 humans stay within each profile's caps (32, 16 per side) and the DME port budget."
           },
           "minimumPlayersPerTeam": {
             "type": "array",
