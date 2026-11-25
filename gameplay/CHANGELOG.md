@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.14.0](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.13.0...gameplay-v0.14.0) (2026-11-25)
+
+
+### Features
+
+* **gameplay:** certify drop links on movement-profiled navmeshes ([#284](https://github.com/tekulvw/mag-recomp-server/issues/284)) ([adb582f](https://github.com/tekulvw/mag-recomp-server/commit/adb582fe8df46e2b58d382b091f65626dd1db178))
+* **gameplay:** let bots pass collision layers their filter row ignores ([#287](https://github.com/tekulvw/mag-recomp-server/issues/287)) ([0eefc25](https://github.com/tekulvw/mag-recomp-server/commit/0eefc2540051cb91ee2fbf7ba659166f466f867e))
+
+
+### Bug Fixes
+
+* **gameplay:** face human spawns the way their spawn point is authored ([#285](https://github.com/tekulvw/mag-recomp-server/issues/285)) ([9042b3f](https://github.com/tekulvw/mag-recomp-server/commit/9042b3f0c77f5a6d579dc8ae562a0858e706a554))
+* **gameplay:** fill squads that share objectives with the other side ([#281](https://github.com/tekulvw/mag-recomp-server/issues/281)) ([ccd9f4f](https://github.com/tekulvw/mag-recomp-server/commit/ccd9f4f85e1630939e5219b038310a182726aeb5))
+* **gameplay:** let static rays pass layers their retail filter row ignores ([#288](https://github.com/tekulvw/mag-recomp-server/issues/288)) ([eaa9309](https://github.com/tekulvw/mag-recomp-server/commit/eaa9309305d6e0c780ea2cc06688bbef955dec62))
+* **gameplay:** spawn defending bots at their forward spawns ([#282](https://github.com/tekulvw/mag-recomp-server/issues/282)) ([65dc37d](https://github.com/tekulvw/mag-recomp-server/commit/65dc37dfc477f8bc560166e080db4c98f9f44306))
+* **gameplay:** stop offering destroyed hospitals and respawn at the HQ point ([#286](https://github.com/tekulvw/mag-recomp-server/issues/286)) ([ea7ff89](https://github.com/tekulvw/mag-recomp-server/commit/ea7ff89d01abd0bb29c0c07d1c341779f749d8a4))
+
 ## [0.13.0](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.12.1...gameplay-v0.13.0) (2026-11-25)
 
 
