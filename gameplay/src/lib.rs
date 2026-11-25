@@ -59,6 +59,8 @@ pub mod bot_resupply;
 pub mod bot_resupply_approach_policy;
 pub mod bot_resupply_catalog;
 mod bot_spawn_selection;
+#[cfg(test)]
+mod bot_squad_packing_tests;
 mod bot_stat_publication;
 mod bot_traffic_costs;
 mod bot_traffic_flow;
@@ -79,6 +81,8 @@ pub mod domination_gameplay_config;
 pub mod domination_gameplay_effects;
 pub mod domination_gameplay_engine;
 pub mod domination_gameplay_provider;
+#[cfg(test)]
+mod domination_idle_tests;
 pub mod domination_match_flow;
 pub mod domination_objective_runtime;
 pub mod domination_repair_runtime;
