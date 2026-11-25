@@ -202,7 +202,8 @@ has the field.
 
 `tools/extraction/add-spawn-facing.py` adds `yaw` to a projected catalog. It
 matches each location by token against the all-map extraction's authored
-`rotation_xyz` (degrees), composes it as Rx·Ry·Rz and takes the forward of +z.
+`rotation_xyz` (degrees), composes it as Rz·Ry·Rx (X applied first) and takes
+the forward of +z.
 That composition matched the client's own SpawnPoint orientations in a
 qualified private capture. The tool changes nothing else in the catalog.
 
