@@ -100,6 +100,18 @@ struct InstanceDocument {
     terrain_material: bool,
 }
 
+#[derive(Clone, Copy)]
+enum RayFilter {
+    All,
+    Movement,
+    Row(u32),
+}
+
+/// Retail query layer of bullets and other projectile flights.
+pub const PROJECTILE_QUERY_LAYER: usize = 23;
+/// Retail query layer of blast exposure against the static world.
+pub const BLAST_QUERY_LAYER: usize = 24;
+
 /// Explicit physics inputs. Missing metadata remains unavailable to body casts;
 /// legacy ray queries do not infer layer0 or zero radius for an absent value.
 #[derive(Clone, Debug, Deserialize)]
@@ -236,6 +248,10 @@ pub struct CollisionWorld {
     /// Static collision layers a character's movement collides with, as a
     /// retail filter-row bitmask; None keeps every triangle solid.
     movement_layers: Option<u32>,
+    /// Retail collision filter rows (bit n of row m: layers m and n collide),
+    /// when loaded; rays issued for a query layer then skip static triangles
+    /// on layers that row passes through.
+    filter_rows: Option<std::sync::Arc<[u32; 32]>>,
     coverage_sidecar: Option<std::sync::Arc<crate::collision_coverage::CoverageSidecar>>,
     metadata: WorldMetadata,
     // Geometry is immutable after BVH construction. Preloaded profiles share
@@ -665,6 +681,7 @@ impl CollisionWorld {
             source_sha256,
             bot_regional_guard: None,
             movement_layers: None,
+            filter_rows: None,
             coverage_sidecar: None,
             metadata,
             instance_ids: instance_ids.into(),
@@ -706,6 +723,56 @@ impl CollisionWorld {
     }
     pub fn character_movement_layers(&self) -> Option<u32> {
         self.movement_layers
+    }
+    /// Read the 32 retail collision filter rows from a JSON file: a list, or
+    /// the first `filter_rows` list found in an object (an Acquisition
+    /// gameplay configuration carries one).
+    pub fn load_filter_rows(path: impl AsRef<std::path::Path>) -> std::io::Result<[u32; 32]> {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?
+            .take(64 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > 64 * 1024 * 1024 {
+            return Err(std::io::Error::other("collision_filter_rows_too_large"));
+        }
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(std::io::Error::other)?;
+        fn rows(value: &serde_json::Value) -> Option<[u32; 32]> {
+            match value {
+                serde_json::Value::Array(items) if items.len() == 32 => {
+                    let parsed: Option<Vec<u32>> = items
+                        .iter()
+                        .map(|v| v.as_u64().and_then(|v| u32::try_from(v).ok()))
+                        .collect();
+                    parsed.and_then(|v| v.try_into().ok())
+                }
+                serde_json::Value::Object(map) => map
+                    .get("filter_rows")
+                    .and_then(rows)
+                    .or_else(|| map.values().find_map(rows)),
+                serde_json::Value::Array(items) => items.iter().find_map(rows),
+                _ => None,
+            }
+        }
+        rows(&value).ok_or_else(|| std::io::Error::other("collision_filter_rows_not_found"))
+    }
+    /// Install the retail collision filter rows used by `query_row`.
+    pub fn with_filter_rows(mut self, rows: Option<[u32; 32]>) -> Self {
+        self.filter_rows = rows.map(std::sync::Arc::new);
+        self
+    }
+    /// The filter row of query `layer` when rows are loaded; None (every
+    /// static triangle collides) otherwise.
+    pub fn query_row(&self, layer: usize) -> Option<u32> {
+        self.filter_rows
+            .as_ref()
+            .and_then(|rows| rows.get(layer).copied())
+    }
+    fn layer_solid(&self, instance: usize, row: u32) -> bool {
+        self.static_properties[instance]
+            .as_ref()
+            .is_none_or(|p| row & (1 << (p.filter_info & 31)) != 0)
     }
     fn movement_solid(&self, instance: usize) -> bool {
         self.movement_layers.is_none_or(|layers| {
@@ -928,7 +995,7 @@ impl CollisionWorld {
         end: Vec3,
         budget: &mut usize,
     ) -> Result<SegmentQuery<'_>, CollisionError> {
-        self.raycast_filtered(start, end, budget, false)
+        self.raycast_filtered(start, end, budget, RayFilter::All)
     }
     /// As `raycast_segment_bounded`, seeing only triangles that block
     /// character movement (`with_character_movement_layers`).
@@ -938,14 +1005,27 @@ impl CollisionWorld {
         end: Vec3,
         budget: &mut usize,
     ) -> Result<SegmentQuery<'_>, CollisionError> {
-        self.raycast_filtered(start, end, budget, true)
+        self.raycast_filtered(start, end, budget, RayFilter::Movement)
+    }
+    /// As `raycast_segment_bounded`, for a query whose filter row is `row`:
+    /// static triangles on layers the row passes through are skipped, and
+    /// instances without filter metadata stay solid. None sees every triangle.
+    pub fn raycast_row_bounded(
+        &self,
+        start: Vec3,
+        end: Vec3,
+        row: Option<u32>,
+        budget: &mut usize,
+    ) -> Result<SegmentQuery<'_>, CollisionError> {
+        let filter = row.map_or(RayFilter::All, RayFilter::Row);
+        self.raycast_filtered(start, end, budget, filter)
     }
     fn raycast_filtered(
         &self,
         start: Vec3,
         end: Vec3,
         budget: &mut usize,
-        movement: bool,
+        filter: RayFilter,
     ) -> Result<SegmentQuery<'_>, CollisionError> {
         if !valid_point(start, self.max_abs_coordinate)
             || !valid_point(end, self.max_abs_coordinate)
@@ -983,7 +1063,12 @@ impl CollisionWorld {
                     for index in *first..*last {
                         consume_budget(budget)?;
                         let triangle = &self.triangles[index];
-                        if movement && !self.movement_solid(triangle.instance) {
+                        let solid = match filter {
+                            RayFilter::All => true,
+                            RayFilter::Movement => self.movement_solid(triangle.instance),
+                            RayFilter::Row(row) => self.layer_solid(triangle.instance, row),
+                        };
+                        if !solid {
                             continue;
                         }
                         if let Some(fraction) = intersect_triangle(start, delta, triangle.vertices)
@@ -1285,6 +1370,9 @@ fn intersect_triangle(start: Vec3, delta: Vec3, vertices: [Vec3; 3]) -> Option<f
     (0.0..=1.0).contains(&fraction).then_some(fraction)
 }
 
+#[cfg(test)]
+#[path = "collision_filter_rows_tests.rs"]
+mod filter_rows_tests;
 #[cfg(test)]
 #[path = "collision_movement_layers_tests.rs"]
 mod movement_layers_tests;

@@ -135,6 +135,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     let mut tick_budget_us = None;
     let mut collision_path: Option<PathBuf> = None;
     let mut collision_coverage_path: Option<PathBuf> = None;
+    let mut collision_filter_rows_path: Option<PathBuf> = None;
     let mut navmesh_path: Option<PathBuf> = None;
     let mut regional_walk_path: Option<PathBuf> = None;
     let mut movement_profile_path: Option<PathBuf> = None;
@@ -531,6 +532,13 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                         .into(),
                 );
             }
+            "--collision-filter-rows" => {
+                collision_filter_rows_path = Some(
+                    args.next()
+                        .ok_or_else(|| io::Error::other("--collision-filter-rows requires a path"))?
+                        .into(),
+                );
+            }
             "--collision-coverage" => {
                 collision_coverage_path = Some(
                     args.next()
@@ -725,6 +733,11 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     }
     // Geometry is loaded before opening logs/listeners. A bad file cannot
     // silently fall back to an empty collision world or accept a reservation.
+    if collision_filter_rows_path.is_some() && match_profiles_path.is_some() {
+        return Err(io::Error::other(
+            "configure collision filter rows inside each match profile",
+        ));
+    }
     if collision_coverage_path.is_some() && match_profiles_path.is_some() {
         return Err(io::Error::other(
             "configure collision coverage inside each match profile",
@@ -750,6 +763,18 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                 )?)
                 .map_err(io::Error::other)?,
         ),
+        (None, world) => world,
+    };
+    // Retail filter rows let static rays skip layers their query passes through.
+    let collision_world = match (&collision_filter_rows_path, collision_world) {
+        (Some(_), None) => {
+            return Err(io::Error::other(
+                "--collision-filter-rows requires --collision-world",
+            ));
+        }
+        (Some(path), Some(world)) => {
+            Some(world.with_filter_rows(Some(CollisionWorld::load_filter_rows(path)?)))
+        }
         (None, world) => world,
     };
     let navmesh_world = if let Some(path) = navmesh_path {

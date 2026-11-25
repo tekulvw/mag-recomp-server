@@ -239,8 +239,9 @@ pub(super) fn static_contact(
     if !length.is_finite() || length == 0. {
         return Ok(None);
     }
+    let row = world.query_row(crate::collision::PROJECTILE_QUERY_LAYER);
     let query = world
-        .raycast_segment_bounded(sweep.start, sweep.end, budget)
+        .raycast_row_bounded(sweep.start, sweep.end, row, budget)
         .map_err(|_| {
             if *budget == 0 {
                 "infantry_rocket_static_work_limit"
@@ -320,7 +321,12 @@ pub(super) fn static_blast(
         }
         if distance > 0.
             && world
-                .raycast_segment_bounded(origin, anchor, &mut budget)
+                .raycast_row_bounded(
+                    origin,
+                    anchor,
+                    world.query_row(crate::collision::BLAST_QUERY_LAYER),
+                    &mut budget,
+                )
                 .map_err(|_| "infantry_rocket_static_blast_query_invalid")?
                 .nearest
                 .is_some()

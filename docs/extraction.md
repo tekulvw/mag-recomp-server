@@ -176,6 +176,15 @@ python3 tools/navmesh/prepare.py --world "$world" --expected-world-sha256 "$worl
 
 `--filter-rows` takes a JSON file holding the 32 rows, either as a list or under a `filter_rows` key (an Acquisition gameplay configuration has one). The preparer leaves out every instance on a layer the character's row passes through and keeps instances without filter metadata. It records the kept layers as `character_movement_layers` in its input and manifest, with the rows file's hash and the excluded counts per layer. `mag-navmesh bake` copies `character_movement_layers` into the artifact. When a navmesh with that field is paired with its collision world (in the engine, in a match profile, or in `add-drop`, `search-spawn-exits` and `replay-drop`), bot movement and drop certification collide only with those layers. Rays, projectiles, blasts, seats and every other query still see every triangle. Without the options, the input, mesh and bot movement are unchanged.
 
+The same rows decide what static rays see. Bullets and other projectile flights query as layer 23, and blast exposure queries as layer 24. Both rows collide with layer 9 and with none of layers 11, 29 or 31. So a player's shots and blasts pass the invisible sheets that stop only vehicles. With `collision_filter_rows` in a match profile, or `--collision-filter-rows` for the direct worker, the static-world rays for the following use those rows:
+
+- bot sight and bot shots (row 23);
+- Sabotage rocket flights (row 23);
+- blast exposure: development blast visibility, Sabotage frags and rockets, and Acquisition destruction explosions (row 24);
+- the Acquisition arrival check, which already had its row 24.
+
+Acquisition destruction uses its configuration's own rows. Triangles without filter metadata still block. Without the rows, every triangle blocks.
+
 ### Offline whole-map reference navigation
 
 Use an explicit reference bake to inspect routes through the emitted static geometry of a provisional world. The preparer preserves the original world hash, winding, and region metadata. It derives its bake envelope from the full f32 vertex inventory, with vertical padding for standing clearance.

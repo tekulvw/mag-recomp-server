@@ -412,6 +412,12 @@ impl<W: Write> Engine<W> {
             })
             .ok_or("acquisition_destruction_collision_world_required")?
             .clone();
+        // Blast exposure crosses what the retail blast row collides with.
+        let blast_row = self
+            .acquisition_gameplay
+            .as_ref()
+            .map(|runtime| runtime.setup.filter_rows[crate::collision::BLAST_QUERY_LAYER])
+            .or_else(|| scene.query_row(crate::collision::BLAST_QUERY_LAYER));
         let source = self
             .ground_runtime
             .as_ref()
@@ -520,9 +526,10 @@ impl<W: Write> Engine<W> {
             // material penetration and dynamic occluders are separate fidelity work.
             if distance > 0.
                 && scene
-                    .raycast_segment_bounded(
+                    .raycast_row_bounded(
                         origin.map(f64::from),
                         point.map(f64::from),
+                        blast_row,
                         &mut los_budget,
                     )
                     .map_err(|_| "acquisition_destruction_static_los_failed")?
