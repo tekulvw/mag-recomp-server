@@ -1556,9 +1556,11 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                     "--bot-resupply-catalog requires configured bot population",
                 ));
             }
-            if application_id != Some(20231) || catalog.match_profile().game_type != 0 {
+            if application_id != Some(20231)
+                || !(0..=2).contains(&catalog.match_profile().game_type)
+            {
                 return Err(io::Error::other(
-                    "bot resupply requires the retail Sabotage profile",
+                    "bot resupply requires a retail Sabotage, Acquisition or Domination profile",
                 ));
             }
             let population = mag_gameplay::bot_registry::BotPopulation::load(

@@ -8,13 +8,13 @@ SCRIPT = Path(__file__).resolve().parents[1] / "tools/project-bot-resupply-appro
 WORLD, DETOUR = "a" * 64, "b" * 64
 
 
-def source():
-    provider = {"source_offset": 42, "name_token": 57, "center": [1, 2, 3],
-                "scales_xyz": [2, 4, 6], "tolerance_m": 0.25,
-                "axes": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]}
+def source(mode=0, providers=1):
+    rows = [{"source_offset": 42 + index, "name_token": 57 + index, "center": [1, 2, 3],
+             "scales_xyz": [2, 4, 6], "tolerance_m": 0.25,
+             "axes": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]} for index in range(providers)]
     return json.dumps({"schema_version": 1, "application_id": 20231,
-                       "mode": 0, "map": "mag_cosmodrome_final",
-                       "collision_sha256": WORLD, "providers": [provider]}).encode()
+                       "mode": mode, "map": "mag_cosmodrome_final",
+                       "collision_sha256": WORLD, "providers": rows}).encode()
 
 
 def parameters():
@@ -62,6 +62,18 @@ class ResupplyApproachProjectorTests(unittest.TestCase):
                 project(source(), WORLD, {**enabled, "retry_ms": retry}, query)
         with self.assertRaises(ValueError):
             project(source(), WORLD, {**parameters(), "planning_window_ms": 1500}, query)
+
+    def test_policy_keeps_the_catalog_mode_and_up_to_the_native_pool_of_providers(self):
+        project = runpy.run_path(str(SCRIPT))["project"]
+        query = lambda *_: reply([(2, [1, 2, 3])])
+        for mode in (0, 1, 2):
+            policy = project(source(mode, 21), WORLD, parameters(), query)
+            self.assertEqual(policy["mode"], mode)
+            self.assertEqual(len(policy["providers"]), 21)
+        self.assertEqual(len(project(source(2, 32), WORLD, parameters(), query)["providers"]), 32)
+        for bad in (source(3), source(-1), source(2, 33), source(2, 0)):
+            with self.assertRaises(ValueError):
+                project(bad, WORLD, parameters(), query)
 
     def test_rejects_absent_candidates_and_mismatched_query_provenance(self):
         project = runpy.run_path(str(SCRIPT))["project"]

@@ -1455,10 +1455,10 @@ fn validate_profile_bots(
         .total
         .or(default_total)
         .ok_or("match_profile_bot_fill_total_required")?;
-    // Bot resupply is only qualified for direct Sabotage workers; keep the
-    // same scope for profiles.
-    if bots.resupply.is_some() && loaded.summary.game_type != 0 {
-        return Err("bot_resupply_requires_sabotage_profile");
+    // Bot resupply is qualified for Sabotage (0), Acquisition (1) and
+    // Domination (2); the catalog itself pins each map to its one mode.
+    if bots.resupply.is_some() && !(0..=2).contains(&loaded.summary.game_type) {
+        return Err("bot_resupply_requires_qualified_mode");
     }
     let names = bots.names.clone().unwrap_or_else(|| inputs.names.clone());
     let resources = EngineResources::for_application(
