@@ -13,6 +13,8 @@ use std::{
 
 type Point = [f64; 3];
 const MAX_POLICY_BYTES: u64 = 65_536;
+/// Native static supply pool capacity; Unalaska authors 21 placements.
+const MAX_PROVIDERS: usize = 32;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -76,7 +78,7 @@ impl Policy {
     fn valid(&self) -> bool {
         self.schema_version == 1
             && self.application_id == 20231
-            && self.mode == 0
+            && (0..=2).contains(&self.mode)
             && !self.map.is_empty()
             && [
                 &self.provider_catalog_sha256,
@@ -107,7 +109,7 @@ impl Policy {
             && self.max_route_length_m > 0.0
             && self.max_route_length_m <= 192.0
             && (1_000..=120_000).contains(&self.seek_max_duration_ms)
-            && (1..=16).contains(&self.providers.len())
+            && (1..=MAX_PROVIDERS).contains(&self.providers.len())
             && self
                 .providers
                 .windows(2)
@@ -185,6 +187,8 @@ impl Policy {
 
     fn validate_providers(&self, catalog: &Catalog) -> Result<(), &'static str> {
         if self.provider_catalog_sha256 != catalog.source_sha256()
+            || self.map != catalog.map()
+            || self.mode != catalog.mode()
             || !self.providers().eq(catalog.keys())
         {
             return Err("bot_resupply_approach_catalog_binding_mismatch");
@@ -243,7 +247,8 @@ impl Policy {
         Self {
             schema_version: 1,
             application_id: 20231,
-            map: "synthetic_arena".into(),
+            // Matches `Catalog::synthetic`.
+            map: "mag_cosmodrome_final".into(),
             mode: 0,
             provider_catalog_sha256: "e".repeat(64),
             collision_sha256: "d".repeat(64),
@@ -286,7 +291,22 @@ mod tests {
         input["query_budget_per_tick"] = json!(17);
         assert!(load(&input).is_err());
         input["query_budget_per_tick"] = json!(1);
-        input["providers"][0]["anchors"][1] = json!([1, 2, 3]);
+        for mode in [1, 2] {
+            input["mode"] = json!(mode);
+            assert!(load(&input).is_ok(), "mode {mode}");
+        }
+        for mode in [-1, 3] {
+            input["mode"] = json!(mode);
+            assert!(load(&input).is_err(), "mode {mode}");
+        }
+        input["mode"] = json!(2);
+        let row = |index: u32| json!({"source_offset": 42 + index, "name_token": 5 + index, "anchors": [[1,2,3]]});
+        input["providers"] = json!((0..32).map(row).collect::<Vec<_>>());
+        assert!(load(&input).is_ok(), "32 providers");
+        input["providers"] = json!((0..33).map(row).collect::<Vec<_>>());
+        assert!(load(&input).is_err(), "33 providers");
+        input["providers"] =
+            json!([{"source_offset": 42, "name_token": 5, "anchors": [[1,2,3],[1,2,3]]}]);
         assert!(load(&input).is_err());
     }
 
@@ -347,6 +367,16 @@ mod tests {
         let key = catalog.keys().next().unwrap();
         let mut policy = Policy::synthetic(key, [3., 2., 3.]);
         assert!(policy.validate_providers(&catalog).is_ok());
+        // The policy names the catalog's own map and mode.
+        for (map, mode) in [("mag_baku_final", 0), ("mag_cosmodrome_final", 2)] {
+            let mut other = Policy::synthetic(key, [3., 2., 3.]);
+            other.map = map.into();
+            other.mode = mode;
+            assert_eq!(
+                other.validate_providers(&catalog),
+                Err("bot_resupply_approach_catalog_binding_mismatch")
+            );
+        }
         policy.providers[0].anchors[0][0] += 0.01;
         assert_eq!(
             policy.validate_providers(&catalog),

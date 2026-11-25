@@ -101,7 +101,7 @@ A profile row can fill its world with bots. The optional row fields are:
 | `bot_population` | `mag_bot_population_v1` file for this profile's map. Required by every other bot field. |
 | `bot_fill_total` | Total world population (humans plus bots). Defaults to the worker's `--bot-fill-total`. |
 | `bot_names` | Bot names for this profile. Defaults to the worker's `--bot-names` (or the synthetic names). |
-| `bot_resupply_catalog` | Optional bot resupply providers. Sabotage profiles only. |
+| `bot_resupply_catalog` | Optional bot resupply providers for a Sabotage, Acquisition or Domination profile on a qualified map ([bot-static-resupply.md](bot-static-resupply.md)). |
 | `bot_resupply_approach_policy` | Optional approach policy. Requires `bot_resupply_catalog` and the profile's navmesh. |
 
 Paths resolve like the other row resources. Bots that route need the

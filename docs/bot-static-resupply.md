@@ -1,26 +1,45 @@
 # Bot-only static resupply
 
-The optional Sabotage provider catalog enables one timed reserve refill for a
-dry idle bot at an authored supply point. Load it with
+The optional provider catalog enables one timed reserve refill for a dry idle
+bot at an authored supply point. Load it with
 `--bot-resupply-catalog /absolute/SUPPLY.json` alongside a firearm-enabled bot
-population. The worker requires retail mode0, the selected source map, and exact
-spawn/collision file digests. The option is absent by default.
+population, or set `bot_resupply_catalog` on a match profile row. The worker
+requires retail application 20231, the selected source map in its qualified
+mode, and exact spawn/collision file digests. The option is absent by default.
 
-Catalogs are supported for the three retail Sabotage maps. Each map pins its
-level archive and CLV identity, its expected provider count and the SHA-256 of
-the private witness that qualified its selection. The tool and the worker share
-these values:
+Catalogs are supported for the three retail Sabotage maps (mode 0) and the
+six retail Acquisition (mode 1) and Domination (mode 2) maps. Each map pins its
+mode, level archive and CLV identity, its expected provider count and the
+SHA-256 of the private witness that qualified its selection. The tool and the
+worker share these values:
 
-| Map | Providers |
-| --- | --- |
-| `mag_cosmodrome_final` | 3 |
-| `mag_kennicott_final` | 2 |
-| `mag_remote_comms_final` | 3 |
+| Map | Mode | Selection | Providers |
+| --- | --- | --- | --- |
+| `mag_cosmodrome_final` | 0 Sabotage | visible, unfrozen, unsnapped | 3 |
+| `mag_kennicott_final` | 0 Sabotage | visible, unfrozen, unsnapped | 2 |
+| `mag_remote_comms_final` | 0 Sabotage | visible, unfrozen, unsnapped | 3 |
+| `mag_alaska_subpen_final` | 1 Acquisition | every authored placement | 10 |
+| `mag_panama_military_base_final` | 1 Acquisition | every authored placement | 9 |
+| `mag_voz_final` | 1 Acquisition | every authored placement | 11 |
+| `mag_baku_final` | 2 Domination | every authored placement | 20 |
+| `mag_canal_final` | 2 Domination | every authored placement | 20 |
+| `mag_unalaska_final` | 2 Domination | every authored placement | 21 |
 
-The worker rejects catalogs for any other map, a source identity or witness
-digest from another map, and any provider count other than the pinned one.
-Level and CLV digests come from `SABOTAGE_MAPS` in
-`tools/extraction/project-retail-sabotage-objectives.py`.
+The worker rejects catalogs for any other map, a map in any other mode, a
+source identity or witness digest from another map, and any provider count
+other than the pinned one. Sabotage level and CLV digests come from
+`SABOTAGE_MAPS` in `tools/extraction/project-retail-sabotage-objectives.py`;
+Acquisition and Domination digests and modes come from `MAPS` in
+`tools/project-retail-human-resupply.py`.
+
+On the Acquisition and Domination maps the Sabotage allowlist would select no
+placement on Canal (every supply placement is authored invisible) or Panama
+(every one is authored snapped to terrain). Those maps therefore select every
+authored supply placement. The tool requires each to be a depth-two child of an
+identity parent, so its authored translation is its world position. This is
+the same placement set that human static resupply
+([human-static-resupply-runtime.md](human-static-resupply-runtime.md)) serves
+on these maps.
 
 Project private operator data from the owned original level and current runtime
 inputs using the maintained tool. `--map` selects the level; it defaults to
@@ -36,10 +55,10 @@ python3 tools/project-retail-bot-resupply.py \
   --receipt /absolute/SUPPLY.receipt.json
 ```
 
-The spawn catalog and collision world must select the same map in mode0. Add
-`--check` to reproduce existing bytes. The supported allowlist selects visible,
-unfrozen, unsnapped source placements. That is an explicit replacement
-policy, not a native activation claim. Original files and generated provider
+The spawn catalog and collision world must select the same map in its
+qualified mode. Add `--check` to reproduce existing bytes. The receipt records
+the map's selection. Both selections are explicit replacement policy, not a
+native activation claim. Original files and generated provider
 catalogs are external inputs and are never bundled into public source.
 
 The trigger uses authored translation, nonuniform axis scales and the qualified
@@ -100,7 +119,10 @@ coverage sidecar (`collision_coverage` in a match profile), also pass
 sidecar, and the receipt records its SHA-256 as `collision_coverage_sha256`.
 Without the option the command, policy and receipt are unchanged.
 
-Each policy allows 1–16 route queries per tick and 1–16 anchors per provider.
+Each policy allows 1–16 route queries per tick, 1–32 providers (the native
+static supply pool size) and 1–16 anchors per provider. The policy carries its
+catalog's map and mode, and the worker rejects a policy whose map or mode
+differs from the catalog's.
 Projection uses at most 16 explicit sample offsets, each within 5 m of the
 authored center. Projection and runtime goal radii are 0.05–5 m; retry intervals
 are positive milliseconds. Multiple samples may retain
@@ -155,8 +177,8 @@ credits; a one-credit policy can alternate failed walking and enabled drop
 surveys across retries. The option does not authorize taking over an unrelated
 active movement.
 
-Human020b interoperability, native packed target identities, non-Sabotage
-maps and native animation/presentation remain separate. Internal provider
+Human020b interoperability, native packed target identities, maps outside the
+table above and native animation/presentation remain separate. Internal provider
 keys identify exact source instances and are not emitted as native handles.
 No human account, resupply XP, UI state or use packet is fabricated. Native
 live-match review and release cutting remain the maintainer's responsibility.

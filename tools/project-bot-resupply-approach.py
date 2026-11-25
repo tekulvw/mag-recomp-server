@@ -10,6 +10,8 @@ import subprocess
 
 MAX_ANCHORS = 16
 MAX_SAMPLES = 16
+# Native static supply pool capacity; Unalaska authors 21 placements.
+MAX_PROVIDERS = 32
 
 
 def sha(raw):
@@ -59,7 +61,7 @@ def in_box(provider, position):
 def project(provider_raw, world_sha, parameters, query):
     source = json.loads(provider_raw)
     require(integer(source["schema_version"], 1, 1) and integer(source["application_id"], 20231, 20231)
-            and integer(source["mode"], 0, 0) and source["collision_sha256"] == world_sha,
+            and integer(source["mode"], 0, 2) and source["collision_sha256"] == world_sha,
             "provider catalog does not bind the current world")
     samples = parameters["sample_offsets"]
     require(isinstance(samples, list) and 1 <= len(samples) <= MAX_SAMPLES
@@ -87,7 +89,7 @@ def project(provider_raw, world_sha, parameters, query):
         knobs.update({key: parameters[key] for key in extra})
     projected, seen_keys = [], set()
     detour_sha = None
-    require(isinstance(source["providers"], list) and 1 <= len(source["providers"]) <= 16,
+    require(isinstance(source["providers"], list) and 1 <= len(source["providers"]) <= MAX_PROVIDERS,
             "invalid provider inventory")
     for provider in source["providers"]:
         key = (provider["source_offset"], provider["name_token"])
@@ -121,7 +123,7 @@ def project(provider_raw, world_sha, parameters, query):
         projected.append({"source_offset": key[0], "name_token": key[1],
                           "anchors": list(anchors.values())})
     projected.sort(key=lambda row: (row["source_offset"], row["name_token"]))
-    return {"schema_version": 1, "application_id": 20231, "map": source["map"], "mode": 0,
+    return {"schema_version": 1, "application_id": 20231, "map": source["map"], "mode": source["mode"],
             "provider_catalog_sha256": sha(provider_raw), "collision_sha256": world_sha,
             "detour_sha256": detour_sha, **knobs, "providers": projected}
 
