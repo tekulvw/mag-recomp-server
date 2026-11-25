@@ -1502,6 +1502,8 @@ impl<W: Write> Engine<W> {
         wall: u64,
     ) -> Result<Vec<OutboundMessage>, &'static str> {
         self.commit_domination_mission_start(&mut world.runtime, now, wall)?;
+        let states_before = self.domination_objective_states();
+        let mut bot_messages = self.tick_domination_bot_interactions(world, now, wall)?;
         // Holds open before this pass. When the pass ends one (the capture
         // completes, the holder leaves the trigger or a script moves the
         // objective), the holder gets the native exit handshake, as in
@@ -1516,7 +1518,7 @@ impl<W: Write> Engine<W> {
                     .collect()
             })
             .unwrap_or_default();
-        let actors_before: BTreeMap<u16, ObjectiveActor> = self
+        let mut actors_before: BTreeMap<u16, ObjectiveActor> = self
             .peers
             .values()
             .chain(self.active.iter())
@@ -1539,9 +1541,12 @@ impl<W: Write> Engine<W> {
                 ))
             })
             .collect();
+        // A bot holding an interaction stays an objective actor like a player.
+        actors_before.extend(self.domination_bot_actors());
+        let bot_actors = self.domination_bot_actors();
         let native = self.owned_acquisition_characters();
         let state = &mut world.state;
-        self.commit_domination_gameplay(
+        let mut messages = self.commit_domination_gameplay(
             &mut world.runtime,
             now,
             wall,
@@ -1619,6 +1624,7 @@ impl<W: Write> Engine<W> {
                                 },
                             ))
                         })
+                        .chain(bot_actors)
                         .collect()
                 } else {
                     actors_before.clone()
@@ -1695,7 +1701,291 @@ impl<W: Write> Engine<W> {
                     },
                 ))
             },
+        )?;
+        bot_messages.append(&mut messages);
+        self.record_domination_objective_states(&states_before, now, wall)?;
+        Ok(bot_messages)
+    }
+
+    fn domination_objective_states(&self) -> BTreeMap<u16, ObjectiveState> {
+        let (Some(catalog), Some(world)) = (&self.objective_catalog, &self.objective_world) else {
+            return BTreeMap::new();
+        };
+        catalog
+            .objects
+            .iter()
+            .filter_map(|o| Some((o.object_index, world.state(o.object_index)?)))
+            .collect()
+    }
+
+    /// One receipt per tick in which any objective changed state, naming the
+    /// interaction owner (a player or bot) when there is one.
+    fn record_domination_objective_states(
+        &mut self,
+        before: &BTreeMap<u16, ObjectiveState>,
+        now: Duration,
+        wall: u64,
+    ) -> Result<(), &'static str> {
+        let after = self.domination_objective_states();
+        let changes: Vec<_> = after
+            .iter()
+            .filter(|(index, state)| before.get(index) != Some(state))
+            .map(|(&index, &state)| {
+                let owner = self
+                    .objective_world
+                    .as_ref()
+                    .and_then(|w| w.interaction_owner(index))
+                    .map(|(player, _, _)| player);
+                json!({"object_index":index,"from":before.get(&index).map(|s| *s as u8),
+                    "to":state as u8,"holder":owner,
+                    "bot_holder":owner.is_some_and(|p| self.bot_registry.bots.contains_key(&p))})
+            })
+            .collect();
+        if changes.is_empty() {
+            return Ok(());
+        }
+        self.record(
+            json!({"op":"domination_objective_states","timestamp_ms":now.as_millis() as u64,
+                "changes":changes}),
+            wall,
         )
+    }
+
+    /// Living registry bots as objective actors.
+    pub(crate) fn domination_bot_actors(&self) -> Vec<(u16, ObjectiveActor)> {
+        self.bot_registry
+            .bots
+            .iter()
+            .filter(|(_, bot)| bot.health > 0)
+            .filter_map(|(&id, bot)| {
+                let r = bot.target.runtime?;
+                Some((
+                    id,
+                    ObjectiveActor {
+                        player: id,
+                        team: bot.target.squad.team(),
+                        generation: r.generation,
+                        position: r.position,
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    /// Bot objective operators send the same synchronous START and RELEASE a
+    /// player does: an operator standing at its assigned point starts the
+    /// side's action there, and a bot that is no longer that point's operator
+    /// releases its hold.
+    pub(crate) fn tick_domination_bot_interactions(
+        &mut self,
+        world: &mut World,
+        now: Duration,
+        wall: u64,
+    ) -> Result<Vec<OutboundMessage>, &'static str> {
+        use crate::protocol::{ObjectiveInteraction, ObjectiveInteractionKind};
+        let enabled = self.bot_registry.config.as_ref().is_some_and(|c| {
+            c.autonomous
+                && c.objective_policy
+                    .as_ref()
+                    .is_some_and(|p| p.interactions_enabled)
+        });
+        let (Some(catalog), Some(objectives)) = (&self.objective_catalog, &self.objective_world)
+        else {
+            return Ok(Vec::new());
+        };
+        if !world.runtime.is_started() || !self.round_combat_allowed(now) {
+            return Ok(Vec::new());
+        }
+        let actors: BTreeMap<u16, ObjectiveActor> =
+            self.domination_bot_actors().into_iter().collect();
+        let mut plans = Vec::new();
+        for object in &catalog.objects {
+            let index = object.object_index;
+            let target_object_id = 0x0c80_0000 | u32::from(index);
+            if let Some((id, generation, trigger)) = objectives.interaction_owner(index) {
+                if let Some(bot) = self.bot_registry.bots.get(&id)
+                    && (!enabled || !bot.task.operator || bot.task.objective != Some(index))
+                    && let Some(actor) = actors.get(&id).filter(|a| a.generation == generation)
+                {
+                    plans.push((
+                        ObjectiveInteraction {
+                            target_object_id,
+                            kind: ObjectiveInteractionKind::Release,
+                            actor_index: id,
+                            trigger_index: trigger,
+                        },
+                        *actor,
+                    ));
+                }
+                continue;
+            }
+            if !enabled {
+                continue;
+            }
+            let Some(state) = objectives.state(index) else {
+                continue;
+            };
+            for (&id, bot) in &self.bot_registry.bots {
+                let Some(actor) = actors.get(&id) else {
+                    continue;
+                };
+                let Some(r) = bot.target.runtime else {
+                    continue;
+                };
+                if !bot.task.operator
+                    || bot.task.objective != Some(index)
+                    || now < bot.task.interaction_retry_at
+                    || bot.task.recovering
+                    || bot.has_supply_action()
+                    || bot.drop_waiting.is_some()
+                    || bot.drop_committed
+                    || bot.drop_holding_goal.is_some()
+                    || bot.traffic_yield.is_some()
+                    || !r.physics_motion.is_some_and(|m| m.grounded)
+                    || r.navmesh_state.on_player
+                {
+                    continue;
+                }
+                let Some((kind, range)) =
+                    crate::bot_objectives::operator_action(object, state, actor.team, objectives)
+                else {
+                    continue;
+                };
+                let Some(trigger) =
+                    (0..range.volumes.len().min(usize::from(u8::MAX)) as u8).find(|&t| {
+                        crate::objective_control::at_native_trigger(actor.position, range, t)
+                    })
+                else {
+                    continue;
+                };
+                plans.push((
+                    ObjectiveInteraction {
+                        target_object_id,
+                        kind,
+                        actor_index: id,
+                        trigger_index: trigger,
+                    },
+                    *actor,
+                ));
+                break;
+            }
+        }
+        let mut messages = Vec::new();
+        for (request, actor) in plans {
+            // A refused candidate leaves the world as it was; only a failed
+            // record stops the tick.
+            let (accepted, reason, mut sent) =
+                match self.run_domination_bot_interaction_world(world, request, actor, now, wall) {
+                    Ok(result) => result,
+                    Err(reason @ ("recorder_unavailable" | "log_limit_reached")) => {
+                        return Err(reason);
+                    }
+                    Err(reason) => (false, reason, Vec::new()),
+                };
+            messages.append(&mut sent);
+            self.record(
+                json!({"op":"bot_objective_action","object_index":actor.player,
+                    "generation":actor.generation,"objective":request.target_object_id as u16,
+                    "action":request.kind as u8,"accepted":accepted,"reason":reason,
+                    "team":actor.team,"position":actor.position,"trigger":request.trigger_index,
+                    "timestamp_ms":now.as_millis() as u64}),
+                wall,
+            )?;
+            if !accepted && let Some(bot) = self.bot_registry.bots.get_mut(&actor.player) {
+                bot.task.interaction_retry_at = now + Duration::from_secs(2);
+            }
+            // An accepted hold stops where it stands, as in the other modes.
+            if accepted
+                && request.kind != crate::protocol::ObjectiveInteractionKind::Release
+                && let Some(bot) = self.bot_registry.bots.get_mut(&actor.player)
+                && let Some(r) = bot.target.runtime.as_mut()
+            {
+                r.phase = crate::development_target::BotPhase::Complete;
+                bot.target.pending_move = None;
+                bot.task.goal = Some(r.position);
+                bot.task.role_goal = Some(r.position);
+            }
+        }
+        Ok(messages)
+    }
+
+    /// The bot form of `run_domination_interaction_world`: no client event,
+    /// no reply message and no leadership change.
+    fn run_domination_bot_interaction_world(
+        &mut self,
+        world: &mut World,
+        request: crate::protocol::ObjectiveInteraction,
+        actor: ObjectiveActor,
+        now: Duration,
+        wall: u64,
+    ) -> Result<(bool, &'static str, Vec<OutboundMessage>), &'static str> {
+        let native = self.owned_acquisition_characters();
+        let state = &mut world.state;
+        let mut outcome = None;
+        let messages = self.commit_domination_gameplay(
+            &mut world.runtime,
+            now,
+            wall,
+            native,
+            |engine, native, runtime, frame| {
+                let bunkers = engine.bunker_world.clone();
+                let ground = engine.ground_runtime.clone();
+                let provider = Provider {
+                    engine,
+                    native,
+                    state: state.clone(),
+                    bunkers,
+                    ground,
+                    phase: MatchPhase::Playing,
+                    now,
+                    audit: Vec::new(),
+                    messages: Vec::new(),
+                    packets: Vec::new(),
+                };
+                let staged = runtime.stage_interaction_with_timing(
+                    frame,
+                    request,
+                    actor,
+                    ActionTimingModifiers::default(),
+                    provider,
+                )?;
+                outcome = Some((
+                    staged.reply.kind == crate::protocol::ObjectiveInteractionKind::Ack,
+                    staged.reason,
+                ));
+                let (candidate, provider) = staged.candidate.detach_effects();
+                let Provider {
+                    state: next_state,
+                    bunkers,
+                    ground,
+                    mut audit,
+                    messages,
+                    packets,
+                    ..
+                } = provider;
+                audit.push(
+                    json!({"op":"domination_bot_interaction","player":actor.player,
+                    "generation":actor.generation,"objective":request.target_object_id as u16,
+                    "kind":request.kind as u8,"trigger":request.trigger_index,
+                    "reason":staged.reason}),
+                );
+                Ok((
+                    candidate,
+                    EffectsCommit {
+                        audit,
+                        messages,
+                        packets,
+                        install: |engine: &mut Self| {
+                            *state = next_state;
+                            engine.bunker_world = bunkers;
+                            engine.ground_runtime = ground;
+                        },
+                    },
+                ))
+            },
+        )?;
+        let (accepted, reason) = outcome.ok_or("missing_domination_bot_interaction")?;
+        Ok((accepted, reason, messages))
     }
 }
 

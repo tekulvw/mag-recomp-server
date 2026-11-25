@@ -2,6 +2,8 @@ use super::*;
 use crate::{acquisition_round::Rules, protocol};
 use serde_json::json;
 
+#[path = "domination_bot_capture_tests.rs"]
+mod bot_capture;
 #[path = "domination_structural_repair_tests.rs"]
 pub(crate) mod structural_repair;
 

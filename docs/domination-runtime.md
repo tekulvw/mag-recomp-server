@@ -213,6 +213,36 @@ and timer gates. Damage, occupant death, destruction and later reinforcement
 consume the shared vehicle and character pipelines. The bounded squad policy
 permits eight humans per aircraft even where the original model has more seats.
 
+## Bot objective operators
+
+Registry bots in a Domination profile follow their squad's current assignment
+from this runtime (the one the squad's humans see, including a leader's manual
+tag), rather than the authored catalog order. One bot per assigned objective
+is chosen as its operator, as in the other modes. An operator standing still
+inside one of the objective's authored trigger boxes sends the same
+synchronous START a player sends:
+
+- At a secure-and-hold point, the attacking side (not the point's owner)
+  secures an open point and cancels a retake; the owning side retakes a
+  secured point and reverses an attacker's capture.
+- At a demolition structure, the attacking side arms a charge and the owner
+  disarms one, under the structure's own rules.
+
+The request runs through the same staged runtime and record boundary as a
+player's, without a client reply. A refused request is recorded, leaves the
+world unchanged, and is not repeated by that operator for 2 s. Living bots are objective actors in the objective pass, so a
+bot's hold progresses while it stays and is lost, like a player's, when it
+dies or leaves. A bot that is no longer that objective's operator sends
+RELEASE. An accepted hold stops the bot where it stands, and an operator
+holding an interaction never fires.
+
+Evidence:
+- `bot_objective_action`: bot, life, objective, action, accepted and reason,
+  team, position and trigger box;
+- `domination_objective_states`: one receipt for each tick in which any
+  objective changed state, with each change's previous and new state, its
+  holder and whether the holder is a bot.
+
 ## Verification and remaining acceptance
 
 Synthetic tests cover state/callback order, packet bounds, independent hospital
