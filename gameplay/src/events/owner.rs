@@ -1128,15 +1128,7 @@ fn plan_update_reply<W: Write>(
         && active
             .pending_spawn_deadline
             .is_some_and(|deadline| now >= deadline)
-        && active
-            .squad_catalog
-            .as_ref()
-            .alpha(
-                active
-                    .selected_spawn
-                    .map_or(active.squad_spawn, |s| s.spawn_point_index),
-            )
-            .is_some()
+        && update_actions::respawn_point(ctx.engine, active).is_some()
         && ctx.engine.actor_matches_team(active)
         && active.life.next_generation().is_some()
         && ctx.engine.match_started
