@@ -402,6 +402,78 @@ pub(super) fn plan_healing_tick<W: Write>(
     Ok(())
 }
 
+/// Whether a life can start at `index` now: the squad may use the point and
+/// the hospital or vehicle it spawns into still stands.
+fn spawn_point_operational<W: Write>(engine: &Engine<W>, active: &Active, index: u16) -> bool {
+    let Some(point) = active.squad_catalog.alpha(index) else {
+        return false;
+    };
+    let profile = engine.match_profile();
+    match point.kind {
+        spawn_catalog::SpawnKind::BunkerPassenger
+            if profile.game_type == 2 && profile.auto_assign_teams =>
+        {
+            engine
+                .bunker_world
+                .as_ref()
+                .and_then(|world| world.domination_bunker_at_spawn(index))
+                .is_none_or(|hospital| {
+                    hospital.operational
+                        && hospital.team == active.team()
+                        && hospital.faction == active.reservation.character.faction
+                })
+        }
+        spawn_catalog::SpawnKind::VehiclePassenger => engine
+            .ground_vehicles
+            .as_ref()
+            .and_then(|world| world.passenger_vehicle(index))
+            .and_then(|binding| engine.current_ground_vehicle(binding.index))
+            .is_none_or(|vehicle| engine.ground_vehicle_is_operational(vehicle.index)),
+        _ => true,
+    }
+}
+
+/// The point a due life starts at: the player's selection (else the squad's
+/// shared spawn) while it is operational. Once its hospital or vehicle is
+/// destroyed, or the squad lost the point, the life starts at the squad's
+/// authored default (its HQ point), else its current default, else another
+/// on-foot point of the squad, instead of being refused every wave. With no
+/// such point the selection stands, so its own refusal is reported.
+pub(super) fn respawn_point<W: Write>(engine: &Engine<W>, active: &Active) -> Option<u16> {
+    let catalog = active.squad_catalog.as_ref();
+    let chosen = active
+        .selected_spawn
+        .map_or(active.squad_spawn, |s| s.spawn_point_index);
+    if spawn_point_operational(engine, active, chosen) {
+        return Some(chosen);
+    }
+    let squad = catalog.squad_index();
+    let on_foot = |index: u16| {
+        catalog.alpha(index).is_some_and(|point| {
+            matches!(
+                point.kind,
+                spawn_catalog::SpawnKind::Insertion
+                    | spawn_catalog::SpawnKind::Alternate
+                    | spawn_catalog::SpawnKind::OnFoot
+            )
+        })
+    };
+    catalog
+        .selected_squad(squad)
+        .map(|binding| catalog.locally_selectable(squad, binding.default_spawn))
+        .into_iter()
+        .chain([catalog.default_spawn()])
+        .chain(
+            catalog
+                .available_for_squad(squad)
+                .unwrap_or_default()
+                .iter()
+                .copied(),
+        )
+        .find(|&index| on_foot(index))
+        .or_else(|| catalog.alpha(chosen).map(|_| chosen))
+}
+
 pub(super) fn plan_respawn<W: Write>(
     ctx: &PlanningContext<'_, W>,
     plan: &mut EventPlan,
@@ -451,11 +523,7 @@ pub(super) fn plan_respawn<W: Write>(
     let point = active
         .squad_catalog
         .as_ref()
-        .alpha(
-            active
-                .selected_spawn
-                .map_or(active.squad_spawn, |s| s.spawn_point_index),
-        )
+        .alpha(respawn_point(ctx.engine, active).ok_or("respawn_point_unavailable")?)
         .unwrap();
     let mut helo_passenger = None;
     if matches!(point.kind, spawn_catalog::SpawnKind::HeloPassenger) {

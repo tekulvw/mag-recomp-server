@@ -492,6 +492,40 @@ impl<W: Write> Provider<'_, W> {
     }
 }
 
+/// A hospital destroyed outside its objective's FSP (by direct damage) stops
+/// offering its spawn, as an objective loss does: the point goes inactive and
+/// every squad routed to it falls back to its category-zero point. The FSP
+/// activation that restores the hospital reactivates the point; a round reset
+/// restores both.
+pub(crate) fn retire_destroyed_hospital_spawns(
+    spawns: &mut SpawnCatalog,
+    bunkers: &BunkerWorld,
+    category_zero: &[u16; 32],
+) -> Result<Vec<u16>, &'static str> {
+    let destroyed: Vec<(u16, u32)> = spawns
+        .map_pool()
+        .locations
+        .iter()
+        .filter(|p| {
+            matches!(p.kind, crate::spawn_catalog::SpawnKind::BunkerPassenger)
+                && spawns.point_active(p.index)
+                && bunkers
+                    .domination_bunker_at_spawn(p.index)
+                    .is_some_and(|hospital| !hospital.operational)
+        })
+        .map(|p| (p.index, p.token))
+        .collect();
+    for &(index, token) in &destroyed {
+        spawns.set_runtime_point_active(index, token, false)?;
+        for squad in 0..32u16 {
+            if spawns.default_for_squad(squad) == Some(index) {
+                spawns.set_runtime_squad_default(squad, category_zero[usize::from(squad)])?;
+            }
+        }
+    }
+    Ok(destroyed.into_iter().map(|(index, _)| index).collect())
+}
+
 impl<W: Write> Provider<'_, W> {
     fn prepare_hospital_damage_presence(&mut self) -> Result<(), &'static str> {
         let Some(bunkers) = self.bunkers.as_mut() else {
@@ -1673,6 +1707,17 @@ impl<W: Write> Engine<W> {
                     .into_values()
                     .collect();
                 provider.prepare_hospital_damage_presence()?;
+                if let Some(bunkers) = provider.bunkers.as_ref() {
+                    let retired = retire_destroyed_hospital_spawns(
+                        &mut candidate.spawns,
+                        bunkers,
+                        &candidate.runtime.category_zero_indices()?,
+                    )?;
+                    if !retired.is_empty() {
+                        provider.audit.push(json!({"op":"domination_hospital_spawns_retired",
+                            "spawn_points":retired,"reason":"hospital_destroyed"}));
+                    }
+                }
                 for &(index, hold @ (player, generation, trigger)) in &prior_holds {
                     if candidate.world.interaction_owner(index) == Some(hold) {
                         continue;

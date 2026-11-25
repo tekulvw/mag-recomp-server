@@ -200,7 +200,21 @@ disembark requires a clear, quantized candidate against static, dynamic and
 sequence/hulk collision. Exit clearance is an explicit conservative server
 policy. Direct hospital hits and critical decay use the qualified vehicle damage
 rules and recorded lifecycle; legacy Alpha damage cannot mutate these bodies.
-Hospital gunner-seat control remains unsupported.
+Hospital gunner control is described in
+[domination-hospital-turrets.md](domination-hospital-turrets.md).
+
+A hospital destroyed by direct damage stops offering its spawn the way an
+objective loss does. In the same tick, its point goes inactive, squads routed
+to it fall back to their category-zero point, and the availability change and
+new squad spawns are published (`domination_hospital_spawns_retired`). The FSP
+activation that restores the hospital, or a round reset, reactivates the point.
+
+A due life whose selected spawn is no longer operational starts at the squad's
+HQ point instead of being refused every wave. That covers a destroyed hospital
+or ground vehicle, or a point the squad lost. The HQ point is the squad's
+authored default, else its current default, else another on-foot point of the
+squad. With no such point the selection stands and its refusal is reported as
+before.
 
 The optional aircraft scope is `core_with_helo_insertion`. It requires a complete
 `core.helo` object containing `fleet`, `models`, `paths`, `damage` and an explicit
