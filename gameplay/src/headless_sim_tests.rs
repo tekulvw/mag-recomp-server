@@ -328,6 +328,29 @@ fn a_backlogged_observer_is_evicted_and_reported() {
 }
 
 #[test]
+fn without_a_profile_the_catalog_world_admits_every_human_seat() {
+    let files = Files::new();
+    let resources = EngineResources::for_application(
+        Arc::new(crate::bot_registry::identity_tests::bootstrap_items()),
+        spawn_catalog::SpawnCatalog::load(files.spawns()).unwrap(),
+        None,
+        crate::resources::tests::wire_profiles(),
+        20231,
+    )
+    .unwrap();
+    let mut engine = Engine::from_resources(Vec::new(), 100_000_000, resources);
+    let options = HeadlessSimOptions {
+        observers: 2,
+        ..HeadlessSimOptions::new(1)
+    };
+    let report = engine.run_headless_sim(&options, 1, None).unwrap();
+    assert_eq!(report.tick_errors, 0, "{:?}", report.first_tick_errors);
+    // The synthetic catalog seats eight per side.
+    assert_eq!(engine.maximum_players, 16);
+    assert_eq!(report.recipients.len(), 2);
+}
+
+#[test]
 fn unknown_profiles_and_too_many_observers_fail_clearly() {
     let files = Files::new();
     let error = worker(&files)

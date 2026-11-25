@@ -15,7 +15,7 @@ pub struct HeadlessSimOptions {
     /// Simulated seconds.
     pub seconds: u64,
     /// Registry profile to select, as Horizon would; `None` configures the
-    /// loaded spawn catalog's match for 64 players.
+    /// loaded spawn catalog's match for every human seat it admits.
     pub profile: Option<String>,
     /// Ready observers that drain their queues like connected clients.
     pub observers: u16,
@@ -220,7 +220,11 @@ impl<W: Write> Engine<W> {
                 request_id: "headless-sim-configure".into(),
                 minimum_players: 1,
                 minimum_players_per_team: [0, 0],
-                maximum_players: MAX_MATCH_PLAYERS,
+                // Every human seat the loaded world admits: 64 in a legacy
+                // 64-character world, the human cap in a larger one.
+                maximum_players: self
+                    .human_admission_capacity_for(20231)
+                    .min(world_capacity::MAX_ADMITTED_HUMANS),
                 application_id: 20231,
             },
         };
