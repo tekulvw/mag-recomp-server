@@ -53,10 +53,10 @@ def invented(platoons=2):
 
 
 class AcquisitionProjectionTests(unittest.TestCase):
-    def project(self, data=None, attacker='Valor', active=(1, 1, 3)):
+    def project(self, data=None, attacker='Valor', active=(1, 1, 3), **options):
         with patch.object(API, 'extract', return_value=data or invented()):
             return API.build(Path('/unused'), Path('/unused'), 'mag_voz_final',
-                             *active, attacking_faction=attacker)
+                             *active, attacking_faction=attacker, **options)
 
     def test_all_records_and_two_platoons_retained_without_selectable_vehicles(self):
         result = self.project()
@@ -77,7 +77,7 @@ class AcquisitionProjectionTests(unittest.TestCase):
             self.assertEqual(squad['platoon'], (squad['index'] % 16) // 4)
         profile = result['match_profile']
         self.assertEqual((profile['game_type'], profile['attacking_faction']), (1, 0))
-        self.assertEqual((profile['team_capacity'], profile['squad_capacity']), (32, 4))
+        self.assertEqual((profile['team_capacity'], profile['squad_capacity']), (32, 8))
         self.assertEqual(profile['initial_spawn_delay_ms'], [35000, 20000])
         self.assertFalse(profile['has_bunkers'])
         self.assertFalse(profile['has_objectives'])
@@ -86,6 +86,38 @@ class AcquisitionProjectionTests(unittest.TestCase):
         self.assertEqual(len(source['default_spawn_fallbacks']), 4)
         self.assertEqual(len(source['unsupported_spawn_links']), len(unsupported))
         self.assertLess(len(result['source'].encode()), 8192)
+        self.assertEqual(source['admission_policy'], 'Local maximum64/team32/squad8 (capacity '
+                         'local64); authored capacity is provenance only')
+
+    def test_capacity_policies_keep_every_authored_squad_address(self):
+        local = self.project()
+        self.assertEqual(local, self.project(capacity='local64'))
+        authored = self.project(capacity='authored')
+        self.assertEqual((authored['match_profile']['team_capacity'],
+                          authored['match_profile']['squad_capacity']), (64, 8))
+        self.assertEqual(json.loads(authored['source'])['admission_policy'],
+                         'Authored maximum128/team64/squad8 (capacity authored, from '
+                         'authored_maximum_players)')
+        # Capacity changes seat counts only: the same squads keep the same
+        # addresses, spawns and defaults, and nothing else in the profile moves.
+        self.assertEqual(local['maps'], authored['maps'])
+        self.assertEqual(local['active'], authored['active'])
+        # Each side's squads seat the whole side, with room to spare at local64.
+        for result, spare in ((local, 32), (authored, 0)):
+            team = result['match_profile']['team_capacity']
+            for side in (0, 1):
+                squads = [s for s in result['maps'][0]['squads'] if s['team'] == side]
+                self.assertEqual(len(squads) * 8 - team, spare)
+        self.assertEqual(dict(local['match_profile'], team_capacity=64), authored['match_profile'])
+
+    def test_authored_capacity_must_match_the_authored_squads(self):
+        for maximum in (96, 129, 0, None):
+            data = invented()
+            data[4]['authored_maximum_players'] = maximum
+            with self.subTest(maximum=maximum), self.assertRaisesRegex(SystemExit, 'Authored maximum'):
+                self.project(data, capacity='authored')
+        with self.assertRaisesRegex(SystemExit, 'Unknown capacity'):
+            self.project(capacity='local128')
 
     def test_attacker_must_be_explicit_and_distinct(self):
         for attacker in (None, 'SVER', 'invalid'):
@@ -137,11 +169,11 @@ class AcquisitionProjectionTests(unittest.TestCase):
 
 
 class DominationProjectionTests(unittest.TestCase):
-    def project(self, data=None, attacker='Valor'):
+    def project(self, data=None, attacker='Valor', **options):
         data = data or self.authored()
         with patch.object(API, 'extract', return_value=data):
             return API.build(Path('/unused'), Path('/unused'), 'mag_voz_final',
-                             1, 3, 3, attacking_faction=attacker)
+                             1, 3, 3, attacking_faction=attacker, **options)
 
     def authored(self):
         data = invented(platoons=4)
@@ -153,7 +185,7 @@ class DominationProjectionTests(unittest.TestCase):
         result = self.project()
         profile = result['match_profile']
         self.assertEqual((profile['game_type'], profile['team_capacity'],
-                          profile['squad_capacity']), (2, 32, 4))
+                          profile['squad_capacity']), (2, 32, 8))
         pool = result['maps'][0]
         self.assertEqual([row['index'] for row in pool['squads']], list(range(32)))
         self.assertEqual(result['active']['squad_index'], 31)
@@ -170,6 +202,17 @@ class DominationProjectionTests(unittest.TestCase):
                 self.assertNotIn(index - 1, squad['available'])
             else:
                 self.assertEqual(pool['locations'][index]['kind'], 'insertion')
+
+    def test_authored_capacity_seats_all_32_squads(self):
+        local = self.project()
+        result = self.project(capacity='authored')
+        profile = result['match_profile']
+        self.assertEqual((profile['team_capacity'], profile['squad_capacity']), (128, 8))
+        self.assertEqual(json.loads(result['source'])['admission_policy'],
+                         'Authored maximum256/team128/squad8 (capacity authored, from '
+                         'authored_maximum_players)')
+        self.assertEqual(result['maps'], local['maps'])
+        self.assertEqual([row['index'] for row in result['maps'][0]['squads']], list(range(32)))
 
     def test_rejects_incomplete_domination_squads(self):
         data = self.authored()

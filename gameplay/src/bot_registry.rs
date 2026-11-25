@@ -2883,7 +2883,15 @@ impl<W: Write> Engine<W> {
                 .item_catalog
                 .bootstrap_loadout(faction, inventory)
                 .ok_or("missing_retail_target_loadout")?;
-            // Squad engineers carry the mode's repair tool.
+            // Squad medics carry the item that heals others, and squad
+            // engineers the mode's repair tool; each swaps its own role
+            // slot's self-healing item.
+            let loadout = crate::bot_healing::medic_loadout(
+                &self.bot_registry.config.as_ref().unwrap().healing,
+                role_slot,
+                &self.item_catalog,
+                loadout,
+            );
             let loadout = crate::bot_repair::engineer_loadout(
                 &self.bot_registry.config.as_ref().unwrap().repair,
                 role_slot,

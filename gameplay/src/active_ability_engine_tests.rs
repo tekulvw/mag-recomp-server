@@ -480,7 +480,7 @@ pub(crate) fn actor_mut(engine: &mut Engine<Vec<u8>>, slot: u16) -> &mut Active 
 }
 
 #[test]
-fn timed_cluster_damage_retries_unqualified_geometry_and_credit_is_fenced_to_invoker() {
+fn timed_cluster_damage_is_fenced_to_invoker_and_refused_geometry_ends_it() {
     let mut engine = configured()
         .with_dynamic_collision_bodies(
             dynamic_collision::Catalog::from_json(&dynamic_fixture::fixture().to_string()).unwrap(),
@@ -490,7 +490,7 @@ fn timed_cluster_damage_retries_unqualified_geometry_and_credit_is_fenced_to_inv
             },
         )
         .unwrap();
-    engine.collision_world = Some(strike_floor(engine.map_name(), false));
+    engine.collision_world = Some(strike_floor(engine.map_name(), true));
     engine.item_catalog = crate::human_kill_reward_tests::combat_items_for_ground_test(0.);
     let rules = character_damage_rules::Rules::from_json(
         &json!({"schema_version":1,"application_id":20231,"map_name":engine.map_name(),
@@ -545,13 +545,6 @@ fn timed_cluster_damage_retries_unqualified_geometry_and_credit_is_fenced_to_inv
             .iter()
             .all(|entry| entry["on_character_hit"].is_null())
     );
-    assert!(matches!(
-        prepare_effect_tick(&mut engine, &native, 47),
-        Err("air_strike_static_impact_ray_failed")
-    ));
-    assert_eq!(actor(&engine, 0).life.damage_health(), Some((1, 400)));
-
-    engine.collision_world = Some(strike_floor(engine.map_name(), true));
     let impact = prepare_effect_tick(&mut engine, &native, 47).unwrap();
     let damage = impact
         .audit()
@@ -578,6 +571,33 @@ fn timed_cluster_damage_retries_unqualified_geometry_and_credit_is_fenced_to_inv
     assert_eq!(damage["damage_source_type"], 4);
     assert_eq!(damage["attacker"], u32::MAX);
     assert_eq!(damage["calculation"]["incoming_damage_base"], 0.5);
+    engine
+        .record_acquisition_character_effects(next, &mut native, 1)
+        .unwrap();
+
+    // A refused impact query is not retried forever: the last bomblet's
+    // failure is recorded, nothing of it is applied, and the bombardment ends.
+    engine.collision_world = Some(strike_floor(engine.map_name(), false));
+    let health = actor(&engine, 0).life.damage_health();
+    let refused = prepare_effect_tick(&mut engine, &native, 63).unwrap();
+    let failure = refused
+        .audit()
+        .iter()
+        .find(|entry| entry["op"] == "active_ability_effect_failed")
+        .unwrap();
+    assert_eq!(failure["error"], "air_strike_static_impact_ray_failed");
+    assert_eq!(failure["ability"], Ability::ClusterBomb.code());
+    assert!(
+        refused
+            .audit()
+            .iter()
+            .all(|entry| entry["on_character_hit"].is_null())
+    );
+    engine
+        .record_acquisition_character_effects(refused, &mut native, 1)
+        .unwrap();
+    assert_eq!(actor(&engine, 0).life.damage_health(), health);
+    assert!(!engine.command_effect_active_for_test(Ability::ClusterBomb));
 }
 
 fn published_detection(engine: &Engine<Vec<u8>>, recipient: u16, target: u16) -> Option<bool> {

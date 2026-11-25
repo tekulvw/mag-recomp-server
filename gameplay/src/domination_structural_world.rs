@@ -2053,6 +2053,19 @@ impl SequenceSurface {
         Ok(false)
     }
 
+    /// Root and child filter layers of a placed sequence pack. Its neutral
+    /// mesh has no per-leaf collision properties; the pack's own collision
+    /// tag is the qualified root layer, and every validated projectile contact
+    /// row for a pack names exactly that root with child layer zero.
+    fn sequence_filter_layers(&self) -> Result<(u8, u8), &'static str> {
+        match &self.projectile {
+            Some(SurfaceBinding::Sequence(binding)) if binding.collision_tag < 32 => {
+                Ok((binding.collision_tag, 0))
+            }
+            _ => Err("air_strike_sequence_filter_unqualified"),
+        }
+    }
+
     fn local(&self, point: [f64; 3]) -> [f64; 3] {
         let delta = geometry::sub(point, self.pose.translation);
         std::array::from_fn(|axis| {
@@ -2379,18 +2392,22 @@ impl SequenceCollisionState {
         budget: &mut usize,
         hits: &mut Vec<collision::MaterialRayHit>,
     ) -> Result<(), &'static str> {
+        // Sequence packs are filtered as whole bodies by their pack layers, like
+        // the fixed overlays below. Asking their neutral meshes for per-leaf
+        // filters failed on every crossing, so a command bomblet landing on any
+        // placed structure failed the whole world update.
         for surface in self.active.values().flatten() {
-            hits.extend(
-                surface
-                    .mesh
-                    .filtered_material_ray_hits(
-                        surface.local(start),
-                        surface.local(end),
-                        row,
-                        budget,
-                    )
-                    .map_err(|_| "air_strike_sequence_filter_query_failed")?,
-            );
+            let crossings = surface
+                .mesh
+                .material_ray_hits(surface.local(start), surface.local(end), budget)
+                .map_err(|_| "air_strike_sequence_filter_query_failed")?;
+            if crossings.is_empty() {
+                continue;
+            }
+            let (root, child) = surface.sequence_filter_layers()?;
+            if row & (1 << root) != 0 && row & (1 << child) != 0 {
+                hits.extend(crossings);
+            }
         }
         let fixed_layer = [
             (&self.hulks, 17, 0x0d80_0000u64),
@@ -2471,6 +2488,72 @@ impl SequenceCollisionState {
 
 #[cfg(test)]
 impl SequenceCollisionState {
+    /// A placed structure like the live packs: a neutral mesh with no
+    /// per-leaf collision properties, filtered by its pack collision tag.
+    /// `None` leaves the pack without a projectile binding.
+    pub(crate) fn synthetic_structure_roof(
+        &mut self,
+        objective: u16,
+        centre: [f64; 3],
+        half_extent: f64,
+        collision_tag: Option<u8>,
+    ) {
+        let h = half_extent;
+        let payload = json!({
+            "format":"mag_collision_world", "schema_version":1, "coordinate_space":"world",
+            "metadata":{"map_name":"synthetic","build":"synthetic","coverage":"provisional",
+                "provenance":["synthetic"],"unknowns":[]},
+            "instances":[{"id":"structure-roof", "material_index":1,
+                "vertices_xyz":[[-h,-0.02,-h],[h,-0.02,-h],[h,0.02,h],[-h,0.02,h]],
+                "triangles":[[0,1,2],[0,2,3]]}]
+        });
+        let mesh = collision::CollisionWorld::from_bytes(
+            &serde_json::to_vec(&payload).unwrap(),
+            collision::CollisionLimits::default(),
+        )
+        .unwrap();
+        let projectile = collision_tag.map(|collision_tag| {
+            SurfaceBinding::Sequence(SequenceBinding {
+                source_sha256: "c".repeat(64),
+                neutral_sha256: mesh.source_sha256().to_owned(),
+                collision_tag,
+                part_ids: vec!["structure-roof".into()],
+            })
+        });
+        self.active
+            .entry((objective, 0))
+            .or_default()
+            .push(SequenceSurface {
+                projectile,
+                pose: Pose::at(centre),
+                mesh,
+            });
+    }
+
+    /// A helicopter hull overlay at a fixed pose, for radial dose routing.
+    pub(crate) fn synthetic_helo(&mut self, index: u16, centre: [f64; 3]) {
+        let payload = json!({
+            "format":"mag_collision_world", "schema_version":1, "coordinate_space":"world",
+            "metadata":{"map_name":"synthetic","build":"synthetic","coverage":"provisional",
+                "provenance":["synthetic"],"unknowns":[]},
+            "instances":[{"id":"helo-hull", "material_index":1,
+                "vertices_xyz":[[-2.,-0.5,-2.],[2.,-0.5,-2.],[0.,0.5,2.]],"triangles":[[0,1,2]]}]
+        });
+        let mesh = collision::CollisionWorld::from_bytes(
+            &serde_json::to_vec(&payload).unwrap(),
+            collision::CollisionLimits::default(),
+        )
+        .unwrap();
+        self.helos.insert(
+            index,
+            SequenceSurface {
+                projectile: None,
+                pose: Pose::at(centre),
+                mesh,
+            },
+        );
+    }
+
     pub(crate) fn synthetic_projectile_hospital(&mut self, index: u16, x: f64, digest: String) {
         let payload = json!({
             "format":"mag_collision_world", "schema_version":1, "coordinate_space":"world",
@@ -2659,6 +2742,95 @@ mod tests {
                 .strike_impact(&scene, &snapshot, [1., 1.], [8., 0.], 100.)
                 .is_err()
         );
+    }
+
+    /// Live packs carry no per-leaf collision properties. A bomblet landing
+    /// on a placed structure used to fail the whole world update here.
+    #[test]
+    fn command_impact_and_cover_use_the_structure_pack_layer() {
+        let payload = json!({
+            "format":"mag_collision_world", "schema_version":1, "coordinate_space":"world",
+            "metadata":{"map_name":"synthetic","build":"synthetic","coverage":"complete",
+                "provenance":["synthetic"],"unknowns":[]},
+            "instances":[{"id":"ground","vertices_xyz":[[-50.,0.9,-50.],[50.,0.9,-50.],[0.,1.1,50.]],
+                "triangles":[[0,1,2]],
+                "collision":{"filter_info":9,"convex_radius":0.,"child_filter_policy":"uniform","provenance":"synthetic"}}]
+        });
+        let scene = collision::CollisionWorld::from_bytes(
+            &serde_json::to_vec(&payload).unwrap(),
+            Default::default(),
+        )
+        .unwrap();
+        let snapshot = dynamic_collision::Snapshot::capture(
+            crate::acquisition_atomic::WorldKey {
+                world_id: 1,
+                incarnation: 1,
+            },
+            0,
+            &[],
+            vec![],
+            0,
+        )
+        .unwrap();
+        let mut rows = [0; 32];
+        rows[19] = 1 | (1 << 9);
+        rows[24] = 1 | (1 << 9);
+        let structure = |tag| {
+            let mut sequences = SequenceCollisionState::default();
+            sequences.synthetic_structure_roof(7, [10., 5., 10.], 3., tag);
+            sequences
+        };
+        let impact = |sequences: &SequenceCollisionState, xz| {
+            BlastCollision {
+                filter_rows: &rows,
+                limits: Default::default(),
+                sequences,
+                material_costs: &BTreeMap::new(),
+                terrain_materials: None,
+            }
+            .strike_impact(&scene, &snapshot, xz, [0., 20.], 100.)
+        };
+        // An eligible pack (layer 9) takes the impact on its roof.
+        let roof = impact(&structure(Some(9)), [10., 10.]).unwrap().unwrap();
+        assert!((roof[1] - 5.5).abs() < 0.05, "{roof:?}");
+        // A pack on a layer outside the row lets the bomblet reach the ground.
+        let ground = impact(&structure(Some(29)), [10., 10.]).unwrap().unwrap();
+        assert!((ground[1] - 1.5).abs() < 0.05, "{ground:?}");
+        // Off the structure nothing about the pack is consulted.
+        let beside = impact(&structure(None), [10., -20.]).unwrap().unwrap();
+        assert!((beside[1] - 1.5).abs() < 0.05, "{beside:?}");
+        // A crossed pack without any qualified layer stays a visible refusal.
+        assert_eq!(
+            impact(&structure(None), [10., 10.]),
+            Err("air_strike_sequence_filter_unqualified")
+        );
+
+        // Zero-penetration cover: the eligible structure blocks a character
+        // under it, and an ineligible one does not.
+        let cover = |sequences: &SequenceCollisionState| {
+            BlastCollision {
+                filter_rows: &rows,
+                limits: Default::default(),
+                sequences,
+                material_costs: &BTreeMap::new(),
+                terrain_materials: None,
+            }
+            .clear_path(
+                &scene,
+                &snapshot,
+                BlastRay {
+                    start: [10., 8., 10.],
+                    end: [10., 2., 10.],
+                    excludes: [None; 2],
+                    penetration: 0.,
+                    zero_penetration_strike: true,
+                    filter_static: true,
+                },
+                &mut 1_000,
+            )
+        };
+        assert_eq!(cover(&structure(Some(9))), Ok(false));
+        assert_eq!(cover(&structure(Some(29))), Ok(true));
     }
 
     #[test]

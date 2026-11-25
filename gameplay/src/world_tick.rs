@@ -36,7 +36,11 @@ impl<W: Write> Engine<W> {
                 Phase::Firearms,
                 self.tick_bot_firearms(now, wall)
             )?);
-            timed!(self, Phase::Healing, self.tick_bot_healing(now, wall))?;
+            messages.extend(timed!(
+                self,
+                Phase::Healing,
+                self.tick_bot_healing(now, wall)
+            )?);
             messages.extend(timed!(
                 self,
                 Phase::Objectives,
@@ -84,6 +88,26 @@ impl<W: Write> Engine<W> {
             Ok(messages) => self.world_response(request_id, messages),
             Err(code) => Response::error(request_id, code),
         }
+    }
+    /// Record a failed world update before its subscriber is dropped, so the
+    /// stream gap names its cause. Returns the same record for process logs.
+    pub fn record_world_tick_failure(
+        &mut self,
+        world_id: u32,
+        error: &str,
+        now: Duration,
+        wall: u64,
+    ) -> Value {
+        let mut failure = json!({"event":"world_tick_failed","error":error,"world_id":world_id,
+            "timestamp_ms":now.as_millis() as u64,"round":self.round_number,
+            "humans":self.active.iter().chain(self.peers.values()).count(),
+            "bots":self.bot_registry.bots.len()});
+        let mut record = failure.clone();
+        record["op"] = json!("world_tick_failed");
+        if let Err(code) = self.record(record, wall) {
+            failure["record_error"] = json!(code);
+        }
+        failure
     }
     /// Squad dead-row timers read the observer's team deadline even while
     /// that observer is alive. Publish each rollover once per recipient.

@@ -2732,15 +2732,29 @@ fn spawn_world_scheduler(
                 .as_secs();
             let waiting = Instant::now();
             let start_us = started.elapsed().as_micros() as u64;
-            let (response, wait_us, engine_us) = match engine.lock() {
+            let (response, wait_us, engine_us, failure) = match engine.lock() {
                 Ok(mut engine) => {
                     let wait = waiting.elapsed().as_micros() as u64;
                     let processing = Instant::now();
-                    let response = engine.tick_world(started.elapsed(), wall, request_id);
-                    (response, wait, processing.elapsed().as_micros() as u64)
+                    let now = started.elapsed();
+                    let response = engine.tick_world(now, wall, request_id);
+                    let elapsed = processing.elapsed().as_micros() as u64;
+                    // Name the cause before the stream gap releases the world.
+                    let failure = (!response.ok).then(|| {
+                        engine.record_world_tick_failure(
+                            world_id,
+                            response.error.as_deref().unwrap_or("unknown"),
+                            now,
+                            wall,
+                        )
+                    });
+                    (response, wait, elapsed, failure)
                 }
                 Err(_) => continue,
             };
+            if let Some(failure) = failure {
+                let _ = writeln!(io::stdout().lock(), "{failure}");
+            }
             if let Some(recorder) = telemetry.as_ref() {
                 recorder.record(
                     TickSample::new(true, start_us, wait_us, engine_us, response.ok, budget)

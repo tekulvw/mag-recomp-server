@@ -142,7 +142,10 @@ the fill total, and yield seats to humans who join later. Bots pack squads
 rather than spreading over them: they fill squads a human occupies first, then
 the fullest squad with a free bound slot, then the lowest squad index, so
 platoons fill in order. When the population shrinks, the bot in the
-last-filled squad leaves first. Domination bots fight but do not capture
+last-filled squad leaves first. A squad-bound population whose fill total is the
+whole world must bind at least `squad_capacity` slots to every squad in the
+spawn catalog (`bot_population_insufficient_squad_slots`), since any squad may
+hold a human. Domination bots fight but do not capture
 objectives. A Domination world with no entered human (for example after the
 last release) does not tick its objectives or write `domination_gameplay`
 records, matching Acquisition.
