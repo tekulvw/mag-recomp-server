@@ -1770,11 +1770,23 @@ impl<W: Write> Engine<W> {
     /// filters and dynamic geometry have independent client validation.
     pub fn with_collision_world(mut self, world: collision::CollisionWorld) -> Self {
         self.collision_world = Some(world);
+        self.bind_movement_layers();
         self
     }
     pub fn with_navmesh_world(mut self, mesh: navmesh::NavMesh) -> Self {
         self.navmesh_world = Some(std::sync::Arc::new(mesh));
+        self.bind_movement_layers();
         self
+    }
+    /// Bots move against the collision layers their navmesh was baked from.
+    fn bind_movement_layers(&mut self) {
+        if let Some(mesh) = &self.navmesh_world {
+            let layers = mesh.artifact().character_movement_layers;
+            self.collision_world = self
+                .collision_world
+                .take()
+                .map(|world| world.with_character_movement_layers(layers));
+        }
     }
     pub fn into_writer(self) -> W {
         self.writer

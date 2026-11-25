@@ -233,11 +233,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some("wide") => Layout::Wide,
                 Some(_) => return Err("--layout must be auto or wide".into()),
             };
-            let input: BakeInput =
+            let mut input: serde_json::Value =
                 serde_json::from_slice(&read(get("--input")?, 128 * 1024 * 1024)?)?;
+            // prepare.py records the character movement layers it kept.
+            let layers = match input
+                .as_object_mut()
+                .and_then(|o| o.remove("character_movement_layers"))
+            {
+                None => None,
+                Some(v) => Some(
+                    v.as_u64()
+                        .and_then(|v| u32::try_from(v).ok())
+                        .ok_or("invalid character_movement_layers")?,
+                ),
+            };
+            let input: BakeInput = serde_json::from_value(input)?;
             let began = Instant::now();
             let grid_tiles = navmesh::grid_tiles(&input.bounds);
-            let artifact = navmesh::bake_with_layout(input, movement_profile()?.as_ref(), layout)?;
+            let mut artifact =
+                navmesh::bake_with_layout(input, movement_profile()?.as_ref(), layout)?;
+            artifact.character_movement_layers = layers;
             write(Some(&get("--output")?.to_string()), &artifact)?;
             eprintln!(
                 "{}",
@@ -320,6 +335,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let map = world.metadata().map_name.clone();
             let mesh =
                 navmesh_spawn_exit_cli::load_mesh(artifact.clone(), &hash, &map, rules.as_ref())?;
+            let world =
+                world.with_character_movement_layers(mesh.artifact().character_movement_layers);
             mesh.validate_coverage(&world)?;
             let link = navmesh::DropLink::certify_with_body(
                 &world,

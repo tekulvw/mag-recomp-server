@@ -123,6 +123,7 @@ impl ReferenceNavMesh {
                 detour_sha256: manifest.detour_sha256.clone(),
                 detour_data: data,
                 drop_links: Vec::new(),
+                character_movement_layers: None,
             },
             world_sha256,
             map_name,

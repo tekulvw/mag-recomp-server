@@ -160,6 +160,22 @@ A runtime route query searches at most 16,384 Detour nodes. On a whole-map mesh,
 
 `prepare.py` reports `runtime_grid_tiles` and `runtime_layout` in its manifest and refuses bounds over 512 tiles. The bake prints the chosen format. Bake bounds default to the first verified region: the world's own region, else the sidecar's. `search-spawn-exits` extends the drop links already in the mesh, so add each seed drop first. A drop certificate records the body it was traced with. `add-drop`, `search-spawn-exits` and `replay-drop` take `--movement-profile` and trace with the profiled mesh's body (the retail slope limit), so a profiled mesh (`v3`/`v5`) carries drops certified with its own profile. A mesh refuses a certificate traced with any other body: a profiled mesh refuses default-body certificates, and a 45-degree mesh (`v2`/`v4`) refuses profiled ones. Default-body certificates serialize as before. At runtime, pass the same sidecar with `--collision-coverage` or a match profile's `collision_coverage`.
 
+#### Character movement layers
+
+Every static triangle carries a retail collision layer (the low five bits of its `filter_info`). Retail decides which layers collide through 32 filter rows, one per layer, where bit *n* of row *m* means layers *m* and *n* collide. The worlds hold four static layers. Layer 9 is the ordinary static world. Layer 11's row collides only with layers 0, 17, 18 and 27: ground vehicles (27) and vehicle hulks (17), never a character. Its triangles are invisible sheets that keep vehicles out of footpaths, yards and doorways. Layer 29's row collides with layers 1, 16, 17, 18 and 27, so it also stops characters. Layer 31's row collides only with layers 7 and 31.
+
+A player walks through a layer-11 sheet. Treating it as a wall sealed whole spawn areas: on VOZ, the squad 16–19 hangars connect to the rest of the map only through such a sheet. The character controller's own layer isn't recorded in the projected data. The candidates are the rows that collide with layer 9 and not with layer 11: rows 1, 3, 4, 5, 7, 13, 14, 16, 19, 23, 24, 28 and 30. They all keep layer 9 and leave out layer 11, and differ only on layers 29 and 31. Use row 1. It keeps layer 29, which, like a player-and-vehicle blocker, collides with vehicles and with candidate rows 1 and 16. It leaves out layer 31, a handful of triangles that collide with nothing on a candidate row except row 7.
+
+Pass the rows and the character's layer to `prepare.py`:
+
+```sh
+python3 tools/navmesh/prepare.py --world "$world" --expected-world-sha256 "$world_sha256" \
+  --collision-coverage COVERAGE_JSON --filter-rows GAMEPLAY_CONFIG_JSON --character-layer 1 \
+  --output BAKE_DIRECTORY
+```
+
+`--filter-rows` takes a JSON file holding the 32 rows, either as a list or under a `filter_rows` key (an Acquisition gameplay configuration has one). The preparer leaves out every instance on a layer the character's row passes through and keeps instances without filter metadata. It records the kept layers as `character_movement_layers` in its input and manifest, with the rows file's hash and the excluded counts per layer. `mag-navmesh bake` copies `character_movement_layers` into the artifact. When a navmesh with that field is paired with its collision world (in the engine, in a match profile, or in `add-drop`, `search-spawn-exits` and `replay-drop`), bot movement and drop certification collide only with those layers. Rays, projectiles, blasts, seats and every other query still see every triangle. Without the options, the input, mesh and bot movement are unchanged.
+
 ### Offline whole-map reference navigation
 
 Use an explicit reference bake to inspect routes through the emitted static geometry of a provisional world. The preparer preserves the original world hash, winding, and region metadata. It derives its bake envelope from the full f32 vertex inventory, with vertical padding for standing clearance.

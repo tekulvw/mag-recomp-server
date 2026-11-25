@@ -233,6 +233,9 @@ pub(crate) struct MaterialRayHit {
 pub struct CollisionWorld {
     source_sha256: String,
     bot_regional_guard: Option<std::sync::Arc<crate::bot_physics::RegionalGuard>>,
+    /// Static collision layers a character's movement collides with, as a
+    /// retail filter-row bitmask; None keeps every triangle solid.
+    movement_layers: Option<u32>,
     coverage_sidecar: Option<std::sync::Arc<crate::collision_coverage::CoverageSidecar>>,
     metadata: WorldMetadata,
     // Geometry is immutable after BVH construction. Preloaded profiles share
@@ -661,6 +664,7 @@ impl CollisionWorld {
         Ok(Self {
             source_sha256,
             bot_regional_guard: None,
+            movement_layers: None,
             coverage_sidecar: None,
             metadata,
             instance_ids: instance_ids.into(),
@@ -690,6 +694,25 @@ impl CollisionWorld {
         let mut world = self.clone();
         world.bot_regional_guard = Some(std::sync::Arc::new(guard));
         world
+    }
+    /// Restrict character movement queries to static collision layers in
+    /// `layers` (bit n set: layer n collides). Triangles on other layers, such
+    /// as retail vehicle-only blockers, stop vehicles but not characters.
+    /// Instances without explicit filter metadata stay solid. Other queries
+    /// (rays, projectiles, seats) are unaffected.
+    pub fn with_character_movement_layers(mut self, layers: Option<u32>) -> Self {
+        self.movement_layers = layers;
+        self
+    }
+    pub fn character_movement_layers(&self) -> Option<u32> {
+        self.movement_layers
+    }
+    fn movement_solid(&self, instance: usize) -> bool {
+        self.movement_layers.is_none_or(|layers| {
+            self.static_properties[instance]
+                .as_ref()
+                .is_none_or(|p| layers & (1 << (p.filter_info & 31)) != 0)
+        })
     }
     pub(crate) fn bot_regional_guard(&self) -> Option<&crate::bot_physics::RegionalGuard> {
         self.bot_regional_guard.as_deref()
@@ -905,6 +928,25 @@ impl CollisionWorld {
         end: Vec3,
         budget: &mut usize,
     ) -> Result<SegmentQuery<'_>, CollisionError> {
+        self.raycast_filtered(start, end, budget, false)
+    }
+    /// As `raycast_segment_bounded`, seeing only triangles that block
+    /// character movement (`with_character_movement_layers`).
+    pub fn movement_raycast_bounded(
+        &self,
+        start: Vec3,
+        end: Vec3,
+        budget: &mut usize,
+    ) -> Result<SegmentQuery<'_>, CollisionError> {
+        self.raycast_filtered(start, end, budget, true)
+    }
+    fn raycast_filtered(
+        &self,
+        start: Vec3,
+        end: Vec3,
+        budget: &mut usize,
+        movement: bool,
+    ) -> Result<SegmentQuery<'_>, CollisionError> {
         if !valid_point(start, self.max_abs_coordinate)
             || !valid_point(end, self.max_abs_coordinate)
             || start == end
@@ -941,6 +983,9 @@ impl CollisionWorld {
                     for index in *first..*last {
                         consume_budget(budget)?;
                         let triangle = &self.triangles[index];
+                        if movement && !self.movement_solid(triangle.instance) {
+                            continue;
+                        }
                         if let Some(fraction) = intersect_triangle(start, delta, triangle.vertices)
                         {
                             let replace = nearest.is_none_or(|(previous, previous_index)| {
@@ -992,6 +1037,27 @@ impl CollisionWorld {
         half: Vec3,
         budget: &mut usize,
     ) -> Result<Option<RayHit>, CollisionError> {
+        self.sweep_filtered(start, end, half, budget, false)
+    }
+    /// As `sweep_aabb`, against only triangles that block character movement
+    /// (`with_character_movement_layers`).
+    pub fn movement_sweep_aabb(
+        &self,
+        start: Vec3,
+        end: Vec3,
+        half: Vec3,
+        budget: &mut usize,
+    ) -> Result<Option<RayHit>, CollisionError> {
+        self.sweep_filtered(start, end, half, budget, true)
+    }
+    fn sweep_filtered(
+        &self,
+        start: Vec3,
+        end: Vec3,
+        half: Vec3,
+        budget: &mut usize,
+        movement: bool,
+    ) -> Result<Option<RayHit>, CollisionError> {
         if !valid_point(start, self.max_abs_coordinate)
             || !valid_point(end, self.max_abs_coordinate)
             || half
@@ -1030,6 +1096,9 @@ impl CollisionWorld {
                     for index in *first..*last {
                         consume_budget(budget)?;
                         let t = &self.triangles[index];
+                        if movement && !self.movement_solid(t.instance) {
+                            continue;
+                        }
                         if let Some((fraction, normal)) =
                             sweep_triangle(start, delta, half, t.vertices)
                             && nearest.is_none_or(|(f, i, _)| {
@@ -1215,6 +1284,10 @@ fn intersect_triangle(start: Vec3, delta: Vec3, vertices: [Vec3; 3]) -> Option<f
     let fraction = dot(edge2, q) / determinant;
     (0.0..=1.0).contains(&fraction).then_some(fraction)
 }
+
+#[cfg(test)]
+#[path = "collision_movement_layers_tests.rs"]
+mod movement_layers_tests;
 
 #[cfg(test)]
 mod material_ray_binding_tests {
