@@ -423,22 +423,33 @@ fn spawn_point_operational<W: Write>(engine: &Engine<W>, active: &Active, index:
                         && hospital.faction == active.reservation.character.faction
                 })
         }
+        // An APC insertion takes a life only while its vehicle exists, stands,
+        // belongs to the player's side, can let passengers out and has a free
+        // passenger seat. (A recipient still awaiting the vehicle creation
+        // batch waits for it in plan_respawn instead.)
         spawn_catalog::SpawnKind::VehiclePassenger => engine
             .ground_vehicles
             .as_ref()
             .and_then(|world| world.passenger_vehicle(index))
             .and_then(|binding| engine.current_ground_vehicle(binding.index))
-            .is_none_or(|vehicle| engine.ground_vehicle_is_operational(vehicle.index)),
+            .is_some_and(|vehicle| {
+                engine.ground_vehicle_is_operational(vehicle.index)
+                    && vehicle.team == active.team()
+                    && vehicle.faction == active.reservation.character.faction
+                    && vehicle.exit_policy().is_some()
+                    && engine.ground_passenger_seat(&vehicle).is_some()
+            }),
         _ => true,
     }
 }
 
 /// The point a due life starts at: the player's selection (else the squad's
 /// shared spawn) while it is operational. Once its hospital or vehicle is
-/// destroyed, or the squad lost the point, the life starts at the squad's
-/// authored default (its HQ point), else its current default, else another
-/// on-foot point of the squad, instead of being refused every wave. With no
-/// such point the selection stands, so its own refusal is reported.
+/// destroyed, absent or full, or the squad lost the point, the life starts at
+/// the squad's authored default (its HQ point), else its current default,
+/// else another on-foot point of the squad, instead of being refused every
+/// wave. Only on-foot points serve as the fallback. With no such point the
+/// selection stands, so its own refusal is reported.
 pub(super) fn respawn_point<W: Write>(engine: &Engine<W>, active: &Active) -> Option<u16> {
     let catalog = active.squad_catalog.as_ref();
     let chosen = active
