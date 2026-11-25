@@ -27,7 +27,7 @@ impl<W: Write> Engine<W> {
             self.advance_strategic_player_waves(now, wall)?;
             self.queue_team_wave_deadlines(now, wall)?;
             messages.extend(self.tick_bot_firearms(now, wall)?);
-            self.tick_bot_healing(now, wall)?;
+            messages.extend(self.tick_bot_healing(now, wall)?);
             messages.extend(self.tick_objectives(now, wall)?);
             self.tick_leadership_auto_repair(now, wall)?;
             self.tick_leadership_auto_heal(now, wall)?;

@@ -419,8 +419,10 @@ fn human_medkit_record_refusal_preserves_session_health_credit_and_fifo() {
     let queue = denied_tick.active.as_ref().unwrap().pending_shared.clone();
     denied_tick.max_log = denied_tick.written;
     assert_eq!(
-        denied_tick.tick_bot_healing(Duration::from_millis(1100), 1),
-        Err("log_limit_reached")
+        denied_tick
+            .tick_bot_healing(Duration::from_millis(1100), 1)
+            .err(),
+        Some("log_limit_reached")
     );
     assert_eq!(denied_tick.bot_registry.bots[&id].health, 160);
     assert!(
