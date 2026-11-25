@@ -337,6 +337,10 @@ pub(super) struct Task {
     /// After a refused objective interaction, the operator waits until then
     /// before asking again.
     pub(super) interaction_retry_at: Duration,
+    /// The destroyed objective of its side this engineer is sent to repair.
+    pub(super) repair: Option<u16>,
+    /// When this engineer's repair tool may submit again.
+    pub(super) repair_next_at: Duration,
     continuing: bool,
     routed: bool,
     wide: bool,
@@ -2406,11 +2410,15 @@ impl<W: Write> Engine<W> {
                 .map(|a| (a.index, a.center))
                 .collect()
         };
+        // An engineer sent to repair a destroyed objective of its side goes
+        // there instead of its squad's lane.
+        let repairs = self.plan_repair_duties();
         // An armed-objective duty replaces the squad's lane for that bot.
         let target_of = |id: u16, squad: u16| {
             duties
                 .get(&id)
-                .map_or(assigned[&squad], |d| Some(d.objective))
+                .map(|d| d.objective)
+                .or_else(|| repairs.get(&id).copied().map_or(assigned[&squad], Some))
         };
         let mut operators = BTreeMap::new();
         if policy.interactions_enabled
@@ -2442,8 +2450,14 @@ impl<W: Write> Engine<W> {
                     {
                         continue;
                     }
-                    let Some((_, range)) =
-                        operator_action(object, state, bot.target.squad.team(), world)
+                    let team = bot.target.squad.team();
+                    let Some(range) = operator_action(object, state, team, world)
+                        .map(|(_, range)| range)
+                        .or_else(|| {
+                            (repairs.get(&id) == Some(&index))
+                                .then(|| crate::bot_repair::repair_range(object, world, team))
+                                .flatten()
+                        })
                     else {
                         continue;
                     };
@@ -2501,6 +2515,7 @@ impl<W: Write> Engine<W> {
             }
             let armed = duties.get(&id).copied();
             let target = target_of(id, bot.target.squad.squad_index());
+            t.repair = repairs.get(&id).copied().filter(|_| armed.is_none());
             let wide = armed.is_none()
                 && target.is_some_and(|objective| {
                     assigned

@@ -1517,6 +1517,7 @@ impl<W: Write> Engine<W> {
         self.commit_domination_mission_start(&mut world.runtime, now, wall)?;
         let states_before = self.domination_objective_states();
         let mut bot_messages = self.tick_domination_bot_interactions(world, now, wall)?;
+        let mut repair_messages = self.tick_domination_bot_repairs(world, now, wall)?;
         // Holds open before this pass. When the pass ends one (the capture
         // completes, the holder leaves the trigger or a script moves the
         // objective), the holder gets the native exit handshake, as in
@@ -1715,6 +1716,7 @@ impl<W: Write> Engine<W> {
                 ))
             },
         )?;
+        bot_messages.append(&mut repair_messages);
         bot_messages.append(&mut messages);
         self.record_domination_objective_states(&states_before, now, wall)?;
         Ok(bot_messages)
@@ -2162,5 +2164,113 @@ impl<W: Write> Engine<W> {
         );
         self.domination_gameplay = Some(world);
         result
+    }
+}
+
+impl<W: Write> Engine<W> {
+    /// Engineers sent to repair a destroyed objective of their side submit
+    /// the repair a player's tool sends, once per tool cooldown, while they
+    /// stand in the objective's range.
+    pub(crate) fn tick_domination_bot_repairs(
+        &mut self,
+        world: &mut World,
+        now: Duration,
+        wall: u64,
+    ) -> Result<Vec<OutboundMessage>, &'static str> {
+        let (Some(tool), Some(catalog), Some(objectives)) = (
+            self.bot_repair_tool(),
+            &self.objective_catalog,
+            &self.objective_world,
+        ) else {
+            return Ok(Vec::new());
+        };
+        if !world.runtime.is_started() || !self.round_combat_allowed(now) {
+            return Ok(Vec::new());
+        }
+        let mut plans = Vec::new();
+        for (&id, bot) in &self.bot_registry.bots {
+            let (Some(index), Some(r)) = (bot.task.repair, bot.target.runtime) else {
+                continue;
+            };
+            if bot.health == 0
+                || now < bot.task.repair_next_at
+                || !matches!(r.phase, crate::development_target::BotPhase::Complete)
+                || !r.physics_motion.is_some_and(|m| m.grounded)
+                || r.navmesh_state.on_player
+                || !crate::bot_repair::carries(bot, tool.item_id)
+            {
+                continue;
+            }
+            let team = bot.target.squad.team();
+            let Some(object) = catalog.objects.iter().find(|o| o.object_index == index) else {
+                continue;
+            };
+            if crate::bot_repair::repair_range(object, objectives, team)
+                .is_some_and(|range| range.contains(r.position))
+            {
+                plans.push((id, index, team, r.generation));
+            }
+        }
+        let mut messages = Vec::new();
+        for (id, index, team, generation) in plans {
+            let authority = crate::domination_repair_runtime::Authority {
+                actor: Actor {
+                    player: id,
+                    generation: generation.into(),
+                    team,
+                },
+                live: true,
+                tool_active: true,
+                // Bots own no skills: the unmodified tool rate.
+                repair_rate: tool.cooldown_seconds,
+            };
+            let target = 0x0c80_0000 | u32::from(index);
+            let mut queued = None;
+            let result = self.commit_domination_gameplay(
+                &mut world.runtime,
+                now,
+                wall,
+                BTreeMap::new(),
+                |_, _, runtime, frame| {
+                    use crate::domination_repair_runtime::Submission;
+                    let (candidate, submission) = runtime.stage_repair(frame, target, authority)?;
+                    queued = Some(matches!(submission, Submission::Queued(_)));
+                    Ok((
+                        candidate,
+                        EffectsCommit {
+                            audit: vec![json!({"op":"domination_bot_repair","object_index":id,
+                                "generation":generation,"objective":index,
+                                "queued":matches!(submission, Submission::Queued(_))})],
+                            messages: Vec::new(),
+                            packets: Vec::new(),
+                            install: |_: &mut Self| {},
+                        },
+                    ))
+                },
+            );
+            let (accepted, reason) = match result {
+                Ok(mut sent) => {
+                    messages.append(&mut sent);
+                    (true, None)
+                }
+                Err(reason @ ("recorder_unavailable" | "log_limit_reached")) => return Err(reason),
+                Err(reason) => (false, Some(reason)),
+            };
+            if let Some(bot) = self.bot_registry.bots.get_mut(&id) {
+                bot.task.repair_next_at = now
+                    + Duration::from_secs_f32(if accepted {
+                        tool.cooldown_seconds.max(0.1)
+                    } else {
+                        2.
+                    });
+            }
+            self.record(
+                json!({"op":"bot_repair","timestamp_ms":now.as_millis() as u64,
+                    "object_index":id,"generation":generation,"objective":index,
+                    "accepted":accepted,"queued":queued,"reason":reason}),
+                wall,
+            )?;
+        }
+        Ok(messages)
     }
 }
