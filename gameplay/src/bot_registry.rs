@@ -137,6 +137,9 @@ pub(crate) struct BotRegistry {
     /// Placements per (spawn point, population source spawn); static geometry.
     pub(super) spawn_qualification:
         BTreeMap<(u16, u16), Result<crate::bot_spawn_selection::QualifiedPoint, &'static str>>,
+    /// Per squad: whether its population slots can route to any objective
+    /// (see `squad_routable`). Static for the installed population.
+    squad_routes: BTreeMap<u16, bool>,
 }
 #[derive(Clone)]
 pub(super) struct WorldBot {
@@ -2670,12 +2673,97 @@ impl<W: Write> Engine<W> {
         self.squad_reservation_count(squad) + self.bot_registry.members(squad).count()
     }
     /// Bots fill squads in ascending rank: squads a human occupies first, then
-    /// the fullest, then the lowest squad index, so platoons fill in order.
-    fn bot_fill_rank(&self, squad: u16) -> (bool, std::cmp::Reverse<usize>) {
+    /// squads whose spawns can route to an objective, then the fullest, then
+    /// the lowest squad index, so platoons fill in order.
+    fn bot_fill_rank(&self, squad: u16) -> (bool, bool, std::cmp::Reverse<usize>) {
         (
             self.squad_reservation_count(squad) == 0,
+            self.bot_registry.squad_routes.get(&squad) == Some(&false),
             std::cmp::Reverse(self.squad_occupants(squad)),
         )
+    }
+    /// Population slots checked per squad when deciding whether it can route.
+    const ROUTE_CHECK_SLOTS: usize = 4;
+    /// Work out, once per installed population, which squads' spawns cannot
+    /// reach any objective on the navmesh, walking or through certified drops.
+    /// A squad counts as unroutable only when at least one of its slots is
+    /// on the navmesh and none of them reaches an objective; missing
+    /// navigation data or an off-mesh slot never demotes a squad.
+    fn cache_squad_routes(&mut self, wall: u64) -> Result<(), &'static str> {
+        let Some(config) = self.bot_registry.config.as_ref() else {
+            return Ok(());
+        };
+        let Some(catalog) = self.spawn_catalog.as_ref() else {
+            return Ok(());
+        };
+        let squads: Vec<u16> = catalog
+            .map_pool()
+            .squads
+            .iter()
+            .map(|s| s.index)
+            .filter(|squad| !self.bot_registry.squad_routes.contains_key(squad))
+            .collect();
+        if squads.is_empty() {
+            return Ok(());
+        }
+        let (Some(mesh), Some(rules), Some(objectives)) = (
+            self.navmesh_world.as_ref(),
+            self.fall_damage_rules.as_ref(),
+            self.objective_catalog.as_ref(),
+        ) else {
+            self.bot_registry
+                .squad_routes
+                .extend(squads.into_iter().map(|squad| (squad, true)));
+            return Ok(());
+        };
+        let goals: Vec<[f64; 3]> = objectives
+            .objects
+            .iter()
+            .filter_map(|o| {
+                o.interaction
+                    .as_ref()
+                    .map(|r| r.position)
+                    .or_else(|| o.demolition.as_ref().map(|r| r.position))
+            })
+            .map(|p| p.map(f64::from))
+            .collect();
+        let mut unroutable = Vec::new();
+        for squad in squads {
+            let mut on_mesh = false;
+            let mut routes = goals.is_empty();
+            for slot in config
+                .slots
+                .iter()
+                .filter(|s| s.squad == Some(squad))
+                .take(Self::ROUTE_CHECK_SLOTS)
+            {
+                let start = point(slot.position);
+                if mesh.component_id(start).is_err() {
+                    continue;
+                }
+                on_mesh = true;
+                if goals.iter().any(|&goal| {
+                    mesh.route_with_drops(start, goal, 5., rules, 400)
+                        .is_ok_and(|r| r.status == navmesh::Status::Complete)
+                }) {
+                    routes = true;
+                    break;
+                }
+            }
+            let routable = routes || !on_mesh;
+            if !routable {
+                unroutable.push(squad);
+            }
+            self.bot_registry.squad_routes.insert(squad, routable);
+        }
+        if !unroutable.is_empty() {
+            self.record(
+                json!({"op":"bot_population_unroutable_squads","squads":unroutable,
+                    "reason":"no_route_from_spawn_to_any_objective"}),
+                wall,
+            )?;
+        }
+        Ok(())
     }
     /// The bot a shrinking population retires first: the reverse of the fill
     /// order (the last-filled squad, then its highest character index), so the
@@ -2793,6 +2881,9 @@ impl<W: Write> Engine<W> {
                 };
                 self.retire_bot_for_human(id, now, wall)?;
             }
+        }
+        if self.bot_registry.bots.len() < desired {
+            self.cache_squad_routes(wall)?;
         }
         while self.bot_registry.bots.len() < desired {
             let counts = |team| {
