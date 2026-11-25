@@ -2,8 +2,11 @@
 
 The server accepts explicit bounded retail mode 2 profiles for all ordered
 faction pairings. The profile generator reads the actual four-platoon map
-layout and emits all 32 squad bindings. Local policy caps the match at 64
-humans and a squad at four. Authored player bounds remain provenance.
+layout and emits all 32 squad bindings. The default `--capacity local64`
+policy caps the world at 64 characters, 32 per side, in squads of 8, the retail
+size. `--capacity authored` writes the authored 256-character world (team 128),
+which fills all 32 squads. Squad addresses are the same under both policies; see
+[spawn catalog capacity](extraction.md#spawn-catalog-capacity).
 
 ```sh
 python3 tools/extraction/build-retail-spawn-catalog.py \

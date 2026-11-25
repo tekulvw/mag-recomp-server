@@ -20,8 +20,11 @@ and alternate points can be selected. Other spawn kinds remain unsupported,
 including active vehicle-user and hospital points. Raw unsupported kind,
 category, user class, activation and squad links remain in the source metadata.
 
-The local profile uses maximum64/team32/squad4. Authored maximum/minimum counts
-are provenance and do not establish supported capacity. This first projector
+The default `--capacity local64` profile uses maximum64/team32/squad8: the
+retail squad size, so at most 4 of the 8 authored squads per side are full.
+`--capacity authored` writes the authored 128-player world (team 64, squad 8),
+which fills all 16 squads. Otherwise the authored maximum and minimum are
+provenance only. See [spawn catalog capacity](extraction.md#spawn-catalog-capacity). This first projector
 leaves native pool identities unverified. Bunkers and objectives are disabled in
 this foundation.
 

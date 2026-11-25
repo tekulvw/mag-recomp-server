@@ -24,6 +24,16 @@ OPPOSING_MODES = {'GameType64': 0, 'GameType128': 1, 'GameType256': 2}
 MODES = {**OPPOSING_MODES, 'GameTypeFactionExercise': 3}
 # Authored (definitions, direct instances) objective cardinality pinned for each
 # supported retail Sabotage map; the configured defender comes from the archive.
+# Capacity policies. The retail Squad object seats 8 members, so every policy
+# uses squads of 8; they differ only in how many characters a side holds.
+#   local64:  32 per side (a 64-character world) in every mode. Acquisition and
+#             Domination keep all their authored squads, so only some of them
+#             are full at once; the worker chooses which.
+#   authored: the mode's authored maximum (Acquisition 128, Domination 256),
+#             which fills every authored squad on both sides.
+CAPACITY_POLICIES = ('local64', 'authored')
+SQUAD_CAPACITY = 8
+LOCAL_TEAM_CAPACITY = 32
 SABOTAGE_OBJECTIVES = {
     'mag_cosmodrome_final': (13, 13),
     'mag_kennicott_final': (13, 13),
@@ -83,6 +93,35 @@ def original_rules(settings, mode_enum):
     }
 
 
+def team_capacity(policy, mode, squads, rules_source):
+    """Return (team_capacity, admission note) for one capacity policy.
+
+    Squads keep their authored addresses (team*16 + platoon*4 + squad) under
+    every policy; capacity never drops or renumbers a squad.
+    """
+    if policy == 'local64':
+        team = LOCAL_TEAM_CAPACITY
+        note = (f'Local maximum{2 * team}/team{team}/squad{SQUAD_CAPACITY} (capacity local64); '
+                'authored capacity is provenance only')
+    elif policy == 'authored':
+        if mode not in ('GameType128', 'GameType256'):
+            raise SystemExit('Authored capacity is supported only for Acquisition and Domination')
+        maximum = rules_source['authored_maximum_players']
+        if type(maximum) is not int or maximum <= 0 or maximum % 2:
+            raise SystemExit('Authored maximum players must be a positive even count')
+        team = maximum // 2
+        # The authored maximum must seat exactly every authored squad of each side.
+        if any(sum(s['team'] == side for s in squads) * SQUAD_CAPACITY != team for side in (0, 1)):
+            raise SystemExit('Authored maximum players does not match the authored squads')
+        note = (f'Authored maximum{maximum}/team{team}/squad{SQUAD_CAPACITY} (capacity authored, '
+                'from authored_maximum_players)')
+    else:
+        raise SystemExit('Unknown capacity policy')
+    if any(sum(s['team'] == side for s in squads) * SQUAD_CAPACITY < team for side in (0, 1)):
+        raise SystemExit('Authored squads cannot seat the team capacity')
+    return team, note
+
+
 def faction_exercise_rules(settings):
     return original_rules(settings, 'GameTypeFactionExercise')
 
@@ -124,7 +163,7 @@ def extract(disc, game_archive, map_name):
 
 
 def build(disc, game_archive, map_name, active_team, active_platoon, active_squad,
-          attacking_faction=None):
+          attacking_faction=None, capacity='local64'):
     points, groups, game_sha, match_rules, rules_source = extract(disc, game_archive, map_name)
     owner = points['map']['owner_faction']
     mode = points['map']['mode_enum']
@@ -216,6 +255,7 @@ def build(disc, game_archive, map_name, active_team, active_platoon, active_squa
                    (active_team, active_platoon, active_squad)), None)
     if active is None:
         raise SystemExit('Active squad is not present in the selected map')
+    team_seats, admission_note = team_capacity(capacity, mode, squads, rules_source)
     source = {'extractor': 'tools/extraction/extract-retail-spawns.py', 'map': map_name, 'game_archive_sha256': game_sha,
               'level_archive_sha256': points['source']['archive_sha256'], 'level_clv_sha256': points['source']['clv_sha256'],
               'game_rules_source': rules_source,
@@ -233,7 +273,7 @@ def build(disc, game_archive, map_name, active_team, active_platoon, active_squa
         source['authored_points_lost_per_death'] = match_rules['points_lost_per_death']
     if acquisition or domination:
         source['default_spawn_fallbacks'] = fallbacks
-        source['admission_policy'] = 'Local maximum64/team32/squad4; authored capacity is provenance only'
+        source['admission_policy'] = admission_note
     # Original-proven modes: Faction Exercise3, Sabotage0, Acquisition1, Domination2.
     # No vehicle spawns are supported here. Objectives are disabled above;
     # Faction Exercise objectives remain an unverified absence policy.
@@ -244,7 +284,7 @@ def build(disc, game_archive, map_name, active_team, active_platoon, active_squa
     # them in the generated runtime configuration rather than Rust constants.
     profile = {'game_type': MODES[mode],
                'attacking_faction': FACTIONS[attacking_faction] if opposing else owner,
-               'auto_assign_teams': True, 'team_capacity': 32, 'squad_capacity': 4 if acquisition or domination else 8,
+               'auto_assign_teams': True, 'team_capacity': team_seats, 'squad_capacity': SQUAD_CAPACITY,
                'maximum_points': match_rules['maximum_points'],
                'spawn_wave_ms': match_rules['spawn_wave_ms'],
                'has_bunkers': False, 'has_objectives': False}
@@ -268,13 +308,16 @@ def main():
     parser.add_argument('--active', required=True, help='team/platoon/squad index for the local player')
     parser.add_argument('--attacking-faction', choices=tuple(FACTIONS),
                         help='Required opposing attacker for Sabotage, Acquisition and Domination; legacy Syr Darya defaults to Valor')
+    parser.add_argument('--capacity', choices=CAPACITY_POLICIES, default='local64',
+                        help='local64 (default): 32 per side, squads of 8. authored: the authored '
+                             'Acquisition 128 / Domination 256 world, squads of 8')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--check', action='store_true', help='Fail unless OUTPUT already matches')
     args = parser.parse_args()
     if args.output.resolve() == args.game_archive.resolve() or args.output.resolve().is_relative_to(args.disc.resolve()):
         raise SystemExit('Output must not replace original assets')
     catalog = build(args.disc, args.game_archive, args.map, *map(int, args.active.split('/')),
-                    attacking_faction=args.attacking_faction)
+                    attacking_faction=args.attacking_faction, capacity=args.capacity)
     text = json.dumps(catalog, indent=2) + '\n'
     if args.check:
         if args.output.read_text() != text:

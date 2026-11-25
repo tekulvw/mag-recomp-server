@@ -27,6 +27,23 @@ python3 tools/extraction/extract-retail-mediation-profile.py --elf RETAIL_ELF --
 
 The spawn builder supports Suppression and the three retail Sabotage maps. The archive's map configuration supplies each defender: `mag_cosmodrome_final` (SVER), `mag_kennicott_final` (Valor) and `mag_remote_comms_final` (Raven). Each map therefore has two attacker profiles, and together they cover all six ordered faction pairs. Pass the exact authored map name, an explicit team/platoon/squad selection and `--attacking-faction`. Only the legacy Cosmodrome profile defaults its attacker to Valor. Authored objective counts are pinned per Sabotage map, and a changed count is refused. It preserves authored coordinates before terrain snapping and marks runtime indices unverified. Objectives remain disabled in its match policy. The all-map metadata extractor does not turn authored bunker exit candidates into grounded, collision-safe exits. Unknown objective fields stay typed/raw rather than acquiring guessed meanings. The objective metadata projector inventories a bounded subset of script calls/conditions without executing Lua or reconstructing general branch semantics. `--map` selects one of the three Sabotage maps (default `mag_cosmodrome_final`). Each map pins its level archive and CLV hashes, its configured defender and its authored objective, control, list, platoon, trigger and forward-spawn counts. Live objective slot bindings remain a separate per-map capture: `project-retail-objective-runtime.py` refuses a map without its own qualified `TOKEN_SLOT_BINDINGS`.
 
+### Spawn catalog capacity
+
+`build-retail-spawn-catalog.py --capacity POLICY` chooses the world size written to `match_profile`. Every policy uses squads of 8, the retail Squad object's size:
+
+| Policy | Sabotage, Suppression | Acquisition | Domination |
+|---|---|---|---|
+| `local64` (default) | team 32, squad 8 | team 32, squad 8 | team 32, squad 8 |
+| `authored` | refused | team 64, squad 8 (128 players) | team 128, squad 8 (256 players) |
+
+`authored` takes the team size from the mode's recorded `authored_maximum_players` and refuses a map whose authored squads would not seat exactly that many on each side. Acquisition and Domination catalogs record the policy in `source.admission_policy`. Sabotage and Suppression output is unchanged.
+
+Capacity changes only the seat counts. Every policy keeps every authored squad binding at its authored address (team × 16 + platoon × 4 + squad, the address the client uses), with the same spawns and defaults: 16 squads in Acquisition (indices 0-7 and 16-23) and 32 in Domination. At `local64` a side has 32 seats and 8 (Acquisition) or 16 (Domination) squads of 8, so at most 4 squads per side are full at once. The worker chooses which. It seats each human in its side's emptiest squad, lowest index first. Bots then fill the squads that hold humans, then the fullest, then the lowest index (see [bot fill](worker-match-profiles.md)). A side with no humans therefore fills platoon 0's four squads (indices 0-3 or 16-19).
+
+Earlier projectors wrote squad 4 for Acquisition and Domination (`Local maximum64/team32/squad4` in `source`). The default output changed on purpose so that 64-player profiles use the retail squad size; a catalog's `source` shows which rule produced it.
+
+A squad-bound bot population for a world filled to its full size must bind at least `squad_capacity` slots to **every** squad in the catalog, because any squad can hold a human and its bots (`bot_population_insufficient_squad_slots`). With squads of 8 that is 128 slots in Acquisition and 256 in Domination, at both `local64` and `authored`. A population built for 4 per squad does not load against an 8-per-squad catalog. Domination with squads of 8 needs a mag-gameplay release newer than 0.12.1, which accepts Domination squads above 4.
+
 The objective volume extractor reads every level archive and emits each objective trigger's authored oriented box; see [objective trigger volumes](objective-trigger-volumes.md) for the box semantics and what remains unestablished.
 
 The mediation profile extracts a protocol word through ELF load mappings. Its disabled character-catalog grants are explicit policy. These tools do not decrypt SELF/PSARC inputs or obtain game files.

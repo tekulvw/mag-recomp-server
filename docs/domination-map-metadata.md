@@ -43,7 +43,9 @@ Alyeska Terminus as the three Domination maps. Each produces 112 spawn points,
 32 squad groups, 16 bunker candidates, and 36 objective-to-forward-spawn links.
 The authored score starts at 1800/1000 and the squad spawn waves are 20 seconds
 on both sides. The authored minimum of 204 and maximum of 256 describe the
-original mode. The server has a separate 64-player ceiling.
+original mode. The spawn catalog projector writes a 64-character world in
+squads of 8 by default, or this authored 256 with `--capacity authored`; see
+[spawn catalog capacity](extraction.md#spawn-catalog-capacity).
 
 The retail ELF independently confirms enum value 2 in the `kGameType_256`
 registration and the `GameType256` enum lookup. The retail deploy UI maps its
