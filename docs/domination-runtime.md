@@ -210,8 +210,9 @@ new squad spawns are published (`domination_hospital_spawns_retired`). The FSP
 activation that restores the hospital, or a round reset, reactivates the point.
 
 A due life whose selected spawn is no longer operational starts at the squad's
-HQ point instead of being refused every wave. That covers a destroyed hospital
-or ground vehicle, or a point the squad lost. The HQ point is the squad's
+HQ point instead of being refused every wave. That covers a destroyed hospital,
+an APC insertion whose vehicle is destroyed, absent or full, and a point the
+squad lost. The HQ point is the squad's
 authored default, else its current default, else another on-foot point of the
 squad. With no such point the selection stands and its refusal is reported as
 before.
