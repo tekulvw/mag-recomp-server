@@ -612,6 +612,15 @@ impl SpawnCatalog {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_unselectable_native_spawns_for_test(
+        &mut self,
+        points: BTreeSet<u16>,
+        fallbacks: [u16; 32],
+    ) {
+        self.unselectable_native_spawns = Some((points, fallbacks));
+    }
+
     fn locally_selectable_default(&self, squad: u16, raw: u16) -> u16 {
         let Some((disabled, fallbacks)) = &self.unselectable_native_spawns else {
             return raw;
@@ -745,6 +754,22 @@ impl SpawnCatalog {
                     | SpawnKind::Parachute
             )
         })
+    }
+
+    /// The squad's runtime default when it is an active point this catalog
+    /// leaves unsupported but the mode routes the squad to natively (an
+    /// Acquisition field hospital while its structure stands). Players fall
+    /// back locally to the squad's category-zero point; bots may arrive on
+    /// foot beside it.
+    pub(crate) fn native_unselectable_default(&self, squad: u16) -> Option<u16> {
+        let (disabled, _) = self.unselectable_native_spawns.as_ref()?;
+        let index = self.runtime_squads.get(&squad)?.default_spawn;
+        (disabled.contains(&index)
+            && self.point_active(index)
+            && self
+                .point(index)
+                .is_some_and(|point| matches!(point.kind, SpawnKind::Unsupported)))
+        .then_some(index)
     }
 
     /// Points a squad gained at runtime (objective progression, a Domination

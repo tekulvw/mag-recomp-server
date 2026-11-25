@@ -225,22 +225,7 @@ impl Setup {
     }
 
     fn configure_spawns(&self, spawns: &mut SpawnCatalog) -> Result<(), &'static str> {
-        let unselectable = self
-            .bindings
-            .rows
-            .values()
-            .filter_map(|row| row.spawn)
-            .filter(|spawn| spawn.user_class == 0)
-            .map(|spawn| spawn.index)
-            .collect();
-        let mut category_zero = [u16::MAX; 32];
-        for (&squad, row) in &self.bindings.squads {
-            category_zero[usize::from(squad)] = row
-                .category_zero
-                .ok_or("acquisition_structural_category_zero_missing")?
-                .0;
-        }
-        spawns.configure_acquisition_structural_spawn_scope(unselectable, category_zero)
+        self.bindings.configure_spawns(spawns)
     }
 
     fn validate_spawn_routes(&self, spawns: &SpawnCatalog) -> Result<(), &'static str> {
@@ -386,6 +371,36 @@ impl Hook {
 }
 
 impl Bindings {
+    fn configure_spawns(&self, spawns: &mut SpawnCatalog) -> Result<(), &'static str> {
+        // Structural forward spawns (the defenders' field hospitals) a spawn
+        // catalog leaves unsupported fall back locally to each squad's
+        // category-zero point. A catalog that makes them selectable lets
+        // players and bots use them directly; those need no fallback.
+        let unselectable: BTreeSet<u16> = self
+            .rows
+            .values()
+            .filter_map(|row| row.spawn)
+            .filter(|spawn| spawn.user_class == 0)
+            .map(|spawn| spawn.index)
+            .filter(|&index| {
+                spawns.point(index).is_none_or(|point| {
+                    matches!(point.kind, crate::spawn_catalog::SpawnKind::Unsupported)
+                })
+            })
+            .collect();
+        if unselectable.is_empty() {
+            return Ok(());
+        }
+        let mut category_zero = [u16::MAX; 32];
+        for (&squad, row) in &self.squads {
+            category_zero[usize::from(squad)] = row
+                .category_zero
+                .ok_or("acquisition_structural_category_zero_missing")?
+                .0;
+        }
+        spawns.configure_acquisition_structural_spawn_scope(unselectable, category_zero)
+    }
+
     fn plan_fsp(
         &self,
         token: u32,
@@ -1348,3 +1363,7 @@ impl<W: Write> Frame<'_, W> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "acquisition_field_hospital_tests.rs"]
+mod field_hospital_tests;

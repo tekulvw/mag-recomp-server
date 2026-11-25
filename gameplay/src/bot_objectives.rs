@@ -717,6 +717,40 @@ fn boxes_intersect(a: crate::actor_collision::Bounds, b: crate::actor_collision:
     (0..3).all(|i| a.min[i] <= b.max[i] && a.max[i] >= b.min[i])
 }
 impl<W: Write> Engine<W> {
+    /// The objective a squad's bots work on now (its lane), if any.
+    /// Domination squads follow the mode runtime's own current assignment,
+    /// the one their human members see.
+    pub(crate) fn bot_squad_lane(&self, squad: u16) -> Option<u16> {
+        if self.domination_gameplay.is_some() {
+            self.initial_objective_index(squad)
+                .ok()
+                .filter(|&index| index != u16::MAX)
+        } else {
+            self.objective_catalog
+                .as_ref()
+                .zip(self.objective_world.as_ref())
+                .and_then(|(c, w)| assignment(c, w, squad))
+        }
+    }
+    /// An objective's centre and the team that owns (defends) it.
+    pub(crate) fn bot_objective_center(&self, objective: u16) -> Option<([f32; 3], u8)> {
+        let object = self
+            .objective_catalog
+            .as_ref()?
+            .objects
+            .iter()
+            .find(|o| o.object_index == objective)?;
+        object
+            .interaction
+            .as_ref()
+            .map(|r| (r.position, r.owner_team))
+            .or_else(|| {
+                object
+                    .demolition
+                    .as_ref()
+                    .map(|r| (r.position, r.owner_team))
+            })
+    }
     pub(super) fn drop_cost_quotes(
         &self,
         id: u16,
@@ -2385,21 +2419,7 @@ impl<W: Write> Engine<W> {
             .map(|b| b.target.squad.squad_index())
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
-            .map(|squad| {
-                // Domination squads follow the mode runtime's own current
-                // assignment, the one their human members see.
-                let objective = if self.domination_gameplay.is_some() {
-                    self.initial_objective_index(squad)
-                        .ok()
-                        .filter(|&index| index != u16::MAX)
-                } else {
-                    self.objective_catalog
-                        .as_ref()
-                        .zip(self.objective_world.as_ref())
-                        .and_then(|(c, w)| assignment(c, w, squad))
-                };
-                (squad, objective)
-            })
+            .map(|squad| (squad, self.bot_squad_lane(squad)))
             .collect();
         let duties = self.plan_armed_duties(&policy.armed, now, &mut receipts);
         let centers: BTreeMap<u16, [f64; 3]> = if duties.is_empty() {

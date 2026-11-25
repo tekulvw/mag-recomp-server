@@ -1934,3 +1934,29 @@ mod domination_placement_tests {
 #[cfg(test)]
 #[path = "domination_bunker_seat_tests.rs"]
 pub(crate) mod domination_bunker_seat_tests;
+
+#[cfg(test)]
+impl BunkerWorld {
+    /// SYNTHETIC: the hospital fixture's operational hospital, rebound to
+    /// `spawn` for `team`/`faction` and placed at `position` with one exit
+    /// 2 m along +x.
+    pub(crate) fn synthetic_hospital(
+        spawn: u16,
+        team: u8,
+        faction: u8,
+        position: replication::CharacterPosition,
+    ) -> Self {
+        let mut world = domination_bunker_seat_tests::fixture()
+            .bunker_world
+            .take()
+            .unwrap();
+        let mut hospital = world.bunkers.remove(&5).unwrap();
+        world.bunkers.clear();
+        hospital.spawn = spawn;
+        hospital.team = team;
+        hospital.faction = faction;
+        hospital.exit.as_mut().unwrap().transform.position = position;
+        world.bunkers.insert(5, hospital);
+        world
+    }
+}

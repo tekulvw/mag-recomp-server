@@ -441,9 +441,19 @@ fn engine(slots: &[(u8, u16, f32, f32)], can_deactivate: bool) -> Engine<Vec<u8>
     let mut engine = engine
         .with_bot_population(config, slots.len())
         .unwrap_or_else(|reason| panic!("{reason}"));
+    // These duty fixtures start every bot at its own slot. Each slot has its
+    // own authored point here, so with lanes known, defending lives would
+    // choose the points nearest their objective, which are other slots'
+    // homes; bot_spawn_selection_tests covers that choice. Allocate before
+    // the objectives are visible.
+    let objectives = (
+        engine.objective_catalog.take(),
+        engine.objective_world.take(),
+    );
     engine
         .reconcile_bot_population(Duration::ZERO, 1, &mut Default::default())
         .unwrap();
+    (engine.objective_catalog, engine.objective_world) = objectives;
     assert_eq!(engine.bot_registry.bots.len(), slots.len());
     // Settle every body on the floor, as the first movement tick would.
     let body = bot_physics::Body::default();
