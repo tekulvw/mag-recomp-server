@@ -21,7 +21,39 @@ wave). The result is deterministic for identical world state.
 
 A point is considered only when the squad may use it now, it is active, and its
 kind is insertion, alternate, on-foot or parachute. Bunker, vehicle and
-helicopter passenger points and unsupported points are never used by bots.
+helicopter passenger points and unsupported points are never used by bots,
+except for the defender hospitals below.
+
+## Defending squads
+
+A squad defends when the objective its bots work on (its lane: the Sabotage
+progression or catalog assignment, the Acquisition catalog assignment, or the
+Domination runtime assignment; before lanes exist, the authored initial
+assignment) belongs to its own team. Defending bots do not keep their
+population slot just because the squad's default is unchanged. Instead each
+life ranks every point the squad may use now by the length of a complete
+navmesh route (walking or certified drops) from the point to the lane
+objective:
+
+- the squad's usable points above, including the population source spawn;
+- in Domination, the squad's hospital (bunker passenger point) while its point
+  is active and the hospital is operational and belongs to the squad's side.
+  Bots arrive on foot at the hospital's authored exits, or a 1 m cell further
+  out, instead of taking a seat;
+- in Acquisition, the field hospital the structural objective routes the
+  squad to while it stands (the squad's runtime default), when the spawn
+  catalog still leaves it unsupported. Players fall back to the squad's
+  category-zero point there; bots stand on routed ground within 6 m of the
+  authored point. A catalog that makes the field hospitals selectable needs no
+  fallback: the structural spawn scope then leaves them alone and they rank
+  like any other point.
+
+A point whose placements do not route to the objective is skipped and reported
+once. Points within 20 m of the shortest route are rotated per bot, so a
+squad spreads over equally forward points. A human squad member's shared
+spawn, once it differs from the authored default, goes first when it routes.
+The population slot stays the final fallback. Attacking squads keep the order
+above.
 
 The source spawn always uses the bot's own population slot and waits while a
 body occupies it, as before. Any other point uses placements that are:
@@ -55,3 +87,7 @@ their slot.
   (`population_slot`, `authored_point` or `parachute_landing`) and `position`.
 - `bot_spawn_point_qualified` (`placements`) or `bot_spawn_point_unusable`
   (`reason`) is written once per point and population source spawn.
+- Defenders: `bot_lane_spawn_qualified` (`route_m`, `placements`, `arrival`)
+  or `bot_lane_spawn_unusable` (`reason`), once per point, lane objective and
+  whether the point is the bot's own population slot. Arrivals add
+  `hospital_exit` and `field_hospital`.

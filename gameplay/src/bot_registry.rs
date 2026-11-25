@@ -137,6 +137,10 @@ pub(crate) struct BotRegistry {
     /// Placements per (spawn point, population source spawn); static geometry.
     pub(super) spawn_qualification:
         BTreeMap<(u16, u16), Result<crate::bot_spawn_selection::QualifiedPoint, &'static str>>,
+    /// Defender placements and route lengths per (spawn point, lane objective,
+    /// whether the point is the bot's own population slot); static geometry.
+    pub(super) lane_spawns:
+        BTreeMap<(u16, u16, bool), Result<crate::bot_spawn_selection::LaneSpawn, &'static str>>,
     /// Per squad: whether its population slots can route to any objective
     /// (see `squad_routable`). Static for the installed population.
     squad_routes: BTreeMap<u16, bool>,
@@ -3173,6 +3177,7 @@ impl<W: Write> Engine<W> {
         self.bot_registry.regional_unavailable = None;
         self.bot_registry.firearm_cursor = 0;
         self.bot_registry.spawn_qualification.clear();
+        self.bot_registry.lane_spawns.clear();
     }
 }
 

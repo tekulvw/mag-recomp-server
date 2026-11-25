@@ -89,6 +89,12 @@ impl BunkerExitPolicy {
             z: self.transform.position.z + offset[2],
         }
     }
+    /// Every candidate's settled world position, in authored order.
+    pub(crate) fn candidate_positions(&self) -> impl Iterator<Item = CharacterPosition> + '_ {
+        self.candidates
+            .iter()
+            .map(|candidate| self.position(candidate.position_offset))
+    }
     /// Rank supplied candidates using camera facing, then transform its supplied
     /// settled offset. An invalid camera selects the first explicit candidate.
     pub fn exit(&self, camera_degrees: u32) -> Result<BunkerExit, &'static str> {
