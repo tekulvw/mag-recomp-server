@@ -81,6 +81,8 @@ pub mod domination_gameplay_config;
 pub mod domination_gameplay_effects;
 pub mod domination_gameplay_engine;
 pub mod domination_gameplay_provider;
+#[cfg(test)]
+mod domination_idle_tests;
 pub mod domination_match_flow;
 pub mod domination_objective_runtime;
 pub mod domination_repair_runtime;

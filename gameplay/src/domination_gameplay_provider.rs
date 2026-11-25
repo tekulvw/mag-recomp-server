@@ -1476,6 +1476,16 @@ impl<W: Write> Engine<W> {
         if !self.match_started || self.match_terminal.is_some() {
             return Ok(Vec::new());
         }
+        // Like Acquisition, an empty world (after the last release) or one
+        // whose humans have not yet entered stays idle: no ticks, no records.
+        if !self
+            .active
+            .iter()
+            .chain(self.peers.values())
+            .any(|a| a.entered_game && a.ready_for_updates && a.initial_objects.is_some())
+        {
+            return Ok(Vec::new());
+        }
         let mut world = self
             .domination_gameplay
             .take()

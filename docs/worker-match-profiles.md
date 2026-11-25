@@ -140,7 +140,9 @@ rather than spreading over them: they fill squads a human occupies first, then
 the fullest squad with a free bound slot, then the lowest squad index, so
 platoons fill in order. When the population shrinks, the bot in the
 last-filled squad leaves first. Domination bots fight but do not capture
-objectives.
+objectives. A Domination world with no entered human (for example after the
+last release) does not tick its objectives or write `domination_gameplay`
+records, matching Acquisition.
 
 An interactive Domination profile additionally supplies `domination_round` and
 `domination_gameplay`, ground vehicles, character damage rules and collision.
