@@ -2674,13 +2674,42 @@ impl<W: Write> Engine<W> {
     }
     /// Bots fill squads in ascending rank: squads a human occupies first, then
     /// squads whose spawns can route to an objective, then the fullest, then
-    /// the lowest squad index, so platoons fill in order.
-    fn bot_fill_rank(&self, squad: u16) -> (bool, bool, std::cmp::Reverse<usize>) {
+    /// squads that share an authored objective with an occupied squad of the
+    /// other side, then the lowest squad index, so platoons fill in order and
+    /// both sides head for the same objectives.
+    fn bot_fill_rank(&self, squad: u16) -> (bool, bool, std::cmp::Reverse<usize>, bool) {
         (
             self.squad_reservation_count(squad) == 0,
             self.bot_registry.squad_routes.get(&squad) == Some(&false),
             std::cmp::Reverse(self.squad_occupants(squad)),
+            !self.shares_objectives_with_opponents(squad),
         )
+    }
+    /// Whether `squad`'s authored objectives meet those of the other side's
+    /// occupied squads. Neutral (true) without an objective catalog, without
+    /// an authored list for the squad or while the other side is empty.
+    fn shares_objectives_with_opponents(&self, squad: u16) -> bool {
+        let (Some(catalog), Some(spawns)) =
+            (self.objective_catalog.as_ref(), self.spawn_catalog.as_ref())
+        else {
+            return true;
+        };
+        let Some(own) = catalog.authored_objectives(squad) else {
+            return true;
+        };
+        let squads = &spawns.map_pool().squads;
+        let team = squads.iter().find(|s| s.index == squad).map(|s| s.team);
+        let mut opponents = squads
+            .iter()
+            .filter(|s| Some(s.team) != team && self.squad_occupants(s.index) > 0)
+            .filter_map(|s| catalog.authored_objectives(s.index))
+            .peekable();
+        if opponents.peek().is_none() {
+            return true;
+        }
+        opponents
+            .flatten()
+            .any(|objective| own.contains(&objective))
     }
     /// Population slots checked per squad when deciding whether it can route.
     const ROUTE_CHECK_SLOTS: usize = 4;
