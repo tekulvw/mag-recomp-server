@@ -470,8 +470,8 @@ fn catalog_with_hq() -> spawn_catalog::SpawnCatalog {
         .map(|i| {
             json!({"index":i,"team":i/16,"platoon":i%16/4,"squad":i%4,
             "faction":if i<16 {None} else {Some(0)},
-            "available":match i {0..16 => vec![0], 17 => vec![4,3], 18 => vec![4,5], _ => vec![3,5,1,2]},
-            "default_spawn":match i {0..16 => 0, 17 | 18 => 4, _ => 3}})
+            "available":match i {0..=15 => vec![0], 17 => vec![4,3], 18 => vec![4,5], _ => vec![3,5,1,2]},
+            "default_spawn":match i {0..=15 => 0, 17 | 18 => 4, _ => 3}})
         })
         .collect();
     spawn_catalog::SpawnCatalog::from_json(&json!({
