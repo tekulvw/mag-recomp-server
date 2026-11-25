@@ -17,7 +17,7 @@ const ABILITIES: [Ability; 6] = [
     Ability::GuidedArtillery,
 ];
 
-fn setup() -> Setup {
+pub(crate) fn setup() -> Setup {
     let digest = "ab".repeat(32);
     let mut modes = Vec::new();
     let mut effects = Vec::new();
@@ -118,29 +118,11 @@ fn setup() -> Setup {
     }
 }
 
-pub(crate) fn configured() -> Engine<Vec<u8>> {
-    configured_for_mode(2)
-}
-
-fn configured_for_mode(game_type: i8) -> Engine<Vec<u8>> {
-    let abilities = setup();
-    let name = &abilities.map_name;
-    let spawns = spawn_catalog::SpawnCatalog::from_json(
-        &json!({
-            "format":"mag_spawn_catalog","schema_version":1,"source":"synthetic ability arena",
-            "active":{"map_name":name,"squad_index":16,"default_spawn":0,"available":[0]},
-            "match_profile":{"game_type":game_type,"auto_assign_teams":true,"team_capacity":8,
-                "squad_capacity":4,"has_bunkers":false,"has_objectives":false,"attacking_faction":0},
-            "maps":[{"name":name,"owner_faction":1,"spawn_count":1,
-                "locations":[{"index":0,"token":71,"kind":"on_foot","position":{"x":100.,"y":3.,"z":100.}}],
-                "squads":(0..2).flat_map(|team| (0..2).map(move |squad| json!({
-                    "index":team*16+squad,"team":team,"platoon":0,"squad":squad,
-                    "faction":if team==1 { Some(1) } else { None },"available":[0],"default_spawn":0
-                }))).collect::<Vec<_>>() }]
-        })
-        .to_string(),
-    )
-    .unwrap();
+/// Invented native leadership tables that admit the active-ability runtime.
+pub(crate) fn native_leadership() -> (
+    leadership_passives::LeadershipCatalog,
+    leadership_runtime::RolePolicy,
+) {
     let passives = leadership_passives::LeadershipCatalog::from_json(
         &json!({
             "schema_version":1,"application_id":20231,
@@ -165,6 +147,33 @@ fn configured_for_mode(game_type: i8) -> Engine<Vec<u8>> {
         .to_string(),
     )
     .unwrap();
+    (passives, policy)
+}
+
+pub(crate) fn configured() -> Engine<Vec<u8>> {
+    configured_for_mode(2)
+}
+
+fn configured_for_mode(game_type: i8) -> Engine<Vec<u8>> {
+    let abilities = setup();
+    let name = &abilities.map_name;
+    let spawns = spawn_catalog::SpawnCatalog::from_json(
+        &json!({
+            "format":"mag_spawn_catalog","schema_version":1,"source":"synthetic ability arena",
+            "active":{"map_name":name,"squad_index":16,"default_spawn":0,"available":[0]},
+            "match_profile":{"game_type":game_type,"auto_assign_teams":true,"team_capacity":8,
+                "squad_capacity":4,"has_bunkers":false,"has_objectives":false,"attacking_faction":0},
+            "maps":[{"name":name,"owner_faction":1,"spawn_count":1,
+                "locations":[{"index":0,"token":71,"kind":"on_foot","position":{"x":100.,"y":3.,"z":100.}}],
+                "squads":(0..2).flat_map(|team| (0..2).map(move |squad| json!({
+                    "index":team*16+squad,"team":team,"platoon":0,"squad":squad,
+                    "faction":if team==1 { Some(1) } else { None },"available":[0],"default_spawn":0
+                }))).collect::<Vec<_>>() }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let (passives, policy) = native_leadership();
     let mut engine = engine()
         .with_spawn_catalog(spawns)
         .with_leadership_passives(passives, policy)

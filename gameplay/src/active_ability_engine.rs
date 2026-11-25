@@ -781,6 +781,14 @@ impl<W: Write> Engine<W> {
         let Some(mut runtime) = self.active_abilities.take() else {
             return Ok(result);
         };
+        let active_effects = |runtime: &Runtime| {
+            runtime
+                .effects
+                .values()
+                .filter(|e| !e.effect.is_complete())
+                .count()
+        };
+        let before = (runtime.version, active_effects(&runtime));
         let outcome = (|| {
             let dt = runtime
                 .last_tick
@@ -1036,7 +1044,12 @@ impl<W: Write> Engine<W> {
                     }
                 }
             }
-            result.audit.push(json!({"op":"active_ability_update","timestamp_ms":now.as_millis() as u32,"active_effects":runtime.effects.values().filter(|e|!e.effect.is_complete()).count(),"version":runtime.version}));
+            // An unchanged ability state is not a gameplay result. Callers
+            // treat any audit row as a change, so report only a transition.
+            let after = (runtime.version, active_effects(&runtime));
+            if after != before {
+                result.audit.push(json!({"op":"active_ability_update","timestamp_ms":now.as_millis() as u32,"active_effects":after.1,"version":after.0}));
+            }
             Ok(())
         })();
         self.active_abilities = Some(runtime);
