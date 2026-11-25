@@ -20,7 +20,9 @@ ROTATIONS = [
     ([0.0, -90.0, 0.0], 768),              # faces -x
     ([-180.0, 0.9, -180.0], 509),          # flipped X/Z encode a turn of 179.1 degrees: faces -z
     ([180.0, 88.0, 180.0], 262),           # flipped X/Z with a near quarter turn
-    ([0.0, 45.0, 30.0], 128),              # roll about the facing axis keeps the heading
+    ([0.0, 45.0, 30.0], 116),              # the Z turn is applied last and shifts the heading
+    ([10.0, -40.0, 0.0], 910),             # pitch is applied first, so the heading is the Y turn
+    ([-20.0, 30.0, 15.0], 69),             # pitch, turn and roll together
 ]
 
 

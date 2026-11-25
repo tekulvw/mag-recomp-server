@@ -6,9 +6,10 @@ atan2(forward.x, forward.z) / 2pi * 1024, so 0 faces +z and 256 faces +x.
 A location without `yaw` keeps the previous fixed facing 0.
 
 The facing comes from the all-map extractor's authored `rotation_xyz` (degrees),
-matched by the location's token. The rotation is composed as Rx * Ry * Rz and
-the character's forward is that rotation applied to +z; this composition matched
-the client's own SpawnPoint orientations in a qualified capture. Positions,
+matched by the location's token. The rotation is composed as Rz * Ry * Rx (X
+applied first) and the character's forward is that rotation applied to +z; this
+composition matched the client's own SpawnPoint orientations exactly, including
+pitched and rolled points, in qualified captures. Positions,
 indices, kinds and every other field are left unchanged.
 """
 import argparse
@@ -23,10 +24,11 @@ def require(condition, message):
 
 
 def forward(rotation_xyz):
-    """Forward (+z) of the rotation Rx(a) * Ry(b) * Rz(c), angles in degrees."""
-    a, b, _ = (math.radians(float(v)) for v in rotation_xyz)
-    # Third column of Rx * Ry * Rz; Rz turns about +z and leaves +z fixed.
-    return (math.sin(b), -math.sin(a) * math.cos(b), math.cos(a) * math.cos(b))
+    """Forward (+z) of the rotation Rz(c) * Ry(b) * Rx(a), angles in degrees."""
+    a, b, c = (math.radians(float(v)) for v in rotation_xyz)
+    # Rx(a) takes +z to (0, -sin a, cos a); Ry(b) then Rz(c) turn that vector.
+    x, y, z = math.cos(a) * math.sin(b), -math.sin(a), math.cos(a) * math.cos(b)
+    return (x * math.cos(c) - y * math.sin(c), x * math.sin(c) + y * math.cos(c), z)
 
 
 def packed_yaw(rotation_xyz):
