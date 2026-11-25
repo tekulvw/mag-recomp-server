@@ -127,7 +127,8 @@ impl<B: EffectBackend> AtomicCallbacks<B> {
         world: WorldKey,
         replay_capacity: usize,
     ) -> Result<Self, &'static str> {
-        if world.world_id == 0 || world.incarnation == 0 || !(1..=4096).contains(&replay_capacity) {
+        // World 0 is Horizon's first DME world; only the incarnation is 1-based.
+        if world.incarnation == 0 || !(1..=4096).contains(&replay_capacity) {
             return Err("invalid_acquisition_callback_context");
         }
         Ok(Self {

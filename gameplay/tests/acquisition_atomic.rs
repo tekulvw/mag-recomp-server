@@ -294,6 +294,28 @@ fn stale_or_foreign_preparations_and_wrong_world_are_rejected_before_record() {
 }
 
 #[test]
+fn horizon_world_zero_hosts_callbacks_but_incarnation_zero_does_not() {
+    let make = |world_id, incarnation| {
+        let (spawns, graph) = support::fixture(0);
+        AtomicCallbacks::new(
+            Catalog::from_json(&graph.to_string(), &spawns).unwrap(),
+            Backend::new(None),
+            WorldKey {
+                world_id,
+                incarnation,
+            },
+            4,
+        )
+    };
+    // Horizon's first DME world is 0; only the round incarnation is 1-based.
+    assert!(make(0, 1).is_ok());
+    assert!(matches!(
+        make(0, 0),
+        Err("invalid_acquisition_callback_context")
+    ));
+}
+
+#[test]
 fn duplicate_preparation_replays_after_commit_but_evicted_replay_stays_rejected() {
     let mut a = adapter(None, 1);
     let first = a.prepare(request(1)).unwrap();

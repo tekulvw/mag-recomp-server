@@ -14,7 +14,16 @@ pub struct Policy {
     pub enabled: bool,
     /// Forward view cone while moving, centred on the published facing.
     pub fov_degrees: f64,
+    /// Sight and engagement distance for a weapon whose retail AI usage band
+    /// is medium (assault rifles, machine guns, most marksman rifles).
     pub view_distance_m: f64,
+    /// The same for the near band (shotguns, side arms) and the far band
+    /// (long-range sniper rifles).
+    pub near_view_distance_m: f64,
+    pub far_view_distance_m: f64,
+    /// Extra delay before reacting to an enemy first seen at the edge of the
+    /// sight distance; nearer enemies scale it down linearly.
+    pub distance_reaction_ms: u64,
     /// Enemies this close are noticed in any direction.
     pub proximity_m: f64,
     /// Delay between first noticing a threat and reacting to it; each bot
@@ -28,6 +37,16 @@ pub struct Policy {
     pub sound_alert_ms: u64,
     /// Upper bound on one continuous interruption of a route.
     pub max_hold_ms: u64,
+    /// A bot still trading fire (its weapon holds an enemy, or it was hit
+    /// within the last two seconds) keeps its hold past `max_hold_ms`, up to
+    /// this total.
+    pub max_engaged_hold_ms: u64,
+    /// How fast a bot without a weapon target turns toward what it noticed.
+    pub attention_turn_degrees_per_second: f64,
+    /// Weapon reaction for an enemy acquired after the bot has already
+    /// reacted to a threat; a fresh acquisition keeps the firearm policy's
+    /// own reaction time.
+    pub primed_reaction_ms: u64,
     /// After the threat clears, sounds alone cannot interrupt again for this
     /// long; after a forced release nothing can.
     pub resume_cooldown_ms: u64,
@@ -47,7 +66,10 @@ impl Default for Policy {
         Self {
             enabled: true,
             fov_degrees: 110.,
-            view_distance_m: 25.,
+            view_distance_m: 60.,
+            near_view_distance_m: 30.,
+            far_view_distance_m: 100.,
+            distance_reaction_ms: 600,
             proximity_m: 4.,
             reaction_min_ms: 200,
             reaction_max_ms: 600,
@@ -55,6 +77,9 @@ impl Default for Policy {
             sight_memory_ms: 4000,
             sound_alert_ms: 2500,
             max_hold_ms: 4000,
+            max_engaged_hold_ms: 15_000,
+            attention_turn_degrees_per_second: 240.,
+            primed_reaction_ms: 250,
             resume_cooldown_ms: 3000,
             max_hold_cooldown_ms: 12_000,
             interrupt_fraction: 0.35,
@@ -97,6 +122,9 @@ impl Policy {
         let h = &self.hearing;
         if !metres(self.fov_degrees, 1., 360.)
             || !metres(self.view_distance_m, 1., 2048.)
+            || !metres(self.near_view_distance_m, 1., 2048.)
+            || !metres(self.far_view_distance_m, 1., 2048.)
+            || self.distance_reaction_ms > 10_000
             || !metres(self.proximity_m, 0., 50.)
             || self.reaction_min_ms > self.reaction_max_ms
             || self.reaction_max_ms > 10_000
@@ -104,6 +132,9 @@ impl Policy {
             || !(100..=60_000).contains(&self.sight_memory_ms)
             || !(100..=60_000).contains(&self.sound_alert_ms)
             || !(500..=120_000).contains(&self.max_hold_ms)
+            || !(self.max_hold_ms..=120_000).contains(&self.max_engaged_hold_ms)
+            || !metres(self.attention_turn_degrees_per_second, 1., 1440.)
+            || self.primed_reaction_ms > 10_000
             || self.resume_cooldown_ms > 60_000
             || self.max_hold_cooldown_ms > 120_000
             || !metres(self.interrupt_fraction, 0., 1.)
@@ -137,6 +168,22 @@ impl Policy {
             SoundKind::Walk => h.walk_m,
         }
     }
+    pub(crate) fn sight_range(&self, band: Band) -> f64 {
+        match band {
+            Band::Near => self.near_view_distance_m,
+            Band::Medium => self.view_distance_m,
+            Band::Far => self.far_view_distance_m,
+        }
+    }
+    /// Reaction delay added for an enemy first seen `distance` away.
+    pub(crate) fn distance_delay(&self, distance: f64, range: f64) -> Duration {
+        let fraction = if range > 0. {
+            (distance / range).clamp(0., 1.)
+        } else {
+            1.
+        };
+        Duration::from_millis((self.distance_reaction_ms as f64 * fraction).round() as u64)
+    }
     /// Fixed per-life reaction delay inside the configured range.
     pub(crate) fn reaction(&self, id: u16, generation: u32) -> Duration {
         let span = self.reaction_max_ms - self.reaction_min_ms;
@@ -147,6 +194,40 @@ impl Policy {
     }
 }
 
+/// The retail weapon's authored AI usage band (`ai_usage` in its parameters).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Band {
+    Near,
+    Medium,
+    Far,
+}
+impl Band {
+    pub(crate) fn of_weapon(parameters: &Value) -> Self {
+        match parameters["ai_usage"].as_str() {
+            Some("kWepAiUsageRangeNear") => Self::Near,
+            Some("kWepAiUsageRangeFar") => Self::Far,
+            _ => Self::Medium,
+        }
+    }
+}
+/// Sight and engagement distance of a bot's equipped primary weapon; a weapon
+/// without catalog parameters uses the medium band.
+pub(crate) fn bot_sight_range(
+    policy: &Policy,
+    items: &item_catalog::ItemCatalog,
+    bot: &WorldBot,
+) -> f64 {
+    let kit = &bot.target.loadout;
+    let band = kit
+        .inventories
+        .get(usize::from(kit.handle.inventory_index))
+        .and_then(|inventory| inventory.slots.get(usize::from(kit.primary.gear_slot)))
+        .copied()
+        .flatten()
+        .and_then(|item| items.weapon_parameters(item).ok())
+        .map_or(Band::Medium, Band::of_weapon);
+    policy.sight_range(band)
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum SoundKind {
@@ -173,6 +254,8 @@ pub(crate) enum Cause {
     Heard(SoundKind),
     NearMiss,
     Sight,
+    /// The bot took damage; the point is the attacker when known.
+    Damaged,
 }
 /// What one bot perceived during one tick.
 #[derive(Clone, Copy, Debug, Default)]
@@ -182,7 +265,11 @@ pub(crate) struct Observation {
     /// Position of the enemy the bot's weapon currently holds.
     pub engaged: Option<(u16, [f64; 3])>,
     pub seen: Option<(u16, [f64; 3])>,
+    /// Extra reaction time for the seen enemy, from its distance.
+    pub sight_delay: Duration,
     pub heard: Option<Heard>,
+    /// Damage taken this tick: the attacker and its position when known.
+    pub damaged: Option<(Option<u16>, [f64; 3])>,
 }
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Heard {
@@ -216,6 +303,9 @@ pub(crate) struct Mind {
     hard_cooldown: bool,
     next_sight: Duration,
     next_footstep: Duration,
+    /// The bot's damage revision already turned into a stimulus.
+    damage_seen: u64,
+    last_damaged: Option<Duration>,
 }
 impl Mind {
     pub(crate) fn held(&self) -> bool {
@@ -225,6 +315,16 @@ impl Mind {
     pub(crate) fn attention(&self, now: Duration) -> Option<[f64; 3]> {
         self.threat.filter(|t| now >= t.react_at).map(|t| t.point)
     }
+    /// The enemy behind the current threat, once the bot has reacted to it.
+    pub(crate) fn threat_enemy(&self, now: Duration) -> Option<u16> {
+        self.threat
+            .filter(|t| now >= t.react_at)
+            .and_then(|t| t.enemy)
+    }
+    fn recently_damaged(&self, now: Duration) -> bool {
+        self.last_damaged
+            .is_some_and(|at| now.saturating_sub(at) <= Duration::from_secs(2))
+    }
     fn notice(
         &mut self,
         policy: &Policy,
@@ -232,7 +332,7 @@ impl Mind {
         now: Duration,
         (cause, point, enemy, urgent): (Cause, [f64; 3], Option<u16>, bool),
     ) {
-        let linger = Duration::from_millis(if cause == Cause::Sight {
+        let linger = Duration::from_millis(if cause >= Cause::Sight {
             policy.sight_memory_ms
         } else {
             policy.sound_alert_ms
@@ -242,7 +342,10 @@ impl Mind {
             Some(t) => {
                 // A fresher or stronger stimulus moves attention; a sound never
                 // replaces an enemy that is still being tracked by sight.
-                if cause >= t.cause || t.cause != Cause::Sight {
+                if cause >= t.cause
+                    || t.cause < Cause::Sight
+                    || (enemy.is_some() && enemy == t.enemy)
+                {
                     t.point = point;
                     t.enemy = enemy;
                     t.cause = t.cause.max(cause);
@@ -250,7 +353,7 @@ impl Mind {
                 }
                 t.last = now;
                 t.urgent |= urgent;
-                if cause == Cause::NearMiss {
+                if matches!(cause, Cause::NearMiss | Cause::Damaged) {
                     t.react_at = t.react_at.min(now + quick);
                 }
             }
@@ -260,7 +363,7 @@ impl Mind {
                     enemy,
                     cause,
                     react_at: now
-                        + if cause == Cause::NearMiss {
+                        + if matches!(cause, Cause::NearMiss | Cause::Damaged) {
                             quick
                         } else {
                             reaction
@@ -291,13 +394,17 @@ impl Mind {
         if let Some((enemy, point)) = obs.seen {
             self.notice(
                 policy,
-                reaction,
+                reaction + obs.sight_delay,
                 now,
                 (Cause::Sight, point, Some(enemy), true),
             );
         }
         if let Some(h) = obs.heard {
             self.notice(policy, reaction, now, (h.cause, h.point, None, h.urgent));
+        }
+        if let Some((enemy, point)) = obs.damaged {
+            self.last_damaged = Some(now);
+            self.notice(policy, reaction, now, (Cause::Damaged, point, enemy, true));
         }
         if self
             .threat
@@ -311,7 +418,10 @@ impl Mind {
                     .threat
                     .is_some_and(|t| t.urgent && now >= t.react_at && obs.interruptible);
                 let sight = self.threat.is_some_and(|t| t.cause == Cause::Sight);
-                let allowed = now >= self.cooldown_until || (!self.hard_cooldown && sight);
+                // Being hit always lets a bot stop and fight back.
+                let allowed = now >= self.cooldown_until
+                    || (!self.hard_cooldown && sight)
+                    || self.recently_damaged(now);
                 if wants && allowed {
                     self.hold_since = Some(now);
                     return Some(Transition::Interrupt(self.threat.unwrap().cause));
@@ -325,7 +435,15 @@ impl Mind {
                     ("route_unavailable", true, policy.resume_cooldown_ms)
                 } else if self.threat.is_none() {
                     ("threat_cleared", false, policy.resume_cooldown_ms)
-                } else if now.saturating_sub(since) >= Duration::from_millis(policy.max_hold_ms) {
+                } else if now.saturating_sub(since)
+                    >= Duration::from_millis(
+                        if obs.engaged.is_some() || self.recently_damaged(now) {
+                            policy.max_engaged_hold_ms
+                        } else {
+                            policy.max_hold_ms
+                        },
+                    )
+                {
                     ("max_hold", true, policy.max_hold_cooldown_ms)
                 } else {
                     return None;
@@ -388,6 +506,9 @@ impl World {
     pub(crate) fn attention(&self, id: u16, now: Duration) -> Option<[f64; 3]> {
         self.minds.get(&id).and_then(|m| m.attention(now))
     }
+    pub(crate) fn threat_enemy(&self, id: u16, now: Duration) -> Option<u16> {
+        self.minds.get(&id).and_then(|m| m.threat_enemy(now))
+    }
     #[cfg(test)]
     pub(crate) fn stats_rays(&self) -> u64 {
         self.stats.sight_rays
@@ -434,11 +555,16 @@ pub(crate) fn off_axis(from: [f64; 3], yaw: f64, to: [f64; 3]) -> f64 {
         .abs()
 }
 /// Could a bot facing `yaw` at `eye` notice `target` without hearing it?
-pub(crate) fn in_view(policy: &Policy, eye: [f64; 3], yaw: f64, target: [f64; 3]) -> bool {
+pub(crate) fn in_view(
+    policy: &Policy,
+    range: f64,
+    eye: [f64; 3],
+    yaw: f64,
+    target: [f64; 3],
+) -> bool {
     let d = distance(eye, target);
     d <= policy.proximity_m
-        || (d <= policy.view_distance_m
-            && off_axis(eye, yaw, target) <= policy.fov_degrees.to_radians() * 0.5)
+        || (d <= range && off_axis(eye, yaw, target) <= policy.fov_degrees.to_radians() * 0.5)
 }
 /// Shortest distance from `p` to the segment `a`-`b`.
 pub(crate) fn segment_distance(p: [f64; 3], a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -590,13 +716,26 @@ struct Body {
     team: u8,
     feet: [f64; 3],
 }
+/// The living enemy Character named by a damage record's attacker field
+/// (character objects are `0x0380_0000 | index`). Other sources, such as
+/// vehicles and the world, and friendly fire give no point to react to.
+fn attacker_body(bodies: &[Body], team: u8, attacker: u32) -> Option<Body> {
+    if attacker & 0xffff_0000 != 0x0380_0000 {
+        return None;
+    }
+    let id = attacker as u16;
+    bodies
+        .iter()
+        .find(|b| b.id == id && b.team != team)
+        .copied()
+}
 
 impl<W: Write> Engine<W> {
     /// Process-wide switch (`--bot-perception off|on`) over every population.
     pub fn set_bot_perception_override(&mut self, enabled: Option<bool>) {
         self.bot_perception.override_enabled = enabled;
     }
-    fn bot_perception_policy(&self) -> Option<Policy> {
+    pub(crate) fn bot_perception_policy(&self) -> Option<Policy> {
         let config = self.bot_registry.config.as_ref()?;
         let enabled = self
             .bot_perception
@@ -777,6 +916,7 @@ impl<W: Write> Engine<W> {
         // Bot lives, stale state and footsteps of bots still walking.
         let held = self.bot_perception.held_ids();
         let mut live = BTreeSet::new();
+        let mut hits = BTreeMap::new();
         for (&id, bot) in &self.bot_registry.bots {
             let Some(r) = bot.target.runtime else {
                 continue;
@@ -793,8 +933,13 @@ impl<W: Write> Engine<W> {
                 *mind = Mind {
                     life: (bot.allocation_generation, r.generation),
                     next_sight: now + Duration::from_millis(u64::from(id % 5) * 50),
+                    damage_seen: bot.damage_revision,
                     ..Default::default()
                 };
+            }
+            if mind.damage_seen != bot.damage_revision {
+                mind.damage_seen = bot.damage_revision;
+                hits.insert(id, (team, bot.damage.last_attacker));
             }
             if matches!(r.phase, BotPhase::Relocating)
                 && !held.contains(&id)
@@ -865,13 +1010,14 @@ impl<W: Write> Engine<W> {
             let team = bot.target.squad.team();
             let eye = torso(me);
             let yaw = yaw_radians(bot.yaw);
+            let range = bot_sight_range(&policy, &items, bot);
             let mut candidates: Vec<_> = bodies
                 .iter()
                 .filter(|b| b.team != team)
                 .map(|b| (distance(eye, torso(b.feet)), *b))
                 .filter(|(d, b)| {
                     if moving {
-                        in_view(&policy, eye, yaw, torso(b.feet))
+                        in_view(&policy, range, eye, yaw, torso(b.feet))
                     } else {
                         *d <= policy.proximity_m
                     }
@@ -879,7 +1025,7 @@ impl<W: Write> Engine<W> {
                 .collect();
             candidates.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.id.cmp(&b.1.id)));
             let mut deferred = false;
-            for (_, candidate) in candidates.into_iter().take(2) {
+            for (d, candidate) in candidates.into_iter().take(2) {
                 let before = rays;
                 match clear_view(
                     self.collision_world.as_ref(),
@@ -890,7 +1036,14 @@ impl<W: Write> Engine<W> {
                     &mut work,
                 ) {
                     Ok(true) => {
-                        seen.insert(id, (candidate.id, candidate.feet));
+                        seen.insert(
+                            id,
+                            (
+                                candidate.id,
+                                candidate.feet,
+                                policy.distance_delay(d, range),
+                            ),
+                        );
                         self.bot_perception.stats.sight_rays += (before - rays) as u64;
                         break;
                     }
@@ -923,8 +1076,13 @@ impl<W: Write> Engine<W> {
             let obs = Observation {
                 interruptible: interruptible(bot, guard),
                 engaged,
-                seen: seen.get(&id).map(|&(enemy, feet)| (enemy, torso(feet))),
+                seen: seen.get(&id).map(|&(enemy, feet, _)| (enemy, torso(feet))),
+                sight_delay: seen.get(&id).map_or(Duration::ZERO, |&(_, _, delay)| delay),
                 heard: heard.get(&id).copied(),
+                damaged: hits
+                    .get(&id)
+                    .and_then(|&(team, attacker)| attacker_body(&bodies, team, attacker))
+                    .map(|b| (Some(b.id), torso(b.feet))),
             };
             let reaction = policy.reaction(id, generation);
             let mind = self.bot_perception.minds.get_mut(&id).unwrap();
@@ -936,7 +1094,8 @@ impl<W: Write> Engine<W> {
                     let t = mind.threat.unwrap();
                     receipts.push(json!({"op":"bot_perception_interrupt","timestamp_ms":now.as_millis() as u64,
                         "object_index":id,"generation":generation,"cause":cause,"source":t.point,"enemy":t.enemy,
-                        "objective":bot.task.objective,"operator":bot.task.operator}));
+                        "objective":bot.task.objective,"operator":bot.task.operator,
+                        "distance_m":distance(torso(bot.target.runtime.unwrap().physical_position()), t.point)}));
                 }
                 Some(Transition::Resume(reason)) => {
                     self.bot_perception.stats.resumes += 1;
@@ -1022,11 +1181,21 @@ mod tests {
         let p = Policy::default();
         let eye = [0., 1., 0.];
         // Facing +Z (yaw 0).
-        assert!(in_view(&p, eye, 0., [10., 1., 20.]));
-        assert!(!in_view(&p, eye, 0., [0., 1., -10.]), "behind");
-        assert!(!in_view(&p, eye, 0., [20., 1., 0.]), "90 degrees off axis");
-        assert!(in_view(&p, eye, 0., [0., 1., -3.]), "very close behind");
-        assert!(!in_view(&p, eye, 0., [0., 1., 26.]), "beyond view distance");
+        assert!(in_view(&p, 25., eye, 0., [10., 1., 20.]));
+        assert!(!in_view(&p, 25., eye, 0., [0., 1., -10.]), "behind");
+        assert!(
+            !in_view(&p, 25., eye, 0., [20., 1., 0.]),
+            "90 degrees off axis"
+        );
+        assert!(
+            in_view(&p, 25., eye, 0., [0., 1., -3.]),
+            "very close behind"
+        );
+        assert!(
+            !in_view(&p, 25., eye, 0., [0., 1., 26.]),
+            "beyond view distance"
+        );
+        assert!(in_view(&p, 100., eye, 0., [0., 1., 90.]), "far band");
     }
 
     #[test]
@@ -1227,6 +1396,133 @@ mod tests {
                 Transition::Interrupt(Cause::Sight),
             ]
         );
+    }
+
+    #[test]
+    fn a_hit_interrupts_quickly_even_during_the_hard_cooldown() {
+        let p = Policy::default();
+        let mut mind = Mind {
+            cooldown_until: ms(10_000),
+            hard_cooldown: true,
+            ..Default::default()
+        };
+        let hit = Observation {
+            interruptible: true,
+            damaged: Some((Some(9), [0., 1., -10.])),
+            ..Default::default()
+        };
+        let walking = Observation {
+            interruptible: true,
+            ..Default::default()
+        };
+        // The slow per-life reaction is replaced by the minimum.
+        assert_eq!(mind.step(&p, ms(600), ms(0), hit), None);
+        assert_eq!(mind.step(&p, ms(600), ms(150), walking), None);
+        assert_eq!(
+            mind.step(&p, ms(600), ms(200), walking),
+            Some(Transition::Interrupt(Cause::Damaged))
+        );
+        assert_eq!(mind.attention(ms(200)), Some([0., 1., -10.]));
+        assert_eq!(mind.threat_enemy(ms(200)), Some(9));
+        // A sound does not pull attention away from the attacker.
+        let gunfire = Observation {
+            interruptible: true,
+            heard: Some(Heard {
+                cause: Cause::Heard(SoundKind::Firearm),
+                point: [20., 1., 0.],
+                urgent: true,
+            }),
+            ..Default::default()
+        };
+        mind.step(&p, ms(600), ms(250), gunfire);
+        assert_eq!(mind.attention(ms(250)), Some([0., 1., -10.]));
+    }
+
+    #[test]
+    fn trading_fire_keeps_the_hold_past_the_ordinary_cap() {
+        let p = Policy::default();
+        let mut mind = Mind::default();
+        let engaged = Observation {
+            interruptible: true,
+            engaged: Some((5, [0., 1., 12.])),
+            ..Default::default()
+        };
+        let mut log = Vec::new();
+        for t in (0..=p.max_engaged_hold_ms + 100).step_by(50) {
+            log.extend(mind.step(&p, ms(0), ms(t), engaged).map(|x| (t, x)));
+        }
+        assert_eq!(
+            log,
+            vec![
+                (0, Transition::Interrupt(Cause::Sight)),
+                (p.max_engaged_hold_ms, Transition::Resume("max_hold")),
+            ]
+        );
+        // Without a held target the ordinary cap applies.
+        let mut idle = Mind::default();
+        idle.step(&p, ms(0), ms(0), sight([0., 1., 5.]));
+        let watching = Observation {
+            interruptible: true,
+            seen: Some((5, [0., 1., 5.])),
+            ..Default::default()
+        };
+        assert_eq!(
+            idle.step(&p, ms(0), ms(p.max_hold_ms), watching),
+            Some(Transition::Resume("max_hold"))
+        );
+        let bad = Policy {
+            max_engaged_hold_ms: p.max_hold_ms - 1,
+            ..Default::default()
+        };
+        assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn weapon_bands_set_sight_distance_and_far_enemies_react_later() {
+        let p = Policy::default();
+        let band = |usage: &str| Band::of_weapon(&json!({"ai_usage": usage}));
+        assert_eq!(p.sight_range(band("kWepAiUsageRangeNear")), 30.);
+        assert_eq!(p.sight_range(band("kWepAiUsageRangeMedium")), 60.);
+        assert_eq!(p.sight_range(band("kWepAiUsageRangeFar")), 100.);
+        assert_eq!(Band::of_weapon(&json!({})), Band::Medium);
+        assert_eq!(p.distance_delay(0., 60.), ms(0));
+        assert_eq!(p.distance_delay(30., 60.), ms(300));
+        assert_eq!(p.distance_delay(90., 60.), ms(600));
+        // The delay adds to the per-life reaction for a seen enemy only.
+        let mut mind = Mind::default();
+        let far = Observation {
+            sight_delay: ms(600),
+            ..sight([0., 1., 55.])
+        };
+        mind.step(&p, ms(200), ms(0), far);
+        assert_eq!(mind.attention(ms(750)), None);
+        assert!(mind.attention(ms(800)).is_some());
+    }
+
+    #[test]
+    fn only_an_enemy_character_attacker_gives_a_point() {
+        let bodies = [
+            Body {
+                id: 3,
+                team: 0,
+                feet: [1., 0., 1.],
+            },
+            Body {
+                id: 4,
+                team: 1,
+                feet: [2., 0., 2.],
+            },
+        ];
+        assert_eq!(
+            attacker_body(&bodies, 0, 0x0380_0004).map(|b| b.id),
+            Some(4)
+        );
+        assert!(attacker_body(&bodies, 0, 0x0380_0003).is_none(), "friendly");
+        assert!(
+            attacker_body(&bodies, 0, 0x0400_0004).is_none(),
+            "not a character"
+        );
+        assert!(attacker_body(&bodies, 0, u32::MAX).is_none());
     }
 
     #[test]

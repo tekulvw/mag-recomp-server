@@ -30,9 +30,19 @@ when its index starts another allocation or life:
 ### Sight
 
 - A walking bot looks along a 110° horizontal cone around its published
-  facing, up to 25 m. Any enemy within 4 m is noticed in every direction.
-  Farther enemies do not stop a walking bot; once it stands, the weapon
-  controller's own 60 m acquisition applies.
+  facing, as far as its weapon's sight distance (below). Any enemy within 4 m
+  is noticed in every direction.
+- The sight distance follows the equipped primary weapon's retail AI usage
+  band (`ai_usage` in the item catalog's weapon parameters): near (shotguns,
+  side arms) 30 m, medium (assault rifles, machine guns, submachine guns and
+  most marksman rifles) 60 m, far (long-range sniper rifles) 100 m. The
+  distances themselves are server tunables, not retail values. The same
+  distance is the weapon controller's engagement distance and the end of its
+  accuracy falloff, replacing the firearm policy's `max_engagement_distance_m`
+  while perception is on; the weapon's own maximum range still applies.
+- An enemy first seen at the edge of the sight distance takes 600 ms longer to
+  react to than one at point-blank range (scaled linearly by distance), so
+  distant enemies are not noticed instantly.
 - A standing bot keeps the weapon controller's own acquisition; perception
   only adds the 4 m all-round check for it.
 - Line of sight uses the static collision world inside verified physics
@@ -73,27 +83,43 @@ Sources:
 No acoustic occlusion is modelled. Vehicles, mounted weapons and rockets are
 not sound sources yet.
 
+### Damage
+
+A bot notices every hit it takes. When the damage record names an enemy
+Character as the last attacker (a human or another bot), the attacker's current
+position becomes the threat point and the attacker becomes the threat's enemy.
+This needs no inference from gunfire, so it also covers suppressed weapons,
+long-range shots and clients whose magazine reports are missing. Damage from
+vehicles, the world or a teammate gives no point to turn to.
+
 ### Reaction
 
 A bot first notices a threat and reacts after a delay drawn once per life from
-200–600 ms by its index and life generation (deterministic). A near miss uses
-the minimum delay. After reacting, the threat's point becomes the bot's
-attention: without a weapon target, the weapon controller turns toward it at
-its normal turn rate and publishes the facing, so the ordinary acquisition
-cone can then find the enemy.
+200–600 ms by its index and life generation (deterministic). A near miss or a
+hit uses the minimum delay. After reacting, the threat's point becomes the
+bot's attention: without a weapon target, the weapon controller turns toward it
+at 240°/s (`attention_turn_degrees_per_second`, never slower than the weapon
+turn rate) and publishes the facing, so the ordinary acquisition cone can then
+find the enemy. A new acquisition prefers the threat's enemy.
 
-A seen enemy keeps the threat alive while it is seen or held by the weapon;
-afterwards its last known position is watched for 4 s. A sound keeps the bot
+A bot that has already reacted is primed: the weapon's first shot at a newly
+acquired enemy waits `primed_reaction_ms` (250 ms) instead of the firearm
+policy's `reaction_ms`. An enemy acquired without any prior stimulus keeps the
+full firearm reaction time.
+
+A seen enemy or an attacker keeps the threat alive while it is seen or held by
+the weapon; afterwards its last known position is watched for 4 s. A sound keeps the bot
 alert and facing its source for 2.5 s.
 
 ## Arbitration above goals
 
 Priority, highest first:
 
-1. A visible enemy (or the enemy the weapon holds).
-2. A near miss, or a sound within 35% of its hearing radius (for example
+1. Damage from a known attacker.
+2. A visible enemy (or the enemy the weapon holds).
+3. A near miss, or a sound within 35% of its hearing radius (for example
    gunfire within 24.5 m, suppressed fire within 6.3 m).
-3. The bot's objective or fixed goal.
+4. The bot's objective or fixed goal.
 
 A farther audible sound turns a standing bot but never interrupts a route.
 
@@ -113,7 +139,10 @@ paused the bot may fire like a standing bot.
 
 The route resumes when the threat expires (`threat_cleared`), when the bot
 stops being an ordinary route follower (`route_unavailable`, released at once
-so passages and queues are never disturbed), or after 4 s (`max_hold`).
+so passages and queues are never disturbed), or after 4 s (`max_hold`). A bot
+still trading fire, because its weapon holds an enemy or it was hit within the
+last 2 s, keeps the hold for up to 15 s (`max_engaged_hold_ms`) before the
+same `max_hold` release.
 Hysteresis avoids oscillation:
 
 - the hold only ends after the threat has lingered without stimulus, so a
@@ -121,15 +150,47 @@ Hysteresis avoids oscillation:
 - for 3 s after the threat clears, sounds alone cannot interrupt again; a
   visible enemy still can, after a fresh reaction delay;
 - after `route_unavailable` nothing interrupts for 3 s, and after `max_hold`
-  nothing interrupts for 12 s, so the bot makes real progress on its goal.
+  nothing interrupts for 12 s, so the bot makes real progress on its goal;
+- a hit is the exception: a bot that is shot always may stop and fight back,
+  even during either cooldown.
 
 A paused bot also refreshes its objective and local-traffic progress, so
 neither the planner nor the traffic arbiter treats it as stuck.
+
+A bot standing still while it waits its turn (in a drop admission queue, at a
+holding spot or during a traffic yield) may fire like any standing bot; walking
+to those spots, holding an objective interaction and taking a passage still
+never fire.
 
 The short hold and long cap cooldown are deliberate. In headless bot-only
 Sabotage runs, longer holds (10–20 s) left bots trading fire at range until
 the cap and delayed objective completion several times over; with these
 defaults a bot in sustained contact still spends most of its time advancing.
+The longer engaged hold applies only while the bot is actually exchanging fire.
+
+### Measured effect
+
+Headless bot-only runs (every Acquisition attack/defend pairing, 600 s each,
+and every Sabotage pairing, 420 s each; private inputs, deterministic). An
+"ambush" is a bot hit by another bot while it had not fired or been hit for
+5 s; "returned" means it fired within 10 s and before dying.
+
+| | Acquisition before | after | Sabotage before | after |
+| --- | --- | --- | --- | --- |
+| Ambushed bots that returned fire | 26% | 55% | 38% | 75% |
+| Died without replying | 49% | 21% | 44% | 15% |
+| Median return-fire time per run | 650–850 ms | 300–400 ms | 1.05–1.75 s | 0.35–0.50 s |
+| Sight detections while walking, median / 90th percentile | ≤ 25 m cap | 40 / 59 m | ≤ 25 m cap | 34 / 56 m |
+| First-shot distance of an engagement, median / 90th percentile | 27 / 50 m | 29 / 54 m | 23 / 41 m | 27 / 50 m |
+| Engagements started beyond 40 m | 355 | 507 | 504 | 917 |
+| Objective completions | 8 captures | 6 | 33 | 38 |
+| Perception CPU, slowest tick | 94 µs | 121 µs | 101 µs | 127 µs |
+
+Every bot in these runs carries the factions' default (medium band) kit, so no
+engagement started beyond 60 m. Sabotage defenders started fewer disarms (50 to
+19 deactivations) because they fight back first. In Acquisition the longer
+walking sight costs some objective progress (more stops on the way); capture
+counts are small and noisy. No sight check was deferred for budget in any run.
 
 ## Cost
 
@@ -144,8 +205,8 @@ misses, sight rays, deferred checks and perception CPU time every 10 s.
 
 ## Evidence
 
-- `bot_perception_interrupt`: bot, life, cause (`sight`, `near_miss`,
-  `{"heard": kind}`), source point, enemy, objective and operator flag.
+- `bot_perception_interrupt`: bot, life, cause (`damaged`, `sight`,
+  `near_miss`, `{"heard": kind}`), source point, enemy, objective and operator flag.
 - `bot_perception_resume`: bot, life, reason and how long the route was
   paused.
 - `bot_perception_summary`: periodic totals, as above.
@@ -158,7 +219,10 @@ The population file's `perception` object; omitted fields use the defaults:
 {
   "enabled": true,
   "fov_degrees": 110,
-  "view_distance_m": 25,
+  "view_distance_m": 60,
+  "near_view_distance_m": 30,
+  "far_view_distance_m": 100,
+  "distance_reaction_ms": 600,
   "proximity_m": 4,
   "reaction_min_ms": 200,
   "reaction_max_ms": 600,
@@ -166,6 +230,9 @@ The population file's `perception` object; omitted fields use the defaults:
   "sight_memory_ms": 4000,
   "sound_alert_ms": 2500,
   "max_hold_ms": 4000,
+  "max_engaged_hold_ms": 15000,
+  "attention_turn_degrees_per_second": 240,
+  "primed_reaction_ms": 250,
   "resume_cooldown_ms": 3000,
   "max_hold_cooldown_ms": 12000,
   "interrupt_fraction": 0.35,
