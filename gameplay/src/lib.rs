@@ -176,7 +176,9 @@ pub mod ground_vehicles;
 pub mod guided_launcher_motion;
 mod guided_launcher_warnings;
 pub mod guided_launchers;
-mod headless_sim;
+pub mod headless_sim;
+#[cfg(test)]
+mod headless_sim_tests;
 pub mod healing;
 mod helo_redeploy;
 mod hospital_blast_areas;
@@ -242,6 +244,7 @@ mod structural_repair_authority;
 pub mod structure_catalog;
 pub mod structures;
 pub mod telemetry;
+pub mod tick_timing;
 pub mod turret;
 pub mod underbarrel_launchers;
 pub mod vehicle_exit;
@@ -1367,6 +1370,8 @@ pub struct Engine<W: Write> {
     bot_names: bot_names::Catalog,
     world_tick_enabled: bool,
     last_world_tick: Option<Duration>,
+    /// Opt-in per-phase world-tick time (headless diagnostics).
+    tick_timing: Option<tick_timing::TickTiming>,
     automatic_repair: leadership_auto_repair::State,
     automatic_heal: leadership_auto_heal::State,
     match_epoch: Option<Duration>,

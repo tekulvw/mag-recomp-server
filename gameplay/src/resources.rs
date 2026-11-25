@@ -261,6 +261,7 @@ impl<W: Write> Engine<W> {
             bot_names: resources.bot_names,
             world_tick_enabled: false,
             last_world_tick: None,
+            tick_timing: None,
             automatic_repair: Default::default(),
             automatic_heal: Default::default(),
             match_epoch: None,
