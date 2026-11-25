@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/tekulvw/mag-recomp-server/compare/chart-v0.11.0...chart-v0.12.0) (2026-11-25)
+
+
+### Features
+
+* **medius:** admit humans against a human cap separate from world size ([#263](https://github.com/tekulvw/mag-recomp-server/issues/263)) ([0e853aa](https://github.com/tekulvw/mag-recomp-server/commit/0e853aa115f5975c9c6c6b9a18737cfbe9afe7e9))
+
 ## [0.11.0](https://github.com/tekulvw/mag-recomp-server/compare/chart-v0.10.0...chart-v0.11.0) (2026-11-24)
 
 

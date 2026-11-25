@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.10.0](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.9.0...medius-v0.10.0) (2026-11-25)
+
+
+### Features
+
+* **medius:** admit humans against a human cap separate from world size ([#263](https://github.com/tekulvw/mag-recomp-server/issues/263)) ([0e853aa](https://github.com/tekulvw/mag-recomp-server/commit/0e853aa115f5975c9c6c6b9a18737cfbe9afe7e9))
+
+
+### Bug Fixes
+
+* **medius:** answer friend-card online and game-info queries ([#267](https://github.com/tekulvw/mag-recomp-server/issues/267)) ([e4297e8](https://github.com/tekulvw/mag-recomp-server/commit/e4297e816a3078d59000ac3e7423be47b64786d7))
+
 ## [0.9.0](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.8.3...medius-v0.9.0) (2026-11-24)
 
 
