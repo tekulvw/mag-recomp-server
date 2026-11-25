@@ -257,6 +257,7 @@ pub(super) fn synthetic_link(id: u32, launch: [f64; 3], landing: [f64; 3]) -> na
         max_drop_height: launch[1] - landing[1],
         trajectory,
         trajectory_sha256: String::new(),
+        body_slope_degrees: None,
     }
 }
 

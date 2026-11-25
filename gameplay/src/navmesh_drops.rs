@@ -26,6 +26,12 @@ pub struct DropLink {
     pub max_drop_height: f64,
     pub trajectory: Vec<Motion>,
     pub trajectory_sha256: String,
+    /// Slope limit of the body the trajectory was certified with, when that is
+    /// a movement profile's rather than the default 45 degree body. A mesh
+    /// accepts only links certified with its own body, so a profiled (retail
+    /// slope) mesh and its links agree on where the body can stand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_slope_degrees: Option<f64>,
 }
 impl DropLink {
     fn valid(&self, world: &str) -> bool {
@@ -63,7 +69,11 @@ impl DropLink {
             })
             && serde_json::to_vec(&self.trajectory)
                 .is_ok_and(|b| sha256(&b) == self.trajectory_sha256)
+            && self
+                .body_slope_degrees
+                .is_none_or(|slope| slope.is_finite() && slope > 0. && slope <= 60.)
     }
+    /// Certify a drop with the default 45 degree body.
     pub fn certify(
         world: &crate::collision::CollisionWorld,
         world_sha256: &str,
@@ -72,13 +82,35 @@ impl DropLink {
         landing: Point,
         speed: f64,
     ) -> Result<Self, Error> {
+        Self::certify_with_body(
+            world,
+            world_sha256,
+            id,
+            launch,
+            landing,
+            speed,
+            Body::default(),
+        )
+    }
+    /// Certify a drop with `body`, the body of the mesh it will join
+    /// (`NavMesh::body`). A body other than the default is recorded.
+    #[allow(clippy::too_many_arguments)]
+    pub fn certify_with_body(
+        world: &crate::collision::CollisionWorld,
+        world_sha256: &str,
+        id: u32,
+        launch: Point,
+        landing: Point,
+        speed: f64,
+        body: Body,
+    ) -> Result<Self, Error> {
         if !valid_sha(world_sha256) || id == 0 {
             return err("navmesh_invalid_drop");
         }
         let terrain = WorldTerrain::new(Some(world), &world.metadata().map_name)
             .map_err(|e| Error(e.code()))?;
         let trace = terrain
-            .validate_descent(launch, landing, speed, Body::default(), 10.)
+            .validate_descent(launch, landing, speed, body, 10.)
             .map_err(|e| Error(e.code()))?
             .ok_or(Error("navmesh_drop_not_traversable"))?;
         let trajectory_sha256 = sha256(
@@ -93,6 +125,8 @@ impl DropLink {
             max_drop_height: (trace.max_drop_height * 100.).ceil() / 100.,
             trajectory: trace.samples,
             trajectory_sha256,
+            body_slope_degrees: (body.max_slope_degrees != Body::default().max_slope_degrees)
+                .then_some(body.max_slope_degrees),
         })
     }
 }
@@ -398,6 +432,7 @@ mod exit_weight_tests {
             max_drop_height: 1.,
             trajectory: Vec::new(),
             trajectory_sha256: String::new(),
+            body_slope_degrees: None,
         }
     }
 

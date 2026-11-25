@@ -580,8 +580,19 @@ impl NavMesh {
         {
             return err("navmesh_identity_mismatch");
         }
-        if rules.is_some() && !artifact.drop_links.is_empty() {
-            return err("navmesh_profiled_drop_links_unsupported");
+        // A drop certificate binds the body it was traced with: the default
+        // 45 degree body for a legacy mesh, the movement profile's for a
+        // profiled one.
+        for link in &artifact.drop_links {
+            match (
+                rules.map(MovementProfile::slope_degrees),
+                link.body_slope_degrees,
+            ) {
+                (None, None) => {}
+                (Some(profile), Some(certified)) if profile == certified => {}
+                (Some(_), None) => return err("navmesh_profiled_drop_links_unsupported"),
+                _ => return err("navmesh_drop_body_mismatch"),
+            }
         }
         if artifact.detour_data.len() < 100
             || artifact.detour_data.len() as u64 > byte_limit(reference, wide)
