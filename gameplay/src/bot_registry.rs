@@ -1276,6 +1276,7 @@ impl<W: Write> Engine<W> {
             .retain(|_, (_, until)| *until > now);
         let body = self.bot_movement_body();
         let mut actors = self.actor_grid(now)?;
+        let population = self.tick_timing_start();
         self.reconcile_bot_population(now, wall, &mut actors)?;
         // New recipients get one coherent creation+inventory+current-life snapshot per bot.
         let recipients: Vec<_> = self
@@ -1325,10 +1326,17 @@ impl<W: Write> Engine<W> {
             }
         }
         self.queue_roster(now)?;
-        self.tick_resupply_planning(now, wall)?;
-        self.tick_resupply_drop_interruptions(now, wall)?;
-        self.tick_drop_admissions(now, wall)?;
-        self.tick_bot_objectives(now, wall, &actors)?;
+        self.tick_timing_end(crate::tick_timing::Phase::BotsPopulation, population);
+        crate::tick_timing::timed!(self, crate::tick_timing::Phase::BotsDrops, {
+            self.tick_resupply_planning(now, wall)?;
+            self.tick_resupply_drop_interruptions(now, wall)?;
+            self.tick_drop_admissions(now, wall)
+        })?;
+        crate::tick_timing::timed!(
+            self,
+            crate::tick_timing::Phase::BotsObjectives,
+            self.tick_bot_objectives(now, wall, &actors)
+        )?;
         let mut packets = Vec::new();
         let mut receipts = Vec::new();
         let map = self.map_name().to_string();

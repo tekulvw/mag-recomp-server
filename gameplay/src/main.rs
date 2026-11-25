@@ -2120,43 +2120,39 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         }
         engine.set_bot_perception_override(bot_perception);
         if let Some(seconds) = headless_sim_seconds {
-            // LOCAL DIAGNOSTIC: virtual-time match with one never-spawning observer.
-            let faction: u8 = std::env::var("MAG_SIM_FACTION")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0);
+            // LOCAL DIAGNOSTIC: a virtual-time match with never-spawning observers.
+            let options =
+                mag_gameplay::headless_sim::HeadlessSimOptions::from_lookup(seconds, |name| {
+                    std::env::var(name).ok()
+                })
+                .map_err(io::Error::other)?;
+            let mut ticks = std::env::var_os("MAG_SIM_TICKS")
+                .map(|path| std::fs::File::create(path).map(io::BufWriter::new))
+                .transpose()?;
             let wall0 = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
             let began = Instant::now();
-            engine.enable_world_ticks();
-            engine
-                .headless_sim_join(Duration::ZERO, wall0, faction)
+            let report = engine
+                .run_headless_sim(
+                    &options,
+                    wall0,
+                    ticks.as_mut().map(|out| out as &mut dyn Write),
+                )
                 .map_err(io::Error::other)?;
-            let snapshots = std::env::var("MAG_SIM_SNAPSHOTS").is_ok_and(|v| v == "1");
-            let step = Duration::from_millis(50);
-            let mut now = step;
-            let mut errors = 0u64;
-            while now <= Duration::from_secs(seconds) {
-                engine.headless_sim_keepalive(now);
-                if snapshots && now.as_millis().is_multiple_of(500) {
-                    engine
-                        .headless_sim_snapshot(now, wall0 + now.as_secs())
-                        .map_err(io::Error::other)?;
-                }
-                let r = engine.tick_world(now, wall0 + now.as_secs(), "headless-sim".into());
-                if !r.ok {
-                    errors += 1;
-                    if errors <= 5 {
-                        eprintln!("tick {} error {:?}", now.as_millis(), r.error);
-                    }
-                }
-                now += step;
+            if let Some(out) = ticks.as_mut() {
+                out.flush()?;
             }
+            for error in &report.first_tick_errors {
+                eprintln!("tick error {error}");
+            }
+            let mut summary = serde_json::to_value(&report).map_err(io::Error::other)?;
+            summary["event"] = "headless_sim_summary".into();
+            eprintln!("{summary}");
             eprintln!(
                 "{}",
-                serde_json::json!({"event":"headless_sim_done","simulated_s":seconds,"wall_ms":began.elapsed().as_millis(),"tick_errors":errors})
+                serde_json::json!({"event":"headless_sim_done","simulated_s":seconds,"wall_ms":began.elapsed().as_millis(),"tick_errors":report.tick_errors})
             );
             return Ok(());
         }
