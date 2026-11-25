@@ -100,15 +100,28 @@ namespace Server.Medius
         sealed class PreparedParty
         {
             public readonly MagPendingHumanQueue<QueuedJoin>.Entry Ticket;
-            public readonly string Cohort = Id();
+            public string Cohort = Id();
             public readonly List<Reservation> Owners = new();
             public readonly List<MagJoinGameResponse> Descriptors = new();
-            public readonly List<object> Requests = new();
+            public readonly List<Dictionary<string, object>> Requests = new();
             public bool Attempted;
             public bool Acknowledged;
 
             public PreparedParty(MagPendingHumanQueue<QueuedJoin>.Entry ticket) => Ticket = ticket;
             public IEnumerable<string> ReservationIds => Owners.Select(owner => owner.Id);
+
+            /// <summary>A released, never-published cohort is retried under a new cohort and new
+            /// reservation IDs; the worker fences the old ones. DME clients and descriptors stay.</summary>
+            public void Renew()
+            {
+                Cohort = Id();
+                for (int i = 0; i < Owners.Count; i++)
+                {
+                    Owners[i].Id = Id();
+                    Requests[i]["reservation_id"] = Owners[i].Id;
+                }
+                Attempted = false;
+            }
         }
 
         async Task<bool> AdmitRegistryPartiesAsync(MagPendingHumanQueue<QueuedJoin>.Entry[] tickets,
@@ -189,25 +202,26 @@ namespace Server.Medius
                         var descriptor = PrepareJoinDescriptor(party.Ticket.Value.Request.TransactionId, client);
                         MagMessageCodec.SerializeForApplication(descriptor, _applicationId);
                         party.Descriptors.Add(descriptor);
-                        party.Requests.Add(new { reservation_id = prepared.Owner.Id, player_id = (ushort)client.DmeId,
-                            account_id = character.Id, session_key = client.SessionKey, access_key = client.Token,
-                            character = prepared.Character });
+                        party.Requests.Add(new Dictionary<string, object> { ["reservation_id"] = prepared.Owner.Id,
+                            ["player_id"] = (ushort)client.DmeId, ["account_id"] = character.Id, ["session_key"] = client.SessionKey,
+                            ["access_key"] = client.Token, ["character"] = prepared.Character });
                     }
                 }
                 finally { _rewardSettlement.Release(); }
 
-                var deadline = DateTime.UtcNow.AddSeconds(30);
                 var squads = new HashSet<ushort>();
                 foreach (var party in parties)
                 {
-                    while (DateTime.UtcNow < deadline && !_matchmakingCancellation.IsCancellationRequested)
+                    // The same attempt limit and per-exchange deadline as a solo reserve.
+                    var attempts = new AdmissionAttempts(AdmissionPolicy.Attempts);
+                    byte team = party.Ticket.Human.Faction == profile.AttackingFaction ? (byte)0 : (byte)1;
+                    while (!_matchmakingCancellation.IsCancellationRequested)
                     {
                         lock (_gate) if (!ReadyForAdmission || !Current()) return false;
                         party.Attempted = true;
                         var reply = await _bridge.RequestControlAsync(new { v = 2, request_id = Id(), op = "reserve_party",
                             formation_id = formation, profile_id = profile.ProfileId, cohort_id = party.Cohort, world_id = world,
-                            admission_epoch = epoch, members = party.Requests });
-                        byte team = party.Ticket.Human.Faction == profile.AttackingFaction ? (byte)0 : (byte)1;
+                            admission_epoch = epoch, members = party.Requests }, AdmissionPolicy.Deadline);
                         if (AdmittedPartyReply(reply, formation, profile.ProfileId, party.Cohort, world, epoch,
                             party.ReservationIds, "reserved", team))
                         {
@@ -215,8 +229,29 @@ namespace Server.Medius
                             if (!squads.Add(reply.PartyReservation.Squad.Value)) return false;
                             break;
                         }
+                        // A definite refusal is final.
                         if (reply?.Ok == false && reply.Failure == GameplayBridgeFailure.None) break;
-                        await Task.Delay(250);
+                        if (!attempts.TryTake())
+                        {
+                            Logger.Warn($"Retail party admission unanswered after {attempts.Used} attempt(s): members={party.Owners.Count} failure={reply?.Failure.ToString() ?? "Unavailable"}; the party returns to the queue");
+                            break;
+                        }
+                        // Never written: the worker cannot hold it, so send it again as it is.
+                        if (reply?.IsTransientFailure == true && reply.RequestNotSent)
+                        {
+                            Logger.Warn($"Retail party admission not delivered: members={party.Owners.Count} failure={reply.Failure}; sending it again over a new connection (attempt {attempts.Used} of {attempts.Total})");
+                            continue;
+                        }
+                        // Sent but not answered (or answered unexpectedly): release this exact
+                        // cohort, which also fences one the worker never saw, then reserve again
+                        // under a new cohort and new reservation IDs.
+                        if (!await ReleaseUnansweredPartyAsync(party, formation, profile.ProfileId, world, epoch))
+                        {
+                            Logger.Warn($"Retail party admission retry abandoned: reason=release_unacknowledged members={party.Owners.Count}; the party returns to the queue");
+                            break;
+                        }
+                        party.Renew();
+                        Logger.Warn($"Retail party admission retrying: members={party.Owners.Count} failure={reply?.Failure.ToString() ?? "Unavailable"} attempt={attempts.Used}/{attempts.Total} after release of the unanswered cohort");
                     }
                     if (!party.Acknowledged) return false;
                 }
@@ -286,6 +321,24 @@ namespace Server.Medius
                     _admission.Release();
                 }
             }
+        }
+
+        /// <summary>Release an unacknowledged cohort within the admission deadline. True once the
+        /// worker acknowledges it (an empty release fences a cohort it never recorded).</summary>
+        async Task<bool> ReleaseUnansweredPartyAsync(PreparedParty party, string formation, string profile, uint world, ulong epoch)
+        {
+            var until = DateTime.UtcNow + AdmissionPolicy.Deadline + AdmissionPolicy.Deadline + TimeSpan.FromSeconds(1);
+            while (!_matchmakingCancellation.IsCancellationRequested && !_bridge.HasWorkerIdentityFault)
+            {
+                var reply = await _bridge.RequestControlAsync(new { v = 2, request_id = Id(), op = "release_party",
+                    formation_id = formation, profile_id = profile, cohort_id = party.Cohort,
+                    world_id = world, admission_epoch = epoch }, AdmissionPolicy.Deadline);
+                if (AdmittedPartyReply(reply, formation, profile, party.Cohort, world, epoch, party.ReservationIds, "released", emptyReleaseAllowed: true))
+                    return true;
+                if (DateTime.UtcNow >= until) return false;
+                await Task.Delay(250);
+            }
+            return false;
         }
 
         async Task ReconcilePartyReleaseAsync(PreparedParty party, string formation, string profile, uint world, ulong epoch)

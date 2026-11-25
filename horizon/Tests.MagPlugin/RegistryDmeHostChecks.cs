@@ -359,6 +359,8 @@ internal static partial class LeadershipProgressionChecks
         public bool SupportsBotFill;
         public Func<JsonObject, Task> BeforePartyReply;
         public volatile bool DropNextPartyReply;
+        // Reserve_party replies still to drop after recording them (int.MaxValue: never answer).
+        public int DropPartyReplies;
         public Func<JsonObject, bool> RefuseParty;
         readonly ConcurrentDictionary<string, string[]> _partyReservations = new(StringComparer.Ordinal);
         public volatile string IncarnationId = "fixture-1";
@@ -516,6 +518,8 @@ internal static partial class LeadershipProgressionChecks
                                     .Select(call => call["cohort_id"]!.GetValue<string>()).Distinct().ToList();
                                 party["squad"] = 16 * team + draws.IndexOf(request["cohort_id"]!.GetValue<string>());
                                 if (DropNextPartyReply) { DropNextPartyReply = false; return; }
+                                if (Interlocked.Decrement(ref DropPartyReplies) >= 0) return;
+                                Interlocked.Exchange(ref DropPartyReplies, 0);
                             }
                             else if (_partyReservations.TryGetValue(request["cohort_id"]!.GetValue<string>(), out var released))
                                 foreach (var reservation in released) party["reservation_ids"]!.AsArray().Add(reservation);
