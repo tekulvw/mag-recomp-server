@@ -44,14 +44,14 @@ namespace Server.Medius
                 .OrderByDescending(w => w.LiveCount + w.PendingCount))
             {
                 var profile = world.CurrentProfile;
-                int room = Math.Min(world.MaximumPlayers, profile.MaximumPlayers) - world.LiveCount - world.PendingCount;
+                int room = Math.Min(world.MaximumPlayers, profile.HumanCapacity) - world.LiveCount - world.PendingCount;
                 var counts = Enumerable.Range(0, 3).Select(f => world.LiveFactionCounts[f] + world.PendingFactionCounts[f]).ToArray();
                 var selected = new List<MagQueuedHuman>();
                 foreach (var human in humans.OrderBy(h => h.Order))
                 {
                     if (selected.Count >= room) break;
                     if (human.Size != 1 || human.GameType != profile.GameType || (human.Faction != profile.AttackingFaction && human.Faction != profile.DefendingFaction) ||
-                        counts[human.Faction] >= profile.TeamCapacity) continue;
+                        counts[human.Faction] >= profile.HumanTeamCapacity) continue;
                     selected.Add(human); counts[human.Faction]++;
                 }
                 if (selected.Count > 0) return new(world.WorkerId, profile, selected.AsReadOnly(), false);
@@ -71,12 +71,12 @@ namespace Server.Medius
                 foreach (var world in running)
                 {
                     var profile = world.CurrentProfile;
-                    int room = Math.Min(world.MaximumPlayers, profile.MaximumPlayers) - world.LiveCount - world.PendingCount;
+                    int room = Math.Min(world.MaximumPlayers, profile.HumanCapacity) - world.LiveCount - world.PendingCount;
                     int side = world.LiveFactionCounts[party.Faction] + world.PendingFactionCounts[party.Faction];
                     if (party.GameType != profile.GameType ||
                         (party.Faction != profile.AttackingFaction && party.Faction != profile.DefendingFaction) ||
                         profile.SquadCapacity is not int squad || party.Size > squad || party.Size > room ||
-                        side + party.Size > profile.TeamCapacity) continue;
+                        side + party.Size > profile.HumanTeamCapacity) continue;
                     return new(world.WorkerId, profile, new[] { party }, false);
                 }
             return null;

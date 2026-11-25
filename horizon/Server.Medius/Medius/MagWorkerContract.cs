@@ -16,7 +16,7 @@ namespace Server.Medius
         {
             "worker_registry_v1", "match_profiles_v1", "independent_match_cohorts_v1",
             "committed_loadout_selection_v1", "active_loadout_refresh_v1", "loadout_layout_revision_v1",
-            "bot_fill_v1", "party_reservation_v1", "party_late_entry_v1"
+            "bot_fill_v1", "party_reservation_v1", "party_late_entry_v1", MagWorldCapacity.Capability
         });
 
         public IReadOnlyList<string> Profiles { get; }
@@ -38,7 +38,8 @@ namespace Server.Medius
         static string Describe(MagMatchProfile p) =>
             $"{p.ProfileId}:type={p.GameType}:{p.AttackingFaction}v{p.DefendingFaction}:max={p.MaximumPlayers}:team={p.TeamCapacity}" +
             $":squad={p.SquadCapacity?.ToString() ?? "-"}:squads={(p.SquadCounts == null ? "-" : string.Join(",", p.SquadCounts))}" +
-            $":bots={p.BotFillTotal?.ToString() ?? "-"}";
+            $":bots={p.BotFillTotal?.ToString() ?? "-"}" +
+            (p.AdvertisedHumanCapacity is int humans ? $":humans={humans}/{p.AdvertisedHumanTeamCapacity}" : "");
 
         /// <summary>Null when both contracts are identical; otherwise a short, loggable description.</summary>
         public string Difference(MagWorkerContract other)

@@ -57,8 +57,12 @@ namespace Server.Medius
         }
         Slot CreateSlot(MagConfiguredWorker row, GameplayBridge bridge)
         {
-            var options = new LocalDmeHostOptions(_config.ApplicationId, 0, row.MinimumPlayers, row.MaximumPlayers,
-                row.MinimumPlayersPerTeam.ToArray(), new[] { 0, 1, 2 }, _config.ClientAddress, _config.ClientTcpPort, row.WorkerId);
+            // A row maximum above 64 admits worlds that large; humans stay within 64, and each
+            // large profile's own human caps (32, 16 per side) apply beneath that.
+            var options = new LocalDmeHostOptions(_config.ApplicationId, 0, row.MinimumPlayers,
+                Math.Min(row.MaximumPlayers, MagWorldCapacity.LegacyWorldCharacters),
+                row.MinimumPlayersPerTeam.ToArray(), new[] { 0, 1, 2 }, _config.ClientAddress, _config.ClientTcpPort, row.WorkerId,
+                worldCapacity: row.MaximumPlayers);
             var host = new LocalDmeHost(bridge, _store, options, progressionGate:_progressionGate, portBudget:_portBudget);
             host.DurableProgressionCommitted += RefreshProgressionOwners;
             host.SetDrainPolicy(()=>System.Threading.Volatile.Read(ref _drainingWorkers).Contains(row.WorkerId));
