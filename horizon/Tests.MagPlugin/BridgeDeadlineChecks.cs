@@ -19,7 +19,8 @@ internal static class BridgeDeadlineChecks
         Check(GameplayBridge.WorldFrameDeadline >= TimeSpan.FromSeconds(12), "World frame deadline is shorter than a live stall");
         Check(GameplayBridge.RequestDeadline == TimeSpan.FromSeconds(2), "Control request deadline changed");
         Task.WhenAll(SlowEventReplyIsAnswered(), SilentWorkerStillTimesOut(), WorldStreamSurvivesAStall(),
-            ResolvedAddressIsCachedUntilAConnectionFails()).GetAwaiter().GetResult();
+            ResolvedAddressIsCachedUntilAConnectionFails(), IdleBridgeUsesItsLastAddressWhileRefreshing(),
+            AbandonedLookupStillFillsTheCache()).GetAwaiter().GetResult();
     }
 
     static object Event(string id) => new { v = 2, request_id = id, op = "event" };
@@ -171,5 +172,71 @@ internal static class BridgeDeadlineChecks
         Check((await bridge.RequestEventAsync(Event("synthetic-resolved-again"))).Ok, "Request after a failure did not resolve again");
         Check(lookups == 2, $"Expected one fresh lookup after the failure, saw {lookups - 1}");
         Check(worker.Connections == 5, $"Worker saw {worker.Connections} connections");
+    }
+
+    static readonly BindingFlags Internals = BindingFlags.Instance | BindingFlags.NonPublic;
+
+    static void SetResolver(GameplayBridge bridge, Func<string, CancellationToken, Task<IPAddress[]>> resolve) =>
+        typeof(GameplayBridge).GetField("_resolve", Internals)!.SetValue(bridge, resolve);
+
+    /// <summary>The first request after an idle spell found its cached address expired and
+    /// waited on the cluster resolver inside its two-second deadline; one lost lookup cost
+    /// a player's admission. An expired answer is now used at once and refreshed beside it.</summary>
+    static async Task IdleBridgeUsesItsLastAddressWhileRefreshing()
+    {
+        await using var worker = new Worker((id, writer, stop) => writer.WriteLineAsync(Reply(id).AsMemory(), stop));
+        var bridge = new GameplayBridge("synthetic-idle-gameplay.invalid", worker.Port);
+        var lookup = new TaskCompletionSource<IPAddress[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        int lookups = 0;
+        SetResolver(bridge, (host, token) => { Interlocked.Increment(ref lookups); return lookup.Task; });
+        var cache = typeof(GameplayBridge).GetField("_addresses", Internals)!;
+        // An answer that expired long ago, as after minutes without a request.
+        var idle = Activator.CreateInstance(cache.FieldType, new object[] { new[] { IPAddress.Loopback }, 0L })!;
+        cache.SetValue(bridge, idle);
+
+        var elapsed = Stopwatch.StartNew();
+        var first = await bridge.RequestControlAsync(new { v = 2, request_id = "synthetic-idle-reserve", op = "reserve" });
+        Check(first.Ok, $"The first request after an idle spell failed while the resolver hung: failure={first.Failure}");
+        Check(elapsed.Elapsed < TimeSpan.FromSeconds(1), $"The first request after an idle spell waited on the resolver: {elapsed.ElapsedMilliseconds} ms");
+        Check((await bridge.RequestEventAsync(Event("synthetic-idle-event"))).Ok, "A second request during the refresh failed");
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        while (Volatile.Read(ref lookups) == 0 && DateTime.UtcNow < deadline) await Task.Delay(10);
+        Check(Volatile.Read(ref lookups) == 1, $"An expired address was not refreshed once in the background: {lookups} lookups");
+
+        lookup.SetResult(new[] { IPAddress.Loopback });
+        while (ReferenceEquals(cache.GetValue(bridge), idle) && DateTime.UtcNow < deadline) await Task.Delay(10);
+        Check(!ReferenceEquals(cache.GetValue(bridge), idle), "The background refresh did not replace the expired address");
+        Check((await bridge.RequestEventAsync(Event("synthetic-refreshed-event"))).Ok && Volatile.Read(ref lookups) == 1,
+            "A refreshed address was resolved again");
+    }
+
+    /// <summary>A lookup outlives the request that gave up on it: a resolver retry no longer
+    /// makes the next request start the same slow lookup again. A request that failed before
+    /// it was written says so, which lets admission send it again.</summary>
+    static async Task AbandonedLookupStillFillsTheCache()
+    {
+        await using var worker = new Worker((id, writer, stop) => writer.WriteLineAsync(Reply(id).AsMemory(), stop));
+        var bridge = new GameplayBridge("synthetic-slow-gameplay.invalid", worker.Port);
+        var lookup = new TaskCompletionSource<IPAddress[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        int lookups = 0;
+        SetResolver(bridge, (host, token) => { Interlocked.Increment(ref lookups); return lookup.Task; });
+        var abandoned = await bridge.RequestControlAsync(new { v = 2, request_id = "synthetic-slow", op = "reserve" }, TimeSpan.FromMilliseconds(500));
+        Check(abandoned.Failure == GameplayBridgeFailure.Timeout && abandoned.RequestNotSent,
+            $"A request that never connected was not reported as unsent: failure={abandoned.Failure} unsent={abandoned.RequestNotSent}");
+        Check(worker.Connections == 0, "The worker saw a request that was reported unsent");
+        lookup.SetResult(new[] { IPAddress.Loopback });
+        var cache = typeof(GameplayBridge).GetField("_addresses", Internals)!;
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        while (cache.GetValue(bridge) == null && DateTime.UtcNow < deadline) await Task.Delay(10);
+        var reply = await bridge.RequestControlAsync(new { v = 2, request_id = "synthetic-after-lookup", op = "reserve" });
+        Check(reply.Ok && !reply.RequestNotSent, $"Request after the late lookup failed: failure={reply.Failure}");
+        Check(Volatile.Read(ref lookups) == 1, $"The late lookup's answer was not kept: {lookups} lookups");
+
+        // A request that reached the worker and went unanswered is never reported unsent.
+        await using var silent = new Worker((id, writer, stop) => Task.Delay(Timeout.Infinite, stop));
+        var unanswered = await new GameplayBridge("127.0.0.1", silent.Port).RequestControlAsync(
+            new { v = 2, request_id = "synthetic-unanswered", op = "reserve" }, TimeSpan.FromMilliseconds(500));
+        Check(unanswered.Failure == GameplayBridgeFailure.Timeout && !unanswered.RequestNotSent,
+            "A sent but unanswered request was reported unsent");
     }
 }

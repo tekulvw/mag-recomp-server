@@ -38,6 +38,8 @@ namespace Server.Medius
         readonly HashSet<byte> _allowedFactions;
         readonly LocalDmeHostOptions _options;
         readonly GameplayBridge _bridge;
+        /// <summary>Reserve retries and deadline; see <see cref="GameplayAdmissionPolicy"/>.</summary>
+        public GameplayAdmissionPolicy AdmissionPolicy { get; init; } = GameplayAdmissionPolicy.FromEnvironment();
         readonly LocalCharacterStore _store;
         readonly MagDmePortBudget _portBudget;
         readonly object _gate = new object();
@@ -308,10 +310,87 @@ namespace Server.Medius
         public Task<MagJoinGameResponse> JoinAsync(MagMlsSession session, MagJoinGameRequest request, Action<MagCharacterRecord> notify = null) =>
             JoinAsync(session, request, notify, null);
 
+        /// <summary>Admission attempts left for one join. A reserve the worker never answered
+        /// may be retried while any remain.</summary>
+        sealed class AdmissionAttempts
+        {
+            public readonly int Total;
+            public int Used = 1;
+            public AdmissionAttempts(int total) => Total = total;
+            public bool TryTake() { if (Used >= Total) return false; Used++; return true; }
+        }
+        /// <summary>A join's reply, or the released reservation to retry after.</summary>
+        sealed record JoinOutcome(MagJoinGameResponse Response, Reservation Retry = null)
+        {
+            public static implicit operator JoinOutcome(MagJoinGameResponse response) => new(response);
+        }
+
         // ownerCurrent is checked under _gate. An old callback cannot allocate
         // or reserve after its exact forwarded queue entry was replaced.
         async Task<MagJoinGameResponse> JoinAsync(MagMlsSession session, MagJoinGameRequest request,
             Action<MagCharacterRecord> notify, Func<bool> ownerCurrent)
+        {
+            // A reserve the worker never answered is retried here, up to the
+            // policy's attempts: an idle bridge's first exchange can be lost.
+            var attempts = new AdmissionAttempts(AdmissionPolicy.Attempts);
+            while (true)
+            {
+                var outcome = await JoinOnceAsync(session, request, notify, ownerCurrent, attempts);
+                if (outcome.Retry == null) return outcome.Response;
+                // The unanswered reservation must be released on the worker
+                // before the same account can reserve again.
+                if (!await SettleAdmissionReleaseAsync(outcome.Retry))
+                {
+                    Logger.Warn($"Gameplay admission retry abandoned: reason=release_unacknowledged attempts={attempts.Used}/{attempts.Total} queued={ownerCurrent != null}");
+                    return UnansweredAdmissionResponse(request.TransactionId, ownerCurrent);
+                }
+            }
+        }
+
+        /// <summary>The reply once a worker has not answered any admission attempt.</summary>
+        /// <remarks>A queued join (faction matchmaking or the configured registry) answers 6, which
+        /// returns the ticket to its queue: the player keeps receiving waiting updates, can cancel,
+        /// and is offered to a world again. The direct legacy join has no queue to return to and
+        /// keeps the ordinary failure result 2. No reply that returns the retail client from its
+        /// queue screen to the lobby has been recovered.</remarks>
+        MagJoinGameResponse UnansweredAdmissionResponse(int transactionId, Func<bool> ownerCurrent) =>
+            JoinResponse(transactionId, ownerCurrent != null ? (byte)6 : (byte)2);
+
+        /// <summary>Wait, within the admission deadline, for the worker to acknowledge the
+        /// release of an unanswered reservation. True once no release for it is pending.</summary>
+        async Task<bool> SettleAdmissionReleaseAsync(Reservation reservation)
+        {
+            var until = DateTime.UtcNow + AdmissionPolicy.Deadline + AdmissionPolicy.Deadline + TimeSpan.FromSeconds(1);
+            while (true)
+            {
+                PendingRelease pending;
+                bool due;
+                lock (_gate)
+                {
+                    if (_disposed) return false;
+                    if (!_pendingReleases.TryGetValue(reservation.Id, out pending) || pending.Reservation != reservation) return true;
+                    due = !pending.InFlight && pending.NextAttempt <= DateTime.UtcNow;
+                }
+                if (DateTime.UtcNow >= until) return false;
+                if (due) await RetryReleaseAsync(pending);
+                else await Task.Delay(TimeSpan.FromMilliseconds(50));
+            }
+        }
+
+        async Task<GameplayBridgeResponse> RequestAdmissionAsync(object reserve, int player, AdmissionAttempts attempts)
+        {
+            while (true)
+            {
+                var reply = await _bridge.RequestControlAsync(reserve, AdmissionPolicy.Deadline);
+                // Only a reserve that never left Medius is sent again as it is: the
+                // worker cannot have seen it. A sent one is released and retried.
+                if (reply?.IsTransientFailure != true || !reply.RequestNotSent || !attempts.TryTake()) return reply;
+                Logger.Warn($"Gameplay admission not delivered: player={player} failure={reply.Failure} elapsed_ms={reply.ElapsedMilliseconds}; sending it again over a new connection (attempt {attempts.Used} of {attempts.Total})");
+            }
+        }
+
+        async Task<JoinOutcome> JoinOnceAsync(MagMlsSession session, MagJoinGameRequest request,
+            Action<MagCharacterRecord> notify, Func<bool> ownerCurrent, AdmissionAttempts attempts)
         {
             var failure = JoinResponse(request.TransactionId, 2);
             // Party membership/admission is not implemented. Do not silently turn a party request into a solo join.
@@ -394,7 +473,7 @@ namespace Server.Medius
                             _rewardOwners.Add(reservation.Id, reservation);
                             reservation.PortLease = lease;
                             lease = null;
-                            acknowledgement = _bridge.RequestControlAsync(reserve);
+                            acknowledgement = RequestAdmissionAsync(reserve, client.DmeId, attempts);
                         }
                         else
                         {
@@ -431,12 +510,28 @@ namespace Server.Medius
                     reservation.ReleaseReason = AdmissionFailureReason(admittedReply, ready);
                     if (admittedReply?.Failure == GameplayBridgeFailure.None && admittedReply.Error == "match_not_configured")
                         GameplayConfigurationLost();
-                    Logger.Warn($"Gameplay admission refused: player={client.DmeId} reason={reservation.ReleaseReason} error={admittedReply?.Error ?? "none"} failure={admittedReply?.Failure.ToString() ?? "Unavailable"} elapsed_ms={admittedReply?.ElapsedMilliseconds ?? -1} ready={readyFlag} world_stream={streamHealthy}");
+                    Logger.Warn($"Gameplay admission refused: player={client.DmeId} reason={reservation.ReleaseReason} error={admittedReply?.Error ?? "none"} failure={admittedReply?.Failure.ToString() ?? "Unavailable"} elapsed_ms={admittedReply?.ElapsedMilliseconds ?? -1} ready={readyFlag} world_stream={streamHealthy} attempt={attempts.Used}/{attempts.Total}");
                     bool terminalRefusal = _independentMatchCohorts && admittedReply?.Failure == GameplayBridgeFailure.None &&
                         admittedReply.Error is "results_cohort_limit" or "match_finished";
-                    // These rejections precede any Rust reservation. A release
+                    // The worker did not answer: it may or may not hold the reservation.
+                    // Releasing it settles either case; then try again, or requeue.
+                    bool unanswered = ready && (admittedReply == null || admittedReply.IsTransientFailure);
+                    bool retry;
+                    lock (_gate) retry = unanswered && (ownerCurrent == null || ownerCurrent()) && attempts.TryTake();
+                    // Terminal rejections precede any Rust reservation. A release
                     // retry would hold the next live admission against an unused ID.
                     await ReleaseReservationAsync(reservation, !terminalRefusal);
+                    if (retry)
+                    {
+                        Logger.Warn($"Gameplay admission retrying: player={client.DmeId} attempt={attempts.Used}/{attempts.Total} after release of the unanswered reservation");
+                        return new JoinOutcome(failure, reservation);
+                    }
+                    if (unanswered)
+                    {
+                        var unansweredReply = UnansweredAdmissionResponse(request.TransactionId, ownerCurrent);
+                        Logger.Warn($"Gameplay admission unanswered after {attempts.Used} attempt(s): player={client.DmeId} result={unansweredReply.Result} queued={ownerCurrent != null}");
+                        return unansweredReply;
+                    }
                     return terminalRefusal || (InRegistry && !ready) ? JoinResponse(request.TransactionId, 6) : failure;
                 }
                 lock (_gate)

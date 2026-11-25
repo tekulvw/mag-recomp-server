@@ -22,11 +22,26 @@ namespace Server.Medius {
   // Each request opens a new connection. Resolving the worker's service name for
   // every one sent several requests per second through the cluster resolver,
   // and a lost lookup took the resolver's five-second retry. Keep the answer
-  // briefly and resolve again after any connection failure.
+  // and refresh it in the background once it is older than AddressLifetime:
+  // the first request after an idle spell must not wait on the resolver inside
+  // its two-second deadline. Resolve again, before giving up, when a connection
+  // to an answer older than AddressLifetime fails, and forget any answer whose
+  // connection fails.
   public static readonly TimeSpan AddressLifetime=TimeSpan.FromSeconds(30);
-  sealed record ResolvedAddresses(IPAddress[] Addresses,long ExpiresAt);
+  // Bounds one lookup on its own, so a request that stops waiting leaves it to
+  // finish and still fill the cache.
+  public static readonly TimeSpan LookupDeadline=TimeSpan.FromSeconds(15);
+  // Requests share a lookup younger than this. An older one is probably waiting
+  // out the resolver's retry, so a new request starts another lookup beside it.
+  public static readonly TimeSpan LookupShareWindow=TimeSpan.FromSeconds(1);
+  sealed record ResolvedAddresses(IPAddress[] Addresses,long ExpiresAt) {
+   public bool Expired=>Environment.TickCount64>=ExpiresAt;
+  }
   Func<string,CancellationToken,Task<IPAddress[]>> _resolve=(host,token)=>Dns.GetHostAddressesAsync(host,token);
   ResolvedAddresses _addresses;
+  readonly object _lookupGate=new();
+  Task<ResolvedAddresses> _lookup;
+  long _lookupStarted;
   readonly string _expectedWorkerId;
   GameplayWorkerIdentity _workerIdentity;
   int _workerIdentityFault;
@@ -38,6 +53,11 @@ namespace Server.Medius {
    _expectedWorkerId=expectedWorkerId;
   }
   public Task<GameplayBridgeResponse> RequestControlAsync(object request) => ExchangeAsync(request,false);
+  /// <summary>A control request with its own reply deadline, for example admission's configured one.</summary>
+  public Task<GameplayBridgeResponse> RequestControlAsync(object request,TimeSpan deadline) {
+   if(deadline<=TimeSpan.Zero)throw new ArgumentOutOfRangeException(nameof(deadline));
+   return ExchangeAsync(request,false,deadline);
+  }
   public async Task<bool> RequestAsync(object request) => (await ExchangeAsync(request,false))?.Ok == true;
   public Task<GameplayBridgeResponse> RequestHelloAsync(object request) => ExchangeAsync(request,true);
   public Task<GameplayBridgeResponse> RequestLoadoutSelectionSettlementAsync(object request) => ExchangeAsync(request,true);
@@ -61,10 +81,11 @@ namespace Server.Medius {
    if(positions||resumeAfter!=null)request["positions"]=true;
    if(resumeAfter!=null)request["resume"]=new Dictionary<string,object>{["epoch"]=resumeAfter.Epoch,["after"]=resumeAfter.Sequence};
    var body=identity==null?JsonSerializer.SerializeToUtf8Bytes(request):AttachWorkerIdentity(JsonSerializer.SerializeToElement(request),identity);
-   using var socket=new TcpClient();
+   TcpClient connected;
    using(var connect=CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)) {
-    connect.CancelAfter(RequestDeadline);await ConnectAsync(socket,connect.Token);
+    connect.CancelAfter(RequestDeadline);connected=await ConnectAsync(connect.Token);
    }
+   using var socket=connected;
    using var stream=socket.GetStream();
    await stream.WriteAsync(body,cancellationToken);await stream.WriteAsync(new byte[]{10},cancellationToken);
    // Keep framing bounds and a fresh deadline for each heartbeat/frame. A peer
@@ -127,12 +148,24 @@ namespace Server.Medius {
    }
    return !HasWorkerIdentityFault;
   }
-  /// <summary>Connect to a cached address of the worker. A failed connection
-  /// forgets the cached answer, so a moved Service or worker is found again.</summary>
-  async Task ConnectAsync(TcpClient socket,CancellationToken token) {
+  /// <summary>Connect to a known address of the worker. A failed connection
+  /// forgets the cached answer, so a moved Service or worker is found again. When
+  /// that answer was older than <see cref="AddressLifetime"/>, resolve the name and
+  /// connect once more inside the same deadline; nothing has been sent yet.</summary>
+  async Task<TcpClient> ConnectAsync(CancellationToken token) {
    var entry=await AddressesAsync(token);
-   try { await socket.ConnectAsync(entry.Addresses,_port,token); }
+   var socket=new TcpClient();
+   try { await socket.ConnectAsync(entry.Addresses,_port,token); return socket; }
    catch(Exception error) when(error is SocketException||error is OperationCanceledException) {
+    socket.Dispose();
+    Interlocked.CompareExchange(ref _addresses,null,entry);
+    if(token.IsCancellationRequested||!entry.Expired)throw;
+   }
+   entry=await LookupAsync().WaitAsync(token);
+   socket=new TcpClient();
+   try { await socket.ConnectAsync(entry.Addresses,_port,token); return socket; }
+   catch(Exception error) when(error is SocketException||error is OperationCanceledException) {
+    socket.Dispose();
     Interlocked.CompareExchange(ref _addresses,null,entry);
     throw;
    }
@@ -140,9 +173,35 @@ namespace Server.Medius {
   async Task<ResolvedAddresses> AddressesAsync(CancellationToken token) {
    if(IPAddress.TryParse(_host,out var literal))return new ResolvedAddresses(new[]{literal},long.MaxValue);
    var cached=Volatile.Read(ref _addresses);
-   if(cached!=null&&Environment.TickCount64<cached.ExpiresAt)return cached;
+   if(cached==null)return await LookupAsync().WaitAsync(token);
+   if(cached.Expired)_=RefreshAddressesAsync();
+   return cached;
+  }
+  async Task RefreshAddressesAsync() {
+   // A failed refresh keeps the last answer; a failed connection forgets it.
+   // Nothing awaits this refresh, so it observes every failure itself.
+   try { await LookupAsync(false); }
+   catch(Exception) {}
+  }
+  /// <summary>Requests close together share one lookup. A lookup outlives a request
+  /// that stops waiting for it, so its answer still reaches the cache.
+  /// A background refresh never starts a second lookup beside one in flight.</summary>
+  Task<ResolvedAddresses> LookupAsync(bool waiting=true) {
+   lock(_lookupGate) {
+    long now=Environment.TickCount64;
+    if(_lookup==null||_lookup.IsCompleted||(waiting&&now-_lookupStarted>=(long)LookupShareWindow.TotalMilliseconds)) {
+     _lookup=ResolveAsync();_lookupStarted=now;
+     // Waiters may all have given up; a failure must still count as observed.
+     _=_lookup.ContinueWith(lookup=>_=lookup.Exception,TaskContinuationOptions.OnlyOnFaulted|TaskContinuationOptions.ExecuteSynchronously);
+    }
+    return _lookup;
+   }
+  }
+  async Task<ResolvedAddresses> ResolveAsync() {
+   await Task.Yield();
    // The deadline bounds the wait even where the platform resolver cannot be cancelled.
-   var resolved=await _resolve(_host,token).WaitAsync(token);
+   using var deadline=new CancellationTokenSource(LookupDeadline);
+   var resolved=await _resolve(_host,deadline.Token).WaitAsync(deadline.Token);
    if(resolved==null||resolved.Length==0)throw new SocketException((int)SocketError.HostNotFound);
    var entry=new ResolvedAddresses(resolved,Environment.TickCount64+(long)AddressLifetime.TotalMilliseconds);
    Volatile.Write(ref _addresses,entry);
@@ -151,7 +210,9 @@ namespace Server.Medius {
   Task<GameplayBridgeResponse> ExchangeAsync(object request,bool eventReply)=>ExchangeAsync(request,eventReply,RequestDeadline);
   async Task<GameplayBridgeResponse> ExchangeAsync(object request,bool eventReply,TimeSpan timeout) {
    var elapsed=Stopwatch.StartNew();
-   GameplayBridgeResponse Failed(GameplayBridgeFailure failure)=>GameplayBridgeResponse.Failed(failure,elapsed.ElapsedMilliseconds);
+   bool sending=false;
+   GameplayBridgeResponse Failed(GameplayBridgeFailure failure)=>MarkUnsent(GameplayBridgeResponse.Failed(failure,elapsed.ElapsedMilliseconds));
+   GameplayBridgeResponse MarkUnsent(GameplayBridgeResponse reply) { reply.RequestNotSent=!sending; return reply; }
    using var deadline=new CancellationTokenSource(timeout);
    try {
     var body=JsonSerializer.SerializeToUtf8Bytes(request); if(body.Length>65536) return Failed(GameplayBridgeFailure.InvalidRequest);
@@ -167,7 +228,8 @@ namespace Server.Medius {
      if(identity!=null)body=AttachWorkerIdentity(root,identity);
      if(body.Length>65536)return Failed(GameplayBridgeFailure.InvalidRequest);
     }
-    using var socket=new TcpClient(); await ConnectAsync(socket,deadline.Token); using var stream=socket.GetStream();
+    using var socket=await ConnectAsync(deadline.Token); using var stream=socket.GetStream();
+    sending=true;
     await stream.WriteAsync(body,deadline.Token); await stream.WriteAsync(new byte[]{10},deadline.Token);
     using var line=new MemoryStream(); var one=new byte[1];
     while(true) { if(await stream.ReadAsync(one,deadline.Token)!=1) return Failed(GameplayBridgeFailure.Unavailable); if(one[0]==10) break; if(line.Length==GameplayBridgeResponseCodec.MaximumResponseBytes) return Failed(GameplayBridgeFailure.MalformedResponse); line.WriteByte(one[0]); }
