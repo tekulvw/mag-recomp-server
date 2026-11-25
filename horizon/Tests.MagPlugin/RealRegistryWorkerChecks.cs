@@ -29,6 +29,13 @@ internal static class RealRegistryWorkerChecks
         LeadershipProgressionChecks.RealRegistryParties(binary, catalogs);
     }
 
+    public static void RunLargeWorld()
+    {
+        string binary = Path.GetFullPath(Environment.GetEnvironmentVariable(BinaryVariable));
+        string catalogs = Path.GetFullPath(Environment.GetEnvironmentVariable(CatalogsVariable));
+        LeadershipProgressionChecks.RealRegistryLargeWorld(binary, catalogs);
+    }
+
     public static void RunRestart()
     {
         string binary = Path.GetFullPath(Environment.GetEnvironmentVariable(BinaryVariable));
@@ -56,7 +63,7 @@ internal static class RealRegistryWorkerChecks
         /// <summary>Start an owned worker. <paramref name="port"/> rebinds a known endpoint, as a restarted
         /// worker does; <paramref name="instance"/> keeps each process's journal separate.</summary>
         public static async Task<Worker> StartAsync(string id, string directory, string binary, string catalogs, bool parties = false,
-            int port = 0, string instance = null)
+            int port = 0, string instance = null, string profiles = null)
         {
             string workingDirectory = Directory.CreateDirectory(Path.Combine(directory, instance ?? id)).FullName;
             string journal = Path.Combine(workingDirectory, "worker.jsonl");
@@ -74,7 +81,7 @@ internal static class RealRegistryWorkerChecks
                 ("--item-catalog", "items.json"), ("--spawn-catalog", "spawns.json"), ("--wire-profiles", "wire.json"),
                 ("--character-blast-rules", "blast.json"), ("--bootstrap-loadouts", "bootstrap.json"),
                 ("--retail-combat-metadata", "combat.json"), ("--retail-armory-catalog", "armory.json"),
-                ("--skill-catalog", "skills.json"), ("--fall-damage-rules", "fall.json"), ("--match-profiles", parties ? "party-profiles.json" : "profiles.json")
+                ("--skill-catalog", "skills.json"), ("--fall-damage-rules", "fall.json"), ("--match-profiles", profiles ?? (parties ? "party-profiles.json" : "profiles.json"))
             })
             {
                 start.ArgumentList.Add(option);
@@ -266,6 +273,87 @@ internal static partial class LeadershipProgressionChecks
                     receipts.Select(row => row["account_id"].GetValue<uint>()).ToHashSet().SetEquals(accounts.Select(account => characters[account])) &&
                     receipts.Select(row => row["team"].GetValue<int>()).ToHashSet().SetEquals(new[] { 0, 1 }),
                     "A real worker recorded another world's membership or failed to assign opposite factions to separate teams");
+            }
+        }
+    });
+
+    /// <summary>A real worker with 128-Character profiles advertises world_capacity_v1 and human caps
+    /// 32/16; Horizon offers them only on a registry row that large and configures 32 humans.</summary>
+    public static void RealRegistryLargeWorld(string binary, string catalogs) => WithDirectory(directory =>
+    {
+        var settings = Server.Medius.Program.Settings;
+        int previous = settings.MagApplicationId;
+        settings.MagApplicationId = 20231;
+        try { VerifyAsync().GetAwaiter().GetResult(); }
+        finally { settings.MagApplicationId = previous; }
+
+        async Task VerifyAsync()
+        {
+            var store = new LocalCharacterStore(Path.Combine(directory, "characters.json"));
+            var characters = new Dictionary<string, uint>(StringComparer.Ordinal);
+            foreach (var (account, faction) in new[] { ("alpha", (byte)0), ("bravo", (byte)1) })
+            {
+                var request = new MagCreateCharacterRequest { AccountName = account, Faction = faction, UniverseId = 26, NpId = new byte[36] };
+                Check(store.CreateForAccount(request, account).Result == MagNetResult.Success, "Synthetic character creation failed");
+                characters.Add(account, store.ReadForAccount(account).Single().Id);
+            }
+            await using var worker = await RealRegistryWorkerChecks.Worker.StartAsync("large", directory, binary, catalogs,
+                profiles: "large-profiles.json");
+
+            // The hello Horizon parses carries world size and the human caps.
+            var hello = await worker.RequestAsync("hello");
+            Check(GameplayBridgeResponseCodec.TryParse(System.Text.Encoding.UTF8.GetBytes(hello.ToJsonString()),
+                    hello["request_id"]!.GetValue<string>(), false, out var parsed) && parsed.Ok &&
+                parsed.Capabilities.Contains("world_capacity_v1") && parsed.MatchProfiles.Count == 6 &&
+                parsed.MatchProfiles.All(p => p.MaximumPlayers == 128 && p.TeamCapacity == 64 && p.LargeWorld &&
+                    p.HumanCapacity == 32 && p.HumanTeamCapacity == 16),
+                "A real worker did not advertise 128-Character rows with human caps 32/16 under world_capacity_v1");
+
+            JsonObject Config(int maximum) => new()
+            {
+                ["format"] = "mag_world_registry_v1", ["application_id"] = 20231, ["client_address"] = "192.0.2.9", ["client_tcp_port"] = 12073,
+                ["workers"] = new JsonArray(new JsonObject
+                {
+                    ["worker_id"] = worker.Id, ["worker_host"] = "127.0.0.1", ["worker_port"] = worker.Port, ["draining"] = false,
+                    ["minimum_players"] = 2, ["maximum_players"] = maximum, ["minimum_players_per_team"] = new JsonArray(1, 1)
+                })
+            };
+            // A row limited to 64 Characters never offers the larger profiles; with nothing left the world stays down.
+            bool refused = false;
+            try
+            {
+                await using var narrow = new MagWorldRegistry(MagWorldRegistryConfig.Parse(Config(64).ToJsonString()), store);
+                await narrow.InitializeAsync();
+            }
+            catch (IOException) { refused = true; }
+            Check(refused, "A registry row of 64 offered a real worker's 128-Character profiles");
+
+            await using (var registry = new MagWorldRegistry(MagWorldRegistryConfig.Parse(Config(128).ToJsonString()), store))
+            {
+                await registry.InitializeAsync();
+                var world = registry.Worlds.Single();
+                Check(world.Ready, "A registry row of 128 did not ready the real 128-Character worker");
+                int transaction = 0;
+                Task<MagJoinGameResponse> Queue(string account)
+                {
+                    var session = MakeSession(store, 20231, account, characters[account]);
+                    var result = new TaskCompletionSource<MagJoinGameResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    registry.QueueJoin(session, new MagRetailJoinGameRequest { TransactionId = ++transaction, Preference = 1, Value = 0 },
+                        message => { if (message is MagJoinGameResponse response) result.TrySetResult(response); }, () => true);
+                    return result.Task;
+                }
+                var queued = new[] { Queue("alpha"), Queue("bravo") };
+                using (var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
+                    while (queued.Any(task => !task.IsCompleted))
+                    {
+                        await registry.TickAsync().WaitAsync(deadline.Token);
+                        await Task.Delay(10, deadline.Token);
+                    }
+                var replies = await Task.WhenAll(queued);
+                var configured = worker.ReadJournal().Where(row => row["op"]?.GetValue<string>() == "match_configured").ToArray();
+                Check(replies.All(reply => reply.Result == 0 && reply.WorldId == world.WorldId) && Reservations(worker).Count == 2 &&
+                    configured.Length == 1 && configured[0]["maximum_players"]!.GetValue<int>() == 32,
+                    "A real 128-Character world did not admit humans under a 32-human configuration");
             }
         }
     });

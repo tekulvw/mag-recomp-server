@@ -18,6 +18,7 @@ fn main() {
 
     let mut profiles = Vec::new();
     let mut party_profiles = Vec::new();
+    let mut large_profiles = Vec::new();
     for attacking in 0..3 {
         for defending in 0..3 {
             if attacking == defending {
@@ -51,6 +52,24 @@ fn main() {
             let party_spawns = output.join(format!("party-{name}.json"));
             fs::write(&party_spawns, serde_json::to_vec(&party_catalog).unwrap()).unwrap();
             party_profiles.push(json!({"profile_id":name,"spawn_catalog":party_spawns}));
+
+            // A 128-Character world (world_capacity_v1): 64 per side over eight
+            // eight-member squads on each side.
+            let mut large_catalog = party_catalog;
+            large_catalog["match_profile"]["team_capacity"] = json!(64);
+            large_catalog["match_profile"]["squad_capacity"] = json!(8);
+            large_catalog["maps"][0]["squads"] = json!((0..2)
+                .flat_map(|team| (0..8).map(move |k| (team, k)))
+                .map(|(team, k)| {
+                    let index = team * 16 + k;
+                    let faction = if team == 0 { json!(null) } else { json!(defending) };
+                    json!({"index":index,"team":team,"platoon":k / 4,"squad":k % 4,"faction":faction,
+                        "available":[0],"default_spawn":0})
+                })
+                .collect::<Vec<_>>());
+            let large_spawns = output.join(format!("large-{name}.json"));
+            fs::write(&large_spawns, serde_json::to_vec(&large_catalog).unwrap()).unwrap();
+            large_profiles.push(json!({"profile_id":name,"spawn_catalog":large_spawns}));
         }
     }
     let manifest = json!({"format":"mag_match_profiles_v1","profiles":profiles});
@@ -62,6 +81,12 @@ fn main() {
     let manifest = json!({"format":"mag_match_profiles_v1","profiles":party_profiles});
     fs::write(
         output.join("party-profiles.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    let manifest = json!({"format":"mag_match_profiles_v1","profiles":large_profiles});
+    fs::write(
+        output.join("large-profiles.json"),
         serde_json::to_vec(&manifest).unwrap(),
     )
     .unwrap();
