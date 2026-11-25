@@ -631,6 +631,18 @@ impl ObjectiveCatalog {
             })
             .collect())
     }
+    /// The objectives a squad's authored list names, when the catalog has it.
+    pub(crate) fn authored_objectives(&self, squad_index: u16) -> Option<Vec<u16>> {
+        self.squads
+            .iter()
+            .find(|s| s.squad_index == squad_index)
+            .map(|s| {
+                s.authored_objectives
+                    .iter()
+                    .map(|o| o.object_index)
+                    .collect()
+            })
+    }
     pub(crate) fn dynamic_assignment(
         &self,
         squad_index: u16,

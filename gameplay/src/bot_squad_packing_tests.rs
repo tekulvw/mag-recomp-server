@@ -34,7 +34,7 @@ fn squad_indices(mode: Mode, team: u16) -> impl Iterator<Item = u16> {
 
 /// A team32 match whose bot population binds `squad_capacity` slots to every squad.
 fn engine(mode: Mode, total: usize) -> Engine<Vec<u8>> {
-    build(mode, total, None)
+    build(mode, total, &[])
 }
 
 /// Height of the walled-off spawn platform in `build`.
@@ -44,7 +44,7 @@ const ISLAND_Y: f64 = 3.;
 /// (and its slots) on a 3 m high platform nothing walks or drops off, a
 /// navmesh baked from that ground, a capture objective on the open floor
 /// and fall rules, so squads can be checked for a route to an objective.
-fn build(mode: Mode, total: usize, island: Option<usize>) -> Engine<Vec<u8>> {
+fn build(mode: Mode, total: usize, islands: &[usize]) -> Engine<Vec<u8>> {
     // Squad k (in list order) owns spawn location k; its slots sit beside it.
     let all: Vec<u16> = (0..2).flat_map(|team| squad_indices(mode, team)).collect();
     let anchor = |k: usize| (10. + (k % 8) as f64 * 12., 10. + (k / 8) as f64 * 12.);
@@ -60,7 +60,7 @@ fn build(mode: Mode, total: usize, island: Option<usize>) -> Engine<Vec<u8>> {
     let locations: Vec<_> = (0..all.len())
         .map(|k| {
             let (x, z) = anchor(k);
-            let y = if island == Some(k) { ISLAND_Y } else { 0. };
+            let y = if islands.contains(&k) { ISLAND_Y } else { 0. };
             json!({"index":k,"token":100 + k,"kind":"on_foot","position":{"x":x,"y":y,"z":z}})
         })
         .collect();
@@ -99,16 +99,17 @@ fn build(mode: Mode, total: usize, island: Option<usize>) -> Engine<Vec<u8>> {
         [0., 0., 120.],
     ];
     let mut triangles = vec![[0u32, 2, 1], [0, 3, 2]];
-    if let Some(k) = island {
+    for &k in islands {
         let (x, z) = anchor(k);
         let (x0, x1, z0, z1) = (x - 3., x + 8., z - 2., z + 6.);
+        let n = vertices.len() as u32;
         vertices.extend([
             [x0, ISLAND_Y, z0],
             [x1, ISLAND_Y, z0],
             [x1, ISLAND_Y, z1],
             [x0, ISLAND_Y, z1],
         ]);
-        triangles.extend([[4, 6, 5], [4, 7, 6]]);
+        triangles.extend([[n, n + 2, n + 1], [n, n + 3, n + 2]]);
     }
     let floor = json!({"format":"mag_collision_world","schema_version":1,"coordinate_space":"world",
         "metadata":{"map_name":MAP,"build":"synthetic","coverage":"provisional",
@@ -121,7 +122,7 @@ fn build(mode: Mode, total: usize, island: Option<usize>) -> Engine<Vec<u8>> {
         collision::CollisionLimits::default(),
     )
     .unwrap();
-    if island.is_some() {
+    if !islands.is_empty() {
         engine = routed(engine, &world, &vertices, &triangles);
     }
     engine = engine.with_collision_world(world);
@@ -133,7 +134,7 @@ fn build(mode: Mode, total: usize, island: Option<usize>) -> Engine<Vec<u8>> {
         .flat_map(|(k, &squad)| (0..mode.squad_capacity).map(move |seat| (k, squad, seat)))
         .map(|(k, squad, seat)| {
             let (x, z) = anchor(k);
-            let y = if island == Some(k) { ISLAND_Y } else { 0. };
+            let y = if islands.contains(&k) { ISLAND_Y } else { 0. };
             json!({"team":squad / 16,"squad":squad,"source_spawn":k,"position":{
                 "x":x + (seat % 4) as f64 * 1.5,"y":y,"z":z + 1.5 + (seat / 4) as f64 * 1.5}})
         })
@@ -200,13 +201,18 @@ fn routed(
         "source":{"authored_catalog_sha256":"0".repeat(64),"binding_capture_sha256":"1".repeat(64),
             "startup_proof_sha256":"2".repeat(64),"source_image_sha256":"3".repeat(64),
             "capture_qualification":"bounded_concurrent_token_slot_capture"},
-        "objects":[{"token":"0x00000005","object_index":5,"initial_state":1,
-            "interaction":{"owner_team":1,"activate_ms":100,"complete_ms":20_000,"deactivate_ms":100,
-                "can_deactivate":true,"position":[60.,0.,60.],"trigger_count":1,
-                "maximum_distance_m":3.,"distance_policy":"development_point_distance"}}],
-        "squads":(0..2u16).flat_map(|team| (0..4u16).map(move |slot| json!({
-            "team":team,"squad_index":team*16+slot,"initial_objective_index":5,
-            "authored_objectives":[{"object_index":5,"order":1}]}))).collect::<Vec<_>>()})
+        "objects":([5u16, 6].map(|index| json!({"token":format!("0x{index:08x}"),"object_index":index,
+            "initial_state":1,"interaction":{"owner_team":1,"activate_ms":100,"complete_ms":20_000,
+                "deactivate_ms":100,"can_deactivate":true,"position":[60.,0.,f64::from(index) * 10.],
+                "trigger_count":1,"maximum_distance_m":3.,
+                "distance_policy":"development_point_distance"}}))),
+        // Each side's first two squads are authored to objective 5, the last
+        // two to objective 6, as Acquisition pairs platoons with prototypes.
+        "squads":(0..2u16).flat_map(|team| (0..4u16).map(move |slot| {
+            let objective = if slot < 2 { 5 } else { 6 };
+            json!({"team":team,"squad_index":team*16+slot,"initial_objective_index":objective,
+                "authored_objectives":[{"object_index":objective,"order":1}]})
+        })).collect::<Vec<_>>()})
         .to_string(),
     )
     .unwrap();
@@ -409,7 +415,7 @@ fn bots_fill_squads_that_can_reach_an_objective_first() {
     // Sabotage shape: four squads of eight a side. Side 1's first squad (16,
     // list entry 4) spawns on a platform with no way down.
     let total = 16;
-    let mut engine = build(SABOTAGE, total, Some(4));
+    let mut engine = build(SABOTAGE, total, &[4]);
     reconcile(&mut engine, 0);
     assert_eq!(engine.bot_registry.bots.len(), total);
     assert_eq!(
@@ -429,7 +435,7 @@ fn bots_fill_squads_that_can_reach_an_objective_first() {
         "{log}"
     );
     // With every routable squad full, the stranded squad still fills last.
-    let mut engine = build(SABOTAGE, 64, Some(4));
+    let mut engine = build(SABOTAGE, 64, &[4]);
     reconcile(&mut engine, 0);
     assert_eq!(seats(&engine, SABOTAGE, 1), [(0, 8); 4]);
     // Without navigation data no squad is demoted: plain index order.
@@ -438,5 +444,25 @@ fn bots_fill_squads_that_can_reach_an_objective_first() {
     assert_eq!(
         seats(&engine, SABOTAGE, 1),
         [(0, 8), (0, 0), (0, 0), (0, 0)]
+    );
+}
+
+#[test]
+fn bots_fill_squads_that_meet_the_other_side_at_an_objective() {
+    // Side 1's squads 16 and 17 (authored to objective 5, like side 0's
+    // squads 0 and 1) are stranded, so side 1 fills squad 18 (objective 6).
+    // Side 0 then fills squad 2, also authored to objective 6, instead of
+    // squad 1, so both sides go to the same objective.
+    let total = 24;
+    let mut engine = build(SABOTAGE, total, &[4, 5]);
+    reconcile(&mut engine, 0);
+    assert_eq!(engine.bot_registry.bots.len(), total);
+    assert_eq!(
+        seats(&engine, SABOTAGE, 1),
+        [(0, 0), (0, 0), (0, 8), (0, 4)]
+    );
+    assert_eq!(
+        seats(&engine, SABOTAGE, 0),
+        [(0, 8), (0, 0), (0, 4), (0, 0)]
     );
 }

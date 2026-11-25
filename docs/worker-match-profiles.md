@@ -141,7 +141,12 @@ start filling once a human is on foot, keep each team at no more than half of
 the fill total, and yield seats to humans who join later. Bots pack squads
 rather than spreading over them: they fill squads a human occupies first, then
 squads whose spawns can reach an objective, then the fullest squad with a free
-bound slot, then the lowest squad index, so platoons fill in order. A squad
+bound slot, then squads whose authored objectives (in the objective catalog)
+include one of an occupied squad's on the other side, then the lowest squad
+index, so platoons fill in order and both sides head for the same objectives.
+Acquisition pairs each attacking platoon with a defending platoon on the same
+objectives, so when a side's first platoon is demoted the other side follows it
+to the paired platoon instead of fighting over objectives nobody defends. A squad
 cannot reach an objective when one of its first four slots is on the navmesh
 and none of them has a route (walking or through certified drops) to any
 objective in the objective catalog; it is checked once per installed
