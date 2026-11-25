@@ -140,8 +140,14 @@ resupply inputs; selecting a profile without bots leaves bots disabled. Bots
 start filling once a human is on foot, keep each team at no more than half of
 the fill total, and yield seats to humans who join later. Bots pack squads
 rather than spreading over them: they fill squads a human occupies first, then
-the fullest squad with a free bound slot, then the lowest squad index, so
-platoons fill in order. When the population shrinks, the bot in the
+squads whose spawns can reach an objective, then the fullest squad with a free
+bound slot, then the lowest squad index, so platoons fill in order. A squad
+cannot reach an objective when one of its first four slots is on the navmesh
+and none of them has a route (walking or through certified drops) to any
+objective in the objective catalog; it is checked once per installed
+population, recorded as `bot_population_unroutable_squads`, and still fills
+once the other squads are full. Without a navmesh, fall rules or objective
+catalog no squad is demoted. When the population shrinks, the bot in the
 last-filled squad leaves first. A squad-bound population whose fill total is the
 whole world must bind at least `squad_capacity` slots to every squad in the
 spawn catalog (`bot_population_insufficient_squad_slots`), since any squad may

@@ -34,6 +34,17 @@ fn squad_indices(mode: Mode, team: u16) -> impl Iterator<Item = u16> {
 
 /// A team32 match whose bot population binds `squad_capacity` slots to every squad.
 fn engine(mode: Mode, total: usize) -> Engine<Vec<u8>> {
+    build(mode, total, None)
+}
+
+/// Height of the walled-off spawn platform in `build`.
+const ISLAND_Y: f64 = 3.;
+
+/// As `engine`, optionally with the spawn of squad list entry `island`
+/// (and its slots) on a 3 m high platform nothing walks or drops off, a
+/// navmesh baked from that ground, a capture objective on the open floor
+/// and fall rules, so squads can be checked for a route to an objective.
+fn build(mode: Mode, total: usize, island: Option<usize>) -> Engine<Vec<u8>> {
     // Squad k (in list order) owns spawn location k; its slots sit beside it.
     let all: Vec<u16> = (0..2).flat_map(|team| squad_indices(mode, team)).collect();
     let anchor = |k: usize| (10. + (k % 8) as f64 * 12., 10. + (k / 8) as f64 * 12.);
@@ -49,7 +60,8 @@ fn engine(mode: Mode, total: usize) -> Engine<Vec<u8>> {
     let locations: Vec<_> = (0..all.len())
         .map(|k| {
             let (x, z) = anchor(k);
-            json!({"index":k,"token":100 + k,"kind":"on_foot","position":{"x":x,"y":0.,"z":z}})
+            let y = if island == Some(k) { ISLAND_Y } else { 0. };
+            json!({"index":k,"token":100 + k,"kind":"on_foot","position":{"x":x,"y":y,"z":z}})
         })
         .collect();
     let spawns: spawn_catalog::SpawnCatalog = serde_json::from_value(json!({
@@ -80,20 +92,39 @@ fn engine(mode: Mode, total: usize) -> Engine<Vec<u8>> {
     .with_bot_names(names);
     let mut engine = Engine::from_resources(Vec::new(), 100_000_000, resources);
     engine.maximum_players = 64;
+    let mut vertices = vec![
+        [0., 0., 0.],
+        [120., 0., 0.],
+        [120., 0., 120.],
+        [0., 0., 120.],
+    ];
+    let mut triangles = vec![[0u32, 2, 1], [0, 3, 2]];
+    if let Some(k) = island {
+        let (x, z) = anchor(k);
+        let (x0, x1, z0, z1) = (x - 3., x + 8., z - 2., z + 6.);
+        vertices.extend([
+            [x0, ISLAND_Y, z0],
+            [x1, ISLAND_Y, z0],
+            [x1, ISLAND_Y, z1],
+            [x0, ISLAND_Y, z1],
+        ]);
+        triangles.extend([[4, 6, 5], [4, 7, 6]]);
+    }
     let floor = json!({"format":"mag_collision_world","schema_version":1,"coordinate_space":"world",
         "metadata":{"map_name":MAP,"build":"synthetic","coverage":"provisional",
             "provenance":["Synthetic packing floor"],"unknowns":["Not a game map"],
             "physics_regions":[{"min":[0.,-5.,0.],"max":[120.,8.,120.],"ground_verified":true,
                 "obstacles_verified":true,"provenance":["Synthetic floor"]}]},
-        "instances":[{"id":"floor","vertices_xyz":[[0.,0.,0.],[120.,0.,0.],[120.,0.,120.],[0.,0.,120.]],
-            "triangles":[[0,2,1],[0,3,2]]}]});
-    engine = engine.with_collision_world(
-        collision::CollisionWorld::from_bytes(
-            &serde_json::to_vec(&floor).unwrap(),
-            collision::CollisionLimits::default(),
-        )
-        .unwrap(),
-    );
+        "instances":[{"id":"floor","vertices_xyz":vertices,"triangles":triangles}]});
+    let world = collision::CollisionWorld::from_bytes(
+        &serde_json::to_vec(&floor).unwrap(),
+        collision::CollisionLimits::default(),
+    )
+    .unwrap();
+    if island.is_some() {
+        engine = routed(engine, &world, &vertices, &triangles);
+    }
+    engine = engine.with_collision_world(world);
     // Bound slots, listed squad by squad, each at its own spot beside the
     // squad's spawn location.
     let slots: Vec<_> = all
@@ -102,8 +133,9 @@ fn engine(mode: Mode, total: usize) -> Engine<Vec<u8>> {
         .flat_map(|(k, &squad)| (0..mode.squad_capacity).map(move |seat| (k, squad, seat)))
         .map(|(k, squad, seat)| {
             let (x, z) = anchor(k);
+            let y = if island == Some(k) { ISLAND_Y } else { 0. };
             json!({"team":squad / 16,"squad":squad,"source_spawn":k,"position":{
-                "x":x + (seat % 4) as f64 * 1.5,"y":0.,"z":z + 1.5 + (seat / 4) as f64 * 1.5}})
+                "x":x + (seat % 4) as f64 * 1.5,"y":y,"z":z + 1.5 + (seat / 4) as f64 * 1.5}})
         })
         .collect();
     let population: bot_registry::BotPopulation = serde_json::from_value(json!({
@@ -111,6 +143,75 @@ fn engine(mode: Mode, total: usize) -> Engine<Vec<u8>> {
     }))
     .unwrap();
     engine.with_bot_population(population, total).unwrap()
+}
+
+/// Navmesh, fall rules and one capture objective on the open floor.
+fn routed(
+    engine: Engine<Vec<u8>>,
+    world: &collision::CollisionWorld,
+    vertices: &[[f64; 3]],
+    triangles: &[[u32; 3]],
+) -> Engine<Vec<u8>> {
+    use sha2::{Digest, Sha256};
+    let vertices: Vec<[f32; 3]> = vertices.iter().map(|p| p.map(|v| v as f32)).collect();
+    let mut hash = Sha256::new();
+    hash.update(b"MAG-NAV-GEOMETRY-v1\0");
+    hash.update((vertices.len() as u32).to_le_bytes());
+    hash.update((triangles.len() as u32).to_le_bytes());
+    for v in vertices.iter().flatten() {
+        hash.update(v.to_le_bytes());
+    }
+    for i in triangles.iter().flatten() {
+        hash.update(i.to_le_bytes());
+    }
+    let artifact = navmesh::bake(navmesh::BakeInput {
+        format: "mag_navmesh_bake_input_v1".into(),
+        map_name: MAP.into(),
+        world_sha256: world.source_sha256().into(),
+        geometry_sha256: format!("{:x}", hash.finalize()),
+        bounds: navmesh::Bounds {
+            min: [0., -1., 0.],
+            max: [120., 6., 120.],
+        },
+        physics_regions: world.metadata().physics_regions.clone(),
+        vertices,
+        triangles: triangles.to_vec(),
+    })
+    .unwrap();
+    let mesh = navmesh::NavMesh::load(artifact, world.source_sha256(), MAP).unwrap();
+    let rules = fall_damage::Rules {
+        schema_version: 1,
+        source_build: "synthetic".into(),
+        application_id: 20231,
+        min_height: 10.,
+        damage_factor: 1.,
+        minimum_damage_exclusive: 0.,
+        jump_fall_state: 0,
+        damage_type: 5,
+        damage_source_type: 1,
+    };
+    let mut engine = engine
+        .with_navmesh_world(mesh)
+        .with_fall_damage_rules(rules);
+    let objectives = objective_catalog::ObjectiveCatalog::from_json(
+        &json!({"schema_version":1,"format":"mag_retail_objective_catalog","application_id":20231,
+        "protocol":protocol::ProtocolInfo::RETAIL_PROTOCOL,"game_type":0,"map_name":MAP,
+        "entity_family":12,"network_type":12,
+        "source":{"authored_catalog_sha256":"0".repeat(64),"binding_capture_sha256":"1".repeat(64),
+            "startup_proof_sha256":"2".repeat(64),"source_image_sha256":"3".repeat(64),
+            "capture_qualification":"bounded_concurrent_token_slot_capture"},
+        "objects":[{"token":"0x00000005","object_index":5,"initial_state":1,
+            "interaction":{"owner_team":1,"activate_ms":100,"complete_ms":20_000,"deactivate_ms":100,
+                "can_deactivate":true,"position":[60.,0.,60.],"trigger_count":1,
+                "maximum_distance_m":3.,"distance_policy":"development_point_distance"}}],
+        "squads":(0..2u16).flat_map(|team| (0..4u16).map(move |slot| json!({
+            "team":team,"squad_index":team*16+slot,"initial_objective_index":5,
+            "authored_objectives":[{"object_index":5,"order":1}]}))).collect::<Vec<_>>()})
+        .to_string(),
+    )
+    .unwrap();
+    engine.objective_catalog = Some(objectives);
+    engine
 }
 
 /// A human reservation on side 0 placed in `squad`.
@@ -300,5 +401,42 @@ fn humans_joining_keep_the_total_displace_bots_and_stay_packed() {
             .enumerate()
             .all(|(i, s)| i + 8 == 12 || *s == (0, 0)),
         "{side0:?}"
+    );
+}
+
+#[test]
+fn bots_fill_squads_that_can_reach_an_objective_first() {
+    // Sabotage shape: four squads of eight a side. Side 1's first squad (16,
+    // list entry 4) spawns on a platform with no way down.
+    let total = 16;
+    let mut engine = build(SABOTAGE, total, Some(4));
+    reconcile(&mut engine, 0);
+    assert_eq!(engine.bot_registry.bots.len(), total);
+    assert_eq!(
+        seats(&engine, SABOTAGE, 0),
+        [(0, 8), (0, 0), (0, 0), (0, 0)]
+    );
+    assert_eq!(
+        seats(&engine, SABOTAGE, 1),
+        [(0, 0), (0, 8), (0, 0), (0, 0)],
+        "side 1 skips the stranded squad 16 for squad 17"
+    );
+    let log = String::from_utf8_lossy(&engine.writer);
+    assert!(
+        log.lines()
+            .any(|line| line.contains("bot_population_unroutable_squads")
+                && line.contains("\"squads\":[16]")),
+        "{log}"
+    );
+    // With every routable squad full, the stranded squad still fills last.
+    let mut engine = build(SABOTAGE, 64, Some(4));
+    reconcile(&mut engine, 0);
+    assert_eq!(seats(&engine, SABOTAGE, 1), [(0, 8); 4]);
+    // Without navigation data no squad is demoted: plain index order.
+    let mut engine = self::engine(SABOTAGE, 16);
+    reconcile(&mut engine, 0);
+    assert_eq!(
+        seats(&engine, SABOTAGE, 1),
+        [(0, 8), (0, 0), (0, 0), (0, 0)]
     );
 }
