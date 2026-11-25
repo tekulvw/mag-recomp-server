@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.13.0](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.12.1...gameplay-v0.13.0) (2026-11-25)
+
+
+### Features
+
+* **gameplay:** let bot medics heal and revive teammates ([#274](https://github.com/tekulvw/mag-recomp-server/issues/274)) ([f051db9](https://github.com/tekulvw/mag-recomp-server/commit/f051db9c1b16c893d0dbbf156bf8d5045389f511))
+* **gameplay:** let Domination bot engineers repair destroyed objectives ([#278](https://github.com/tekulvw/mag-recomp-server/issues/278)) ([6be9808](https://github.com/tekulvw/mag-recomp-server/commit/6be980803ec3598462e9e60d71dcc3c58d00dc15))
+* **gameplay:** let Domination bots capture, retake, arm and disarm objectives ([#276](https://github.com/tekulvw/mag-recomp-server/issues/276)) ([feb1a1b](https://github.com/tekulvw/mag-recomp-server/commit/feb1a1b379168604dfc4d1b333b71ac79d4001f0))
+* **gameplay:** measure tick cost and per-human traffic in the headless sim ([#266](https://github.com/tekulvw/mag-recomp-server/issues/266)) ([1b942b4](https://github.com/tekulvw/mag-recomp-server/commit/1b942b4a343e9f3cef81c35005c562d6ee3bc5a4))
+* **gameplay:** qualify bot resupply catalogs for Acquisition and Domination maps ([#279](https://github.com/tekulvw/mag-recomp-server/issues/279)) ([599052e](https://github.com/tekulvw/mag-recomp-server/commit/599052e447358c3982cb4ca0f413d736fe0a5850))
+* **gameplay:** separate world character capacity from the human cap ([#265](https://github.com/tekulvw/mag-recomp-server/issues/265)) ([5c76727](https://github.com/tekulvw/mag-recomp-server/commit/5c767275e45bc089f7ae466130954d237d2dcaf5))
+* **medius:** admit humans against a human cap separate from world size ([#263](https://github.com/tekulvw/mag-recomp-server/issues/263)) ([0e853aa](https://github.com/tekulvw/mag-recomp-server/commit/0e853aa115f5975c9c6c6b9a18737cfbe9afe7e9))
+
+
+### Bug Fixes
+
+* **gameplay:** build the headless sim against the world capacity constants ([#273](https://github.com/tekulvw/mag-recomp-server/issues/273)) ([78e1112](https://github.com/tekulvw/mag-recomp-server/commit/78e1112085b676072feb27d3d385ff94c240e910))
+* **gameplay:** clear the Domination activation prompt after a capture ([#268](https://github.com/tekulvw/mag-recomp-server/issues/268)) ([df22b5e](https://github.com/tekulvw/mag-recomp-server/commit/df22b5e539386bf68008c7aea274a70547752400))
+* **gameplay:** enable static-world rockets and frags for registry Sabotage profiles ([#270](https://github.com/tekulvw/mag-recomp-server/issues/270)) ([bca1990](https://github.com/tekulvw/mag-recomp-server/commit/bca1990959545009dd292d3d761eb032f64c7c7b))
+* **gameplay:** fill squads whose spawns can reach an objective first ([#280](https://github.com/tekulvw/mag-recomp-server/issues/280)) ([9568a2e](https://github.com/tekulvw/mag-recomp-server/commit/9568a2e382cb282afc19cb6aa3337d0c8132e928))
+* **gameplay:** keep Acquisition world ticks running in Horizon world 0 ([#269](https://github.com/tekulvw/mag-recomp-server/issues/269)) ([8a09a6e](https://github.com/tekulvw/mag-recomp-server/commit/8a09a6e3fc4d5bb13105173a30534cfd503bc694))
+* **gameplay:** keep the world running when a command ability fails ([#275](https://github.com/tekulvw/mag-recomp-server/issues/275)) ([c974b0a](https://github.com/tekulvw/mag-recomp-server/commit/c974b0a00f34e1f5c2f8f89c6dc1ce6c1bf7742b))
+* **gameplay:** make bots react to being shot and see enemies at weapon range ([#271](https://github.com/tekulvw/mag-recomp-server/issues/271)) ([ef3c4ad](https://github.com/tekulvw/mag-recomp-server/commit/ef3c4adc18b46078043977c246431cc0502b3eac))
+
 ## [0.12.1](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.12.0...gameplay-v0.12.1) (2026-11-25)
 
 
