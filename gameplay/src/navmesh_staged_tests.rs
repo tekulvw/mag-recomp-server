@@ -222,3 +222,37 @@ fn the_coarse_order_leads_staged_pieces_around_a_long_obstacle() {
         full.length_m
     );
 }
+
+/// A perforated 300 m by 60 m floor cut into six 10 m lanes joined at
+/// alternating ends, so a route from the first lane to the last snakes about
+/// 1.8 km over far more polygons than a direct search's 1,024-polygon path.
+fn serpentine() -> BakeInput {
+    floor(30, |x, z| {
+        let cut = z % 5 == 4 && z < 29;
+        let open = if (z / 5) % 2 == 0 { x >= 145 } else { x < 5 };
+        (cut && !open) || (matches!(x % 5, 2 | 3) && z % 4 == 2)
+    })
+}
+
+#[test]
+fn a_staged_route_carries_a_corridor_longer_than_a_direct_search() {
+    static ARTIFACT: std::sync::OnceLock<Artifact> = std::sync::OnceLock::new();
+    let mesh = load(
+        ARTIFACT.get_or_init(|| bake(serpentine()).unwrap()),
+        QUERY_NODE_LIMIT,
+    );
+    let (start, goal) = ([3., 0., 3.], [3., 0., 57.]);
+    let route = mesh.route(start, goal, 0.5).unwrap();
+    assert_eq!(route.status, Status::Complete, "{route:?}");
+    assert!(route.stages > 1, "{}", route.stages);
+    assert!(
+        route.corridor_refs.len() > 1024,
+        "the fixture must need a corridor over 1,024 polygons: {}",
+        route.corridor_refs.len()
+    );
+    assert!(route.corridor_refs.len() <= MAX_ROUTE_CORRIDOR);
+    assert!(route.length_m > 1500., "{}", route.length_m);
+    for waypoint in &route.waypoints {
+        assert!(mesh.contains(*waypoint, &route), "{waypoint:?}");
+    }
+}

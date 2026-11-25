@@ -405,8 +405,8 @@ impl NavMesh {
             .sum();
         if !route.length_m.is_finite()
             || route.length_m > 2048.
-            || route.waypoints.len() > 1024
-            || route.corridor_refs.len() > 1024
+            || route.waypoints.len() > MAX_ROUTE_CORRIDOR
+            || route.corridor_refs.len() > MAX_ROUTE_CORRIDOR
         {
             return err("navmesh_route_limit");
         }
