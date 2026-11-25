@@ -683,7 +683,7 @@ pub(crate) fn interruptible(bot: &WorldBot, guard: DropGuard) -> bool {
         })
 }
 /// Line of sight through static collision only; bodies do not hide a person.
-fn clear_view(
+pub(crate) fn clear_view(
     world: Option<&collision::CollisionWorld>,
     map: &str,
     from: [f64; 3],
@@ -704,7 +704,9 @@ fn clear_view(
     }) {
         return Ok(false);
     }
-    match world.raycast_segment_bounded(from, to, work) {
+    // Sight lines see through what bullets fly through (the projectile row).
+    let row = world.query_row(crate::collision::PROJECTILE_QUERY_LAYER);
+    match world.raycast_row_bounded(from, to, row, work) {
         Ok(query) => Ok(query.nearest.is_none()),
         Err(_) if *work == 0 => Err(()),
         Err(_) => Ok(false),

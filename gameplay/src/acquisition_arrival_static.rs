@@ -67,7 +67,7 @@ impl ArrivalStatic {
         let end = [start[0], f64::from(position.y + 5.), start[2]];
         let result = self
             .world
-            .raycast_segment_bounded(start, end, budget)
+            .raycast_row_bounded(start, end, Some(filter_rows[ARRIVAL_LAYER]), budget)
             .map_err(|_| "acquisition_arrival_static_query_failed")?;
         Ok(result
             .nearest

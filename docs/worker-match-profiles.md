@@ -69,7 +69,13 @@ Objective map/mode/wire identities, squad assignments and forward spawns must
 agree. Collision metadata must match the spawn map. An optional
 `collision_coverage` path supplies a [coverage sidecar](collision-coverage-sidecar.md)
 for the row's `collision_world`; it requires collision and must name that world's
-exact hash and map. Navmesh requires collision,
+exact hash and map. An optional `collision_filter_rows` path (a JSON list of
+the 32 retail collision filter rows, or a file with a `filter_rows` list, such as
+an Acquisition gameplay configuration) requires collision. With it, static rays
+skip triangles on layers their retail query row passes through. Without it,
+every triangle blocks, as before. The direct worker takes the same file as
+`--collision-filter-rows` (see [character movement and ray
+layers](extraction.md#character-movement-layers)). Navmesh requires collision,
 its exact source hash, matching map and coverage validation against the world's
 regions and any sidecar regions. Vehicles and
 character damage rules retain their existing exact spawn-source hash checks.

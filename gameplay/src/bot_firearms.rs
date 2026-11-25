@@ -257,7 +257,7 @@ impl State {
     }
 }
 #[derive(Clone)]
-struct Actor {
+pub(crate) struct Actor {
     life: Life,
     team: u8,
     feet: [f64; 3],
@@ -364,7 +364,7 @@ fn intersects(from: [f64; 3], to: [f64; 3], bounds: Bounds) -> bool {
     true
 }
 #[allow(clippy::too_many_arguments)]
-fn visible(
+pub(crate) fn visible(
     world: Option<&collision::CollisionWorld>,
     map: &str,
     from: [f64; 3],
@@ -389,8 +389,10 @@ fn visible(
     }) {
         return Err("geometry_coverage_unknown");
     }
+    // A shot crosses what the retail projectile row collides with.
+    let row = world.query_row(crate::collision::PROJECTILE_QUERY_LAYER);
     if world
-        .raycast_segment_bounded(from, to, work)
+        .raycast_row_bounded(from, to, row, work)
         .map_err(|_| "geometry_query_budget")?
         .nearest
         .is_some()

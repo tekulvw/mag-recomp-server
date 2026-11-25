@@ -100,7 +100,9 @@ pub fn query_blast_visibility(
         let nearest = if length <= 0.04 {
             None
         } else {
-            match world.raycast_segment(query_start, query_end) {
+            let row = world.query_row(crate::collision::BLAST_QUERY_LAYER);
+            let mut budget = usize::MAX;
+            match world.raycast_row_bounded(query_start, query_end, row, &mut budget) {
                 Ok(query) => query.nearest,
                 Err(error) => {
                     return BlastVisibility::QueryFailed {

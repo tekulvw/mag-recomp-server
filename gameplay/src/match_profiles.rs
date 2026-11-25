@@ -68,6 +68,10 @@ struct Source {
     active_abilities: Option<PathBuf>,
     collision_world: Option<PathBuf>,
     collision_coverage: Option<PathBuf>,
+    /// Retail collision filter rows; static rays then skip layers their
+    /// query row passes through (see `collision::CollisionWorld::query_row`).
+    #[serde(default)]
+    collision_filter_rows: Option<PathBuf>,
     navmesh_world: Option<PathBuf>,
     movement_profile: Option<PathBuf>,
     ground_vehicles: Option<PathBuf>,
@@ -429,6 +433,18 @@ impl Registry {
                             path,
                         )?)
                         .map_err(io::Error::other)?,
+                ),
+                (None, world) => world,
+            };
+            let collision = match (source.collision_filter_rows.as_ref(), collision) {
+                (Some(_), None) => {
+                    return Err(io::Error::other(
+                        "match_profile_collision_filter_rows_require_collision",
+                    ));
+                }
+                (Some(path), Some(world)) => Some(
+                    world
+                        .with_filter_rows(Some(collision::CollisionWorld::load_filter_rows(path)?)),
                 ),
                 (None, world) => world,
             };

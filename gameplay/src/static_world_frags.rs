@@ -183,7 +183,12 @@ impl<W: Write> Engine<W> {
             let end = anchor.map(f64::from);
             if end != origin
                 && scene
-                    .raycast_segment_bounded(origin, end, &mut budget)
+                    .raycast_row_bounded(
+                        origin,
+                        end,
+                        scene.query_row(crate::collision::BLAST_QUERY_LAYER),
+                        &mut budget,
+                    )
                     .map_err(|_| {
                         if budget == 0 {
                             "static_world_frag_blast_work_limit"
