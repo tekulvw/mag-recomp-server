@@ -725,9 +725,9 @@ fn onfoot_respawn_faces_the_authored_point_yaw() {
 fn spawn_catalog_rejects_an_out_of_range_yaw() {
     let mut value = spawn_json();
     value["maps"][0]["locations"][0]["yaw"] = json!(1024);
-    let error = spawns(value)
-        .err()
-        .expect("out-of-range yaw must be refused");
+    let Err(error) = spawns(value) else {
+        panic!("out-of-range yaw must be refused");
+    };
     assert!(error.to_string().contains("invalid_spawn_yaw"), "{error}");
     let mut value = spawn_json();
     value["maps"][0]["locations"][0]["yaw"] = json!(1023);
