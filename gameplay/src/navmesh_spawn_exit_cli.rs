@@ -2,11 +2,25 @@
 use mag_gameplay::{
     bot_physics::{Body, WorldTerrain},
     collision::{CollisionLimits, CollisionWorld},
-    navmesh::{self, Artifact, NavMesh, Status},
+    navmesh::{self, Artifact, MovementProfile, NavMesh, Status},
 };
 use serde::Deserialize;
 use serde_json::json;
 use std::{collections::BTreeMap, fs, io::Write};
+
+/// Load a mesh with the movement profile it was baked with, if any. The
+/// mesh's body (`NavMesh::body`) is then the one every trace here uses.
+pub fn load_mesh(
+    artifact: Artifact,
+    world_sha256: &str,
+    map_name: &str,
+    rules: Option<&MovementProfile>,
+) -> Result<NavMesh, navmesh::Error> {
+    match rules {
+        Some(rules) => NavMesh::load_with_movement_profile(artifact, world_sha256, map_name, rules),
+        None => NavMesh::load(artifact, world_sha256, map_name),
+    }
+}
 
 /// Load a collision world and, when given, its hash-bound coverage sidecar.
 pub fn load_world(
@@ -189,7 +203,7 @@ fn robust_descent(
 ) -> Result<Vec<serde_json::Value>, String> {
     let mut evidence = vec![];
     for cadence in recorded {
-        let body = Body::default();
+        let body = mesh.body();
         let r = mesh
             .route(spawn, l.launch, 0.1)
             .map_err(|e| e.0.to_owned())?;
@@ -296,6 +310,7 @@ pub fn run(
     output: &str,
     fall_rules: &str,
     health: u16,
+    movement_profile: Option<&MovementProfile>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let rules = mag_gameplay::fall_damage::Rules::load(fall_rules)?;
     if health == 0 {
@@ -358,10 +373,15 @@ pub fn run(
     let mut art: Artifact = serde_json::from_slice(&fs::read(mesh_path)?)?;
     let old = art.drop_links.clone();
     art.drop_links.clear();
-    let mesh = NavMesh::load(art.clone(), &hash, &world.metadata().map_name)?;
+    let mesh = load_mesh(
+        art.clone(),
+        &hash,
+        &world.metadata().map_name,
+        movement_profile,
+    )?;
     mesh.validate_coverage(&world)?;
     let t = WorldTerrain::new(Some(&world), &world.metadata().map_name).map_err(|e| e.code())?;
-    let body = Body::default();
+    let body = mesh.body();
     let mut all = old.clone();
     let mut rows = vec![];
     for parameter in &config.groups {
@@ -466,8 +486,8 @@ pub fn run(
                             if all.iter().any(|l| l.id == id) {
                                 return Err("duplicate candidate ID".into());
                             }
-                            let link = match navmesh::DropLink::certify(
-                                &world, &hash, id, launch, landing, 4.5,
+                            let link = match navmesh::DropLink::certify_with_body(
+                                &world, &hash, id, launch, landing, 4.5, body,
                             ) {
                                 Ok(v) => v,
                                 Err(e) => {
@@ -613,6 +633,7 @@ pub fn replay_case(
     mesh_path: &str,
     fixture_path: &str,
     output: &str,
+    movement_profile: Option<&MovementProfile>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let f: ReplayCase = serde_json::from_slice(&fs::read(fixture_path)?)?;
     if f.slices.is_empty()
@@ -626,7 +647,7 @@ pub fn replay_case(
     let world = load_world(world_path, coverage_path)?;
     let hash = navmesh::sha256(&fs::read(world_path)?);
     let art: Artifact = serde_json::from_slice(&fs::read(mesh_path)?)?;
-    let mesh = NavMesh::load(art, &hash, &world.metadata().map_name)?;
+    let mesh = load_mesh(art, &hash, &world.metadata().map_name, movement_profile)?;
     let l = mesh
         .artifact()
         .drop_links
@@ -665,7 +686,7 @@ pub fn replay_case(
             [0.; 3]
         };
         let before = m;
-        m = t.advance(m, v, dt, Body::default()).map_err(|e| e.code())?;
+        m = t.advance(m, v, dt, mesh.body()).map_err(|e| e.code())?;
         rows.push(json!({"before":before,"after":m,"slice":dt}));
         if m.blocked {
             error = Some("physics_blocked");

@@ -254,6 +254,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "--output",
                     "--fall-damage-rules",
                     "--health",
+                    "--movement-profile",
                 ]
                 .contains(&k.as_str())
             }) {
@@ -267,6 +268,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 get("--output")?,
                 get("--fall-damage-rules")?,
                 get("--health")?.parse()?,
+                movement_profile()?.as_ref(),
             )?;
         }
         "replay-drop" => {
@@ -277,6 +279,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "--collision-coverage",
                     "--fixture",
                     "--output",
+                    "--movement-profile",
                 ]
                 .contains(&k.as_str())
             }) {
@@ -288,6 +291,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 get("--mesh")?,
                 get("--fixture")?,
                 get("--output")?,
+                movement_profile()?.as_ref(),
             )?;
         }
         "add-drop" => {
@@ -301,6 +305,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "--speed",
                     "--id",
                     "--output",
+                    "--movement-profile",
                 ]
                 .contains(&k.as_str())
             }) {
@@ -311,18 +316,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let world_path = get("--collision-world")?;
             let hash = navmesh::sha256(&read(world_path, 128 * 1024 * 1024)?);
             let world = navmesh_spawn_exit_cli::load_world(world_path, coverage)?;
-            let mesh = NavMesh::load(artifact.clone(), &hash, &world.metadata().map_name)?;
+            let rules = movement_profile()?;
+            let map = world.metadata().map_name.clone();
+            let mesh =
+                navmesh_spawn_exit_cli::load_mesh(artifact.clone(), &hash, &map, rules.as_ref())?;
             mesh.validate_coverage(&world)?;
-            let link = navmesh::DropLink::certify(
+            let link = navmesh::DropLink::certify_with_body(
                 &world,
                 &hash,
                 get("--id")?.parse()?,
                 point(get("--launch")?)?,
                 point(get("--landing")?)?,
                 get("--speed")?.parse()?,
+                mesh.body(),
             )?;
             artifact.drop_links.push(link);
-            let _ = NavMesh::load(artifact.clone(), &hash, &world.metadata().map_name)?;
+            let _ =
+                navmesh_spawn_exit_cli::load_mesh(artifact.clone(), &hash, &map, rules.as_ref())?;
             write(Some(&get("--output")?.to_string()), &artifact)?;
         }
         "goals" => {
