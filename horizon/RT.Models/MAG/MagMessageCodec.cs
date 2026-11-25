@@ -25,7 +25,8 @@ namespace RT.Models.MAG
             if (TryParseForApplication(payload, applicationId, out message) && (message is MagRetailPartyInvite || message is MagRetailPartyInviteResponse ||
                 message is MagRetailPartyLeave || message is MagRetailPartyOpenInvite || message is MagRetailPartyRejoinRequest || message is MagRetailCancelJoinRequest || message is MagTrainingCompletedRequest || message is MagKeepAlive || message is MagJoinGameRequest || message is MagServerStatusRequest || message is MagHello || message is MagProtocolInfo || message is MagAccountLoginRequest || message is MagCharacterDataRequest ||
                 message is MagNpAuthenticateRequest || message is MagUniverseListRequest || message is MagRetailPatchRequest || message is MagRetailAccountLogoutRequest ||
-                message is MagNewsEulaRequest || message is MagCharacterListRequest || message is MagCreateCharacterRequest || message is MagLoadoutUpdateRequest || message is MagRetailLoadoutDeleteRequest || message is MagPurchaseSkillRequest || message is MagRetailNominationsUpdate)) return true;
+                message is MagNewsEulaRequest || message is MagCharacterListRequest || message is MagCreateCharacterRequest || message is MagLoadoutUpdateRequest || message is MagRetailLoadoutDeleteRequest || message is MagPurchaseSkillRequest || message is MagRetailNominationsUpdate ||
+                message is MagRetailPlayerOnlineRequest || message is MagRetailPlayerGameInfoRequest)) return true;
             message = null;
             return false;
         }
@@ -99,6 +100,10 @@ namespace RT.Models.MAG
                     0x0221 when applicationId == 20231 => new MagRetailLoadoutDeleteRequest(),
                     0x0222 when applicationId == 20231 => new MagRetailLoadoutDeleteResponse(),
                     0x0243 when applicationId == 20231 => new MagRetailNominationsUpdate(),
+                    0x022b when applicationId == 20231 => new MagRetailPlayerGameInfoRequest(),
+                    0x022c when applicationId == 20231 => new MagRetailPlayerGameInfoResponse(),
+                    0x022d when applicationId == 20231 => new MagRetailPlayerOnlineRequest(),
+                    0x022e when applicationId == 20231 => new MagRetailPlayerOnlineResponse(),
                     0x0236 => new MagCharacterListRequest(),
                     0x0237 => applicationId == 20231 ? new MagRetailCharacterListResponse() : new MagCharacterListResponse(),
                     0x0238 => new MagCharacterDataRequest(),
@@ -140,6 +145,19 @@ namespace RT.Models.MAG
                         break;
                     case MagRetailNominationsUpdate nominations:
                         nominations.Nominations = reader.ReadByte();
+                        break;
+                    case MagRetailPlayerOnlineRequest online:
+                        online.AccountId = reader.ReadUInt32();
+                        break;
+                    case MagRetailPlayerOnlineResponse online:
+                        online.AccountId = reader.ReadUInt32(); online.Online = reader.ReadBoolean();
+                        break;
+                    case MagRetailPlayerGameInfoRequest gameInfo:
+                        gameInfo.AccountId = reader.ReadUInt32();
+                        break;
+                    case MagRetailPlayerGameInfoResponse gameInfo:
+                        gameInfo.AccountId = reader.ReadUInt32(); gameInfo.GameId = reader.ReadUInt32(); gameInfo.LevelName = reader.ReadString();
+                        gameInfo.GameType = reader.ReadByte(); gameInfo.TrailingValue1 = reader.ReadByte(); gameInfo.TrailingValue2 = reader.ReadByte();
                         break;
                     case MagRetailPatchRequest patch:
                         patch.HighestVersion = unchecked((int)reader.ReadUInt32()); patch.InitialVersion = unchecked((int)reader.ReadUInt32());
@@ -298,7 +316,8 @@ namespace RT.Models.MAG
         // Legacy callers retain prototype behavior; the explicit retail summary type carries its profile.
         // Shared full-record/update types must use the application's explicit serializer at session boundaries.
         public static byte[] Serialize(MagMessage message) =>
-            SerializeForApplication(message, message is MagRetailPartyMessage || message is MagTrainingCompletedRequest || message is MagRetailCharacterListResponse || message is MagRetailAccountLoginRequest || message is MagRetailAccountLoginResponse || message is MagRetailJoinGameRequest || message is MagRetailJoinGameResponse || message is MagRetailLoadoutDeleteRequest or MagRetailLoadoutDeleteResponse || message is MagRetailAccountLogoutRequest or MagRetailAccountLogoutResponse ? 20231 : 20230);
+            SerializeForApplication(message, message is MagRetailPartyMessage || message is MagTrainingCompletedRequest || message is MagRetailCharacterListResponse || message is MagRetailAccountLoginRequest || message is MagRetailAccountLoginResponse || message is MagRetailJoinGameRequest || message is MagRetailJoinGameResponse || message is MagRetailLoadoutDeleteRequest or MagRetailLoadoutDeleteResponse || message is MagRetailAccountLogoutRequest or MagRetailAccountLogoutResponse ||
+                message is MagRetailPlayerOnlineRequest or MagRetailPlayerOnlineResponse or MagRetailPlayerGameInfoRequest or MagRetailPlayerGameInfoResponse ? 20231 : 20230);
 
         public static byte[] SerializeForApplication(MagMessage message, int applicationId)
         {
@@ -322,6 +341,8 @@ namespace RT.Models.MAG
                 throw new ArgumentException("Loadout delete messages are retail-only.", nameof(message));
             if (message is (MagRetailAccountLogoutRequest or MagRetailAccountLogoutResponse) && applicationId != 20231)
                 throw new ArgumentException("Account logout messages are retail-only.", nameof(message));
+            if (message is (MagRetailPlayerOnlineRequest or MagRetailPlayerOnlineResponse or MagRetailPlayerGameInfoRequest or MagRetailPlayerGameInfoResponse) && applicationId != 20231)
+                throw new ArgumentException("Player status messages are retail-only.", nameof(message));
             var writer = new MagBitWriter();
             writer.WriteUInt16(message.MessageType);
             if (message is MagPluginClientMessage common) WriteHeader(writer, common);
@@ -336,6 +357,19 @@ namespace RT.Models.MAG
                     break;
                 case MagRetailAccountLogoutResponse logout:
                     writer.WriteBoolean(logout.Success);
+                    break;
+                case MagRetailPlayerOnlineRequest online:
+                    writer.WriteUInt32(online.AccountId);
+                    break;
+                case MagRetailPlayerOnlineResponse online:
+                    writer.WriteUInt32(online.AccountId); writer.WriteBoolean(online.Online);
+                    break;
+                case MagRetailPlayerGameInfoRequest gameInfo:
+                    writer.WriteUInt32(gameInfo.AccountId);
+                    break;
+                case MagRetailPlayerGameInfoResponse gameInfo:
+                    writer.WriteUInt32(gameInfo.AccountId); writer.WriteUInt32(gameInfo.GameId); writer.WriteString(gameInfo.LevelName ?? string.Empty);
+                    writer.WriteByte(gameInfo.GameType); writer.WriteByte(gameInfo.TrailingValue1); writer.WriteByte(gameInfo.TrailingValue2);
                     break;
                 case MagPurchaseSkillRequest purchase:
                     writer.WriteByte(unchecked((byte)purchase.SkillId));

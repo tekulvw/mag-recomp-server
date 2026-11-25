@@ -104,6 +104,17 @@ namespace Server.Medius
             lock (_markerGate) _markerPath = path;
             PublishMarker(now, true);
         }
+        /// <summary>True while a client holds a live, channel-bound lease for this account id (the
+        /// id clients publish in presence and name in player-card queries).</summary>
+        public bool IsAccountOnline(uint accountId, DateTime now)
+        {
+            if (accountId == 0) return false;
+            lock (_gate)
+            {
+                Purge(now);
+                return _tickets.Values.Any(t => t.AccountId == accountId && t.ChannelId != null);
+            }
+        }
         public IReadOnlyDictionary<string, DateTime> ActiveAccounts(DateTime now)
         {
             lock (_gate)
