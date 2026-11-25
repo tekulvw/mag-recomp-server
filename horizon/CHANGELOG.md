@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.1](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.10.0...medius-v0.10.1) (2026-11-25)
+
+
+### Bug Fixes
+
+* **medius:** give party admission the same bounded retries ([#296](https://github.com/tekulvw/mag-recomp-server/issues/296)) ([b8215ea](https://github.com/tekulvw/mag-recomp-server/commit/b8215eac1e08aaa19b5af14a8f939fb7969bcd4e))
+* **medius:** retry gameplay admission the worker did not answer ([#293](https://github.com/tekulvw/mag-recomp-server/issues/293)) ([73ad20f](https://github.com/tekulvw/mag-recomp-server/commit/73ad20fa5db223bbc715459d0366f336ce8a73d3))
+
 ## [0.10.0](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.9.0...medius-v0.10.0) (2026-11-25)
 
 
