@@ -701,6 +701,7 @@ impl<W: Write> Engine<W> {
             return Ok(vec![]);
         }
         let setup = Arc::clone(&runtime.setup);
+        let assignments_before = squad_assignments(&runtime);
         let mut world = self
             .objective_world
             .clone()
@@ -994,6 +995,10 @@ impl<W: Write> Engine<W> {
             }
             return Ok(vec![]);
         }
+        // Squad orders follow objective state. A tick that only moved ground,
+        // ability or character state leaves every HUD order as published.
+        let refresh_assignments =
+            starting || !changed.is_empty() || squad_assignments(&runtime) != assignments_before;
         let audit = json!({
             "op":"acquisition_objective_tick", "timestamp_ms":now.as_millis() as u64,
             "startup":starting, "controller_sha256":setup.controller.fingerprint(),
@@ -1013,7 +1018,7 @@ impl<W: Write> Engine<W> {
                 characters,
                 native,
                 leadership: None,
-                refresh_assignments: true,
+                refresh_assignments,
                 audit,
             },
             now,
@@ -1153,6 +1158,14 @@ impl<W: Write> Engine<W> {
         }
         Ok(messages)
     }
+}
+
+fn squad_assignments(
+    runtime: &Runtime,
+) -> Vec<(u16, crate::acquisition_objective_runtime::Assignment)> {
+    (0..32)
+        .filter_map(|index| runtime.state.squad(index).map(|s| (index, s.assignment)))
+        .collect()
 }
 
 fn human_objective_actors<W: Write>(engine: &Engine<W>) -> BTreeMap<u16, ObjectiveActor> {

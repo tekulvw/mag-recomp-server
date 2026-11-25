@@ -1119,6 +1119,28 @@ fn plan_update_reply<W: Write>(
     let now = ctx.now;
     let next_sequence = ctx.next_sequence;
     let history_available = ctx.history_available;
+    // A queued character consumes its due wave before any squad-order
+    // refresh. Spawning re-arms the clear and assignment for the new life,
+    // so deferring them loses no order, while answering them first can hold
+    // the wave indefinitely whenever orders keep changing.
+    let respawn_due = active.ready_for_updates
+        && active.entered_game
+        && active
+            .pending_spawn_deadline
+            .is_some_and(|deadline| now >= deadline)
+        && active
+            .squad_catalog
+            .as_ref()
+            .alpha(
+                active
+                    .selected_spawn
+                    .map_or(active.squad_spawn, |s| s.spawn_point_index),
+            )
+            .is_some()
+        && ctx.engine.actor_matches_team(active)
+        && active.life.next_generation().is_some()
+        && ctx.engine.match_started
+        && history_available;
     if h.client_index != 0 {
         plan.rejection = Some("replication_client_mismatch");
     } else if plan.rejection.is_some() || !body_supported {
@@ -1257,6 +1279,7 @@ fn plan_update_reply<W: Write>(
         && h.nak_sequence == 0
         && history_available
         && active.objective_needs_clear
+        && !respawn_due
         && (active.spawn_delta.is_none() || active.life.is_alive())
         && ctx.engine.match_profile().has_objectives
     {
@@ -1277,6 +1300,7 @@ fn plan_update_reply<W: Write>(
         && history_available
         && active.objective_delta.is_some()
         && !active.objective_assigned
+        && !respawn_due
         && (active.spawn_delta.is_none() || active.life.is_alive())
     {
         // Source-list first objective for this actor's current squad.
@@ -1472,25 +1496,7 @@ fn plan_update_reply<W: Write>(
         plan.combat.dummy_health = step.health;
         plan.combat.bot_runtime = Some(step.runtime);
         plan.audit.bot_script = Some(step.receipt);
-    } else if active.ready_for_updates
-        && active.entered_game
-        && active
-            .pending_spawn_deadline
-            .is_some_and(|deadline| now >= deadline)
-        && active
-            .squad_catalog
-            .as_ref()
-            .alpha(
-                active
-                    .selected_spawn
-                    .map_or(active.squad_spawn, |s| s.spawn_point_index),
-            )
-            .is_some()
-        && ctx.engine.actor_matches_team(active)
-        && active.life.next_generation().is_some()
-        && ctx.engine.match_started
-        && history_available
-    {
+    } else if respawn_due {
         update_actions::plan_respawn(ctx, plan)?;
     }
     // While the picker is open, publish rollover without enqueuing.

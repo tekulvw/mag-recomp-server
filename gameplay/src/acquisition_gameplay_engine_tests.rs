@@ -1295,6 +1295,9 @@ pub(crate) fn ground_grenade_driver_fixture() -> Engine<Vec<u8>> {
 #[path = "acquisition_vehicle_wave_effects_tests.rs"]
 mod vehicle_wave_effects;
 
+#[path = "acquisition_ability_spawn_tests.rs"]
+mod ability_spawn;
+
 fn grenade_report(e: &Engine<Vec<u8>>, sequence: u32, position: CharacterPosition) -> Vec<u8> {
     grenade_report_for_slot(e, sequence, position, 0)
 }
