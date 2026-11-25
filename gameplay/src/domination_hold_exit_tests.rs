@@ -165,8 +165,18 @@ fn completed_domination_capture_ends_the_holders_interaction_once() {
     );
     // The handshake travels with the recorded transaction.
     let log = String::from_utf8_lossy(&e.writer).into_owned();
-    let last = log.lines().last().unwrap();
-    assert!(last.contains("\"op\":\"domination_gameplay\""));
+    // The state-change receipt follows the transaction record.
+    let last = log
+        .lines()
+        .rev()
+        .find(|line| line.contains("\"op\":\"domination_gameplay\""))
+        .unwrap();
+    assert!(
+        log.lines()
+            .last()
+            .unwrap()
+            .contains("domination_objective_states")
+    );
     assert!(last.contains(&exit_hex()));
 
     // The capturer, the teammate and the enemy all receive the new state.

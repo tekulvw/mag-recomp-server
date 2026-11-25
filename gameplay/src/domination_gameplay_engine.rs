@@ -387,6 +387,10 @@ impl Runtime {
         self.setup.category_zero_indices()
     }
 
+    pub(crate) fn is_started(&self) -> bool {
+        self.started
+    }
+
     pub(crate) fn reset(&mut self) {
         self.started = false;
         self.callbacks.clear();

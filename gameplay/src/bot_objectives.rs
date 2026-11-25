@@ -334,6 +334,9 @@ pub(super) struct Task {
     pub(super) armed: Option<crate::bot_armed_objectives::Assignment>,
     generation: u32,
     pub(super) recovering: bool,
+    /// After a refused objective interaction, the operator waits until then
+    /// before asking again.
+    pub(super) interaction_retry_at: Duration,
     continuing: bool,
     routed: bool,
     wide: bool,
@@ -420,7 +423,25 @@ pub(super) fn operator_action<'a>(
     crate::objective_range::ObjectiveRange<'a>,
 )> {
     use protocol::ObjectiveInteractionKind::{Activate, Deactivate};
-    use replication::ObjectiveState::{Activated, Activating, Deactivated, Deactivating};
+    use replication::ObjectiveState::{
+        Activated, Activating, CancelRetaken, Completed, Deactivated, Deactivating, Retaken,
+        Retaking,
+    };
+    // A native secure-and-hold point (Domination): the attacking side secures
+    // an open or retaken point, the owning side retakes a secured one. The
+    // in-progress states keep the operator holding.
+    if object.native_class == Some(objective_catalog::NativeClass::SecureHold)
+        && let Some(r) = &object.interaction
+    {
+        let kind = match (team == r.owner_team, state) {
+            (false, Deactivated | Activating | Retaken | CancelRetaken) => Activate,
+            (true, Activated | Deactivating | Completed | Retaking) if r.can_deactivate => {
+                Deactivate
+            }
+            _ => return None,
+        };
+        return Some((kind, r.range()));
+    }
     if let Some(r) = &object.demolition {
         let kind = if team != r.owner_team && matches!(state, Deactivated | Activating) {
             Activate
@@ -2361,11 +2382,18 @@ impl<W: Write> Engine<W> {
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .map(|squad| {
-                let objective = self
-                    .objective_catalog
-                    .as_ref()
-                    .zip(self.objective_world.as_ref())
-                    .and_then(|(c, w)| assignment(c, w, squad));
+                // Domination squads follow the mode runtime's own current
+                // assignment, the one their human members see.
+                let objective = if self.domination_gameplay.is_some() {
+                    self.initial_objective_index(squad)
+                        .ok()
+                        .filter(|&index| index != u16::MAX)
+                } else {
+                    self.objective_catalog
+                        .as_ref()
+                        .zip(self.objective_world.as_ref())
+                        .and_then(|(c, w)| assignment(c, w, squad))
+                };
                 (squad, objective)
             })
             .collect();
