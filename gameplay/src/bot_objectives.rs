@@ -374,6 +374,32 @@ impl Task {
         self.progress_at = now;
     }
 
+    /// A continuing task whose final destination the bot already stands on,
+    /// for example after a cancelled supply walk that resumed the task, is
+    /// done: there is nothing to route, and a zero-length route is no route.
+    /// Settle it there instead of planning. True when it settled.
+    fn settle_at_role_goal(
+        &mut self,
+        here: replication::CharacterPosition,
+        arrival_m: f64,
+        now: Duration,
+        stall: Duration,
+    ) -> bool {
+        let Some(goal) = self.role_goal else {
+            return false;
+        };
+        if !self.continuing || self.goal.is_some() || distance(goal, here) > arrival_m {
+            return false;
+        }
+        self.goal = Some(goal);
+        self.continuing = false;
+        self.recovering = false;
+        self.routed = true;
+        self.progress_at = now;
+        self.progress_distance = None;
+        self.retry_at = now + stall;
+        true
+    }
     fn finish_segment(&mut self, now: Duration) {
         self.goal = None;
         self.retry_at = now;
@@ -2870,6 +2896,20 @@ impl<W: Write> Engine<W> {
                 )?;
                 continue;
             }
+            {
+                let bot = self.bot_registry.bots.get_mut(&id).unwrap();
+                let here = bot.target.runtime.unwrap().position;
+                let stall = Duration::from_millis(policy.stall_ms);
+                if bot
+                    .task
+                    .settle_at_role_goal(here, policy.arrival_m, now, stall)
+                {
+                    bot.target.pending_move = None;
+                    bot.target.runtime.as_mut().unwrap().phase = BotPhase::Complete;
+                    receipts.push(json!({"op":"bot_objective_settled","timestamp_ms":now.as_millis() as u64,"object_index":id,"objective":bot.task.objective,"goal":here}));
+                    continue;
+                }
+            }
             let bot = &self.bot_registry.bots[&id];
             let objective = bot.task.objective.unwrap();
             let squad = bot.target.squad.squad_index();
@@ -3245,6 +3285,40 @@ mod public_synthetic_policy_tests {
         assert!(!task.recovering && task.progress_distance.is_none());
         assert_eq!(task.retry_at, now);
         assert_eq!(task.progress_at, now);
+    }
+
+    #[test]
+    fn a_resumed_task_already_at_its_destination_settles_without_a_route() {
+        let final_goal = super::position([12., 0., 15.]);
+        let mut task = super::Task {
+            objective: Some(4),
+            role_goal: Some(final_goal),
+            continuing: true,
+            ..Default::default()
+        };
+        let now = std::time::Duration::from_secs(12);
+        let stall = std::time::Duration::from_secs(3);
+        // Half an arrival radius away: settle there.
+        assert!(task.settle_at_role_goal(super::position([12.2, 0., 15.]), 0.5, now, stall));
+        assert_eq!(task.goal, Some(final_goal));
+        assert!(!task.continuing && task.routed && !task.recovering);
+        assert_eq!(task.retry_at, now + stall);
+        // Settled tasks, unfinished segments and far bots still plan.
+        assert!(!task.settle_at_role_goal(final_goal, 0.5, now, stall));
+        let mut far = super::Task {
+            role_goal: Some(final_goal),
+            continuing: true,
+            ..Default::default()
+        };
+        assert!(!far.settle_at_role_goal(super::position([20., 0., 15.]), 0.5, now, stall));
+        assert!(far.goal.is_none() && far.continuing);
+        let mut mid_segment = super::Task {
+            goal: Some(super::position([3., 0., 6.])),
+            role_goal: Some(final_goal),
+            continuing: true,
+            ..Default::default()
+        };
+        assert!(!mid_segment.settle_at_role_goal(final_goal, 0.5, now, stall));
     }
 
     #[test]
