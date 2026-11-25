@@ -119,6 +119,12 @@ coverage sidecar (`collision_coverage` in a match profile), also pass
 sidecar, and the receipt records its SHA-256 as `collision_coverage_sha256`.
 Without the option the command, policy and receipt are unchanged.
 
+A movement-profiled navmesh loads only with its movement profile. For such a
+mesh, also pass `--movement-profile /absolute/MOVEMENT.json` (the profile row's
+`movement_profile`). The goal queries then load the mesh with that profile, and
+the receipt records its SHA-256 as `movement_profile_sha256`. Without the option
+the command, policy and receipt are unchanged.
+
 Each policy allows 1–16 route queries per tick, 1–32 providers (the native
 static supply pool size) and 1–16 anchors per provider. The policy carries its
 catalog's map and mode, and the worker rejects a policy whose map or mode

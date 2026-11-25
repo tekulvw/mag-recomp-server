@@ -128,11 +128,14 @@ def project(provider_raw, world_sha, parameters, query):
             "detour_sha256": detour_sha, **knobs, "providers": projected}
 
 
-def goals_command(navmesh_cli, mesh, collision_world, coverage, seed, radius):
-    """The navigation CLI goal query; a coverage sidecar is passed only when supplied."""
+def goals_command(navmesh_cli, mesh, collision_world, coverage, seed, radius, movement_profile=None):
+    """The navigation CLI goal query; a coverage sidecar and a movement profile are passed only
+    when supplied."""
     command = [str(navmesh_cli), "goals", "--mesh", str(mesh), "--collision-world", str(collision_world)]
     if coverage is not None:
         command += ["--collision-coverage", str(coverage)]
+    if movement_profile is not None:
+        command += ["--movement-profile", str(movement_profile)]
     return command + ["--goal", ",".join(map(str, seed)), "--goal-radius", str(radius)]
 
 
@@ -142,13 +145,15 @@ def main():
         parser.add_argument(name, required=True, type=Path)
     parser.add_argument("--collision-coverage", type=Path,
                         help="Coverage sidecar for a collision world that declares no physics region")
+    parser.add_argument("--movement-profile", type=Path,
+                        help="Movement profile a movement-profiled navmesh requires to load")
     parser.add_argument("--receipt", type=Path)
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
 
     def query(seed, radius):
         command = goals_command(args.navmesh_cli.resolve(), args.mesh, args.collision_world,
-                                args.collision_coverage, seed, radius)
+                                args.collision_coverage, seed, radius, args.movement_profile)
         return json.loads(subprocess.check_output(command, timeout=30))
 
     try:
@@ -157,6 +162,8 @@ def main():
                   "parameters_sha256": args.parameters}
         if args.collision_coverage is not None:
             inputs["collision_coverage_sha256"] = args.collision_coverage
+        if args.movement_profile is not None:
+            inputs["movement_profile_sha256"] = args.movement_profile
         outputs = [path for path in (args.out, args.receipt) if path is not None]
         output_paths = {path.resolve() for path in outputs}
         require(len(output_paths) == len(outputs)
@@ -167,7 +174,7 @@ def main():
         digests = {"provider_catalog_sha256": sha(provider_raw), "parameters_sha256": sha(parameters_raw),
                    **{name: file_sha(inputs[name]) for name in
                       ("mesh_sha256", "collision_sha256", "navigation_cli_sha256",
-                       "collision_coverage_sha256") if name in inputs}}
+                       "collision_coverage_sha256", "movement_profile_sha256") if name in inputs}}
         rules = project(provider_raw, digests["collision_sha256"], json.loads(parameters_raw), query)
         encode = lambda value: (json.dumps(value, sort_keys=True, indent=2, allow_nan=False) + "\n").encode()
         encoded = encode(rules)

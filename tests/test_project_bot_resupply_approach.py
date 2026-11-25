@@ -96,3 +96,13 @@ class ResupplyApproachProjectorTests(unittest.TestCase):
                                        "--collision-coverage", "/coverage"])
         self.assertEqual(covered[8:], plain[6:])
 
+
+    def test_movement_profile_is_passed_to_goal_queries_only_when_supplied(self):
+        command = runpy.run_path(str(SCRIPT))["goals_command"]
+        plain = command("/cli", "/mesh", "/world", "/coverage", [1, 2, 3], 0.75)
+        profiled = command("/cli", "/mesh", "/world", "/coverage", [1, 2, 3], 0.75, "/profile")
+        self.assertEqual(profiled[:8], plain[:8])
+        self.assertEqual(profiled[8:10], ["--movement-profile", "/profile"])
+        self.assertEqual(profiled[10:], plain[8:])
+        self.assertEqual(command("/cli", "/mesh", "/world", None, [1, 2, 3], 0.75, "/profile")[6:8],
+                         ["--movement-profile", "/profile"])
