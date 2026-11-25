@@ -68,6 +68,10 @@ namespace Server.Medius {
   public GameplayBridgeFailure Failure {get;}
   public long ElapsedMilliseconds {get; internal set;}
   public bool IsTransientFailure => Failure == GameplayBridgeFailure.Timeout || Failure == GameplayBridgeFailure.Unavailable;
+  /// <summary>The bridge failed before it began writing the request: the name did not resolve
+  /// or no connection opened in time. The worker cannot have seen it, so it is safe to send
+  /// again over a new connection. False for every reply and for any later failure.</summary>
+  public bool RequestNotSent {get; internal set;}
   public IReadOnlyList<GameplayBridgeMessage> Messages {get;}
   public IReadOnlyList<GameplayReward> Rewards {get;}
   public GameplayMatchTerminal MatchTerminal {get;}

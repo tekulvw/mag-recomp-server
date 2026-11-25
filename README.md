@@ -80,6 +80,8 @@ for extracted JSON updates; catalogs and account state are external inputs.
 
 The gameplay engine and Horizon exchange authenticated gameplay state through a
 JSONL bridge. Their native protocol codecs remain distinct from that bridge.
+[Gameplay admission](docs/gameplay-admission.md) retries a reserve the worker
+did not answer, and requeues a queued player rather than dropping it.
 Existing implementation covers admission, replication, loadouts, damage,
 progression, objectives, bot behavior, and collision/navigation processing.
 [Combat reward relationships](docs/combat-reward-relationships.md) distinguish

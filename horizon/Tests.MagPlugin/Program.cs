@@ -75,6 +75,10 @@ Test("operator Training level raises new completions to an earned-equivalent min
 Test("unsupported join requests name their rejection", JoinRejectionChecks.Run);
 Test("refused gameplay admission names its release reason", AdmissionFailureChecks.Run);
 Test("rejected gameplay release cannot hold admission forever", RejectedReleaseChecks.Run);
+Test("gameplay admission policy configuration", LeadershipProgressionChecks.AdmissionPolicyConfiguration);
+Test("unanswered gameplay admission is released and retried", LeadershipProgressionChecks.UnansweredAdmissionIsRetried);
+Test("undelivered gameplay admission is sent again", LeadershipProgressionChecks.UndeliveredAdmissionIsResent);
+Test("unanswered gameplay admission requeues or fails, never hangs", LeadershipProgressionChecks.UnansweredAdmissionRequeuesOrFails);
 Test("restarted legacy gameplay worker is reconfigured before admission", LeadershipProgressionChecks.LegacyWorkerRestartReconfigures);
 Test("gameplay bridge deadlines outlast short worker stalls", BridgeDeadlineChecks.Run);
 Test("world stream resumes on the same worker and releases on a restart", LeadershipProgressionChecks.WorldStreamResumeKeepsPlayers);
