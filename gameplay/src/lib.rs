@@ -55,6 +55,7 @@ mod bot_perception_tests;
 pub mod bot_physics;
 mod bot_regional_collision;
 pub mod bot_registry;
+mod bot_repair;
 pub mod bot_resupply;
 pub mod bot_resupply_approach_policy;
 pub mod bot_resupply_catalog;

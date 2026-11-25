@@ -38,6 +38,8 @@ pub struct BotPopulation {
     #[serde(default)]
     pub perception: crate::bot_perception::Policy,
     #[serde(default)]
+    pub repair: crate::bot_repair::Policy,
+    #[serde(default)]
     pub regional_collision: Option<RegionalCollision>,
     #[serde(default)]
     pub regional_team: Option<u8>,
@@ -82,6 +84,7 @@ impl BotPopulation {
         self.firearms.validate()?;
         self.healing.validate()?;
         self.perception.validate()?;
+        self.repair.validate()?;
         if let Some(policy) = &self.objective_policy {
             policy.validate()?;
         }
@@ -2880,6 +2883,14 @@ impl<W: Write> Engine<W> {
                 .item_catalog
                 .bootstrap_loadout(faction, inventory)
                 .ok_or("missing_retail_target_loadout")?;
+            // Squad engineers carry the mode's repair tool.
+            let loadout = crate::bot_repair::engineer_loadout(
+                &self.bot_registry.config.as_ref().unwrap().repair,
+                role_slot,
+                &self.item_catalog,
+                self.bot_repair_tool().map(|tool| tool.item_id),
+                loadout,
+            );
             let generation = self
                 .bot_registry
                 .generations
