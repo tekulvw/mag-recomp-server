@@ -230,6 +230,54 @@ Findings:
     publish nothing.
   - The bound that matters is every bot moving: 4 updates/s per bot.
 
+### Phase 0 baseline: 32 observers at 64 characters
+
+Measured with the Phase 0 sim tooling (#266, branch
+`feat/gameplay-sim-profiles-observers`) on the same private Acquisition
+(Panama) and Domination (Unalaska) 64-player profiles:
+
+- 900 simulated seconds, statistics exclude the first 120 s, Apple M4 Pro,
+  `nice -n 15`, one sim at a time.
+- 32 observers drain their queues like clients, 16 per side. The fill total
+  counts them, so 32 bots remain.
+- Observers send no owner updates, so other humans' relayed updates are not
+  included. Byte counts are plugin payload, without RT, DME or TCP framing.
+- "Events" is the simulated client event rate per observer. Each event's reply
+  runs the shared drain once more, as it does live. At 0, world frames are the
+  only drain.
+
+| World | Observers | Events | Bots alive | Tick mean / p99 / max (ms) | Drain mean (ms) | Per observer pkt/s | Per observer B/s | Queue depth max | Evicted |
+|---|---|---|---|---|---|---|---|---|---|
+| Acq 64 | 32 | 10 Hz | 31.4 | 0.60 / 1.62 / 9.9 | 0.11 | 37.7 | 1,150 | 0 | 0 |
+| Acq 64 | 32 | 5 Hz | 31.4 | 0.61 / 1.31 / 11.1 | 0.11 | 36.8 | 1,121 | 0 | 0 |
+| Acq 64 | 32 | 0 | — | — | — | 80.0 sent, 102.5 offered | 2,778 sent | 508 | all 32 at 22.5 s |
+| Dom 64 | 32 | 10 Hz | 30.2 | 1.19 / 4.11 / 9.7 | 0.17 | 65.9 | 2,027 | 0 | 0 |
+| Dom 64 | 32 | 5 Hz | 30.5 | 1.08 / 3.88 / 7.2 | 0.15 | 61.2 | 1,883 | 0 | 0 |
+| Dom 64 | 32 | 0 | — | — | — | 79.6 sent, 108.2 offered | 2,930 sent | 508 | all 32 at 17.7 s |
+| Acq 64 | 1 | 10 Hz | 62.2 | 0.66 / 1.40 / 11.4 | 0.01 | 52.9 | 1,618 | 0 | 0 |
+| Dom 64 | 1 | 10 Hz | 61.4 | 1.13 / 4.39 / 11.2 | 0.02 | 78.3 | 2,405 | 0 | 0 |
+
+Findings:
+
+- **Steady per-human demand is small.** With 32 bots it is 38 packets/s and
+  1.2 KB/s in Acquisition, and 66 packets/s and 2.0 KB/s in Domination. The
+  mean packet is about 31 bytes. All 32 observers together receive 37-65 KB/s
+  (0.3-0.5 Mbit/s).
+- **The bot population start is a burst.** In the first 20 s each observer
+  receives 102-108 packets/s: a creation snapshot per bot, then first
+  movement. That is above the 80 messages/s per human that world frames alone
+  can carry at 32 recipients.
+- **World frames alone cannot carry 32 humans, even at 64 characters.** With no
+  client events, every observer's queue reached 508 and all 32 were evicted as
+  `replication_backlogged` within 18-23 s. The world then emptied of bots.
+- **Event replies carry most of the drain live.** At 5 or 10 events/s per
+  observer, queues peaked at 40-86 messages during the start and were empty in
+  steady state. The real client event rate is not measured yet; a client that
+  sends few events while loading is the one at risk.
+- **Fan-out CPU is cheap.** Draining to 32 recipients costs 0.11-0.17 ms per
+  tick. The 320 simulated reply drains per second cost 0.21-0.24 ms per 50 ms in
+  total. Tick cost with 32 observers matches 1 observer.
+
 ## Network
 
 Per human, worst case at Domination 256 (255 other characters):
