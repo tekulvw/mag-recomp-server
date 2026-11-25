@@ -11,6 +11,7 @@ impl<W: Write> Engine<W> {
     pub(super) fn admission_capacity(&self) -> usize {
         self.admission_capacity_for(self.wire_profile.application_id())
     }
+    /// Characters (humans plus bots) the world holds.
     pub(super) fn admission_capacity_for(&self, application_id: u32) -> usize {
         let policy = self.match_profile();
         if application_id == 20231 && matches!(policy.game_type, 0..=3) && policy.auto_assign_teams
@@ -19,6 +20,25 @@ impl<W: Write> Engine<W> {
         } else {
             8
         }
+    }
+    /// Humans the world admits: its whole capacity up to the legacy world
+    /// size, and the separate human cap above it.
+    pub(super) fn human_admission_capacity_for(&self, application_id: u32) -> usize {
+        let world = self.admission_capacity_for(application_id);
+        if world_capacity::is_large(world / 2) {
+            world_capacity::human_capacity(world / 2)
+        } else {
+            world
+        }
+    }
+    /// Humans one side admits; the world's team capacity up to the legacy
+    /// world size.
+    pub(super) fn human_team_capacity(&self) -> usize {
+        world_capacity::human_team_capacity(self.match_profile().team_capacity)
+    }
+    /// Per-recipient reliable queue bound for this world's size.
+    pub(super) fn shared_queue_limit(&self) -> usize {
+        world_capacity::shared_queue_limit(self.admission_capacity())
     }
     pub(super) fn actor_matches_team(&self, actor: &Active) -> bool {
         let policy = self.match_profile();
@@ -78,7 +98,7 @@ impl<W: Write> Engine<W> {
                 .chain(self.active.iter())
                 .filter(|a| a.team() == team)
                 .count();
-            if count + members <= policy.team_capacity {
+            if count + members <= self.human_team_capacity() {
                 teams.push((count, u16::from(team) != preferred_team, team));
             }
         }
@@ -273,6 +293,7 @@ impl<W: Write> Engine<W> {
             smoke_bootstrap: 0..0,
             ordered_health_pending: false,
             replication_backlogged: false,
+            shared_queue_limit: self.shared_queue_limit(),
             objective_delta: None,
             objective_assigned: false,
             objective_needs_clear: false,

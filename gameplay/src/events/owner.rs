@@ -1261,7 +1261,7 @@ fn plan_update_reply<W: Write>(
             || (!sequence_batches.is_empty()
                 && (active.replication_backlogged
                     || active.ordinary_shared_len() + sequence_batches.len()
-                        > crate::multiplayer::MAX_SHARED_QUEUE))
+                        > active.shared_queue_limit))
         {
             // Leave bootstrap incomplete so a later pull retries the full snapshot.
             return Ok(());

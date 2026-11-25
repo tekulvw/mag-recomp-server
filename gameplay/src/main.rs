@@ -2363,7 +2363,7 @@ fn serve(
     if hello && response.ok {
         // Served-worker bridge features; in-process engines do not offer them.
         // Horizon accepts at most 32 capabilities; a full discovery reply with
-        // these two and worker_registry_v1 lists 16.
+        // these two, worker_registry_v1 and world_capacity_v1 lists 17.
         response.capabilities.extend([
             world_stream::CAPABILITY.to_owned(),
             world_stream::EVENT_REPLAY_CAPABILITY.to_owned(),

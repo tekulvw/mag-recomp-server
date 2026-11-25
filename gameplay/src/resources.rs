@@ -268,6 +268,7 @@ impl<W: Write> Engine<W> {
             alpha_turret_reporter: None,
             team_waves: [None; 2],
             shared_drain_cursor: 0,
+            shared_deferral: Default::default(),
             last_published_rosters: Default::default(),
             sequence: 0,
             written: 0,

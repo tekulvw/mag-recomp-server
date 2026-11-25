@@ -389,7 +389,7 @@ fn fill_cohort(engine: &mut Engine<Vec<u8>>, prefix: &str, template: &Character)
     if let Some(actor) = engine.active.take() {
         actors.insert(actor.reservation.id.clone(), actor);
     }
-    for slot in 0..MAX_MATCH_PLAYERS as u16 {
+    for slot in 0..world_capacity::MAX_ADMITTED_HUMANS as u16 {
         if actors
             .values()
             .any(|actor| actor.reservation.player == slot)
@@ -415,7 +415,7 @@ fn fill_cohort(engine: &mut Engine<Vec<u8>>, prefix: &str, template: &Character)
 #[test]
 fn ack_level_publications_respect_the_shared_bridge_reply_limit() {
     let (mut engine, reward) = archived_destruction();
-    engine.maximum_players = MAX_MATCH_PLAYERS;
+    engine.maximum_players = world_capacity::MAX_ADMITTED_HUMANS;
     engine.world_tick_enabled = true;
     let successor = actor(&engine, SUCCESSOR);
     let account = successor.reservation.account;
@@ -441,7 +441,7 @@ fn ack_level_publications_respect_the_shared_bridge_reply_limit() {
     );
     let mut delivered = level_messages(&response.messages, engine.wire_profile);
     assert_eq!(response.messages.len(), delivered.len() + 1);
-    assert!(delivered.len() < 2 * MAX_MATCH_PLAYERS + 2);
+    assert!(delivered.len() < 2 * world_capacity::MAX_ADMITTED_HUMANS + 2);
 
     let drained = engine
         .tick_results_cohorts(Duration::from_millis(140), 1, Vec::new())
@@ -457,7 +457,7 @@ fn ack_level_publications_respect_the_shared_bridge_reply_limit() {
         assert_eq!((sequence, object), want);
         assert!(delivered.insert(id, (sequence, object)).is_none());
     }
-    assert_eq!(delivered.len(), 2 * MAX_MATCH_PLAYERS + 2);
+    assert_eq!(delivered.len(), 2 * world_capacity::MAX_ADMITTED_HUMANS + 2);
 }
 
 #[test]

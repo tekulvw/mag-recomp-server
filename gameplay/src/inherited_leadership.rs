@@ -174,7 +174,7 @@ impl<W: Write> Engine<W> {
                 .map(|a| Creation::capture(a, self.round_number)),
         ) {
             if actor.replication_backlogged
-                || actor.ordinary_shared_len() >= crate::multiplayer::MAX_SHARED_QUEUE
+                || actor.ordinary_shared_len() >= actor.shared_queue_limit
             {
                 continue;
             }

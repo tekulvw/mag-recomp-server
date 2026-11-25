@@ -280,7 +280,7 @@ impl<W: Write> Engine<W> {
                 ..
             } => {
                 let index = projectile_id as u16;
-                if usize::from(index) >= crate::MAX_MATCH_PLAYERS
+                if usize::from(index) >= crate::world_capacity::MAX_WORLD_CHARACTERS
                     || !(16..=19).contains(&(projectile_id >> 24))
                     || projectile_id & 0x00ff_0000 != 0x0080_0000
                     || (attacker != u32::MAX && attacker != (0x0380_0000 | u32::from(index)))
@@ -986,7 +986,7 @@ impl Candidate {
                 .checked_sub(actor.hospital_bootstrap.len())
                 .and_then(|ordinary| ordinary.checked_sub(actor.smoke_bootstrap.len()))
                 .and_then(|ordinary| ordinary.checked_add(count))
-                .is_some_and(|total| total <= multiplayer::MAX_SHARED_QUEUE);
+                .is_some_and(|total| total <= actor.shared_queue_limit);
             if staged.replication_backlogged || !fits {
                 return Err("hospital_rocket_publication_budget_exceeded");
             }

@@ -127,7 +127,7 @@ impl ProjectileReplicas {
         creation: ProjectileCreation,
     ) -> Result<(), &'static str> {
         if generation == 0
-            || usize::from(creation.object_index) >= crate::MAX_MATCH_PLAYERS
+            || usize::from(creation.object_index) >= crate::world_capacity::MAX_WORLD_CHARACTERS
             || creation.owner_index != creation.object_index
             || creation.shooter_id != (0x03800000 | u32::from(creation.object_index))
         {

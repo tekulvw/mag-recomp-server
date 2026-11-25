@@ -2840,10 +2840,12 @@ impl<W: Write> Engine<W> {
                 }
                 break;
             };
-            let Some(index) = (0..self.admission_capacity() as u16)
-                .rev()
-                .find(|i| !human_ids.contains(i) && !self.bot_registry.bots.contains_key(i))
-            else {
+            // Bots leave the human range for last; see world_capacity.
+            let Some(index) = world_capacity::bot_index_order(
+                self.match_profile().team_capacity,
+                self.admission_capacity(),
+            )
+            .find(|i| !human_ids.contains(i) && !self.bot_registry.bots.contains_key(i)) else {
                 return Err("bot_population_no_free_character_index");
             };
             let squad = replication::SquadAddress::from_index(squad)?;

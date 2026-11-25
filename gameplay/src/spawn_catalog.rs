@@ -408,7 +408,7 @@ impl SpawnCatalog {
         }
         let profile = self.match_profile();
         if profile.team_capacity == 0
-            || profile.team_capacity > crate::MAX_MATCH_PLAYERS / 2
+            || profile.team_capacity > crate::world_capacity::MAX_WORLD_CHARACTERS / 2
             || profile.squad_capacity == 0
             || profile.squad_capacity > 8
             || profile
