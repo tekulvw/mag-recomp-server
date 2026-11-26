@@ -38,7 +38,8 @@ namespace Server.Medius
         Task _worldCleanupWorker = Task.CompletedTask;
 
         bool InRegistry => _options.WorkerId != null;
-        bool Draining => _operatorDraining || (InRegistry && (_bridge.HasWorkerIdentityFault || _readDrainPolicy?.Invoke() == true));
+        bool Draining => _operatorDraining || _workerDraining ||
+            (InRegistry && (_bridge.HasWorkerIdentityFault || _readDrainPolicy?.Invoke() == true));
         bool HasWorldStreamLease => _worldStreamHealthy && (!InRegistry ||
             (!_bridge.HasWorkerIdentityFault && _timeProvider.GetElapsedTime(_lastWorldFrameTimestamp) < WorldStreamLease));
         // A legacy stream that is resuming keeps its sessions usable (client events
@@ -91,7 +92,7 @@ namespace Server.Medius
                 if (!_independentMatchCohorts || !UsesFactionMatchmaking || !hello.SupportsWorkerRegistry ||
                     _bridge.WorkerIdentity?.WorkerId != _options.WorkerId)
                     throw new IOException("Configured gameplay requires worker identity, faction profiles and independent result cohorts.");
-                CreateWorld(manager);
+                if (World == null) CreateWorld(manager);
                 await StartWorldStreamAsync();
                 lock (_gate) _ready = true;
             }
@@ -106,6 +107,18 @@ namespace Server.Medius
         void CreateWorld(Server.Dme.MediusManager manager)
         {
             lock (WorldRegistrationGate) World = new DmeWorld(manager, _applicationId, _maximumPlayers);
+        }
+
+        /// <summary>Create this configured row's DME world before its worker is contacted. The
+        /// registry calls it for every row in configuration order, so a Medius process gives each
+        /// row the same world ID every time it starts (row N is world N), whichever worker answers
+        /// first. An adopted replacement still takes a fresh ID.</summary>
+        public void ReserveRegistryWorld(Server.Dme.MediusManager manager)
+        {
+            if (!InRegistry || manager?.LocalOnly != true || manager.ApplicationId != _applicationId)
+                throw new ArgumentException("Configured gameplay requires the local DME manager for its application.", nameof(manager));
+            lock (_gate) if (_started || _disposed || World != null) throw new InvalidOperationException("The world is already created.");
+            CreateWorld(manager);
         }
 
         public LocalDmeWorkerPlacement GetPlacement()

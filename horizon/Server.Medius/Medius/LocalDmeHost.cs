@@ -81,6 +81,14 @@ namespace Server.Medius
         // and resubscribes after that frame until the grace period ends.
         bool _supportsWorldStreamResume;
         bool _supportsEventReplay;
+        // control_plane_rebind_v1: this host's name on every subscribe_world. A worker that
+        // outlived another Horizon process releases what that process admitted, instead of
+        // refusing this world ID or sending frames that name the old one.
+        readonly string _controlPlane = Id();
+        bool _supportsControlPlaneRebind;
+        // worker_drain_v1: the worker said it is shutting down; it admits no one.
+        bool _supportsWorkerDrain;
+        bool _workerDraining;
         GameplayWorldStreamPosition _worldStreamPosition;
         bool _worldStreamResuming;
         long _worldStreamGapStarted;
@@ -272,6 +280,8 @@ namespace Server.Medius
             _supportsWorldStreamResume = hello.SupportsWorldStreamResume;
             _supportsEventReplay = hello.SupportsEventReplay;
             _supportsVoiceGroups = hello.SupportsVoiceGroups;
+            _supportsControlPlaneRebind = hello.SupportsControlPlaneRebind;
+            _supportsWorkerDrain = hello.SupportsWorkerDrain;
             WorkerContract = MagWorkerContract.From(hello);
         }
         public static void RequireLoadoutSelectionCapability(GameplayBridgeResponse hello)
@@ -555,7 +565,7 @@ namespace Server.Medius
                 // Reconcile once after admission, closing saves committed between
                 // the initial store read and registration/reserve acknowledgement.
                 ArmoryLoadoutCommitted(reservation.Account, reservation.CharacterId);
-                Logger.Info($"Gameplay admission accepted: player={client.DmeId} dme_ports={_portBudget.InUse}/{_portBudget.Capacity?.ToString() ?? "unbounded"}");
+                Logger.Info($"Gameplay admission accepted: {StreamScope} player={client.DmeId} dme_ports={_portBudget.InUse}/{_portBudget.Capacity?.ToString() ?? "unbounded"}");
                 return PrepareJoinDescriptor(request.TransactionId, client);
             }
             finally
@@ -698,18 +708,20 @@ namespace Server.Medius
                     continue;
                 }
                 using var subscription = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-                bool positions; GameplayWorldStreamPosition resumeAfter; bool voiceGroups;
+                bool positions; GameplayWorldStreamPosition resumeAfter; bool voiceGroups; GameplayWorldSubscription options;
                 lock (_gate)
                 {
                     _worldSubscription = subscription;
                     positions = _supportsWorldStreamResume && !InRegistry;
                     resumeAfter = positions && _worldStreamResuming ? _worldStreamPosition : null;
                     voiceGroups = WantsVoiceGroups;
+                    options = new GameplayWorldSubscription(positions, resumeAfter, voiceGroups,
+                        _supportsControlPlaneRebind ? _controlPlane : null, _supportsWorkerDrain);
                 }
                 bool acknowledged = false;
                 try
                 {
-                    await _bridge.SubscribeWorldAsync((uint)World.WorldId, Id(), positions, resumeAfter, voiceGroups, async reply =>
+                    await _bridge.SubscribeWorldAsync((uint)World.WorldId, Id(), options, async reply =>
                     {
                         lock (_gate)
                         {
@@ -722,6 +734,7 @@ namespace Server.Medius
                             AdvanceWorldStream(reply, first, resumeAfter);
                             if (!Route(reply)) throw new InvalidDataException("World stream recipient mismatch.");
                             ApplyVoiceGroups(reply);
+                            NoteWorkerDraining(reply);
                             _lastWorldFrameTimestamp = _timeProvider.GetTimestamp();
                             _worldStreamHealthy = true;
                             if (_worldStreamResuming)
@@ -749,29 +762,48 @@ namespace Server.Medius
                         _worldStreamHealthy = false;
                         // The next connection may reach a restarted worker.
                         _gameplayConfigured = false;
-                        if (positions && !acknowledged && error is InvalidDataException)
+                        // A refusal of the request itself, not of this world's state.
+                        bool unsupported = !acknowledged && error is InvalidDataException &&
+                            !(error is GameplayWorldSubscriptionRefusedException { Reason: "subscription_world_mismatch" });
+                        if (positions && unsupported)
                         {
                             // A worker without positions refuses the request outright
                             // (for example after a rollback); stop asking for them.
                             _supportsWorldStreamResume = false;
                         }
                         // Likewise a worker rolled back below voice_groups_v1 refuses the request.
-                        if (voiceGroups && !acknowledged && error is InvalidDataException) _supportsVoiceGroups = false;
+                        if (voiceGroups && unsupported) _supportsVoiceGroups = false;
                         retained = RetainThroughWorldStreamGap(error);
                         count = _reservations.Count;
                     }
                     if (InRegistry && error is GameplayWorkerIdentityException)
                         _firstWorldStream.TrySetException(error);
+                    string failure = DescribeStreamFailure(error, acknowledged);
                     if (retained)
-                        Logger.Warn($"Gameplay world stream interrupted: failure={error.GetType().Name}; keeping {count} reservations while it resumes after frame {_worldStreamPosition?.Sequence}");
+                        Logger.Warn($"Gameplay world stream interrupted: {StreamScope} {failure}; keeping {count} reservations while it resumes after frame {_worldStreamPosition?.Sequence}");
                     else
-                        await ReleaseWorldStreamReservationsAsync($"failure={error.GetType().Name}");
+                        await ReleaseWorldStreamReservationsAsync(failure);
                     if (InRegistry && _bridge.HasWorkerIdentityFault) break;
                 }
                 finally { lock (_gate) if (_worldSubscription == subscription) _worldSubscription = null; }
                 try { await Task.Delay(TimeSpan.FromSeconds(1), cancellation); }
                 catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { break; }
             }
+        }
+        /// <summary>Which worker and world a log line is about.</summary>
+        string StreamScope => $"worker={_options.WorkerId ?? "legacy"} world={World?.WorldId.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "none"}";
+        /// <summary>A stream failure for the log: its type, whether the subscription was acknowledged,
+        /// and the reason. Every message is Horizon's own text, or a worker refusal code it validated.</summary>
+        static string DescribeStreamFailure(Exception error, bool acknowledged) =>
+            $"failure={error.GetType().Name} stage={(acknowledged ? "frame" : "subscribe")} " +
+            (error is GameplayWorldSubscriptionRefusedException refused ? $"refusal={refused.Reason}" : $"reason=\"{error.Message}\"");
+        /// <summary>Called with _gate held. A worker that announced its drain admits no one;
+        /// close admission here at once instead of waiting for refused reserves.</summary>
+        void NoteWorkerDraining(GameplayBridgeResponse reply)
+        {
+            if (!reply.WorkerDraining || _workerDraining) return;
+            _workerDraining = true;
+            Logger.Warn($"Gameplay worker draining: {StreamScope} reservations={_reservations.Count}; admission closed until the worker is replaced");
         }
         /// <summary>Check a frame's position. Called with _gate held. The first reply of a
         /// subscription is its acknowledgement, which names the position the next frame
@@ -828,7 +860,7 @@ namespace Server.Medius
                 affected = _reservations.Values.ToArray();
                 foreach (var reservation in affected) { reservation.Invalidated = true; reservation.ReleaseReason = "world_stream_gap"; }
             }
-            Logger.Warn($"Gameplay world stream interrupted: {cause}; releasing {affected.Length} affected reservations");
+            Logger.Warn($"Gameplay world stream interrupted: {StreamScope} {cause}; releasing {affected.Length} affected reservations");
             // A successful socket write does not prove client receipt. Without a
             // replay we end affected sessions instead of resuming after an unknown
             // replication gap. Fresh joins use fresh identities.
@@ -1025,7 +1057,7 @@ namespace Server.Medius
                         if (!_rewardOwners.TryGetValue(reward.ReservationId, out var owner) ||
                             reward.WorldId != (uint)World.WorldId || reward.PlayerId != (ushort)owner.Client.DmeId ||
                             reward.AccountId != owner.Account || reward.CharacterId != owner.CharacterId)
-                        { _rewardRetry = true; Logger.Warn("Gameplay reward rejected: admission identity mismatch"); return; }
+                        { _rewardRetry = true; Logger.Warn($"Gameplay reward rejected: {StreamScope} admission identity mismatch"); return; }
                         if (reward.Kind == MagProgressionCatalog.RepairRewardKind && !owner.RepairRewardsEnabled)
                         { _rewardRetry = true; Logger.Warn("Gameplay reward rejected: repair rewards were disabled at admission"); return; }
                         if (reward.Kind == MagProgressionCatalog.AssistRewardKind &&
@@ -1187,7 +1219,7 @@ namespace Server.Medius
                 r.Client.DmeWorld.Manager.RemoveClient(r.Client);
                 r.Client.DmeWorld.RemoveLocalClient(r.Client);
             }
-            Logger.Warn($"Gameplay reservation released: player={r.Client.DmeId} reason={r.ReleaseReason ?? (r.Deadline <= DateTime.UtcNow ? "application_inactivity" : "transport_closed")}");
+            Logger.Warn($"Gameplay reservation released: {StreamScope} player={r.Client.DmeId} reason={r.ReleaseReason ?? (r.Deadline <= DateTime.UtcNow ? "application_inactivity" : "transport_closed")}");
             // The port is free again only once the transport has stopped.
             try { await r.Client.Stop(); }
             finally { r.PortLease?.Dispose(); }
