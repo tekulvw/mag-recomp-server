@@ -682,9 +682,11 @@ pub(crate) fn interruptible(bot: &WorldBot, guard: DropGuard) -> bool {
                 && p.route_distance_to_launch > guard.queue_distance_m + 2.
         })
 }
-/// Line of sight through static collision only; bodies do not hide a person.
+/// Line of sight through static collision and the mode's placed structures;
+/// bodies do not hide a person.
 pub(crate) fn clear_view(
     world: Option<&collision::CollisionWorld>,
+    structures: Option<crate::bot_firearms::Structures<'_>>,
     map: &str,
     from: [f64; 3],
     to: [f64; 3],
@@ -707,9 +709,15 @@ pub(crate) fn clear_view(
     // Sight lines see through what bullets fly through (the projectile row).
     let row = world.query_row(crate::collision::PROJECTILE_QUERY_LAYER);
     match world.raycast_row_bounded(from, to, row, work) {
-        Ok(query) => Ok(query.nearest.is_none()),
-        Err(_) if *work == 0 => Err(()),
-        Err(_) => Ok(false),
+        Ok(query) if query.nearest.is_some() => return Ok(false),
+        Ok(_) => {}
+        Err(_) if *work == 0 => return Err(()),
+        Err(_) => return Ok(false),
+    }
+    match structures.map(|s| s.blocks(from, to, work)) {
+        None | Some(Ok(false)) => Ok(true),
+        Some(Err(_)) if *work == 0 => Err(()),
+        Some(_) => Ok(false),
     }
 }
 #[derive(Clone, Copy)]
@@ -1031,6 +1039,7 @@ impl<W: Write> Engine<W> {
                 let before = rays;
                 match clear_view(
                     self.collision_world.as_ref(),
+                    self.bot_sight_structures(),
                     &map,
                     eye,
                     torso(candidate.feet),

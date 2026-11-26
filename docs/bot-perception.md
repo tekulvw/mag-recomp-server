@@ -46,8 +46,13 @@ when its index starts another allocation or life:
 - A standing bot keeps the weapon controller's own acquisition; perception
   only adds the 4 m all-round check for it.
 - Line of sight uses the static collision world inside verified physics
-  coverage. Bodies do not hide a person from view; the weapon controller still
-  checks body blocking before a shot.
+  coverage and, in Acquisition and Domination, the mode's placed structures
+  (bunkers, field hospitals, helicopters), both on the projectile query row.
+  A structure without a qualified filter binding is solid. Bodies do not hide
+  a person from view; the weapon controller still checks body blocking before
+  a shot. The weapon controller makes the same static and structure checks
+  for every shot, and a shot a structure stops reports `bot_firearm_blocked`
+  with reason `structure_blocked`.
 - Each bot is checked at most every 250 ms, nearest two candidates first, in
   round-robin order. A tick spends at most 32 rays and 32,768 geometry work
   units; a bot that does not fit waits for the next tick.
