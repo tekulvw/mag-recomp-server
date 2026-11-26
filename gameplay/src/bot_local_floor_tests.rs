@@ -111,6 +111,15 @@ fn canopy_engine() -> (Engine<Vec<u8>>, u16) {
     (engine, id)
 }
 
+/// The bundled policy with a ground search reaching the roof, as deployed
+/// populations use.
+fn deployed_policy() -> ObjectivePolicy {
+    let mut policy = ObjectivePolicy::bundled();
+    policy.ground_search_m = 8.;
+    assert_eq!(policy.validate(), Ok(()));
+    policy
+}
+
 #[test]
 fn a_spot_beside_a_body_under_a_roof_is_on_its_floor_not_the_roof() {
     let (engine, id) = canopy_engine();
@@ -121,7 +130,7 @@ fn a_spot_beside_a_body_under_a_roof_is_on_its_floor_not_the_roof() {
         .unwrap()
         .physical_position();
     let floor = mesh.component_id(here).unwrap();
-    let policy = ObjectivePolicy::bundled();
+    let policy = deployed_policy();
     let body = bot_physics::Body::default();
     let raw = position([here[0] + 2., here[1] + 0.5, here[2]]);
     // The plain search takes the highest surface in reach: the roof, a floor
@@ -174,7 +183,7 @@ fn a_bot_asked_to_yield_under_a_roof_stages_beside_itself() {
             retry_at: Duration::ZERO,
             resume: false,
         });
-    let policy = ObjectivePolicy::bundled();
+    let policy = deployed_policy();
     let actors = crate::actor_collision::ActorGrid::default();
     let mut receipts = Vec::new();
     let mut queries = 0;
