@@ -33,6 +33,8 @@ use std::sync::Arc;
 const CELL_M: f64 = 0.25;
 const MAX_CELLS_PER_AXIS: usize = 192;
 const MAX_REGIONS: usize = 64;
+/// Extra room route legs keep from structures, beyond the body's own.
+const STEER_MARGIN_M: f64 = 0.3;
 
 /// Identities of the structures a polygon's gate was computed from.
 pub(crate) type GateSources = Vec<(String, String, [u64; 12])>;
@@ -356,11 +358,15 @@ pub(crate) fn refine(
     }
     let body = mesh.body();
     let (up, half) = lifted(body);
+    // Legs keep this much more room from a structure than the body needs,
+    // so bots crossing in opposite directions next to a wall can pass; a
+    // passage narrower than that is still used at the body's own width.
+    let wide = [half[0] + STEER_MARGIN_M, half[1], half[2] + STEER_MARGIN_M];
     let centre = |p: [f64; 3]| [p[0], p[1] + up, p[2]];
     let clear = |a: [f64; 3], b: [f64; 3]| -> bool {
         let mut work = STRUCTURE_WORK_LIMIT;
         matches!(
-            snapshot.sweep_aabb(centre(a), centre(b), half, &mut work),
+            snapshot.sweep_aabb(centre(a), centre(b), wide, &mut work),
             Ok(None)
         )
     };
@@ -383,7 +389,9 @@ pub(crate) fn refine(
                     .collect(),
             ),
         };
-        match detour(snapshot, polygons, w[0], w[1], half, up) {
+        match detour(snapshot, polygons, w[0], w[1], wide, up)
+            .or_else(|| detour(snapshot, polygons, w[0], w[1], half, up))
+        {
             Some(points) => out.extend(points),
             None => out.push(w[1]),
         }

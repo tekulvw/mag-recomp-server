@@ -75,7 +75,10 @@ the goal, in front of the gate.
 The string-pulled path can still cut across a structure inside one polygon,
 for example past a door jamb. Each straight leg the lifted body cannot follow
 is replaced by a shortest grid path over free cells inside the corridor's
-polygons, then shortened to the fewest straight legs. A leg that no grid path
+polygons, then shortened to the fewest straight legs. Legs keep 0.3 m more
+room from a structure than the body needs, so bots crossing next to a wall
+can pass each other. A passage narrower than that is still used at the
+body's own width. A leg that no grid path
 replaces is kept as it was, and body physics still stops at the structure.
 
 The gates are rebuilt with the snapshot, so a destroyed gate opens its road
