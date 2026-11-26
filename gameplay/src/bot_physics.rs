@@ -512,15 +512,22 @@ impl<'a> WorldTerrain<'a> {
         .map_err(|_| PhysicsError::QueryFailed)?;
         // The mode's placed structures in their current state: intact walls,
         // gates and shells stop the body like static geometry does. Both body
-        // shapes sweep their box (radius, height): conservative for a capsule.
+        // shapes sweep their box (radius, height): conservative for a capsule,
+        // whose lowest point may sit just below the feet.
         if let Some(structures) = self.world.bot_structures() {
             let mut work = crate::bot_structure_collision::STRUCTURE_WORK_LIMIT;
-            let middle = |p: Point| [p[0], p[1] + body.height * 0.5, p[2]];
+            let low = if body.shape.capsule().is_some() {
+                body.bottom().min(0.0)
+            } else {
+                0.0
+            };
+            let half = (body.height - low) * 0.5;
+            let middle = |p: Point| [p[0], p[1] + low + half, p[2]];
             if let Some((fraction, normal, label)) = structures
                 .sweep_aabb(
                     middle(from),
                     middle(to),
-                    [body.radius, body.height * 0.5, body.radius],
+                    [body.radius, half, body.radius],
                     &mut work,
                 )
                 .map_err(|_| PhysicsError::QueryFailed)?
