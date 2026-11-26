@@ -412,3 +412,73 @@ fn unchanged_structures_keep_their_polygon_gates() {
         "{gated} {after} {reused}"
     );
 }
+
+#[test]
+fn a_wall_crossing_a_polygon_edge_does_not_seal_the_route_beside_it() {
+    // The floor's polygons meet along x = 20. A wall along z = 10 from x = 14
+    // to the east edge crosses that edge, so both of the east polygon's
+    // regions (north and south of the wall) touch it. A route that stays
+    // south of the wall passes; one that has to cross the wall does not.
+    let floor = floor_world();
+    let mesh = floor_mesh(&floor);
+    let mut sequences = SequenceCollisionState::default();
+    sequences.synthetic_structure_mesh(
+        7,
+        Pose::at([27., 0., 10.]),
+        boxes(&[([-13., 0., -0.2], [13.5, 3., 0.2])]),
+        Some(PACK_LAYER),
+    );
+    let structures = snapshot(&sequences);
+    crate::navmesh_structure_gates::install_now(&mesh, Some(&structures)).unwrap();
+    for (from, to) in [
+        ([16., 0., 5.], [24., 0., 5.]),
+        ([16., 0., 15.], [36., 0., 15.]),
+    ] {
+        let beside = mesh.route(from, to, 0.5).unwrap();
+        assert_eq!(beside.status, Status::Complete, "{from:?}: {beside:?}");
+        assert!(clear_of(&beside, &structures), "{:?}", beside.waypoints);
+    }
+    // Around the wall's west end is the only way to the other side.
+    let around = mesh.route([16., 0., 5.], [36., 0., 15.], 0.5).unwrap();
+    assert_eq!(around.status, Status::Complete, "{around:?}");
+    assert!(
+        around.waypoints.iter().any(|p| p[0] < 14.),
+        "{:?}",
+        around.waypoints
+    );
+    assert!(clear_of(&around, &structures), "{:?}", around.waypoints);
+}
+
+#[test]
+fn only_a_beside_route_reaches_a_walled_off_goal_beside_it() {
+    // A goal inside a closed shell (a console a charge was planted on, a
+    // sealed room): a beside route (a spawn's lane check) with a goal radius
+    // that reaches past the shell ends at the nearest reachable free spot
+    // within that radius. An ordinary route (a bot walking to defuse) stays
+    // partial, so its caller keeps its own approach to the trigger.
+    let floor = floor_world();
+    let mesh = floor_mesh(&floor);
+    let mut sequences = SequenceCollisionState::default();
+    sequences.synthetic_structure_mesh(
+        8,
+        Pose::at([30., 0., 10.]),
+        closed_bunker(),
+        Some(PACK_LAYER),
+    );
+    let structures = snapshot(&sequences);
+    crate::navmesh_structure_gates::install_now(&mesh, Some(&structures)).unwrap();
+    let goal = [30., 0., 10.];
+    // An approach that must stand at the goal (an interaction range) is not
+    // told it arrived outside the shell.
+    let approach = mesh.route([5., 0., 10.], goal, 5.).unwrap();
+    assert_eq!(approach.status, Status::Partial, "{approach:?}");
+    let route = mesh.route_beside([5., 0., 10.], goal, 5.).unwrap();
+    assert_eq!(route.status, Status::Complete, "{route:?}");
+    let end = *route.waypoints.last().unwrap();
+    let away = (end[0] - goal[0]).hypot(end[2] - goal[2]);
+    assert!(away <= 5. && away > 3., "{end:?}");
+    assert!(clear_of(&route, &structures), "{:?}", route.waypoints);
+    // A goal radius that ends inside the shell still stops outside it.
+    let short = mesh.route_beside([5., 0., 10.], goal, 0.5).unwrap();
+    assert_eq!(short.status, Status::Partial, "{short:?}");
+}

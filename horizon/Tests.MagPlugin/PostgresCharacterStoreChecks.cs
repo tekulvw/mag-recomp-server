@@ -297,12 +297,37 @@ internal static partial class LeadershipProgressionChecks
         catch (InvalidDataException) { }
         Check(Scalar(connection, "SELECT count(*) FROM mag.characters") == 0, "A refused import wrote rows");
 
-        var imported = pg.ImportFrom(json);
-        Check(imported == json.Summarize() && imported.Characters == 2 && imported.Receipts == 6 && imported.MatchRows == 3,
-            "Import summary differs from the JSON store: " + imported.Describe());
+        // A dry run reports what an import would do and writes nothing.
+        var planned = pg.PlanImport(json);
+        Check(planned.Action == CharacterImportAction.Import && planned.Target == null && planned.Source == json.Summarize() &&
+            planned.LastImportAt == null, "Dry run of the first import: " + planned);
+        Check(Scalar(connection, "SELECT count(*) FROM mag.characters") == 0 && Scalar(connection, "SELECT count(*) FROM mag.admin_changes") == 0,
+            "A dry run wrote rows");
+
+        var first = pg.ImportFrom(json);
+        var imported = first.After;
+        Check(first.Plan.Action == CharacterImportAction.Import && imported == json.Summarize() && imported.Characters == 2 &&
+            imported.Receipts == 6 && imported.MatchRows == 3, "Import summary differs from the JSON store: " + imported.Describe());
         Check(pg.CompareWith(json).Count == 0, "Import does not verify");
-        try { pg.ImportFrom(json); throw new Exception("A second import merged into a non-empty store"); }
+        const string imports = "SELECT count(*) FROM mag.admin_changes WHERE operation = 'character-store-import'";
+        Check(Scalar(connection, imports) == 1, "The import was not recorded");
+
+        // Idempotent: importing the same store again writes nothing.
+        var again = pg.ImportFrom(json);
+        Check(again.Plan.Action == CharacterImportAction.Unchanged && again.After == imported && Scalar(connection, imports) == 1 &&
+            Scalar(connection, "SELECT count(*) FROM mag.characters WHERE revision > 1") == 0, "A repeated import was not a no-op: " + again.Plan);
+
+        // The JSON store moves on (a reward committed after the import, before the switch). Without --replace the
+        // import refuses to merge; with it, the rows are replaced, since the server has not used the database.
+        Check(json.ApplyRewardForAccount("alpha", 1, "late-1", "world-3-m3", "enemy_killed", 1).Result == MagNetResult.Success, "Late JSON reward");
+        var refused = pg.PlanImport(json);
+        Check(refused.Action == CharacterImportAction.Refused && !refused.ChangedSinceImport && refused.Differences > 0 &&
+            refused.Reason.Contains("--replace"), "A differing database was not refused: " + refused);
+        try { pg.ImportFrom(json); throw new Exception("An import merged into a differing store"); }
         catch (InvalidDataException) { }
+        var replaced = pg.ImportFrom(json, new CharacterImportOptions(Replace: true));
+        Check(replaced.Plan.Action == CharacterImportAction.Replace && replaced.After == json.Summarize() && pg.CompareWith(json).Count == 0 &&
+            Scalar(connection, imports) == 2, "Replacing an unused import failed: " + replaced.Plan);
 
         // The imported store keeps working: replays, new rewards and new characters (IDs continue).
         var replay = pg.ApplyRewardForAccount("alpha", 1, "r2", "world-1-m1", "enemy_killed", 1);
@@ -322,5 +347,78 @@ internal static partial class LeadershipProgressionChecks
         pg.ExportTo(exported, true);
         Check(Directory.GetFiles(directory, "exported.json.before-export-*").Length == 1, "Export did not keep the replaced store");
         Check(json.CompareWith(pg).Any(d => d.StartsWith("character delta", StringComparison.Ordinal)), "Verify missed a difference");
+
+        // Once the server has written to the database, --replace refuses to discard that, unless told to.
+        var used = pg.PlanImport(json, new CharacterImportOptions(Replace: true));
+        Check(used.Action == CharacterImportAction.Refused && used.ChangedSinceImport && used.Reason.Contains("--discard-postgres-changes"),
+            "Replace over server writes was not refused: " + used);
+        try { pg.ImportFrom(json, new CharacterImportOptions(Replace: true)); throw new Exception("Replace discarded server writes"); }
+        catch (InvalidDataException) { }
+        Check(Scalar(connection, "SELECT count(*) FROM mag.characters") == 3, "A refused replace changed rows");
+        var discarded = pg.ImportFrom(json, new CharacterImportOptions(Replace: true, DiscardPostgresChanges: true));
+        Check(discarded.Plan.Action == CharacterImportAction.Replace && pg.CompareWith(json).Count == 0 &&
+            Scalar(connection, "SELECT count(*) FROM mag.characters") == 2 && Scalar(connection, imports) == 3,
+            "Replace with --discard-postgres-changes failed: " + discarded.Plan);
+        Check(pg.CreateForAccount(new MagCreateCharacterRequest { AccountName = "Echo", Faction = 1, UniverseId = 26, NpId = new byte[36] },
+            "echo").Result == MagNetResult.Success && pg.ReadForAccount("echo").Single().Id == 3, "Character IDs do not continue after a replace");
+    }));
+
+    public static void PostgresSecretDirectoryConnection() => WithDirectory(directory =>
+    {
+        foreach (var (name, value) in new[] { ("host", "db-rw"), ("port", "5432\n"), ("dbname", "mag"), ("user", "mag"), ("password", "invented") })
+            File.WriteAllText(Path.Combine(directory, name), value);
+        var builder = new NpgsqlConnectionStringBuilder(PostgresCharacterDatabase.ConnectionStringFromSecretDirectory(directory, null));
+        Check(builder.Host == "db-rw" && builder.Port == 5432 && builder.Database == "mag" && builder.SslMode == SslMode.Require,
+            "Secret directory connection settings");
+        Check(builder.GssEncryptionMode == GssEncryptionMode.Disable, "GSSAPI encryption is attempted (libgssapi_krb5 load errors)");
+    });
+
+    public static void PostgresImportCommandLine() => WithDirectory(directory => WithPostgres("postgres import command line", (database, connection) =>
+    {
+        var catalogs = ParityCatalogsIn(directory);
+        string jsonPath = Path.Combine(directory, "characters.json");
+        RunParityScript(Configure(new LocalCharacterStore(jsonPath), catalogs), Path.Combine(directory, "backups"));
+        var pg = Configure(LocalCharacterStore.ForPostgres(database), catalogs);
+        (int Code, string Output, string Error) Run(params string[] args)
+        {
+            var output = new StringWriter(); var error = new StringWriter();
+            int code = MagAdminCli.RunCharacterStore(args, database, () => pg, path => Configure(new LocalCharacterStore(path), catalogs), output, error);
+            string all = output.ToString() + error.ToString();
+            // Differences name their records (docs/admin-cli.md); everything else is counts and digests only.
+            if (!all.Contains("difference: ", StringComparison.Ordinal))
+                foreach (var secret in new[] { "alpha", "Alpha", "bravo", "Bravo", "world-1-m1" })
+                    Check(!all.Contains(secret, StringComparison.Ordinal), $"character-store {args[0]} printed player data ({secret})");
+            return (code, output.ToString(), error.ToString());
+        }
+        string digest = Configure(new LocalCharacterStore(jsonPath), catalogs).Summarize().Digest;
+
+        var dry = Run("import", "--from", jsonPath, "--dry-run");
+        Check(dry.Code == 0 && dry.Output.Contains("database: empty") && dry.Output.Contains("dry run: nothing written") &&
+            dry.Output.Contains(digest), "import --dry-run: " + dry);
+        Check(Scalar(connection, "SELECT count(*) FROM mag.characters") == 0, "import --dry-run wrote rows");
+        var import = Run("import", "--from", jsonPath);
+        Check(import.Code == 0 && import.Output.Contains("imported: 2 characters, 6 reward receipts, 3 match rows, digest " + digest) &&
+            import.Output.Contains("verified"), "import: " + import);
+        var repeat = Run("import", "--from", jsonPath);
+        Check(repeat.Code == 0 && repeat.Output.Contains("unchanged: "), "repeated import: " + repeat);
+        var verify = Run("verify", "--json", jsonPath);
+        Check(verify.Code == 0 && verify.Output.Contains("json:     2 characters") && verify.Output.Contains("postgres: 2 characters") &&
+            verify.Output.Contains(digest), "verify: " + verify);
+        var status = Run("status");
+        Check(status.Code == 0 && status.Output.Contains("characters 2, character_loadouts 5") && status.Output.Contains("reward_receipts 6") &&
+            status.Output.Contains("digest " + digest) && !status.Output.Contains("last import: never"), "status: " + status);
+        Check(Run("import", "--from", jsonPath, "--discard-postgres-changes").Code == 2, "--discard-postgres-changes without --replace was accepted");
+
+        // A JSON change after the import: the dry run predicts the refusal, verify names the record, and the exit codes say so.
+        Check(Configure(new LocalCharacterStore(jsonPath), catalogs).ApplyRewardForAccount("bravo", 2, "late-2", "world-3-m3", "enemy_killed", 1)
+            .Result == MagNetResult.Success, "Late JSON reward");
+        var differs = Run("verify", "--json", jsonPath);
+        Check(differs.Code == 1 && differs.Error.Contains("difference(s)") && differs.Error.Contains("receipt late-2: only in the json store"),
+            "verify after a JSON change: " + differs);
+        var predicted = Run("import", "--from", jsonPath, "--dry-run");
+        Check(predicted.Code == 1 && predicted.Error.Contains("would be refused"), "import --dry-run of a differing store: " + predicted);
+        var replace = Run("import", "--from", jsonPath, "--replace", "--dry-run");
+        Check(replace.Code == 0 && replace.Output.Contains("action:   replace"), "import --replace --dry-run: " + replace);
+        Check(Run("import", "--from", jsonPath, "--replace").Code == 0 && Run("verify", "--json", jsonPath).Code == 0, "import --replace");
     }));
 }

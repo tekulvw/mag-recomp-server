@@ -22,10 +22,16 @@ namespace Server.Medius
         [--apply]                            XP becomes the level threshold and each gained level's skill
                                              points are added. Without --apply this is a dry run.
 
-  character-store status                     The configured backend (MAG_CHARACTER_STORE) and its schema.
+  character-store status                     The configured backend (MAG_CHARACTER_STORE), its schema, row counts,
+                                             contents digest and last import.
   character-store migrate                    Apply pending PostgreSQL schema migrations.
-  character-store import --from <json>       Copy a JSON store into the empty PostgreSQL store, then verify.
-  character-store verify --json <json>       Compare a JSON store with PostgreSQL by record and field name.
+  character-store import --from <json>       Copy a JSON store into PostgreSQL, then verify. Idempotent: an empty
+        [--dry-run]                          database is filled, one already equal is left alone, and one that
+        [--replace]                          differs is refused. --dry-run writes nothing. --replace replaces rows
+        [--discard-postgres-changes]         unless the server wrote after the last import; adding
+                                             --discard-postgres-changes replaces them anyway.
+  character-store verify --json <json>       Compare a JSON store with PostgreSQL: counts, digests, and differences
+                                             by record and field name.
   character-store export --to <json>         Write PostgreSQL to a JSON store (rollback); --replace keeps
         [--replace]                          a timestamped copy of an existing file and replaces it.
   character-store prune                      Run PostgreSQL reward-ledger retention now.
@@ -134,7 +140,13 @@ a level is refused. Applied changes first copy the store to .maintenance-backups
                     case "status":
                         if (database == null) { output.WriteLine("backend: json"); return 0; }
                         output.WriteLine($"backend: postgres {database.Target}{(database.ReadOnly ? " (read-only)" : "")}");
-                        output.WriteLine($"schema:  {database.SchemaVersion()} of {database.LatestSchemaVersion}");
+                        int version = database.SchemaVersion();
+                        output.WriteLine($"schema:  {version} of {database.LatestSchemaVersion}");
+                        if (version != database.LatestSchemaVersion) return 0;
+                        var (tables, lastImport) = database.RowCounts();
+                        output.WriteLine("rows:    " + string.Join(", ", tables.Select(t => $"{t.Table} {t.Rows}")));
+                        output.WriteLine("contents: " + configured().Summarize().Describe());
+                        output.WriteLine("last import: " + (lastImport is DateTime at ? at.ToString("yyyy-MM-ddTHH:mm:ssZ") : "never"));
                         return 0;
                     case "migrate":
                         int applied = database.Migrate();
@@ -144,13 +156,31 @@ a level is refused. Applied changes first copy the store to .maintenance-backups
                     {
                         database.RequireCurrentSchema();
                         var target = configured(); var source = json(from);
+                        var options = new CharacterImportOptions(args.Contains("--replace"), args.Contains("--discard-postgres-changes"));
+                        if (options.DiscardPostgresChanges && !options.Replace)
+                        { error.WriteLine("mag-admin: --discard-postgres-changes needs --replace"); return 2; }
                         output.WriteLine($"target: {database.Target}");
-                        output.WriteLine("imported: " + target.ImportFrom(source).Describe());
+                        if (args.Contains("--dry-run"))
+                        {
+                            var plan = target.PlanImport(source, options);
+                            DescribePlan(plan, output);
+                            if (plan.Action == CharacterImportAction.Refused) { error.WriteLine("mag-admin: import would be refused: " + plan.Reason); return 1; }
+                            output.WriteLine("dry run: nothing written");
+                            return 0;
+                        }
+                        var result = target.ImportFrom(source, options);
+                        DescribePlan(result.Plan, output);
+                        output.WriteLine((result.Plan.Action == CharacterImportAction.Unchanged ? "unchanged: " : "imported: ") + result.After.Describe());
                         return Report(target.CompareWith(source), output, error);
                     }
                     case "verify" when Option("--json") is string path:
+                    {
                         database.RequireCurrentSchema();
-                        return Report(configured().CompareWith(json(path)), output, error);
+                        var target = configured(); var source = json(path);
+                        output.WriteLine("json:     " + source.Summarize().Describe());
+                        output.WriteLine("postgres: " + target.Summarize().Describe());
+                        return Report(target.CompareWith(source), output, error);
+                    }
                     case "export" when Option("--to") is string to:
                         database.RequireCurrentSchema();
                         output.WriteLine("exported: " + configured().ExportTo(json(to), args.Contains("--replace")).Describe());
@@ -169,6 +199,22 @@ a level is refused. Applied changes first copy the store to .maintenance-backups
                 error.WriteLine("mag-admin: " + e.Message);
                 return 1;
             }
+        }
+
+        private static void DescribePlan(CharacterImportPlan plan, TextWriter output)
+        {
+            output.WriteLine("source:   " + plan.Source.Describe());
+            output.WriteLine("database: " + (plan.Target?.Describe() ?? "empty"));
+            output.WriteLine("last import: " + (plan.LastImportAt is DateTime at ? at.ToString("yyyy-MM-ddTHH:mm:ssZ") : "never") +
+                (plan.Target != null && plan.Action != CharacterImportAction.Unchanged
+                    ? $"; written since: {(plan.ChangedSinceImport ? "yes" : "no")}; {plan.Differences} record(s) differ" : ""));
+            output.WriteLine("action:   " + plan.Action switch
+            {
+                CharacterImportAction.Import => "import into the empty database",
+                CharacterImportAction.Unchanged => "none, the stores already agree",
+                CharacterImportAction.Replace => "replace the database's rows with the JSON store",
+                _ => "refuse",
+            });
         }
 
         private static int Report(IReadOnlyList<string> differences, TextWriter output, TextWriter error)

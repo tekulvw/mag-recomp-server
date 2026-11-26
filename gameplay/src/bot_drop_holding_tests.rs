@@ -255,3 +255,52 @@ fn a_ring_spot_on_the_walkway_is_still_preferred_to_holding_in_place() {
     assert!((f64::from(goal.x) - CENTRE_X).abs() < 0.2, "{goal:?}");
     assert_eq!(receipts.last().unwrap()["action"], "stage");
 }
+
+#[test]
+fn a_capsule_frozen_in_an_approach_lane_steps_clear_of_it() {
+    let (mut engine, id) = walkway_engine();
+    queue_for_drop(&mut engine, id, CENTRE_X + 0.75);
+    let passage = engine.bot_registry.bots[&id].drop_queue_passage.unwrap();
+    let here = engine.bot_registry.bots[&id]
+        .target
+        .runtime
+        .unwrap()
+        .physical_position();
+    let policy = ObjectivePolicy::bundled();
+    // Another bot's approach crosses the walkway right where this one stands.
+    let lane = vec![[
+        [CENTRE_X - 5., WALKWAY_Y, here[2]],
+        [CENTRE_X + 5., WALKWAY_Y, here[2]],
+    ]];
+    let lanes = vec![lane.clone()];
+    assert!(in_traffic(here, &lanes, &[], &policy));
+    let capsule = bot_physics::BodyShape::Capsule {
+        radius: 0.4,
+        half_height: 0.5,
+        centre_height: 0.9,
+    };
+    let actors = crate::actor_collision::ActorGrid::with_probe_shape(capsule);
+    let map = engine.map_name().to_string();
+    let spot = engine
+        .holding_beside_lanes(id, passage, &map, &policy, &actors, &lanes, &[])
+        .expect("a spot along the walkway, clear of the lane");
+    let p = point(spot);
+    let clearance = policy.reservation_spacing_m + 0.4;
+    assert!(
+        !crate::bot_traffic_flow::in_lane(p, &lane, clearance),
+        "{p:?}"
+    );
+    assert!((p[1] - WALKWAY_Y).abs() < 0.2, "on the walkway: {p:?}");
+    let mesh = engine.navmesh_world.as_ref().unwrap();
+    assert_eq!(mesh.component_id(p).ok(), mesh.component_id(here).ok());
+    // Nowhere clear of a lane down the whole walkway: no spot.
+    let along = vec![vec![[
+        [CENTRE_X, WALKWAY_Y, 0.],
+        [CENTRE_X, WALKWAY_Y, 30.],
+    ]]];
+    assert!(
+        engine
+            .holding_beside_lanes(id, passage, &map, &policy, &actors, &along, &[])
+            .is_none()
+    );
+}

@@ -392,3 +392,156 @@ fn a_reply_over_the_bridge_budget_defers_frames_in_order_and_reports_it() {
     }
     assert!(records(&engine, "replication_backlog_released").is_empty());
 }
+
+fn human(engine: &mut Engine<Vec<u8>>, player: u16) -> Option<&mut Active> {
+    engine
+        .peers
+        .values_mut()
+        .chain(engine.active.iter_mut())
+        .find(|actor| actor.reservation.player == player)
+}
+
+/// Ticks the world for `ms`, keeping both humans' clients talking.
+fn run(engine: &mut Engine<Vec<u8>>, from_ms: u64, ms: u64) -> u64 {
+    engine.enable_world_ticks();
+    let mut now = from_ms;
+    while now < from_ms + ms {
+        now += 50;
+        for actor in engine.peers.values_mut().chain(engine.active.iter_mut()) {
+            actor.last_event = Duration::from_millis(now);
+        }
+        let response = engine.tick_world(Duration::from_millis(now), 1, "synthetic-tick".into());
+        assert!(response.ok, "{:?}", response.error);
+    }
+    now
+}
+
+/// A human rejoins a full 256-character Domination world. Admission retires a
+/// bot for it, and its client reports ready, but its indexed hospital creation
+/// comes one client update later, so its shared FIFO cannot drain yet. The
+/// world's 255 bot snapshots and every bot's deltas must wait for that instead
+/// of filling its 768-frame bound and evicting it before its first spawn;
+/// afterwards it receives one snapshot per bot and stays admitted.
+#[test]
+fn a_human_rejoining_a_full_256_bot_world_is_not_evicted_while_it_loads() {
+    let mut engine = engine(DOMINATION_256, 256);
+    engine.bunker_world = crate::structures::domination_bunker_seat_tests::fixture()
+        .bunker_world
+        .take();
+    crate::hospital_turrets::tests::enable_synthetic_hospital_turrets(&mut engine);
+    assert!(reserve(&mut engine, 0, 0).ok);
+    crate::spawn_progression::tests::ready(human(&mut engine, 0).unwrap());
+    reconcile(&mut engine, 0);
+    let now = run(&mut engine, 0, 1_000);
+    assert_eq!(engine.bot_registry.bots.len(), 255);
+
+    // The rejoiner takes a borrowed index; that bot yields it.
+    assert!(reserve(&mut engine, 1, 1).ok);
+    {
+        let joiner = human(&mut engine, 1).unwrap();
+        joiner.initial_objects = Some(Vec::new());
+        joiner.ready_for_updates = true;
+        assert!(joiner.emplacement_creation.is_none());
+    }
+    let now = run(&mut engine, now, 5_000);
+    assert!(records(&engine, "replication_backlog_released").is_empty());
+    let joiner = human(&mut engine, 1).expect("a loading rejoiner must stay admitted");
+    assert!(!joiner.replication_backlogged);
+    assert!(
+        joiner.ordinary_shared_len() < 64,
+        "bot traffic queued for an undrained rejoiner: {}",
+        joiner.ordinary_shared_len()
+    );
+    let id = joiner.reservation.id.clone();
+    assert!(engine.bot_registry.known_bots(&id).is_none());
+
+    // Its hospital creation arrives: one snapshot per current bot, drained.
+    human(&mut engine, 1).unwrap().emplacement_creation = Some(Vec::new());
+    run(&mut engine, now, 3_000);
+    assert!(records(&engine, "replication_backlog_released").is_empty());
+    let joiner = human(&mut engine, 1).expect("the rejoiner stays admitted");
+    assert!(!joiner.replication_backlogged);
+    assert!(joiner.shared_frames_drained >= 254);
+    assert_eq!(engine.bot_registry.known_bots(&id), Some(&bots(&engine)));
+    assert!(!human(&mut engine, 0).unwrap().replication_backlogged);
+}
+
+/// A joiner on its deploy screen in a full 256-character world (not ready, but
+/// it holds the objective bootstrap) takes objective state that nothing
+/// re-sends. Those frames bypass the ordinary bound: with that queue nearly
+/// full and the world's bots publishing, it keeps them, is not evicted, and
+/// drains them in order once ready.
+#[test]
+fn a_deploy_screen_joiner_in_a_full_256_bot_world_keeps_objective_state() {
+    let mut engine = engine(DOMINATION_256, 256);
+    engine.bunker_world = crate::structures::domination_bunker_seat_tests::fixture()
+        .bunker_world
+        .take();
+    crate::hospital_turrets::tests::enable_synthetic_hospital_turrets(&mut engine);
+    assert!(reserve(&mut engine, 0, 0).ok);
+    crate::spawn_progression::tests::ready(human(&mut engine, 0).unwrap());
+    reconcile(&mut engine, 0);
+    let mut now = run(&mut engine, 0, 1_000);
+
+    assert!(reserve(&mut engine, 1, 1).ok);
+    let frame = |player| {
+        replication::multiplayer::CharacterRemoval {
+            sequence: 1,
+            timestamp_ms: 0,
+            player,
+        }
+        .encode_with_profile(engine.wire_profile)
+        .unwrap()
+    };
+    let (ordinary, objective) = (frame(300), frame(301));
+    let limit = {
+        let joiner = human(&mut engine, 1).unwrap();
+        crate::spawn_progression::tests::ready(joiner);
+        joiner.ready_for_updates = false; // on its deploy screen
+        assert!(joiner.receives_objective_state());
+        // Other world traffic left the ordinary queue near its bound.
+        for _ in 0..joiner.shared_queue_limit - 8 {
+            joiner.queue_shared(ordinary.clone());
+        }
+        joiner.shared_queue_limit
+    };
+    for _ in 0..20 {
+        engine.broadcast_objective_packet(objective.clone());
+        now = run(&mut engine, now, 150);
+    }
+    assert!(records(&engine, "replication_backlog_released").is_empty());
+    let joiner = human(&mut engine, 1).expect("a deploy-screen joiner must stay admitted");
+    assert!(!joiner.replication_backlogged);
+    assert_eq!(
+        joiner
+            .pending_shared
+            .iter()
+            .filter(|p| **p == objective)
+            .count(),
+        20
+    );
+    assert!(joiner.ordinary_shared_len() < limit);
+
+    // The older traffic ahead of them is delivered (as an event reply would);
+    // the objective frames stay queued and keep their exemption.
+    for _ in 0..limit - 8 {
+        joiner.pop_shared();
+    }
+    assert_eq!(joiner.state_frames.len(), 20);
+    assert_eq!(
+        joiner.ordinary_shared_len(),
+        joiner.pending_shared.len() - 20
+    );
+
+    human(&mut engine, 1).unwrap().ready_for_updates = true;
+    run(&mut engine, now, 4_000);
+    assert!(records(&engine, "replication_backlog_released").is_empty());
+    let joiner = human(&mut engine, 1).expect("the joiner stays admitted");
+    assert!(!joiner.replication_backlogged);
+    assert!(joiner.state_frames.is_empty());
+    assert!(!joiner.pending_shared.iter().any(|p| *p == objective));
+    let drained = joiner.shared_frames_drained;
+    let id = joiner.reservation.id.clone();
+    assert!(drained >= (limit - 8 + 20 + 254) as u64, "{drained}");
+    assert_eq!(engine.bot_registry.known_bots(&id), Some(&bots(&engine)));
+}

@@ -72,6 +72,28 @@ nothing else reaches the goal, the route is cut at the sealed crossing and
 ends, as a partial route, at the point of its last reachable region nearest
 the goal, in front of the gate.
 
+That rule alone cannot tell which side of a wall crossing the entry edge a
+route is on, so it would also seal a route running beside such a wall (past
+a bunker whose shell crosses a polygon edge, say). The search is therefore
+first run with the ambiguous entry allowed on either side, and its corridor is
+then followed region by region: the route starts in the regions at its start,
+crosses each shared edge into the regions whose free cells meet its own along
+that edge (an ungated polygon is one region), and must end in a region holding
+its goal. A corridor that gets through is kept. A crossing it cannot pass is
+refused to the next search, up to four searches; a crossing sealed outright
+ends them early. Only then is the conservative rule above used.
+
+A goal a structure covers or walls off, such as a Sabotage objective whose
+console was swapped for the planted-charge console, can be reached beside it,
+but only by routes that ask for that: the defender spawn checks that a point
+routes to its lane objective. Such a route ends, when its regions in the
+goal's polygon do not hold the goal itself, at their free cell nearest the
+goal, provided it lies within the goal radius, and counts as complete.
+Ordinary routes, including a bot's walk to arm or defuse an objective, stay
+partial there as before, so their callers keep their own approach to the
+interaction range instead of stopping beside the console. Movement collision
+is unchanged: the console still blocks bodies.
+
 The string-pulled path can still cut across a structure inside one polygon,
 for example past a door jamb. Each straight leg the lifted body cannot follow
 is replaced by a shortest grid path over free cells inside the corridor's

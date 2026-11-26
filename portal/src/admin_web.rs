@@ -1,6 +1,6 @@
 //! The staff admin panel under `/admin`: users, reserved names, staff roles, an audit log and
-//! the game server's characters (`game`), service accounts (`service`) and launcher reports
-//! (`reports`).
+//! the game server's characters (`game`), service accounts (`service`), launcher reports
+//! (`reports`) and the server status with its maintenance banner (`status`).
 //!
 //! Everyone else gets 404 for every admin path. Staff act only on accounts and roles ranked
 //! below their own (see `staff::outranks`); every change is written to the audit log.
@@ -51,6 +51,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/admin/staff/set", post(staff_set))
         .route("/admin/staff/remove", post(staff_remove))
         .merge(game::routes())
+        .merge(status::routes())
 }
 
 struct Staff {
@@ -202,6 +203,7 @@ macro_rules! guard {
 }
 
 mod game;
+mod status;
 
 // ---- Dashboard ----
 

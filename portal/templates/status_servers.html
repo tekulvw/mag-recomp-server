@@ -1,0 +1,42 @@
+{% for s in view.servers %}
+<section class="status-server" id="server-{{ s.id }}">
+  <div class="status-head">
+    <div>
+      <h3>{{ s.name }}</h3>
+      {% if let Some(h) = s.host %}<p class="quiet"><code>{{ h }}</code></p>{% endif %}
+    </div>
+    <span class="pill state-{{ s.state.as_str() }}">{{ crate::status::state_label(s.state.as_str()) }}</span>
+  </div>
+  <p>{{ s.summary }}{% if s.worlds.is_empty() %}{% if let Some(t) = s.last_seen_text %} Last seen {{ t }}.{% endif %}{% endif %}</p>
+  {% if !s.worlds.is_empty() %}
+  <dl class="status-facts">
+    <dt>Players online</dt><dd>{% if let Some(n) = s.players_online %}{{ n }}{% else %}<span class="quiet">unknown</span>{% endif %}</dd>
+    <dt>Waiting for a match</dt><dd>{% if let Some(n) = s.queued %}{{ n }}{% else %}<span class="quiet">unknown</span>{% endif %}</dd>
+    {% if let Some(p) = s.dme_ports %}<dt>Game ports in use</dt><dd>{{ p.in_use }}{% if let Some(c) = p.capacity %} of {{ c }}{% endif %}</dd>{% endif %}
+    {% if let Some(u) = s.uptime_text %}<dt>Up for</dt><dd>{{ u }}</dd>{% endif %}
+    <dt>Versions</dt><dd>Medius {% if let Some(v) = s.medius_version %}{{ v }}{% else %}<span class="quiet">unknown</span>{% endif %} · gameplay {% if let Some(v) = s.gameplay_version %}{{ v }}{% else %}<span class="quiet">unknown</span>{% endif %}</dd>
+  </dl>
+  <ul class="worlds">
+    {% for w in s.worlds %}
+    <li class="world{% if !w.open %} closed{% endif %}">
+      <div class="status-head">
+        <h4>{% if w.modes.is_empty() %}{{ w.id }}{% else %}{{ w.modes|join(" / ") }}{% endif %}</h4>
+        <span class="pill state-{% if w.open %}up{% else %}down{% endif %}">{{ w.state_text }}</span>
+      </div>
+      {% if let Some(m) = w.current %}
+      <p><strong>{{ m.attackers }}</strong> attacking <strong>{{ m.defenders }}</strong></p>
+      <dl class="status-facts">
+        <dt>Players</dt><dd>{{ m.humans }} of {{ m.human_capacity }} ({{ m.attacking_humans }} attacking, {{ m.defending_humans }} defending)</dd>
+        <dt>Bots</dt><dd>{{ m.bots }}</dd>
+        <dt>Map profile</dt><dd><code>{{ m.profile }}</code></dd>
+      </dl>
+      {% else %}
+      <p class="quiet">No match in progress. Up to {{ w.human_capacity }} players.</p>
+      {% endif %}
+      <p class="quiet">Waiting: {{ w.queued }}</p>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+{% endfor %}

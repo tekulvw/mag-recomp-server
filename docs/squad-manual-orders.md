@@ -52,6 +52,10 @@ effective tag, waypoint position and active bit after squad creation. Current
 recipients receive changes; late joiners receive retained state. Full queues defer
 updates, and failed records change neither baseline nor queued bytes.
 
+Population bots work on their squad's FRAGO while it stays open, and squads
+without a human leader carry an automatic tag on their bots' current objective
+([bot-squad-orders.md](bot-squad-orders.md)).
+
 Synthetic tests verify codecs, shared timing, held-role admission, native mode
 assignment behavior and rollback. Source-derived profile checks establish
 configuration and selection, not rendered client behavior. Live FRAGO markers,

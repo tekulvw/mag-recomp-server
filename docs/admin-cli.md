@@ -60,12 +60,30 @@ record and field names; never player data or credentials.
 
 | Command | Effect |
 | --- | --- |
-| `character-store status` | The backend and, for PostgreSQL, its host, database and schema version. |
+| `character-store status` | The backend and, for PostgreSQL, its host, database and schema version, each table's row count, the contents' counts and digest, and when the last import wrote. |
 | `character-store migrate` | Apply pending schema migrations (main Medius also does this at startup). |
-| `character-store import --from <json>` | Copy a JSON store into the **empty** PostgreSQL store in one transaction, then verify. The JSON file stays locked meanwhile. A non-empty database, or a JSON store with fields this build doesn't know, is refused. |
-| `character-store verify --json <json>` | Compare a JSON store with PostgreSQL: characters (unset XP and level read as 0 and 1), receipts and match rows (without their dates). Differences are listed by record and field name; exit 1 if any. |
+| `character-store import --from <json> [--dry-run] [--replace [--discard-postgres-changes]]` | Copy a JSON store into PostgreSQL in one transaction, then verify. The JSON file stays locked meanwhile, and a JSON store with fields this build doesn't know is refused. See below. |
+| `character-store verify --json <json>` | Compare a JSON store with PostgreSQL: both stores' counts and digests, then characters (unset XP and level read as 0 and 1), receipts and match rows (without their dates). Differences are listed by record and field name; exit 1 if any. |
 | `character-store export --to <json> [--replace]` | Write PostgreSQL to a JSON store, the rollback path. Settled history is compacted to fit the JSON bound. An existing file is replaced only with `--replace`, which first keeps it as `<json>.before-export-<UTC time>`. |
 | `character-store prune` | Run reward-ledger retention now (main Medius runs it hourly). |
+
+`import` is idempotent. It prints both stores' counts and digests, the last import and the
+action it takes:
+
+- **Empty database:** it imports.
+- **Same contents as the JSON store:** it writes nothing and reports `unchanged`, so a repeated
+  import is safe.
+- **Different contents:** it refuses, unless `--replace` is given. `--replace` deletes the database's
+  characters (with their kits, match rows, receipts and history) and imports again in the same
+  transaction, but only if nothing was written after the last import. The server's own writes, a
+  retention prune or an operator change all count. To discard those too, add
+  `--discard-postgres-changes`, after an `export` if they matter.
+
+`--dry-run` reads the JSON file without locking it, prints the same report and writes nothing. It
+exits 1 when the import would be refused. Every import that writes records its counts and digest,
+never player data, in `mag.admin_changes` (operation `character-store-import`).
+While it runs, the import holds an exclusive lock on `mag.characters`, so no character write can
+interleave.
 
 Cutover, with no matches running:
 
@@ -77,19 +95,23 @@ Cutover, with no matches running:
 
    ```sh
    M=deploy/<release>-mag-recomp-server-medius
+   PG="env MAG_CHARACTER_STORE=postgres mag-admin character-store"
    kubectl exec -n <namespace> $M -c medius -- cp /accounts/characters.json /accounts/characters.before-postgres.json
-   kubectl exec -n <namespace> $M -c medius -- env MAG_CHARACTER_STORE=postgres mag-admin character-store migrate
-   kubectl exec -n <namespace> $M -c medius -- env MAG_CHARACTER_STORE=postgres mag-admin character-store import --from /accounts/characters.json
+   kubectl exec -n <namespace> $M -c medius -- $PG migrate
+   kubectl exec -n <namespace> $M -c medius -- $PG import --from /accounts/characters.json --dry-run
+   kubectl exec -n <namespace> $M -c medius -- $PG import --from /accounts/characters.json
    ```
 
 3. Just before switching, run `verify --json /accounts/characters.json` the same
-   way. It must report no differences; anything committed to the JSON store after
-   the import shows up here.
+   way. It must report no differences. Anything committed to the JSON store after
+   the import shows up here; `import --replace` then brings the database up to date.
 4. Set `characterStore.backend: postgres` and roll Medius.
 
 To roll back, stop play, run
 `mag-admin character-store export --to /accounts/characters.json --replace`, then
-set `characterStore.backend: json`.
+set `characterStore.backend: json`. To cut over again later, import with
+`--replace --discard-postgres-changes`. The database then holds rows the server wrote
+before the rollback, which the export already carried into the JSON store.
 
 ## Admin API
 
@@ -134,8 +156,40 @@ Anything else is `401 {"error":"unauthorized"}`; the log records only the reason
 | `GET /admin/v1/characters/{account}` | `200 {"account","level","experience","skill_points","next_level_experience","session"}`; `next_level_experience` is null at the maximum level |
 | `POST /admin/v1/characters/{account}/level` with `{"level":N,"apply":bool}` | `200 {"applied","account","from_level","to_level","experience_before","experience_after","skill_points_before","skill_points_after","backup"}`; `backup` is the backup file name, or null for a dry run |
 | `GET /admin/v1/dme-ports` | `200 {"capacity","in_use","available","first_port","last_port","source","udp_ports_bound"}`: humans holding a DME UDP port across all worlds against the [cap](configured-world-registry.md#dme-port-capacity). `capacity`, `available` and `last_port` are null when unbounded; `source` is `port_range`, `override` or `unbounded`; `udp_ports_bound` counts sockets actually bound |
+| `GET /admin/v1/status` | `200`: the read-only server status below, for the portal's public status page |
 
 `session` is `online`, `offline` or `unknown`, decided as `accounts list` decides it.
+
+`GET /admin/v1/status` carries counts only, never an account, character or player name, so
+the portal can publish it:
+
+```json
+{"medius_version":"0.11.0","gameplay_version":"0.15.0","started_at":"2026-11-26T10:00:00Z",
+ "uptime_seconds":7200,"mode":"registry","players_online":12,"queued":1,"queued_by_game_type":[1,0,0],
+ "dme_ports":{"capacity":32,"in_use":9},
+ "worlds":[{"worker_id":"sabotage","state":"open","game_types":[0],"human_capacity":32,"pending":0,
+   "match":{"profile_id":"…","game_type":0,"attacking_faction":1,"defending_faction":2,"humans":8,
+            "attacking_humans":5,"defending_humans":3,"human_capacity":32,"bots":56,"world_capacity":64}}]}
+```
+
+- `medius_version` and `gameplay_version` are the newest releases in the Medius changelog built
+  into the image and the gameplay changelog the chart copies from the gameplay image (the same
+  notes the in-game NEWS shows); null without them. `started_at` is when this process started.
+- `mode` is `registry` (configured worlds), `single` (one local world, reported as `gameplay`) or
+  `none` (no local gameplay).
+- `players_online` counts accounts holding a live login lease, as `accounts list` decides
+  `online`; null when no session marker can be read.
+- `queued_by_game_type` counts humans in the registry's global queue by requested game type
+  (Sabotage, Acquisition, Domination); `pending` counts humans already placed on a world and not
+  yet admitted there.
+- A world's `state` is `open` (admitting), `draining` (closed to new players by the registry's
+  `draining`, matches continue), `faulted` (closed after a worker fault: unreachable at start, a
+  failed tick, a foreign or refused incarnation, or the adoption cap; Medius logs these as
+  "Configured worker …", and the entry reopens only when a matching worker is adopted) or
+  `unavailable` (not faulted, but not ready: starting, or its world stream lapsed).
+- `match` is null unless humans are in a match. Factions are 0 Valor, 1 Raven, 2 SVER; game
+  types 0 Sabotage, 1 Acquisition, 2 Domination. `bots` is the profile's bot fill less the
+  humans, the population the worker tops the world up to; 0 without bot fill.
 Set-level refusals are `409 {"error":code,"message":text}`:
 
 | Code | When (`mag-admin` reason) |

@@ -275,3 +275,45 @@ fn ground_recovery_still_refuses_a_bot_on_the_mesh() {
         Err("bot_ground_recovery_requires_supported_offmesh_stop")
     );
 }
+
+#[test]
+fn a_recovery_goal_on_the_edge_of_its_reach_is_not_refused_by_rounding() {
+    let (mut engine, id) = slab_engine(BAND_X);
+    let mesh = engine.navmesh_world.clone().unwrap();
+    let here = engine.bot_registry.bots[&id]
+        .target
+        .runtime
+        .unwrap()
+        .physical_position();
+    let policy = ObjectivePolicy::bundled();
+    let nearest = nearest_floor_mesh_point(&mesh, here, 2. * policy.recovery_m).unwrap();
+    let goal = point(recovery_move(nearest).destination);
+    let reach = (goal[0] - here[0]).hypot(goal[2] - here[2]);
+    let map = engine.map_name().to_string();
+    let world = engine.collision_world.clone().unwrap();
+    let actors = crate::actor_collision::ActorGrid::default();
+    let target = &mut engine.bot_registry.bots.get_mut(&id).unwrap().target;
+    let attempt = |target: &mut crate::development_target::Target, maximum: f64| {
+        target.begin_registry_ground_recovery(
+            &world,
+            mesh.clone(),
+            &map,
+            recovery_move(nearest),
+            Duration::ZERO,
+            maximum,
+            policy.drop_entry_buffer_m,
+            crate::actor_collision::Query {
+                grid: &actors,
+                actor: id,
+            },
+            policy.drop_traffic_query_budget,
+        )
+    };
+    // A goal a hair beyond the reach (single-precision positions on a ring
+    // of exactly that radius) is accepted; one clearly beyond is refused.
+    assert_eq!(
+        attempt(target, reach - 0.05),
+        Err("bot_ground_recovery_goal_not_local_mesh")
+    );
+    attempt(target, reach - 1e-5).expect("rounding past the reach is not a refusal");
+}

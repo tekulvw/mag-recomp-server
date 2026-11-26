@@ -125,12 +125,13 @@ pub(super) fn resupply_planning_ammo(
     let catalog = items.retail_combat().ok()?;
     let kit = &bot.target.loadout;
     let item = kit.primary;
-    let profile = retail_combat::RetailBulletProfile::from_equipped(
-        catalog,
+    let profile = retail_combat::RetailBulletProfile::from_equipped_with_items(
+        items,
         kit,
         item,
         item.gear_slot,
         item.ammo_pool,
+        true,
     )
     .ok()?;
     let metadata = catalog.bullet_metadata(profile.item_id())?;
@@ -465,6 +466,32 @@ pub(crate) fn visible(
     }
     Ok(())
 }
+/// The order bots spend this tick's shared ray budget in: round robin from
+/// `cursor`, with every bot already holding a target ahead of every bot still
+/// looking for one. A held target needs at most one ray per shot, while a
+/// search can spend `max_candidates_per_bot`; served in plain id order, a
+/// large lobby's searches used the whole budget and an engaged bot was only
+/// reached every few ticks, firing single shots instead of at its refire rate.
+fn visit_order(bots: &BTreeMap<u16, WorldBot>, cursor: u16) -> Vec<u16> {
+    order_engaged_first(bots.keys().copied(), cursor, |id| {
+        bots[&id].firearm.target.is_some()
+    })
+}
+fn order_engaged_first(
+    ids: impl Iterator<Item = u16>,
+    cursor: u16,
+    engaged: impl Fn(u16) -> bool,
+) -> Vec<u16> {
+    let ids: Vec<_> = ids.collect();
+    let start = ids.partition_point(|&id| id < cursor);
+    let (mut order, searching): (Vec<_>, Vec<_>) = ids[start..]
+        .iter()
+        .chain(&ids[..start])
+        .copied()
+        .partition(|&id| engaged(id));
+    order.extend(searching);
+    order
+}
 // Character pitch pack operation is statically crosschecked against original
 // retail0x61fde0..0x61fe60; see docs/BOT-FIREARMS.md for provenance and limits.
 fn deferred(reason: &str) -> bool {
@@ -508,14 +535,14 @@ pub(crate) fn validate_weapon_recoil(
     items: &item_catalog::ItemCatalog,
     kit: &replication::CharacterLoadout,
 ) -> Result<(), &'static str> {
-    let catalog = items.retail_combat()?;
     let equipped = kit.primary;
-    let profile = retail_combat::RetailBulletProfile::from_equipped(
-        catalog,
+    let profile = retail_combat::RetailBulletProfile::from_equipped_with_items(
+        items,
         kit,
         equipped,
         equipped.gear_slot,
         equipped.ammo_pool,
+        true,
     )?;
     recoil::Profile::from_weapon(items.weapon_parameters(profile.item_id())?).map(|_| ())
 }
@@ -639,12 +666,7 @@ impl<W: Write> Engine<W> {
         let mut rays = policy.max_rays_per_tick;
         let mut work = policy.geometry_work_per_tick;
         let map = self.map_name().to_owned();
-        let mut ids: Vec<_> = self.bot_registry.bots.keys().copied().collect();
-        if !ids.is_empty() {
-            let offset =
-                ids.partition_point(|&id| id < self.bot_registry.firearm_cursor) % ids.len();
-            ids.rotate_left(offset);
-        }
+        let ids = visit_order(&self.bot_registry.bots, self.bot_registry.firearm_cursor);
         let base_policy = policy;
         for id in ids {
             if rays == 0 || work == 0 {
@@ -699,12 +721,13 @@ impl<W: Write> Engine<W> {
             if servicing && current_equipment_key(bot) != bot.firearm.equipment {
                 continue;
             }
-            let profile = retail_combat::RetailBulletProfile::from_equipped(
-                catalog,
+            let profile = retail_combat::RetailBulletProfile::from_equipped_with_items(
+                &items,
                 kit,
                 equipped,
                 equipped.gear_slot,
                 equipped.ammo_pool,
+                true,
             );
             let supported = profile.and_then(|p| {
                 let metadata = catalog
@@ -1260,7 +1283,11 @@ impl<W: Write> Engine<W> {
             if publish {
                 bot.yaw = yaw;
             }
-            for packet in owner_packet.into_iter().chain(damage_packet) {
+            // The shooter's own pose follows its snapshot; damage can be to a human.
+            if let Some(packet) = owner_packet {
+                self.broadcast_bot_state_packet(packet);
+            }
+            if let Some(packet) = damage_packet {
                 self.broadcast_bot_packet(packet);
             }
         }
@@ -1272,6 +1299,27 @@ impl<W: Write> Engine<W> {
 #[cfg(test)]
 mod policy_tests {
     use super::*;
+
+    #[test]
+    fn engaged_bots_spend_the_ray_budget_before_searching_bots() {
+        let ids = [2u16, 5, 7, 9, 12, 20];
+        let engaged = |id: u16| matches!(id, 5 | 12 | 20);
+        // Round robin from the cursor inside each group, engaged group first.
+        assert_eq!(
+            order_engaged_first(ids.into_iter(), 9, engaged),
+            [12, 20, 5, 9, 2, 7]
+        );
+        // A cursor past every id wraps to the start, as before.
+        assert_eq!(
+            order_engaged_first(ids.into_iter(), 300, engaged),
+            [5, 12, 20, 2, 7, 9]
+        );
+        // With nobody engaged it is the previous plain rotation.
+        assert_eq!(
+            order_engaged_first(ids.into_iter(), 7, |_| false),
+            [7, 9, 12, 20, 2, 5]
+        );
+    }
 
     #[test]
     fn explicit_engagement_policy_loads_and_rejects_invalid_limits() {

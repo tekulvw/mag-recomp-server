@@ -18,6 +18,8 @@ use std::sync::{
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+mod worker_shutdown;
+
 fn parse_application_id(value: &str) -> io::Result<u32> {
     match value {
         "20230" => Ok(20230),
@@ -133,6 +135,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     let mut log_retention_s: Option<u64> = None;
     let mut telemetry_path: Option<PathBuf> = None;
     let mut tick_budget_us = None;
+    let mut drain_policy = worker_shutdown::DrainPolicy::default();
     let mut collision_path: Option<PathBuf> = None;
     let mut collision_coverage_path: Option<PathBuf> = None;
     let mut collision_filter_rows_path: Option<PathBuf> = None;
@@ -635,6 +638,30 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                         .map_err(|_| io::Error::other("invalid --log-segment-bytes"))?,
                 );
             }
+            "--drain-seconds" => {
+                let seconds: u64 = args
+                    .next()
+                    .ok_or_else(|| io::Error::other("--drain-seconds requires seconds"))?
+                    .parse()
+                    .map_err(|_| io::Error::other("invalid --drain-seconds"))?;
+                if seconds > worker_shutdown::MAXIMUM_DRAIN_SECONDS {
+                    return Err(io::Error::other("--drain-seconds must be at most 86400"));
+                }
+                drain_policy.drain = Duration::from_secs(seconds);
+            }
+            "--receipt-flush-seconds" => {
+                let seconds: u64 = args
+                    .next()
+                    .ok_or_else(|| io::Error::other("--receipt-flush-seconds requires seconds"))?
+                    .parse()
+                    .map_err(|_| io::Error::other("invalid --receipt-flush-seconds"))?;
+                if seconds > worker_shutdown::MAXIMUM_RECEIPT_FLUSH_SECONDS {
+                    return Err(io::Error::other(
+                        "--receipt-flush-seconds must be at most 600",
+                    ));
+                }
+                drain_policy.receipt_flush = Duration::from_secs(seconds);
+            }
             "--log-retention-s" => {
                 log_retention_s = Some(
                     args.next()
@@ -645,7 +672,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             }
             _ => {
                 return Err(io::Error::other(
-                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--match-profiles /absolute/MATCH_PROFILES.json] [--party-reservations] [--active-abilities /absolute/ACTIVE_ABILITIES.json] [--squad-orders /absolute/ORDERS.json] [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--dynamic-bodies /absolute/BODIES.json] [--static-partition /absolute/PARTITION.json] [--acquisition-gameplay /absolute/GAMEPLAY.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--firearm-assist-rules /absolute/ASSISTS.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--smoke-grenade-rules /absolute/SMOKE.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--worker-id ID] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json [--collision-coverage COVERAGE.json]] [--navmesh-world MESH.mag-nav] [--regional-walk-coverage /absolute/COVERAGE.json] [--movement-profile /absolute/MOVEMENT.json] [--bot-body-profile /absolute/BODY.json] [--bot-fill-total N --bot-population POPULATION.json] [--bot-perception on|off] [--bot-cover on|crouch|off] [--bot-names /absolute/NAMES.json] [--bot-resupply-catalog /absolute/SUPPLY.json] [--bot-resupply-approach-policy /absolute/APPROACH.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS] [--coalesce-character-replication] [--per-recipient-reply-budget] [--voice-routing] [--log-segment-bytes BYTES [--log-retention-s SECONDS]]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
+                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--match-profiles /absolute/MATCH_PROFILES.json] [--party-reservations] [--active-abilities /absolute/ACTIVE_ABILITIES.json] [--squad-orders /absolute/ORDERS.json] [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--dynamic-bodies /absolute/BODIES.json] [--static-partition /absolute/PARTITION.json] [--acquisition-gameplay /absolute/GAMEPLAY.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--firearm-assist-rules /absolute/ASSISTS.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--smoke-grenade-rules /absolute/SMOKE.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--worker-id ID] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json [--collision-coverage COVERAGE.json]] [--navmesh-world MESH.mag-nav] [--regional-walk-coverage /absolute/COVERAGE.json] [--movement-profile /absolute/MOVEMENT.json] [--bot-body-profile /absolute/BODY.json] [--bot-fill-total N --bot-population POPULATION.json] [--bot-perception on|off] [--bot-cover on|crouch|off] [--bot-names /absolute/NAMES.json] [--bot-resupply-catalog /absolute/SUPPLY.json] [--bot-resupply-approach-policy /absolute/APPROACH.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS] [--coalesce-character-replication] [--per-recipient-reply-budget] [--voice-routing] [--log-segment-bytes BYTES [--log-retention-s SECONDS]] [--drain-seconds SECONDS] [--receipt-flush-seconds SECONDS]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
                 ));
             }
         }
@@ -801,10 +828,23 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             "configure collision coverage inside each match profile",
         ));
     }
+    // A mesh records the SHA-256 of the collision file it was baked from:
+    // read it first, then read the world against that digest.
+    let mut pending_mesh = match (&navmesh_path, &collision_path, &regional_walk_path) {
+        (Some(path), Some(_), None) => Some(mag_gameplay::navmesh::VerifiedArtifact::read(path)?),
+        _ => None,
+    };
     let collision_world = collision_path
         .as_ref()
         .map(|path| {
-            CollisionWorld::load(path, CollisionLimits::default()).map_err(io::Error::other)
+            let limits = CollisionLimits::default();
+            match &pending_mesh {
+                Some(mesh) => {
+                    CollisionWorld::load_expecting(path, limits, &mesh.artifact().world_sha256)
+                }
+                None => CollisionWorld::load(path, limits),
+            }
+            .map_err(io::Error::other)
         })
         .transpose()?;
     // A coverage sidecar must name this exact world; the world bytes stay unchanged.
@@ -839,13 +879,10 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         let world = collision_world
             .as_ref()
             .ok_or_else(|| io::Error::other("--navmesh-world requires --collision-world"))?;
-        if std::fs::metadata(&path)?.len() > mag_gameplay::navmesh::MAX_ARTIFACT_JSON_BYTES {
-            return Err(io::Error::other("navmesh artifact size limit"));
-        }
         use mag_gameplay::navmesh::{self, BodyShape, MovementProfile, NavMesh};
-        let raw = std::fs::read(path)?;
-        let mesh = if let Some(path) = regional_walk_path.as_ref() {
-            let artifact = serde_json::from_slice(&raw).map_err(io::Error::other)?;
+        let mesh = if let Some(regional) = regional_walk_path.as_ref() {
+            let artifact = navmesh::regional::RegionalArtifact::read(&path)?;
+            let path = regional;
             let coverage = navmesh::regional::Coverage::load(path)?;
             let mesh =
                 navmesh::regional::load(artifact, world, coverage).map_err(io::Error::other)?;
@@ -864,7 +901,10 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                 .map_err(io::Error::other)?;
             mesh
         } else {
-            let artifact = serde_json::from_slice(&raw).map_err(io::Error::other)?;
+            let artifact = match pending_mesh.take() {
+                Some(artifact) => artifact,
+                None => navmesh::VerifiedArtifact::read(&path)?,
+            };
             let hash = world.source_sha256();
             let map = &world.metadata().map_name;
             let rules = movement_profile_path
@@ -878,7 +918,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                 .map(BodyShape::load_profile)
                 .transpose()?
                 .unwrap_or_default();
-            NavMesh::load_with_body(artifact, hash, map, rules.as_ref(), body)
+            NavMesh::load_verified(artifact, hash, map, rules.as_ref(), body)
                 .map_err(io::Error::other)?
         };
         mesh.validate_coverage(world).map_err(io::Error::other)?;
@@ -2061,9 +2101,10 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             .map(|path| open_log(path, rotation).map(|writer| TickRecorder::start(writer, max_log)))
             .transpose()?;
         // Storage stalls must not hold the world lock; see async_log.
-        let writer: LogWriter = Box::new(mag_gameplay::async_log::AsyncLogWriter::start(open_log(
-            &path, rotation,
-        )?));
+        let journal_writer = worker_shutdown::ClosableLog::new(Box::new(
+            mag_gameplay::async_log::AsyncLogWriter::start(open_log(&path, rotation)?),
+        ));
+        let writer: LogWriter = Box::new(journal_writer.clone());
         let mut engine =
             Engine::from_resources(writer, max_log, resources).with_skill_catalog(skill_catalog);
         if let Some(vehicles) = ground_vehicles {
@@ -2263,6 +2304,8 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         }
         // Served workers wait for Horizon's configure_match before admission.
         engine.require_match_configuration();
+        // From here on SIGTERM drains instead of being ignored by PID 1.
+        worker_shutdown::install();
         let engine = Arc::new(Mutex::new(engine));
         let listener = TcpListener::bind(bind)?;
         let started = Instant::now();
@@ -2277,6 +2320,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             telemetry.clone(),
             tick_budget_us,
         );
+        worker_shutdown::spawn_monitor(Arc::clone(&engine), drain_policy, journal_writer);
         println!(
             "{}",
             serde_json::json!({"event":"listening","application_id":application_id.unwrap_or(20230),"match_profiles":match_profiles_path,"active_abilities":active_abilities_path,"squad_orders":squad_orders_path,"profile_selection":if application_id.is_some(){"explicit"}else{"legacy"},"protocol":mag_gameplay::BRIDGE_VERSION,"address":listener.local_addr()?.to_string(),"collision":collision_info,"spawn_catalog":spawn_path,"objective_catalog":objective_info,"item_catalog":item_path,"character_blast_rules":blast_rules_path,"retail_combat_metadata":retail_metadata,"bootstrap_loadouts":bootstrap_loadouts_path,"fall_damage_rules":fall_rules_path,"incapacitation_rules":incapacitation_rules_path,"character_damage_rules":character_damage_rules_path,"firearm_assist_rules":firearm_assist_rules_path,"skill_catalog":skill_path,"retail_armory_catalog":retail_armory_path,"smoke_grenade_rules":smoke_grenade_rules_path,"leadership_passives":leadership_passives_path,"leadership_role_policy":leadership_role_policy_path,"bunkers":bunker_info,"tick_telemetry":telemetry_path,"tick_budget_us":tick_budget_us,"scheduler":"independent_50ms_when_subscribed","bot_fill_total":bot_fill_total,"initial_spawn_delay_ms":effective_initial_spawn_delay_ms,"initial_spawn_delay_source":if initial_spawn_delay_ms.is_some(){"override"}else{"catalog"},"bot_population":bot_population_path,"bot_resupply_catalog":bot_resupply_catalog_path,"bot_resupply_approach_policy":bot_resupply_approach_policy_path,"bot_names":bot_names_path,"bot_names_count":bot_names_count,"development_dummy_position":actual_dummy_position,"infantry_rockets":static_world_rocket_info,"static_world_frag_blast":static_world_frag_info})
@@ -2408,6 +2452,7 @@ fn serve(
             journal,
             slot,
             worker_identity,
+            *started,
         );
     }
     let parsed = parse_request(&line);
@@ -2464,11 +2509,13 @@ fn serve(
     if hello && response.ok {
         // Served-worker bridge features; in-process engines do not offer them.
         // Horizon accepts at most 32 capabilities; a full discovery reply with
-        // these two, worker_registry_v1, world_capacity_v1 and
-        // reply_budget_per_recipient_v1 lists 18.
+        // these four, worker_registry_v1, world_capacity_v1 and
+        // reply_budget_per_recipient_v1 lists 20.
         response.capabilities.extend([
             world_stream::CAPABILITY.to_owned(),
             world_stream::EVENT_REPLAY_CAPABILITY.to_owned(),
+            mag_gameplay::control_plane::CAPABILITY.to_owned(),
+            mag_gameplay::worker_drain::CAPABILITY.to_owned(),
         ]);
     }
     write_response(&mut stream, response, worker_identity)
@@ -2530,6 +2577,8 @@ struct WorldSubscriber {
     positions: bool,
     /// The subscriber asked for relay tables (voice_groups_v1).
     voice_groups: bool,
+    /// The subscriber asked to hear that this worker is draining (worker_drain_v1).
+    drain_notices: bool,
 }
 type SharedSubscriber = Arc<Mutex<Option<WorldSubscriber>>>;
 
@@ -2547,6 +2596,13 @@ struct SubscribeWorld {
     /// Ask for `voice_groups` frames. A worker without `--voice-routing` sends none.
     #[serde(default)]
     voice_groups: bool,
+    /// The subscribing Horizon process (control_plane_rebind_v1). Another name
+    /// than the last subscriber's releases what that process admitted.
+    #[serde(default)]
+    control_plane: Option<String>,
+    /// Ask for `worker_draining` on frames (worker_drain_v1).
+    #[serde(default)]
+    drain_notices: bool,
 }
 fn write_response(
     stream: &mut TcpStream,
@@ -2564,6 +2620,7 @@ fn write_response(
         .and_then(|_| stream.write_all(&bytes))
         .map_err(|e| ConnectionFailure::io(ConnectionStage::WriteResponse, e))
 }
+#[allow(clippy::too_many_arguments)]
 fn serve_subscription(
     mut stream: TcpStream,
     line: &[u8],
@@ -2572,6 +2629,7 @@ fn serve_subscription(
     journal: &Mutex<Journal>,
     slot: ConnectionSlot,
     worker_identity: Option<&WorkerIdentity>,
+    started: Instant,
 ) -> Result<(), ConnectionFailure> {
     let request = serde_json::from_slice::<SubscribeWorld>(line)
         .ok()
@@ -2582,6 +2640,9 @@ fn serve_subscription(
                 && r.request_id
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                && r.control_plane
+                    .as_deref()
+                    .is_none_or(mag_gameplay::control_plane::valid_control_plane)
         });
     let Some(request) = request else {
         return write_response(
@@ -2604,6 +2665,33 @@ fn serve_subscription(
             stage: ConnectionStage::WriteResponse,
             kind: io::ErrorKind::Other,
         })?;
+        // A new Horizon process: what the previous one admitted is gone with it.
+        if let Some(control_plane) = request.control_plane.as_deref() {
+            let wall = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            match engine.bind_control_plane(
+                control_plane,
+                request.world_id,
+                started.elapsed(),
+                wall,
+            ) {
+                Ok(Some(event)) => {
+                    let _ = writeln!(io::stdout().lock(), "{event}");
+                }
+                Ok(None) => {}
+                Err(code) => {
+                    drop(engine);
+                    drop(guard);
+                    return write_response(
+                        &mut stream,
+                        Response::error(request.request_id, code),
+                        worker_identity,
+                    );
+                }
+            }
+        }
         if !engine.accepts_subscription_world(request.world_id) {
             drop(engine);
             drop(guard);
@@ -2614,7 +2702,9 @@ fn serve_subscription(
             );
         }
         let voice_groups = request.voice_groups;
-        let receiver = match register_subscriber(&mut guard, journal, request, generation) {
+        let draining = engine.is_draining();
+        let receiver = match register_subscriber(&mut guard, journal, request, generation, draining)
+        {
             Ok(receiver) => receiver,
             Err((request_id, code)) => {
                 drop(engine);
@@ -2652,6 +2742,7 @@ fn register_subscriber(
     journal: &Mutex<Journal>,
     request: SubscribeWorld,
     generation: u64,
+    draining: bool,
 ) -> Result<mpsc::Receiver<Response>, (String, &'static str)> {
     let positions = request.positions || request.resume.is_some();
     let (acknowledged, replay) = {
@@ -2676,11 +2767,15 @@ fn register_subscriber(
     // The acknowledgement names the position the next frame follows.
     let mut acknowledgement = Response::success(request.request_id.clone());
     acknowledgement.world_stream = acknowledged;
+    acknowledgement.worker_draining = (draining && request.drain_notices).then_some(true);
     sender.send(acknowledgement).unwrap();
     for mut frame in replay {
         frame.request_id = request.request_id.clone();
         if !request.voice_groups {
             frame.voice_groups = None;
+        }
+        if !request.drain_notices {
+            frame.worker_draining = None;
         }
         sender.send(frame).unwrap();
     }
@@ -2691,6 +2786,7 @@ fn register_subscriber(
         sender,
         positions,
         voice_groups: request.voice_groups,
+        drain_notices: request.drain_notices,
     });
     Ok(receiver)
 }
@@ -2918,6 +3014,9 @@ fn publish_frame(subscriber: &SharedSubscriber, journal: &Mutex<Journal>, frame:
     if !current.voice_groups {
         frame.voice_groups = None;
     }
+    if !current.drain_notices {
+        frame.worker_draining = None;
+    }
     if let Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) =
         current.sender.try_send(frame)
     {
@@ -2961,6 +3060,7 @@ mod subscription_tests {
             sender: sender.clone(),
             positions: false,
             voice_groups: false,
+            drain_notices: false,
         });
         (sender, receiver)
     }
@@ -3071,8 +3171,10 @@ mod subscription_tests {
             positions,
             resume,
             voice_groups,
+            control_plane: None,
+            drain_notices: false,
         };
-        register_subscriber(&mut guard, journal, request, generation)
+        register_subscriber(&mut guard, journal, request, generation, false)
     }
 
     fn frame(payload: &str) -> Response {
@@ -3168,6 +3270,43 @@ mod subscription_tests {
             ["03", "04", "05", "06"]
         );
         assert!(resumed.iter().all(|f| f.request_id == "synthetic-second"));
+    }
+
+    #[test]
+    fn a_subscription_names_its_control_plane_and_hears_drain_notices_only_when_asked() {
+        let request: SubscribeWorld = serde_json::from_value(serde_json::json!({
+            "op":"subscribe_world","v":mag_gameplay::BRIDGE_VERSION,"request_id":"synthetic-drain",
+            "world_id":1,"control_plane":"synthetic-control-plane-first","drain_notices":true}))
+        .unwrap();
+        assert_eq!(
+            request.control_plane.as_deref(),
+            Some("synthetic-control-plane-first")
+        );
+        let shared: SharedSubscriber = Arc::new(Mutex::new(None));
+        let journal = Mutex::new(Journal::new("synthetic-epoch".into()));
+        let draining = || {
+            let mut frame = frame("01");
+            frame.worker_draining = Some(true);
+            frame
+        };
+        let asked = {
+            let mut guard = vacant_subscriber_slot(&shared).ok().flatten().unwrap();
+            register_subscriber(&mut guard, &journal, request, 1, true).unwrap()
+        };
+        // The acknowledgement already says so when the worker drains before subscribing.
+        assert_eq!(asked.recv().unwrap().worker_draining, Some(true));
+        publish_frame(&shared, &journal, draining());
+        assert_eq!(asked.recv().unwrap().worker_draining, Some(true));
+
+        drop(asked);
+        publish_frame(&shared, &journal, draining());
+        let plain = subscribe(&shared, &journal, "synthetic-plain", false, None, 2).unwrap();
+        assert_eq!(plain.recv().unwrap().worker_draining, None);
+        publish_frame(&shared, &journal, draining());
+        let delivered = plain.recv().unwrap();
+        assert_eq!(delivered.worker_draining, None);
+        let encoded = serde_json::to_value(&delivered).unwrap();
+        assert!(encoded.get("worker_draining").is_none());
     }
 
     #[test]

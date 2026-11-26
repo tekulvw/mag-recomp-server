@@ -624,7 +624,6 @@ impl TerrainMaterialGrid {
         catalog: &Catalog,
         retail_elf_sha256: &str,
     ) -> Result<Self, &'static str> {
-        use sha2::Digest;
         use std::io::Read;
 
         #[derive(Deserialize)]
@@ -671,21 +670,41 @@ impl TerrainMaterialGrid {
         {
             return Err("domination_terrain_material_source_mismatch");
         }
-        let mut buffer = Vec::with_capacity(BYTES);
-        std::fs::File::open(pixels)
-            .and_then(|file| file.take((BYTES + 1) as u64).read_to_end(&mut buffer))
-            .map_err(|_| "invalid_domination_terrain_material_pixels")?;
-        if buffer.len() != BYTES
-            || format!("{:x}", sha2::Sha256::digest(&buffer)) != index.materials_sha256
-            || buffer.iter().any(|&slot| slot > 26 && slot != 255)
-        {
-            return Err("invalid_domination_terrain_material_pixels");
-        }
+        // The index records the grid's digest: a read that does not match is
+        // logged and read again (`verified_read`), naming both digests.
+        use crate::verified_read::{Failure, Rejection};
+        let pixels = crate::verified_read::read(
+            pixels,
+            BYTES as u64,
+            "domination_terrain_material_grid",
+            |buffer| {
+                let actual = crate::verified_read::sha256(buffer);
+                if buffer.len() != BYTES || actual != index.materials_sha256 {
+                    return Err(Rejection::Digest {
+                        code: "invalid_domination_terrain_material_pixels",
+                        expected: index.materials_sha256.clone(),
+                        actual,
+                        bytes: buffer.len(),
+                    });
+                }
+                if buffer.iter().any(|&slot| slot > 26 && slot != 255) {
+                    return Err(Rejection::Final(
+                        "invalid_domination_terrain_material_pixels",
+                    ));
+                }
+                Ok(Box::<[u8]>::from(buffer))
+            },
+        )
+        .map_err(|failure| match failure {
+            Failure::Final(error) => error,
+            // An unverified read was logged with the path and both digests.
+            Failure::Io(_) | Failure::Unverified(_) => "invalid_domination_terrain_material_pixels",
+        })?;
         Ok(Self {
             columns: index.columns,
             cell_size: index.cell_size,
             tile_width: index.tile_width,
-            pixels: buffer.into_boxed_slice(),
+            pixels,
         })
     }
 

@@ -40,6 +40,8 @@ pub struct AppState {
     pub limits: Limits,
     /// Launcher reports (`PORTAL_REPORTS`); `None` answers `503 reports_disabled`.
     pub reports: Option<Arc<crate::reports::Reports>>,
+    /// The cached server status and maintenance banner (`/status`).
+    pub status: Arc<crate::status::StatusService>,
 }
 
 /// Per-address limits on the requests that create rows or carry large bodies, and per-account
@@ -134,6 +136,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .merge(crate::admin_web::routes())
         .merge(crate::social_web::routes())
+        .merge(crate::status::routes())
         .layer(axum::middleware::from_fn(failed_requests))
         .layer(axum::middleware::map_response(security_headers))
         .with_state(state)
@@ -285,6 +288,9 @@ pub(crate) type PageResult = Result<Response, AppError>;
 struct HomePage {
     nav_csrf: Option<String>,
     player_name: Option<String>,
+    /// The public server status and banner, from the in-memory cache: no session needed.
+    view: crate::status::StatusView,
+    configured: bool,
 }
 
 #[derive(Template)]
@@ -476,11 +482,14 @@ pub(crate) async fn require_session(
 
 async fn home(State(state): Shared, headers: HeaderMap) -> PageResult {
     let session = current_session(&state, &headers).await?;
+    let view = state.status.view(OffsetDateTime::now_utc(), false);
     Ok(page(
         StatusCode::OK,
         HomePage {
             player_name: session.as_ref().and_then(|s| s.account.player_name.clone()),
             nav_csrf: session.map(|s| s.csrf_token),
+            configured: !view.servers.is_empty(),
+            view,
         },
     ))
 }

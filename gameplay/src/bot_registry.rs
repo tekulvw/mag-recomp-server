@@ -46,6 +46,8 @@ pub struct BotPopulation {
     #[serde(default)]
     pub blast: crate::bot_blast::Policy,
     #[serde(default)]
+    pub squad_orders: crate::bot_squad_orders::Policy,
+    #[serde(default)]
     pub regional_collision: Option<RegionalCollision>,
     #[serde(default)]
     pub regional_team: Option<u8>,
@@ -143,11 +145,16 @@ pub(crate) struct BotRegistry {
     pub(super) traffic_cursor: u16,
     pub(super) firearm_cursor: u16,
     pub(super) delay_book: crate::bot_traffic_costs::Book,
-    /// Placements per (spawn point, population source spawn); static geometry.
+    /// Sides whose bots have taken their first lives this match; a side
+    /// waits for its first wave only before then.
+    pub(super) sides_started: [bool; 2],
+    /// The structure gates the spawn caches below were routed through.
+    pub(super) spawn_route_gates: Option<(u64, u32)>,
+    /// Placements per (spawn point, population source spawn).
     pub(super) spawn_qualification:
         BTreeMap<(u16, u16), Result<crate::bot_spawn_selection::QualifiedPoint, &'static str>>,
     /// Defender placements and route lengths per (spawn point, lane objective,
-    /// whether the point is the bot's own population slot); static geometry.
+    /// whether the point is the bot's own population slot).
     pub(super) lane_spawns:
         BTreeMap<(u16, u16, bool), Result<crate::bot_spawn_selection::LaneSpawn, &'static str>>,
     /// Per squad: whether its population slots can route to any objective
@@ -162,6 +169,8 @@ pub(super) struct WorldBot {
     pub(super) target: Target,
     pub(super) slot: usize,
     pub(super) role_slot: u8,
+    /// The varied kit and appearance chosen when the bot joined, if any.
+    pub(super) kit: Option<BotKit>,
     pub(super) traffic_yield: Option<crate::bot_traffic_flow::Yield>,
     pub(super) traffic_yield_cursor: usize,
     pub(super) traffic_progress: Option<crate::bot_traffic_flow::Progress>,
@@ -215,6 +224,14 @@ pub(super) struct WorldBot {
     last_move_since: Option<Duration>,
     last_navigation_status: Option<String>,
     pub(super) task: crate::bot_objectives::Task,
+}
+/// A bot's varied kit identity and appearance; kept for all its lives.
+#[derive(Clone, Debug)]
+pub(super) struct BotKit {
+    pub(super) id: String,
+    pub(super) role: crate::bot_kits::Role,
+    pub(super) head: u8,
+    pub(super) voice: u8,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PassageLife {
@@ -725,7 +742,17 @@ impl WorldBot {
                 .ok_or("bot_name_index")?,
             self.target.squad,
             Some(&physical),
+            self.appearance(),
         )
+    }
+    /// Head and voice presented in the character's MagCharacterInfo.
+    pub(super) fn appearance(&self) -> dummy::Appearance {
+        self.kit
+            .as_ref()
+            .map_or_else(Default::default, |kit| dummy::Appearance {
+                head: kit.head,
+                voice: kit.voice,
+            })
     }
 }
 fn regional_slot_source_active(catalog: &spawn_catalog::SpawnCatalog, slot: &BotSlot) -> bool {
@@ -803,6 +830,97 @@ impl<W: Write> Engine<W> {
             .map_or_else(bot_physics::Body::default, |mesh| mesh.body())
     }
 
+    /// Varied bot kits for this world's bots. Every kit and apparel item is
+    /// checked against the loaded item catalog and both match factions.
+    pub fn with_bot_kits(
+        mut self,
+        kits: std::sync::Arc<crate::bot_kits::Catalog>,
+    ) -> Result<Self, &'static str> {
+        self.install_bot_kits(Some(kits))?;
+        Ok(self)
+    }
+    pub(crate) fn install_bot_kits(
+        &mut self,
+        kits: Option<std::sync::Arc<crate::bot_kits::Catalog>>,
+    ) -> Result<(), &'static str> {
+        if let Some(catalog) = &kits {
+            catalog.validate_items(&self.item_catalog)?;
+            let profile = self.match_profile();
+            for faction in [profile.attacking_faction, profile.defending_faction] {
+                if !catalog.covers(faction) {
+                    return Err("bot_kits_missing_match_faction");
+                }
+            }
+        }
+        self.bot_kits = kits;
+        Ok(())
+    }
+    /// The kit a newly joining bot carries for all its lives: a varied kit
+    /// when a kit catalog is installed, otherwise the faction bootstrap kit.
+    fn bot_life_kit(
+        &self,
+        faction: u8,
+        squad: replication::SquadAddress,
+        role_slot: u8,
+        name_index: u16,
+    ) -> Result<(replication::CharacterLoadout, Option<BotKit>), &'static str> {
+        let Some(kits) = self.bot_kits.as_ref() else {
+            let inventory = self
+                .item_catalog
+                .bootstrap_default_inventory_index(faction)
+                .ok_or("missing_retail_target_loadout")?;
+            let loadout = self
+                .item_catalog
+                .bootstrap_loadout(faction, inventory)
+                .ok_or("missing_retail_target_loadout")?;
+            return Ok((loadout, None));
+        };
+        use crate::bot_kits::Role;
+        let config = self.bot_registry.config.as_ref().unwrap();
+        let engineer_tool = self
+            .bot_repair_tool()
+            .map(|tool| tool.item_id)
+            .filter(|&tool| self.item_catalog.is_retail_repair_tool(tool));
+        let assigned = if config.healing.medic(role_slot) {
+            Some(Role::Medic)
+        } else if config.repair.enabled
+            && config.repair.engineer_role_slots.contains(&role_slot)
+            && engineer_tool.is_some()
+        {
+            Some(Role::Engineer)
+        } else {
+            None
+        };
+        let squad_roles: Vec<_> = self
+            .bot_registry
+            .bots
+            .values()
+            .filter(|b| b.target.squad == squad)
+            .filter_map(|b| b.kit.as_ref().map(|k| k.role))
+            .collect();
+        let chosen = kits.choose(
+            &self.item_catalog,
+            crate::bot_kits::Request {
+                faction,
+                name_index,
+                salt: self
+                    .selected_match
+                    .as_ref()
+                    .map_or("", |m| m.formation_id.as_str()),
+                assigned,
+                squad_roles: &squad_roles,
+            },
+        )?;
+        Ok((
+            chosen.loadout,
+            Some(BotKit {
+                id: chosen.kit_id,
+                role: chosen.role,
+                head: chosen.head,
+                voice: chosen.voice,
+            }),
+        ))
+    }
     pub fn with_bot_population(
         mut self,
         mut config: BotPopulation,
@@ -1030,7 +1148,7 @@ impl<W: Write> Engine<W> {
         now: Duration,
     ) -> Result<crate::actor_collision::ActorGrid, &'static str> {
         use crate::actor_collision::{ActorGrid, Bounds};
-        let mut grid = ActorGrid::default();
+        let mut grid = ActorGrid::with_probe_shape(self.bot_movement_body().shape);
         // Bodies take the runtime body's shape (a box unless a body profile
         // selects a capsule); only its dimensions matter here.
         let body = bot_physics::Body::default().with_shape(self.bot_movement_body().shape);
@@ -1181,7 +1299,7 @@ impl<W: Write> Engine<W> {
         }
         .encode_with_profile(self.wire_profile)?;
         self.commit_bot_damage(id, generation, damage, now)?;
-        self.broadcast_bot_packet(packet);
+        self.broadcast_bot_state_packet(packet);
         Ok(())
     }
     pub(crate) fn commit_bot_damage(
@@ -1268,16 +1386,59 @@ impl<W: Write> Engine<W> {
         Err("bot_not_found")
     }
     pub(super) fn broadcast_bot_packet(&mut self, packet: Vec<u8>) {
-        // Bot deltas go only to recipients that tick_bots also snapshots. A client
-        // that is loading (not ready_for_updates) is not drained, and it receives
-        // one fresh snapshot per bot once it is ready again, so queuing deltas for
-        // it would only fill its bounded reliable queue until a populated world
-        // evicted it as replication_backlogged within seconds of joining.
+        // Shared character deltas (human lives, vehicles, damage a bot deals) for
+        // ready clients. A loading client (not ready_for_updates) is not drained
+        // and is re-snapshotted when ready, so queuing these for it would only
+        // fill its bounded reliable queue. A bot's own state uses
+        // `broadcast_bot_state_packet`, which also waits for the drain gate.
         for recipient in self
             .peers
             .values_mut()
             .chain(self.active.iter_mut())
             .filter(|a| a.initial_objects.is_some() && a.ready_for_updates)
+        {
+            recipient.queue_shared(packet.clone());
+        }
+    }
+    /// Objective world deltas, unlike bot frames, are never re-sent when a
+    /// client returns from its deploy screen (`ready_for_updates` false). A
+    /// client that already holds the objective bootstrap keeps receiving them
+    /// there and drains them in order once ready; one still waiting for its
+    /// bootstrap gets the current state in that snapshot instead.
+    pub(crate) fn broadcast_objective_packet(&mut self, packet: Vec<u8>) {
+        for recipient in self
+            .peers
+            .values_mut()
+            .chain(self.active.iter_mut())
+            .filter(|a| a.receives_objective_state())
+        {
+            recipient.queue_state_shared(packet.clone());
+        }
+    }
+    /// Shared spawn availability deltas. The initial objects carry the squad
+    /// spawns a client starts from, and a client on its deploy screen needs
+    /// every later change to choose a spawn.
+    pub(crate) fn broadcast_spawn_packet(&mut self, packet: Vec<u8>) {
+        for recipient in self
+            .peers
+            .values_mut()
+            .chain(self.active.iter_mut())
+            .filter(|a| a.initial_objects.is_some())
+        {
+            recipient.queue_state_shared(packet.clone());
+        }
+    }
+    /// A bot's own movement, life or removal, for the recipients that hold the
+    /// current bot snapshots (the set [`Self::tick_bots`] snapshots). Any other
+    /// recipient receives a fresh snapshot per bot once its FIFO drains, so these
+    /// deltas would only fill its bounded queue.
+    pub(super) fn broadcast_bot_state_packet(&mut self, packet: Vec<u8>) {
+        let gate = self.shared_drain_gate();
+        for recipient in self
+            .peers
+            .values_mut()
+            .chain(self.active.iter_mut())
+            .filter(|a| a.initial_objects.is_some() && gate.admits(a))
         {
             recipient.queue_shared(packet.clone());
         }
@@ -1327,7 +1488,7 @@ impl<W: Write> Engine<W> {
                 player: index,
             }
             .encode_with_profile(self.wire_profile)?;
-            self.broadcast_bot_packet(packet);
+            self.broadcast_bot_state_packet(packet);
             for known in self.bot_registry.known.values_mut() {
                 known.remove(&index);
             }
@@ -1393,12 +1554,14 @@ impl<W: Write> Engine<W> {
         {
             return Ok(Vec::new());
         }
-        // Start the first population only after a real human reaches on foot.
+        // Start the first population once a real human reaches on foot, or
+        // once a side's first wave is due (see `bot_team_first_wave`).
         // Thereafter its world-owned lives/routes continue through human death.
         if self.bot_registry.bots.is_empty()
             && !self.peers.values().chain(self.active.iter()).any(|a| {
                 a.entered_game && a.ready_for_updates && a.life.is_alive() && !a.is_mounted()
             })
+            && !(0..2).any(|team| self.bot_team_first_wave(team).is_some_and(|due| due <= now))
         {
             return Ok(Vec::new());
         }
@@ -1416,12 +1579,17 @@ impl<W: Write> Engine<W> {
         let mut actors = self.actor_grid(now)?;
         let population = self.tick_timing_start();
         self.reconcile_bot_population(now, wall, &mut actors)?;
-        // New recipients get one coherent creation+inventory+current-life snapshot per bot.
+        // New recipients get one coherent creation+inventory+current-life snapshot per bot,
+        // once their shared FIFO drains. A late joiner into a full world stays
+        // ready but undrained while its hospital and vehicle creations arrive one
+        // client update at a time; 255 snapshots plus every bot's deltas would
+        // fill its bounded queue and evict it before its first spawn.
+        let gate = self.shared_drain_gate();
         let recipients: Vec<_> = self
             .peers
             .values()
             .chain(self.active.iter())
-            .filter(|a| a.ready_for_updates && a.initial_objects.is_some())
+            .filter(|a| a.initial_objects.is_some() && gate.admits(a))
             .map(|a| a.reservation.id.clone())
             .collect();
         self.bot_registry
@@ -1852,7 +2020,7 @@ impl<W: Write> Engine<W> {
             self.record(receipt, wall)?;
         }
         for packet in packets {
-            self.broadcast_bot_packet(packet);
+            self.broadcast_bot_state_packet(packet);
         }
         Ok(Vec::new())
     }
@@ -3015,6 +3183,35 @@ impl<W: Write> Engine<W> {
             })
             .map(|(&id, _)| id)
     }
+    /// The first spawn wave a side's bots wait for before their first
+    /// lives, or None when they need not wait. A side with a human confirmed
+    /// waits for its own first wave, unless one of its humans is already
+    /// alive. A side without a human or clock counts as confirmed when the
+    /// other side's first human did, so each side keeps its authored initial
+    /// spawn delay: retail defenders come in before attackers.
+    pub(crate) fn bot_team_first_wave(&self, team: u8) -> Option<Duration> {
+        let humans = |side: usize| {
+            self.peers
+                .values()
+                .chain(self.active.iter())
+                .filter(move |a| usize::from(a.team()) == side)
+        };
+        let team = usize::from(team);
+        if humans(team).any(|a| a.entered_game && a.life.is_alive()) {
+            return None;
+        }
+        if let Some(clock) = self.team_waves[team] {
+            return humans(team).next().map(|_| clock.first_deadline);
+        }
+        let other = 1 - team;
+        let delays = self.match_profile().initial_spawn_delay_ms;
+        humans(other).next()?;
+        self.team_waves[other]?
+            .first_deadline
+            .checked_sub(Duration::from_millis(u64::from(delays[other])))?
+            .checked_add(Duration::from_millis(u64::from(delays[team])))
+    }
+
     pub(crate) fn reconcile_bot_population(
         &mut self,
         now: Duration,
@@ -3121,6 +3318,15 @@ impl<W: Write> Engine<W> {
         if self.bot_registry.bots.len() < desired {
             self.cache_squad_routes(wall)?;
         }
+        // The first wave each side's bots wait for, as the humans set it;
+        // bots allocated below do not move it. A side that has started
+        // refills at any time.
+        let first_waves = [self.bot_team_first_wave(0), self.bot_team_first_wave(1)];
+        let sides_started = self.bot_registry.sides_started;
+        let started = |team: u8| {
+            sides_started[usize::from(team)]
+                || first_waves[usize::from(team)].is_none_or(|due| due <= now)
+        };
         while self.bot_registry.bots.len() < desired {
             let counts = |team| {
                 humans.iter().filter(|h| h.1 == team).count()
@@ -3131,9 +3337,25 @@ impl<W: Write> Engine<W> {
                         .filter(|b| b.target.squad.team() == team)
                         .count()
             };
-            let team = config
-                .regional_team
-                .unwrap_or_else(|| if counts(0) <= counts(1) { 0 } else { 1 });
+            // A side whose first wave is still ahead waits for it; the other
+            // side fills meanwhile, up to its half.
+            let team = match config.regional_team {
+                Some(team) => team,
+                None => {
+                    let preferred = if counts(0) <= counts(1) { 0 } else { 1 };
+                    let half = self.bot_registry.total.div_ceil(2);
+                    match [preferred, 1 - preferred]
+                        .into_iter()
+                        .find(|&team| started(team) && counts(team) < half)
+                    {
+                        Some(team) => team,
+                        None => break,
+                    }
+                }
+            };
+            if !started(team) {
+                break;
+            }
             let used: BTreeSet<_> = self.bot_registry.bots.values().map(|b| b.slot).collect();
             let catalog = self
                 .spawn_catalog
@@ -3162,7 +3384,7 @@ impl<W: Write> Engine<W> {
                             && (config.regional_team.is_none()
                                 || regional_slot_source_active(catalog, s))
                             && !actors
-                                .occupied(u16::MAX, point(s.position), bot_physics::Body::default())
+                                .occupied(u16::MAX, point(s.position), actors.probe())
                                 .unwrap_or(true)
                     })
                     .map(|(i, s)| (squad, i, s))
@@ -3202,30 +3424,6 @@ impl<W: Write> Engine<W> {
             } else {
                 self.match_profile().defending_faction
             };
-            let inventory = self
-                .item_catalog
-                .bootstrap_default_inventory_index(faction)
-                .ok_or("missing_retail_target_loadout")?;
-            let loadout = self
-                .item_catalog
-                .bootstrap_loadout(faction, inventory)
-                .ok_or("missing_retail_target_loadout")?;
-            // Squad medics carry the item that heals others, and squad
-            // engineers the mode's repair tool; each swaps its own role
-            // slot's self-healing item.
-            let loadout = crate::bot_healing::medic_loadout(
-                &self.bot_registry.config.as_ref().unwrap().healing,
-                role_slot,
-                &self.item_catalog,
-                loadout,
-            );
-            let loadout = crate::bot_repair::engineer_loadout(
-                &self.bot_registry.config.as_ref().unwrap().repair,
-                role_slot,
-                &self.item_catalog,
-                self.bot_repair_tool().map(|tool| tool.item_id),
-                loadout,
-            );
             let generation = self
                 .bot_registry
                 .generations
@@ -3292,17 +3490,39 @@ impl<W: Write> Engine<W> {
                 .name_for(name_index)
                 .ok_or("bot_name_index")?
                 .to_owned();
+            let (loadout, kit) = self.bot_life_kit(faction, squad, role_slot, name_index)?;
+            // Squad medics carry the item that heals others, and squad
+            // engineers the mode's repair tool; each swaps its own role
+            // slot's self-healing item. A varied kit for those slots already
+            // carries the item, so the swap leaves it unchanged.
+            let loadout = crate::bot_healing::medic_loadout(
+                &self.bot_registry.config.as_ref().unwrap().healing,
+                role_slot,
+                &self.item_catalog,
+                loadout,
+            );
+            let loadout = crate::bot_repair::engineer_loadout(
+                &self.bot_registry.config.as_ref().unwrap().repair,
+                role_slot,
+                &self.item_catalog,
+                self.bot_repair_tool().map(|tool| tool.item_id),
+                loadout,
+            );
             // A side containing only bots still owns a shared schedule. Adopt
             // the same authored first-participant policy as human confirmation,
             // while preserving both initial bot admission and an existing phase.
             let new_clock = if self.team_waves[usize::from(team)].is_none() {
                 let policy = self.match_profile();
-                Some(TeamWaveClock {
-                    first_deadline: now
+                let first_deadline = match first_waves[usize::from(team)] {
+                    Some(due) => due,
+                    None => now
                         .checked_add(Duration::from_millis(u64::from(
                             policy.initial_spawn_delay_ms[usize::from(team)],
                         )))
                         .ok_or("wave_clock_overflow")?,
+                };
+                Some(TeamWaveClock {
+                    first_deadline,
                     period: Duration::from_millis(u64::from(self.strategic_spawn_interval(
                         team,
                         policy.spawn_wave_ms[usize::from(team)],
@@ -3311,10 +3531,20 @@ impl<W: Write> Engine<W> {
             } else {
                 None
             };
-            self.record(json!({"op":"bot_population_spawn","name":display_name,"name_index":name_index,"object_index":index,"generation":generation,"team":team,"squad_index":squad.squad_index(),"source_spawn":slot.source_spawn,"slot":slot_index,"spawn_point_index":spawn.spawn_point,"arrival":spawn.arrival.code(),"position":spawn.position}),wall)?;
+            let mut spawn_receipt = json!({"op":"bot_population_spawn","name":display_name,"name_index":name_index,"object_index":index,"generation":generation,"team":team,"squad_index":squad.squad_index(),"source_spawn":slot.source_spawn,"slot":slot_index,"spawn_point_index":spawn.spawn_point,"arrival":spawn.arrival.code(),"position":spawn.position});
+            if let Some(kit) = &kit {
+                spawn_receipt["kit"] = json!(kit.id);
+                spawn_receipt["kit_role"] = json!(kit.role.code());
+                spawn_receipt["role_slot"] = json!(role_slot);
+                spawn_receipt["head"] = json!(kit.head);
+                spawn_receipt["voice"] = json!(kit.voice);
+                spawn_receipt["primary"] = json!(loadout.inventories[0].slots[0]);
+            }
+            self.record(spawn_receipt, wall)?;
             if let Some(clock) = new_clock {
                 self.team_waves[usize::from(team)] = Some(clock);
             }
+            self.bot_registry.sides_started[usize::from(team)] = true;
             self.bot_registry.generations.insert(index, generation);
             self.bot_registry.bots.insert(
                 index,
@@ -3339,6 +3569,7 @@ impl<W: Write> Engine<W> {
                     },
                     slot: slot_index,
                     role_slot,
+                    kit,
                     traffic_yield: None,
                     traffic_yield_cursor: 0,
                     traffic_progress: None,
@@ -3406,6 +3637,8 @@ impl<W: Write> Engine<W> {
         self.bot_registry.firearm_cursor = 0;
         self.bot_registry.spawn_qualification.clear();
         self.bot_registry.lane_spawns.clear();
+        self.bot_registry.spawn_route_gates = None;
+        self.bot_registry.sides_started = [false; 2];
     }
 }
 
@@ -3728,6 +3961,7 @@ pub(crate) mod identity_tests {
                     &expected,
                     bot.target.squad,
                     Some(&physical),
+                    bot.appearance(),
                 )
                 .unwrap();
                 assert_eq!(
@@ -3929,6 +4163,13 @@ pub(crate) mod healing_reward_relationship_tests;
 pub(crate) struct CharacterDamageCandidate {
     bots: BTreeMap<u16, WorldBot>,
     reservations: BTreeMap<u16, (crate::actor_collision::Reservation, Duration)>,
+}
+#[cfg(test)]
+impl BotRegistry {
+    /// The bots a recipient holds snapshots of, if it has been snapshotted.
+    pub(crate) fn known_bots(&self, reservation_id: &str) -> Option<&BTreeSet<u16>> {
+        self.known.get(reservation_id)
+    }
 }
 impl BotRegistry {
     pub(crate) fn character_damage_candidate(&self) -> CharacterDamageCandidate {

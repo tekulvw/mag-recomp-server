@@ -569,8 +569,53 @@ impl CollisionWorld {
         Self::from_bytes(&bytes, limits)
     }
 
+    /// `load` for a world whose file SHA-256 another artifact recorded (a
+    /// navmesh's `world_sha256`). The digest is taken over the bytes read,
+    /// before parsing; a read that does not match is logged and read again
+    /// (`verified_read`), and when none matches the error names the file and
+    /// both digests (`collision_world_hash_mismatch: ...`).
+    pub fn load_expecting(
+        path: impl AsRef<Path>,
+        limits: CollisionLimits,
+        expected_sha256: &str,
+    ) -> Result<Self, CollisionError> {
+        Self::validate_limits(limits)?;
+        let path = path.as_ref();
+        let info =
+            std::fs::metadata(path).map_err(|e| invalid(format!("collision metadata: {e}")))?;
+        if !info.is_file() {
+            return Err(invalid("collision input must be a regular file"));
+        }
+        crate::verified_read::read(path, limits.max_file_bytes, "collision_world", |bytes| {
+            let actual = crate::verified_read::sha256(bytes);
+            if actual != expected_sha256 {
+                return Err(crate::verified_read::Rejection::Digest {
+                    code: "collision_world_hash_mismatch",
+                    expected: expected_sha256.to_string(),
+                    actual,
+                    bytes: bytes.len(),
+                });
+            }
+            Self::from_digested_bytes(bytes, actual, limits)
+                .map_err(crate::verified_read::Rejection::Final)
+        })
+        .map_err(|failure| match failure {
+            crate::verified_read::Failure::Final(error) => error,
+            other => invalid(other.to_string()),
+        })
+    }
+
     pub(crate) fn from_bytes(
         bytes: &[u8],
+        limits: CollisionLimits,
+    ) -> Result<Self, CollisionError> {
+        Self::from_digested_bytes(bytes, crate::verified_read::sha256(bytes), limits)
+    }
+
+    /// `from_bytes` with the SHA-256 of `bytes` already taken.
+    fn from_digested_bytes(
+        bytes: &[u8],
+        source_sha256: String,
         limits: CollisionLimits,
     ) -> Result<Self, CollisionError> {
         Self::validate_limits(limits)?;
@@ -688,8 +733,6 @@ impl CollisionWorld {
             bvh_nodes: nodes.len(),
             bounds: root.map(|i| nodes[i].bounds()),
         };
-        use sha2::Digest;
-        let source_sha256 = format!("{:x}", sha2::Sha256::digest(bytes));
         Ok(Self {
             source_sha256,
             bot_regional_guard: None,

@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Server status{% endblock %}
+{% block head %}<meta http-equiv="refresh" content="{{ view.refresh_seconds }}">{% endblock %}
+{% block content %}
+<p class="eyebrow">Server status</p>
+<h1>{{ crate::status::headline(view.state) }}</h1>
+{% if let Some(b) = view.banner %}
+<div class="banner" role="status"><strong>Notice:</strong> {{ b.message }}{% if let Some(t) = b.restart_text %} <span class="quiet">Back by {{ t }}.</span>{% endif %}</div>
+{% endif %}
+{% if !configured %}
+<p class="quiet">This site does not show game server status.</p>
+{% else %}
+{% include "status_servers.html" %}
+{% endif %}
+<p class="quiet">This page reloads every {{ view.refresh_seconds }} seconds and shows counts only, never who is playing. The same data is at <a href="/api/v1/status">/api/v1/status</a>.</p>
+{% endblock %}

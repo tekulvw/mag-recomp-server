@@ -5,7 +5,8 @@ in with Google, claim a player name and link their launcher. The launcher trades
 device token for expiring **game tickets**, which the game server verifies with the
 portal's public key. See the [design](../docs/superpowers/specs/2026-11-22-portal-design.md)
 and the [ticket format](../docs/portal-ticket.md). Launchers also send performance and error
-reports with their logs: see [launcher reports](../docs/portal-reports.md). Players keep a
+reports with their logs: see [launcher reports](../docs/portal-reports.md). The home page shows each game server's status
+(counts only, cached and polled in the background; see [server status](../docs/portal-status.md)). Players keep a
 friends list (requests, blocks) at `/friends`, and game clients relay presence through the
 portal: see [friends and presence](../docs/portal-social.md).
 
@@ -71,6 +72,8 @@ holds ticket test vectors for other verifiers; regenerate them with
 | `PORTAL_CLIENT_IP_HEADER` | no | Header the trusted proxy appends the client address to (`x-forwarded-for`); the last entry is used. Without it, rate limits use the connecting address, which behind a proxy is the proxy. |
 | `PORTAL_GAME_ADMIN_URL` | no | Origin of the game server's internal admin API, such as `http://mag-medius-admin.mag.svc:10490` (http or https). Set it with `PORTAL_GAME_ADMIN_SECRET_FILE`, or neither; without them the admin panel's Game server section shows "not configured". |
 | `PORTAL_GAME_ADMIN_SECRET_FILE` | with the URL | File holding the admin API's shared HMAC secret, at least 32 bytes (surrounding whitespace is trimmed). Never logged. |
+| `PORTAL_STATUS_SERVERS` | no | Game servers on the public status (home page, `/status`, `/api/v1/status`), such as `live,modes`; each other id takes `PORTAL_STATUS_<ID>_ADMIN_URL` and `PORTAL_STATUS_<ID>_ADMIN_SECRET_FILE`. Unset: `live` when the game admin API is set. See [server status](../docs/portal-status.md). |
+| `PORTAL_STATUS_REFRESH_SECONDS` | no | Seconds between status polls of each game server, 5 to 300 (default 15). |
 | `PORTAL_OPERATOR_CONTACT` | no | Contact text shown on the privacy page. |
 | `PORTAL_REPORTS` | no | `on` (default) takes launcher reports and needs a report store; `off` answers `503 reports_disabled`. See [launcher reports](../docs/portal-reports.md). |
 | `PORTAL_REPORT_STORE` | with reports on | Where report logs go: `s3` (production) or `dir` (tests and development). |

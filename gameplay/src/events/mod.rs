@@ -12,6 +12,7 @@ mod orders;
 pub(crate) use objectives::exit_message as objective_hold_exit;
 mod bunker_seats;
 mod owner;
+mod respawn_queue;
 mod resuscitate;
 mod seats;
 mod statistics;

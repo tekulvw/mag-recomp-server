@@ -108,6 +108,7 @@ A profile row can fill its world with bots. The optional row fields are:
 | `bot_population` | `mag_bot_population_v1` file for this profile's map. Required by every other bot field. |
 | `bot_fill_total` | Total world population (humans plus bots). Defaults to the worker's `--bot-fill-total`. |
 | `bot_names` | Bot names for this profile. Defaults to the worker's `--bot-names` (or the synthetic names). |
+| `bot_kits` | Optional `mag_bot_kits_v1` catalog of varied bot kits, apparel, heads and voices ([bot-kits.md](bot-kits.md)). Without it every bot carries its faction's bootstrap kit with head and voice 0. |
 | `bot_resupply_catalog` | Optional bot resupply providers for a Sabotage, Acquisition or Domination profile on a qualified map ([bot-static-resupply.md](bot-static-resupply.md)). |
 | `bot_resupply_approach_policy` | Optional approach policy. Requires `bot_resupply_catalog` and the profile's navmesh. |
 | `bot_body_profile` | Optional bot body profile: the box (default) or a capsule ([extraction.md](extraction.md#optional-bot-body-shape)). Needs only the profile's `navmesh_world`, which must be certified for that body shape. |

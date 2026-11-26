@@ -110,6 +110,12 @@ impl RetailArmory {
         }
         Ok(result)
     }
+    /// Whether the Armory offers this item to the faction.
+    pub(crate) fn offers(&self, faction: u8, id: u16) -> bool {
+        self.items
+            .get(&id)
+            .is_some_and(|item| item.factions.contains(&faction))
+    }
     pub(crate) fn skill_purchases_sha256(&self) -> Option<&str> {
         self.skill_purchases_sha256.as_deref()
     }

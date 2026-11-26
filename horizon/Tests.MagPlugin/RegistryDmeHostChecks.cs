@@ -357,6 +357,9 @@ internal static partial class LeadershipProgressionChecks
         public bool SupportsParties;
         public bool SupportsLateParties;
         public bool SupportsBotFill;
+        // Advertise control_plane_rebind_v1 and worker_drain_v1.
+        public bool SupportsControlPlane;
+        public bool SupportsDrain;
         public Func<JsonObject, Task> BeforePartyReply;
         public volatile bool DropNextPartyReply;
         // Reserve_party replies still to drop after recording them (int.MaxValue: never answer).
@@ -458,6 +461,8 @@ internal static partial class LeadershipProgressionChecks
                                     profile["human_capacity"] = 32; profile["human_team_capacity"] = 16;
                                 }
                             }
+                            if (SupportsControlPlane) response["capabilities"]!.AsArray().Add("control_plane_rebind_v1");
+                            if (SupportsDrain) response["capabilities"]!.AsArray().Add("worker_drain_v1");
                             if (SupportsBotFill)
                             {
                                 response["capabilities"]!.AsArray().Add("bot_fill_v1");

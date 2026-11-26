@@ -29,6 +29,8 @@ impl Runtime {
         self.published.clear();
     }
 }
+/// Per squad: whether its automatic tag applied, or why not.
+pub(crate) type TagResults = BTreeMap<u16, Result<(), &'static str>>;
 pub(crate) struct Candidate {
     runtime: Runtime,
     acquisition: Option<acquisition_gameplay_engine::Runtime>,
@@ -170,6 +172,26 @@ impl<W: Write> Engine<W> {
             candidate.runtime.state.set_waypoint(squad, position, now);
         }
         Ok(candidate)
+    }
+    /// Server-kept tags of squads without a human order: no leader authority,
+    /// no shared set gate. A squad its mode cannot tag is reported and left.
+    pub(crate) fn plan_automatic_squad_tags(
+        &self,
+        tags: &[(u16, u32)],
+    ) -> Result<(Option<Candidate>, TagResults), &'static str> {
+        let mut candidate = self.squad_order_candidate()?;
+        let mut results = BTreeMap::new();
+        let mut any = false;
+        for &(squad, target) in tags {
+            let result = if target != u32::MAX && !self.squad_order_target_exists(target) {
+                Err("squad_order_target_unavailable")
+            } else {
+                self.set_candidate_tag(&mut candidate, squad, target)
+            };
+            any |= result.is_ok();
+            results.insert(squad, result);
+        }
+        Ok((any.then_some(candidate), results))
     }
     pub(crate) fn plan_removed_squad_orders(
         &self,
