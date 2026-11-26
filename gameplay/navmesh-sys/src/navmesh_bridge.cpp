@@ -961,12 +961,12 @@ static int route_impl(MagNav* h,const float* start,const float* goal,float radiu
 // `gated` 0 plans on the static mesh alone (a start inside a structure's
 // enclosed room, which no opening leaves).
 int mag_nav_route(MagNav* h,const float* start,const float* goal,float radius,float* projected_start,float* projected_goal,
-                  float* points,int* point_count,unsigned long long* refs,int* ref_count,int* nodes,int* stages,int flags) {
+                  float* points,int* point_count,unsigned long long* refs,int* ref_count,int* nodes,int* stages,int options) {
     // Bit 0: gate by the standing structures. Bit 1: a goal they wall off is
     // reached beside it (see `gate_tracked_violation`); callers that must
     // stand at the goal itself (an interaction range) leave it clear.
-    const int gated=flags&1;
-    const bool beside=(flags&2)!=0;
+    const int gated=options&1;
+    const bool beside=(options&2)!=0;
     if(gated && !h->gates.empty()) {
         std::vector<std::array<dtPolyRef,3>> refused;
         for(int attempt=0; attempt<RelaxedGateAttempts; ++attempt) {
