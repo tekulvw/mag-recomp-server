@@ -1035,10 +1035,7 @@ impl Target {
     ) -> Result<(), &'static str> {
         let runtime = self.runtime.ok_or("bot_not_spawned")?;
         let initial = runtime.physics_motion.ok_or("bot_physics_state_missing")?;
-        if !initial.grounded
-            || runtime.navmesh_state.on_player
-            || !runtime.navmesh_state.navigation_aborted
-            || mesh.component_id(initial.position).is_ok()
+        if !self.supported_offmesh_stop(&mesh)
             || movement.mode != BotMoveMode::Navigation
             || movement.sprint
             || !maximum_m.is_finite()
@@ -1129,6 +1126,22 @@ impl Target {
             ..runtime
         });
         Ok(())
+    }
+    /// A bot standing on supported ground just off the walking navmesh and
+    /// no longer following a route: its navigation stopped early, or its last
+    /// move finished. A body can rest in the band the navmesh erodes beside
+    /// ledges, walls and steep slopes (a slide or a shove from a neighbour
+    /// leaves it there), and no route can start from there; only a short local
+    /// walk back onto the mesh can. Such a bot takes ground recovery instead
+    /// of retrying routes that cannot start.
+    pub(super) fn supported_offmesh_stop(&self, mesh: &navmesh::NavMesh) -> bool {
+        self.runtime.is_some_and(|runtime| {
+            runtime.physics_motion.is_some_and(|m| m.grounded)
+                && !runtime.navmesh_state.on_player
+                && (runtime.navmesh_state.navigation_aborted
+                    || matches!(runtime.phase, BotPhase::Complete))
+                && mesh.component_id(runtime.physical_position()).is_err()
+        })
     }
     pub(super) fn registry_ground_recovery(&self) -> bool {
         self.pending_move
