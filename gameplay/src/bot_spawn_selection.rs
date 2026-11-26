@@ -27,17 +27,18 @@
 //! placement is skipped and reported once with its reason. When nothing else
 //! qualifies the population slot is the fallback.
 //!
-//! With a navmesh, every squad instead ranks every point it may use now,
+//! With a navmesh, a squad that defends the objective it works on now
+//! (`bot_squad_current_objective`), or works on one other than its lane
+//! objective (its human leader's FRAGO, or the nearest objective of its team
+//! once its lane is exhausted), instead ranks every point it may use now,
 //! including an operational hospital of its side and a natively routed field
-//! hospital, toward the objective it works on now
-//! (`bot_squad_current_objective`: its human leader's FRAGO, else its lane,
-//! else the nearest objective of its team). Forward spawns (such a hospital,
-//! a point the squad gained at runtime, or its runtime default once the mode
-//! moved it) come first whenever they route there, then the squad's other
-//! points; within each group the shorter navmesh route goes first. Points
-//! that do not route there are skipped, near-equal points are spread per bot,
-//! and the population slot is the last fallback. When no point routes to the
-//! current objective the lane objective is tried, then the order above. With
+//! hospital, toward that objective. Forward spawns (such a hospital, a point
+//! the squad gained at runtime, or its runtime default once the mode moved
+//! it) come first whenever they route there, then the squad's other points;
+//! within each group the shorter navmesh route goes first. Points that do not
+//! route there are skipped, near-equal points are spread per bot, and the
+//! population slot is the last fallback. When no point routes to that
+//! objective a defended lane objective is tried, then the order above. With
 //! `squad_orders.spawn_at_current_objective` off only defending squads (whose
 //! lane objective their own team owns) rank, toward their lane objective.
 //!
@@ -497,34 +498,43 @@ impl<W: Write> Engine<W> {
     }
 
     /// The objectives a squad's bot lives are ranked toward, in order, each
-    /// with its centre: the objective the squad works on now (its human
-    /// leader's FRAGO, else its lane, else the nearest objective of its team),
-    /// then, for when no point routes to the ones before, its lane objective
-    /// (the lane defence it breaks first, see bot_breach) and the mode's own
-    /// lane objective. Before lanes exist the authored initial assignment
-    /// stands in. With
+    /// with its centre. The objective the squad works on now (its human
+    /// leader's FRAGO, else its lane, else the nearest objective of its team)
+    /// comes first when the squad defends it or it is not the squad's lane
+    /// objective. Its lane objective (the lane defence it breaks first, see
+    /// bot_breach) and the mode's own lane objective follow when the squad
+    /// defends them, for when no point routes to the ones before. Before lanes
+    /// exist the authored initial assignment stands in. An attacking squad on
+    /// its lane gets none and keeps the active-spawn order. With
     /// `spawn_at_current_objective` off, only a defended lane is ranked
     /// toward, as before.
     pub(crate) fn bot_spawn_goals(&self, squad: u16) -> Vec<(u16, [f64; 3])> {
         if !self.bot_spawn_at_current_objective() {
             return self.bot_defended_lane(squad).into_iter().collect();
         }
+        let Ok(team) = replication::SquadAddress::from_index(squad).map(|s| s.team()) else {
+            return Vec::new();
+        };
         let lane = self.bot_squad_lane(squad).or_else(|| {
             self.initial_objective_index(squad)
                 .ok()
                 .filter(|&index| index != u16::MAX)
         });
+        let current = self.bot_squad_current_objective(squad).or(lane);
         let mut goals: Vec<(u16, [f64; 3])> = Vec::new();
-        for objective in [
-            self.bot_squad_current_objective(squad),
-            lane,
-            self.bot_mode_lane(squad),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if goals.iter().all(|goal| goal.0 != objective)
-                && let Some((center, _)) = self.bot_objective_center(objective)
+        for (objective, off_lane) in [
+            (current, current != lane),
+            (lane, false),
+            (self.bot_mode_lane(squad), false),
+        ] {
+            let Some(objective) = objective else {
+                continue;
+            };
+            if goals.iter().any(|goal| goal.0 == objective) {
+                continue;
+            }
+            if let Some((center, owner)) = self.bot_objective_center(objective)
+                && (off_lane || owner == team)
             {
                 goals.push((objective, center.map(f64::from)));
             }

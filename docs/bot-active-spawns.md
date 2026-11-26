@@ -26,16 +26,23 @@ except for the defender hospitals below.
 
 ## Ranking toward the current objective
 
-Each bot life ranks the points its squad may use now by the length of a
-complete navmesh route (walking or certified drops) from the point to the
-objective the squad works on now ([bot-squad-orders.md](bot-squad-orders.md)):
-its human leader's open FRAGO, else its lane objective (the Sabotage
-progression or catalog assignment, the Acquisition catalog assignment, or the
-Domination runtime assignment, or while the lane's defences stand the defence
-the squad breaks first), else the nearest objective of its team. Before
-the first bot tick, and before lanes exist, the lane objective or the authored
-initial assignment stands in. This applies to attacking and defending squads,
-at their first lives and at every respawn wave. The candidates are:
+A squad ranks its points when it defends the objective it works on now, or
+when that objective is not its lane objective: its human leader's open FRAGO,
+or once its lane is exhausted the nearest objective of its team
+([bot-squad-orders.md](bot-squad-orders.md)). The lane objective is the
+Sabotage progression or catalog assignment, the Acquisition catalog
+assignment, or the Domination runtime assignment, or while the lane's
+defences stand the defence the squad breaks first
+([bot-breach-order.md](bot-breach-order.md)). A squad defends an objective its
+own team owns. Before the first bot tick, and before lanes exist, the lane
+objective or the authored initial assignment stands in. An attacking squad on
+its lane keeps the active-spawn order above, which already follows the spawns
+the mode opens for it.
+
+Each life of a ranking squad, at its first life and at every respawn wave,
+ranks the points the squad may use now by the length of a complete navmesh
+route (walking or certified drops) from the point to that objective. The
+candidates are:
 
 - the squad's usable points above, including the population source spawn;
 - the squad's hospital (bunker passenger point) while its point is active and
@@ -72,18 +79,18 @@ spawn, once it differs from the authored default, goes first when it routes.
 The population slot stays the final fallback.
 
 When no point routes to the current objective (a FRAGO off the walking
-network, say), the lane objective is ranked toward instead: the lane defence
-the squad breaks first ([bot-breach-order.md](bot-breach-order.md)), then the
-mode's own lane objective behind it. When nothing routes to those either, the
-active-spawn order above applies. A new FRAGO
-ranks toward the new objective at the next life; route qualifications are
-cached per point and objective, so changing back reuses them.
+network, say), a defended lane objective is ranked toward instead: the lane
+defence the squad holds, then the mode's own lane objective. When nothing
+routes to those either, or the squad attacks its lane, the active-spawn order
+above applies. A new FRAGO ranks toward the new objective at the next life;
+route qualifications are cached per point and objective, so changing back
+reuses them.
 
 The population file's `squad_orders.spawn_at_current_objective` (default
 `true`) controls this. `false` restores the earlier rule: only defending
 squads (whose lane objective their own team owns) rank their points, toward
-the lane objective, without the moved-default forward spawn; attacking squads
-keep the active-spawn order.
+the lane objective, ignoring the FRAGO and without the moved-default forward
+spawn.
 
 Routes respect the structures standing now
 ([bot-structure-collision.md](bot-structure-collision.md)), so every cached

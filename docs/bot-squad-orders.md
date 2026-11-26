@@ -49,9 +49,9 @@ squad stays on its lane.
 Duties still come first for the bots that hold them, in their existing order:
 armed-objective duties and blast evacuation, repair, demolition teams, then
 the squad's objective. Resupply runs pause objective work as before. When a
-duty ends, the bot returns to its squad's objective. Bot lives start at the
-points nearest this objective by route
-([bot-active-spawns.md](bot-active-spawns.md)). Demolition team scoring still
+duty ends, the bot returns to its squad's objective. Bot lives of a squad on
+a FRAGO, or defending its objective, start at the points nearest this
+objective by route ([bot-active-spawns.md](bot-active-spawns.md)). Demolition team scoring still
 measures from the lane objective.
 
 ## Automatic orders for bot-led squads
@@ -82,7 +82,7 @@ The population file's `squad_orders` object. Omitted fields use the defaults:
   the nearest-objective fallback.
 - `"automatic_orders": false` leaves bot-led squads untagged, as before.
 - `"spawn_at_current_objective": false` ranks only defenders' spawns, toward
-  their lane objective, as before
+  their lane objective, ignoring the FRAGO, as before
   ([bot-active-spawns.md](bot-active-spawns.md)).
 
 ## Evidence

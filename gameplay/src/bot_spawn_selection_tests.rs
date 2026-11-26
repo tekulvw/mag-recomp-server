@@ -540,11 +540,24 @@ fn a_full_forward_point_overflows_to_the_next_forward_point() {
 }
 
 #[test]
-fn attackers_rank_their_points_toward_their_objective() {
-    // Squad 0's lane (objective 5) is owned by the other side: it attacks.
-    // Both of its points route there within the spread, so its bots spread
-    // over them by route instead of keeping their population slot.
+fn attackers_on_their_lane_keep_the_existing_order() {
+    // Squad 0's lane (objective 5) is owned by the other side: it attacks,
+    // so its bots keep their population slot while the authored default
+    // stands.
     let mut engine = engine_with_defence();
+    let spawn = spawned(choose(&mut engine, &Default::default()).0);
+    assert_eq!(spawn.arrival, Arrival::PopulationSlot);
+    assert_eq!(spawn.spawn_point, Some(HOME));
+    assert_eq!(spawn.objective, None);
+    assert!(engine.bot_spawn_goals(SQUAD).is_empty());
+}
+
+#[test]
+fn attackers_with_a_frago_rank_their_points_toward_it() {
+    // Both points route to the FRAGO within the spread, so the squad's bots
+    // spread over them by route.
+    let mut engine = engine_with_defence();
+    order(&mut engine, SQUAD, Some(NEAR_HOME_FRAGO));
     let mut used = std::collections::BTreeSet::new();
     for actor in [200, 201] {
         let mut receipts = Vec::new();
@@ -553,10 +566,19 @@ fn attackers_rank_their_points_toward_their_objective() {
                 .choose_bot_life_spawn(actor, SQUAD, 0, &Default::default(), &mut receipts)
                 .unwrap(),
         );
-        assert_eq!(spawn.objective.map(|o| o.0), Some(5));
+        assert_eq!(spawn.objective.map(|o| o.0), Some(NEAR_HOME_FRAGO));
         used.insert(spawn.spawn_point);
     }
     assert_eq!(used, [Some(HOME), Some(ALTERNATE)].into());
+    // An attacking squad's lane is no fallback: it keeps the earlier order.
+    assert_eq!(
+        engine
+            .bot_spawn_goals(SQUAD)
+            .into_iter()
+            .map(|g| g.0)
+            .collect::<Vec<_>>(),
+        [NEAR_HOME_FRAGO]
+    );
 }
 
 #[test]
@@ -632,11 +654,9 @@ fn a_frago_no_point_routes_to_falls_back_to_the_lane_objective() {
             .iter()
             .any(|r| r["op"] == "bot_lane_spawn_unusable" && r["objective"] == OFF_MESH_FRAGO)
     );
-    // Nothing routable at all: the earlier active-spawn order applies.
+    // An attacking squad has no defended lane to fall back on: with nothing
+    // routable it keeps the earlier active-spawn order.
     order(&mut engine, SQUAD, Some(OFF_MESH_FRAGO));
-    deactivate(&mut engine, ALTERNATE);
-    engine.objective_catalog = None;
-    engine.objective_world = None;
     let spawn = spawned(choose(&mut engine, &Default::default()).0);
     assert_eq!(spawn.spawn_point, Some(HOME));
     assert_eq!(spawn.objective, None);
