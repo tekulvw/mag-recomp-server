@@ -36,6 +36,13 @@ internal static class RealRegistryWorkerChecks
         LeadershipProgressionChecks.RealRegistryLargeWorld(binary, catalogs);
     }
 
+    public static void RunMediusRestart()
+    {
+        string binary = Path.GetFullPath(Environment.GetEnvironmentVariable(BinaryVariable));
+        string catalogs = Path.GetFullPath(Environment.GetEnvironmentVariable(CatalogsVariable));
+        LeadershipProgressionChecks.RealRegistryMediusRestart(binary, catalogs);
+    }
+
     public static void RunRestart()
     {
         string binary = Path.GetFullPath(Environment.GetEnvironmentVariable(BinaryVariable));

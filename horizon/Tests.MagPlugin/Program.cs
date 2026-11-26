@@ -36,6 +36,7 @@ if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(RealRegistryWo
     Test("configured registry real workers grouped", RealRegistryWorkerChecks.RunParties);
     Test("configured registry real workers restart adoption", RealRegistryWorkerChecks.RunRestart);
     Test("configured registry real workers large world", RealRegistryWorkerChecks.RunLargeWorld);
+    Test("configured registry real workers outlive a Medius restart", RealRegistryWorkerChecks.RunMediusRestart);
 }
 Test("registry DME host world and lease isolation", RegistryDmeHostChecks.Run);
 Test("voice diagnostics are off by default, sample bounded and find lab voice blocks", VoiceDiagnosticsChecks.Run);
@@ -49,6 +50,8 @@ Test("DME port capacity refuses standalone admission and frees ports on release"
 Test("DME port capacity holds registry players until transports release", DmePortCapacityChecks.Registry);
 Test("DME port capacity admits a party as a unit or refuses it", DmePortCapacityChecks.Parties);
 Test("configured registry restarted worker adoption", RegistryAdoptionChecks.Run);
+Test("worker drain notices and subscription options parse strictly", WorkerDrainChecks.Codec);
+Test("configured registry subscription options and worker drain notices", WorkerDrainChecks.Run);
 Test("bundled server NEWS formatting and bounds", ServerNewsChecks.Formatting);
 Test("bundled server NEWS and EULA wire responses", ServerNewsChecks.Run);
 

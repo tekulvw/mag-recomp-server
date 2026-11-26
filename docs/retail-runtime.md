@@ -106,6 +106,44 @@ configured worker registry never resumes. The worker produces frames only while
 a subscription is registered, so the journal only has to cover frames in flight
 when a stream broke.
 
+### A worker that outlives Medius (`control_plane_rebind_v1`)
+
+A served worker keeps running when the Medius process that admitted its players
+restarts, but those players' DME connections ended with that process. When the
+worker's hello lists `control_plane_rebind_v1`, Medius names its own process on
+every `subscribe_world` (`control_plane`, 16 to 64 letters, digits, `-` or `_`,
+fresh for each Medius host). A reconnect from the same process changes nothing,
+so a resume still works. A different name means the previous process is gone,
+and before it answers, the worker:
+
+- releases every reservation that process made, live or showing results,
+  through the ordinary idle-expiry path (journal `expired` with
+  `cause: "control_plane_rebound"`); a match left without humans resets, as
+  after an idle timeout, and the old reservation IDs stay retired;
+- drops the rewards and loadout selections only that process could have
+  acknowledged. The journal records each one in a `control_plane_rebound` row;
+  nothing replays them;
+- moves a finished match's terminal to the new world ID, without the old
+  members.
+
+Without this, a worker still holding the old players refused the new world ID
+with `subscription_world_mismatch`. A worker that had already finished its match
+was acknowledged but then sent, on every frame, a terminal that named the old
+world. Medius treated that as a malformed stream and resubscribed once a second
+for as long as the worker ran. The worker prints
+`{"event":"control_plane_rebound",...}` with the counts. Workers and Medius
+without the capability keep the previous behaviour.
+
+Medius also gives configured worlds their IDs in configuration order before it
+contacts any worker, so a restarted Medius gives each row the same ID again.
+Every stream failure is logged with the worker, the world, the stage
+(`subscribe` or `frame`) and the reason, for example
+`Gameplay world stream interrupted: worker=sabotage world=2 failure=GameplayWorldSubscriptionRefusedException stage=subscribe refusal=subscription_world_mismatch`.
+
+### Shutting a worker down (`worker_drain_v1`)
+
+See [worker shutdown](worker-shutdown.md).
+
 ### Retrying events (`event_replay_v1`)
 
 A served worker keeps its last 512 event replies by request ID and answers a

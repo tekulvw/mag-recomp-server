@@ -25,6 +25,9 @@ namespace Server.Medius
             public volatile bool Faulted;
             // Set once this slot's incarnation was written off; a replacement slot takes its index.
             public volatile bool WrittenOff;
+            // Its host never started (for example its world stream was refused), so it admitted
+            // no one: the same incarnation may be started again without a write-off.
+            public volatile bool StartupFailed;
         }
         static readonly IInternalLogger Logger = InternalLoggerFactory.GetInstance<MagWorldRegistry>();
         readonly MagWorldRegistryConfig _config;
@@ -87,6 +90,8 @@ namespace Server.Medius
         public async Task InitializeAsync()
         {
             lock (_gate) { if (_initialized || _disposed) throw new InvalidOperationException("Registry already initialized or disposed."); _initialized = true; }
+            // World IDs in configuration order, before the concurrent worker handshakes.
+            foreach (var slot in _slots) slot.Host.ReserveRegistryWorld(_manager);
             await Task.WhenAll(_slots.Select(InitializeSlotAsync));
             for (int i = 0; i < _slots.Length; i++)
                 if (!_slots[i].Faulted && _slots[i].Host.WorkerContract is MagWorkerContract contract) _entries[i].Contract = contract;
@@ -100,7 +105,10 @@ namespace Server.Medius
         {
             try { await slot.Host.StartInRegistryAsync(_manager); }
             catch (Exception error) when (error is IOException || error is ArgumentException || error is InvalidOperationException)
-            { slot.Faulted = true; Logger.Warn($"Configured worker unavailable: worker={slot.Config.WorkerId} error={error.GetType().Name}"); }
+            {
+                slot.StartupFailed = true; slot.Faulted = true;
+                Logger.Warn($"Configured worker unavailable: worker={slot.Config.WorkerId} error={error.GetType().Name} reason=\"{error.Message}\"");
+            }
         }
         public async Task StartAsync()
         {
