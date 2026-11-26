@@ -760,9 +760,8 @@ impl<W: Write> Engine<W> {
     }
     /// An objective's centre and the team that owns (defends) it.
     pub(crate) fn bot_objective_center(&self, objective: u16) -> Option<([f32; 3], u8)> {
-        let object = self
-            .objective_catalog
-            .as_ref()?
+        let catalog = self.objective_catalog.as_ref()?;
+        let object = catalog
             .objects
             .iter()
             .find(|o| o.object_index == objective)?;
@@ -776,6 +775,36 @@ impl<W: Write> Engine<W> {
                     .as_ref()
                     .map(|r| (r.position, r.owner_team))
             })
+            .or_else(|| self.bot_arrival_center(catalog, objective))
+    }
+    /// An Acquisition arrival (deliver the captured vehicle) has no
+    /// interaction of its own: its place is the arrival trigger the vehicle
+    /// must reach, and it belongs to the side that owns the capture before it.
+    fn bot_arrival_center(
+        &self,
+        catalog: &objective_catalog::ObjectiveCatalog,
+        objective: u16,
+    ) -> Option<([f32; 3], u8)> {
+        let setup = &self.acquisition_gameplay.as_ref()?.setup;
+        let token = catalog
+            .bound_objects()
+            .find(|&(_, index)| index == objective)?
+            .0;
+        let chain = setup
+            .controller
+            .chains()
+            .iter()
+            .find(|chain| chain.arrival_token == token)?;
+        let trigger = setup.arrival_triggers.get(&token)?;
+        let (capture, _) = catalog.binding(chain.capture_token)?;
+        let owner = catalog
+            .objects
+            .iter()
+            .find(|o| o.object_index == capture)?
+            .interaction
+            .as_ref()?
+            .owner_team;
+        Some((trigger.centre, owner))
     }
     pub(super) fn drop_cost_quotes(
         &self,
@@ -2689,7 +2718,11 @@ impl<W: Write> Engine<W> {
                     && b.target.runtime.is_some_and(|r| {
                         r.physics_motion.is_some_and(|m| m.grounded) && !r.navmesh_state.on_player
                     })
-                    && ((b.task.objective.is_some() && !b.task.routed)
+                    // A bot whose objective cannot be placed is backing off;
+                    // it is not a wave waiting for its first route.
+                    && ((b.task.objective.is_some()
+                        && !b.task.routed
+                        && !b.task.unavailable_reported)
                         || (b.drop_waiting.is_some() && b.drop_holding_goal.is_none()))
             })
             .count();
@@ -2913,17 +2946,17 @@ impl<W: Write> Engine<W> {
             let bot = &self.bot_registry.bots[&id];
             let objective = bot.task.objective.unwrap();
             let squad = bot.target.squad.squad_index();
-            let Some((center, owner)) = self
-                .objective_catalog
-                .as_ref()
-                .and_then(|c| c.objects.iter().find(|o| o.object_index == objective))
-                .and_then(|o| {
-                    o.interaction
-                        .as_ref()
-                        .map(|r| (r.position, r.owner_team))
-                        .or_else(|| o.demolition.as_ref().map(|r| (r.position, r.owner_team)))
-                })
-            else {
+            let Some((center, owner)) = self.bot_objective_center(objective) else {
+                // Nothing to place a destination around. Back off like any
+                // other unplannable candidate and say so once, so these bots
+                // cannot hold every candidate check of every tick and starve
+                // the rest of the population.
+                let t = &mut self.bot_registry.bots.get_mut(&id).unwrap().task;
+                t.retry_at = now + Duration::from_millis(policy.stall_ms);
+                if !t.unavailable_reported {
+                    t.unavailable_reported = true;
+                    receipts.push(json!({"op":"bot_objective_waiting","timestamp_ms":now.as_millis()as u64,"object_index":id,"squad_index":squad,"assigned_objective":objective,"reason":"bot_objective_unplaceable","planning_query":false}));
+                }
                 continue;
             };
             let defending = bot.target.squad.team() == owner;
