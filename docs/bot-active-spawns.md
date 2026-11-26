@@ -52,12 +52,40 @@ objective:
   like any other point. A catalog that binds them as bunker passenger points
   uses the hospital rule above.
 
+Forward spawns come first whenever they route to the objective: the hospital
+or field hospital above, and any point the squad gained at runtime (a forward
+spawn the match opened for it). The squad's other points follow. Within each
+group the shorter route goes first, so a standing forward spawn is used even
+when a rear point is nearer the objective (an Acquisition squad's prototype
+sits in its rear base, behind its field hospital). Once the hospital falls,
+its point goes inactive and the rear points take over.
+
 A point whose placements do not route to the objective is skipped and reported
-once. Points within 20 m of the shortest route are rotated per bot, so a
-squad spreads over equally forward points. A human squad member's shared
+once. Points within 20 m of their group's shortest route are rotated per bot,
+so a squad spreads over equally forward points. A human squad member's shared
 spawn, once it differs from the authored default, goes first when it routes.
 The population slot stays the final fallback. Attacking squads keep the order
 above.
+
+Routes respect the structures standing now
+([bot-structure-collision.md](bot-structure-collision.md)), so every cached
+qualification (and its receipt) is renewed whenever the navmesh installs gates
+for a new structure snapshot: a destroyed gate opens a way, a repaired one
+closes it.
+
+## First lives
+
+Bots of a side take their first lives at that side's first spawn wave. The
+first human of a side to confirm a spawn starts the side's wave clock at its
+authored initial spawn delay, and the side's bots wait for that wave (or for
+one of its humans to be alive). A side with no human counts as having
+confirmed when the other side's first human did, so it keeps its own initial
+delay: with the retail delays (attackers 35 s, defenders 20 s) defending bots
+come in 15 s before attacking ones, as retail defenders do, instead of with
+the first human's side. Their wave clock starts at that first wave. A side
+that has started refills at any time. Without a confirmed human the
+population starts as before, when the first human reaches on foot, with every
+side at once.
 
 The source spawn always uses the bot's own population slot and waits while a
 body occupies it, as before. Any other point uses placements that are:

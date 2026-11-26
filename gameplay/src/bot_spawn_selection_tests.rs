@@ -643,3 +643,152 @@ fn a_dead_defender_respawns_forward() {
         "{spawn:?}"
     );
 }
+
+#[test]
+fn defenders_prefer_a_standing_hospital_to_nearer_rear_points() {
+    // North and south sit beside the objective; the hospital is ~24 m out.
+    let mut engine = engine_with_defence();
+    engine.spawn_catalog = Some(spawns_with_hospital());
+    engine.bunker_world = Some(crate::structures::BunkerWorld::synthetic_hospital(
+        HOSPITAL,
+        1,
+        2,
+        replication::CharacterPosition {
+            x: 30.,
+            y: 0.,
+            z: 30.,
+        },
+    ));
+    for actor in [200, 201] {
+        let (spawn, receipts) = choose_defender(&mut engine, actor, &Default::default());
+        assert_eq!(spawn.spawn_point, Some(HOSPITAL), "{receipts:?}");
+        assert_eq!(spawn.arrival, Arrival::HospitalExit);
+    }
+    // Once the hospital falls, the points beside the objective take over.
+    deactivate(&mut engine, HOSPITAL);
+    let (spawn, _) = choose_defender(&mut engine, 200, &Default::default());
+    assert!(
+        matches!(spawn.spawn_point, Some(NORTH | SOUTH)),
+        "{spawn:?}"
+    );
+}
+
+#[test]
+fn defenders_prefer_a_forward_point_their_squad_gained() {
+    let mut engine = engine_with_defence();
+    let catalog = engine.spawn_catalog.as_mut().unwrap();
+    catalog
+        .activate_forward(ForwardSpawnBinding {
+            objective_index: 20,
+            squad_index: DEFENDERS,
+            spawn_point_index: HOSPITAL,
+        })
+        .unwrap();
+    let (spawn, _) = choose_defender(&mut engine, 200, &Default::default());
+    assert_eq!(spawn.spawn_point, Some(HOSPITAL));
+    assert_eq!(spawn.arrival, Arrival::AuthoredPoint);
+}
+
+#[test]
+fn spawn_routes_are_qualified_again_when_the_structure_gates_change() {
+    let mut engine = engine_with_defence();
+    let lane_receipts = |receipts: &[Value]| {
+        receipts
+            .iter()
+            .filter(|r| r["op"] == "bot_lane_spawn_qualified")
+            .count()
+    };
+    let (_, first) = choose_defender(&mut engine, 200, &Default::default());
+    assert!(lane_receipts(&first) > 0);
+    let (_, cached) = choose_defender(&mut engine, 200, &Default::default());
+    assert_eq!(lane_receipts(&cached), 0);
+    // New structure gates (here: an empty snapshot) invalidate the routes.
+    let structures = std::sync::Arc::new(crate::bot_structure_collision::StructureObstacles::new(
+        &crate::domination_structural_world::SequenceCollisionState::default(),
+        1,
+    ));
+    let mesh = engine.navmesh_world.clone().unwrap();
+    crate::navmesh_structure_gates::install_now(&mesh, Some(&structures)).unwrap();
+    let (_, again) = choose_defender(&mut engine, 200, &Default::default());
+    assert_eq!(lane_receipts(&again), lane_receipts(&first));
+}
+
+#[test]
+fn each_side_starts_its_bots_at_its_own_first_wave() {
+    // A human confirmed at 0 s, so their side's first wave is at its 35 s
+    // initial delay. The bot-only side counts from the same moment with its
+    // own 20 s delay, as retail defenders come in before attackers.
+    let mut engine = engine();
+    engine.bot_names = crate::bot_names::Catalog::from_json(
+        &serde_json::to_vec(&json!({"entries":[{"name":"Synthetic One"},
+            {"name":"Synthetic Two"},{"name":"Synthetic Three"},{"name":"Synthetic Four"}]}))
+        .unwrap(),
+    )
+    .unwrap();
+    let config = engine.bot_registry.config.clone().unwrap();
+    let mut engine = engine.with_bot_population(config, 4).unwrap();
+    let reserve = engine.handle(
+        Request::Reserve {
+            v: BRIDGE_VERSION,
+            request_id: "synthetic-first-wave-reserve".into(),
+            reservation_id: "synthetic-first-wave-human".into(),
+            world_id: 1,
+            player_id: 0,
+            account_id: 1,
+            session_key: "aaaaaaaaaaaaaaaa".into(),
+            access_key: "bbbbbbbbbbbbbbbb".into(),
+            character: serde_json::from_value(json!({"name":"Synthetic Human",
+                "faction":2,"head":0,"voice":0,"universe_id":26,"character_id":1}))
+            .unwrap(),
+        },
+        Duration::ZERO,
+        1,
+    );
+    assert!(reserve.ok, "{:?}", reserve.error);
+    let human = engine.active.as_ref().unwrap().team();
+    let bots_only = 1 - human;
+    let mut delays = [0; 2];
+    delays[usize::from(human)] = 35_000;
+    delays[usize::from(bots_only)] = 20_000;
+    let mut value = spawns_value();
+    value["match_profile"]["initial_spawn_delay_ms"] = json!(delays);
+    engine.spawn_catalog = Some(serde_json::from_value(value).unwrap());
+    engine.team_waves[usize::from(human)] = Some(TeamWaveClock {
+        first_deadline: Duration::from_secs(35),
+        period: Duration::from_secs(20),
+    });
+    assert_eq!(
+        engine.bot_team_first_wave(human),
+        Some(Duration::from_secs(35))
+    );
+    assert_eq!(
+        engine.bot_team_first_wave(bots_only),
+        Some(Duration::from_secs(20))
+    );
+    let teams = |engine: &Engine<Vec<u8>>| {
+        let mut teams: Vec<_> = engine
+            .bot_registry
+            .bots
+            .values()
+            .map(|b| b.target.squad.team())
+            .collect();
+        teams.sort_unstable();
+        teams
+    };
+    let reconcile = |engine: &mut Engine<Vec<u8>>, secs| {
+        engine
+            .reconcile_bot_population(Duration::from_secs(secs), 1, &mut Default::default())
+            .unwrap()
+    };
+    reconcile(&mut engine, 10);
+    assert!(teams(&engine).is_empty());
+    reconcile(&mut engine, 20);
+    assert_eq!(teams(&engine), [bots_only; 2]);
+    // The bot-only side's wave clock starts at its first wave.
+    assert_eq!(
+        engine.team_waves[usize::from(bots_only)].map(|c| c.first_deadline),
+        Some(Duration::from_secs(20))
+    );
+    reconcile(&mut engine, 35);
+    assert!(teams(&engine).contains(&human), "{:?}", teams(&engine));
+}
