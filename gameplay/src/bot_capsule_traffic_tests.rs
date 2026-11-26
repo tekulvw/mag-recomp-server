@@ -329,3 +329,28 @@ fn opposing_capsule_bots_get_through_a_doorway_too_narrow_to_pass_in() {
         assert!(t.is_some(), "bot {i} never got through: {arrived:?}");
     }
 }
+
+#[test]
+fn a_capsule_goal_may_rest_its_settle_lift_above_the_mesh() {
+    let capsule = bot_physics::Body {
+        max_slope_degrees: 54.,
+        ..Default::default()
+    }
+    .with_shape(capsule());
+    let lift = capsule.settle_lift().unwrap();
+    let projected = [10., 2., 10.];
+    // The box: the plain distance, up or down.
+    let boxed = bot_physics::Body::default();
+    for goal in [[10.1, 2.25, 10.], [10.1, 1.75, 10.]] {
+        let d = (0.1f64).hypot(0.25);
+        assert!((goal_projection_offset(goal, projected, boxed) - d).abs() < 1e-12);
+    }
+    // The capsule: height above the mesh within its settle lift is free,
+    // beyond it and below the mesh it counts as for the box.
+    let above = [10.1, 2. + lift - 0.01, 10.];
+    assert!((goal_projection_offset(above, projected, capsule) - 0.1).abs() < 1e-9);
+    let higher = [10.1, 2. + lift + 0.2, 10.];
+    assert!((goal_projection_offset(higher, projected, capsule) - 0.1f64.hypot(0.2)).abs() < 1e-9);
+    let below = [10.1, 1.75, 10.];
+    assert!((goal_projection_offset(below, projected, capsule) - 0.1f64.hypot(0.25)).abs() < 1e-12);
+}

@@ -151,7 +151,7 @@ impl Body {
     /// through the feet at the slope limit (on flat ground, just its reach
     /// below the feet), at most a step, plus the skin. None for the box,
     /// which starts only where it stands free.
-    fn settle_lift(self) -> Option<f64> {
+    pub(crate) fn settle_lift(self) -> Option<f64> {
         let (capsule, centre) = self.shape.capsule()?;
         let sphere = centre - capsule.half_height;
         let depth = (capsule.radius / self.slope_cos() - sphere)

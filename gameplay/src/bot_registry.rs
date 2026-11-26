@@ -1025,7 +1025,7 @@ impl<W: Write> Engine<W> {
         now: Duration,
     ) -> Result<crate::actor_collision::ActorGrid, &'static str> {
         use crate::actor_collision::{ActorGrid, Bounds};
-        let mut grid = ActorGrid::default();
+        let mut grid = ActorGrid::with_probe_shape(self.bot_movement_body().shape);
         // Bodies take the runtime body's shape (a box unless a body profile
         // selects a capsule); only its dimensions matter here.
         let body = bot_physics::Body::default().with_shape(self.bot_movement_body().shape);
@@ -3154,7 +3154,7 @@ impl<W: Write> Engine<W> {
                             && (config.regional_team.is_none()
                                 || regional_slot_source_active(catalog, s))
                             && !actors
-                                .occupied(u16::MAX, point(s.position), bot_physics::Body::default())
+                                .occupied(u16::MAX, point(s.position), actors.probe())
                                 .unwrap_or(true)
                     })
                     .map(|(i, s)| (squad, i, s))

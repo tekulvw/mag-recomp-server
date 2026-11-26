@@ -86,6 +86,8 @@ impl Trail {
 pub(crate) struct ActorGrid {
     bodies: BTreeMap<u16, Entry>,
     cells: BTreeMap<(i32, i32), BTreeSet<u16>>,
+    /// The bots' body shape: the shape `probe` asks with.
+    probe_shape: crate::bot_physics::BodyShape,
 }
 #[derive(Clone, Copy)]
 pub(crate) struct Query<'a> {
@@ -93,6 +95,19 @@ pub(crate) struct Query<'a> {
     pub actor: u16,
 }
 impl ActorGrid {
+    /// A grid whose occupancy probes take the bots' `shape` (see `probe`).
+    pub(crate) fn with_probe_shape(shape: crate::bot_physics::BodyShape) -> Self {
+        Self {
+            probe_shape: shape,
+            ..Self::default()
+        }
+    }
+    /// The body a bot-placement query (is this spot or path clear for a
+    /// bot?) asks with: the default box, or the bots' capsule, which then
+    /// meets other capsule bodies exactly rather than through their boxes.
+    pub(crate) fn probe(&self) -> Body {
+        Body::default().with_shape(self.probe_shape)
+    }
     #[cfg(test)]
     pub(crate) fn diagnostic_entries(&self) -> Vec<(u16, Bounds, bool)> {
         self.bodies
@@ -897,5 +912,29 @@ mod tests {
         assert_eq!(a.bodies[&2].bounds.min, b.bodies[&2].bounds.min);
         assert_eq!(a.bodies[&2].bounds.max, b.bodies[&2].bounds.max);
         assert!(b.bodies[&2].capsule.is_none() && !b.bodies[&2].allow_overlap_escape);
+    }
+
+    #[test]
+    fn placement_probes_take_the_bots_shape() {
+        // A box world probes with the default box, exactly as before.
+        let grid = ActorGrid::default();
+        let probe = grid.probe();
+        assert_eq!(probe.shape, crate::bot_physics::BodyShape::Box);
+        assert_eq!(
+            (probe.radius, probe.height),
+            (Body::default().radius, Body::default().height)
+        );
+        // A capsule world probes with the capsule, which meets a standing
+        // capsule bot round: a spot diagonally off it (clear of the round
+        // body, inside its box) is free.
+        let body = capsule_body();
+        let mut grid = ActorGrid::with_probe_shape(body.shape);
+        grid.insert_reserved_body(2, [0., 0., 0.], body).unwrap();
+        assert_eq!(grid.probe().radius, 0.4);
+        let corner = [0.6, 0., 0.6];
+        assert!(!grid.occupied(1, corner, grid.probe()).unwrap());
+        assert!(grid.occupied(1, corner, Body::default()).unwrap());
+        // Straight beside it the round body still occupies the spot.
+        assert!(grid.occupied(1, [0.75, 0., 0.], grid.probe()).unwrap());
     }
 }
