@@ -581,12 +581,12 @@ impl World {
 pub(crate) fn torso_at(feet: [f64; 3], height: f64) -> [f64; 3] {
     [feet[0], feet[1] + height * 0.6, feet[2]]
 }
-pub(crate) fn torso(feet: [f64; 3]) -> [f64; 3] {
-    [
-        feet[0],
-        feet[1] + bot_physics::Body::default().height * 0.6,
-        feet[2],
-    ]
+/// The torso of `body` standing at `feet`.
+pub(crate) fn torso(feet: [f64; 3], body: bot_physics::Body) -> [f64; 3] {
+    torso_at(
+        feet,
+        bot_physics::stance_height(body, bot_physics::Stance::Standing),
+    )
 }
 fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
     (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f64>().sqrt()
@@ -820,6 +820,8 @@ impl<W: Write> Engine<W> {
             self.bot_perception.clear();
             return Ok(());
         };
+        // Eyes and torsos take the runtime body's height (`stance_height`).
+        let body_shape = self.bot_movement_body();
         let Some(world_id) = self
             .active
             .as_ref()
@@ -871,7 +873,10 @@ impl<W: Write> Engine<W> {
                 id,
                 team,
                 feet,
-                height: bot_physics::Body::default().height,
+                height: bot_physics::stance_height(
+                    self.bot_movement_body(),
+                    bot_physics::Stance::Standing,
+                ),
             });
             present.insert(a.reservation.id.clone());
             let ear = self
@@ -897,7 +902,7 @@ impl<W: Write> Engine<W> {
                     let kind = a.equipped_loadout().map_or(SoundKind::Firearm, |kit| {
                         firearm_kind(&items, &kit, item.gear_slot)
                     });
-                    let origin = torso(feet);
+                    let origin = torso(feet, body_shape);
                     let yaw = yaw_radians(a.owner_fields.yaw.unwrap_or(0));
                     let pitch = f64::from(a.owner_fields.pitch.unwrap_or(127))
                         * std::f64::consts::PI
@@ -993,7 +998,7 @@ impl<W: Write> Engine<W> {
                 id,
                 team,
                 feet,
-                height: self.bot_cover.body_height(id),
+                height: self.bot_cover.body_height(id, body_shape),
             });
             let mind = self.bot_perception.minds.entry(id).or_default();
             if mind.life != (bot.allocation_generation, r.generation) {
@@ -1036,7 +1041,7 @@ impl<W: Write> Engine<W> {
                 if body.team == sound.team || body.id == sound.source {
                     continue;
                 }
-                let ear = torso(body.feet);
+                let ear = torso(body.feet, body_shape);
                 if let Some(h) = hear(&policy, ear, sound) {
                     if h.cause == Cause::NearMiss {
                         self.bot_perception.stats.near_misses += 1;
@@ -1075,16 +1080,16 @@ impl<W: Write> Engine<W> {
             self.bot_perception.cursor = id.wrapping_add(1);
             let me = bot.target.runtime.unwrap().physical_position();
             let team = bot.target.squad.team();
-            let eye = torso_at(me, self.bot_cover.body_height(id));
+            let eye = torso_at(me, self.bot_cover.body_height(id, body_shape));
             let yaw = yaw_radians(bot.yaw);
             let range = bot_sight_range(&policy, &items, bot);
             let mut candidates: Vec<_> = bodies
                 .iter()
                 .filter(|b| b.team != team)
-                .map(|b| (distance(eye, torso(b.feet)), *b))
+                .map(|b| (distance(eye, torso(b.feet, body_shape)), *b))
                 .filter(|(d, b)| {
                     if moving {
-                        in_view(&policy, range, eye, yaw, torso(b.feet))
+                        in_view(&policy, range, eye, yaw, torso(b.feet, body_shape))
                     } else {
                         *d <= policy.proximity_m
                     }
@@ -1139,20 +1144,22 @@ impl<W: Write> Engine<W> {
                 bodies
                     .iter()
                     .find(|b| b.id == enemy)
-                    .map(|b| (enemy, torso(b.feet)))
+                    .map(|b| (enemy, torso(b.feet, body_shape)))
             });
             let obs = Observation {
                 // A bot the cover layer is moving or holding is not on its
                 // ordinary route; any hold releases at once.
                 interruptible: interruptible(bot, guard) && !self.bot_cover.controls(id),
                 engaged,
-                seen: seen.get(&id).map(|&(enemy, feet, _)| (enemy, torso(feet))),
+                seen: seen
+                    .get(&id)
+                    .map(|&(enemy, feet, _)| (enemy, torso(feet, body_shape))),
                 sight_delay: seen.get(&id).map_or(Duration::ZERO, |&(_, _, delay)| delay),
                 heard: heard.get(&id).copied(),
                 damaged: hits
                     .get(&id)
                     .and_then(|&(team, attacker)| attacker_body(&bodies, team, attacker))
-                    .map(|b| (Some(b.id), torso(b.feet))),
+                    .map(|b| (Some(b.id), torso(b.feet, body_shape))),
             };
             let reaction = policy.reaction(id, generation);
             let mind = self.bot_perception.minds.get_mut(&id).unwrap();
@@ -1165,7 +1172,7 @@ impl<W: Write> Engine<W> {
                     receipts.push(json!({"op":"bot_perception_interrupt","timestamp_ms":now.as_millis() as u64,
                         "object_index":id,"generation":generation,"cause":cause,"source":t.point,"enemy":t.enemy,
                         "objective":bot.task.objective,"operator":bot.task.operator,
-                        "distance_m":distance(torso(bot.target.runtime.unwrap().physical_position()), t.point)}));
+                        "distance_m":distance(torso(bot.target.runtime.unwrap().physical_position(), body_shape), t.point)}));
                 }
                 Some(Transition::Resume(reason)) => {
                     self.bot_perception.stats.resumes += 1;

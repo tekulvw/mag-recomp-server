@@ -18,6 +18,27 @@ const GRAVITY: f64 = 9.81;
 /// few updates instead of being thrown apart.
 const DEPENETRATION_MPS: f64 = 1.5;
 
+/// How a body stands: upright, or crouched (behind low cover).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Stance {
+    Standing,
+    Crouched,
+}
+/// Height of the default box body crouched; a crouched body of any shape
+/// keeps this proportion of its standing height. Its torso (aim point and
+/// muzzle) is at 60% of it, as a standing body's is.
+pub(crate) const CROUCH_HEIGHT_M: f64 = 1.2;
+/// The height `body` presents to shots and sight lines in `stance`: its own
+/// height standing (the box's 1.8 m, or a capsule's top above its feet), and
+/// the box's crouched proportion of it crouched. The single source of every
+/// torso, eye, muzzle and aim point (torso = feet + 60% of this height). The
+/// box gives exactly 1.8 m and `CROUCH_HEIGHT_M`.
+pub(crate) fn stance_height(body: Body, stance: Stance) -> f64 {
+    match stance {
+        Stance::Standing => body.height,
+        Stance::Crouched => CROUCH_HEIGHT_M * (body.height / Body::default().height),
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PhysicsError {
     Unavailable,
@@ -1195,3 +1216,42 @@ mod capsule_tests;
 #[cfg(test)]
 #[path = "bot_physics_steep_tests.rs"]
 mod steep_tests;
+#[cfg(test)]
+mod stance_tests {
+    use super::*;
+
+    #[test]
+    fn the_box_keeps_its_standing_and_crouched_heights_exactly() {
+        let body = Body::default();
+        assert_eq!(stance_height(body, Stance::Standing), 1.8);
+        assert_eq!(stance_height(body, Stance::Crouched), CROUCH_HEIGHT_M);
+        // A runtime box with another slope limit is the same box.
+        let mesh_box = Body {
+            max_slope_degrees: 54.,
+            ..Default::default()
+        }
+        .with_shape(BodyShape::Box);
+        assert_eq!(stance_height(mesh_box, Stance::Standing), 1.8);
+        assert_eq!(stance_height(mesh_box, Stance::Crouched), CROUCH_HEIGHT_M);
+        let feet = [3., 2., 1.];
+        assert_eq!(
+            crate::bot_perception::torso(feet, body),
+            [3., 2. + 1.8 * 0.6, 1.]
+        );
+    }
+
+    #[test]
+    fn a_capsule_stands_and_crouches_at_its_own_height() {
+        let capsule = Body::default().with_shape(BodyShape::Capsule {
+            radius: 0.43,
+            half_height: 0.51,
+            centre_height: 0.91,
+        });
+        let standing = stance_height(capsule, Stance::Standing);
+        assert!((standing - 1.85).abs() < 1e-12, "{standing}");
+        let crouched = stance_height(capsule, Stance::Crouched);
+        assert!((crouched - 1.2 * 1.85 / 1.8).abs() < 1e-12, "{crouched}");
+        let torso = crate::bot_perception::torso([0.; 3], capsule);
+        assert!((torso[1] - 1.85 * 0.6).abs() < 1e-12, "{torso:?}");
+    }
+}

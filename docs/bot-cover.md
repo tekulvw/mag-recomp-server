@@ -148,6 +148,13 @@ While crouched, the bot's body is 1.2 m tall: enemy bots aim at its torso at
 What clients see therefore matches what the server tests. Human Characters
 are still treated as standing by bot weapons and sight.
 
+These are the default box body's heights. Every torso, eye, muzzle, aim point
+and hit-box height comes from one function of the runtime body and stance
+(`bot_physics::stance_height`): standing, the body's own height (1.8 m for the
+box, the capsule's top above its feet when a bot body profile selects a
+capsule); crouched, the box's 1.2/1.8 proportion of it. Humans take the same
+runtime body. The box's heights are unchanged.
+
 ## Measured effect
 
 Headless bot-only runs (`--bot-cover off|on|crouch`) on the live private
