@@ -111,6 +111,7 @@ A profile row can fill its world with bots. The optional row fields are:
 | `bot_resupply_catalog` | Optional bot resupply providers for a Sabotage, Acquisition or Domination profile on a qualified map ([bot-static-resupply.md](bot-static-resupply.md)). |
 | `bot_resupply_approach_policy` | Optional approach policy. Requires `bot_resupply_catalog` and the profile's navmesh. |
 | `bot_body_profile` | Optional bot body profile: the box (default) or a capsule ([extraction.md](extraction.md#optional-bot-body-shape)). Needs only the profile's `navmesh_world`, which must be certified for that body shape. |
+| `sabotage_structures` | Optional `mag_sabotage_objective_collision_v1` index of the Sabotage objectives' own collision. Bots move and route against it in each objective's current state ([sabotage-structures.md](sabotage-structures.md)). Needs the profile's Sabotage objective catalog and collision world. |
 
 Paths resolve like the other row resources. Bots that route need the
 profile's own `navmesh_world` (and its `collision_world`). An example row with
