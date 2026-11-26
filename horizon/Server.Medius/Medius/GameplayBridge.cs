@@ -77,13 +77,18 @@ namespace Server.Medius {
   /// every frame carries its position; <paramref name="resumeAfter"/> asks the same worker process
   /// to replay the frames after that position first. A worker that cannot (another process, or
   /// frames no longer retained) refuses with <see cref="GameplayWorldResumeRefusedException"/>.</summary>
-  public async Task SubscribeWorldAsync(uint worldId,string requestId,bool positions,GameplayWorldStreamPosition resumeAfter,Func<GameplayBridgeResponse,Task> receive,CancellationToken cancellationToken) {
+  public Task SubscribeWorldAsync(uint worldId,string requestId,bool positions,GameplayWorldStreamPosition resumeAfter,Func<GameplayBridgeResponse,Task> receive,CancellationToken cancellationToken)=>
+   SubscribeWorldAsync(worldId,requestId,positions,resumeAfter,false,receive,cancellationToken);
+  /// <summary>As above; with <paramref name="voiceGroups"/> (only toward a worker that advertised
+  /// voice_groups_v1) its frames may also carry the world's voice relay table.</summary>
+  public async Task SubscribeWorldAsync(uint worldId,string requestId,bool positions,GameplayWorldStreamPosition resumeAfter,bool voiceGroups,Func<GameplayBridgeResponse,Task> receive,CancellationToken cancellationToken) {
    if(string.IsNullOrEmpty(requestId)||receive==null)throw new ArgumentException("Invalid world subscription.");
    var identity=WorkerIdentity;
    if(_expectedWorkerId!=null&&(identity==null||HasWorkerIdentityFault))throw new GameplayWorkerIdentityException();
    var request=new Dictionary<string,object>{["v"]=2,["request_id"]=requestId,["op"]="subscribe_world",["world_id"]=worldId};
    if(positions||resumeAfter!=null)request["positions"]=true;
    if(resumeAfter!=null)request["resume"]=new Dictionary<string,object>{["epoch"]=resumeAfter.Epoch,["after"]=resumeAfter.Sequence};
+   if(voiceGroups)request["voice_groups"]=true;
    var body=identity==null?JsonSerializer.SerializeToUtf8Bytes(request):AttachWorkerIdentity(JsonSerializer.SerializeToElement(request),identity);
    TcpClient connected;
    using(var connect=CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)) {

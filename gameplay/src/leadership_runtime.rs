@@ -750,6 +750,25 @@ impl<W: Write> Engine<W> {
         }
         Some(participant)
     }
+    /// The leadership role an actor holds now under the installed policy: a development
+    /// binding, the first-member squad leader, or the native election. `None` without one.
+    pub(crate) fn current_held_role(&self, a: &Active) -> HeldLeadershipRole {
+        let Some(runtime) = &self.leadership else {
+            return HeldLeadershipRole::None;
+        };
+        runtime.policy.binding(a).unwrap_or_else(|| {
+            let squad = a.squad_catalog.squad_index();
+            match runtime.policy.squad_leader {
+                Some(SquadLeaderMode::FirstMember)
+                    if self.squad_members(squad, None)[0] == a.reservation.player =>
+                {
+                    HeldLeadershipRole::SquadLeader
+                }
+                Some(SquadLeaderMode::Native) => runtime.native_role(a),
+                _ => HeldLeadershipRole::None,
+            }
+        })
+    }
     pub(crate) fn plan_leadership(&self, now: Duration) -> Result<LeadershipPlan, &'static str> {
         let Some(runtime) = &self.leadership else {
             return Ok(LeadershipPlan::default());
@@ -761,20 +780,7 @@ impl<W: Write> Engine<W> {
             .chain(self.peers.values())
             .filter(|a| a.wire_profile.application_id() == 20231)
             .collect();
-        let role_for = |a: &Active| {
-            runtime.policy.binding(a).unwrap_or_else(|| {
-                let squad = a.squad_catalog.squad_index();
-                match runtime.policy.squad_leader {
-                    Some(SquadLeaderMode::FirstMember)
-                        if self.squad_members(squad, None)[0] == a.reservation.player =>
-                    {
-                        HeldLeadershipRole::SquadLeader
-                    }
-                    Some(SquadLeaderMode::Native) => runtime.native_role(a),
-                    _ => HeldLeadershipRole::None,
-                }
-            })
-        };
+        let role_for = |a: &Active| self.current_held_role(a);
         let providers: Vec<_> = actors
             .iter()
             .filter_map(|a| {

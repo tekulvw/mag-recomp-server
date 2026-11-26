@@ -693,6 +693,9 @@ pub struct Response {
     /// Served world-stream frame position, sent only to subscribers that ask.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub world_stream: Option<world_stream::Position>,
+    /// World-stream relay table, sent only to subscribers that ask (`voice_groups_v1`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_groups: Option<voice_routing::VoiceGroups>,
 }
 impl Response {
     pub fn success(request_id: String) -> Self {
@@ -711,6 +714,7 @@ impl Response {
             party_reservation: None,
             worker_identity: None,
             world_stream: None,
+            voice_groups: None,
         }
     }
 
@@ -1303,6 +1307,9 @@ struct Active {
     prefer_statistics: bool,
     pending_firearm_assist_rows:
         std::collections::BTreeMap<u16, firearm_assist_publication::Pending>,
+    /// The talk channel this client last selected (message `0x0259`), with voice routing on.
+    /// Advisory: it never widens what the player may transmit to.
+    talk_channel: Option<voice_routing::TalkChannel>,
     /// Contiguous one-time hospital bootstrap inside the reliable FIFO.
     hospital_bootstrap: std::ops::Range<usize>,
     smoke_bootstrap: std::ops::Range<usize>,
@@ -1414,6 +1421,9 @@ pub struct Engine<W: Write> {
     /// `--per-recipient-reply-budget`: each recipient gets its own allowance
     /// of shared frames per reply (see `reply_budget`).
     per_recipient_reply_budget: bool,
+    /// `--voice-routing`: decode the talk channel and publish `voice_groups` (see
+    /// `voice_routing`). `None` keeps the stream and message summaries unchanged.
+    voice: Option<voice_routing::Publisher>,
     last_published_rosters: std::collections::BTreeMap<u16, ([u16; 8], u16)>,
     sequence: u64,
     written: u64,
@@ -1984,6 +1994,9 @@ impl<W: Write> Engine<W> {
         ];
         if self.per_recipient_reply_budget {
             capabilities.push(reply_budget::CAPABILITY.into());
+        }
+        if self.voice.is_some() {
+            capabilities.push(voice_routing::CAPABILITY.into());
         }
         let match_profiles = self
             .match_profiles
@@ -2582,3 +2595,6 @@ mod objective_action_timing_event_tests;
 
 mod inherited_leadership;
 pub mod voice_diagnostics;
+pub mod voice_routing;
+#[cfg(test)]
+mod voice_routing_engine_tests;

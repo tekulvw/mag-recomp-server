@@ -491,6 +491,8 @@ pub enum GameMessage<'a> {
     PingRequest(PingRequest),
     ObjectUpdate(crate::replication::ObjectUpdate<'a>),
     CorrectionAck(crate::correction_ack::CorrectionAck),
+    /// `0x0259`: the client's talk-channel selection, one byte.
+    TalkChannel(crate::voice_routing::TalkChannel),
     Unknown {
         message_type: u16,
         body: &'a [u8],
@@ -752,6 +754,18 @@ impl<'a> GameMessage<'a> {
                 }
                 Ok(Self::PluginGreeting)
             }
+            // Exactly one known channel byte. Any other body stays unknown, so the lab
+            // diagnostic still shows it.
+            crate::voice_routing::CHANNEL_SELECT => match &bytes[r.pos..] {
+                [value] => Ok(crate::voice_routing::TalkChannel::from_wire(*value).map_or(
+                    Self::Unknown {
+                        message_type,
+                        body: &bytes[r.pos..],
+                    },
+                    Self::TalkChannel,
+                )),
+                body => Ok(Self::Unknown { message_type, body }),
+            },
             _ => Ok(Self::Unknown {
                 message_type,
                 body: &bytes[r.pos..],
