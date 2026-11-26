@@ -1005,3 +1005,58 @@ fn friendly_damage_revive_restores_health_and_notice_without_earned_credit() {
     );
     assert_eq!(patient(&engine).last_damage.last_attacker, 0x0380_0001);
 }
+
+#[test]
+fn a_bled_out_patient_rejoins_the_next_wave_at_the_point_chosen_while_downed() {
+    use crate::replication::{ObjectUpdate, UpdateHeader};
+    let mut engine = two_actors(0.4);
+    down_patient(&mut engine, Duration::ZERO);
+    let healer = engine.active.take().unwrap();
+    engine.active = engine.peers.remove("synthetic-reservation-0000");
+    engine.peers.insert(healer.reservation.id.clone(), healer);
+    // The map is open while downed: the choice is stored and the
+    // confirmation cannot queue a downed character.
+    let mut select = 0x0219u16.to_be_bytes().to_vec();
+    select.extend(1u16.to_be_bytes());
+    dispatch(&mut engine, &select, 1000).unwrap();
+    let _ = dispatch(&mut engine, &0x0211u16.to_be_bytes(), 1000);
+    let actor = engine.active.as_ref().unwrap();
+    assert_eq!(actor.selected_spawn.unwrap().spawn_point_index, 1);
+    assert!(actor.pending_spawn_deadline.is_none());
+    engine
+        .tick_incapacitation(Duration::from_secs(7), 1)
+        .unwrap();
+    assert!(matches!(
+        engine.active.as_ref().unwrap().life,
+        CharacterLife::AwaitingRespawn { generation: 4 }
+    ));
+    // The client sends nothing more; its ordinary updates carry it through.
+    let update = |engine: &mut Engine<Vec<u8>>, now_ms: u64| {
+        let header = UpdateHeader {
+            sequence: engine.active.as_ref().unwrap().latest_owner_sequence + 1,
+            nak_sequence: 0,
+            client_index: 0,
+            object_type_mask: 0,
+            timestamp_ms: now_ms as u32,
+        };
+        let bytes = ObjectUpdate { header, wire: &[] }
+            .encode_empty_with_profile(engine.wire_profile)
+            .unwrap();
+        dispatch(engine, &bytes, now_ms).unwrap();
+    };
+    update(&mut engine, 7050);
+    let deadline = engine
+        .active
+        .as_ref()
+        .unwrap()
+        .pending_spawn_deadline
+        .expect("bled-out character rejoins the queue");
+    update(&mut engine, deadline.as_millis() as u64);
+    let actor = engine.active.as_ref().unwrap();
+    assert!(matches!(
+        actor.life,
+        CharacterLife::Alive { generation: 5, .. }
+    ));
+    let stored = actor.tracking.sample.unwrap().position;
+    assert_eq!([stored.x, stored.y, stored.z], [120., 3., 100.]);
+}

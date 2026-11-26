@@ -123,6 +123,7 @@ pub(super) fn object_update<W: Write>(
         "bot_script":plan.audit.bot_script,
         "development_target_spawned":plan.combat.dummy_health.is_some() && plan.audit.bot_script.as_ref().is_none_or(|r|r["phase"]=="spawn" || r["phase"]=="respawn"),
         "team_wave_deadline_ms":plan.session.published_wave_deadline.map(|d|d.as_millis() as u32),
+        "automatic_respawn_deadline_ms":plan.session.new_spawn_deadline.filter(|_|plan.session.automatic_respawn_queue).map(|d|d.as_millis() as u32),
         "spawn_point_index":plan.audit.spawned_point,"spawn_fallback":plan.audit.spawn_fallback.map(|(selected, used, reason)| json!({"selected":selected,"used":used,"reason":reason})),"spawn_mounted_seat":plan.session.new_mounted_seat.flatten(),"spawn_mounted_bunker":plan.session.new_mounted_bunker,
         "spawn_ground_vehicle_index":plan.session.new_ground_seat.flatten().map(|s|s.vehicle_index),
         "spawn_ground_passenger_seat":plan.session.new_ground_seat.flatten().map(|s|s.seat),
@@ -1491,12 +1492,23 @@ fn plan_update_reply<W: Write>(
     } else if respawn_due {
         update_actions::plan_respawn(ctx, plan)?;
     }
-    // While the picker is open, publish rollover without enqueuing.
-    // A queued due spawn has priority above; never move its deadline
-    // forward before the character can consume that wave.
+    // A character that already lived keeps its place in the respawn queue
+    // across deaths: once dead it rejoins for the next team wave at its stored
+    // selection without a new selection or confirmation, unless the player
+    // left the queue after this death. The first life still waits for the
+    // client's confirmation, and a downed character is not dead yet.
+    let rejoin_queue = matches!(active.life, CharacterLife::AwaitingRespawn { .. })
+        && !active.respawn_held
+        && ctx.engine.match_started
+        && ctx.engine.match_terminal.is_none()
+        && !(ctx.engine.maximum_players == 1
+            && active.replication_history.len() + 2 > MAX_REPLICATION_HISTORY)
+        && update_actions::respawn_point(ctx.engine, active).is_some();
+    // While the picker is open, publish rollover. A queued due spawn has
+    // priority above; never move its deadline forward before the character
+    // can consume that wave.
     if plan.rejection.is_none()
         && body_supported
-        && plan.outgoing.is_none()
         && h.nak_sequence == 0
         && active.ready_for_updates
         && active.entered_game
@@ -1504,21 +1516,36 @@ fn plan_update_reply<W: Write>(
         && active.pending_spawn_deadline.is_none()
         && history_available
         && ctx.engine.actor_matches_team(active)
-        && let Some(clock) = ctx.engine.team_waves[usize::from(active.team())]
     {
-        let deadline = clock.next_after(now)?;
-        if active.published_wave_deadline != Some(deadline) {
-            let packet = replication::TeamSpawnDeadline {
-                sequence: next_sequence,
-                timestamp_ms: now.as_millis() as u32,
-                object_index: 0,
-                team: active.team(),
-                deadline_ms: deadline.as_millis() as u32,
+        let team = active.team();
+        let running = ctx.engine.team_waves[usize::from(team)];
+        let clock = match running {
+            Some(clock) => Some(clock),
+            None if rejoin_queue => Some(control::team_wave_clock(ctx.engine, team, now)?),
+            None => None,
+        };
+        if let Some(clock) = clock {
+            let deadline = clock.next_after(now)?;
+            if rejoin_queue {
+                plan.session.new_spawn_deadline = Some(deadline);
+                plan.session.automatic_respawn_queue = true;
+                if running.is_none() {
+                    plan.session.new_team_wave = Some(clock);
+                }
             }
-            .encode_with_profile(ctx.engine.wire_profile)?;
-            plan.outgoing = Some(packet.clone());
-            plan.replication.wave_delta = Some(packet);
-            plan.session.published_wave_deadline = Some(deadline);
+            if plan.outgoing.is_none() && active.published_wave_deadline != Some(deadline) {
+                let packet = replication::TeamSpawnDeadline {
+                    sequence: next_sequence,
+                    timestamp_ms: now.as_millis() as u32,
+                    object_index: 0,
+                    team,
+                    deadline_ms: deadline.as_millis() as u32,
+                }
+                .encode_with_profile(ctx.engine.wire_profile)?;
+                plan.outgoing = Some(packet.clone());
+                plan.replication.wave_delta = Some(packet);
+                plan.session.published_wave_deadline = Some(deadline);
+            }
         }
     }
     Ok(())

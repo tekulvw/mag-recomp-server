@@ -323,6 +323,7 @@ impl<W: Write> Engine<W> {
             squad_spawn: shared_spawn,
             squad_catalog: std::sync::Arc::new(squad_catalog),
             pending_spawn_deadline: None,
+            respawn_held: false,
             published_wave_deadline: None,
             entered_game: false,
             owner_fields: player_tracking::ClientCharacterFields::default(),
