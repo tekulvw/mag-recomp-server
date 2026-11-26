@@ -15,8 +15,11 @@ command authority. A command uses the server clock and the round-owned unit time
 squad and platoon instances have distinct individual timers and share the platoon
 gate. Replacing the leader does not reset those timers. A dead character cannot execute. Availability follows the
 retail mode switch and authored lists: Sabotage grants no command abilities,
-Acquisition uses its attacker128 lists for both sides, and Domination uses its
-side-specific256 lists. The local admission cap does not select a different list.
+Acquisition uses each side's own 128-player lists, and Domination uses each side's
+own 256-player lists. In Acquisition, defender squad leaders get Cluster Bomb and
+Guided Artillery, and defender platoon leaders get Sensor and Gas Bombardment.
+Attackers get Cluster Bomb and Sensor (squad) and Precision Strike and Strafing
+Run (platoon). The local admission cap does not select a different list.
 
 Attacker admission uses the nearest current anti-air objective and its interception
 cooldown. A successful intercept publishes enabled-at-start=false and spends the

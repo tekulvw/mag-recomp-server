@@ -486,3 +486,61 @@ fn acquisition_frag_ground_rejects_stale_fuse_and_rolls_back_on_record_failure()
     assert!(!engine.projectile_cleanup_pending(actor, 3));
     assert!(engine.ground_runtime == before);
 }
+
+/// Guided Artillery's single point blast reaches the Escort through its
+/// vehicle channel, ignores cover, and leaves a character in its radius alone.
+#[test]
+fn acquisition_guided_artillery_point_blast_destroys_the_escort_but_spares_characters() {
+    use crate::domination_structural_world::{AreaDamageState, DamageWork};
+    let mut engine = ground_blast_fixture(false);
+    let position = engine.current_ground_vehicle(ESCORT).unwrap().position;
+    let attacker = 0x0380_0000 | u32::from(engine.active.as_ref().unwrap().reservation.player);
+    // The fixture's wall sits between this origin and the Escort; the point
+    // blast has no cover ray. The character stands 15 m away, inside 30 m.
+    let origin = [position.x + 5., position.y, position.z + 25.];
+    let setup = Arc::clone(&engine.acquisition_gameplay.as_ref().unwrap().setup);
+    let work = {
+        let runtime = engine.acquisition_gameplay.as_ref().unwrap();
+        let collision = runtime.blast_collision().unwrap();
+        engine
+            .collect_guided_artillery_blast(attacker, origin, 30., collision)
+            .unwrap()
+    };
+    let DamageWork::Blast { observations, .. } = &work else {
+        panic!("guided artillery must be a blast");
+    };
+    // Both of the Escort's collision roots overlap; nothing else does.
+    assert!(!observations.is_empty());
+    assert!(
+        observations.iter().all(|seen| matches!(
+            seen.target,
+            crate::domination_structural_world::BlastTarget::Ground(_)
+        )),
+        "{observations:?}"
+    );
+    let before = engine.active.as_ref().unwrap().life.damage_health();
+    let mut native = BTreeMap::new();
+    let commit = engine
+        .stage_domination_damage_with_ground(
+            &mut AreaDamageState::default(),
+            &mut native,
+            Duration::from_millis(3400),
+            std::slice::from_ref(&work),
+            setup.ground_damage.as_ref(),
+        )
+        .unwrap();
+    assert!(
+        commit.changed_ground.contains(&ESCORT),
+        "{:?}",
+        commit.audit
+    );
+    assert_eq!(vehicle_damage(&engine).health_quarter_points, 0);
+    assert_eq!(vehicle_damage(&engine).last_attacker, attacker);
+    assert!(
+        commit
+            .audit
+            .iter()
+            .all(|row| row["on_character_hit"].is_null())
+    );
+    assert_eq!(engine.active.as_ref().unwrap().life.damage_health(), before);
+}

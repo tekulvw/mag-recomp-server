@@ -9,8 +9,9 @@ const ABILITY_COUNT: usize = 6;
 const SQUAD_COUNT: usize = 32;
 const PLATOON_COUNT: usize = 8;
 
-/// Retail LevelLoaded uses the attacker 128-player columns for both sides
-/// in Acquisition and Faction Exercise. Other unsupported modes register none.
+/// Retail LevelLoaded registers each side's own authored column: 64 players in
+/// Sabotage, 128 in Acquisition and 256 in Domination. Mode 3 registers the
+/// attacker 128-player column on both sides. Other unsupported modes register none.
 pub fn native_command_availability(
     rules: &Rules,
     mode: u16,
@@ -19,7 +20,8 @@ pub fn native_command_availability(
 ) -> Option<&[Ability]> {
     match mode {
         0 => rules.allowed(64, side, role),
-        1 | 3 => rules.allowed(128, Side::Attacker, role),
+        1 => rules.allowed(128, side, role),
+        3 => rules.allowed(128, Side::Attacker, role),
         2 => rules.allowed(256, side, role),
         _ => Some(&[]),
     }

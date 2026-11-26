@@ -38,12 +38,17 @@ fn native_availability_uses_the_switch_and_authored_side_columns() {
     let rules = rules();
     let defender_squad =
         |mode| native_command_availability(&rules, mode, Side::Defender, CommandRole::SquadLeader);
-    for mode in [1, 3] {
-        assert_eq!(
-            defender_squad(mode).unwrap(),
-            &[Ability::ClusterBomb, Ability::Sensor]
-        );
-    }
+    // Acquisition registers the defender's own 128-player column.
+    assert_eq!(defender_squad(1).unwrap(), &[Ability::GuidedArtillery]);
+    assert_eq!(
+        native_command_availability(&rules, 1, Side::Attacker, CommandRole::SquadLeader).unwrap(),
+        &[Ability::ClusterBomb, Ability::Sensor]
+    );
+    // Mode 3 registers the attacker 128-player column on both sides.
+    assert_eq!(
+        defender_squad(3).unwrap(),
+        &[Ability::ClusterBomb, Ability::Sensor]
+    );
     assert_eq!(
         defender_squad(2).unwrap(),
         &[Ability::ClusterBomb, Ability::GuidedArtillery]

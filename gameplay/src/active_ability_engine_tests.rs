@@ -1,7 +1,9 @@
 //! Normal authenticated command-event regressions with invented map and tuning.
 use super::*;
 use crate::{
-    active_abilities::{Ability, Authority, CommandProperty, CommandRequest, Mode, Rules, Side},
+    active_abilities::{
+        Ability, Authority, CommandProperty, CommandRequest, CommandRole, Mode, Rules, Side,
+    },
     active_ability_effects::{ClusterRules, EffectRules},
     active_ability_engine::{Boundary, SensorObjective, Setup},
     active_ability_sensor::SensorRules,
@@ -798,4 +800,73 @@ fn acquisition_control_mask_is_used_by_command_admission_and_candidate_rollback(
             .0
             .is_some()
     );
+}
+
+/// Acquisition registers each side's own 128-player column. A defender squad
+/// leader's Guided Artillery is admitted and the attacker-only Sensor is not.
+#[test]
+fn acquisition_defender_squad_leader_uses_the_defender_128_column() {
+    use crate::active_ability_effects::GuidedArtilleryRules;
+    let mut engine = configured_for_mode(1);
+    add_ready(&mut engine, 0);
+    engine.match_started = true;
+    engine.reconcile_squad_leaders().unwrap();
+    let setup = std::sync::Arc::make_mut(&mut engine.active_abilities.as_mut().unwrap().setup);
+    for mode in &mut setup.rules.modes {
+        if mode.players == 128 {
+            (mode.squad, mode.platoon) = match mode.side {
+                Side::Attacker => (
+                    vec![Ability::ClusterBomb, Ability::Sensor],
+                    vec![Ability::PrecisionStrike, Ability::StrafingRun],
+                ),
+                Side::Defender => (
+                    vec![Ability::ClusterBomb, Ability::GuidedArtillery],
+                    vec![Ability::Sensor, Ability::GasBombardment],
+                ),
+            };
+        }
+    }
+    for faction in 0..3 {
+        setup.effects.push((
+            Side::Defender,
+            faction,
+            Ability::GuidedArtillery,
+            EffectRules::GuidedArtillery(GuidedArtilleryRules {
+                delay_ms: 12,
+                damage_delay_ms: 5,
+                effective_radius: 30.,
+            }),
+        ));
+    }
+    let runtime = engine.active_abilities.as_ref().unwrap();
+    // Published availability: bit = command code - 1.
+    assert_eq!(
+        runtime.available(1, Side::Defender, CommandRole::SquadLeader),
+        0x21
+    );
+    assert_eq!(
+        runtime.available(1, Side::Defender, CommandRole::PlatoonLeader),
+        0x0c
+    );
+    assert_eq!(
+        runtime.available(1, Side::Attacker, CommandRole::SquadLeader),
+        0x05
+    );
+    assert_eq!(
+        runtime.available(1, Side::Attacker, CommandRole::PlatoonLeader),
+        0x12
+    );
+    assert_eq!(actor(&engine, 0).team(), 1);
+
+    assert!(activate(&mut engine, request(16, Ability::Sensor), 0, 20).ok);
+    assert_eq!(
+        last_command(&engine)["gameplay_denial"],
+        "command_unavailable_in_mode"
+    );
+    assert!(activate(&mut engine, request(16, Ability::GuidedArtillery), 0, 20).ok);
+    let event = last_command(&engine);
+    assert_eq!(event["gameplay_denial"], Value::Null, "{event}");
+    assert_eq!(event["decoded"]["accepted"], true);
+    assert_eq!(event["decoded"]["enabled_at_start"], true);
+    assert!(engine.command_effect_active_for_test(Ability::GuidedArtillery));
 }
