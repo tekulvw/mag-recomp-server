@@ -53,6 +53,44 @@ internal static class ServerStatusChecks
             row.Match.DefendingHumans == 2, "A configured row bounds humans below the profile");
         var faulted = MagServerStatus.Describe("broken", true, Placement(false, true, null, new[] { 0, 0, 0 }, 0));
         Check(faulted.State == "faulted" && faulted.GameTypes.Count == 0 && faulted.HumanCapacity == 0, "A faulted world without profiles");
+        Check(faulted.HumanLimit == 0 && faulted.WorldSize == 0 && faulted.BotFill == null, "A world without profiles holds nobody");
+    }
+
+    /// <summary>The effective human limit: the row and profile cap within the server-wide DME port
+    /// cap, reported apart from the world size and the bot fill.</summary>
+    public static void HumanLimit()
+    {
+        // Live's shapes: a 64-Character Sabotage row where every seat may be human, and
+        // 128/256-Character worlds whose profiles cap humans at 32; 32 DME ports in all.
+        var sabotage = new MagMatchProfile("synthetic-sab-1-2", 0, 1, 2, 64, 32, BotFillTotal: 64);
+        var acquisition = new MagMatchProfile("synthetic-acq-1-2", 1, 1, 2, 128, 64, BotFillTotal: 128,
+            AdvertisedHumanCapacity: 32, AdvertisedHumanTeamCapacity: 16);
+        var domination = new MagMatchProfile("synthetic-dom-1-2", 2, 1, 2, 256, 128, BotFillTotal: 256,
+            AdvertisedHumanCapacity: 32, AdvertisedHumanTeamCapacity: 16);
+
+        var idle = MagServerStatus.Describe("sabotage", false, Placement(true, false, null, new[] { 0, 0, 0 }, 0, sabotage), 32);
+        Check(idle.HumanCapacity == 64 && idle.HumanLimit == 32 && idle.WorldSize == 64 && idle.BotFill == 64,
+            "A 64-seat Sabotage row holds only as many humans as there are DME ports");
+        var running = MagServerStatus.Describe("sabotage", false, Placement(true, false, sabotage, new[] { 0, 2, 1 }, 0, sabotage), 32);
+        Check(running.HumanLimit == 32 && running.Match.HumanCapacity == 64 && running.Match.HumanLimit == 32 &&
+            running.Match.BotFill == 64 && running.Match.Bots == 61 && running.WorldSize == 64, "A running Sabotage match");
+        foreach (var (profile, size) in new[] { (acquisition, 128), (domination, 256) })
+        {
+            var world = MagServerStatus.Describe("large", false, Placement(true, false, null, new[] { 0, 0, 0 }, 0, profile), 32);
+            Check(world.HumanCapacity == 32 && world.HumanLimit == 32 && world.WorldSize == size && world.BotFill == size,
+                "A large world: 32 humans, bots fill to its size");
+        }
+        // A smaller port cap bounds every world; unbounded ports leave the row cap.
+        Check(MagServerStatus.Describe("domination", false, Placement(true, false, null, new[] { 0, 0, 0 }, 0, domination), 16).HumanLimit == 16,
+            "The port cap bounds a large world");
+        Check(MagServerStatus.Describe("sabotage", false, Placement(true, false, null, new[] { 0, 0, 0 }, 0, sabotage)).HumanLimit == 64,
+            "Without a port cap the row cap stands");
+        Check(MagServerStatus.Describe("sabotage", false, Placement(true, false, null, new[] { 0, 0, 0 }, 0, sabotage), 0).HumanLimit == 0,
+            "A zero port cap holds nobody");
+        // No bot fill: the world size is still reported, and bot_fill is absent.
+        var plain = new MagMatchProfile("synthetic-acq-0-1", 1, 0, 1, 16, 8);
+        var noBots = MagServerStatus.Describe("plain", false, Placement(true, false, null, new[] { 0, 0, 0 }, 0, plain), 32);
+        Check(noBots.WorldSize == 16 && noBots.BotFill == null && noBots.HumanLimit == 16, "A world without bot fill");
     }
 
     /// <summary>Release versions come from the newest heading of each bundled changelog.</summary>
@@ -113,7 +151,7 @@ internal static class ServerStatusChecks
             var profile = new MagMatchProfile("synthetic-sab-1-0", 0, 1, 0, 64, 32, BotFillTotal: 64);
             var worlds = new[]
             {
-                MagServerStatus.Describe("sabotage", false, Placement(true, false, profile, new[] { 1, 2, 0 }, 0, profile)),
+                MagServerStatus.Describe("sabotage", false, Placement(true, false, profile, new[] { 1, 2, 0 }, 0, profile), 32),
                 MagServerStatus.Describe("acquisition", true, Placement(false, true, null, new[] { 0, 0, 0 }, 0)),
             };
             var ports = new MagDmePortBudget(10505, null);
@@ -150,6 +188,11 @@ internal static class ServerStatusChecks
                 match.GetProperty("humans").GetInt32() == 3 && match.GetProperty("attacking_humans").GetInt32() == 2 &&
                 match.GetProperty("defending_humans").GetInt32() == 1 && match.GetProperty("bots").GetInt32() == 61 &&
                 match.GetProperty("world_capacity").GetInt32() == 64, "Running match");
+            Check(open.GetProperty("human_limit").GetInt32() == 32 && open.GetProperty("world_size").GetInt32() == 64 &&
+                open.GetProperty("bot_fill").GetInt32() == 64 && match.GetProperty("human_limit").GetInt32() == 32 &&
+                match.GetProperty("bot_fill").GetInt32() == 64 && body.GetProperty("human_limit").GetInt32() == 32,
+                "The effective human limit, world size and bot fill, apart from the row cap");
+            Check(rows[1].GetProperty("bot_fill").ValueKind == JsonValueKind.Null, "No profiles, no bot fill");
             Check(rows[1].GetProperty("state").GetString() == "faulted" && rows[1].GetProperty("match").ValueKind == JsonValueKind.Null,
                 "Faulted world without a match");
 

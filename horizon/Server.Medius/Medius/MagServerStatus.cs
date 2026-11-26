@@ -6,17 +6,25 @@ using System.Linq;
 namespace Server.Medius
 {
     /// <summary>A running match in one world: counts only, never accounts.</summary>
+    /// <param name="HumanCapacity">Humans the match's profile and configured row admit, before the DME port cap.</param>
     /// <param name="Bots">The profile's bot fill less the humans in the match; zero without bot fill.</param>
+    /// <param name="HumanLimit">Humans the match can actually hold: <paramref name="HumanCapacity"/> within the server-wide DME port cap.</param>
+    /// <param name="BotFill">The population bots fill the match to, humans included; null without bot fill.</param>
     public sealed record MagWorldMatchStatus(string ProfileId, int GameType, int AttackingFaction, int DefendingFaction,
-        int Humans, int AttackingHumans, int DefendingHumans, int HumanCapacity, int Bots, int WorldCapacity);
+        int Humans, int AttackingHumans, int DefendingHumans, int HumanCapacity, int Bots, int WorldCapacity,
+        int HumanLimit = 0, int? BotFill = null);
 
     /// <summary>One configured world for the server status (<c>GET /admin/v1/status</c>).</summary>
     /// <param name="State">See <see cref="MagServerStatus.WorldState"/>.</param>
     /// <param name="GameTypes">Game types the world's profiles serve.</param>
     /// <param name="HumanCapacity">Humans the running match admits, or the most any profile admits.</param>
     /// <param name="Pending">Humans placed on this world and not admitted yet.</param>
+    /// <param name="HumanLimit">Humans the world can actually hold: <paramref name="HumanCapacity"/> within the
+    /// server-wide DME port cap, which every world shares.</param>
+    /// <param name="WorldSize">Characters in the running match's world, or the largest profile's: humans and bots.</param>
+    /// <param name="BotFill">The population bots fill the world to, humans included; null when no profile fills with bots.</param>
     public sealed record MagWorldStatus(string WorkerId, string State, IReadOnlyList<int> GameTypes, int HumanCapacity,
-        MagWorldMatchStatus Match, int Pending);
+        MagWorldMatchStatus Match, int Pending, int HumanLimit = 0, int WorldSize = 0, int? BotFill = null);
 
     /// <summary>
     /// The read-only server status the accounts portal publishes on its status page: whether each
@@ -46,13 +54,15 @@ namespace Server.Medius
             faulted ? Faulted : !ready ? Unavailable : draining ? Draining : Open;
 
         /// <summary>One world from its host's placement state.</summary>
-        public static MagWorldStatus Describe(string workerId, bool faulted, LocalDmeWorkerPlacement placement)
+        /// <param name="portCapacity">The server-wide DME port cap on humans (shared by every world); null when unbounded.</param>
+        public static MagWorldStatus Describe(string workerId, bool faulted, LocalDmeWorkerPlacement placement, int? portCapacity = null)
         {
             ArgumentNullException.ThrowIfNull(placement);
             var profiles = placement.Profiles ?? Array.Empty<MagMatchProfile>();
             // Up to 64 the configured row also bounds humans; larger worlds keep their own caps beneath it.
             int rowHumans = placement.StartupPolicy?.MaximumPlayers ?? int.MaxValue;
             int Humans(MagMatchProfile profile) => Math.Min(profile.HumanCapacity, rowHumans);
+            int Limit(int humans) => portCapacity is int ports ? Math.Min(humans, Math.Max(0, ports)) : humans;
             MagWorldMatchStatus match = null;
             if (placement.CurrentProfile is MagMatchProfile current)
             {
@@ -61,12 +71,15 @@ namespace Server.Medius
                 int humans = placement.LiveCount;
                 match = new MagWorldMatchStatus(current.ProfileId, current.GameType, current.AttackingFaction, current.DefendingFaction,
                     humans, Side(current.AttackingFaction), Side(current.DefendingFaction), Humans(current),
-                    current.BotFillTotal is int fill ? Math.Max(0, fill - humans) : 0, current.MaximumPlayers);
+                    current.BotFillTotal is int fill ? Math.Max(0, fill - humans) : 0, current.MaximumPlayers,
+                    Limit(Humans(current)), current.BotFillTotal);
             }
             int capacity = match?.HumanCapacity ?? (profiles.Count == 0 ? 0 : profiles.Max(Humans));
+            int worldSize = match?.WorldCapacity ?? (profiles.Count == 0 ? 0 : profiles.Max(p => p.MaximumPlayers));
+            int? botFill = match != null ? match.BotFill : profiles.Where(p => p.BotFill).Select(p => (int?)p.BotFillTotal).Max();
             return new MagWorldStatus(workerId, WorldState(faulted, placement.Ready, placement.Draining),
                 Array.AsReadOnly(profiles.Select(p => p.GameType).Distinct().OrderBy(t => t).ToArray()),
-                capacity, match, placement.PendingQueueCount);
+                capacity, match, placement.PendingQueueCount, Limit(capacity), worldSize, botFill);
         }
 
         /// <summary>Distinct accounts holding a live login lease in any marker; null when none can be read.</summary>
@@ -95,7 +108,7 @@ namespace Server.Medius
             else if (single != null)
             {
                 mode = "single";
-                worlds = new[] { Describe("gameplay", false, single.GetPlacement()) };
+                worlds = new[] { Describe("gameplay", false, single.GetPlacement(), (ports ?? MagDmePortBudget.Unbounded()).Capacity) };
                 queued = new int[3];
             }
             else
@@ -129,12 +142,18 @@ namespace Server.Medius
                 queued = queuedByGameType.Sum(),
                 queued_by_game_type = queuedByGameType,
                 dme_ports = new { capacity = ports.Capacity, in_use = ports.InUse },
+                // Humans the whole server holds at once, across every world: the DME port cap.
+                human_limit = ports.Capacity,
                 worlds = worlds.Select(world => new
                 {
                     worker_id = world.WorkerId,
                     state = world.State,
                     game_types = world.GameTypes,
+                    // The row and profile cap, kept for older readers; human_limit is what the world can hold.
                     human_capacity = world.HumanCapacity,
+                    human_limit = world.HumanLimit,
+                    world_size = world.WorldSize,
+                    bot_fill = world.BotFill,
                     pending = world.Pending,
                     match = world.Match == null ? null : (object)new
                     {
@@ -146,7 +165,9 @@ namespace Server.Medius
                         attacking_humans = world.Match.AttackingHumans,
                         defending_humans = world.Match.DefendingHumans,
                         human_capacity = world.Match.HumanCapacity,
+                        human_limit = world.Match.HumanLimit,
                         bots = world.Match.Bots,
+                        bot_fill = world.Match.BotFill,
                         world_capacity = world.Match.WorldCapacity,
                     },
                 }).ToArray(),
