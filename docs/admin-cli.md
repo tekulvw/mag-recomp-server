@@ -60,12 +60,30 @@ record and field names; never player data or credentials.
 
 | Command | Effect |
 | --- | --- |
-| `character-store status` | The backend and, for PostgreSQL, its host, database and schema version. |
+| `character-store status` | The backend and, for PostgreSQL, its host, database and schema version, each table's row count, the contents' counts and digest, and when the last import wrote. |
 | `character-store migrate` | Apply pending schema migrations (main Medius also does this at startup). |
-| `character-store import --from <json>` | Copy a JSON store into the **empty** PostgreSQL store in one transaction, then verify. The JSON file stays locked meanwhile. A non-empty database, or a JSON store with fields this build doesn't know, is refused. |
-| `character-store verify --json <json>` | Compare a JSON store with PostgreSQL: characters (unset XP and level read as 0 and 1), receipts and match rows (without their dates). Differences are listed by record and field name; exit 1 if any. |
+| `character-store import --from <json> [--dry-run] [--replace [--discard-postgres-changes]]` | Copy a JSON store into PostgreSQL in one transaction, then verify. The JSON file stays locked meanwhile, and a JSON store with fields this build doesn't know is refused. See below. |
+| `character-store verify --json <json>` | Compare a JSON store with PostgreSQL: both stores' counts and digests, then characters (unset XP and level read as 0 and 1), receipts and match rows (without their dates). Differences are listed by record and field name; exit 1 if any. |
 | `character-store export --to <json> [--replace]` | Write PostgreSQL to a JSON store, the rollback path. Settled history is compacted to fit the JSON bound. An existing file is replaced only with `--replace`, which first keeps it as `<json>.before-export-<UTC time>`. |
 | `character-store prune` | Run reward-ledger retention now (main Medius runs it hourly). |
+
+`import` is idempotent. It prints both stores' counts and digests, the last import and the
+action it takes:
+
+- **Empty database:** it imports.
+- **Same contents as the JSON store:** it writes nothing and reports `unchanged`, so a repeated
+  import is safe.
+- **Different contents:** it refuses, unless `--replace` is given. `--replace` deletes the database's
+  characters (with their kits, match rows, receipts and history) and imports again in the same
+  transaction, but only if nothing was written after the last import. The server's own writes, a
+  retention prune or an operator change all count. To discard those too, add
+  `--discard-postgres-changes`, after an `export` if they matter.
+
+`--dry-run` reads the JSON file without locking it, prints the same report and writes nothing. It
+exits 1 when the import would be refused. Every import that writes records its counts and digest,
+never player data, in `mag.admin_changes` (operation `character-store-import`).
+While it runs, the import holds an exclusive lock on `mag.characters`, so no character write can
+interleave.
 
 Cutover, with no matches running:
 
@@ -77,19 +95,23 @@ Cutover, with no matches running:
 
    ```sh
    M=deploy/<release>-mag-recomp-server-medius
+   PG="env MAG_CHARACTER_STORE=postgres mag-admin character-store"
    kubectl exec -n <namespace> $M -c medius -- cp /accounts/characters.json /accounts/characters.before-postgres.json
-   kubectl exec -n <namespace> $M -c medius -- env MAG_CHARACTER_STORE=postgres mag-admin character-store migrate
-   kubectl exec -n <namespace> $M -c medius -- env MAG_CHARACTER_STORE=postgres mag-admin character-store import --from /accounts/characters.json
+   kubectl exec -n <namespace> $M -c medius -- $PG migrate
+   kubectl exec -n <namespace> $M -c medius -- $PG import --from /accounts/characters.json --dry-run
+   kubectl exec -n <namespace> $M -c medius -- $PG import --from /accounts/characters.json
    ```
 
 3. Just before switching, run `verify --json /accounts/characters.json` the same
-   way. It must report no differences; anything committed to the JSON store after
-   the import shows up here.
+   way. It must report no differences. Anything committed to the JSON store after
+   the import shows up here; `import --replace` then brings the database up to date.
 4. Set `characterStore.backend: postgres` and roll Medius.
 
 To roll back, stop play, run
 `mag-admin character-store export --to /accounts/characters.json --replace`, then
-set `characterStore.backend: json`.
+set `characterStore.backend: json`. To cut over again later, import with
+`--replace --discard-postgres-changes`. The database then holds rows the server wrote
+before the rollback, which the export already carried into the JSON store.
 
 ## Admin API
 
