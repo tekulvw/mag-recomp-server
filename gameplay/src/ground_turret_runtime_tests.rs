@@ -634,3 +634,229 @@ fn ground_primary_only_accepts_current_native_empty_secondary_without_arming_it(
         );
     }
 }
+
+/// Driver (field 1) and gunner (field 6) owners carried by one seat transition.
+/// `None` means the field is absent from the update. Also checks that the
+/// same update moves the character into `seat`: occupancy is carried only by
+/// the occupant's state14 vehicle/seat user data.
+fn transition_owners(
+    frames: &[crate::OutboundMessage],
+    profile: crate::wire_profile::WireProfile,
+    index: u16,
+    seat: u8,
+) -> (Option<u32>, Option<u32>) {
+    use crate::replication::{BitReader, ObjectUpdate};
+    let wire = frames
+        .iter()
+        .map(|frame| protocol::decode_hex(&frame.payload_hex))
+        .find(|wire| {
+            ObjectUpdate::decode_with_profile(wire, profile)
+                .is_ok_and(|update| update.header.object_type_mask & (1 << 3) != 0)
+        })
+        .expect("seat transition");
+    let update = ObjectUpdate::decode_with_profile(&wire, profile).unwrap();
+    let mut bits = BitReader::with_profile(&wire, profile);
+    bits.position = profile.header_bits();
+    let owners = if update.header.object_type_mask & (1 << 1) != 0 {
+        ground_row_owners(&mut bits, index)
+    } else {
+        (None, None)
+    };
+    assert_eq!(bits.read(1), Ok(1));
+    bits.read(16).unwrap();
+    for field in 0..22 {
+        assert_eq!(bits.read(1), Ok(u32::from(field == 4)), "field {field}");
+        if field == 4 {
+            assert_eq!(bits.read(8), Ok(14));
+            let user_data = [bits.read(8), bits.read(8), bits.read(8)].map(Result::unwrap);
+            assert_eq!(user_data, [1, u32::from(index), u32::from(seat)]);
+        }
+    }
+    assert_eq!(bits.read(1), Ok(0));
+    owners
+}
+
+fn ground_row_owners(
+    bits: &mut crate::replication::BitReader<'_>,
+    index: u16,
+) -> (Option<u32>, Option<u32>) {
+    assert_eq!(bits.read(1), Ok(1));
+    assert_eq!(bits.read(16), Ok(index.into()));
+    let (mut driver, mut gunner) = (None, None);
+    for field in 0..30 {
+        if bits.read(1).unwrap() == 0 {
+            continue;
+        }
+        match field {
+            1 => driver = Some(bits.read(16).unwrap()),
+            6 => gunner = Some(bits.read(16).unwrap()),
+            10 => {
+                bits.read(8).unwrap();
+                for _ in 0..3 {
+                    if bits.read(1).unwrap() != 0 {
+                        bits.read(12).unwrap();
+                    }
+                }
+            }
+            _ => panic!("unexpected seat transition field {field}"),
+        }
+    }
+    assert_eq!(bits.read(1), Ok(0), "one Ground row per seat transition");
+    (driver, gunner)
+}
+
+/// Send one owner driving report and return whether the vehicle moved to `x`.
+fn drives(engine: &mut Engine<Vec<u8>>, index: u16, sequence: u32, x: f32, now: u64) -> bool {
+    use crate::spawn_progression::tests::ground_vehicle_runtime::ground_driver_relay;
+    let report = ground_driver_relay(engine.wire_profile, index, sequence, (x * 32.) as u32);
+    dispatch(engine, &report, now).unwrap();
+    engine.current_ground_vehicle(index).unwrap().position.x == x
+}
+
+/// Name, engine, vehicle index, the seated human's player slot and a passenger
+/// seat, for a vehicle with driver seat 0 and gunner seat 1.
+type SeatChangeVehicle = (&'static str, Engine<Vec<u8>>, u16, u16, u8);
+
+fn seat_change_vehicles() -> Vec<SeatChangeVehicle> {
+    use crate::spawn_progression::tests::ground_vehicle_runtime::escort_driver_engine;
+    let mut apc = driver_engine(8);
+    opt_in(&mut apc, 8);
+    ready_on_foot(&mut apc, 0, 10);
+    let mut escort = escort_driver_engine();
+    opt_in(&mut escort, 4);
+    vec![
+        ("domination_apc", apc, 8, 0, 2),
+        ("acquisition_escort", escort, 4, 3, 2),
+    ]
+}
+
+#[test]
+fn in_place_seat_changes_grant_driving_exactly_like_a_fresh_driver_mount() {
+    for (name, mut engine, index, player, passenger) in seat_change_vehicles() {
+        let profile = engine.wire_profile;
+        let owner = u32::from(player);
+        let server = u32::from(crate::ground_vehicles::SERVER_OWNER);
+        let unowned = u32::from(u16::MAX);
+        let gunner_owner =
+            |engine: &Engine<Vec<u8>>| engine.ground_turret_snapshot(index).unwrap().turret_owner;
+
+        // Fresh driver mount: atomic owner grant, and driving is accepted.
+        let frames = mount(&mut engine, index, 0, 20).unwrap();
+        assert_eq!(
+            transition_owners(&frames, profile, index, 0),
+            (Some(owner), None),
+            "{name}"
+        );
+        assert_eq!(engine.ground_driver_owner(index), Some(player), "{name}");
+        assert!(drives(&mut engine, index, 20, 101., 120), "{name}");
+
+        // Driver -> gunner in place releases driving and grants the turret.
+        let frames = mount(&mut engine, index, 1, 130).unwrap();
+        assert_eq!(
+            transition_owners(&frames, profile, index, 1),
+            (Some(server), Some(owner)),
+            "{name}"
+        );
+        assert_eq!(engine.ground_driver_owner(index), None, "{name}");
+        assert_eq!(gunner_owner(&engine), Some(player), "{name}");
+        assert!(!drives(&mut engine, index, 21, 102., 230), "{name}");
+
+        // Gunner -> driver in place releases the turret and grants driving.
+        let frames = mount(&mut engine, index, 0, 240).unwrap();
+        assert_eq!(
+            transition_owners(&frames, profile, index, 0),
+            (Some(owner), Some(unowned)),
+            "{name}"
+        );
+        assert_eq!(engine.ground_driver_owner(index), Some(player), "{name}");
+        assert_eq!(gunner_owner(&engine), Some(u16::MAX), "{name}");
+        assert!(!engine.ground_turret(index).unwrap().has_grant(), "{name}");
+        assert!(drives(&mut engine, index, 22, 102., 340), "{name}");
+
+        // The live Escort cycle: driver -> gunner -> passenger -> driver.
+        mount(&mut engine, index, 1, 350).unwrap();
+        let frames = mount(&mut engine, index, passenger, 360).unwrap();
+        assert_eq!(
+            transition_owners(&frames, profile, index, passenger),
+            (None, Some(unowned)),
+            "{name}"
+        );
+        assert_eq!(engine.ground_driver_owner(index), None, "{name}");
+        assert_eq!(gunner_owner(&engine), Some(u16::MAX), "{name}");
+        assert!(
+            !engine.is_ground_gunner(engine.active.as_ref().unwrap()),
+            "{name}"
+        );
+        assert!(!drives(&mut engine, index, 23, 103., 460), "{name}");
+        let frames = mount(&mut engine, index, 0, 470).unwrap();
+        assert_eq!(
+            transition_owners(&frames, profile, index, 0),
+            (Some(owner), None),
+            "{name}"
+        );
+        assert!(drives(&mut engine, index, 24, 103., 570), "{name}");
+
+        // Driver -> passenger -> driver.
+        let frames = mount(&mut engine, index, passenger, 580).unwrap();
+        assert_eq!(
+            transition_owners(&frames, profile, index, passenger),
+            (Some(server), None),
+            "{name}"
+        );
+        assert!(!drives(&mut engine, index, 25, 104., 680), "{name}");
+        mount(&mut engine, index, 0, 690).unwrap();
+        assert!(drives(&mut engine, index, 26, 104., 790), "{name}");
+        assert_eq!(
+            engine.active.as_ref().unwrap().ground_seat.unwrap().seat,
+            0,
+            "{name}"
+        );
+        // A late joiner's creation row carries the same current owners.
+        let creation = engine.current_ground_batch(0, 25, 800).unwrap();
+        let (driver, gunner, ..) = read_creation_turret(&creation, profile, index.into());
+        assert_eq!((driver, gunner), (owner, unowned), "{name}");
+    }
+}
+
+#[test]
+fn in_place_seat_change_into_a_held_driver_seat_is_refused() {
+    for (name, mut engine, index, driver, _) in seat_change_vehicles() {
+        let gunner = driver + 1;
+        mount(&mut engine, index, 0, 20).unwrap();
+        ready_on_foot(&mut engine, gunner, 25);
+        assert!(
+            !mount(&mut engine, index, 1, 30).unwrap().is_empty(),
+            "{name}"
+        );
+
+        // The gunner cannot take the held driver seat; nothing changes.
+        assert!(
+            mount(&mut engine, index, 0, 40).unwrap().is_empty(),
+            "{name}"
+        );
+        let active = engine.active.as_ref().unwrap();
+        assert_eq!(active.ground_seat.unwrap().seat, 1, "{name}");
+        assert!(engine.is_ground_gunner(active), "{name}");
+        assert!(engine.ground_turret(index).unwrap().has_grant(), "{name}");
+        assert_eq!(engine.ground_driver_owner(index), Some(driver), "{name}");
+        assert!(!drives(&mut engine, index, 20, 101., 140), "{name}");
+        focus(&mut engine, driver);
+        assert!(drives(&mut engine, index, 20, 101., 150), "{name}");
+
+        // Once the driver moves to a passenger seat, the gunner can drive.
+        mount(&mut engine, index, 2, 160).unwrap();
+        assert_eq!(engine.ground_driver_owner(index), None, "{name}");
+        focus(&mut engine, gunner);
+        assert!(
+            !mount(&mut engine, index, 0, 170).unwrap().is_empty(),
+            "{name}"
+        );
+        assert_eq!(engine.ground_driver_owner(index), Some(gunner), "{name}");
+        assert_eq!(
+            engine.ground_turret_snapshot(index).unwrap().turret_owner,
+            Some(u16::MAX),
+            "{name}"
+        );
+        assert!(drives(&mut engine, index, 21, 102., 270), "{name}");
+    }
+}
