@@ -2126,13 +2126,20 @@ fn fake_status() -> Value {
         "medius_version": "9.8.7", "gameplay_version": "6.5.4", "started_at": "2026-11-26T10:00:00Z",
         "uptime_seconds": 7260, "mode": "registry", "players_online": 4, "queued": 2,
         "queued_by_game_type": [2, 0, 0], "dme_ports": {"capacity": 32, "in_use": 4},
+        "human_limit": 32,
         "worlds": [
-            {"worker_id": "sabotage", "state": "open", "game_types": [0], "human_capacity": 32,
+            // A 64-Character row where every seat may be human, held to 32 by the ports.
+            {"worker_id": "sabotage", "state": "open", "game_types": [0], "human_capacity": 64,
+             "human_limit": 32, "world_size": 64, "bot_fill": 64,
              "pending": 0, "match": {"profile_id": "synthetic-sab-raven-sver", "game_type": 0,
              "attacking_faction": 1, "defending_faction": 2, "humans": 3, "attacking_humans": 2,
-             "defending_humans": 1, "human_capacity": 32, "bots": 61, "world_capacity": 64}},
+             "defending_humans": 1, "human_capacity": 64, "human_limit": 32, "bots": 61,
+             "bot_fill": 64, "world_capacity": 64}},
+            // As an older game server reports it: the row cap only.
             {"worker_id": "acquisition", "state": "faulted", "game_types": [1],
-             "human_capacity": 32, "pending": 0, "match": null}
+             "human_capacity": 32, "pending": 0, "match": null},
+            {"worker_id": "domination", "state": "open", "game_types": [2], "human_capacity": 32,
+             "human_limit": 32, "world_size": 256, "bot_fill": 256, "pending": 0, "match": null}
         ]
     })
 }
@@ -3760,7 +3767,10 @@ async fn server_status_is_public_cached_and_names_nobody(
         "Degraded",
         "Sabotage",
         "Raven</strong> attacking <strong>SVER",
-        "3 of 32",
+        "Humans 3 / 32 · bots fill the rest (64-player match)",
+        "Humans 0 / 32 · bots fill the rest (256-player match)",
+        "4 · up to 32 humans at once across all modes",
+        "2 humans attacking, 1 defending",
         "synthetic-sab-raven-sver",
         "Acquisition",
         "9.8.7",
@@ -3782,19 +3792,87 @@ async fn server_status_is_public_cached_and_names_nobody(
         "Server lab",
         "127.0.0.1",
         &url,
+        // A world size or row cap is never shown as a human cap.
+        "/ 64",
+        "of 64",
+        "Up to 64",
     ] {
         assert!(!page.contains(hidden), "home page shows {hidden:?}");
     }
+    // It updates itself through the page script, and needs no full-page reload; the block
+    // above is the server-rendered fallback for browsers without scripts.
+    assert!(
+        page.contains("id=\"status-live\"")
+            && page.contains("id=\"status-servers\"")
+            && page.contains("id=\"status-banner\"")
+            && page.contains(&format!(
+                "<script src=\"/status.js?v={}\" defer></script>",
+                mag_portal::status::script_version()
+            )),
+        "{page}"
+    );
+    assert!(!page.contains("http-equiv=\"refresh\""));
 
     let (code, page) = body(h.get("/status", None).await).await;
     assert_eq!(code, StatusCode::OK);
-    assert!(page.contains("http-equiv=\"refresh\"") && page.contains("synthetic-sab-raven-sver"));
+    assert!(page.contains("synthetic-sab-raven-sver") && page.contains("/status.js?v="));
+    assert!(!page.contains("http-equiv=\"refresh\""));
     assert!(!page.contains("alpha") && !page.contains("Server lab"));
+
+    // The script is same-origin, allowed by the policy, and builds nodes from text only.
+    let home = h.get("/", None).await;
+    let policy = home.headers()["content-security-policy"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        policy.contains("script-src 'self'") && policy.contains("connect-src 'self'"),
+        "{policy}"
+    );
+    assert!(!policy.contains("unsafe-inline"), "{policy}");
+    let r = h
+        .get(
+            &format!("/status.js?v={}", mag_portal::status::script_version()),
+            None,
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(
+        r.headers()["content-type"],
+        "text/javascript; charset=utf-8"
+    );
+    assert!(
+        r.headers()["cache-control"]
+            .to_str()
+            .unwrap()
+            .contains("immutable")
+    );
+    let script = r.text().await.unwrap();
+    assert!(script.contains("textContent") && script.contains("visibilitychange"));
+    for unsafe_sink in [
+        "innerHTML",
+        "outerHTML",
+        "insertAdjacentHTML",
+        "document.write",
+        "eval(",
+    ] {
+        assert!(
+            !script.contains(unsafe_sink),
+            "the script uses {unsafe_sink}"
+        );
+    }
 
     let r = h.get("/api/v1/status", None).await;
     assert_eq!(r.status(), StatusCode::OK);
     let text = r.text().await.unwrap();
-    for hidden in ["alpha", "bravo", "charlie", "lab", "127.0.0.1"] {
+    for hidden in [
+        "alpha",
+        "bravo",
+        "charlie",
+        "Server lab",
+        "lab.example.test",
+        "127.0.0.1",
+    ] {
         assert!(!text.contains(hidden), "JSON shows {hidden:?}: {text}");
     }
     let json: Value = serde_json::from_str(&text).unwrap();
@@ -3807,6 +3885,27 @@ async fn server_status_is_public_cached_and_names_nobody(
     assert_eq!(live["worlds"][0]["match"]["bots"], 61);
     assert_eq!(live["worlds"][0]["match"]["attackers"], "Raven");
     assert_eq!(live["worlds"][1]["open"], false);
+    // The fields the page script renders, with the same wording as the page.
+    assert_eq!(json["headline"], "Some servers or worlds are closed");
+    assert_eq!(live["state_label"], "Degraded");
+    assert_eq!(live["human_limit"], 32);
+    assert_eq!(
+        live["players_text"],
+        "4 · up to 32 humans at once across all modes"
+    );
+    assert_eq!(live["worlds"][0]["human_capacity"], 64);
+    assert_eq!(live["worlds"][0]["human_limit"], 32);
+    assert_eq!(live["worlds"][0]["world_size"], 64);
+    assert_eq!(
+        live["worlds"][0]["match"]["humans_text"],
+        "Humans 3 / 32 · bots fill the rest (64-player match)"
+    );
+    // An older game server's row cap is held to the port cap too.
+    assert_eq!(live["worlds"][1]["human_limit"], 32);
+    assert_eq!(
+        live["worlds"][2]["humans_text"],
+        "Humans 0 / 32 · bots fill the rest (256-player match)"
+    );
     assert_eq!(json["servers"][1]["state"], "down");
     assert_eq!(json["servers"].as_array().unwrap().len(), 2);
 

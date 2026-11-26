@@ -166,6 +166,8 @@ section { margin: 0 0 56px; }
 .world.closed { border-top-color: var(--danger); }
 .world p { margin: 8px 0 0; font-size: 15px; }
 .world .status-facts { margin: 8px 0 0; font-size: 15px; }
+#status-live.stale .status-server { opacity: 0.6; }
+#status-updated.stale { color: var(--accent); }
 
 /* Admin */
 .admin-nav { display: flex; flex-wrap: wrap; gap: 20px; align-items: center; padding: 0 0 12px; margin-bottom: 28px; border-bottom: 1px solid var(--line); font: 13px var(--mono); letter-spacing: 0.08em; text-transform: uppercase; }

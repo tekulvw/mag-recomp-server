@@ -269,9 +269,11 @@ impl StatusService {
             .filter(|(server, _)| staff || !server.staff_only)
             .map(|(server, polled)| server_view(server, polled, now, self.stale_after()))
             .collect();
+        let state = overall(servers.iter().map(|s| s.state)).as_str();
         StatusView {
             generated_at: rfc3339(now),
-            state: overall(servers.iter().map(|s| s.state)).as_str(),
+            state,
+            headline: headline(state),
             banner: cache.banner.as_ref().map(BannerView::from),
             refresh_seconds: self.refresh.as_secs(),
             servers,
@@ -409,6 +411,8 @@ pub struct StatusView {
     pub generated_at: String,
     /// `up`, `degraded`, `down` or `unknown` across the servers shown.
     pub state: &'static str,
+    /// The heading for `state`.
+    pub headline: &'static str,
     pub banner: Option<BannerView>,
     pub refresh_seconds: u64,
     pub servers: Vec<ServerView>,
@@ -418,7 +422,6 @@ pub struct StatusView {
 pub struct BannerView {
     pub message: String,
     pub restart_expected_at: Option<String>,
-    #[serde(skip)]
     pub restart_text: Option<String>,
     pub updated_at: String,
 }
@@ -441,21 +444,25 @@ pub struct ServerView {
     pub host: Option<String>,
     #[serde(serialize_with = "state_str")]
     pub state: Health,
+    /// `Up`, `Degraded`, `Down` or `Checking`.
+    pub state_label: &'static str,
     /// Why, in a sentence.
     pub summary: String,
     /// When the server last answered.
     pub last_seen: Option<String>,
-    #[serde(skip)]
     pub last_seen_text: Option<String>,
     pub medius_version: Option<String>,
     pub gameplay_version: Option<String>,
     pub started_at: Option<String>,
     pub uptime_seconds: Option<u64>,
-    #[serde(skip)]
     pub uptime_text: Option<String>,
     pub players_online: Option<u32>,
     pub queued: Option<u32>,
     pub dme_ports: Option<PortsView>,
+    /// Humans the whole server holds at once, across every mode (the DME port cap).
+    pub human_limit: Option<u32>,
+    /// `3 · up to 32 humans at once across all modes`.
+    pub players_text: Option<String>,
     pub worlds: Vec<WorldView>,
 }
 
@@ -474,14 +481,23 @@ pub struct WorldView {
     pub id: String,
     /// `open`, `draining`, `faulted` or `unavailable`.
     pub state: String,
-    #[serde(skip)]
     pub state_text: &'static str,
     pub open: bool,
     pub modes: Vec<&'static str>,
     /// Humans waiting for this world: those placed on it, plus the global queue for the modes
     /// only this world serves.
     pub queued: u32,
+    /// The configured row and profile cap, before the server-wide human limit; kept for older
+    /// readers. `human_limit` is what the world can hold.
     pub human_capacity: u32,
+    /// Humans the world can actually hold: at most the server-wide human limit.
+    pub human_limit: u32,
+    /// Characters in the world, humans and bots.
+    pub world_size: Option<u32>,
+    /// The population bots fill the world to, humans included.
+    pub bot_fill: Option<u32>,
+    /// `Humans 0 / 32 · bots fill the rest (64-player match)`, for a world with no match.
+    pub humans_text: String,
     #[serde(rename = "match")]
     pub current: Option<MatchView>,
 }
@@ -495,8 +511,40 @@ pub struct MatchView {
     pub humans: u32,
     pub attacking_humans: u32,
     pub defending_humans: u32,
+    /// As [`WorldView::human_capacity`].
     pub human_capacity: u32,
+    /// Humans the match can actually hold.
+    pub human_limit: u32,
     pub bots: u32,
+    /// `Humans 3 / 32 · bots fill the rest (256-player match)`.
+    pub humans_text: String,
+}
+
+/// How many humans a world or match holds, said so that a world's size is never read as a
+/// human cap: `Humans 3 / 32 · bots fill the rest (256-player match)`, or without bot fill
+/// `Humans 3 / 16 (16-player match)`.
+pub fn humans_text(
+    humans: u32,
+    limit: u32,
+    bot_fill: Option<u32>,
+    world_size: Option<u32>,
+) -> String {
+    match (bot_fill, world_size) {
+        (Some(fill), _) => {
+            format!("Humans {humans} / {limit} · bots fill the rest ({fill}-player match)")
+        }
+        (None, Some(size)) => format!("Humans {humans} / {limit} ({size}-player match)"),
+        (None, None) => format!("Humans {humans} / {limit}"),
+    }
+}
+
+/// `3 · up to 32 humans at once across all modes`, or just the count without a server-wide limit.
+pub fn players_text(online: Option<u32>, limit: Option<u32>) -> String {
+    let online = online.map_or_else(|| "unknown".to_owned(), |n| n.to_string());
+    match limit {
+        Some(limit) => format!("{online} · up to {limit} humans at once across all modes"),
+        None => online,
+    }
 }
 
 /// One server for the page. Only these fields are copied from the game server's answer.
@@ -513,6 +561,7 @@ pub fn server_view(
         name: server.name.clone(),
         host: server.host.clone(),
         state,
+        state_label: state_label(state.as_str()),
         summary: String::new(),
         last_seen: last_seen.map(rfc3339),
         last_seen_text: last_seen.map(when),
@@ -524,6 +573,8 @@ pub fn server_view(
         players_online: None,
         queued: None,
         dme_ports: None,
+        human_limit: None,
+        players_text: None,
         worlds: Vec::new(),
     };
     let fresh = polled
@@ -540,6 +591,9 @@ pub fn server_view(
         return view;
     };
     let worlds = &status.worlds;
+    // An older game server reports only the row cap: bound it by the port cap here.
+    let server_limit = status.human_limit.or(status.dme_ports.capacity);
+    let bounded = |cap: u32| server_limit.map_or(cap, |limit| cap.min(limit));
     let served_by = |game_type: u8| {
         worlds
             .iter()
@@ -557,6 +611,13 @@ pub fn server_view(
                 .filter(|t| served_by(**t) == 1)
                 .filter_map(|t| status.queued_by_game_type.get(usize::from(*t)))
                 .sum();
+            let human_limit = w.human_limit.unwrap_or_else(|| bounded(w.human_capacity));
+            let world_size = w
+                .world_size
+                .or_else(|| w.current.as_ref().map(|m| m.world_capacity));
+            let bot_fill = w
+                .bot_fill
+                .or_else(|| w.current.as_ref().and_then(|m| m.bot_fill));
             WorldView {
                 id: shown(&w.worker_id, 64),
                 state: shown(&w.state, 16),
@@ -565,16 +626,26 @@ pub fn server_view(
                 modes,
                 queued: w.pending.saturating_add(global),
                 human_capacity: w.human_capacity,
-                current: w.current.as_ref().map(|m| MatchView {
-                    profile: shown(&m.profile_id, 64),
-                    mode: mode_name(m.game_type),
-                    attackers: faction_name(m.attacking_faction),
-                    defenders: faction_name(m.defending_faction),
-                    humans: m.humans,
-                    attacking_humans: m.attacking_humans,
-                    defending_humans: m.defending_humans,
-                    human_capacity: m.human_capacity,
-                    bots: m.bots,
+                human_limit,
+                world_size,
+                bot_fill,
+                humans_text: humans_text(0, human_limit, bot_fill, world_size),
+                current: w.current.as_ref().map(|m| {
+                    let limit = m.human_limit.unwrap_or_else(|| bounded(m.human_capacity));
+                    let fill = m.bot_fill.or(bot_fill);
+                    MatchView {
+                        profile: shown(&m.profile_id, 64),
+                        mode: mode_name(m.game_type),
+                        attackers: faction_name(m.attacking_faction),
+                        defenders: faction_name(m.defending_faction),
+                        humans: m.humans,
+                        attacking_humans: m.attacking_humans,
+                        defending_humans: m.defending_humans,
+                        human_capacity: m.human_capacity,
+                        human_limit: limit,
+                        bots: m.bots,
+                        humans_text: humans_text(m.humans, limit, fill, Some(m.world_capacity)),
+                    }
                 }),
             }
         })
@@ -608,6 +679,8 @@ pub fn server_view(
     view.uptime_seconds = Some(status.uptime_seconds);
     view.uptime_text = Some(duration_text(status.uptime_seconds));
     view.players_online = status.players_online;
+    view.human_limit = server_limit;
+    view.players_text = Some(players_text(status.players_online, server_limit));
     view.queued = Some(status.queued);
     view.dme_ports = Some(PortsView {
         in_use: status.dme_ports.in_use,
@@ -711,6 +784,38 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/status", get(status_page))
         .route("/api/v1/status", get(status_json))
+        .route("/status.js", get(status_script))
+}
+
+const SCRIPT: &str = include_str!("../static/status.js");
+
+/// A short digest of the status script, for `/status.js?v=<this>` (as for the stylesheet).
+pub fn script_version() -> &'static str {
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERSION.get_or_init(|| crate::tokens::b64url(&crate::tokens::sha256(SCRIPT.as_bytes())[..9]))
+}
+
+#[derive(serde::Deserialize)]
+struct ScriptQuery {
+    v: Option<String>,
+}
+
+/// The optional script that keeps the status block current without a reload. Pages render
+/// the status themselves; without the script they are only as old as their load.
+async fn status_script(axum::extract::Query(q): axum::extract::Query<ScriptQuery>) -> Response {
+    let cache = if q.v.as_deref() == Some(script_version()) {
+        "public, max-age=31536000, immutable"
+    } else {
+        "public, max-age=300"
+    };
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, cache),
+        ],
+        SCRIPT,
+    )
+        .into_response()
 }
 
 #[derive(Template)]
@@ -784,6 +889,9 @@ mod tests {
             state: state.into(),
             game_types: vec![game_type],
             human_capacity: 32,
+            human_limit: None,
+            world_size: None,
+            bot_fill: None,
             pending: 1,
             current: running.then(|| MatchStatus {
                 profile_id: format!("synthetic-{id}"),
@@ -794,7 +902,9 @@ mod tests {
                 attacking_humans: 3,
                 defending_humans: 2,
                 human_capacity: 32,
+                human_limit: None,
                 bots: 59,
+                bot_fill: None,
                 world_capacity: 64,
             }),
         }
@@ -814,6 +924,7 @@ mod tests {
                 capacity: Some(32),
                 in_use: 5,
             },
+            human_limit: None,
             worlds,
         }
     }
@@ -913,12 +1024,142 @@ mod tests {
         );
         assert_eq!((m.humans, m.human_capacity, m.bots), (5, 32, 59));
         assert_eq!(view.worlds[1].state_text, "Down");
+        // A game server without human_limit: the row cap within the port cap.
+        assert_eq!(m.humans_text, "Humans 5 / 32 (64-player match)");
+        assert_eq!(
+            view.players_text.as_deref(),
+            Some("7 · up to 32 humans at once across all modes")
+        );
 
         // Down: the last answer's time stays, its counts do not.
         let down = server_view(&server("live", false), &polled, at(60), STALE);
         assert_eq!(down.state, Health::Down);
         assert!(down.worlds.is_empty() && down.players_online.is_none());
         assert_eq!(down.last_seen.as_deref(), Some("2027-01-15T08:00:00Z"));
+    }
+
+    /// Live's shapes: a 64-Character Sabotage row whose seats may all be human, 128/256
+    /// Character worlds capped at 32 humans, and 32 DME ports for the whole server.
+    #[test]
+    fn human_limits_are_never_world_sizes() {
+        let sized =
+            |id: &str, game_type: u8, row: u32, size: u32, running: bool, limit: Option<u32>| {
+                let mut w = world(id, "open", game_type, running);
+                w.human_capacity = row;
+                w.human_limit = limit;
+                w.world_size = Some(size);
+                w.bot_fill = Some(size);
+                if let Some(m) = w.current.as_mut() {
+                    (m.humans, m.human_capacity, m.human_limit) = (3, row, limit);
+                    (m.world_capacity, m.bot_fill, m.bots) = (size, Some(size), size - 3);
+                }
+                w
+            };
+        // The current game server reports human_limit; an older one reports only the row cap.
+        for limits in [Some(32), None] {
+            let mut answer = status(vec![
+                sized("sabotage", 0, 64, 64, false, limits),
+                sized("acquisition", 1, 32, 128, false, limits),
+                sized("domination", 2, 32, 256, true, limits),
+            ]);
+            answer.human_limit = limits;
+            let polled = Polled {
+                ok: Some((at(0), answer)),
+                checked: Some(at(0)),
+                error: None,
+            };
+            let view = server_view(&server("live", false), &polled, at(5), STALE);
+            let [sabotage, acquisition, domination] = &view.worlds[..] else {
+                panic!("three worlds")
+            };
+            assert_eq!(
+                sabotage.human_capacity, 64,
+                "the row cap stays for older readers"
+            );
+            assert_eq!(sabotage.human_limit, 32);
+            assert_eq!(
+                sabotage.humans_text,
+                "Humans 0 / 32 · bots fill the rest (64-player match)"
+            );
+            assert_eq!(
+                acquisition.humans_text,
+                "Humans 0 / 32 · bots fill the rest (128-player match)"
+            );
+            let m = domination.current.as_ref().unwrap();
+            assert_eq!(m.human_limit, 32);
+            assert_eq!(
+                m.humans_text,
+                "Humans 3 / 32 · bots fill the rest (256-player match)"
+            );
+            assert_eq!(view.human_limit, Some(32));
+            assert_eq!(
+                view.players_text.as_deref(),
+                Some("7 · up to 32 humans at once across all modes")
+            );
+        }
+        assert_eq!(humans_text(2, 16, None, None), "Humans 2 / 16");
+        assert_eq!(players_text(None, None), "unknown");
+        assert_eq!(players_text(Some(4), None), "4");
+    }
+
+    /// A staff-only server (the private modes server) adds nothing public: no card, no state,
+    /// no count, no limit and no wording, however its numbers differ.
+    #[test]
+    fn staff_only_servers_add_nothing_public() {
+        let service = StatusService::new(
+            vec![server("live", false), server("modes", true)],
+            Duration::from_secs(15),
+        );
+        let mut live = status(vec![world("sabotage", "open", 0, true)]);
+        live.human_limit = Some(32);
+        let mut private = status(vec![
+            world("acquisition", "faulted", 1, true),
+            world("domination", "open", 2, false),
+        ]);
+        (private.players_online, private.queued, private.human_limit) = (Some(91), 83, Some(77));
+        private.dme_ports = DmePorts {
+            capacity: Some(77),
+            in_use: 69,
+        };
+        private.medius_version = Some("5.4.3".into());
+        service.record(0, Ok(live), at(0));
+        service.record(1, Ok(private), at(0));
+
+        let public = service.view(at(1), false);
+        assert_eq!(public.servers.len(), 1);
+        assert_eq!(public.servers[0].id, "live");
+        // The private server is degraded; the public state is live's alone.
+        assert_eq!(
+            (public.state, public.headline),
+            ("up", "All servers are up")
+        );
+        assert_eq!(
+            public.servers[0].players_text.as_deref(),
+            Some("7 · up to 32 humans at once across all modes")
+        );
+        let json = serde_json::to_string(&public).unwrap();
+        for hidden in [
+            "MODES",
+            "91",
+            "83",
+            "77",
+            "69",
+            "5.4.3",
+            "Acquisition",
+            "Domination",
+        ] {
+            assert!(
+                !json.contains(hidden),
+                "public status shows {hidden:?}: {json}"
+            );
+        }
+        // Staff see it, with its own limit.
+        let staff = service.view(at(1), true);
+        assert_eq!(staff.state, "degraded");
+        assert_eq!(
+            staff.servers[1].players_text.as_deref(),
+            Some("91 · up to 77 humans at once across all modes")
+        );
     }
 
     #[test]

@@ -10,7 +10,7 @@
   <p>{{ s.summary }}{% if s.worlds.is_empty() %}{% if let Some(t) = s.last_seen_text %} Last seen {{ t }}.{% endif %}{% endif %}</p>
   {% if !s.worlds.is_empty() %}
   <dl class="status-facts">
-    <dt>Players online</dt><dd>{% if let Some(n) = s.players_online %}{{ n }}{% else %}<span class="quiet">unknown</span>{% endif %}</dd>
+    {% if let Some(t) = s.players_text %}<dt>Players online</dt><dd>{{ t }}</dd>{% endif %}
     <dt>Waiting for a match</dt><dd>{% if let Some(n) = s.queued %}{{ n }}{% else %}<span class="quiet">unknown</span>{% endif %}</dd>
     {% if let Some(p) = s.dme_ports %}<dt>Game ports in use</dt><dd>{{ p.in_use }}{% if let Some(c) = p.capacity %} of {{ c }}{% endif %}</dd>{% endif %}
     {% if let Some(u) = s.uptime_text %}<dt>Up for</dt><dd>{{ u }}</dd>{% endif %}
@@ -26,12 +26,13 @@
       {% if let Some(m) = w.current %}
       <p><strong>{{ m.attackers }}</strong> attacking <strong>{{ m.defenders }}</strong></p>
       <dl class="status-facts">
-        <dt>Players</dt><dd>{{ m.humans }} of {{ m.human_capacity }} ({{ m.attacking_humans }} attacking, {{ m.defending_humans }} defending)</dd>
+        <dt>Players</dt><dd>{{ m.humans_text }}</dd>
+        <dt>Sides</dt><dd>{{ m.attacking_humans }} humans attacking, {{ m.defending_humans }} defending</dd>
         <dt>Bots</dt><dd>{{ m.bots }}</dd>
         <dt>Map profile</dt><dd><code>{{ m.profile }}</code></dd>
       </dl>
       {% else %}
-      <p class="quiet">No match in progress. Up to {{ w.human_capacity }} players.</p>
+      <p class="quiet">No match in progress. {{ w.humans_text }}</p>
       {% endif %}
       <p class="quiet">Waiting: {{ w.queued }}</p>
     </li>
