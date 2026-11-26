@@ -45,6 +45,10 @@ pub enum PhysicsError {
     MapMismatch,
     QueryFailed,
     InvalidQuery,
+    /// A well-formed start whose body would begin inside geometry (a wall, a
+    /// prop, a placed structure) and cannot settle out of it. Not a malformed
+    /// request: the same body fits somewhere beside it.
+    Obstructed,
     CoverageUnknown,
     RegionalBlocked,
 }
@@ -55,6 +59,7 @@ impl PhysicsError {
             Self::MapMismatch => "bot_physics_map_mismatch",
             Self::QueryFailed => "bot_physics_query_failed_or_budget",
             Self::InvalidQuery => "bot_physics_invalid_query",
+            Self::Obstructed => "bot_physics_start_obstructed",
             Self::RegionalBlocked => "bot_regional_collision_blocked",
             Self::CoverageUnknown => "bot_physics_geometry_coverage_unknown",
         }
@@ -363,8 +368,9 @@ impl<'a> WorldTerrain<'a> {
             Err(PhysicsError::CoverageUnknown)
         }
     }
-    /// Refuses known initial penetration. Surface tangency is allowed; no
-    /// depenetration/ground plane is invented to make an invalid spawn usable.
+    /// Refuses known initial penetration (`Obstructed`). Surface tangency is
+    /// allowed; no depenetration/ground plane is invented to make an invalid
+    /// spawn usable.
     ///
     /// A capsule's rounded bottom can overlap the ground its feet point stands
     /// on: below the feet when the capsule reaches under them, and on any
@@ -382,11 +388,11 @@ impl<'a> WorldTerrain<'a> {
             return Ok(Motion::new(position));
         }
         let Some(lift) = body.settle_lift() else {
-            return Err(PhysicsError::InvalidQuery);
+            return Err(PhysicsError::Obstructed);
         };
         let up = [position[0], position[1] + lift, position[2]];
         if self.sweep(up, up, body, &mut budget)?.is_some() {
-            return Err(PhysicsError::InvalidQuery);
+            return Err(PhysicsError::Obstructed);
         }
         let hit = self
             .sweep(up, position, body, &mut budget)?

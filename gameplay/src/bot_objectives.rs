@@ -571,13 +571,14 @@ fn supported(
     policy: &ObjectivePolicy,
     body: bot_physics::Body,
 ) -> Result<replication::CharacterPosition, &'static str> {
-    supported_interval(
+    supported_beside(
         world,
         map,
         raw,
         policy.ground_search_m,
         policy.ground_search_m,
         body,
+        |_| true,
     )
 }
 /// How far above a nearby body's floor a spot beside it first looks for
@@ -599,13 +600,14 @@ fn supported_local(
     policy: &ObjectivePolicy,
     body: bot_physics::Body,
 ) -> Result<replication::CharacterPosition, &'static str> {
-    supported_interval(
+    supported_beside(
         world,
         map,
         raw,
         LOCAL_FLOOR_UP_M.min(policy.ground_search_m),
         policy.ground_search_m,
         body,
+        |_| true,
     )
     .or_else(|_| supported(world, map, raw, policy, body))
 }
@@ -677,8 +679,61 @@ fn supported_operator(
     // Restrict support discovery to the trigger's own vertical span so a generic
     // upward ray cannot land on a roof above the action instead of its floor.
     let (up, down) = range.support_window(point(raw));
-    supported_interval(world, map, raw, up, down, body)
+    // A spot moved beside an obstruction must still be inside the range.
+    supported_beside(world, map, raw, up, down, body, |feet| {
+        range.contains_planned(point(feet))
+    })
 }
+/// What one column offers a body: feet standing on its ground, a start that
+/// would put the body inside geometry above ground at `floor` height, or a
+/// refusal (no ground, no coverage, a failed or malformed query).
+enum ColumnSupport {
+    Standing(replication::CharacterPosition),
+    Obstructed { floor: f64 },
+    Refused(&'static str),
+}
+/// The ground in `raw`'s column, searched `up` above and `down` below it, and
+/// whether `body` dropped half a metre above that ground fits there and comes
+/// to rest standing on it.
+fn column_support(
+    terrain: &bot_physics::WorldTerrain<'_>,
+    raw: [f64; 3],
+    up: f64,
+    down: f64,
+    body: bot_physics::Body,
+) -> ColumnSupport {
+    use ColumnSupport::*;
+    let ground = match terrain.sample_ground(raw, up, down) {
+        Ok(Some(ground)) => ground,
+        Ok(None) => return Refused("bot_objective_unsupported"),
+        Err(e) => return Refused(e.code()),
+    };
+    let p = [
+        ground.position[0],
+        ground.position[1] + 0.5,
+        ground.position[2],
+    ];
+    if let Err(e) = terrain.require_horizontal_coverage(p, p, body) {
+        return Refused(e.code());
+    }
+    let start = match terrain.start_motion(p, body) {
+        Ok(start) => start,
+        Err(bot_physics::PhysicsError::Obstructed) => {
+            return Obstructed {
+                floor: ground.position[1],
+            };
+        }
+        Err(e) => return Refused(e.code()),
+    };
+    match terrain.advance(start, [0.; 3], 1., body) {
+        Ok(m) if m.grounded && !m.blocked => Standing(position(m.position)),
+        Ok(_) => Refused("bot_objective_unsupported"),
+        Err(e) => Refused(e.code()),
+    }
+}
+/// Feet where `body` stands on the ground in `raw`'s exact column, searched
+/// `up` above and `down` below it. A body that would start inside geometry
+/// there is refused as `bot_physics_start_obstructed`.
 pub(crate) fn supported_interval(
     world: Option<&collision::CollisionWorld>,
     map: &str,
@@ -688,30 +743,61 @@ pub(crate) fn supported_interval(
     body: bot_physics::Body,
 ) -> Result<replication::CharacterPosition, &'static str> {
     let terrain = bot_physics::WorldTerrain::new(world, map).map_err(|e| e.code())?;
-    let ground = terrain
-        .sample_ground(point(raw), up, down)
-        .map_err(|e| e.code())?
-        .ok_or("bot_objective_unsupported")?;
-    let p = [
-        ground.position[0],
-        ground.position[1] + 0.5,
-        ground.position[2],
-    ];
-    terrain
-        .require_horizontal_coverage(p, p, body)
-        .map_err(|e| e.code())?;
-    let m = terrain
-        .advance(
-            terrain.start_motion(p, body).map_err(|e| e.code())?,
-            [0.; 3],
-            1.,
-            body,
-        )
-        .map_err(|e| e.code())?;
-    if !m.grounded || m.blocked {
-        return Err("bot_objective_unsupported");
+    match column_support(&terrain, point(raw), up, down, body) {
+        ColumnSupport::Standing(feet) => Ok(feet),
+        ColumnSupport::Obstructed { .. } => Err(bot_physics::PhysicsError::Obstructed.code()),
+        ColumnSupport::Refused(reason) => Err(reason),
     }
-    Ok(position(m.position))
+}
+/// Rings, nearest first, searched around a spot whose body would start
+/// inside geometry: past a wall's skin, around a crate or console, out of a
+/// trigger's own prop. Two metres clears the props objective triggers are
+/// built around; eight directions per ring.
+const BESIDE_RADII_M: [f64; 6] = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0];
+const BESIDE_DIRECTIONS: u32 = 8;
+/// As `supported_interval`, but a candidate spot is a place to stand near,
+/// not an exact column. Spots are generated without the body's footprint (an
+/// objective trigger's centre sits in its console, a recovery ring point or
+/// role offset can land in a wall), so the body would start inside geometry
+/// and the spot was wasted. Such a spot moves to the nearest column beside it
+/// where the body stands on the same floor (within a step and its ground
+/// snap of the obstructed spot's ground, never onto the prop's top or another
+/// storey) and that `accept` admits. A spot that already fits is kept as it
+/// is, and every other refusal is returned unchanged.
+fn supported_beside(
+    world: Option<&collision::CollisionWorld>,
+    map: &str,
+    raw: replication::CharacterPosition,
+    up: f64,
+    down: f64,
+    body: bot_physics::Body,
+    accept: impl Fn(replication::CharacterPosition) -> bool,
+) -> Result<replication::CharacterPosition, &'static str> {
+    let terrain = bot_physics::WorldTerrain::new(world, map).map_err(|e| e.code())?;
+    let origin = point(raw);
+    let floor = match column_support(&terrain, origin, up, down, body) {
+        ColumnSupport::Standing(feet) => return Ok(feet),
+        ColumnSupport::Refused(reason) => return Err(reason),
+        ColumnSupport::Obstructed { floor } => floor,
+    };
+    let reach = body.max_step + body.ground_snap;
+    for radius in BESIDE_RADII_M {
+        for k in 0..BESIDE_DIRECTIONS {
+            let angle = std::f64::consts::TAU * f64::from(k) / f64::from(BESIDE_DIRECTIONS);
+            let column = [
+                origin[0] + radius * angle.cos(),
+                origin[1],
+                origin[2] + radius * angle.sin(),
+            ];
+            if let ColumnSupport::Standing(feet) = column_support(&terrain, column, up, down, body)
+                && (f64::from(feet.y) - floor).abs() <= reach
+                && accept(feet)
+            {
+                return Ok(feet);
+            }
+        }
+    }
+    Err(bot_physics::PhysicsError::Obstructed.code())
 }
 impl Director {
     fn candidate_support(
@@ -3658,6 +3744,9 @@ mod drop_holding_tests;
 #[cfg(test)]
 #[path = "bot_local_floor_tests.rs"]
 mod local_floor_tests;
+#[cfg(test)]
+#[path = "bot_obstructed_spot_tests.rs"]
+mod obstructed_spot_tests;
 #[cfg(test)]
 #[path = "bot_offmesh_stop_tests.rs"]
 mod offmesh_stop_tests;
