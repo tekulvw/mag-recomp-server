@@ -961,7 +961,12 @@ static int route_impl(MagNav* h,const float* start,const float* goal,float radiu
 // `gated` 0 plans on the static mesh alone (a start inside a structure's
 // enclosed room, which no opening leaves).
 int mag_nav_route(MagNav* h,const float* start,const float* goal,float radius,float* projected_start,float* projected_goal,
-                  float* points,int* point_count,unsigned long long* refs,int* ref_count,int* nodes,int* stages,int gated) {
+                  float* points,int* point_count,unsigned long long* refs,int* ref_count,int* nodes,int* stages,int options) {
+    // Bit 0: gate by the standing structures. Bit 1: a goal they wall off is
+    // reached beside it (see `gate_tracked_violation`); callers that must
+    // stand at the goal itself (an interaction range) leave it clear.
+    const int gated=options&1;
+    const bool beside=(options&2)!=0;
     if(gated && !h->gates.empty()) {
         std::vector<std::array<dtPolyRef,3>> refused;
         for(int attempt=0; attempt<RelaxedGateAttempts; ++attempt) {
@@ -970,7 +975,9 @@ int mag_nav_route(MagNav* h,const float* start,const float* goal,float radius,fl
             if(relaxed==4 || relaxed==5 || relaxed==6 || *ref_count<=0) return relaxed;
             const float* reached = *point_count>0 ? points+3*(*point_count-1) : projected_goal;
             float arrival[3]; bool moved=false;
-            const int at=gate_tracked_violation(h,refs,*ref_count,projected_start,reached,goal,radius,arrival,&moved);
+            const int at=beside
+                ? gate_tracked_violation(h,refs,*ref_count,projected_start,reached,goal,radius,arrival,&moved)
+                : gate_tracked_violation(h,refs,*ref_count,projected_start,reached);
             if(at<0 && moved) {
                 // The goal is walled off: end at the nearest reachable free cell within the goal radius.
                 std::vector<dtPolyRef> corridor(refs,refs+*ref_count);

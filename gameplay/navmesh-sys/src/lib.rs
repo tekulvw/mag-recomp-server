@@ -45,7 +45,7 @@ unsafe extern "C" {
         nrefs: *mut c_int,
         nodes: *mut c_int,
         stages: *mut c_int,
-        gated: c_int,
+        options: c_int,
     ) -> c_int;
     pub fn mag_nav_polys_in_box(
         handle: *mut std::ffi::c_void,

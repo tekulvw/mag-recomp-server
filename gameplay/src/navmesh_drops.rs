@@ -280,6 +280,28 @@ impl NavMesh {
     ) -> Result<Route, Error> {
         self.route_with_drop_costs(start, goal, radius, rules, hp, &BTreeMap::new(), None)
     }
+    /// As `route_with_drops`, with the last ground segment reaching a goal a
+    /// standing structure walls off beside it (see `NavMesh::route_beside`).
+    pub fn route_with_drops_beside(
+        &self,
+        start: Point,
+        goal: Point,
+        radius: f64,
+        rules: &Rules,
+        hp: u16,
+    ) -> Result<Route, Error> {
+        self.route_with_drop_costs_core(
+            start,
+            goal,
+            radius,
+            rules,
+            hp,
+            &BTreeMap::new(),
+            None,
+            1.,
+            true,
+        )
+    }
     #[allow(clippy::too_many_arguments)]
     pub fn route_with_drop_costs(
         &self,
@@ -309,6 +331,31 @@ impl NavMesh {
         penalties: &BTreeMap<u32, f64>,
         first_drop: Option<u32>,
         exit_goal_weight: f64,
+    ) -> Result<Route, Error> {
+        self.route_with_drop_costs_core(
+            start,
+            goal,
+            radius,
+            rules,
+            hp,
+            penalties,
+            first_drop,
+            exit_goal_weight,
+            false,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn route_with_drop_costs_core(
+        &self,
+        start: Point,
+        goal: Point,
+        radius: f64,
+        rules: &Rules,
+        hp: u16,
+        penalties: &BTreeMap<u32, f64>,
+        first_drop: Option<u32>,
+        exit_goal_weight: f64,
+        beside: bool,
     ) -> Result<Route, Error> {
         let began = Instant::now();
         if !valid_point(goal) || !radius.is_finite() || !(0.05..=5.).contains(&radius) {
@@ -371,7 +418,10 @@ impl NavMesh {
         {
             let link = selection.map(|i| links[i].2);
             let target = link.map_or(goal, |l| l.launch);
-            let ground = self.route(from, target, if link.is_some() { 0.75 } else { radius })?;
+            let ground = match link {
+                Some(_) => self.route(from, target, 0.75)?,
+                None => self.route_to(from, target, radius, beside)?,
+            };
             if ground.status != Status::Complete {
                 return err("navmesh_ground_segment_incomplete");
             }
