@@ -130,9 +130,29 @@ fn a_spot_that_already_fits_is_unchanged() {
     assert!(flat(exact, raw) < 1e-6);
 }
 
+/// The floor with one placed structure: a solid box `half` metres either side
+/// of (10, 10) in x and z and `height` tall, as the mode places an
+/// objective's console, crate or shell.
+fn placed(half: f64, height: f64) -> CollisionWorld {
+    let shape = mesh("structure", &[([-half, 0., -half], [half, height, half])], false);
+    let structures = std::sync::Arc::new(
+        crate::bot_structure_collision::StructureObstacles::from_surfaces(
+            (1, 1),
+            vec![(
+                "objective-0-1-0".into(),
+                crate::dynamic_collision::Pose::at([10., 0., 10.]),
+                shape,
+            )],
+        ),
+    );
+    let mut world = world(&[]);
+    world.set_bot_structures(Some(structures));
+    world
+}
+
 /// A 2 m square machine 2.5 m tall in the middle of the floor.
 fn machine() -> CollisionWorld {
-    world(&[([9., 0., 9.], [11., 2.5, 11.])])
+    placed(1., 2.5)
 }
 
 #[test]
@@ -183,7 +203,7 @@ fn an_operator_approach_moves_beside_its_prop_but_stays_in_range() {
 #[test]
 fn a_spot_with_no_room_within_two_metres_stays_obstructed() {
     // A 6 m block: every ring column is inside it.
-    let world = world(&[([7., 0., 7.], [13., 2.5, 13.])]);
+    let world = placed(3., 2.5);
     assert_eq!(
         supported_beside(Some(&world), MAP, at([10., 2., 10.]), 0., 4., Body::default(), |_| true),
         Err(OBSTRUCTED)
@@ -208,19 +228,7 @@ fn a_spot_beside_a_raised_block_never_moves_onto_its_top() {
 #[test]
 fn a_placed_structure_obstructs_a_spot_and_the_spot_moves_beside_it() {
     let base = world(&[]);
-    let crate_mesh = mesh("structure", &[([-1., 0., -1.], [1., 2., 1.])], false);
-    let structures = std::sync::Arc::new(
-        crate::bot_structure_collision::StructureObstacles::from_surfaces(
-            (1, 1),
-            vec![(
-                "objective-0-1-0".into(),
-                crate::dynamic_collision::Pose::at([10., 0., 10.]),
-                crate_mesh,
-            )],
-        ),
-    );
-    let mut world = base.clone();
-    world.set_bot_structures(Some(structures));
+    let world = placed(1., 2.);
     let raw = [10., 0.5, 10.];
     let body = Body::default();
     assert!(supported_interval(Some(&base), MAP, at(raw), 1., 8., body).is_ok());
