@@ -400,6 +400,26 @@ for bounded retention, ordered delivery and exact identity rules. No worker
 selection permits concurrent live multi-world hosting, starts a service, or
 authorizes a release.
 
+## Changing squads
+
+A ready client can move to another squad in its own platoon from the deploy
+screen. The worker accepts the change when the target is a different squad of
+the same platoon, it has room under the profile's squad capacity (at most
+eight, as on the original server) and the client's replication is not
+backlogged. Another platoon or the other side is refused. The player then
+follows the new squad's shared spawn and spawn points.
+
+Profiles with bunkers accept the change only when their hospitals are indexed,
+because each squad's hospital point then seats its own lives: Domination profiles that
+assign teams, and Acquisition profiles that bind their field hospitals. A bunker
+profile without indexed hospitals still refuses a change to any squad but its
+configured one.
+
+In Domination this is how a player reaches an APC. An APC that is a squad
+spawn point offers "enter vehicle" only to the squads whose spawn points
+include it, so a player in a squad without an APC must change to one that has
+one.
+
 ## Shared squad spawn selection
 
 A ready client can change its squad's shared spawn only after its initial objects
