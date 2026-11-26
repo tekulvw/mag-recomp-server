@@ -58,6 +58,9 @@ these links so far; elsewhere every structure is `other`.
   team that has not armed its structure within `give_up_ms` gives it up, and
   the squad does not pick it again for `retry_ms`.
 - A structure the defenders have repaired may be armed again.
+- Structures that whole attacking squads break as their lane's defences
+  ([bot-breach-order.md](bot-breach-order.md)) are not candidates while those
+  squads work them.
 
 What destroying a structure does is unchanged. The mode runtime applies the
 authored effects: the linked forward spawn closes and its squads fall back to

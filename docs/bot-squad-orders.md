@@ -32,6 +32,8 @@ Each squad with bots works on one objective, chosen every bot tick:
    therefore moves the squad on to the next uncompleted objective of its lane.
    A Domination lane stays on its secured point while its next points are
    still inactive; holding that point is the native primary.
+   While the lane's defences stand, the lane objective is the defence the
+   squad breaks first ([bot-breach-order.md](bot-breach-order.md)).
 3. **The nearest active objective.** A squad whose lane is exhausted helps the
    objective, among those other squads of its team work on, nearest to the
    mean position of its living bots. Ties go to the lower objective index.

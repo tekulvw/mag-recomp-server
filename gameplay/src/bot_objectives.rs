@@ -325,6 +325,7 @@ pub(super) struct Director {
     pub(super) armed: crate::bot_armed_objectives::Book,
     pub(super) demolition: crate::bot_demolition::Book,
     pub(super) squad_orders: crate::bot_squad_orders::Book,
+    pub(super) breach: crate::bot_breach::Book,
 }
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct CandidateKey {
@@ -421,7 +422,7 @@ pub(crate) fn eligible(state: replication::ObjectiveState) -> bool {
 }
 /// Initial authored lanes; after one prerequisite completes, reinforce the other.
 /// C remains unavailable through its real five-second delayed activation.
-fn assignment(
+pub(crate) fn lane_assignment(
     catalog: &objective_catalog::ObjectiveCatalog,
     world: &objective_control::ObjectiveWorld,
     squad: u16,
@@ -885,18 +886,16 @@ fn boxes_intersect(a: crate::actor_collision::Bounds, b: crate::actor_collision:
 impl<W: Write> Engine<W> {
     /// The objective a squad's bots work on now (its lane), if any.
     /// Domination squads follow the mode runtime's own current assignment,
-    /// the one their human members see.
+    /// the one their human members see. While their lane's defences stand,
+    /// squads break those first (bot_breach).
     pub(crate) fn bot_squad_lane(&self, squad: u16) -> Option<u16> {
-        if self.domination_gameplay.is_some() {
-            self.initial_objective_index(squad)
-                .ok()
-                .filter(|&index| index != u16::MAX)
-        } else {
-            self.objective_catalog
-                .as_ref()
-                .zip(self.objective_world.as_ref())
-                .and_then(|(c, w)| assignment(c, w, squad))
-        }
+        self.bot_mode_lane(squad).map(|lane| {
+            self.bot_registry
+                .director
+                .breach
+                .instead_of(squad, lane)
+                .unwrap_or(lane)
+        })
     }
     /// An objective's centre and the team that owns (defends) it.
     pub(crate) fn bot_objective_center(&self, objective: u16) -> Option<([f32; 3], u8)> {

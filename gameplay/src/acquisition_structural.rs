@@ -199,6 +199,57 @@ impl Setup {
         Ok(())
     }
 
+    /// What each bound Structural row is to bots breaking a lane's defences
+    /// (bot_breach), in row order. A row whose authored hooks
+    /// open passive drop objectives is anti-air, with the spawn points those
+    /// objectives open; other hooks (mortar, sensor, motor pool) are support.
+    /// A row without hooks that is the forward spawn of an on-foot squad
+    /// point is a bunker; the rest are obstacles (gates, barricades).
+    pub(crate) fn bot_stage_roles(&self) -> Vec<(u16, crate::bot_breach::Role)> {
+        use crate::bot_breach::Role;
+        let rows = &self.bindings.rows;
+        rows.iter()
+            .filter(|(_, row)| row.class == NativeClass::Structural)
+            .map(|(&index, row)| {
+                let role = if let Some(Hook::Antiaircraft { spawns, .. }) = row
+                    .hooks
+                    .values()
+                    .find(|hook| matches!(hook, Hook::Antiaircraft { .. }))
+                {
+                    let mut opened: Vec<u16> = spawns
+                        .iter()
+                        .filter_map(|target| rows.get(target)?.spawn.map(|s| s.index))
+                        .collect();
+                    opened.dedup();
+                    Role::AntiAir(opened)
+                } else if !row.hooks.is_empty() {
+                    Role::Support
+                } else if let Some(spawn) = row.spawn.filter(|s| !s.vehicle) {
+                    Role::OwnerSpawn(spawn.index)
+                } else if row.spawn.is_some() {
+                    Role::Support
+                } else {
+                    Role::Obstacle
+                };
+                (index, role)
+            })
+            .collect()
+    }
+
+    /// Each squad's authored spawn points, by squad index.
+    pub(crate) fn squad_spawn_points(&self) -> Vec<(u16, Vec<u16>)> {
+        self.bindings
+            .squads
+            .iter()
+            .map(|(&squad, s)| {
+                (
+                    u16::from(squad),
+                    s.points.iter().map(|&(index, _)| index).collect(),
+                )
+            })
+            .collect()
+    }
+
     /// Every bound field hospital must be the forward spawn of one of this
     /// map's Structural objectives, whose FSP then drives its emplacement.
     pub(crate) fn validate_hospitals(
