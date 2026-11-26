@@ -110,7 +110,15 @@ pub(crate) fn character_with_loadout(
         name,
         squad,
         None,
+        Appearance::default(),
     )
+}
+
+/// MagCharacterInfo head and voice identities a server character presents.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Appearance {
+    pub head: u8,
+    pub voice: u8,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -124,8 +132,11 @@ pub(crate) fn character_snapshot(
     name: &str,
     squad: crate::replication::SquadAddress,
     physical: Option<&crate::replication::CharacterRespawn>,
+    appearance: Appearance,
 ) -> Result<Vec<u8>, &'static str> {
     let mut character = server_character(faction, name, squad);
+    character.mag_info.head_id = appearance.head;
+    character.mag_info.voice_id = appearance.voice;
     character.object_index = object_index;
     if object_index != OBJECT_INDEX {
         character.info.account_id = 0x8000_0000 | u32::from(object_index);

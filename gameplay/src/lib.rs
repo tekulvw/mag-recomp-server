@@ -48,6 +48,7 @@ mod bot_demolition;
 mod bot_firearm_kd;
 pub mod bot_firearms;
 pub mod bot_healing;
+pub mod bot_kits;
 pub mod bot_names;
 pub mod bot_navigation;
 mod bot_objectives;
@@ -1392,6 +1393,8 @@ pub struct Engine<W: Write> {
     bot_registry: bot_registry::BotRegistry,
     bot_perception: bot_perception::World,
     bot_names: bot_names::Catalog,
+    /// Opt-in varied bot kits; bots keep the bootstrap kit when absent.
+    bot_kits: Option<std::sync::Arc<bot_kits::Catalog>>,
     world_tick_enabled: bool,
     last_world_tick: Option<Duration>,
     /// Opt-in per-phase world-tick time (headless diagnostics).

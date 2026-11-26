@@ -159,6 +159,8 @@ pub(super) struct WorldBot {
     pub(super) target: Target,
     pub(super) slot: usize,
     pub(super) role_slot: u8,
+    /// The varied kit and appearance chosen when the bot joined, if any.
+    pub(super) kit: Option<BotKit>,
     pub(super) traffic_yield: Option<crate::bot_traffic_flow::Yield>,
     pub(super) traffic_yield_cursor: usize,
     pub(super) traffic_progress: Option<crate::bot_traffic_flow::Progress>,
@@ -210,6 +212,14 @@ pub(super) struct WorldBot {
     last_move_since: Option<Duration>,
     last_navigation_status: Option<String>,
     pub(super) task: crate::bot_objectives::Task,
+}
+/// A bot's varied kit identity and appearance; kept for all its lives.
+#[derive(Clone, Debug)]
+pub(super) struct BotKit {
+    pub(super) id: String,
+    pub(super) role: crate::bot_kits::Role,
+    pub(super) head: u8,
+    pub(super) voice: u8,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PassageLife {
@@ -720,7 +730,17 @@ impl WorldBot {
                 .ok_or("bot_name_index")?,
             self.target.squad,
             Some(&physical),
+            self.appearance(),
         )
+    }
+    /// Head and voice presented in the character's MagCharacterInfo.
+    pub(super) fn appearance(&self) -> dummy::Appearance {
+        self.kit
+            .as_ref()
+            .map_or_else(Default::default, |kit| dummy::Appearance {
+                head: kit.head,
+                voice: kit.voice,
+            })
     }
 }
 fn regional_slot_source_active(catalog: &spawn_catalog::SpawnCatalog, slot: &BotSlot) -> bool {
@@ -798,6 +818,97 @@ impl<W: Write> Engine<W> {
             .map_or_else(bot_physics::Body::default, |mesh| mesh.body())
     }
 
+    /// Varied bot kits for this world's bots. Every kit and apparel item is
+    /// checked against the loaded item catalog and both match factions.
+    pub fn with_bot_kits(
+        mut self,
+        kits: std::sync::Arc<crate::bot_kits::Catalog>,
+    ) -> Result<Self, &'static str> {
+        self.install_bot_kits(Some(kits))?;
+        Ok(self)
+    }
+    pub(crate) fn install_bot_kits(
+        &mut self,
+        kits: Option<std::sync::Arc<crate::bot_kits::Catalog>>,
+    ) -> Result<(), &'static str> {
+        if let Some(catalog) = &kits {
+            catalog.validate_items(&self.item_catalog)?;
+            let profile = self.match_profile();
+            for faction in [profile.attacking_faction, profile.defending_faction] {
+                if !catalog.covers(faction) {
+                    return Err("bot_kits_missing_match_faction");
+                }
+            }
+        }
+        self.bot_kits = kits;
+        Ok(())
+    }
+    /// The kit a newly joining bot carries for all its lives: a varied kit
+    /// when a kit catalog is installed, otherwise the faction bootstrap kit.
+    fn bot_life_kit(
+        &self,
+        faction: u8,
+        squad: replication::SquadAddress,
+        role_slot: u8,
+        name_index: u16,
+    ) -> Result<(replication::CharacterLoadout, Option<BotKit>), &'static str> {
+        let Some(kits) = self.bot_kits.as_ref() else {
+            let inventory = self
+                .item_catalog
+                .bootstrap_default_inventory_index(faction)
+                .ok_or("missing_retail_target_loadout")?;
+            let loadout = self
+                .item_catalog
+                .bootstrap_loadout(faction, inventory)
+                .ok_or("missing_retail_target_loadout")?;
+            return Ok((loadout, None));
+        };
+        use crate::bot_kits::Role;
+        let config = self.bot_registry.config.as_ref().unwrap();
+        let engineer_tool = self
+            .bot_repair_tool()
+            .map(|tool| tool.item_id)
+            .filter(|&tool| self.item_catalog.is_retail_repair_tool(tool));
+        let assigned = if config.healing.medic(role_slot) {
+            Some(Role::Medic)
+        } else if config.repair.enabled
+            && config.repair.engineer_role_slots.contains(&role_slot)
+            && engineer_tool.is_some()
+        {
+            Some(Role::Engineer)
+        } else {
+            None
+        };
+        let squad_roles: Vec<_> = self
+            .bot_registry
+            .bots
+            .values()
+            .filter(|b| b.target.squad == squad)
+            .filter_map(|b| b.kit.as_ref().map(|k| k.role))
+            .collect();
+        let chosen = kits.choose(
+            &self.item_catalog,
+            crate::bot_kits::Request {
+                faction,
+                name_index,
+                salt: self
+                    .selected_match
+                    .as_ref()
+                    .map_or("", |m| m.formation_id.as_str()),
+                assigned,
+                squad_roles: &squad_roles,
+            },
+        )?;
+        Ok((
+            chosen.loadout,
+            Some(BotKit {
+                id: chosen.kit_id,
+                role: chosen.role,
+                head: chosen.head,
+                voice: chosen.voice,
+            }),
+        ))
+    }
     pub fn with_bot_population(
         mut self,
         mut config: BotPopulation,
@@ -3194,30 +3305,6 @@ impl<W: Write> Engine<W> {
             } else {
                 self.match_profile().defending_faction
             };
-            let inventory = self
-                .item_catalog
-                .bootstrap_default_inventory_index(faction)
-                .ok_or("missing_retail_target_loadout")?;
-            let loadout = self
-                .item_catalog
-                .bootstrap_loadout(faction, inventory)
-                .ok_or("missing_retail_target_loadout")?;
-            // Squad medics carry the item that heals others, and squad
-            // engineers the mode's repair tool; each swaps its own role
-            // slot's self-healing item.
-            let loadout = crate::bot_healing::medic_loadout(
-                &self.bot_registry.config.as_ref().unwrap().healing,
-                role_slot,
-                &self.item_catalog,
-                loadout,
-            );
-            let loadout = crate::bot_repair::engineer_loadout(
-                &self.bot_registry.config.as_ref().unwrap().repair,
-                role_slot,
-                &self.item_catalog,
-                self.bot_repair_tool().map(|tool| tool.item_id),
-                loadout,
-            );
             let generation = self
                 .bot_registry
                 .generations
@@ -3284,6 +3371,24 @@ impl<W: Write> Engine<W> {
                 .name_for(name_index)
                 .ok_or("bot_name_index")?
                 .to_owned();
+            let (loadout, kit) = self.bot_life_kit(faction, squad, role_slot, name_index)?;
+            // Squad medics carry the item that heals others, and squad
+            // engineers the mode's repair tool; each swaps its own role
+            // slot's self-healing item. A varied kit for those slots already
+            // carries the item, so the swap leaves it unchanged.
+            let loadout = crate::bot_healing::medic_loadout(
+                &self.bot_registry.config.as_ref().unwrap().healing,
+                role_slot,
+                &self.item_catalog,
+                loadout,
+            );
+            let loadout = crate::bot_repair::engineer_loadout(
+                &self.bot_registry.config.as_ref().unwrap().repair,
+                role_slot,
+                &self.item_catalog,
+                self.bot_repair_tool().map(|tool| tool.item_id),
+                loadout,
+            );
             // A side containing only bots still owns a shared schedule. Adopt
             // the same authored first-participant policy as human confirmation,
             // while preserving both initial bot admission and an existing phase.
@@ -3303,7 +3408,16 @@ impl<W: Write> Engine<W> {
             } else {
                 None
             };
-            self.record(json!({"op":"bot_population_spawn","name":display_name,"name_index":name_index,"object_index":index,"generation":generation,"team":team,"squad_index":squad.squad_index(),"source_spawn":slot.source_spawn,"slot":slot_index,"spawn_point_index":spawn.spawn_point,"arrival":spawn.arrival.code(),"position":spawn.position}),wall)?;
+            let mut spawn_receipt = json!({"op":"bot_population_spawn","name":display_name,"name_index":name_index,"object_index":index,"generation":generation,"team":team,"squad_index":squad.squad_index(),"source_spawn":slot.source_spawn,"slot":slot_index,"spawn_point_index":spawn.spawn_point,"arrival":spawn.arrival.code(),"position":spawn.position});
+            if let Some(kit) = &kit {
+                spawn_receipt["kit"] = json!(kit.id);
+                spawn_receipt["kit_role"] = json!(kit.role.code());
+                spawn_receipt["role_slot"] = json!(role_slot);
+                spawn_receipt["head"] = json!(kit.head);
+                spawn_receipt["voice"] = json!(kit.voice);
+                spawn_receipt["primary"] = json!(loadout.inventories[0].slots[0]);
+            }
+            self.record(spawn_receipt, wall)?;
             if let Some(clock) = new_clock {
                 self.team_waves[usize::from(team)] = Some(clock);
             }
@@ -3330,6 +3444,7 @@ impl<W: Write> Engine<W> {
                     },
                     slot: slot_index,
                     role_slot,
+                    kit,
                     traffic_yield: None,
                     traffic_yield_cursor: 0,
                     traffic_progress: None,
@@ -3719,6 +3834,7 @@ pub(crate) mod identity_tests {
                     &expected,
                     bot.target.squad,
                     Some(&physical),
+                    bot.appearance(),
                 )
                 .unwrap();
                 assert_eq!(
