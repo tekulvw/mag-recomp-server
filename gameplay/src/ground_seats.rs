@@ -253,6 +253,51 @@ impl<W: Write> Engine<W> {
         occupants >= usize::from(vehicle.maximum_occupancy.unwrap_or(1))
     }
 
+    /// A vehicle that is a squad's spawn point holds eight seats for every
+    /// squad whose spawn points include it. A character of one of those squads
+    /// may always take a free seat. Anyone else may take one only while more
+    /// seats are free than the squads still hold, counting the seats their
+    /// members already fill. The client applies the same rule before it offers
+    /// "enter vehicle", so this refuses only requests the client would not send.
+    pub(crate) fn ground_seat_reserved_for_other_squads(
+        &self,
+        vehicle: &ground_vehicles::Creation,
+        actor: &Active,
+    ) -> bool {
+        const SEATS_PER_SQUAD: usize = 8;
+        let (Some(cap), Some(spawns)) = (vehicle.maximum_occupancy, self.spawn_catalog.as_ref())
+        else {
+            return false;
+        };
+        let squads: std::collections::BTreeSet<u16> = spawns
+            .map_pool()
+            .squads
+            .iter()
+            .filter(|squad| squad.available.contains(&vehicle.spawn_point_index))
+            .map(|squad| squad.index)
+            .collect();
+        if squads.is_empty() || squads.contains(&actor.squad_catalog.squad_index()) {
+            return false;
+        }
+        let occupants: Vec<_> = self
+            .peers
+            .values()
+            .chain(self.active.iter())
+            .filter(|other| {
+                other
+                    .ground_seat
+                    .is_some_and(|seat| seat.vehicle_index == vehicle.index)
+            })
+            .collect();
+        let squad_occupants = occupants
+            .iter()
+            .filter(|other| squads.contains(&other.squad_catalog.squad_index()))
+            .count();
+        let free = usize::from(cap).saturating_sub(occupants.len());
+        let held = (SEATS_PER_SQUAD * squads.len()).saturating_sub(squad_occupants);
+        free <= held
+    }
+
     pub(crate) fn ground_passenger_seat(
         &self,
         vehicle: &ground_vehicles::Creation,

@@ -239,11 +239,10 @@ fn domination_apc_setup() -> (Engine<Vec<u8>>, Value) {
     domination_apc_setup_at(0)
 }
 
-fn domination_apc_setup_at(first_apc: u16) -> (Engine<Vec<u8>>, Value) {
+/// SYNTHETIC: a Domination spawn pool whose points `first_apc..first_apc + 8`
+/// are APC passenger points and whose squads all use the first two of them.
+fn domination_apc_spawn_json(first_apc: u16) -> Value {
     let apcs = first_apc..first_apc + 8;
-    let mut engine = acquisition_entry::acquisition()
-        .with_match_limits(1, 64)
-        .unwrap();
     let mut spawn = apc_spawn_json(1);
     spawn["match_profile"]["game_type"] = json!(2);
     let available = json!([first_apc, first_apc + 1]);
@@ -263,7 +262,15 @@ fn domination_apc_setup_at(first_apc: u16) -> (Engine<Vec<u8>>, Value) {
             }))
             .collect::<Vec<_>>()
     );
-    engine.spawn_catalog = Some(spawns(spawn).unwrap());
+    spawn
+}
+
+fn domination_apc_setup_at(first_apc: u16) -> (Engine<Vec<u8>>, Value) {
+    let apcs = first_apc..first_apc + 8;
+    let mut engine = acquisition_entry::acquisition()
+        .with_match_limits(1, 64)
+        .unwrap();
+    engine.spawn_catalog = Some(spawns(domination_apc_spawn_json(first_apc)).unwrap());
     let mut value = catalog(&engine);
     value["source"]["creation_scope"] = json!("native_domination_vehicle_source_points");
     let template = value["vehicles"][0].clone();
