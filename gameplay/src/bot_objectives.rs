@@ -749,6 +749,20 @@ fn ring_offset(mut index: usize, grid: f64, first: i32) -> [f64; 2] {
     }
     [48., 48.]
 }
+/// Whether a bot standing at `p` stands in another bot's approach lane or a
+/// protected passage, as the holding checks judge it.
+fn in_traffic(
+    p: [f64; 3],
+    lanes: &[Vec<[[f64; 3]; 2]>],
+    protected: &[crate::actor_collision::Bounds],
+    policy: &ObjectivePolicy,
+) -> bool {
+    let bounds = crate::actor_collision::Bounds::body(p, bot_physics::Body::default());
+    protected.iter().any(|b| boxes_intersect(bounds, *b))
+        || lanes
+            .iter()
+            .any(|lane| crate::bot_traffic_flow::in_lane(p, lane, policy.reservation_spacing_m))
+}
 fn boxes_intersect(a: crate::actor_collision::Bounds, b: crate::actor_collision::Bounds) -> bool {
     (0..3).all(|i| a.min[i] <= b.max[i] && a.max[i] >= b.min[i])
 }
@@ -1763,6 +1777,101 @@ impl<W: Write> Engine<W> {
                 .is_none_or(|launch| launch == component))
         .then_some(r.position)
     }
+    /// For a capsule bot frozen inside an approach lane with no holding spot on
+    /// the launch ring: the nearest supported spot around it, on the launch's
+    /// navmesh component and not past the ledge, that keeps the lane spacing
+    /// plus its own radius from every lane and clear of protected passages
+    /// and other bodies. Rings of 1 to 3 m in 0.5 m steps, 8 directions; each
+    /// spot's support is cached like the ring's.
+    #[allow(clippy::too_many_arguments)]
+    fn holding_beside_lanes(
+        &mut self,
+        id: u16,
+        passage: development_bot_movement::DropPassage,
+        map: &str,
+        policy: &ObjectivePolicy,
+        actors: &crate::actor_collision::ActorGrid,
+        lanes: &[Vec<[[f64; 3]; 2]>],
+        protected: &[crate::actor_collision::Bounds],
+    ) -> Option<replication::CharacterPosition> {
+        let mesh = self.navmesh_world.clone()?;
+        let here = self.bot_registry.bots[&id]
+            .target
+            .runtime?
+            .physical_position();
+        // The launch's floor, or the bot's own when the launch sits just off
+        // the eroded mesh (as `holding_in_place` allows).
+        let component = mesh
+            .component_id(passage.launch)
+            .or_else(|_| mesh.component_id(here))
+            .ok()?;
+        let probe = actors.probe();
+        let clearance = policy.reservation_spacing_m + probe.radius;
+        let forward = [
+            passage.landing[0] - passage.launch[0],
+            passage.landing[2] - passage.launch[2],
+        ];
+        let length = forward[0].hypot(forward[1]);
+        for step in 2..=6 {
+            let radius = f64::from(step) * 0.5;
+            for k in 0..8 {
+                let angle = f64::from(k) * std::f64::consts::FRAC_PI_4;
+                let raw = position([
+                    here[0] + radius * angle.cos(),
+                    here[1] + 0.5,
+                    here[2] + radius * angle.sin(),
+                ]);
+                let key = (
+                    passage.id,
+                    [raw.x.to_bits(), raw.y.to_bits(), raw.z.to_bits()],
+                );
+                let support = match self.bot_registry.director.holding_cache.get(&key) {
+                    Some(g) => *g,
+                    None => {
+                        let g = supported(
+                            self.collision_world.as_ref(),
+                            map,
+                            raw,
+                            policy,
+                            self.bot_movement_body(),
+                        );
+                        if self.bot_registry.director.holding_cache.len() >= policy.cache_limit {
+                            self.bot_registry.director.holding_cache.pop_first();
+                        }
+                        self.bot_registry.director.holding_cache.insert(key, g);
+                        g
+                    }
+                };
+                let Ok(spot) = support else {
+                    continue;
+                };
+                let p = point(spot);
+                let beyond = length > 0.01
+                    && ((p[0] - passage.launch[0]) * forward[0]
+                        + (p[2] - passage.launch[2]) * forward[1])
+                        / length
+                        > 0.5 * policy.drop_holding_grid_m;
+                if beyond
+                    || mesh.component_id(p).ok() != Some(component)
+                    || boxes_intersect(
+                        crate::actor_collision::Bounds::body(p, probe),
+                        passage.protected_bounds,
+                    )
+                    || protected.iter().any(|b| {
+                        boxes_intersect(crate::actor_collision::Bounds::body(p, probe), *b)
+                    })
+                    || lanes
+                        .iter()
+                        .any(|lane| crate::bot_traffic_flow::in_lane(p, lane, clearance))
+                    || !matches!(actors.occupied(id, p, probe), Ok(false))
+                {
+                    continue;
+                }
+                return Some(spot);
+            }
+        }
+        None
+    }
     /// Queue staging around a launch: walk the candidate ring from `attempt`,
     /// rejecting with cheap static checks (in front of the ledge, support
     /// outside the launch floor's vertical window, a different navmesh
@@ -2003,6 +2112,23 @@ impl<W: Write> Engine<W> {
                 // launch's floor. Wait where the queue froze this bot instead.
                 Err(reason) if misses + 1 + scanned >= policy.drop_holding_candidate_limit => {
                     match self.holding_in_place(id, passage, policy) {
+                        // A capsule frozen inside another bot's approach lane
+                        // (or a protected passage) cannot wait there: it
+                        // steps just clear of it instead, if it can.
+                        Some(here)
+                            if actors.probe().shape.capsule().is_some()
+                                && in_traffic(point(here), &lanes, &protected, policy) =>
+                        {
+                            match self.holding_beside_lanes(
+                                id, passage, &map, policy, actors, &lanes, &protected,
+                            ) {
+                                Some(spot) => Ok(spot),
+                                None => {
+                                    in_place = true;
+                                    Ok(here)
+                                }
+                            }
+                        }
                         Some(here) => {
                             in_place = true;
                             Ok(here)
