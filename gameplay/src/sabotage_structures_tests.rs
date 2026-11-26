@@ -13,9 +13,7 @@ const SERVER: u16 = 7;
 
 fn catalog(game_type: u8) -> ObjectiveCatalog {
     let per_team: u16 = if game_type == 0 { 4 } else { 8 };
-    let object = |index: u16, initial: u8| {
-        json!({"token":format!("0x{index:08x}"),"object_index":index,"initial_state":initial})
-    };
+    let object = |index: u16, initial: u8| json!({"token":format!("0x{index:08x}"),"object_index":index,"initial_state":initial});
     ObjectiveCatalog::from_json(
         &json!({"schema_version":1,"format":"mag_retail_objective_catalog","application_id":20231,
         "protocol":crate::protocol::ProtocolInfo::RETAIL_PROTOCOL,"game_type":game_type,
@@ -279,7 +277,10 @@ fn placed_packs_block_bot_movement_through_the_structure_snapshot() {
         .unwrap();
     // A body walking along x at the console's height stops at its face.
     let (fraction, normal, label) = sweep(&runtime).expect("the console blocks");
-    assert!((fraction - (10. - 1. - 0.4) / 20.).abs() < 1e-3, "{fraction}");
+    assert!(
+        (fraction - (10. - 1. - 0.4) / 20.).abs() < 1e-3,
+        "{fraction}"
+    );
     assert!(normal[0] < -0.9);
     assert_eq!(label, "objective-4-0-0");
     runtime
@@ -325,7 +326,10 @@ fn the_index_must_bind_to_a_sabotage_catalog_map_and_its_own_dependents() {
 #[test]
 fn standing_packs_stand_all_match_and_survive_a_restart() {
     let mut raw = index();
-    raw["standing"] = json!([surface('4', [50., 5., 10.], 9), surface('4', [50., 1., 10.], 29)]);
+    raw["standing"] = json!([
+        surface('4', [50., 5., 10.], 9),
+        surface('4', [50., 1., 10.], 29)
+    ]);
     let mut runtime = Runtime::new(Arc::new(assets(raw).unwrap()), ROW | 1 << 29);
     assert_eq!(heights(&runtime), [1., 5.]);
     runtime

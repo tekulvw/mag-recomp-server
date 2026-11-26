@@ -733,7 +733,9 @@ impl Registry {
                         io::Error::other("sabotage_structures_require_objective_catalog")
                     })?;
                     if policy.game_type != 0 || collision.is_none() {
-                        return Err(io::Error::other("sabotage_structures_require_sabotage_world"));
+                        return Err(io::Error::other(
+                            "sabotage_structures_require_sabotage_world",
+                        ));
                     }
                     sabotage_structures::Assets::load(path, spawns.map_name(), catalog)
                         .map(Arc::new)

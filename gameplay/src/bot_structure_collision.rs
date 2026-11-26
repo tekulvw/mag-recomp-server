@@ -545,9 +545,10 @@ impl<W: Write> crate::Engine<W> {
     /// Place and remove the Sabotage objectives' collision for the states
     /// they are in now; each change is recorded as `sabotage_structures`.
     fn sync_sabotage_structures(&mut self, wall: u64) -> Result<(), &'static str> {
-        let (Some(runtime), Some(world)) =
-            (self.sabotage_structures.as_mut(), self.objective_world.as_ref())
-        else {
+        let (Some(runtime), Some(world)) = (
+            self.sabotage_structures.as_mut(),
+            self.objective_world.as_ref(),
+        ) else {
             return Ok(());
         };
         for change in runtime.sync(world)? {
