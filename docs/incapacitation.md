@@ -30,7 +30,11 @@ not a game preset:
 ```
 
 Initial admission compares final adjusted HP damage strictly below the threshold,
-with the configured physical-state exclusions. The duration uses the effective
+with the configured physical-state exclusions. A lethal hit whose damage type carries
+KineticResponse (bit 8 of the native type, which explosives such as frags and
+rockets set) is never admitted: the client marks such a death as complete as
+soon as it applies that field8, and goes straight to the respawn screen without
+a down. Hits without the flag, such as bullets, can still down a player. The duration uses the effective
 owned and inherited `kCharModIncapacitatedTime` modifier. Further adjusted damage
 accumulates separately and finishes at or above the threshold. Expiry consumes
 the downed state once and clears the two low condition bits.
