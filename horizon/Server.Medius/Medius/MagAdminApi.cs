@@ -165,15 +165,17 @@ namespace Server.Medius
         private readonly Func<DateTime> _clock;
         private readonly Action<string> _log;
         private readonly MagDmePortBudget _portBudget;
+        private readonly Func<DateTime, object> _status;
         private readonly SemaphoreSlim _connections = new SemaphoreSlim(MaximumConnections);
         private readonly CancellationTokenSource _stop = new CancellationTokenSource();
         private TcpListener _listener;
         private Task _acceptLoop;
 
         public MagAdminApi(IPEndPoint listen, byte[] secret, LocalCharacterStore store, string backupDirectory, string markerDirectory,
-            Func<DateTime> clock, Action<string> log, MagDmePortBudget portBudget = null)
+            Func<DateTime> clock, Action<string> log, MagDmePortBudget portBudget = null, Func<DateTime, object> status = null)
         {
             _portBudget = portBudget ?? MagDmePortBudget.Unbounded();
+            _status = status;
             _listen = listen ?? throw new ArgumentNullException(nameof(listen));
             _authenticator = new MagAdminApiAuthenticator(secret);
             _store = store ?? throw new ArgumentNullException(nameof(store));
@@ -327,6 +329,8 @@ namespace Server.Medius
                         return request.Method != "POST" ? MethodNotAllowed("POST") : SetLevel(account, request.Body, actor, now);
                     case ["", "admin", "v1", "dme-ports"]:
                         return request.Method != "GET" ? MethodNotAllowed("GET") : DmePorts();
+                    case ["", "admin", "v1", "status"] when _status != null:
+                        return request.Method != "GET" ? MethodNotAllowed("GET") : MagAdminApiResponse.Json(200, _status(now));
                     default:
                         return MagAdminApiResponse.Error(404, "not_found");
                 }

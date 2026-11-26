@@ -134,8 +134,40 @@ Anything else is `401 {"error":"unauthorized"}`; the log records only the reason
 | `GET /admin/v1/characters/{account}` | `200 {"account","level","experience","skill_points","next_level_experience","session"}`; `next_level_experience` is null at the maximum level |
 | `POST /admin/v1/characters/{account}/level` with `{"level":N,"apply":bool}` | `200 {"applied","account","from_level","to_level","experience_before","experience_after","skill_points_before","skill_points_after","backup"}`; `backup` is the backup file name, or null for a dry run |
 | `GET /admin/v1/dme-ports` | `200 {"capacity","in_use","available","first_port","last_port","source","udp_ports_bound"}`: humans holding a DME UDP port across all worlds against the [cap](configured-world-registry.md#dme-port-capacity). `capacity`, `available` and `last_port` are null when unbounded; `source` is `port_range`, `override` or `unbounded`; `udp_ports_bound` counts sockets actually bound |
+| `GET /admin/v1/status` | `200`: the read-only server status below, for the portal's public status page |
 
 `session` is `online`, `offline` or `unknown`, decided as `accounts list` decides it.
+
+`GET /admin/v1/status` carries counts only, never an account, character or player name, so
+the portal can publish it:
+
+```json
+{"medius_version":"0.11.0","gameplay_version":"0.15.0","started_at":"2026-11-26T10:00:00Z",
+ "uptime_seconds":7200,"mode":"registry","players_online":12,"queued":1,"queued_by_game_type":[1,0,0],
+ "dme_ports":{"capacity":32,"in_use":9},
+ "worlds":[{"worker_id":"sabotage","state":"open","game_types":[0],"human_capacity":32,"pending":0,
+   "match":{"profile_id":"…","game_type":0,"attacking_faction":1,"defending_faction":2,"humans":8,
+            "attacking_humans":5,"defending_humans":3,"human_capacity":32,"bots":56,"world_capacity":64}}]}
+```
+
+- `medius_version` and `gameplay_version` are the newest releases in the Medius changelog built
+  into the image and the gameplay changelog the chart copies from the gameplay image (the same
+  notes the in-game NEWS shows); null without them. `started_at` is when this process started.
+- `mode` is `registry` (configured worlds), `single` (one local world, reported as `gameplay`) or
+  `none` (no local gameplay).
+- `players_online` counts accounts holding a live login lease, as `accounts list` decides
+  `online`; null when no session marker can be read.
+- `queued_by_game_type` counts humans in the registry's global queue by requested game type
+  (Sabotage, Acquisition, Domination); `pending` counts humans already placed on a world and not
+  yet admitted there.
+- A world's `state` is `open` (admitting), `draining` (closed to new players by the registry's
+  `draining`, matches continue), `faulted` (closed after a worker fault: unreachable at start, a
+  failed tick, a foreign or refused incarnation, or the adoption cap; Medius logs these as
+  "Configured worker …", and the entry reopens only when a matching worker is adopted) or
+  `unavailable` (not faulted, but not ready: starting, or its world stream lapsed).
+- `match` is null unless humans are in a match. Factions are 0 Valor, 1 Raven, 2 SVER; game
+  types 0 Sabotage, 1 Acquisition, 2 Domination. `bots` is the profile's bot fill less the
+  humans, the population the worker tops the world up to; 0 without bot fill.
 Set-level refusals are `409 {"error":code,"message":text}`:
 
 | Code | When (`mag-admin` reason) |

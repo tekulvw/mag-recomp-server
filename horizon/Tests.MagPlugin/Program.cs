@@ -76,6 +76,10 @@ Test("admin API is off by default and validates its configuration", AdminApiChec
 Test("admin API signs requests like the portal vectors", AdminApiChecks.Vectors);
 Test("admin API authenticates requests and shares the mag-admin rules", AdminApiChecks.Run);
 Test("admin API reports DME ports in use against the cap", AdminApiChecks.DmePorts);
+Test("server status world states and match counts", ServerStatusChecks.Describe);
+Test("server status versions from the bundled changelogs", ServerStatusChecks.Versions);
+Test("server status endpoint is signed, read-only and names no account", ServerStatusChecks.Endpoint);
+Test("server status of a configured registry", ServerStatusChecks.Registry);
 Test("medius starts through Program.Main, not the admin CLI", MediusEntryPointChecks.Run);
 Test("operator starting level creates earned-equivalent characters", StartingLevelChecks.Run);
 Test("operator Training level raises new completions to an earned-equivalent minimum", TrainingLevelChecks.Run);
