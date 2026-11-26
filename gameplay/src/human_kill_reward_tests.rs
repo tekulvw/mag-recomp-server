@@ -607,9 +607,10 @@ fn queued_grenade_collapse_grants_xp_for_owned_damage_even_after_killer_dies() {
             engine.active.as_mut().unwrap().life = CharacterLife::AwaitingRespawn { generation: 4 };
         }
         queue_grenade(&mut engine, 0, 1, 4, 40.0, 1000).unwrap();
+        // This frag carries KineticResponse, so its lethal hit is final.
         assert!(matches!(
             victim(&engine).life,
-            CharacterLife::Incapacitated { generation: 4, .. }
+            CharacterLife::AwaitingRespawn { generation: 4 }
         ));
         assert_eq!(victim(&engine).reward_statistics.get(&12), Some(&1));
         let rewards = kills(&engine);

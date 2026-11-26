@@ -147,6 +147,40 @@ fn initial_threshold_equality_and_excluded_state_are_terminal() {
 }
 
 #[test]
+fn a_lethal_hit_with_kinetic_response_is_terminal_below_the_threshold() {
+    let engine = two_actors(0.4);
+    // Explosive (2) with KineticResponse (8): type 10 in the high nibble.
+    for (kind, downs) in [
+        (0x1, true),
+        (0x2, true),
+        (0x5, true),
+        (0xa, false),
+        (0x9, false),
+    ] {
+        let hit = replication::CharacterDamage {
+            last_location_and_type: (kind << 4) | 1,
+            ..damage(0x0380_0002)
+        };
+        let (model, life) = engine
+            .plan_human_damage(patient(&engine), 40.0, hit, Duration::ZERO)
+            .unwrap();
+        if downs {
+            assert!(
+                matches!(life, CharacterLife::Incapacitated { generation: 4, .. }),
+                "type {kind}"
+            );
+            assert_eq!(model.conditions & 2, 2, "type {kind}");
+        } else {
+            assert!(
+                matches!(life, CharacterLife::AwaitingRespawn { generation: 4 }),
+                "type {kind}"
+            );
+            assert_eq!(model.conditions & 2, 0, "type {kind}");
+        }
+    }
+}
+
+#[test]
 fn finishing_crosses_accumulated_threshold_and_preserves_initial_attribution() {
     let mut engine = two_actors(0.4);
     down_patient(&mut engine, Duration::ZERO);

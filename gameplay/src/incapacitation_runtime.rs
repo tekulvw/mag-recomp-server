@@ -1,6 +1,12 @@
 //! Human lifecycle authority. Wire model conditions and spawn eligibility are distinct.
 use super::*;
 
+/// Native DamageType packs a 3-bit kind with a KineticResponse flag (8); the
+/// wire byte carries that type in its high nibble, above the hit location.
+pub(crate) fn kinetic_response(damage: replication::CharacterDamage) -> bool {
+    damage.last_location_and_type & 0x80 != 0
+}
+
 impl<W: Write> Engine<W> {
     /// Opt in using caller-loaded rules. No game tuning is embedded or loaded implicitly.
     pub fn with_incapacitation_rules(
@@ -30,7 +36,11 @@ impl<W: Write> Engine<W> {
                         health_quarter_points: damage.health_quarter_points,
                     }
                 };
+                // A lethal hit flagged KineticResponse (damage type bit 8, as
+                // explosives carry it) is final: the client marks that death as
+                // complete and never shows a down, so never admit one for it.
                 if damage.health_quarter_points == 0
+                    && !kinetic_response(damage)
                     && !victim.is_mounted()
                     && victim.wire_profile.application_id() == 20231
                     && let Some(rules) = &self.incapacitation_rules
