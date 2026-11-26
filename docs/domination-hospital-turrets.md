@@ -30,6 +30,8 @@ python3 tools/extraction/project-retail-hospital-turrets.py \
 ```
 
 Repeat the same command with `--check` to verify existing output byte for byte.
+`--mode acquisition` binds the same variants to Acquisition field hospitals; see
+[Acquisition gameplay](acquisition-gameplay.md#field-hospital-turrets).
 The optional proof records model-node and protocol qualification. The runtime
 rules bind the source identities, faction variants, hospital placements and
 authored weapon identities. Hospital structure types that share a property file

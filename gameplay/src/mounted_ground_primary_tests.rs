@@ -442,7 +442,7 @@ fn mounted_ground_primary_preserves_grant_round_and_record_guards() {
 }
 
 #[test]
-fn ground_primary_keeps_acquisition_onfoot_only_and_accepts_ordinary_tcp_hits() {
+fn acquisition_ground_hits_accept_ordinary_tcp_and_a_qualified_hospital_primary() {
     let hit = native_hit(ESCORT, 185);
     let mut engine = ground_firearm_fixture(100.125, false);
     dispatch_hit(&mut engine, &hit, Transport::Tcp, 3300).unwrap();
@@ -451,8 +451,15 @@ fn ground_primary_keeps_acquisition_onfoot_only_and_accepts_ordinary_tcp_hits() 
     assert_eq!(record["decoded"]["weapon_item"], 2);
     assert_eq!(target(&engine, ESCORT).health_quarter_points, 199);
 
+    // A bound Acquisition field-hospital gunner reaches the same Ground
+    // targets as an on-foot firearm, with its projected primary.
     let mut mounted = ground_firearm_fixture(100.125, false);
-    mounted.bunker_world = domination_bunker_seat_tests::fixture().bunker_world;
+    mounted.item_catalog = Arc::new(
+        Arc::try_unwrap(combat_items_for_ground_test(50.))
+            .unwrap()
+            .with_retail_combat(combat_catalog()),
+    );
+    mounted.bunker_world = domination_bunker_seat_tests::fixture_for_mode(1).bunker_world;
     enable_synthetic_hospital_turrets(&mut mounted);
     equip_synthetic_hospital_turret(&mut mounted, 5);
     assert!(
@@ -464,11 +471,22 @@ fn ground_primary_keeps_acquisition_onfoot_only_and_accepts_ordinary_tcp_hits() 
             .is_ok()
     );
     dispatch_hit(&mut mounted, &hit, Transport::Udp, 3300).unwrap();
-    assert_eq!(
-        last_record(&mounted)["gameplay_denial"],
-        "ground_hit_requires_living_onfoot_actor"
-    );
-    assert_eq!(target(&mounted, ESCORT).health_quarter_points, 600);
+    let record = last_record(&mounted);
+    assert_eq!(record["gameplay_denial"], Value::Null, "{record}");
+    assert_eq!(record["decoded"]["weapon_item"], 4);
+    // The invented hospital round deals 12 vehicle HP: 48 quarter points.
+    assert_eq!(record["decoded"]["amount_hp"].as_f64(), Some(12.));
+    assert_eq!(target(&mounted, ESCORT).health_quarter_points, 552);
+
+    // Without a turret grant the mounted actor stays refused.
+    let mut unbound = ground_firearm_fixture(100.125, false);
+    unbound.bunker_world = domination_bunker_seat_tests::fixture_for_mode(1).bunker_world;
+    let actor = unbound.active.as_mut().unwrap();
+    actor.mounted_bunker = Some(5);
+    actor.mounted_seat = Some(0);
+    dispatch_hit(&mut unbound, &hit, Transport::Udp, 3300).unwrap();
+    assert_ne!(last_record(&unbound)["gameplay_denial"], Value::Null);
+    assert_eq!(target(&unbound, ESCORT).health_quarter_points, 600);
 }
 
 #[test]

@@ -318,7 +318,9 @@ update reaches every client that has the emplacement
 restores the body. No hulk or destruction blast is bound for Acquisition; the
 Structural objective's own sequence supplies the wreck. Direct hits on the
 emplacement do not damage it in Acquisition: the Structural objective's damage
-governs the bunker. Hospital turrets (seat 0) are not bound for Acquisition.
+governs the bunker. Seat 0, the turret, is refused
+(`bunker_turret_authority_unavailable`) unless the profile binds hospital
+turrets, as described below.
 
 Without the three inputs every point behaves as before, and profile loading
 refuses hospital inputs without the Acquisition gameplay configuration or for a
@@ -334,3 +336,36 @@ model. Each field hospital takes the lowest free family-13 index in spawn
 order. It also writes the promoted spawn catalog; rebind every resource that
 pins the old catalog's SHA-256. The client's acceptance of these emplacements
 (seating and exits on a live client) remains a lab check.
+
+### Field-hospital turrets
+
+Acquisition field hospitals use the same three faction emplacement variants as
+Domination hospitals (one per defending faction, with the same model, operator
+seat, turret pivots and weapons). Set `hospital_turrets` in each Acquisition
+gameplay configuration to bind seat 0 of every field hospital. The path is
+relative to the configuration file. The rules come from
+`tools/extraction/project-retail-hospital-turrets.py --mode acquisition`, which
+takes the same retail ELF, game and main archives, item catalog, item bindings
+and structure catalog as the Domination mode, and one `--profile SPAWNS
+HOSPITALS` pair for each of the six Acquisition profiles (the promoted spawn
+catalog and the field-hospital placements described above). It reads each
+faction's emplacement variant from the original registry, property file and
+model instead of the Domination placer inputs, and writes the
+`mag_acquisition_hospital_turrets_v1` schema. A Domination profile accepts only
+the Domination schema, and an Acquisition profile only this one. The rules pin
+each profile's spawn catalog, so rebuild them whenever those catalogs change.
+
+A bound turret then uses the Domination hospital authority unchanged: the one
+living defender in seat 0 gets a fresh equipment grant, reports aim and
+equipment on the authenticated UDP owner route, and fires the projected primary
+through the existing character armor, damage, kill and reward transaction. Its
+primary also reaches the same Ground targets as an on-foot firearm (the Escort
+and the insertion APCs) through the Acquisition vehicle damage policy. Late
+joiners receive the current definition, aim and owner. When the Structural
+objective deactivates the field hospital, the gunner dies with the other
+occupants and the grant is revoked; the following repair restores a mountable
+turret. The worker reports `acquisition_hospital_turrets_validated` once a
+profile binds them. Hospital secondary rockets need Domination projectile
+contacts and are not bound for Acquisition, and bots do not use hospital
+turrets in either mode. Turret aim, firing and seating on a live client remain
+a lab check.

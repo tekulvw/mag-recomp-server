@@ -584,3 +584,201 @@ fn indexed_hospital_rejects_equipment_for_unpopulated_slot() {
         assert!(turret.report(fields).is_err());
     }
 }
+
+/// SYNTHETIC: invented emplacement rules bound to the two-hospital fixture
+/// under a profile's game type, with three faction variants and six profiles.
+mod profile_binding {
+    use super::*;
+    use crate::structures::domination_bunker_seat_tests::fixture_for_mode;
+    use serde_json::{Map, Value};
+
+    const ELF: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const GAME: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+    const STRUCTURES: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const ITEMS: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+    const TOKEN: u32 = 0x00c0_ffee;
+
+    /// Faction list `faction + 1`, local ordinals 22 (primary) and 23 (secondary).
+    fn item_ids(faction: u16) -> (u16, u16) {
+        let base = ((faction + 1) << 10) + 50;
+        (base + 22, base + 23)
+    }
+
+    fn items() -> ItemCatalog {
+        let mut authored = Map::new();
+        let mut weapons = Map::new();
+        let mut bullets = Map::new();
+        for faction in 0..3_u16 {
+            let namespace = format!("FactionItemList{}", faction + 1);
+            for (ordinal, kind) in [(22, "primary"), (23, "secondary")] {
+                let reference = format!("{namespace}:{ordinal}");
+                let name = format!("invented_{kind}_{faction}");
+                authored.insert(
+                    reference.clone(),
+                    json!({"name":name,"authored_ref":reference,"faction_list":namespace,
+                        "local_ordinal":ordinal,"wire_item_id":null,"item_type":"kWeapon",
+                        "definition":{"group":"weapons","name":name}}),
+                );
+                weapons.insert(name.clone(), json!({"parameters":{"id":name}}));
+            }
+            let (primary, _) = item_ids(faction);
+            let mut bullet = crate::retail_combat::hospital_primary_tests::combat_catalog_bullet();
+            bullet["authored_ref"] = json!(format!("{namespace}:22"));
+            bullet["usage"] = json!("hospital_primary");
+            bullets.insert(primary.to_string(), bullet);
+        }
+        let combat = json!({"schema_version":2,"application_id":20231,"status":"synthetic",
+            "authority":{"bullet_damage":true,"armor_reduction":true,"body_damage":true,
+                "grenade_damage":false,"grenade_physics":false,"healing_schedule":false,
+                "ammo_tokens":false},
+            "provenance":{"catalog_sha256":ITEMS,"source_archive_sha256":GAME},
+            "bullets":bullets,"armor":{},"grenades":{},"healing":{},"unsupported":{},
+            "body":(0..16).map(|location| json!({"location":location,"armor_area":0,
+                "multiplier":1.0,"incapacitated_multiplier":1.0,"source":{}}))
+                .collect::<Vec<_>>(),"limitations":[]});
+        let blast = crate::blast_rules::CharacterBlastRules {
+            armor_rating_reduction: 0.0,
+            armor_prevention_reduction: 0.0,
+            hit_location: 0,
+            damage_type: 10,
+        };
+        ItemCatalog::from_value_for_application(
+            json!({"schema_version":2,"application_id":20231,
+                "build":{"source_archive_sha256":GAME},"items":authored,
+                "definitions":{"weapons":weapons}}),
+            blast,
+            20231,
+        )
+        .unwrap()
+        .with_retail_combat(
+            crate::retail_combat::RetailCombatCatalog::from_json(&combat.to_string()).unwrap(),
+        )
+    }
+
+    fn rules(schema: &str, engine: &Engine<Vec<u8>>) -> Value {
+        let world = engine.bunker_world.as_ref().unwrap();
+        let spawns = engine.spawn_catalog.as_ref().unwrap();
+        let hospital = world.hospital(5).unwrap();
+        let variants: Vec<_> = (0..3_u16)
+            .map(|faction| {
+                let (primary, secondary) = item_ids(faction);
+                let source = if u16::from(hospital.faction) == faction {
+                    hospital.properties_source.to_string()
+                } else {
+                    format!("vehicle/invented_{faction}.zpr")
+                };
+                json!({"faction":faction,"primary_item_id":primary,
+                    "secondary_item_id":secondary,"properties_source":source,
+                    "seat_node":"gunner_seat","seat_index":0,"turret_index":0,
+                    "seat_pose_scope":"retail_root0_identity_fallback","occupant_visible":false})
+            })
+            .collect();
+        let placements: Vec<_> = [5, 6]
+            .map(|index| {
+                let row = world.hospital(index).unwrap();
+                json!({"object_index":index,"spawn_index":row.spawn_index,
+                    "spawn_token":spawns.point(row.spawn_index).unwrap().token,
+                    "faction":row.faction})
+            })
+            .into();
+        let active = json!({"map_name":spawns.map_name(),
+            "spawn_catalog_sha256":spawns.source_sha256().unwrap(),
+            "placements":placements});
+        let mut profiles = vec![active];
+        profiles.extend((0..5).map(|other| {
+            json!({"map_name":format!("invented_map_{other}"),
+                "spawn_catalog_sha256":format!("{other}").repeat(64),
+                "placements":[{"object_index":0,"spawn_index":3,"spawn_token":9,"faction":0}]})
+        }));
+        json!({"schema":schema,
+            "source":{"structure_sha256":STRUCTURES,"item_catalog_sha256":ITEMS,
+                "retail_elf_sha256":ELF,"retail_archive_sha256":GAME,"vehicle_type_token":TOKEN,
+                "seat_pose_sha256":"3".repeat(64),"wire_proof_sha256":"4".repeat(64)},
+            "variants":variants,"profiles":profiles})
+    }
+
+    fn engine(game_type: u8) -> Engine<Vec<u8>> {
+        let mut engine = fixture_for_mode(game_type);
+        engine
+            .bunker_world
+            .as_mut()
+            .unwrap()
+            .set_synthetic_hospital_source(STRUCTURES, TOKEN);
+        engine.item_catalog = std::sync::Arc::new(items());
+        engine
+    }
+
+    fn bind(engine: &Engine<Vec<u8>>, rules: &Value) -> std::io::Result<BTreeMap<u16, Runtime>> {
+        qualify(
+            &serde_json::to_vec(rules).unwrap(),
+            engine.bunker_world.as_ref().unwrap(),
+            engine.spawn_catalog.as_ref().unwrap(),
+            &engine.item_catalog,
+            ELF,
+        )
+    }
+
+    #[test]
+    fn each_mode_binds_only_its_own_hospital_turret_schema() {
+        for (game_type, own, other) in [
+            (
+                1,
+                "mag_acquisition_hospital_turrets_v1",
+                "mag_domination_hospital_turrets_v1",
+            ),
+            (
+                2,
+                "mag_domination_hospital_turrets_v1",
+                "mag_acquisition_hospital_turrets_v1",
+            ),
+        ] {
+            let engine = engine(game_type);
+            let bound = bind(&engine, &rules(own, &engine)).unwrap();
+            assert_eq!(bound.keys().copied().collect::<Vec<_>>(), [5, 6]);
+            let (primary, secondary) = item_ids(0);
+            assert_eq!(bound[&5], Runtime::new(primary, Some(secondary)));
+            assert!(bind(&engine, &rules(other, &engine)).is_err(), "{own}");
+        }
+    }
+
+    #[test]
+    fn acquisition_rules_must_cover_every_field_hospital_and_its_spawn() {
+        let engine = engine(1);
+        let mut partial = rules("mag_acquisition_hospital_turrets_v1", &engine);
+        partial["profiles"][0]["placements"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        assert!(bind(&engine, &partial).is_err());
+        let mut moved = rules("mag_acquisition_hospital_turrets_v1", &engine);
+        moved["profiles"][0]["placements"][0]["spawn_token"] = json!(999);
+        assert!(bind(&engine, &moved).is_err());
+        let mut absent = rules("mag_acquisition_hospital_turrets_v1", &engine);
+        absent["profiles"][0]["spawn_catalog_sha256"] = json!("9".repeat(64));
+        assert!(bind(&engine, &absent).is_err());
+    }
+
+    /// A qualified Acquisition field hospital grants seat 0 with the
+    /// projected primary and secondary definition, as Domination does.
+    #[test]
+    fn a_bound_acquisition_field_hospital_turret_grants_its_seat() {
+        let mut engine = engine(1);
+        assert!(mount(&mut engine, 5, 1000).unwrap().is_empty());
+        let record = String::from_utf8_lossy(&engine.writer).to_string();
+        assert!(record.contains("bunker_turret_authority_unavailable"));
+        let bound = bind(
+            &engine,
+            &rules("mag_acquisition_hospital_turrets_v1", &engine),
+        )
+        .unwrap();
+        engine.bunker_world.as_mut().unwrap().hospital_turrets = bound;
+        assert!(!mount(&mut engine, 5, 1001).unwrap().is_empty());
+        let actor = engine.active.as_ref().unwrap();
+        assert_eq!(
+            (actor.mounted_bunker, actor.mounted_seat),
+            (Some(5), Some(0))
+        );
+        assert_eq!(turret(&engine, 5).version, 3);
+        assert!(turret(&engine, 5).grant_matches(actor));
+    }
+}

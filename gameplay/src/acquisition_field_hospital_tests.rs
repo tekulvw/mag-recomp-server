@@ -399,6 +399,56 @@ mod bound_emplacements {
         assert_eq!(packets.len(), 1);
     }
 
+    /// SYNTHETIC: a bound field-hospital turret goes down with its
+    /// structure and comes back with the repair.
+    #[test]
+    fn a_retired_field_hospital_kills_its_gunner_and_repair_restores_the_turret() {
+        use crate::hospital_turrets::tests::{
+            enable_synthetic_hospital_turrets, equip_synthetic_hospital_turret,
+        };
+        let (mut engine, mut native) = occupant_fixture();
+        enable_synthetic_hospital_turrets(&mut engine);
+        equip_synthetic_hospital_turret(&mut engine, 5);
+        let granted = &engine.bunker_world.as_ref().unwrap().hospital_turrets[&5];
+        assert!(granted.grant_matches(engine.active.as_ref().unwrap()));
+        let mut hospitals = None;
+        let (candidate, _, rows) = stage(
+            &mut engine,
+            &native,
+            &mut hospitals,
+            &[request(101, 1, VehicleHook::OnFspDeactivate)],
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row["op"] == "acquisition_hospital_cycle"
+                    && row["bunker_index"] == 5
+                    && row["occupants_killed"] == true)
+        );
+        let staged = hospitals.as_ref().unwrap();
+        assert!(!staged.hospital(5).unwrap().operational);
+        assert!(!staged.hospital_turrets[&5].has_grant());
+        assert!(
+            staged.hospital_turrets[&6]
+                == engine.bunker_world.as_ref().unwrap().hospital_turrets[&6]
+        );
+        engine
+            .record_acquisition_character_effects(candidate, &mut native, 1)
+            .unwrap();
+        let gunner = engine.active.as_ref().unwrap();
+        assert!(!gunner.life.is_alive());
+        assert_eq!((gunner.mounted_bunker, gunner.mounted_seat), (None, None));
+
+        stage(
+            &mut engine,
+            &native,
+            &mut hospitals,
+            &[request(101, 1, VehicleHook::OnFspActivate)],
+        );
+        let restored = hospitals.as_ref().unwrap().hospital(5).unwrap();
+        assert!(restored.operational && restored.turret_qualified);
+        assert!(restored.seat_position(0).is_some());
+    }
+
     #[test]
     fn forward_spawns_without_a_bound_emplacement_have_no_vehicle_work() {
         let (mut engine, native) = occupant_fixture();

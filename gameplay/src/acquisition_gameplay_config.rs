@@ -43,6 +43,9 @@ pub struct Configuration {
     ground_damage: Option<crate::acquisition_ground_damage::Policy>,
     ground_turrets: Option<PathBuf>,
     apc_turrets: Option<PathBuf>,
+    /// Field-hospital turret rules from
+    /// `project-retail-hospital-turrets.py --mode acquisition`.
+    hospital_turrets: Option<PathBuf>,
     #[serde(default)]
     frag_character_blast: bool,
     frag_ground_areas: Option<PathBuf>,
@@ -201,6 +204,9 @@ impl Configuration {
         if let Some(source) = &mut result.apc_turrets {
             crate::resources::resolve_manifest_path(directory, source)?;
         }
+        if let Some(source) = &mut result.hospital_turrets {
+            crate::resources::resolve_manifest_path(directory, source)?;
+        }
         if let Some(source) = &mut result.frag_ground_areas {
             *source = directory.join(&*source);
         }
@@ -279,6 +285,13 @@ impl Configuration {
             return Err("empty_acquisition_ground_turret_source_path");
         }
         if self
+            .hospital_turrets
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            return Err("empty_acquisition_hospital_turret_source_path");
+        }
+        if self
             .frag_ground_areas
             .as_ref()
             .is_some_and(|path| path.as_os_str().is_empty())
@@ -342,6 +355,12 @@ impl Configuration {
 
     pub(crate) fn apc_turret_source(&self) -> io::Result<Option<Vec<u8>>> {
         Self::read_ground_turret_source(self.apc_turrets.as_ref())
+    }
+
+    /// The field-hospital turret rules; they bind to the profile's hospitals
+    /// once the item catalog is loaded.
+    pub(crate) fn hospital_turret_source(&self) -> io::Result<Option<Vec<u8>>> {
+        Self::read_ground_turret_source(self.hospital_turrets.as_ref())
     }
 
     fn read_ground_turret_source(path: Option<&PathBuf>) -> io::Result<Option<Vec<u8>>> {

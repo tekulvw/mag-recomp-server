@@ -175,6 +175,71 @@ class Fixture:
                          'placements': json.loads(json.dumps(placements))}
             self.profile_data.append((spawns, hospitals))
 
+    def acquisition_profiles(self, *, field_hospitals=8):
+        """Invented Acquisition profiles: each owner's map has field hospitals
+        bound to that owner's emplacement property."""
+        result = []
+        for owner, name in enumerate(('test_acq_map_0', 'test_acq_map_1', 'test_acq_map_2')):
+            script = f'vehicle/test_property_{owner}.zpr'
+            level = {'archive_sha256': sha(name.encode()), 'clv_sha256': sha(name.upper().encode())}
+            locations = [{'index': 0, 'token': 900, 'kind': 'insertion', 'active': True}]
+            placements = []
+            for allocation in range(field_hospitals):
+                index = 40 + 3 * allocation
+                spawn_token = 70000 + owner * 100 + allocation
+                locations.append({'index': index, 'token': spawn_token, 'kind': 'bunker_passenger',
+                                  'active': True})
+                placements.append({'object_index': allocation, 'spawn_index': index,
+                                   'spawn_token': spawn_token, 'properties_source': script,
+                                   'max_occupancy': 12, 'passenger_seats': 12})
+            pool = {'name': name, 'owner_faction': owner, 'runtime_indices_verified': True,
+                    'locations': locations, 'squads': []}
+            for attacker in range(3):
+                if attacker == owner:
+                    continue
+                provenance = {'map': name, 'game_archive_sha256': GAME, 'native_elf_sha256': ELF,
+                              'level_archive_sha256': level['archive_sha256'],
+                              'level_clv_sha256': level['clv_sha256'], 'hospital_allocation_sha256': ALLOCATION}
+                spawns = {'format': 'mag_spawn_catalog', 'schema_version': 1, 'source': json.dumps(provenance),
+                          'active': {'map_name': name},
+                          'match_profile': {'game_type': 1, 'attacking_faction': attacker,
+                                            'auto_assign_teams': True, 'has_bunkers': True},
+                          'maps': [json.loads(json.dumps(pool))]}
+                hospitals = {'format': 'mag_domination_hospital_placements_v1', 'map_name': name,
+                             'allocation_scope': 'successful_production_fresh_level_load',
+                             'source_proof_sha256': ALLOCATION, 'passenger_pose_sha256': PASSENGER,
+                             'passenger_pose_scope': 'retail_unresolved_passenger_node_zero_local_pose',
+                             'vehicle_type_token': token('DefensiveEmplacement'),
+                             'placements': json.loads(json.dumps(placements))}
+                result.append((spawns, hospitals))
+        return result
+
+    def locate_body(self, model_token):
+        found = [(member, raw) for member, raw in self.main.items()
+                 if self.model[raw]['name_token'] == model_token]
+        if len(found) != 1:
+            raise ValueError('expected one original hospital body member')
+        return found[0]
+
+    def project_acquisition(self, profile_data):
+        catalog = encode(self.catalog)
+        structures = dict(self.structures, item_catalog_sha256=sha(catalog))
+        self.bindings['catalog_sha256'] = sha(catalog)
+        self.bindings['binding_configuration']['source_catalog_sha256'] = sha(catalog)
+        report = encode(self.bindings)
+        self.tool.BINDING_REPORT_SHA256 = sha(report)
+        self.tool.BINDING_POSITIONS = 6
+        structures['retail_item_binding_sha256'] = sha(report)
+        structure_raw = encode(structures)
+        pairs = []
+        for spawns, hospitals in profile_data:
+            spawn_raw = encode(spawns)
+            pairs.append((spawn_raw, encode(dict(hospitals, spawn_catalog_sha256=sha(spawn_raw),
+                                                structure_catalog_sha256=sha(structure_raw)))))
+        return self.tool.project_acquisition(catalog, report, structure_raw, pairs, self.game.__getitem__,
+                                             self.main.__getitem__, self.read_model, self.locate_body,
+                                             self.native)
+
     def read_model(self, raw, model_token):
         model = self.model[raw]
         if model['name_token'] != model_token:
@@ -270,6 +335,78 @@ class HospitalTurretProjectorTests(unittest.TestCase):
         fixture.profile_data[1][0]['match_profile']['attacking_faction'] = 1
         with self.assertRaisesRegex(ValueError, 'profile coverage'):
             fixture.project()
+
+    def test_acquisition_mode_binds_the_same_variants_to_every_field_hospital(self):
+        fixture = Fixture()
+        domination, _ = fixture.project()
+        rules, proof = fixture.project_acquisition(fixture.acquisition_profiles())
+        self.assertEqual(rules['schema'], 'mag_acquisition_hospital_turrets_v1')
+        self.assertEqual(proof['format'], 'mag_retail_acquisition_hospital_turret_proof_v1')
+        # The same three faction models and weapons qualify both modes.
+        self.assertEqual(rules['variants'], domination['variants'])
+        self.assertEqual(rules['source'], domination['source'])
+        self.assertEqual(len(rules['profiles']), 6)
+        self.assertTrue(all(len(row['placements']) == 8 for row in rules['profiles']))
+        row = next(row for row in rules['profiles'] if row['map_name'] == 'test_acq_map_2')
+        self.assertEqual(row['placements'][7], {
+            'faction': 2, 'object_index': 7, 'spawn_index': 61, 'spawn_token': 70207,
+        })
+        self.assertEqual({(row['map_name'], row['attacking_faction']) for row in proof['profiles']},
+                         {(f'test_acq_map_{owner}', attacker) for owner in range(3)
+                          for attacker in range(3) if attacker != owner})
+        self.assertEqual(fixture.project_acquisition(reversed(fixture.acquisition_profiles())),
+                         (rules, proof))
+
+    def test_acquisition_mode_rejects_unbound_or_incomplete_field_hospitals(self):
+        def edit_profiles(edit):
+            fixture = Fixture()
+            profiles = fixture.acquisition_profiles()
+            edit(profiles)
+            return fixture, profiles
+
+        def wrong_faction(profiles):
+            profiles[0][1]['placements'][0]['properties_source'] = 'vehicle/test_property_1.zpr'
+
+        def missing(profiles):
+            del profiles[0][1]['placements'][3]
+
+        def domination(profiles):
+            profiles[0][0]['match_profile']['game_type'] = 2
+
+        def duplicate(profiles):
+            profiles[1][0]['match_profile']['attacking_faction'] = 1
+
+        def token_changed(profiles):
+            profiles[2][1]['placements'][1]['spawn_token'] += 1
+
+        def unbound_allocation(profiles):
+            profiles[3][1]['source_proof_sha256'] = '7' * 64
+
+        for edit, error in [
+            (wrong_faction, 'identity differs'),
+            (missing, 'coverage'),
+            (domination, 'spawn source differs'),
+            (duplicate, 'profile coverage'),
+            (token_changed, 'identity differs'),
+            (unbound_allocation, 'unbound Acquisition'),
+        ]:
+            fixture, profiles = edit_profiles(edit)
+            with self.subTest(edit=edit.__name__), self.assertRaisesRegex(ValueError, error):
+                fixture.project_acquisition(profiles)
+        fixture = Fixture()
+        with self.assertRaisesRegex(ValueError, 'six Acquisition'):
+            fixture.project_acquisition(fixture.acquisition_profiles()[:5])
+
+    def test_acquisition_mode_reads_each_model_and_rejects_an_ambiguous_body(self):
+        fixture = Fixture()
+        fixture.main['/test_body_copy.zrb'] = b'invented duplicate body'
+        fixture.model[b'invented duplicate body'] = fixture.model[fixture.main['/test_body_2.zrb']]
+        with self.assertRaisesRegex(ValueError, 'one original hospital body'):
+            fixture.project_acquisition(fixture.acquisition_profiles())
+        fixture = Fixture()
+        fixture.model[fixture.main['/test_body_1.zrb']]['nodes'][1] = node(1, 0, 'test_other_pivot')
+        with self.assertRaisesRegex(ValueError, 'pivot chain'):
+            fixture.project_acquisition(fixture.acquisition_profiles())
 
     def test_writes_outside_checkout_once_and_checks_exact_bytes(self):
         fixture = Fixture()

@@ -519,6 +519,7 @@ impl Registry {
                 .transpose()?;
             let (
                 acquisition,
+                acquisition_hospital_turrets,
                 acquisition_ground_turrets,
                 acquisition_apc_turret_source,
                 acquisition_rocket_source,
@@ -568,8 +569,15 @@ impl Registry {
                             .map_err(io::Error::other)?;
                     }
                 }
+                let hospital_turrets = config.hospital_turret_source()?;
+                if hospital_turrets.is_some() && bunkers.is_none() {
+                    return Err(io::Error::other(
+                        "acquisition_hospital_turrets_require_hospitals",
+                    ));
+                }
                 (
                     Some(Arc::new(setup)),
+                    hospital_turrets.map(Arc::from),
                     config.ground_turret_source()?.map(Arc::from),
                     config.apc_turret_source()?.map(Arc::from),
                     config.infantry_rocket_source()?.map(Arc::from),
@@ -589,7 +597,7 @@ impl Registry {
                         "acquisition_gameplay_configuration_required"
                     }));
                 }
-                (None, None, None, None, None, None, None, None)
+                (None, None, None, None, None, None, None, None, None)
             };
             let damage = source
                 .character_damage_rules
@@ -667,7 +675,7 @@ impl Registry {
             } else {
                 (
                     None,
-                    None,
+                    acquisition_hospital_turrets,
                     acquisition_ground_turrets,
                     None,
                     acquisition_rocket_source,
@@ -1353,6 +1361,17 @@ impl Registry {
                     .domination
                     .as_ref()
                     .is_some_and(|world| world.state.human_static_resupply.is_some())
+        })
+    }
+
+    /// Some Acquisition profile binds its field-hospital turrets (seat 0).
+    pub fn has_acquisition_hospital_turrets(&self) -> bool {
+        self.profiles.values().any(|profile| {
+            profile.acquisition.is_some()
+                && profile
+                    .bunkers
+                    .as_ref()
+                    .is_some_and(|world| !world.hospital_turrets.is_empty())
         })
     }
 

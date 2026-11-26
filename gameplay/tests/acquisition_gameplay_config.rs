@@ -73,3 +73,22 @@ fn retired_smoke_field_points_operators_to_the_worker_flag() {
         assert!(error.contains("--smoke-grenade-rules"), "{error}");
     }
 }
+
+#[test]
+fn field_hospital_turret_rules_need_a_portable_nonempty_path() {
+    let mut config = configuration();
+    config["hospital_turrets"] = json!("");
+    assert!(Configuration::from_json(&config.to_string()).is_err());
+    let dir = std::env::temp_dir().join(format!(
+        "mag-acquisition-hospital-turrets-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("gameplay.json");
+    for (value, admitted) in [("resources/turrets.json", true), ("../turrets.json", false)] {
+        config["hospital_turrets"] = json!(value);
+        std::fs::write(&path, config.to_string()).unwrap();
+        assert_eq!(Configuration::load(&path).is_ok(), admitted, "{value}");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
