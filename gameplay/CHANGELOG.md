@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.14.4](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.14.3...gameplay-v0.14.4) (2026-11-26)
+
+
+### Bug Fixes
+
+* **gameplay:** seat Acquisition field-hospital lives in their bunker ([#311](https://github.com/tekulvw/mag-recomp-server/issues/311)) ([12cc216](https://github.com/tekulvw/mag-recomp-server/commit/12cc216ce549a0f5480fce9b5dac81f910315827))
+* **gameplay:** walk bots resting just off the navmesh back onto it ([#309](https://github.com/tekulvw/mag-recomp-server/issues/309)) ([38792da](https://github.com/tekulvw/mag-recomp-server/commit/38792daf35986560129f74f5002da9adbce3a0c9))
+
 ## [0.14.3](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.14.2...gameplay-v0.14.3) (2026-11-26)
 
 
