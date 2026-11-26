@@ -139,6 +139,7 @@ fn options_default_to_one_observer_and_read_every_setting() {
             ("MAG_SIM_FACTION", "1"),
             ("MAG_SIM_SNAPSHOTS", "1"),
             ("MAG_SIM_WARMUP_S", "120"),
+            ("MAG_SIM_COMPLETE_STRUCTURALS", "24@60, 27@90"),
         ]),
     )
     .unwrap();
@@ -152,6 +153,7 @@ fn options_default_to_one_observer_and_read_every_setting() {
             faction: Some(1),
             snapshots: true,
             warmup_seconds: 120,
+            structural_completions: vec![(24, 60), (27, 90)],
         }
     );
 }
@@ -167,6 +169,10 @@ fn invalid_options_fail_instead_of_falling_back() {
         ("MAG_SIM_FACTION", "256"),
         ("MAG_SIM_SNAPSHOTS", "yes"),
         ("MAG_SIM_WARMUP_S", "60"),
+        ("MAG_SIM_COMPLETE_STRUCTURALS", "24"),
+        ("MAG_SIM_COMPLETE_STRUCTURALS", "24@0"),
+        ("MAG_SIM_COMPLETE_STRUCTURALS", "24@61"),
+        ("MAG_SIM_COMPLETE_STRUCTURALS", "x@10"),
     ] {
         let error = HeadlessSimOptions::from_lookup(60, lookup(&[(name, value)])).unwrap_err();
         assert!(error.contains(name), "{name}={value:?}: {error}");

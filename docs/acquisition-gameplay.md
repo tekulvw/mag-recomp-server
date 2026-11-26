@@ -70,9 +70,10 @@ The provider runs the sourced startup entries and native Structural updates
 in family-12 order, including Precision transitions. It applies linked insertion points, motor-pool hooks,
 tactical command availability, Structural explosions and area damage, and
 sequence collision. Committed sequence state is included in late-join
-replication. Bound native infantry spawn types 4, 5 and 8 use the authored
-category-zero point for local character insertion until their physical routes
-are qualified.
+replication. Bound native infantry spawn types 4, 5 and 8 that the spawn
+catalog leaves unsupported use the authored category-zero point for local
+character insertion. Projected field hospitals (type 8) and parachute drop zones
+(type 5) are selectable; see the next two sections.
 
 ### Controller objective sequences
 
@@ -369,3 +370,39 @@ profile binds them. Hospital secondary rockets need Domination projectile
 contacts and are not bound for Acquisition, and bots do not use hospital
 turrets in either mode. Turret aim, firing and seating on a live client remain
 a lab check.
+
+## Parachute drops
+
+Each map gives one attacking platoon a LALO drop zone per squad (spawn type 5,
+category 2, the squad's third point). Each zone is the forward spawn, active
+when complete, of a passive Secure-and-Hold objective. The defenders'
+anti-aircraft Structural drives those objectives through its authored
+`AntiaircraftControl` script: when the anti-aircraft is destroyed the
+objectives complete, the zones open and each becomes its squad's spawn point;
+a repair (or the mission-start deactivation) closes them again and the squads
+return to their category-zero point. While closed, the client shows the
+parachute icon greyed, as in the original game.
+
+A spawn catalog that lists the zones as `unsupported` keeps this routing but
+never publishes them, so the icon stays greyed after the anti-aircraft falls
+and nobody can drop. `tools/extraction/project-retail-acquisition-lalo.py`
+promotes them to `kind: "parachute"`:
+
+```sh
+python3 tools/extraction/project-retail-acquisition-lalo.py \
+  --catalog SPAWNS --source SPAWN_EXTRACTION --output OUTPUT
+```
+
+`SPAWN_EXTRACTION` is the `extract-retail-spawns.py` output for the map (one map
+file or the all-map form). The pose is the authored zone: its position is the
+airborne drop point, `forward` is the authored rotation applied to +z, each later
+jumper of a wave starts 10 m further along it (the game's spacing for the
+default zone radius 1; other radii are refused), and `yaw` is that heading in
+the 10-bit wire convention. A committed human drop then uses the shared
+parachute respawn ([retail-runtime.md](retail-runtime.md#objective-driven-forward-and-parachute-spawns)):
+character state 17 at the wave's next offset, after which the client flies the
+descent and landing. Bots have no airborne model and land on the first
+supporting surface below the same drop line
+([bot-active-spawns.md](bot-active-spawns.md#parachute-points)). Rebind every
+resource that pins the old catalog's SHA-256. The drop itself on a live client
+remains a lab check.

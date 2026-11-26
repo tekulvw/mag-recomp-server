@@ -30,6 +30,10 @@ pub struct HeadlessSimOptions {
     pub snapshots: bool,
     /// Leading simulated seconds left out of the summary statistics.
     pub warmup_seconds: u64,
+    /// Acquisition Structural objectives completed by a scripted request at
+    /// a simulated second, as (object index, second). Diagnostic only: it
+    /// stands in for attackers destroying the structure.
+    pub structural_completions: Vec<(u16, u64)>,
 }
 
 impl HeadlessSimOptions {
@@ -42,6 +46,7 @@ impl HeadlessSimOptions {
             faction: None,
             snapshots: false,
             warmup_seconds: 0,
+            structural_completions: Vec::new(),
         }
     }
 
@@ -98,6 +103,18 @@ impl HeadlessSimOptions {
                 ));
             }
             options.warmup_seconds = warmup;
+        }
+        if let Some(list) = lookup("MAG_SIM_COMPLETE_STRUCTURALS") {
+            let invalid = || format!("invalid MAG_SIM_COMPLETE_STRUCTURALS: {list:?}");
+            for item in list.split(',') {
+                let (index, second) = item.trim().split_once('@').ok_or_else(invalid)?;
+                let index: u16 = index.trim().parse().map_err(|_| invalid())?;
+                let second: u64 = second.trim().parse().map_err(|_| invalid())?;
+                if second == 0 || second > seconds {
+                    return Err(invalid());
+                }
+                options.structural_completions.push((index, second));
+            }
         }
         Ok(options)
     }
@@ -468,6 +485,21 @@ impl<W: Write> Engine<W> {
         while now <= Duration::from_secs(options.seconds) {
             let wall = wall0 + now.as_secs();
             self.headless_sim_keepalive(now);
+            for &(index, second) in &options.structural_completions {
+                if now == Duration::from_secs(second) {
+                    let result = self.queue_acquisition_structural_state(
+                        index,
+                        replication::ObjectiveState::Completed,
+                    );
+                    self.record(
+                        json!({"op":"sim_structural_completion_requested",
+                            "timestamp_ms":now.as_millis() as u64,"object_index":index,
+                            "error":result.err()}),
+                        wall,
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+            }
             if options.snapshots && now.as_millis().is_multiple_of(500) {
                 self.headless_sim_snapshot(now, wall)
                     .map_err(|e| e.to_string())?;
