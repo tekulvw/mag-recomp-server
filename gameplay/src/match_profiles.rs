@@ -90,6 +90,9 @@ struct Source {
     bot_names: Option<PathBuf>,
     bot_resupply_catalog: Option<PathBuf>,
     bot_resupply_approach_policy: Option<PathBuf>,
+    /// Sabotage objectives' own collision per state (`sabotage_structures::SCHEMA`).
+    #[serde(default)]
+    sabotage_structures: Option<PathBuf>,
 }
 /// One profile's bot inputs. A population is map-bound, so startup validates
 /// it against this profile's own world before the worker advertises it.
@@ -205,6 +208,7 @@ struct Loaded {
     ground_turret_source: Option<Arc<[u8]>>,
     acquisition_apc_turret_source: Option<Arc<[u8]>>,
     bots: Option<ProfileBots>,
+    sabotage_structures: Option<Arc<sabotage_structures::Assets>>,
 }
 pub struct Registry {
     profiles: BTreeMap<String, Loaded>,
@@ -321,6 +325,7 @@ impl Registry {
                 source.bot_names.as_mut(),
                 source.bot_resupply_catalog.as_mut(),
                 source.bot_resupply_approach_policy.as_mut(),
+                source.sabotage_structures.as_mut(),
             ]
             .into_iter()
             .flatten()
@@ -720,6 +725,23 @@ impl Registry {
                     .map(Arc::new)
                 })
                 .transpose()?;
+            let sabotage_structures = source
+                .sabotage_structures
+                .as_ref()
+                .map(|path| {
+                    let catalog = objectives.as_ref().ok_or_else(|| {
+                        io::Error::other("sabotage_structures_require_objective_catalog")
+                    })?;
+                    if policy.game_type != 0 || collision.is_none() {
+                        return Err(io::Error::other(
+                            "sabotage_structures_require_sabotage_world",
+                        ));
+                    }
+                    sabotage_structures::Assets::load(path, spawns.map_name(), catalog)
+                        .map(Arc::new)
+                        .map_err(io::Error::other)
+                })
+                .transpose()?;
             let summary = Summary {
                 profile_id: source.profile_id.clone(),
                 game_type: policy.game_type,
@@ -767,6 +789,7 @@ impl Registry {
                     ground_turret_source,
                     acquisition_apc_turret_source,
                     bots,
+                    sabotage_structures,
                 },
             );
         }
@@ -1339,6 +1362,13 @@ impl Registry {
             .any(|profile| profile.active_abilities.is_some())
     }
 
+    /// Whether any profile places its Sabotage objectives' own collision.
+    pub fn has_sabotage_structures(&self) -> bool {
+        self.profiles
+            .values()
+            .any(|profile| profile.sabotage_structures.is_some())
+    }
+
     pub fn has_domination_gameplay(&self) -> bool {
         self.profiles
             .values()
@@ -1867,6 +1897,15 @@ impl<W: Write> Engine<W> {
                 .as_ref()
                 .is_some_and(|world| world.state.frag_character_blast);
         self.domination_gameplay = loaded.domination;
+        self.sabotage_structures = loaded.sabotage_structures.map(|assets| {
+            // Placed packs collide with what the character movement row does.
+            let row = self.collision_world.as_ref().and_then(|world| {
+                world
+                    .query_row(crate::bot_structure_collision::CHARACTER_QUERY_LAYER)
+                    .or(world.character_movement_layers())
+            });
+            sabotage_structures::Runtime::new(assets, row.unwrap_or(u32::MAX))
+        });
         self.character_damage_rules = loaded.damage;
         self.development_dummy_position = self
             .spawn_catalog
@@ -3025,6 +3064,7 @@ mod tests {
                 acquisition_apc_turret_source: None,
                 acquisition: Some(sample.acquisition_gameplay.unwrap().setup),
                 bots: None,
+                sabotage_structures: None,
             },
         );
     }

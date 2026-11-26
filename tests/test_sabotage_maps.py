@@ -237,6 +237,35 @@ class DynamicExclusionTests(unittest.TestCase):
         self.assertEqual(region['provenance'][-2:], lines)
 
 
+    def test_root_packs_of_excluded_instances_are_written_at_their_placement(self):
+        meshes = [dict(vertices_xyz=[[0, 0, 0], [1, 0, 0], [0, 1, 0]], triangles=[[0, 1, 2]],
+                       subpart_index=0)]
+        packs = {}
+        cache = {}
+        for token, parent, sha in (('22222222', '0badf00d', 'b' * 64), ('22222222', '00000000', 'c' * 64)):
+            pack = dict(source_sha256=sha, neutral_output=dict(file=sha, sha256='1' * 64, decoded_sha256='2' * 64),
+                        resource_binding=dict(parent_token=parent, collision_tag_raw=29, material_indices=[255]))
+            packs.setdefault(token, []).append(pack)
+            cache[sha] = (('1' * 64, '2' * 64, sha), meshes)
+        record = self.record(0x200, '22222222', retail_compiled.ANIMATED_CLASS)
+        record['placement']['matrix'] = [[1, 0, 0, 10], [0, 1, 0, 20], [0, 0, 1, 30], [0, 0, 0, 1]]
+        _, excluded = retail_compiled.dynamic_exclusions([record], packs, {'22222222': {'f' * 64}})
+        with tempfile.TemporaryDirectory() as scratch:
+            out = Path(scratch) / 'roots'
+            retail_compiled.export_animated_root_packs(out, excluded, {0x200: record}, packs, Path(scratch),
+                                                       cache, 'synthetic_map', 'synthetic', 'd' * 64)
+            index = __import__('json').loads((out / 'index.json').read_text())
+            self.assertEqual(index['world_sha256'], 'd' * 64)
+            row, = index['packs']  # The attached pack stays omitted.
+            self.assertEqual((row['packfile_sha256'], row['collision_tag'], row['material_indices']),
+                             ('c' * 64, 29, [255]))
+            payload = (out / (row['neutral_sha256'] + '.json')).read_bytes()
+            self.assertEqual(hashlib.sha256(payload).hexdigest(), row['neutral_sha256'])
+            world = __import__('json').loads(payload)
+            self.assertEqual(world['instances'][0]['vertices_xyz'][1], [11.0, 20.0, 30.0])
+            self.assertIn('packfile_sha256=' + 'c' * 64, world['metadata']['provenance'])
+
+
 class UnshippedExclusionTests(unittest.TestCase):
     CLV = '/levels/invented/invented.clv'
 

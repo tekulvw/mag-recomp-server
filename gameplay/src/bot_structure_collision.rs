@@ -528,11 +528,42 @@ impl<W: Write> crate::Engine<W> {
         u32,
     )> {
         match (&self.acquisition_gameplay, &self.domination_gameplay) {
-            (Some(runtime), _) => runtime.blast_collision(),
-            (None, Some(world)) => Some(world.frag_blast_collision()),
-            (None, None) => None,
+            (Some(runtime), _) => runtime
+                .blast_collision()
+                .map(|c| (c.sequences, c.filter_rows[CHARACTER_QUERY_LAYER])),
+            (None, Some(world)) => {
+                let c = world.frag_blast_collision();
+                Some((c.sequences, c.filter_rows[CHARACTER_QUERY_LAYER]))
+            }
+            (None, None) => self
+                .sabotage_structures
+                .as_ref()
+                .map(crate::sabotage_structures::Runtime::collision),
         }
-        .map(|c| (c.sequences, c.filter_rows[CHARACTER_QUERY_LAYER]))
+    }
+
+    /// Place and remove the Sabotage objectives' collision for the states
+    /// they are in now; each change is recorded as `sabotage_structures`.
+    fn sync_sabotage_structures(&mut self, wall: u64) -> Result<(), &'static str> {
+        let (Some(runtime), Some(world)) = (
+            self.sabotage_structures.as_mut(),
+            self.objective_world.as_ref(),
+        ) else {
+            return Ok(());
+        };
+        for change in runtime.sync(world)? {
+            self.record(
+                serde_json::json!({
+                    "op": "sabotage_structures",
+                    "object_index": change.object_index,
+                    "state": change.state,
+                    "slot": change.sequence,
+                    "packs": change.packs,
+                }),
+                wall,
+            )?;
+        }
+        Ok(())
     }
 
     /// Bring the structure snapshot bot movement and routing see up to date
@@ -543,6 +574,7 @@ impl<W: Write> crate::Engine<W> {
         &mut self,
         wall: u64,
     ) -> Result<(), &'static str> {
+        self.sync_sabotage_structures(wall)?;
         let wanted = self
             .bot_structure_source()
             .map(|(sequences, row)| (sequences.revision(), row));

@@ -419,6 +419,26 @@ def absent_resources(tokens, archives, resource_class):
 
 def export_collision(projection, globaldata, graphics, physics, records, output):
     """Convert the authored physics packs to neutral mesh-local BVHs."""
+    exported, parent_poses = export_collision_packs(
+        projection, globaldata, graphics, physics, records, output)
+    index = {
+        'schema': 'mag_domination_structural_collision_v1',
+        'map': projection['map'],
+        'level_archive_sha256': projection['level_archive_sha256'],
+        'physics_sha256': projection['physics_sha256'],
+        'resources': exported,
+        'geometry_sha256': projection['global_data_sha256'],
+        'parent_reference_poses': parent_poses,
+    }
+    (output / 'index.json').write_text(json.dumps(index, indent=2, allow_nan=False) + '\n')
+
+
+def export_collision_packs(projection, globaldata, graphics, physics, records, output):
+    """Write each bound collision pack as a neutral mesh named by its packfile hash.
+
+    Returns the pack rows per collision token and the reference pose of every
+    parent node a pack is attached to, per geometry token.
+    """
     utilities = TOOLS.parent / 'collision'
     sys.path.insert(0, str(utilities))
     try:
@@ -511,16 +531,7 @@ def export_collision(projection, globaldata, graphics, physics, records, output)
                              'rotation': [[world[col][row] for col in range(3)] for row in range(3)]},
                 }
 
-    index = {
-        'schema': 'mag_domination_structural_collision_v1',
-        'map': projection['map'],
-        'level_archive_sha256': projection['level_archive_sha256'],
-        'physics_sha256': projection['physics_sha256'],
-        'resources': exported,
-        'geometry_sha256': projection['global_data_sha256'],
-        'parent_reference_poses': parent_poses,
-    }
-    (output / 'index.json').write_text(json.dumps(index, indent=2, allow_nan=False) + '\n')
+    return exported, parent_poses
 
 
 def main():

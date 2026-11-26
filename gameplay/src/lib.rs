@@ -236,6 +236,7 @@ pub mod retail_combat;
 mod retail_firearm_coverage_tests;
 pub mod retail_melee;
 pub mod rotating_log;
+pub mod sabotage_structures;
 mod score_clock;
 mod seated_death;
 pub mod skill_catalog;
@@ -1428,6 +1429,8 @@ pub struct Engine<W: Write> {
     acquisition_round: Option<acquisition_round::Round>,
     domination_round: Option<acquisition_round::Round>,
     domination_gameplay: Option<domination_gameplay_provider::World>,
+    /// Collision the Sabotage objectives place in their current states.
+    sabotage_structures: Option<sabotage_structures::Runtime>,
     hospital_rockets: Option<std::sync::Arc<hospital_rockets::Catalog>>,
     infantry_rockets: Option<std::sync::Arc<infantry_rockets::Catalog>>,
     guided_launchers: Option<std::sync::Arc<guided_launchers::Catalog>>,
