@@ -148,10 +148,9 @@ impl<W: Write> Engine<W> {
             .find(|actor| actor.reservation.player == index && actor.initial_objects.is_some())
             .map(active_ability_engine::detection_identity)
             .or_else(|| {
-                self.bot_combat_snapshots()
-                    .into_iter()
-                    .find(|bot| bot.object_index == index)
-                    .map(|bot| format!("bot:{}:{}", bot.object_index, bot.generation))
+                self.bot_combat_generations(index)
+                    .next()
+                    .map(|generation| format!("bot:{index}:{generation}"))
             })
     }
 
