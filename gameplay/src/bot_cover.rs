@@ -602,6 +602,9 @@ struct Stats {
 pub(crate) struct World {
     override_enabled: Option<bool>,
     override_crouch: Option<bool>,
+    /// Headless simulation waits for spot builds instead of running on
+    /// without cover while virtual time races ahead.
+    pub(crate) blocking_builds: bool,
     map: Option<(MapKey, Arc<CoverMap>)>,
     job: Option<(
         MapKey,
@@ -758,7 +761,7 @@ impl<W: Write> Engine<W> {
     }
 
     /// Keep the static and structure spot maps current; builds run on a
-    /// worker thread (inline in tests).
+    /// worker thread (waited for in tests and headless simulation).
     fn refresh_cover_maps(&mut self, wall: u64) -> Result<(), &'static str> {
         let (Some(world), Some(mesh)) =
             (self.collision_world.as_ref(), self.navmesh_world.as_ref())
@@ -804,9 +807,9 @@ impl<W: Write> Engine<W> {
                             .name("bot-cover-map".into())
                             .spawn(move || build_static(&w, &m))
                             .map_err(|_| "bot_cover_thread_unavailable")?;
-                        if cfg!(test) {
+                        if cfg!(test) || self.bot_cover.blocking_builds {
                             while !job.is_finished() {
-                                std::thread::yield_now();
+                                std::thread::sleep(Duration::from_millis(2));
                             }
                         }
                         self.bot_cover.job = Some((key.clone(), job));
@@ -836,9 +839,9 @@ impl<W: Write> Engine<W> {
                         .name("bot-cover-structures".into())
                         .spawn(move || build_structures(&w, &m, &snapshot))
                         .map_err(|_| "bot_cover_thread_unavailable")?;
-                    if cfg!(test) {
+                    if cfg!(test) || self.bot_cover.blocking_builds {
                         while !job.is_finished() {
-                            std::thread::yield_now();
+                            std::thread::sleep(Duration::from_millis(2));
                         }
                     }
                     self.bot_cover.structure_job = Some((k, job));
