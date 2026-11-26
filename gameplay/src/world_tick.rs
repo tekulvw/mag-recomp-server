@@ -91,7 +91,12 @@ impl<W: Write> Engine<W> {
             )
         })();
         match result {
-            Ok(messages) => self.world_response(request_id, messages),
+            Ok(messages) => {
+                let mut response = self.world_response(request_id, messages);
+                // Only when due: a subscription began or a membership changed.
+                response.voice_groups = self.next_voice_groups();
+                response
+            }
             Err(code) => Response::error(request_id, code),
         }
     }

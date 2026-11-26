@@ -152,6 +152,8 @@ struct SessionChanges {
     squad_spawn: Option<u16>,
     squad_catalog: Option<std::sync::Arc<spawn_catalog::SpawnCatalog>>,
     new_nominations: Option<u8>,
+    /// A decoded talk-channel selection, recorded with voice routing on.
+    talk_channel: Option<crate::voice_routing::TalkChannel>,
     entered_game: bool,
     client_position: Option<(replication::CharacterPosition, u32)>,
     queued_correction_position: Option<(replication::CharacterPosition, u32)>,
@@ -402,6 +404,26 @@ fn plan_message<W: Write>(
             Ok(
                 json!({"type":"rocket_lock_state","target":report.target,"state":report.state,"accepted":plan.guided_warnings.is_some()}),
             )
+        }
+        Ok(protocol::GameMessage::TalkChannel(channel)) => {
+            if !ctx.engine.voice_routing_enabled() {
+                // Without voice routing the message stays exactly as it was summarised before.
+                return Ok(crate::voice_diagnostics::unknown_message(
+                    crate::voice_routing::CHANNEL_SELECT,
+                    &[channel.wire()],
+                ));
+            }
+            plan.session.talk_channel = Some(channel);
+            let placed = ctx.active.initial_objects.is_some();
+            Ok(crate::voice_routing::talk_channel_summary(
+                channel,
+                placed.then(|| ctx.active.squad_catalog.squad_index()),
+                if placed {
+                    ctx.engine.current_held_role(ctx.active)
+                } else {
+                    crate::leadership_passives::HeldLeadershipRole::None
+                },
+            ))
         }
         Ok(protocol::GameMessage::Unknown { message_type, body }) => Ok(
             crate::voice_diagnostics::unknown_message(message_type, body),
@@ -1328,6 +1350,9 @@ impl<W: Write> Engine<W> {
         }
         if let Some(nominations) = plan.session.new_nominations {
             active.nominations = nominations;
+        }
+        if plan.session.talk_channel.is_some() {
+            active.talk_channel = plan.session.talk_channel;
         }
         if let Some(catalog) = plan.session.squad_catalog {
             // A new squad needs its own HUD order; world state/history remain intact.
