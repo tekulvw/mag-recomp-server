@@ -578,13 +578,17 @@ impl<'a> WorldTerrain<'a> {
         for _ in 0..count {
             // Establish support only from supplied ground. Airborne starts do not
             // climb or snap upward into a plane; a vertical sweep lands them.
+            let mut support = None;
             if m.grounded {
                 // Contact belongs to the whole body footprint. A center ray can
                 // miss a ramp/edge supporting a box corner and falsely disable
                 // the step lift on every subsequent tick.
                 let down = add(m.position, [0.0, -b.ground_snap - b.skin, 0.0]);
-                let support = self.sweep(m.position, down, b, &mut budget)?;
-                m.grounded = support.is_some_and(|g| g.normal[1] >= b.slope_cos());
+                support = match self.sweep(m.position, down, b, &mut budget)? {
+                    Some(hit) => self.support_normal(m.position, &hit, b, &mut budget)?,
+                    None => None,
+                };
+                m.grounded = support.is_some();
             }
             let delta = [velocity[0] * h, 0.0, velocity[2] * h];
             let origin = m.position;
@@ -607,10 +611,33 @@ impl<'a> WorldTerrain<'a> {
             if lifted {
                 let down = add(m.position, [0.0, -b.max_step - b.ground_snap, 0.0]);
                 if let Some(hit) = self.sweep(m.position, down, b, &mut budget)?
-                    && hit.normal[1] >= b.slope_cos()
+                    && self.stands_on(
+                        stop_before(m.position, down, hit.fraction, b.skin),
+                        &hit,
+                        b,
+                        &mut budget,
+                    )?
                 {
                     m.position = stop_before(m.position, down, hit.fraction, b.skin);
                     m.grounded = true;
+                    let run = delta[0].hypot(delta[2]);
+                    let made = (m.position[0] - origin[0]).hypot(m.position[2] - origin[2]);
+                    // The step lift raises the box's top by a step too. Under a
+                    // beam or lintel the lifted body can be stopped where the
+                    // unlifted one passes, so a stalled step also tries the move
+                    // along the ground.
+                    if blocked
+                        && made < 0.5 * run
+                        && let Some(normal) = support
+                        && let Some(feet) =
+                            self.surface_slide(origin, delta, normal, b, &mut budget)?
+                        && (feet[0] - origin[0]).hypot(feet[2] - origin[2]) > made + 0.25 * run
+                    {
+                        m = before_step;
+                        self.actor_contact.set(contact_before_step);
+                        m.position = feet;
+                        m.grounded = true;
+                    }
                     m.vertical_velocity = 0.0;
                     m.slide_velocity = [0.0; 2];
                     observe(&m);
@@ -625,6 +652,20 @@ impl<'a> WorldTerrain<'a> {
                 m.position = p;
                 m.blocked |= blocked;
                 m.grounded = false;
+            }
+            let run = delta[0].hypot(delta[2]);
+            let made = (m.position[0] - origin[0]).hypot(m.position[2] - origin[2]);
+            if m.blocked
+                && run > 1e-9
+                && made < 0.5 * run
+                && let Some(normal) = support
+                && let Some(feet) = self.surface_slide(origin, delta, normal, b, &mut budget)?
+                && (feet[0] - origin[0]).hypot(feet[2] - origin[2]) > made + 0.25 * run
+            {
+                m = before_step;
+                self.actor_contact.set(contact_before_step);
+                m.position = feet;
+                m.grounded = true;
             }
             if m.grounded {
                 m.vertical_velocity = 0.0;
@@ -652,6 +693,118 @@ impl<'a> WorldTerrain<'a> {
             observe(&m);
         }
         Ok(m)
+    }
+    /// Whether a body whose feet rest at `feet`, with `hit` its first downward
+    /// contact, stands there. A walkable contact holds it. So does an upward
+    /// steep contact at the edge of its footprint (a rock lip, a kerb, a seam
+    /// between terrain facets) when the ground under the body's centre is
+    /// walkable and within a step below its feet: a rounded body standing
+    /// there rests on that ground, and only the box's corner touches the lip.
+    /// A body on steep ground throughout still slides.
+    fn stands_on(
+        &self,
+        feet: Point,
+        hit: &RayHit,
+        b: Body,
+        budget: &mut usize,
+    ) -> Result<bool, PhysicsError> {
+        Ok(self.support_normal(feet, hit, b, budget)?.is_some())
+    }
+    /// The walkable surface a standing body rests on (see `stands_on`).
+    fn support_normal(
+        &self,
+        feet: Point,
+        hit: &RayHit,
+        b: Body,
+        budget: &mut usize,
+    ) -> Result<Option<Point>, PhysicsError> {
+        if hit.normal[1] >= b.slope_cos() {
+            return Ok(Some(hit.normal));
+        }
+        if hit.normal[1] <= 1e-6 {
+            return Ok(None);
+        }
+        Ok(self
+            .ground(feet, b.skin, b.max_step + b.ground_snap + b.skin, budget)?
+            .map(|g| g.normal)
+            .filter(|n| n[1] >= b.slope_cos()))
+    }
+    /// A grounded move the stepping box could not make: carry it along the
+    /// supporting surface instead and slide it off every contact in three
+    /// dimensions, so a body pressed under a leaning overhang or into a
+    /// slope seam moves along them as a rounded body would. It must end
+    /// standing on walkable ground within a step; it never climbs a surface
+    /// steeper than the body's slope limit, since only walkable support
+    /// carries it upward.
+    fn surface_slide(
+        &self,
+        origin: Point,
+        delta: Point,
+        support: Point,
+        b: Body,
+        budget: &mut usize,
+    ) -> Result<Option<Point>, PhysicsError> {
+        if support[1] < b.slope_cos() {
+            return Ok(None);
+        }
+        // Follow the support plane: the same horizontal motion, with the rise
+        // or fall the plane gives it.
+        let rise = -(support[0] * delta[0] + support[2] * delta[2]) / support[1];
+        let mut d = [delta[0], rise, delta[2]];
+        // Leave the supporting surface by a hair, as far as headroom allows.
+        let clearance = 2.0 * b.skin;
+        let lift = add(origin, [0.0, clearance, 0.0]);
+        let mut p = match self.sweep(origin, lift, b, budget)? {
+            Some(hit) => stop_before(origin, lift, hit.fraction, b.skin),
+            None => lift,
+        };
+        // The support is the first plane the move is held to; each contact
+        // adds another, and between two planes the move follows their crease.
+        let mut previous = support;
+        for _ in 0..4 {
+            if length(d) < 1e-9 {
+                break;
+            }
+            let end = add(p, d);
+            let Some(hit) = self.sweep(p, end, b, budget)? else {
+                p = end;
+                break;
+            };
+            if hit.instance_id.starts_with("dynamic-character:") {
+                return Ok(None);
+            }
+            p = stop_before(p, end, hit.fraction, b.skin);
+            d = scale(d, 1.0 - hit.fraction);
+            let n = hit.normal;
+            let into = dot(d, n);
+            if into < 0.0 {
+                d = sub(d, scale(n, into));
+            }
+            if dot(d, previous) < 0.0 {
+                let crease = cross(previous, n);
+                let len = length(crease);
+                if len < 1e-6 {
+                    break;
+                }
+                let crease = scale(crease, 1.0 / len);
+                d = scale(crease, dot(d, crease));
+            }
+            previous = n;
+            // Contacts may not carry the body up faster than walkable ground.
+            if d[1] > 0.0 {
+                let run = d[0].hypot(d[2]);
+                d[1] = d[1].min(run * b.slope_cos().acos().tan());
+            }
+        }
+        let down = add(p, [0.0, -b.max_step - b.ground_snap, 0.0]);
+        let Some(hit) = self.sweep(p, down, b, budget)? else {
+            return Ok(None);
+        };
+        let feet = stop_before(p, down, hit.fraction, b.skin);
+        if !self.stands_on(feet, &hit, b, budget)? {
+            return Ok(None);
+        }
+        Ok(Some(feet))
     }
     /// Project gravity and its remaining displacement along steep surfaces.
     /// Walkable upward-facing contacts land; walls still block. Each projected
@@ -683,7 +836,7 @@ impl<'a> WorldTerrain<'a> {
             );
             p = stop_before(p, end, hit.fraction, b.skin);
             let n = hit.normal;
-            if delta[1] <= 0.0 && n[1] >= b.slope_cos() {
+            if delta[1] <= 0.0 && self.stands_on(p, &hit, b, budget)? {
                 return Ok((p, [0.0; 3], true, blocked));
             }
             // A steep upward-facing surface permits descent, but does not count
@@ -758,6 +911,13 @@ fn sub(a: Point, b: Point) -> Point {
 fn scale(a: Point, s: f64) -> Point {
     a.map(|v| v * s)
 }
+fn cross(a: Point, b: Point) -> Point {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
 fn dot(a: Point, b: Point) -> f64 {
     (0..3).map(|i| a[i] * b[i]).sum()
 }
@@ -796,3 +956,6 @@ mod regional_guard_tests {
         assert!(guard.check([0., 0., 0.], [8., 0., 0.], body).is_err());
     }
 }
+#[cfg(test)]
+#[path = "bot_physics_steep_tests.rs"]
+mod steep_tests;
