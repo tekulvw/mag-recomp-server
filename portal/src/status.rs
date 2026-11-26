@@ -1102,6 +1102,66 @@ mod tests {
         assert_eq!(players_text(Some(4), None), "4");
     }
 
+    /// A staff-only server (the private modes server) adds nothing public: no card, no state,
+    /// no count, no limit and no wording, however its numbers differ.
+    #[test]
+    fn staff_only_servers_add_nothing_public() {
+        let service = StatusService::new(
+            vec![server("live", false), server("modes", true)],
+            Duration::from_secs(15),
+        );
+        let mut live = status(vec![world("sabotage", "open", 0, true)]);
+        live.human_limit = Some(32);
+        let mut private = status(vec![
+            world("acquisition", "faulted", 1, true),
+            world("domination", "open", 2, false),
+        ]);
+        (private.players_online, private.queued, private.human_limit) = (Some(91), 83, Some(77));
+        private.dme_ports = DmePorts {
+            capacity: Some(77),
+            in_use: 69,
+        };
+        private.medius_version = Some("5.4.3".into());
+        service.record(0, Ok(live), at(0));
+        service.record(1, Ok(private), at(0));
+
+        let public = service.view(at(1), false);
+        assert_eq!(public.servers.len(), 1);
+        assert_eq!(public.servers[0].id, "live");
+        // The private server is degraded; the public state is live's alone.
+        assert_eq!(
+            (public.state, public.headline),
+            ("up", "All servers are up")
+        );
+        assert_eq!(
+            public.servers[0].players_text.as_deref(),
+            Some("7 · up to 32 humans at once across all modes")
+        );
+        let json = serde_json::to_string(&public).unwrap();
+        for hidden in [
+            "MODES",
+            "91",
+            "83",
+            "77",
+            "69",
+            "5.4.3",
+            "Acquisition",
+            "Domination",
+        ] {
+            assert!(
+                !json.contains(hidden),
+                "public status shows {hidden:?}: {json}"
+            );
+        }
+        // Staff see it, with its own limit.
+        let staff = service.view(at(1), true);
+        assert_eq!(staff.state, "degraded");
+        assert_eq!(
+            staff.servers[1].players_text.as_deref(),
+            Some("91 · up to 77 humans at once across all modes")
+        );
+    }
+
     #[test]
     fn staff_only_servers_and_the_cache() {
         let service = StatusService::new(
