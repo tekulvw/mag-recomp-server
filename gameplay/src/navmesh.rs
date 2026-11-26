@@ -1022,6 +1022,28 @@ impl NavMesh {
         .with_shape(self.body_shape)
     }
     pub fn route(&self, start: Point, goal: Point, goal_radius: f64) -> Result<Route, Error> {
+        self.route_to(start, goal, goal_radius, false)
+    }
+    /// As `route`, but a goal a standing structure covers or walls off is
+    /// reached beside it: the route ends at the nearest free spot it reaches
+    /// within `goal_radius` and counts as complete. For checks that only need
+    /// to get near the goal (a spawn's route to its lane objective), never
+    /// for an approach that must stand in an interaction range.
+    pub fn route_beside(
+        &self,
+        start: Point,
+        goal: Point,
+        goal_radius: f64,
+    ) -> Result<Route, Error> {
+        self.route_to(start, goal, goal_radius, true)
+    }
+    pub(crate) fn route_to(
+        &self,
+        start: Point,
+        goal: Point,
+        goal_radius: f64,
+        beside: bool,
+    ) -> Result<Route, Error> {
         if !valid_point(start)
             || !valid_point(goal)
             || !goal_radius.is_finite()
@@ -1078,7 +1100,7 @@ impl NavMesh {
                 &mut nr,
                 &mut nodes,
                 &mut stages,
-                c_int::from(snapshot.is_some()),
+                c_int::from(snapshot.is_some()) | (c_int::from(beside) << 1),
             )
         };
         let status = match status {
