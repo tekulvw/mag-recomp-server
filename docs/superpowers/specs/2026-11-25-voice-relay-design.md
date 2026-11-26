@@ -19,11 +19,13 @@ same numbers as the client document.
 
 ## What the game expects from the server
 
-- A client sends each voice packet to the DME tagged with a relay group number (U1). The server delivers
-  it to every other client that listens to that group, marked with the talker's client index (U10). The
-  game server never reads or changes the audio bytes.
-- When a player changes talk channel, the client sends game message `0x0259` naming the channel (U7).
-  Gameplay records it per player.
+- A client sends each voice packet to the DME addressed to a relay group (U1: the transport message).
+  The packet carries the group (one byte), a media type (one byte), the data size (two bytes), a
+  per-sender sequence number (two bytes) and at most 248 data bytes. The server delivers it to every
+  other client that listens to that group, marked with the sender's DME client index (U10). The game
+  server never reads or changes the audio bytes, and the receiver tracks sequence per sender.
+- Game message `0x0259` carries one byte, the talk channel. The client sends it when its voice menu
+  opens and on each change a leader makes. Gameplay records it per player.
 - Each client listens to at most 8 groups. The listen sets follow from the side, platoon, squad and
   leadership role the server already holds.
 
@@ -32,22 +34,37 @@ same numbers as the client document.
 Channels, by the game's wire value: 1 Squad chat, 2 Platoon chat, 3 Company chat, 4 Platoon broadcast,
 5 Team broadcast, 6 Proximity (later), 7 Party (out of scope), 0 none.
 
-Relay groups (83 per world; exact numbers U8): per side one team group and one company group; per
-platoon a platoon group and a platoon-broadcast group; per squad a squad group; and party groups, which
-the relay never serves.
+Relay groups, numbered as the client computes them from its side and world squad index (0 to 31; a
+platoon is four consecutive squads): team group = side (0, 1); company group = 2 + side; platoon group =
+4 + platoon; platoon-broadcast group = 12 + platoon; squad group = 20 + squad index. 52 to 82 are party
+groups, which the relay never serves. Retail also has 256 proximity groups (83 to 338), one per player;
+see "Proximity room".
 
-Working rule for roles (U6, to be confirmed before the leader tiers ship):
+Who hears each channel (the retail delivery rule): Squad chat, the talker's squad; Platoon chat, the
+platoon leader and the platoon's four squad leaders; Company chat, the OIC and the platoon leaders;
+Platoon broadcast, the whole platoon; Team broadcast, the whole side. So each player's listen set is:
 
-| Role | Listens to | May transmit to |
-| --- | --- | --- |
-| Member | own squad, own platoon broadcast, own team | own squad |
-| Squad leader | as member, plus own platoon | as member, plus own platoon |
-| Platoon leader | as squad leader, plus own company | own squad (if in one), own platoon, own company, own platoon broadcast |
-| OIC | as member, plus own company | own squad (if in one), own company, own team |
+| Role | Listens to |
+| --- | --- |
+| Member | own squad, own platoon broadcast, own team |
+| Squad leader | as member, plus own platoon |
+| Platoon leader | as member, plus own platoon and own company |
+| OIC | as member, plus own company |
 
-That is at most five groups per player. A group's members are exactly the players whose listen set
-contains it. A player with no squad listens to the team and company groups their role gives them and
-transmits to nothing until placed.
+The transmit set follows the channels the game's menu offers each role:
+
+| Role | May transmit to |
+| --- | --- |
+| Member | own squad |
+| Squad leader | own squad, own platoon |
+| Platoon leader, worlds with more than one platoon a side | own squad, own platoon, own company, own platoon broadcast |
+| Platoon leader, one platoon a side (64-player modes, no OIC) | own squad, own platoon, own team |
+| OIC | own squad, own platoon, own company, own team |
+
+That is at most five listen groups per player, within the client's limit of 8. A group's members are
+exactly the players whose listen set contains it. A player without a squad transmits to nothing and
+listens to the team group only, until placed. Retail's server did not check the stored channel; we do
+check the transmit set, which only refuses what the menu never offers.
 
 ## Gameplay
 
@@ -63,9 +80,11 @@ transmits to nothing until placed.
 - **No audio.** Gameplay never receives voice packets; the DME keeps them off the event bridge, which
   would otherwise carry one request per packet.
 - **Proximity room.** The routing is one function from a world's memberships (and, later, positions) to
-  per-player sets. Proximity will add a per-talker audience computed from positions on a slow cadence
-  (a few times a second), enemies included, published the same way as an audience list for the
-  proximity channel. Nothing in the frame format assumes the static tiers are the only source.
+  per-player sets. Retail gives every player a proximity group of their own; proximity will put each
+  listener near a talker, enemies included, into that talker's proximity group, recomputed from
+  positions on a slow cadence (a few times a second) and published the same way. Proximity groups pass
+  the 8-group listen limit quickly in a crowd, so the nearest talkers win. Nothing in the frame format
+  assumes the static tiers are the only source.
 
 ## DME relay
 
