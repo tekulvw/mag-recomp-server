@@ -57,6 +57,28 @@ wave limits). Anything that pauses an ordinary objective walk, such as a combat
 reaction, also pauses and resumes a duty walk. The selection itself compares
 distances for each armed objective and bot.
 
+## Attackers keep out of the blast
+
+An armed demolition charge explodes with its authored instantaneous blast
+when its fuse ends. The blast is centred on the trigger where the charge was
+planted. Its hot zone is a circle around the objective's position: the
+distance to its farthest trigger, plus the authored outer blast radius, plus
+`blast.margin_m`. Only objectives whose mode runtime supplies the blast
+(Domination and Acquisition structural objectives) have a zone. While the
+objective is armed, defusable or not:
+
+- Every living attacking bot inside the zone takes an `armed_guard` duty on it
+  if it has none there, outside the usual cap and reach. The planter is one of
+  them: once the charge is armed it has no action left there and walks out.
+- The attackers' guard ring is pushed outside the zone and keeps its width.
+  A guard keeps its current spot only when that spot is outside the zone.
+- An attacking bot's route that would enter a zone it does not start in is
+  refused (`bot_route_blast_zone`), and the bot plans again later. By then the
+  charge has gone off or been disarmed.
+
+Defenders are not moved. They may stay to defend the objective or disarm it
+as before.
+
 ## Configuration
 
 `objective_policy.armed` in the population file. If omitted, these defaults
@@ -72,8 +94,18 @@ apply:
 deactivate a Sabotage capture when their lane leads there. Defusing and
 deactivating always need `interactions_enabled`.
 
+The population file's `blast` object sets the hot zone's margin. With
+`"enabled": false`, attackers no longer leave an armed charge's zone and their
+guard ring and routes ignore it:
+
+```json
+"blast": {"enabled": true, "margin_m": 4.0}
+```
+
 ## Evidence receipts
 
+- `bot_blast_evacuation`: an attacker inside an armed charge's zone was sent
+  out (`objective`, `radius_m`, `position`).
 - `bot_armed_objective_duty`: `joined` true/false, `objective`, `role`
   (`defend`/`attack`), `slot`, `duty`.
 - `bot_objective_task`: `destination_role` is the duty code for duty goals.

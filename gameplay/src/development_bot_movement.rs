@@ -781,6 +781,18 @@ impl Target {
         });
         Ok(())
     }
+    /// The waypoints of the route the bot follows now, if any.
+    pub(super) fn registry_route_points(&self) -> Option<&[[f64; 3]]> {
+        Some(
+            &self
+                .pending_move
+                .as_ref()?
+                .navigation
+                .as_ref()?
+                .route
+                .waypoints,
+        )
+    }
     /// Progress toward the next production route waypoint, even on a dogleg
     /// that temporarily increases distance from the final destination.
     pub(super) fn registry_route_progress(&self) -> Option<(usize, f64)> {

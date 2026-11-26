@@ -769,6 +769,14 @@ impl Runtime {
         Ok(())
     }
 
+    /// The authored blast of a structural objective, when it has one.
+    pub(crate) fn blast_properties(
+        &self,
+        index: u16,
+    ) -> Option<crate::domination_structural_effects::BlastProperties> {
+        self.setup.playback.blast_properties(index).ok()
+    }
+
     pub(crate) fn advances_native_objectives(&self) -> bool {
         self.setup.bindings.schema == NATIVE_BINDINGS
     }

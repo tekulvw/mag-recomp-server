@@ -117,6 +117,17 @@ fn structural_fixture(
     area_radius: f32,
     area_value: f32,
 ) -> Structural {
+    blast_structural_fixture(objectives, 0., area_radius, area_value)
+}
+
+/// The synthetic structural effects with an instantaneous blast of
+/// `blast_radius` metres (both damage radii).
+pub(crate) fn blast_structural_fixture(
+    objectives: &ObjectiveCatalog,
+    blast_radius: f32,
+    area_radius: f32,
+    area_value: f32,
+) -> Structural {
     let states = [
         "Inactive",
         "Deactivated",
@@ -142,8 +153,8 @@ fn structural_fixture(
         "collision_resources":{},"unresolved_collision_tokens":[],
         "definitions":{"0x000000aa":{"definition_sha256":asset_hash,
             "state_sequence_indices":BTreeMap::from_iter(states.map(|name| (name,-2))),
-            "sequence_tokens":[],"blast_properties":{"SubType":1,"FullDamageRadius":0.,
-                "HalfDamageRadius":0.,"DamageValue":0.,"MaterialPenetration":0.,
+            "sequence_tokens":[],"blast_properties":{"SubType":1,"FullDamageRadius":blast_radius,
+                "HalfDamageRadius":blast_radius,"DamageValue":0.,"MaterialPenetration":0.,
                 "CharacterDamageOverTimeRadius":area_radius,"CharacterDamageOverTimeValue":area_value}}},
         "placements":placements,"sequences":{}
     }).to_string(), objectives, "synthetic", &asset_hash, &asset_hash).unwrap()
