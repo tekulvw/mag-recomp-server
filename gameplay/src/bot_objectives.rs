@@ -173,7 +173,7 @@ pub struct ObjectivePolicy {
     /// drop out of a spawn: 0 picks the fastest exit, 1 the shortest route.
     #[serde(default = "default_spawn_exit_goal_weight")]
     pub(super) spawn_exit_goal_weight: f64,
-    planning_slice_us: u64,
+    pub(super) planning_slice_us: u64,
     pub(super) candidate_checks_per_tick: usize,
     pub(super) route_queries_per_tick: usize,
     fresh_route_share: usize,

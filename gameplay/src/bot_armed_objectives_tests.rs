@@ -1014,6 +1014,20 @@ fn an_unplaceable_lane_cannot_starve_the_shared_planner() {
         })
         .collect();
     let mut e = engine_with(&slots, catalog);
+    // The planner also stops each pass on a wall-clock slice. Lift it so the
+    // check budgets alone decide who is planned, however fast the machine
+    // runs; a slow or busy runner otherwise ends the first wave passes early
+    // and the last team-1 bot can miss the window.
+    let policy = e
+        .bot_registry
+        .config
+        .as_mut()
+        .unwrap()
+        .objective_policy
+        .as_mut()
+        .unwrap();
+    policy.planning_slice_us = u64::MAX;
+    policy.wave_planning_slice_us = u64::MAX;
     for tick in 0..120 {
         plan_tick(&mut e, 100 + tick * 50);
     }
