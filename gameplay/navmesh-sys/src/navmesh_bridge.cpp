@@ -5,6 +5,7 @@
 #include "DetourNavMeshQuery.h"
 #include "DetourNode.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <new>
@@ -445,11 +446,12 @@ static uint64_t gate_point_regions(const StructureGate& g, const float* p) {
 }
 // Whether a route may cross polygon `cur`, entering over the link from `prev`
 // (or starting at `pa` when prev is 0) and leaving over the link to `next`
-// (or ending at `pb`). The entry and exit must share a region; an entry edge
-// touching several through regions (a wall crossing that edge) is not known
-// to be in any one of them, so every one must reach the exit.
+// (or ending at `pb`). The entry and exit must share a region. Unless
+// `relaxed`, an entry edge touching several through regions (a wall crossing
+// that edge) is not known to be in any one of them, so every one must reach
+// the exit; a relaxed search leaves that to `gate_tracked_violation`.
 static bool gate_passes(const MagNav* h, dtPolyRef prev, dtPolyRef cur, dtPolyRef next,
-                        const float* pa, const float* pb) {
+                        const float* pa, const float* pb, bool relaxed = false) {
     const auto found = h->gates.find(cur);
     if (found == h->gates.end()) return true;
     const StructureGate& g = found->second;
@@ -466,27 +468,39 @@ static bool gate_passes(const MagNav* h, dtPolyRef prev, dtPolyRef cur, dtPolyRe
     const uint64_t entry = side(prev, pa, &ambiguous, &through);
     const uint64_t exit = side(next, pb, &unused, &exit_through);
     if ((entry & exit) == 0) return false;
-    return !(prev && ambiguous && (through & ~exit) != 0);
+    return relaxed || !(prev && ambiguous && (through & ~exit) != 0);
 }
 static constexpr float GateBlockedCost = 1.0e7f;
+// Relaxed plans a gated route may take before the conservative one.
+static constexpr int RelaxedGateAttempts = 4;
 // Detour's default costs, plus a prohibitive cost on a crossing the standing
 // structures seal. A search takes one only when nothing else reaches the
 // goal; `gate_truncate` then cuts the corridor there.
 class GateFilter : public dtQueryFilter {
 public:
-    GateFilter(const MagNav* h, bool enabled) : h(h), enabled(enabled) { setIncludeFlags(1); setExcludeFlags(0); }
+    GateFilter(const MagNav* h, bool enabled, bool relaxed = false,
+               const std::vector<std::array<dtPolyRef, 3>>* refused = nullptr)
+        : h(h), enabled(enabled), relaxed(relaxed), refused(refused) {
+        setIncludeFlags(1); setExcludeFlags(0);
+    }
     float getCost(const float* pa, const float* pb,
                   const dtPolyRef prevRef, const dtMeshTile* prevTile, const dtPoly* prevPoly,
                   const dtPolyRef curRef, const dtMeshTile* curTile, const dtPoly* curPoly,
                   const dtPolyRef nextRef, const dtMeshTile* nextTile, const dtPoly* nextPoly) const override {
         float cost = dtQueryFilter::getCost(pa, pb, prevRef, prevTile, prevPoly, curRef, curTile, curPoly,
                                             nextRef, nextTile, nextPoly);
-        if (enabled && !h->gates.empty() && !gate_passes(h, prevRef, curRef, nextRef, pa, pb)) cost += GateBlockedCost;
+        if (enabled && !h->gates.empty()
+            && (!gate_passes(h, prevRef, curRef, nextRef, pa, pb, relaxed)
+                || (refused && std::find(refused->begin(), refused->end(),
+                                         std::array<dtPolyRef, 3>{prevRef, curRef, nextRef}) != refused->end())))
+            cost += GateBlockedCost;
         return cost;
     }
 private:
     const MagNav* h;
     bool enabled;
+    bool relaxed;
+    const std::vector<std::array<dtPolyRef, 3>>* refused;
 };
 // First corridor index whose crossing a standing structure seals, or -1.
 static int gate_violation(const MagNav* h, const unsigned long long* refs, int count,
@@ -496,6 +510,85 @@ static int gate_violation(const MagNav* h, const unsigned long long* refs, int c
         const dtPolyRef prev = i ? refs[i - 1] : 0, next = i + 1 < count ? refs[i + 1] : 0;
         if (!gate_passes(h, prev, refs[i], next, start, goal)) return i;
     }
+    return -1;
+}
+// The part of `from`'s edge it shares with `to`, as mag_nav_poly_info reports it.
+static bool shared_portal(const MagNav* h, dtPolyRef from, dtPolyRef to, float* a_out, float* b_out) {
+    const dtMeshTile* tile = nullptr; const dtPoly* poly = nullptr;
+    if (dtStatusFailed(h->mesh->getTileAndPolyByRef(from, &tile, &poly))) return false;
+    for (unsigned int l = poly->firstLink; l != DT_NULL_LINK; l = tile->links[l].next) {
+        const dtLink& link = tile->links[l];
+        if (link.ref != to) continue;
+        const float* a = &tile->verts[poly->verts[link.edge] * 3];
+        const float* b = &tile->verts[poly->verts[(link.edge + 1) % poly->vertCount] * 3];
+        float low = 0.f, high = 1.f;
+        if (link.side != 0xff) { low = link.bmin / 255.f; high = link.bmax / 255.f; }
+        for (int k = 0; k < 3; ++k) { a_out[k] = a[k] + (b[k] - a[k]) * low; b_out[k] = a[k] + (b[k] - a[k]) * high; }
+        return true;
+    }
+    return false;
+}
+// Regions of `g` with a labelled cell within one cell of (x, z), the way each
+// link's edge regions are found.
+static uint64_t gate_regions_near(const StructureGate& g, float x, float z) {
+    const int cx = static_cast<int>(std::floor((x - g.ox) / g.cell));
+    const int cz = static_cast<int>(std::floor((z - g.oz) / g.cell));
+    uint64_t mask = 0;
+    for (int dz = -1; dz <= 1; ++dz) for (int dx = -1; dx <= 1; ++dx) {
+        const int px = cx + dx, pz = cz + dz;
+        if (px < 0 || pz < 0 || px >= g.nx || pz >= g.nz) continue;
+        const int label = g.labels[px + pz * g.nx];
+        if (label) mask |= uint64_t(1) << (label - 1);
+    }
+    return mask;
+}
+// First corridor index the route cannot get through when it follows the
+// regions it actually stands in, or -1. The regions of the first polygon are
+// those at `start`; crossing a shared edge, the route enters the regions of
+// the next polygon whose free cells meet free cells of its current regions
+// along that edge (an ungated polygon is one region); the last polygon's
+// regions must hold `goal`. This resolves an entry edge that a wall crosses,
+// which `gate_passes` must otherwise treat as possibly either side.
+static int gate_tracked_violation(const MagNav* h, const unsigned long long* refs, int count,
+                                  const float* start, const float* goal) {
+    if (h->gates.empty() || count <= 0) return -1;
+    constexpr uint64_t All = ~uint64_t(0);
+    const auto gate_of = [&](dtPolyRef ref) -> const StructureGate* {
+        const auto found = h->gates.find(ref);
+        return found == h->gates.end() ? nullptr : &found->second;
+    };
+    const auto link_regions = [](const StructureGate& g, dtPolyRef neighbour) {
+        const auto link = g.links.find(neighbour);
+        return link == g.links.end() ? All : link->second.first;
+    };
+    const StructureGate* first = gate_of(static_cast<dtPolyRef>(refs[0]));
+    uint64_t reach = first ? gate_point_regions(*first, start) : All;
+    for (int i = 0; i + 1 < count; ++i) {
+        const dtPolyRef cur = static_cast<dtPolyRef>(refs[i]), next = static_cast<dtPolyRef>(refs[i + 1]);
+        const StructureGate* gc = gate_of(cur);
+        const StructureGate* gn = gate_of(next);
+        if (gc && !(reach & link_regions(*gc, next))) return i;
+        if (!gn) { reach = All; continue; }
+        const uint64_t entry = link_regions(*gn, cur);
+        float a[3], b[3];
+        if (!gc || !shared_portal(h, cur, next, a, b)) {
+            reach = entry;
+        } else {
+            const float length = std::hypot(b[0] - a[0], b[2] - a[2]);
+            const float step = 0.5f * std::min(gc->cell, gn->cell);
+            const int samples = std::max(1, static_cast<int>(std::ceil(length / step)));
+            uint64_t entered = 0;
+            for (int k = 0; k <= samples && samples <= 8192; ++k) {
+                const float t = static_cast<float>(k) / samples;
+                const float x = a[0] + (b[0] - a[0]) * t, z = a[2] + (b[2] - a[2]) * t;
+                if (gate_regions_near(*gc, x, z) & reach) entered |= gate_regions_near(*gn, x, z);
+            }
+            reach = samples <= 8192 ? entered & entry : entry;
+        }
+        if (!reach) return i;
+    }
+    const StructureGate* last = gate_of(static_cast<dtPolyRef>(refs[count - 1]));
+    if (last && !(reach & gate_point_regions(*last, goal))) return count - 1;
     return -1;
 }
 // The point of polygon `ref`'s entry regions nearest `goal`, for a corridor
@@ -782,9 +875,10 @@ private:
 // status:0 complete,1 partial,2 disconnected,3 out of nodes,4 invalid start,5 invalid goal,6 query failure.
 // `nodes` reports search nodes used and `stages` the corridor pieces of a staged route (0 when direct).
 static int route_impl(MagNav* h,const float* start,const float* goal,float radius,float* projected_start,float* projected_goal,
-                  float* points,int* point_count,unsigned long long* refs,int* ref_count,int* nodes,int* stages,bool gated) {
+                  float* points,int* point_count,unsigned long long* refs,int* ref_count,int* nodes,int* stages,bool gated,
+                  bool relaxed=false,const std::vector<std::array<dtPolyRef,3>>* refused=nullptr) {
     *point_count=0;*ref_count=0;*nodes=0;*stages=0;
-    GateFilter filter(h,gated);
+    GateFilter filter(h,gated,relaxed,refused);
     const float se[3]={.75f,2.f,.75f}, ge[3]={radius,8.f,radius};
     dtPolyRef sr=0;
     if(dtStatusFailed(h->query->findNearestPoly(start,se,&filter,&sr,projected_start)) || !sr) return 4;
@@ -838,13 +932,33 @@ static int route_impl(MagNav* h,const float* start,const float* goal,float radiu
     if(partial) return !h->reference && count==1 ? 2 : 1;
     return 0;
 }
-// As route_impl, then cut at the first crossing a standing structure seals:
-// the corridor keeps the polygons up to it and ends in its entry regions,
-// nearest the goal, as a partial route.
+// Gated routes are first planned with a wall-crossed entry edge allowed on
+// either side, and kept when following the regions the route actually stands
+// in gets it through (`gate_tracked_violation`). A crossing that check
+// refuses is refused to the next plan, up to `RelaxedGateAttempts` plans.
+// Otherwise, as route_impl, then cut at the first crossing a standing
+// structure seals: the corridor keeps the polygons up to it and ends in its
+// entry regions, nearest the goal, as a partial route.
 // `gated` 0 plans on the static mesh alone (a start inside a structure's
 // enclosed room, which no opening leaves).
 int mag_nav_route(MagNav* h,const float* start,const float* goal,float radius,float* projected_start,float* projected_goal,
                   float* points,int* point_count,unsigned long long* refs,int* ref_count,int* nodes,int* stages,int gated) {
+    if(gated && !h->gates.empty()) {
+        std::vector<std::array<dtPolyRef,3>> refused;
+        for(int attempt=0; attempt<RelaxedGateAttempts; ++attempt) {
+            const int relaxed=route_impl(h,start,goal,radius,projected_start,projected_goal,points,point_count,refs,ref_count,
+                                         nodes,stages,true,true,&refused);
+            if(relaxed==4 || relaxed==5 || relaxed==6 || *ref_count<=0) return relaxed;
+            const float* reached = *point_count>0 ? points+3*(*point_count-1) : projected_goal;
+            const int at=gate_tracked_violation(h,refs,*ref_count,projected_start,reached);
+            if(at<0) return relaxed;
+            const std::array<dtPolyRef,3> crossing{at ? static_cast<dtPolyRef>(refs[at-1]) : 0, static_cast<dtPolyRef>(refs[at]),
+                                                   at+1<*ref_count ? static_cast<dtPolyRef>(refs[at+1]) : 0};
+            // A crossing sealed even when relaxed means nothing else reaches the goal.
+            if(!gate_passes(h,crossing[0],crossing[1],crossing[2],projected_start,reached,true)) break;
+            refused.push_back(crossing);
+        }
+    }
     const int status=route_impl(h,start,goal,radius,projected_start,projected_goal,points,point_count,refs,ref_count,nodes,stages,gated!=0);
     if(!gated || status==4 || status==5 || status==6 || *ref_count<=0) return status;
     const float* reached = *point_count>0 ? points+3*(*point_count-1) : projected_goal;

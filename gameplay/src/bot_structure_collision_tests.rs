@@ -412,3 +412,39 @@ fn unchanged_structures_keep_their_polygon_gates() {
         "{gated} {after} {reused}"
     );
 }
+
+#[test]
+fn a_wall_crossing_a_polygon_edge_does_not_seal_the_route_beside_it() {
+    // The floor's polygons meet along x = 20. A wall along z = 10 from x = 14
+    // to the east edge crosses that edge, so both of the east polygon's
+    // regions (north and south of the wall) touch it. A route that stays
+    // south of the wall passes; one that has to cross the wall does not.
+    let floor = floor_world();
+    let mesh = floor_mesh(&floor);
+    let mut sequences = SequenceCollisionState::default();
+    sequences.synthetic_structure_mesh(
+        7,
+        Pose::at([27., 0., 10.]),
+        boxes(&[([-13., 0., -0.2], [13.5, 3., 0.2])]),
+        Some(PACK_LAYER),
+    );
+    let structures = snapshot(&sequences);
+    crate::navmesh_structure_gates::install_now(&mesh, Some(&structures)).unwrap();
+    for (from, to) in [
+        ([16., 0., 5.], [24., 0., 5.]),
+        ([16., 0., 15.], [36., 0., 15.]),
+    ] {
+        let beside = mesh.route(from, to, 0.5).unwrap();
+        assert_eq!(beside.status, Status::Complete, "{from:?}: {beside:?}");
+        assert!(clear_of(&beside, &structures), "{:?}", beside.waypoints);
+    }
+    // Around the wall's west end is the only way to the other side.
+    let around = mesh.route([16., 0., 5.], [36., 0., 15.], 0.5).unwrap();
+    assert_eq!(around.status, Status::Complete, "{around:?}");
+    assert!(
+        around.waypoints.iter().any(|p| p[0] < 14.),
+        "{:?}",
+        around.waypoints
+    );
+    assert!(clear_of(&around, &structures), "{:?}", around.waypoints);
+}
