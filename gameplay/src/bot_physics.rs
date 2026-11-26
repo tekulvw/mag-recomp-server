@@ -25,7 +25,8 @@ pub(crate) enum Stance {
     Crouched,
 }
 /// Height of the default box body crouched; a crouched body of any shape
-/// keeps this proportion of its standing height.
+/// keeps this proportion of its standing height. Its torso (aim point and
+/// muzzle) is at 60% of it, as a standing body's is.
 pub(crate) const CROUCH_HEIGHT_M: f64 = 1.2;
 /// The height `body` presents to shots and sight lines in `stance`: its own
 /// height standing (the box's 1.8 m, or a capsule's top above its feet), and

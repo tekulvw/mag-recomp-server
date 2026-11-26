@@ -149,10 +149,6 @@ const PEEK_OFFSET_M: f64 = 0.8;
 const GRID_M: f64 = 8.;
 /// A surface steeper than this (normal's vertical part below it) is a wall.
 const WALL_NORMAL_Y: f64 = 0.7;
-/// Body height of a crouched box bot; its torso (aim point and muzzle) is at
-/// 60% of it, as a standing body's is. Other shapes scale it
-/// (`bot_physics::stance_height`).
-pub(crate) const CROUCH_HEIGHT_M: f64 = bot_physics::CROUCH_HEIGHT_M;
 /// The client's Character stance codes (standing, crouched).
 const STANCE_STANDING: u8 = 0;
 const STANCE_CROUCHED: u8 = 1;
