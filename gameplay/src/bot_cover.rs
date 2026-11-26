@@ -733,6 +733,8 @@ struct Budget {
     rays: usize,
     work: usize,
     routes: usize,
+    /// Perception's sight memory: how long a quiet threat stays live.
+    sight_memory: Duration,
 }
 
 #[derive(Clone, Copy)]
@@ -1251,6 +1253,10 @@ impl<W: Write> Engine<W> {
             rays: policy.max_rays_per_tick,
             work: policy.geometry_work_per_tick,
             routes: policy.max_routes_per_tick,
+            sight_memory: Duration::from_millis(
+                self.bot_perception_policy()
+                    .map_or(4000, |p| p.sight_memory_ms),
+            ),
         };
         // Episodes first: they are cheap unless they relocate.
         let ids: Vec<_> = self.bot_cover.episodes.keys().copied().collect();
@@ -1497,11 +1503,7 @@ impl<W: Write> Engine<W> {
         }
         let me = r.physical_position();
         let quiet = now.saturating_sub(e.last_threat);
-        let sight_memory = Duration::from_millis(
-            self.bot_perception_policy()
-                .map_or(4000, |p| p.sight_memory_ms),
-        );
-        if quiet > sight_memory {
+        if quiet > budget.sight_memory {
             self.end_cover(id, now, "threat_cleared", policy, true, receipts);
             return Ok(());
         }
