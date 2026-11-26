@@ -291,6 +291,7 @@ impl<W: Write> Engine<W> {
             acquisition_round: None,
             domination_round: None,
             domination_gameplay: None,
+            sabotage_structures: None,
             hospital_rockets: None,
             infantry_rockets: None,
             guided_launchers: None,

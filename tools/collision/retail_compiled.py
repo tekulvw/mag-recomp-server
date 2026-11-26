@@ -277,9 +277,15 @@ def export(args):
             searched.append((path.name, sha(data), Psarc(data), None))
         records, unshipped = unshipped_exclusions(records, packs, searched)
     excluded = []
+    root_output = getattr(args, 'animated_root_packs', None)
+    if root_output is not None:
+        require(getattr(args, 'exclude_animated_parented', False),
+                '--animated-root-packs requires --exclude-animated-parented')
+        require(not root_output.exists(), 'refusing existing animated root pack output')
     if getattr(args, 'exclude_animated_parented', False):
         require(not getattr(args, 'reference_pose', False),
                 'dynamic exclusion and reference-pose export are mutually exclusive')
+        before = {record['collision_offset']: record for record in records}
         records, excluded = dynamic_exclusions(records, packs, member_sha256)
     parented = any(has_parent(packs.get(record['placement']['token'], [])) for record in records)
     resolver = None
@@ -379,10 +385,62 @@ def export(args):
         report['parent_resolution'] = resolver.report()
     args.output.mkdir(parents=True)
     (args.output/'world.json').write_bytes(world_bytes)
+    if root_output is not None:
+        export_animated_root_packs(root_output, excluded, before, packs, args.catalog, cache,
+                                   map_name, manifest['build'], sha(world_bytes))
     (args.output/'terrain-native-proof.json').write_bytes(terrain_bytes)
     (args.output/'placement-native-proof.json').write_bytes(placement_bytes)
     (args.output/'assembly.json').write_text(json.dumps(report, separators=(',', ':'))+'\n')
     print(json.dumps({k: report[k] for k in ['counts', 'compiled_joined', 'instances', 'triangles', 'world_bytes', 'world_sha256']}))
+
+
+def export_animated_root_packs(output, excluded, records, packs, catalog, cache, map_name, build,
+                               world_sha256):
+    """Write the root-attached packs of each excluded animated instance.
+
+    An excluded instance's packs with no parent node stay at the instance's
+    compiled placement while its animation moves only the attached nodes, so
+    each is written as its own world-coordinate mesh, named by its content
+    hash, for a runtime to place as standing collision. Attached packs stay
+    omitted. The static world is unchanged.
+    """
+    output.mkdir(parents=True)
+    rows = []
+    for row in excluded:
+        record = records[row['collision_offset']]
+        for ordinal, pack in enumerate(packs[row['resource_token']]):
+            binding = pack['resource_binding']
+            if binding['parent_token'] != '00000000':
+                continue
+            instances = []
+            for index, mesh in enumerate(load_meshes(pack, catalog, cache)):
+                vertices = [bake_vertex(v, record['placement']) for v in mesh['vertices_xyz']]
+                triangles, _ = nondegenerate_triangles(vertices, mesh['triangles'])
+                if not triangles:
+                    continue
+                instance = dict(id=f"{row['instance_id']}:pack-{ordinal}:mesh-{index}",
+                                vertices_xyz=vertices, triangles=triangles)
+                material = mesh.get('subpart_index')
+                if material is not None and material < len(binding['material_indices']):
+                    instance['material_index'] = binding['material_indices'][material]
+                instances.append(instance)
+            require(instances, 'empty animated root pack')
+            document = dict(format='mag_collision_world', schema_version=1, coordinate_space='world',
+                            metadata=dict(map_name=map_name, build=build, coverage='provisional',
+                                          provenance=['packfile_sha256=' + pack['source_sha256'],
+                                                      f"root pack of {row['instance_id']} at its compiled placement"],
+                                          unknowns=['Standing collision of an animated instance; attached '
+                                                    'moving parts are omitted.']),
+                            instances=instances)
+            payload = (json.dumps(document, separators=(',', ':'), allow_nan=False) + '\n').encode()
+            digest = sha(payload)
+            (output / f'{digest}.json').write_bytes(payload)
+            rows.append(dict(instance_id=row['instance_id'], instance_name=row['instance_name'],
+                             resource_token=row['resource_token'], packfile_sha256=pack['source_sha256'],
+                             neutral_sha256=digest, collision_tag=binding['collision_tag_raw'],
+                             material_indices=binding['material_indices']))
+    index = dict(schema='mag_animated_root_packs_v1', map=map_name, world_sha256=world_sha256, packs=rows)
+    (output / 'index.json').write_text(json.dumps(index, indent=1) + '\n')
 
 
 def main():
@@ -409,6 +467,9 @@ def main():
     parser.add_argument('--shipped-archive', type=Path, action='append',
                         help='Further shipped archive searched for unshipped resources (repeatable; '
                              'the level archive is always searched)')
+    parser.add_argument('--animated-root-packs', type=Path,
+                        help='With --exclude-animated-parented: new directory for the excluded '
+                             'instances\' root-attached packs as world-coordinate meshes')
     parser.add_argument('--physics-region-min', type=lambda s: [float(v) for v in s.split(',')])
     parser.add_argument('--physics-region-max', type=lambda s: [float(v) for v in s.split(',')])
     export(parser.parse_args())

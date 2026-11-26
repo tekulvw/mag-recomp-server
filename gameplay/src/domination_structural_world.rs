@@ -1521,6 +1521,13 @@ pub struct SequenceCollisionState {
     revision: u64,
 }
 static SEQUENCE_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+/// One collision pack a mode places itself at a world pose.
+pub(crate) struct PlacedPack {
+    pub(crate) pose: Pose,
+    pub(crate) mesh: collision::CollisionWorld,
+    pub(crate) collision_tag: u8,
+    pub(crate) packfile_sha256: String,
+}
 #[derive(Clone)]
 pub(crate) struct SequenceSurface {
     projectile: Option<SurfaceBinding>,
@@ -2337,6 +2344,33 @@ impl SequenceCollisionState {
         );
         self.touch();
         Ok(())
+    }
+
+    /// Replace what slot `slot` of objective `objective` places with `packs`
+    /// (none removes it). Each pack is filtered by its own collision tag.
+    pub(crate) fn set_placed_packs(&mut self, objective: u16, slot: u8, packs: Vec<PlacedPack>) {
+        let key = (objective, slot);
+        if packs.is_empty() {
+            if self.active.remove(&key).is_some() {
+                self.touch();
+            }
+            return;
+        }
+        let surfaces = packs
+            .into_iter()
+            .map(|pack| SequenceSurface {
+                projectile: Some(SurfaceBinding::Sequence(SequenceBinding {
+                    source_sha256: pack.packfile_sha256,
+                    neutral_sha256: pack.mesh.source_sha256().to_owned(),
+                    collision_tag: pack.collision_tag,
+                    part_ids: projectile_part_ids(&pack.mesh),
+                })),
+                pose: pack.pose,
+                mesh: pack.mesh,
+            })
+            .collect();
+        self.active.insert(key, surfaces);
+        self.touch();
     }
 
     pub fn remove_hospital_hulk(&mut self, index: u16) {
