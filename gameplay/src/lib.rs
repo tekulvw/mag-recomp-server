@@ -62,6 +62,9 @@ mod bot_repair;
 pub mod bot_resupply;
 pub mod bot_resupply_approach_policy;
 pub mod bot_resupply_catalog;
+#[cfg(test)]
+mod bot_sight_parallel_tests;
+mod bot_sight_prefetch;
 mod bot_spawn_selection;
 #[cfg(test)]
 mod bot_squad_packing_tests;
@@ -1410,6 +1413,10 @@ pub struct Engine<W: Write> {
     last_world_tick: Option<Duration>,
     /// Opt-in per-phase world-tick time (headless diagnostics).
     tick_timing: Option<tick_timing::TickTiming>,
+    /// Workers for read-only bot sight queries; 1 keeps them on the tick thread.
+    bot_threads: usize,
+    /// How prefetched sight lines were used, for diagnostics.
+    bot_sight_usage: bot_sight_prefetch::Usage,
     /// Off-tick analysis of the bot structure snapshot, while it runs.
     bot_structure_analysis: Option<bot_structure_collision::Analysis>,
     /// Key of the structure snapshot the last analysis was started for.

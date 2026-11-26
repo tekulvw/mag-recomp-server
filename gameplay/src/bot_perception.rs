@@ -684,6 +684,76 @@ pub(crate) fn interruptible(bot: &WorldBot, guard: DropGuard) -> bool {
 }
 /// Line of sight through static collision and the mode's placed structures;
 /// bodies do not hide a person.
+/// A bot's eye and the two nearest enemies it can check this tick: in its
+/// view cone while it moves, within the all-round radius otherwise.
+fn sight_candidates(
+    policy: &Policy,
+    range: f64,
+    bot: &crate::bot_registry::WorldBot,
+    moving: bool,
+    bodies: &[Body],
+) -> ([f64; 3], Vec<(f64, Body)>) {
+    let eye = torso(bot.target.runtime.unwrap().physical_position());
+    let team = bot.target.squad.team();
+    let yaw = yaw_radians(bot.yaw);
+    let mut candidates: Vec<_> = bodies
+        .iter()
+        .filter(|b| b.team != team)
+        .map(|b| (distance(eye, torso(b.feet)), *b))
+        .filter(|(d, b)| {
+            if moving {
+                in_view(policy, range, eye, yaw, torso(b.feet))
+            } else {
+                *d <= policy.proximity_m
+            }
+        })
+        .collect();
+    candidates.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.id.cmp(&b.1.id)));
+    candidates.truncate(2);
+    (eye, candidates)
+}
+impl<W: Write> Engine<W> {
+    /// With bot workers, answer ahead the sight lines this tick's sight
+    /// checks will ask, in budget order, until the ray budget would be spent.
+    /// See `bot_sight_prefetch` for why results stay identical.
+    fn prefetch_perception_sight(
+        &self,
+        ids: &[u16],
+        bodies: &[Body],
+        policy: &Policy,
+        items: &crate::item_catalog::ItemCatalog,
+        guard: DropGuard,
+        now: Duration,
+    ) -> Option<crate::bot_sight_prefetch::SightPrefetch> {
+        let world = self
+            .collision_world
+            .as_ref()
+            .filter(|w| self.bot_threads > 1 && w.metadata().map_name == self.map_name())?;
+        let mut lines = Vec::new();
+        for &id in ids {
+            if lines.len() >= policy.max_sight_rays_per_tick {
+                break;
+            }
+            let bot = &self.bot_registry.bots[&id];
+            let mind = &self.bot_perception.minds[&id];
+            let moving = interruptible(bot, guard);
+            if now < mind.next_sight || mind.held() || (!moving && !crate::bot_firearms::safe(bot))
+            {
+                continue;
+            }
+            let range = bot_sight_range(policy, items, bot);
+            let (eye, candidates) = sight_candidates(policy, range, bot, moving, bodies);
+            lines.extend(candidates.iter().map(|(_, c)| (eye, torso(c.feet))));
+        }
+        Some(crate::bot_sight_prefetch::SightPrefetch::compute(
+            world,
+            self.bot_sight_structures(),
+            policy.geometry_work_per_tick,
+            &lines,
+            self.bot_threads,
+        ))
+    }
+}
 pub(crate) fn clear_view(
     world: Option<&collision::CollisionWorld>,
     structures: Option<crate::bot_firearms::Structures<'_>>,
@@ -692,6 +762,7 @@ pub(crate) fn clear_view(
     to: [f64; 3],
     rays: &mut usize,
     work: &mut usize,
+    prefetch: Option<&crate::bot_sight_prefetch::SightPrefetch>,
 ) -> Result<bool, ()> {
     let Some(world) = world.filter(|w| w.metadata().map_name == map) else {
         return Ok(false);
@@ -707,14 +778,13 @@ pub(crate) fn clear_view(
         return Ok(false);
     }
     // Sight lines see through what bullets fly through (the projectile row).
-    let row = world.query_row(crate::collision::PROJECTILE_QUERY_LAYER);
-    match world.raycast_row_bounded(from, to, row, work) {
-        Ok(query) if query.nearest.is_some() => return Ok(false),
-        Ok(_) => {}
+    match crate::bot_sight_prefetch::world_blocked(prefetch, world, from, to, work) {
+        Ok(true) => return Ok(false),
+        Ok(false) => {}
         Err(_) if *work == 0 => return Err(()),
         Err(_) => return Ok(false),
     }
-    match structures.map(|s| s.blocks(from, to, work)) {
+    match structures.map(|s| s.blocks_with(prefetch, from, to, work)) {
         None | Some(Ok(false)) => Ok(true),
         Some(Err(_)) if *work == 0 => Err(()),
         Some(_) => Ok(false),
@@ -1000,6 +1070,7 @@ impl<W: Write> Engine<W> {
             let offset = ids.partition_point(|&id| id < self.bot_perception.cursor) % ids.len();
             ids.rotate_left(offset);
         }
+        let prefetch = self.prefetch_perception_sight(&ids, &bodies, &policy, &items, guard, now);
         for id in ids {
             let bot = &self.bot_registry.bots[&id];
             let mind = &self.bot_perception.minds[&id];
@@ -1016,26 +1087,10 @@ impl<W: Write> Engine<W> {
                 break;
             }
             self.bot_perception.cursor = id.wrapping_add(1);
-            let me = bot.target.runtime.unwrap().physical_position();
-            let team = bot.target.squad.team();
-            let eye = torso(me);
-            let yaw = yaw_radians(bot.yaw);
             let range = bot_sight_range(&policy, &items, bot);
-            let mut candidates: Vec<_> = bodies
-                .iter()
-                .filter(|b| b.team != team)
-                .map(|b| (distance(eye, torso(b.feet)), *b))
-                .filter(|(d, b)| {
-                    if moving {
-                        in_view(&policy, range, eye, yaw, torso(b.feet))
-                    } else {
-                        *d <= policy.proximity_m
-                    }
-                })
-                .collect();
-            candidates.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.id.cmp(&b.1.id)));
+            let (eye, candidates) = sight_candidates(&policy, range, bot, moving, &bodies);
             let mut deferred = false;
-            for (d, candidate) in candidates.into_iter().take(2) {
+            for (d, candidate) in candidates {
                 let before = rays;
                 match clear_view(
                     self.collision_world.as_ref(),
@@ -1045,6 +1100,7 @@ impl<W: Write> Engine<W> {
                     torso(candidate.feet),
                     &mut rays,
                     &mut work,
+                    prefetch.as_ref(),
                 ) {
                     Ok(true) => {
                         seen.insert(
@@ -1073,6 +1129,7 @@ impl<W: Write> Engine<W> {
             self.bot_perception.minds.get_mut(&id).unwrap().next_sight =
                 now + Duration::from_millis(policy.sight_interval_ms);
         }
+        self.record_sight_usage(prefetch);
         // Arbitration and transitions.
         let mut receipts = Vec::new();
         for &id in &live {

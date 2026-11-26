@@ -50,6 +50,7 @@ fn sight(world: &CollisionWorld) -> bool {
         TO,
         &mut 4,
         &mut 10_000,
+        None,
     )
     .unwrap()
 }
@@ -66,6 +67,7 @@ fn shot(world: &CollisionWorld) -> Result<(), &'static str> {
         &[],
         &mut 4,
         &mut 10_000,
+        None,
     )
 }
 
@@ -146,6 +148,7 @@ fn placed_structures_block_bot_sight_and_shots_on_the_projectile_row() {
             to,
             &mut 4,
             &mut 10_000,
+            None,
         );
         let shot = crate::bot_firearms::visible(
             Some(&world),
@@ -158,6 +161,7 @@ fn placed_structures_block_bot_sight_and_shots_on_the_projectile_row() {
             &[],
             &mut 4,
             &mut 10_000,
+            None,
         );
         (sight, shot)
     };
