@@ -43,23 +43,28 @@ const TO: [f64; 3] = [15., 1.5, 5.];
 
 fn sight(world: &CollisionWorld) -> bool {
     crate::bot_perception::clear_view(
-        Some(world),
-        None,
-        "synthetic",
+        crate::bot_firearms::SightGeometry {
+            world: Some(world),
+            structures: None,
+            map: "synthetic",
+            prefetch: None,
+        },
         FROM,
         TO,
         &mut 4,
         &mut 10_000,
-        None,
     )
     .unwrap()
 }
 
 fn shot(world: &CollisionWorld) -> Result<(), &'static str> {
     crate::bot_firearms::visible(
-        Some(world),
-        None,
-        "synthetic",
+        crate::bot_firearms::SightGeometry {
+            world: Some(world),
+            structures: None,
+            map: "synthetic",
+            prefetch: None,
+        },
         FROM,
         TO,
         1,
@@ -67,7 +72,6 @@ fn shot(world: &CollisionWorld) -> Result<(), &'static str> {
         &[],
         &mut 4,
         &mut 10_000,
-        None,
     )
 }
 
@@ -141,19 +145,24 @@ fn placed_structures_block_bot_sight_and_shots_on_the_projectile_row() {
     let (from, to) = ([5., 3., 5.], [15., 0.5, 5.]);
     let check = |structures: Option<Structures<'_>>| {
         let sight = crate::bot_perception::clear_view(
-            Some(&world),
-            structures,
-            "synthetic",
+            crate::bot_firearms::SightGeometry {
+                world: Some(&world),
+                structures,
+                map: "synthetic",
+                prefetch: None,
+            },
             from,
             to,
             &mut 4,
             &mut 10_000,
-            None,
         );
         let shot = crate::bot_firearms::visible(
-            Some(&world),
-            structures,
-            "synthetic",
+            crate::bot_firearms::SightGeometry {
+                world: Some(&world),
+                structures,
+                map: "synthetic",
+                prefetch: None,
+            },
             from,
             to,
             1,
@@ -161,7 +170,6 @@ fn placed_structures_block_bot_sight_and_shots_on_the_projectile_row() {
             &[],
             &mut 4,
             &mut 10_000,
-            None,
         );
         (sight, shot)
     };

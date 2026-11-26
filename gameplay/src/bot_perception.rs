@@ -755,15 +755,18 @@ impl<W: Write> Engine<W> {
     }
 }
 pub(crate) fn clear_view(
-    world: Option<&collision::CollisionWorld>,
-    structures: Option<crate::bot_firearms::Structures<'_>>,
-    map: &str,
+    geometry: crate::bot_firearms::SightGeometry<'_>,
     from: [f64; 3],
     to: [f64; 3],
     rays: &mut usize,
     work: &mut usize,
-    prefetch: Option<&crate::bot_sight_prefetch::SightPrefetch>,
 ) -> Result<bool, ()> {
+    let crate::bot_firearms::SightGeometry {
+        world,
+        structures,
+        map,
+        prefetch,
+    } = geometry;
     let Some(world) = world.filter(|w| w.metadata().map_name == map) else {
         return Ok(false);
     };
@@ -1093,14 +1096,16 @@ impl<W: Write> Engine<W> {
             for (d, candidate) in candidates {
                 let before = rays;
                 match clear_view(
-                    self.collision_world.as_ref(),
-                    self.bot_sight_structures(),
-                    &map,
+                    crate::bot_firearms::SightGeometry {
+                        world: self.collision_world.as_ref(),
+                        structures: self.bot_sight_structures(),
+                        map: &map,
+                        prefetch: prefetch.as_ref(),
+                    },
                     eye,
                     torso(candidate.feet),
                     &mut rays,
                     &mut work,
-                    prefetch.as_ref(),
                 ) {
                     Ok(true) => {
                         seen.insert(

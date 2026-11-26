@@ -218,6 +218,16 @@ Domination run, `max_rays_per_tick` 256, `geometry_work_per_tick` 262,144 and
 `max_candidates_per_bot` 4 raised an engaged bot's median from 8.5 to 10 shots
 a second (the refire cap) for about 0.2 ms more firearm time per tick.
 
+`mag-gameplay --bot-threads N` (default 1) answers perception's sight checks
+and the weapon controller's target searches on N threads. Before each loop the
+tick thread predicts, in budget order, the lines the loop will check, and the
+workers answer them against the read-only collision world and structures. The
+loop itself still runs on the tick thread. It takes a prefetched answer only
+when its remaining work covers the work that answer spent, and charges that
+work, so every result and receipt is the same as with one thread. Shot lines,
+and lines a kill earlier in the tick changed, are asked directly. Route
+planning is not parallelised.
+
 `bot_perception_summary` records cumulative interrupts, resumes, sounds, near
 misses, sight rays, deferred checks and perception CPU time every 10 s.
 

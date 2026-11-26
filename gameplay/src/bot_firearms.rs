@@ -418,11 +418,19 @@ impl<W: Write> Engine<W> {
         })
     }
 }
+/// What a sight line is checked against: the static world and the map it
+/// must belong to, the mode's placed structures, and any answers prefetched
+/// for this phase.
+#[derive(Clone, Copy)]
+pub(crate) struct SightGeometry<'a> {
+    pub(crate) world: Option<&'a collision::CollisionWorld>,
+    pub(crate) structures: Option<Structures<'a>>,
+    pub(crate) map: &'a str,
+    pub(crate) prefetch: Option<&'a crate::bot_sight_prefetch::SightPrefetch>,
+}
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn visible(
-    world: Option<&collision::CollisionWorld>,
-    structures: Option<Structures<'_>>,
-    map: &str,
+    geometry: SightGeometry<'_>,
     from: [f64; 3],
     to: [f64; 3],
     shooter: u16,
@@ -430,8 +438,13 @@ pub(crate) fn visible(
     actors: &[Actor],
     rays: &mut usize,
     work: &mut usize,
-    prefetch: Option<&crate::bot_sight_prefetch::SightPrefetch>,
 ) -> Result<(), &'static str> {
+    let SightGeometry {
+        world,
+        structures,
+        map,
+        prefetch,
+    } = geometry;
     let world = world.ok_or("geometry_unavailable")?;
     if world.metadata().map_name != map {
         return Err("geometry_map_mismatch");
@@ -959,9 +972,12 @@ impl<W: Write> Engine<W> {
                 let mut confirmed_quiet = true;
                 for candidate in candidates {
                     match visible(
-                        self.collision_world.as_ref(),
-                        self.bot_sight_structures(),
-                        &map,
+                        SightGeometry {
+                            world: self.collision_world.as_ref(),
+                            structures: self.bot_sight_structures(),
+                            map: &map,
+                            prefetch: prefetch.as_ref(),
+                        },
                         from,
                         torso(candidate.feet),
                         id,
@@ -969,7 +985,6 @@ impl<W: Write> Engine<W> {
                         &actors,
                         &mut rays,
                         &mut work,
-                        prefetch.as_ref(),
                     ) {
                         Ok(()) => {
                             selected = Some(candidate.life.clone());
@@ -1107,9 +1122,12 @@ impl<W: Write> Engine<W> {
                         seed,
                     );
                     match visible(
-                        self.collision_world.as_ref(),
-                        self.bot_sight_structures(),
-                        &map,
+                        SightGeometry {
+                            world: self.collision_world.as_ref(),
+                            structures: self.bot_sight_structures(),
+                            map: &map,
+                            prefetch: prefetch.as_ref(),
+                        },
                         from,
                         shot_end,
                         id,
@@ -1117,7 +1135,6 @@ impl<W: Write> Engine<W> {
                         &actors,
                         &mut rays,
                         &mut work,
-                        prefetch.as_ref(),
                     ) {
                         Ok(()) => {
                             if state.consume(now, schedule) {

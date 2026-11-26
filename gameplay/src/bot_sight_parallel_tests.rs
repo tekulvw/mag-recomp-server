@@ -157,16 +157,12 @@ fn arena(prefix: &str, threads: usize, rays: usize) -> Engine<Vec<u8>> {
     engine
 }
 
-/// Everything the fight leaves behind: the evidence log and each bot's
-/// health, ammunition, target and facing.
-fn fight(
-    threads: usize,
-    rays: usize,
-) -> (
-    String,
-    Vec<(u16, u16, u32, Option<u16>, u16)>,
-    (u64, u64, u64),
-) {
+/// Each bot's index, health, magazine, target and facing.
+type BotState = Vec<(u16, u16, u32, Option<u16>, u16)>;
+
+/// Everything the fight leaves behind: the evidence log, each bot's state
+/// and how prefetched lines were used.
+fn fight(threads: usize, rays: usize) -> (String, BotState, (u64, u64, u64)) {
     let mut engine = arena("SW", threads, rays);
     for t in (0..8000).step_by(50) {
         let now = Duration::from_millis(t);
