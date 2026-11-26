@@ -229,3 +229,120 @@ fn the_operator_arms_the_structure_and_its_spawn_follows_destruction_and_repair(
             .is_some()
     );
 }
+
+/// The demolition fixture with structure 0 armed (charge planted) and an
+/// authored 10 m blast, and the attacking bot standing at the charge.
+fn armed_fixture() -> (Engine<Vec<u8>>, u16) {
+    let (mut engine, bot) = demolition_fixture();
+    let mut catalog = engine.objective_catalog.clone().unwrap();
+    catalog.objects[0].initial_state = ObjectiveState::Activated as u8;
+    engine.objective_world = Some(ObjectiveWorld::new(&catalog));
+    engine.objective_catalog = Some(catalog.clone());
+    engine
+        .domination_gameplay
+        .as_mut()
+        .unwrap()
+        .state
+        .structural = super::structural_repair::blast_structural_fixture(&catalog, 10., 0., 0.);
+    (engine, bot)
+}
+
+fn evacuations(engine: &Engine<Vec<u8>>) -> BTreeMap<u16, crate::bot_armed_objectives::Assignment> {
+    let zones = engine.armed_blast_zones();
+    let mut duties = BTreeMap::new();
+    engine.plan_blast_evacuations(&zones, &mut duties, test_time(1000), &mut Vec::new());
+    duties
+}
+
+#[test]
+fn an_armed_charge_has_a_hot_zone_of_its_authored_blast_and_the_margin() {
+    let (engine, _) = armed_fixture();
+    let zones = engine.armed_blast_zones();
+    let zone = zones[&0];
+    let margin = crate::bot_blast::Policy::default().margin_m;
+    assert!((zone.radius - (10. + margin)).abs() < 1e-6, "{zone:?}");
+    assert_eq!(zone.attackers, 0);
+}
+
+#[test]
+fn an_attacker_at_an_armed_charge_takes_a_guard_duty_outside_its_blast() {
+    let (engine, bot) = armed_fixture();
+    let duties = evacuations(&engine);
+    let duty = duties[&bot];
+    assert_eq!(duty.objective, 0);
+    assert_eq!(duty.duty, crate::bot_armed_objectives::Duty::Guard);
+    // Every place on its ring lies outside the zone.
+    let zones = engine.armed_blast_zones();
+    let policy = Engine::<Vec<u8>>::armed_policy_outside_blast(
+        &zones,
+        0,
+        &crate::bot_armed_objectives::ArmedPolicy::default(),
+    );
+    for attempt in 0..16 {
+        let p = crate::bot_armed_objectives::duty_point([1., 2., 1.], 0, duty, &policy, attempt);
+        assert!(!zones[&0].contains(p), "{p:?}");
+    }
+}
+
+#[test]
+fn defenders_stay_at_an_armed_charge() {
+    let (mut engine, bot) = armed_fixture();
+    engine.bot_registry.bots.get_mut(&bot).unwrap().target.squad =
+        crate::replication::SquadAddress::from_index(16).unwrap();
+    assert!(evacuations(&engine).is_empty());
+}
+
+#[test]
+fn an_attacker_outside_the_zone_or_with_the_blast_policy_off_is_left_alone() {
+    let (mut engine, bot) = armed_fixture();
+    let runtime = engine
+        .bot_registry
+        .bots
+        .get_mut(&bot)
+        .unwrap()
+        .target
+        .runtime
+        .as_mut()
+        .unwrap();
+    runtime.position.x = 30.;
+    assert!(evacuations(&engine).is_empty());
+    let (mut engine, _) = armed_fixture();
+    engine.bot_registry.config.as_mut().unwrap().blast.enabled = false;
+    assert!(engine.armed_blast_zones().is_empty());
+    assert!(evacuations(&engine).is_empty());
+}
+
+#[test]
+fn the_planter_leaves_the_blast_once_its_charge_is_armed() {
+    let (mut engine, bot) = demolition_fixture();
+    let catalog = engine.objective_catalog.clone().unwrap();
+    engine
+        .domination_gameplay
+        .as_mut()
+        .unwrap()
+        .state
+        .structural = super::structural_repair::blast_structural_fixture(&catalog, 10., 0., 0.);
+    let task = &mut engine.bot_registry.bots.get_mut(&bot).unwrap().task;
+    task.operator = true;
+    task.objective = Some(0);
+    interact(&mut engine, 1000);
+    assert!(
+        evacuations(&engine).is_empty(),
+        "still arming: no blast yet"
+    );
+    engine
+        .tick_domination_objectives(test_time(1015), 1)
+        .unwrap();
+    assert_eq!(
+        engine.objective_world.as_ref().unwrap().state(0),
+        Some(ObjectiveState::Activated)
+    );
+    let world = engine.objective_world.as_ref().unwrap();
+    let object = &engine.objective_catalog.as_ref().unwrap().objects[0];
+    assert!(
+        crate::bot_objectives::operator_action(object, ObjectiveState::Activated, 0, world)
+            .is_none(),
+        "the planter has nothing more to do there"
+    );
+    assert_eq!(evacuations(&engine)[&bot].objective, 0);
+}
