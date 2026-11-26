@@ -124,6 +124,7 @@ impl ReferenceNavMesh {
                 detour_data: data,
                 drop_links: Vec::new(),
                 character_movement_layers: None,
+                body_shape: None,
             },
             world_sha256,
             map_name,

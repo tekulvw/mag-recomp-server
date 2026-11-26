@@ -32,6 +32,11 @@ pub struct DropLink {
     /// slope) mesh and its links agree on where the body can stand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_slope_degrees: Option<f64>,
+    /// Shape of the body the trajectory was traced with, when it is not the
+    /// default box. A mesh accepts only links traced with its runtime body
+    /// shape (`NavMesh::load_with_body`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_shape: Option<BodyShape>,
 }
 impl DropLink {
     fn valid(&self, world: &str) -> bool {
@@ -72,6 +77,7 @@ impl DropLink {
             && self
                 .body_slope_degrees
                 .is_none_or(|slope| slope.is_finite() && slope > 0. && slope <= 60.)
+            && self.body_shape.is_none_or(BodyShape::valid)
     }
     /// Certify a drop with the default 45 degree body.
     pub fn certify(
@@ -93,7 +99,7 @@ impl DropLink {
         )
     }
     /// Certify a drop with `body`, the body of the mesh it will join
-    /// (`NavMesh::body`). A body other than the default is recorded.
+    /// (`NavMesh::body`). A slope or shape other than the default is recorded.
     #[allow(clippy::too_many_arguments)]
     pub fn certify_with_body(
         world: &crate::collision::CollisionWorld,
@@ -127,6 +133,7 @@ impl DropLink {
             trajectory_sha256,
             body_slope_degrees: (body.max_slope_degrees != Body::default().max_slope_degrees)
                 .then_some(body.max_slope_degrees),
+            body_shape: body.shape.stamp(),
         })
     }
 }
@@ -433,6 +440,7 @@ mod exit_weight_tests {
             trajectory: Vec::new(),
             trajectory_sha256: String::new(),
             body_slope_degrees: None,
+            body_shape: None,
         }
     }
 

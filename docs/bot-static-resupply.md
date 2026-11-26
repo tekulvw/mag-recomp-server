@@ -125,6 +125,12 @@ mesh, also pass `--movement-profile /absolute/MOVEMENT.json` (the profile row's
 the receipt records its SHA-256 as `movement_profile_sha256`. Without the option
 the command, policy and receipt are unchanged.
 
+A mesh certified for a non-default bot body loads only with its body profile.
+For such a mesh, also pass `--body-profile /absolute/BODY.json` (the profile
+row's `bot_body_profile`). The receipt then records its SHA-256 as
+`body_profile_sha256`. Without the option the command, policy and receipt are
+unchanged.
+
 Each policy allows 1–16 route queries per tick, 1–32 providers (the native
 static supply pool size) and 1–16 anchors per provider. The policy carries its
 catalog's map and mode, and the worker rejects a policy whose map or mode

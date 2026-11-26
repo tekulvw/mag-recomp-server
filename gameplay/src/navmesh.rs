@@ -1,5 +1,6 @@
 //! Offline Recast bake and shared Detour navigation for verified static worlds.
 //! Route queries never certify raw collision edges; physical movement remains authoritative.
+pub use crate::bot_physics::BodyShape;
 use mag_navmesh_sys::{
     mag_nav_bake, mag_nav_column_goals, mag_nav_component, mag_nav_component_id, mag_nav_contains,
     mag_nav_contains_settlement_column, mag_nav_destroy, mag_nav_free_bytes, mag_nav_goals,
@@ -130,6 +131,11 @@ pub struct Artifact {
     /// mesh and bot physics agree on which triangles are solid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub character_movement_layers: Option<u32>,
+    /// The bot body shape this mesh and its drop certificates are for, when
+    /// it is not the default box (`BodyShape::stamp`). A mesh loads only for
+    /// that body (`NavMesh::load_with_body`); absent means the box.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_shape: Option<BodyShape>,
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -506,6 +512,7 @@ fn bake_layout(
         detour_data: bytes,
         drop_links: Vec::new(),
         character_movement_layers: None,
+        body_shape: None,
     })
 }
 struct Native(*mut std::ffi::c_void);
@@ -522,6 +529,8 @@ pub struct NavMesh {
     artifact: Artifact,
     detour_bytes: usize,
     regional_coverage: Option<regional::Coverage>,
+    /// The runtime body shape the mesh was loaded for.
+    body_shape: BodyShape,
     native: Mutex<Native>,
 }
 impl NavMesh {
@@ -552,6 +561,27 @@ impl NavMesh {
             false,
         )
     }
+    /// Load a mesh for the runtime `body` shape. The mesh and every drop
+    /// certificate in it must record that same shape (absent: the box), so
+    /// the body that follows a certified drop is the one that traced it.
+    pub fn load_with_body(
+        artifact: Artifact,
+        world_sha256: &str,
+        map_name: &str,
+        rules: Option<&MovementProfile>,
+        body: BodyShape,
+    ) -> Result<Self, Error> {
+        Self::load_artifact_with_body(
+            artifact,
+            world_sha256,
+            map_name,
+            false,
+            QUERY_NODE_LIMIT,
+            rules,
+            false,
+            body,
+        )
+    }
     fn load_artifact(
         artifact: Artifact,
         world_sha256: &str,
@@ -560,6 +590,28 @@ impl NavMesh {
         node_limit: c_int,
         rules: Option<&MovementProfile>,
         regional: bool,
+    ) -> Result<Self, Error> {
+        Self::load_artifact_with_body(
+            artifact,
+            world_sha256,
+            map_name,
+            reference,
+            node_limit,
+            rules,
+            regional,
+            BodyShape::Box,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn load_artifact_with_body(
+        artifact: Artifact,
+        world_sha256: &str,
+        map_name: &str,
+        reference: bool,
+        node_limit: c_int,
+        rules: Option<&MovementProfile>,
+        regional: bool,
+        body: BodyShape,
     ) -> Result<Self, Error> {
         let wide = !reference
             && !regional
@@ -603,6 +655,14 @@ impl NavMesh {
                 (Some(_), None) => return err("navmesh_profiled_drop_links_unsupported"),
                 _ => return err("navmesh_drop_body_mismatch"),
             }
+            // And the shape: a box certificate does not hold for a capsule,
+            // nor the reverse.
+            if BodyShape::from_stamp(link.body_shape) != body {
+                return err("navmesh_drop_body_shape_mismatch");
+            }
+        }
+        if BodyShape::from_stamp(artifact.body_shape) != body {
+            return err("navmesh_body_shape_mismatch");
         }
         if artifact.detour_data.len() < 100
             || artifact.detour_data.len() as u64 > byte_limit(reference, wide)
@@ -627,6 +687,7 @@ impl NavMesh {
             detour_bytes: artifact.detour_data.len(),
             artifact,
             regional_coverage: None,
+            body_shape: body,
             native: Mutex::new(Native(handle)),
         };
         mesh.validate_drop_links()?;
@@ -662,11 +723,14 @@ impl NavMesh {
     pub fn detour_bytes(&self) -> usize {
         self.detour_bytes
     }
+    /// The bot body for this mesh: its slope policy and the body shape it
+    /// was loaded for.
     pub fn body(&self) -> crate::bot_physics::Body {
         crate::bot_physics::Body {
             max_slope_degrees: self.artifact.profile.max_slope_degrees,
             ..Default::default()
         }
+        .with_shape(self.body_shape)
     }
     pub fn route(&self, start: Point, goal: Point, goal_radius: f64) -> Result<Route, Error> {
         if !valid_point(start)

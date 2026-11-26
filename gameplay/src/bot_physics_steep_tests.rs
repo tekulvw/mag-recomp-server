@@ -3,7 +3,7 @@
 use super::*;
 
 /// One triangle soup instance per entry; each quad is `[a, b, c, d]` in order.
-fn world(quads: &[[Point; 4]], min: Point, max: Point) -> CollisionWorld {
+pub(super) fn world(quads: &[[Point; 4]], min: Point, max: Point) -> CollisionWorld {
     let mut vertices = Vec::new();
     let mut triangles = Vec::new();
     for q in quads {
@@ -24,7 +24,7 @@ fn world(quads: &[[Point; 4]], min: Point, max: Point) -> CollisionWorld {
 }
 
 /// A horizontal quad facing up (counter-clockwise seen from above).
-fn floor(x0: f64, x1: f64, y: f64, z0: f64, z1: f64) -> [Point; 4] {
+pub(super) fn floor(x0: f64, x1: f64, y: f64, z0: f64, z1: f64) -> [Point; 4] {
     [[x0, y, z0], [x0, y, z1], [x1, y, z1], [x1, y, z0]]
 }
 
@@ -60,7 +60,7 @@ fn walk(world: &CollisionWorld, start: Point, goal: Point, speed: f64, seconds: 
     false
 }
 
-fn ramp(degrees: f64) -> (CollisionWorld, Point, Point) {
+pub(super) fn ramp(degrees: f64) -> (CollisionWorld, Point, Point) {
     let rise = 4.0;
     let x1 = 6.0;
     let x2 = x1 + rise / degrees.to_radians().tan();
@@ -102,7 +102,7 @@ fn a_ramp_steeper_than_the_limit_is_still_not_climbed() {
 /// along the platform overlaps the bank's foot with one side of its footprint
 /// while the platform under its centre is flat, so a step's downward sweep
 /// first meets the steep face.
-fn lip_world() -> CollisionWorld {
+pub(super) fn lip_world() -> CollisionWorld {
     let (edge, top, lip_x, crest_h) = (5.0, 0.25, 5.5, 1.0);
     let (z0, crest, z1) = (5.15, 5.6, 6.05);
     world(
@@ -153,7 +153,7 @@ fn a_steep_bank_beside_walkable_ground_is_walked_past() {
 }
 
 /// A beam across the way whose underside is `clearance` above the floor.
-fn lintel_world(clearance: f64) -> CollisionWorld {
+pub(super) fn lintel_world(clearance: f64) -> CollisionWorld {
     let (x0, x1) = (5.5, 6.5);
     world(
         &[
@@ -204,7 +204,7 @@ fn a_lintel_lower_than_the_body_still_blocks() {
 
 /// A 14 degree rise along +z under a leaning overhang whose underside faces
 /// down and toward +x and climbs more slowly than the floor.
-fn overhang_world() -> CollisionWorld {
+pub(super) fn overhang_world() -> CollisionWorld {
     let (floor_grade, roof_grade) = (0.25, 0.2);
     world(
         &[

@@ -74,6 +74,9 @@ struct Source {
     collision_filter_rows: Option<PathBuf>,
     navmesh_world: Option<PathBuf>,
     movement_profile: Option<PathBuf>,
+    /// Bot body profile (`bot_physics::BodyShape`); the box when absent.
+    #[serde(default)]
+    bot_body_profile: Option<PathBuf>,
     ground_vehicles: Option<PathBuf>,
     character_damage_rules: Option<PathBuf>,
     acquisition_gameplay: Option<PathBuf>,
@@ -305,6 +308,7 @@ impl Registry {
                 source.collision_coverage.as_mut(),
                 source.navmesh_world.as_mut(),
                 source.movement_profile.as_mut(),
+                source.bot_body_profile.as_mut(),
                 source.ground_vehicles.as_mut(),
                 source.character_damage_rules.as_mut(),
                 source.acquisition_gameplay.as_mut(),
@@ -458,6 +462,11 @@ impl Registry {
                     "match_profile_movement_profile_requires_navmesh",
                 ));
             }
+            if source.bot_body_profile.is_some() && source.navmesh_world.is_none() {
+                return Err(io::Error::other(
+                    "match_profile_bot_body_profile_requires_navmesh",
+                ));
+            }
             let navmesh = source
                 .navmesh_world
                 .as_ref()
@@ -473,19 +482,24 @@ impl Registry {
                         return Err(io::Error::other("navmesh artifact size limit"));
                     }
                     let artifact = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-                    let mesh = match source.movement_profile.as_ref() {
-                        Some(path) => navmesh::NavMesh::load_with_movement_profile(
-                            artifact,
-                            world.source_sha256(),
-                            spawns.map_name(),
-                            &navmesh::MovementProfile::load(path)?,
-                        ),
-                        None => navmesh::NavMesh::load(
-                            artifact,
-                            world.source_sha256(),
-                            spawns.map_name(),
-                        ),
-                    }
+                    let rules = source
+                        .movement_profile
+                        .as_ref()
+                        .map(navmesh::MovementProfile::load)
+                        .transpose()?;
+                    let body = source
+                        .bot_body_profile
+                        .as_ref()
+                        .map(navmesh::BodyShape::load_profile)
+                        .transpose()?
+                        .unwrap_or_default();
+                    let mesh = navmesh::NavMesh::load_with_body(
+                        artifact,
+                        world.source_sha256(),
+                        spawns.map_name(),
+                        rules.as_ref(),
+                        body,
+                    )
                     .map_err(io::Error::other)?;
                     mesh.validate_coverage(world).map_err(io::Error::other)?;
                     Ok::<_, io::Error>(Arc::new(mesh))

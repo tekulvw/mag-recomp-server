@@ -1,9 +1,14 @@
 //! Bounded development bot locomotion over caller-supplied world triangles.
-//! Uses a conservative upright box, not native Havok character/capsule parity.
+//! The body is a conservative upright box by default, or an upright capsule
+//! selected by an external body profile (`BodyShape`); neither claims native
+//! character-controller parity.
 //! Supplied coverage/provenance remains authoritative only for that subset;
 //! missing ground is a hole, never an invented plane. Optional player bodies use the same sweeps.
 use crate::collision::{CollisionWorld, RayHit};
+#[path = "bot_physics_shape.rs"]
+mod shape;
 use serde::{Deserialize, Serialize};
+pub use shape::{BODY_PROFILE_FORMAT, BodyShape};
 pub type Point = [f64; 3];
 const WORK_LIMIT: usize = 16_384;
 const SUBSTEP: f64 = 0.05;
@@ -56,6 +61,10 @@ pub struct Body {
     pub max_slope_degrees: f64,
     pub ground_snap: f64,
     pub skin: f64,
+    /// The swept shape. For a capsule, `radius` and `height` are its radius
+    /// and the height of its top above the feet (set by `with_shape`), so
+    /// footprint and coverage bounds stay correct for either shape.
+    pub shape: BodyShape,
 }
 impl Default for Body {
     fn default() -> Self {
@@ -66,6 +75,7 @@ impl Default for Body {
             max_slope_degrees: 45.0,
             ground_snap: 0.2,
             skin: 0.005,
+            shape: BodyShape::Box,
         }
     }
 }
@@ -87,13 +97,50 @@ impl Body {
             || !(0.0..=60.0).contains(&self.max_slope_degrees)
             || !(0.0..=1.0).contains(&self.ground_snap)
             || !(0.001..=0.05).contains(&self.skin)
+            || !self.shape.valid()
+            || self.shape.capsule().is_some_and(|(capsule, centre)| {
+                self.radius != capsule.radius
+                    || self.height != centre + capsule.half_height + capsule.radius
+            })
         {
             return Err(PhysicsError::InvalidQuery);
         }
         Ok(())
     }
+    /// This body with `shape`. A capsule also sets `radius` and `height` from
+    /// its dimensions; the box keeps the body's own.
+    pub fn with_shape(self, shape: BodyShape) -> Self {
+        match shape.capsule() {
+            None => Self { shape, ..self },
+            Some((capsule, centre)) => Self {
+                radius: capsule.radius,
+                height: centre + capsule.half_height + capsule.radius,
+                shape,
+                ..self
+            },
+        }
+    }
     fn slope_cos(self) -> f64 {
         self.max_slope_degrees.to_radians().cos()
+    }
+    /// Height above the feet of the point the sweeps move: the box's centre
+    /// or the capsule's.
+    fn centre_height(self) -> f64 {
+        match self.shape.capsule() {
+            None => self.height * 0.5,
+            Some((_, centre)) => centre,
+        }
+    }
+    /// Lowest point of the body relative to its feet: zero for the box, the
+    /// capsule's rounded bottom otherwise (it may sit slightly below the feet).
+    pub(crate) fn bottom(self) -> f64 {
+        match self.shape.capsule() {
+            None => 0.0,
+            Some((capsule, centre)) => centre - capsule.half_height - capsule.radius,
+        }
+    }
+    fn is_capsule(self) -> bool {
+        self.shape != BodyShape::Box
     }
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -201,7 +248,11 @@ impl<'a> WorldTerrain<'a> {
         if !valid(from) || !valid(to) {
             return Err(PhysicsError::InvalidQuery);
         }
-        let margin = [body.radius, body.ground_snap + body.skin, body.radius];
+        let mut margin = [body.radius, body.ground_snap + body.skin, body.radius];
+        if body.is_capsule() {
+            // A capsule's rounded bottom may reach slightly below its feet.
+            margin[1] -= body.bottom().min(0.0);
+        }
         let upper = [
             body.radius,
             body.height + body.max_step + body.skin,
@@ -392,16 +443,25 @@ impl<'a> WorldTerrain<'a> {
         if let Some(guard) = self.world.bot_regional_guard() {
             guard.check(from, to, body)?;
         }
-        let center = |p: Point| [p[0], p[1] + body.height * 0.5, p[2]];
-        let mut nearest = self
-            .world
-            .movement_sweep_aabb(
+        let lift = body.centre_height();
+        let center = |p: Point| [p[0], p[1] + lift, p[2]];
+        let mut nearest = match body.shape.capsule() {
+            None => self.world.movement_sweep_aabb(
                 center(from),
                 center(to),
                 [body.radius, body.height * 0.5, body.radius],
                 budget,
-            )
-            .map_err(|_| PhysicsError::QueryFailed)?;
+            ),
+            // The capsule hit's normal is its contact normal: the face normal
+            // on a face, otherwise from the touched edge or corner toward the
+            // axis, so a lip or crest supports the body only as it would a
+            // rounded body.
+            Some((capsule, _)) => self
+                .world
+                .movement_sweep_capsule(center(from), center(to), capsule, budget)
+                .map(|hit| hit.map(|h| h.hit)),
+        }
+        .map_err(|_| PhysicsError::QueryFailed)?;
         if let Some(query) = self.actors
             && let Some(hit) = query
                 .grid
@@ -410,7 +470,7 @@ impl<'a> WorldTerrain<'a> {
             && nearest.as_ref().is_none_or(|h| hit.fraction < h.fraction)
         {
             let mut position = std::array::from_fn(|i| from[i] + (to[i] - from[i]) * hit.fraction);
-            position[1] += body.height * 0.5;
+            position[1] += lift;
             nearest = Some(RayHit {
                 instance_id: format!("dynamic-character:{}", hit.id),
                 triangle_index: 0,
@@ -456,11 +516,17 @@ impl<'a> WorldTerrain<'a> {
                 return Ok(false);
             }
             let mut height = sample.position[1];
+            // The box's corners, or four points on the capsule's rim.
+            let reach = if body.is_capsule() {
+                body.radius * std::f64::consts::FRAC_1_SQRT_2
+            } else {
+                body.radius
+            };
             for offset in [
-                [-body.radius, -body.radius],
-                [-body.radius, body.radius],
-                [body.radius, -body.radius],
-                [body.radius, body.radius],
+                [-reach, -reach],
+                [-reach, reach],
+                [reach, -reach],
+                [reach, reach],
             ] {
                 let point = [probe[0] + offset[0], probe[1], probe[2] + offset[1]];
                 let Some(g) = self.ground(
@@ -480,8 +546,16 @@ impl<'a> WorldTerrain<'a> {
             // Center/corner rays establish sampled ground and slope policy, but
             // can miss a ridge inside the footprint. Use the same full-body
             // downward contact as locomotion to establish supported feet height.
-            let high = [probe[0], height + body.skin + body.max_step, probe[2]];
+            let mut high = [probe[0], height + body.skin + body.max_step, probe[2]];
             let low = [probe[0], height - body.ground_snap, probe[2]];
+            if body.is_capsule() {
+                // Start the capsule's contact below any overhead obstacle it
+                // fits under, as its headroom-limited step lift does.
+                let base = [probe[0], height + body.skin, probe[2]];
+                if let Some(hit) = self.sweep(base, high, body, &mut budget)? {
+                    high = stop_before(base, high, hit.fraction, body.skin);
+                }
+            }
             let Some(contact) = self.sweep(high, low, body, &mut budget)? else {
                 return Ok(false);
             };
@@ -490,7 +564,7 @@ impl<'a> WorldTerrain<'a> {
             }
             let next = [
                 probe[0],
-                contact.position[1] - body.height * 0.5 + body.skin,
+                contact.position[1] - body.centre_height() + body.skin,
                 probe[2],
             ];
             if i == 0 {
@@ -516,7 +590,21 @@ impl<'a> WorldTerrain<'a> {
         b: Body,
         budget: &mut usize,
     ) -> Result<bool, PhysicsError> {
-        let top = from[1].max(to[1]) + b.max_step;
+        let mut top = from[1].max(to[1]) + b.max_step;
+        if b.is_capsule() {
+            // Lift only as far as the headroom over both ends allows, as
+            // locomotion does, but at least to the higher end.
+            let ceiling = top;
+            for p in [from, to] {
+                let up = [p[0], ceiling, p[2]];
+                if let Some(hit) = self.sweep(p, up, b, budget)? {
+                    top = top.min(stop_before(p, up, hit.fraction, b.skin)[1]);
+                }
+            }
+            if top < from[1].max(to[1]) {
+                return Ok(false);
+            }
+        }
         let a = [from[0], top, from[2]];
         let c = [to[0], top, to[2]];
         if self.sweep(from, a, b, budget)?.is_some()
@@ -598,18 +686,33 @@ impl<'a> WorldTerrain<'a> {
                 self.require_horizontal_coverage(origin, add(origin, delta), b)?;
             }
             let mut lifted = false;
+            let mut lift = b.max_step;
             if m.grounded && (delta[0] != 0.0 || delta[2] != 0.0) {
                 let up = add(origin, [0.0, b.max_step, 0.0]);
-                if self.sweep(origin, up, b, &mut budget)?.is_none() {
-                    m.position = up;
-                    lifted = true;
+                match self.sweep(origin, up, b, &mut budget)? {
+                    None => {
+                        m.position = up;
+                        lifted = true;
+                    }
+                    // A capsule lifts as far as its headroom allows: under a
+                    // beam it fits beneath, its rounded bottom still clears a
+                    // lower lip.
+                    Some(hit) if b.is_capsule() => {
+                        let top = stop_before(origin, up, hit.fraction, b.skin);
+                        if top[1] - origin[1] > b.skin {
+                            lift = top[1] - origin[1];
+                            m.position = top;
+                            lifted = true;
+                        }
+                    }
+                    Some(_) => {}
                 }
             }
             let (p, blocked) = self.slide(m.position, delta, b, &mut budget)?;
             m.position = p;
             m.blocked |= blocked;
             if lifted {
-                let down = add(m.position, [0.0, -b.max_step - b.ground_snap, 0.0]);
+                let down = add(m.position, [0.0, -lift - b.ground_snap, 0.0]);
                 if let Some(hit) = self.sweep(m.position, down, b, &mut budget)?
                     && self.stands_on(
                         stop_before(m.position, down, hit.fraction, b.skin),
@@ -721,7 +824,9 @@ impl<'a> WorldTerrain<'a> {
         if hit.normal[1] >= b.slope_cos() {
             return Ok(Some(hit.normal));
         }
-        if hit.normal[1] <= 1e-6 {
+        // A capsule's contact normal already says how a lip or crest holds
+        // it; only the flat-bottomed box needs the ground under its centre.
+        if b.is_capsule() || hit.normal[1] <= 1e-6 {
             return Ok(None);
         }
         Ok(self
@@ -956,6 +1061,9 @@ mod regional_guard_tests {
         assert!(guard.check([0., 0., 0.], [8., 0., 0.], body).is_err());
     }
 }
+#[cfg(test)]
+#[path = "bot_physics_capsule_tests.rs"]
+mod capsule_tests;
 #[cfg(test)]
 #[path = "bot_physics_steep_tests.rs"]
 mod steep_tests;

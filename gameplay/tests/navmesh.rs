@@ -102,6 +102,7 @@ fn reference_cli_bakes_full_grid_without_physics_authority() {
         detour_data: data.clone(),
         drop_links: Vec::new(),
         character_movement_layers: None,
+        body_shape: None,
     };
     assert!(matches!(
         NavMesh::load(runtime_artifact.clone(), &"0".repeat(64), "synthetic"),

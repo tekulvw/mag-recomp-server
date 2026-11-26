@@ -135,6 +135,23 @@ For a direct gameplay worker, add `--movement-profile /absolute/MOVEMENT_JSON` a
 
 Omitting the option preserves the existing 45-degree bakes and runtime behavior. The explicit profile does not qualify collision coverage or convert a reference bundle into a gameplay mesh. Runtime static coverage and current-body admission remain separate requirements. Movement profiles, collision worlds and generated navigation data remain external to the source distribution.
 
+### Optional bot body shape
+
+Bots move with an upright box (the body's 0.35 m radius and 1.8 m height) unless a bot body profile selects an upright capsule. The profile is an external JSON document; this repository supplies no dimensions:
+
+```json
+{"format": "mag_bot_body_profile_v1",
+ "body": {"shape": "capsule", "radius": R, "half_height": H, "centre_height": C}}
+```
+
+The capsule is every point within `radius` of a vertical axis that runs `half_height` above and below its centre, `centre_height` above the bot's feet point. `{"shape": "box"}` names the default box. Unknown fields fail. A capsule needs a 0.05–2 m radius, a 0–2 m half-height, its top 0.2–4 m above the feet, and its lowest point within 0.5 m of the feet; it may sit slightly below them.
+
+The shape is part of the body's identity. Drop certificates are traced with it, and a mesh records the shape it is for. A box mesh or certificate records nothing, so box artifacts serialize as before, and an artifact without a shape is the box. A mesh loads only for the runtime body's shape. A box drop certificate under a capsule body, or a capsule certificate under the box, fails with `navmesh_drop_body_shape_mismatch`. A mesh recorded for another shape fails with `navmesh_body_shape_mismatch`, even with no drops.
+
+Pass `--body-profile BODY_JSON` to `mag-navmesh bake` to record the shape in a new mesh. `add-drop`, `search-spawn-exits` and `replay-drop` take the same option and trace with that body. `search-spawn-exits` refuses seed drops certified with another shape. `goals`, `query`, `inspect` and `component` take it to load such a mesh. `mag-navmesh rebind-body --mesh MESH_JSON --body-profile BODY_JSON --output NEW_MESH_JSON` re-targets an existing mesh at another shape. It removes the mesh's drop certificates, which were traced with the old body; certify them again with `add-drop` and `search-spawn-exits`. Omit `--body-profile` to rebind to the box.
+
+For a direct gameplay worker, add `--bot-body-profile /absolute/BODY_JSON` alongside `--navmesh-world`. A match-profile registry instead accepts a `bot_body_profile` path beside that profile's `navmesh_world`. The shape applies to the bots' locomotion and local traversal checks, and to the bodies in their dynamic collision: humans and bots there take the runtime shape, and a capsule meets another capsule exactly. Without a profile, everything stays the box. The capsule's grounding uses its contact normal: on a face, the face normal; on an edge or corner, the direction from it to the capsule's axis. A lip or crest then holds the body only as it would hold a rounded body. The capsule's step lift stops at the first contact overhead, so the body can step while passing under a beam it fits beneath. The capsule body does not claim native character-controller parity.
+
 ### Whole-map runtime navigation
 
 Bots can use a whole map when the operator asserts its coverage in a [coverage sidecar](collision-coverage-sidecar.md). The reviewed world file stays unchanged. The flow is: prepare the coverage sidecar, prepare the bake input with it, bake, then certify drops and spawn exits against the same world and sidecar. For each map:

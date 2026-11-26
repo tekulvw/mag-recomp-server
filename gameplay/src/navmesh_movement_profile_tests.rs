@@ -165,6 +165,7 @@ fn profiled_runtime_artifact_requires_rules_and_refuses_legacy_drop_certificates
         trajectory: Vec::new(),
         trajectory_sha256: "0".repeat(64),
         body_slope_degrees: None,
+        body_shape: None,
     });
     assert!(matches!(
         load(with_drop),
@@ -339,4 +340,109 @@ fn a_profiled_mesh_accepts_drops_certified_with_its_own_body() {
         load_profiled(with(profiled, &other_body)),
         Err(Error("navmesh_drop_body_mismatch"))
     ));
+}
+
+#[test]
+fn a_mesh_loads_only_for_the_body_shape_its_drops_were_certified_with() {
+    let (world, input) = ledge();
+    let sha = world.source_sha256().to_owned();
+    let capsule = BodyShape::Capsule {
+        radius: 0.4,
+        half_height: 0.5,
+        centre_height: 0.9,
+    };
+    let (launch, landing) = ([7.3, 2.02, 5.], [10.5, 0., 5.]);
+    let legacy = bake(input).unwrap();
+    let mut stamped = legacy.clone();
+    stamped.body_shape = capsule.stamp();
+    let load = |artifact, shape| NavMesh::load_with_body(artifact, &sha, "synthetic", None, shape);
+    let capsule_body = load(stamped.clone(), capsule).unwrap().body();
+    assert_eq!(capsule_body.shape, capsule);
+    assert_eq!(capsule_body.radius, 0.4);
+    assert!((capsule_body.height - 1.8).abs() < 1e-12);
+    let box_link = DropLink::certify(&world, &sha, 1, launch, landing, 4.5).unwrap();
+    let capsule_link =
+        DropLink::certify_with_body(&world, &sha, 1, launch, landing, 4.5, capsule_body).unwrap();
+    // The box records nothing, so box certificates and meshes serialize as
+    // before; a capsule records its dimensions.
+    assert_eq!(box_link.body_shape, None);
+    assert!(
+        !serde_json::to_string(&box_link)
+            .unwrap()
+            .contains("body_shape")
+    );
+    assert!(
+        !serde_json::to_string(&legacy)
+            .unwrap()
+            .contains("body_shape")
+    );
+    assert_eq!(capsule_link.body_shape, Some(capsule));
+    let with = |mut artifact: Artifact, link: &DropLink| {
+        artifact.drop_links.push(link.clone());
+        artifact
+    };
+    // A legacy mesh and its legacy certificates are the box.
+    assert!(NavMesh::load(with(legacy.clone(), &box_link), &sha, "synthetic").is_ok());
+    assert!(load(with(legacy.clone(), &box_link), BodyShape::Box).is_ok());
+    assert_eq!(
+        load(legacy.clone(), BodyShape::Box).unwrap().body().shape,
+        BodyShape::Box
+    );
+    // A capsule runtime refuses box certificates, and a box mesh without any.
+    assert!(matches!(
+        load(with(legacy.clone(), &box_link), capsule),
+        Err(Error("navmesh_drop_body_shape_mismatch"))
+    ));
+    assert!(matches!(
+        load(legacy.clone(), capsule),
+        Err(Error("navmesh_body_shape_mismatch"))
+    ));
+    assert!(load(with(stamped.clone(), &capsule_link), capsule).is_ok());
+    assert!(matches!(
+        load(with(stamped.clone(), &box_link), capsule),
+        Err(Error("navmesh_drop_body_shape_mismatch"))
+    ));
+    // The box runtime refuses capsule certificates and a capsule mesh.
+    assert!(matches!(
+        NavMesh::load(with(legacy, &capsule_link), &sha, "synthetic"),
+        Err(Error("navmesh_drop_body_shape_mismatch"))
+    ));
+    assert!(matches!(
+        NavMesh::load(stamped.clone(), &sha, "synthetic"),
+        Err(Error("navmesh_body_shape_mismatch"))
+    ));
+    // Any other capsule is another body.
+    let other = BodyShape::Capsule {
+        radius: 0.4,
+        half_height: 0.45,
+        centre_height: 0.85,
+    };
+    let mut other_mesh = with(stamped, &capsule_link);
+    assert!(matches!(
+        load(other_mesh.clone(), other),
+        Err(Error("navmesh_drop_body_shape_mismatch"))
+    ));
+    other_mesh.drop_links.clear();
+    assert!(matches!(
+        load(other_mesh, other),
+        Err(Error("navmesh_body_shape_mismatch"))
+    ));
+    // A recorded shape outside the body limits is an invalid certificate.
+    let mut bad = capsule_link;
+    bad.body_shape = Some(BodyShape::Capsule {
+        radius: 0.,
+        half_height: 0.5,
+        centre_height: 0.9,
+    });
+    let mut bad_mesh = legacy_with_shape(bake(ledge().1).unwrap(), bad.body_shape);
+    bad_mesh.drop_links.push(bad.clone());
+    assert!(matches!(
+        load(bad_mesh, bad.body_shape.unwrap()),
+        Err(Error("navmesh_invalid_drop"))
+    ));
+}
+
+fn legacy_with_shape(mut artifact: Artifact, shape: Option<BodyShape>) -> Artifact {
+    artifact.body_shape = shape;
+    artifact
 }

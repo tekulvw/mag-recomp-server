@@ -106,3 +106,11 @@ class ResupplyApproachProjectorTests(unittest.TestCase):
         self.assertEqual(profiled[10:], plain[8:])
         self.assertEqual(command("/cli", "/mesh", "/world", None, [1, 2, 3], 0.75, "/profile")[6:8],
                          ["--movement-profile", "/profile"])
+
+    def test_body_profile_is_passed_to_goal_queries_only_when_supplied(self):
+        command = runpy.run_path(str(SCRIPT))["goals_command"]
+        plain = command("/cli", "/mesh", "/world", None, [1, 2, 3], 0.75)
+        shaped = command("/cli", "/mesh", "/world", None, [1, 2, 3], 0.75, None, "/body")
+        self.assertEqual(shaped[:6], plain[:6])
+        self.assertEqual(shaped[6:8], ["--body-profile", "/body"])
+        self.assertEqual(shaped[8:], plain[6:])
