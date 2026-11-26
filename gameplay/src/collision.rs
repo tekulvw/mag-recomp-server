@@ -5,6 +5,8 @@
 //! Coverage is a producer claim, not certification: even `complete` does not
 //! establish material/filter behavior or agreement with the running client.
 
+use crate::capsule_sweep::sweep_capsule_triangle;
+pub use crate::capsule_sweep::{TriangleFeature, VerticalCapsule};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeSet, HashSet},
@@ -201,6 +203,14 @@ pub struct RayHit {
     pub position: Vec3,
     /// Unit face normal following stored winding; queries are double-sided.
     pub normal: Vec3,
+}
+/// A capsule sweep hit: `hit.position` is the capsule centre at impact and
+/// `hit.normal` the contact normal; `contact` is the touched triangle point.
+#[derive(Clone, Debug, Serialize)]
+pub struct CapsuleHit {
+    pub hit: RayHit,
+    pub contact: Vec3,
+    pub feature: TriangleFeature,
 }
 #[derive(Debug, Serialize)]
 pub struct SegmentQuery<'a> {
@@ -1152,7 +1162,107 @@ impl CollisionWorld {
             return Err(invalid("invalid body sweep"));
         }
         let delta = sub(end, start);
-        let mut nearest: Option<(f64, usize, Vec3)> = None;
+        let nearest = self.sweep_traverse(start, delta, half, budget, movement, |t, _| {
+            sweep_triangle(start, delta, half, t.vertices)
+        })?;
+        Ok(nearest
+            .map(|(fraction, index, normal)| self.body_hit(start, delta, fraction, index, normal)))
+    }
+
+    /// Continuous collision of a translated upright capsule (see
+    /// [`crate::capsule_sweep`]) against double-sided triangles. `start` and
+    /// `end` are the capsule centre, midway along its axis. Exact time of
+    /// impact; includes initial overlap (fraction zero), does not depenetrate;
+    /// tangent motion along a touched surface is not a hit. The hit's
+    /// `position` is the centre at impact, as for `sweep_aabb`, and its normal
+    /// is the contact normal: the face normal for a face contact, otherwise
+    /// from the touched edge or corner toward the axis.
+    pub fn sweep_capsule(
+        &self,
+        start: Vec3,
+        end: Vec3,
+        capsule: VerticalCapsule,
+        budget: &mut usize,
+    ) -> Result<Option<CapsuleHit>, CollisionError> {
+        self.capsule_filtered(start, end, capsule, budget, false)
+    }
+    /// As `sweep_capsule`, against only triangles that block character
+    /// movement (`with_character_movement_layers`). Same broad phase and
+    /// budget accounting as `movement_sweep_aabb`.
+    pub fn movement_sweep_capsule(
+        &self,
+        start: Vec3,
+        end: Vec3,
+        capsule: VerticalCapsule,
+        budget: &mut usize,
+    ) -> Result<Option<CapsuleHit>, CollisionError> {
+        self.capsule_filtered(start, end, capsule, budget, true)
+    }
+    fn capsule_filtered(
+        &self,
+        start: Vec3,
+        end: Vec3,
+        capsule: VerticalCapsule,
+        budget: &mut usize,
+        movement: bool,
+    ) -> Result<Option<CapsuleHit>, CollisionError> {
+        if !valid_point(start, self.max_abs_coordinate)
+            || !valid_point(end, self.max_abs_coordinate)
+            || !capsule.valid()
+        {
+            return Err(invalid("invalid body sweep"));
+        }
+        let delta = sub(end, start);
+        let half = capsule.half_extents();
+        let nearest = self.sweep_traverse(start, delta, half, budget, movement, |t, nearest| {
+            // Exact per-triangle cull: the swept capsule box against the
+            // triangle's box, before the narrow phase.
+            let expanded = Bounds {
+                min: std::array::from_fn(|i| t.bounds.min[i] - half[i]),
+                max: std::array::from_fn(|i| t.bounds.max[i] + half[i]),
+            };
+            if !expanded.intersects(start, delta, nearest) {
+                return None;
+            }
+            sweep_capsule_triangle(start, delta, capsule, t.vertices).map(|c| (c.fraction, c))
+        })?;
+        Ok(nearest.map(|(fraction, index, contact)| CapsuleHit {
+            hit: self.body_hit(start, delta, fraction, index, contact.normal),
+            contact: contact.contact,
+            feature: contact.feature,
+        }))
+    }
+    fn body_hit(
+        &self,
+        start: Vec3,
+        delta: Vec3,
+        fraction: f64,
+        index: usize,
+        normal: Vec3,
+    ) -> RayHit {
+        let t = &self.triangles[index];
+        RayHit {
+            instance_id: self.instance_ids[t.instance].clone(),
+            triangle_index: t.triangle_index,
+            fraction,
+            position: std::array::from_fn(|i| start[i] + fraction * delta[i]),
+            normal,
+        }
+    }
+    /// Shared body-sweep broad phase: node bounds grown by `expand` against the
+    /// centre ray, pruned by the nearest hit so far, one budget unit per node
+    /// and per leaf triangle, ties broken by (instance, triangle index).
+    /// `narrow` receives each solid candidate and the current nearest fraction.
+    fn sweep_traverse<H>(
+        &self,
+        start: Vec3,
+        delta: Vec3,
+        expand: Vec3,
+        budget: &mut usize,
+        movement: bool,
+        mut narrow: impl FnMut(&Triangle, f64) -> Option<(f64, H)>,
+    ) -> Result<Option<(f64, usize, H)>, CollisionError> {
+        let mut nearest: Option<(f64, usize, H)> = None;
         let mut stack = Vec::new();
         if let Some(root) = self.root {
             stack.push(root);
@@ -1162,10 +1272,10 @@ impl CollisionWorld {
             let node = &self.nodes[index];
             let b = node.bounds();
             let expanded = Bounds {
-                min: std::array::from_fn(|i| b.min[i] - half[i]),
-                max: std::array::from_fn(|i| b.max[i] + half[i]),
+                min: std::array::from_fn(|i| b.min[i] - expand[i]),
+                max: std::array::from_fn(|i| b.max[i] + expand[i]),
             };
-            if !expanded.intersects(start, delta, nearest.map_or(1.0, |h| h.0)) {
+            if !expanded.intersects(start, delta, nearest.as_ref().map_or(1.0, |h| h.0)) {
                 continue;
             }
             match node {
@@ -1184,34 +1294,25 @@ impl CollisionWorld {
                         if movement && !self.movement_solid(t.instance) {
                             continue;
                         }
-                        if let Some((fraction, normal)) =
-                            sweep_triangle(start, delta, half, t.vertices)
-                            && nearest.is_none_or(|(f, i, _)| {
-                                fraction < f
-                                    || (fraction == f
+                        if let Some((fraction, value)) =
+                            narrow(t, nearest.as_ref().map_or(1.0, |h| h.0))
+                            && nearest.as_ref().is_none_or(|(f, i, _)| {
+                                fraction < *f
+                                    || (fraction == *f
                                         && (t.instance, t.triangle_index)
                                             < (
-                                                self.triangles[i].instance,
-                                                self.triangles[i].triangle_index,
+                                                self.triangles[*i].instance,
+                                                self.triangles[*i].triangle_index,
                                             ))
                             })
                         {
-                            nearest = Some((fraction, index, normal));
+                            nearest = Some((fraction, index, value));
                         }
                     }
                 }
             }
         }
-        Ok(nearest.map(|(fraction, index, normal)| {
-            let t = &self.triangles[index];
-            RayHit {
-                instance_id: self.instance_ids[t.instance].clone(),
-                triangle_index: t.triangle_index,
-                fraction,
-                position: std::array::from_fn(|i| start[i] + fraction * delta[i]),
-                normal,
-            }
-        }))
+        Ok(nearest)
     }
 }
 fn consume_budget(budget: &mut usize) -> Result<(), CollisionError> {
