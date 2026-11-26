@@ -242,6 +242,27 @@ struct PassageQueue {
     departing: Vec<PassageOwner>,
     waiting: std::collections::VecDeque<PassageLife>,
     probe_cursor: usize,
+    /// Since when the passage has had waiters, no owner and no staged waiter.
+    idle_since: Option<Duration>,
+}
+/// Whether a passage that has waiters, no owner and no staged waiter has been
+/// idle for `grant_ms` (`0`: never), starting the idle clock on first call.
+fn crowd_grant_due(idle_since: &mut Option<Duration>, now: Duration, grant_ms: u64) -> bool {
+    grant_ms > 0
+        && now.saturating_sub(*idle_since.get_or_insert(now)) >= Duration::from_millis(grant_ms)
+}
+
+/// The waiter a crowded idle passage grants: of the `eligible` waiters
+/// (queue index, route distance to the launch), the one nearest the launch
+/// whose approach is `clear`; ties keep ticket order. In a single file along
+/// the route that is the waiter at the front.
+fn crowd_grant(
+    eligible: impl IntoIterator<Item = (usize, f64)>,
+    clear: impl FnMut(&usize) -> bool,
+) -> Option<usize> {
+    let mut eligible: Vec<_> = eligible.into_iter().collect();
+    eligible.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+    eligible.into_iter().map(|(index, _)| index).find(clear)
 }
 impl PassageQueue {
     fn holders(&self) -> impl Iterator<Item = &PassageOwner> {
@@ -2493,9 +2514,69 @@ impl<W: Write> Engine<W> {
                         Err(_) => false,
                     }
                 });
+                // A crowd can fill every staging spot and freeze its waiters on
+                // the approach itself; then no waiter is staged and the passage
+                // would stay idle. After `drop_crowd_grant_ms` of that, grant the
+                // waiter nearest the launch whose own approach is clear: in a
+                // single file along the route it is the one at the front.
+                let mut crowd = false;
+                let staged = if flying.is_some() || staged.is_some() {
+                    q.idle_since = None;
+                    staged
+                } else if !crowd_grant_due(&mut q.idle_since, now, policy.drop_crowd_grant_ms) {
+                    None
+                } else {
+                    let eligible = q.waiting.iter().enumerate().filter_map(|(index, life)| {
+                        let b = &self.bot_registry.bots[&life.id];
+                        let r = b.target.runtime?;
+                        let p = b.drop_queue_passage?;
+                        (matches!(r.phase, BotPhase::Complete)
+                            && !r.navmesh_state.navigation_aborted
+                            && r.physics_motion.is_some_and(|m| m.grounded)
+                            && !r.navmesh_state.on_player
+                            && !b.drop_queue_approach.is_empty()
+                            && !intersects(
+                                crate::actor_collision::Bounds::body(
+                                    r.physical_position(),
+                                    Default::default(),
+                                ),
+                                p.protected_bounds,
+                            ))
+                        .then(|| {
+                            let along = passages
+                                .get(&life.id)
+                                .map_or(f64::INFINITY, |s| s.route_distance_to_launch);
+                            (index, along)
+                        })
+                    });
+                    let found = crowd_grant(eligible, |&index| {
+                        let b = &self.bot_registry.bots[&q.waiting[index].id];
+                        let mut traffic_budget = candidate_budget;
+                        !active_access.iter().any(|(&other, lane)| {
+                            other != drop_id
+                                && (exclusive.contains(&(other.min(drop_id), other.max(drop_id)))
+                                    || crate::bot_traffic_flow::lanes_conflict(
+                                        &b.drop_queue_approach,
+                                        lane,
+                                        &mut traffic_budget,
+                                    ))
+                        }) && matches!(
+                            crate::bot_traffic_flow::approach_blocker(
+                                &actors,
+                                q.waiting[index].id,
+                                &b.drop_queue_approach,
+                                &mut traffic_budget,
+                            ),
+                            Ok(None)
+                        )
+                    });
+                    crowd = found.is_some();
+                    found
+                };
                 if let Some(life) =
                     flying.or_else(|| staged.and_then(|index| q.waiting.remove(index)))
                 {
+                    q.idle_since = None;
                     q.waiting.retain(|v| *v != life);
                     let b = self.bot_registry.bots.get_mut(&life.id).unwrap();
                     let r = b.target.runtime.unwrap();
@@ -2541,7 +2622,13 @@ impl<W: Write> Engine<W> {
                         entered,
                         cert_started: matches!(p.phase, DropPhase::Traversing | DropPhase::Landed),
                     });
-                    receipts.push(json!({"op":"bot_drop_admission","timestamp_ms":now.as_millis()as u64,"drop_id":drop_id,"object_index":life.id,"generation":life.generation,"action":"granted","queue_length":q.waiting.len()}));
+                    if crowd {
+                        // Unstaged: resume the frozen route through this passage.
+                        let b = self.bot_registry.bots.get_mut(&life.id).unwrap();
+                        b.drop_holding_goal = None;
+                        b.drop_resume = true;
+                    }
+                    receipts.push(json!({"op":"bot_drop_admission","timestamp_ms":now.as_millis()as u64,"drop_id":drop_id,"object_index":life.id,"generation":life.generation,"action":"granted","queue_length":q.waiting.len(),"crowd":crowd}));
                 }
             }
             let landing_busy = q.departing.iter().any(|d| {
@@ -3602,6 +3689,28 @@ pub(crate) mod identity_tests {
 #[cfg(test)]
 mod convoy_tests {
     use super::*;
+    #[test]
+    fn an_idle_crowded_passage_grants_the_clear_waiter_at_the_front() {
+        let ms = Duration::from_millis;
+        // The idle clock starts on the first idle tick and is due after the grace.
+        let mut idle = None;
+        assert!(!crowd_grant_due(&mut idle, ms(1000), 1500));
+        assert_eq!(idle, Some(ms(1000)));
+        assert!(!crowd_grant_due(&mut idle, ms(2400), 1500));
+        assert!(crowd_grant_due(&mut idle, ms(2500), 1500));
+        // Zero disables it, however long the passage idles.
+        let mut never = Some(Duration::ZERO);
+        assert!(!crowd_grant_due(&mut never, ms(60_000), 0));
+        // Nearest the launch first, whatever the ticket order; ties keep
+        // ticket order; a waiter whose approach is blocked is passed over.
+        let eligible = [(0, 7.5), (1, 2.0), (2, 4.0), (3, 2.0)];
+        assert_eq!(crowd_grant(eligible, |_| true), Some(1));
+        assert_eq!(crowd_grant(eligible, |&i| i != 1), Some(3));
+        assert_eq!(crowd_grant(eligible, |&i| i == 0), Some(0));
+        assert_eq!(crowd_grant(eligible, |_| false), None);
+        assert_eq!(crowd_grant([], |_| true), None);
+    }
+
     #[test]
     fn convoy_member_departs_only_off_the_pad_and_followers_wait_for_a_vacated_landing() {
         let launch = [10., 5., 10.];

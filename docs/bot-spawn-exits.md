@@ -91,6 +91,29 @@ Ground recovery back onto the navmesh searches only the cells a route of its
 `maximum_m` can reach, so an unreachable target no longer costs a full 64-cell
 grid search.
 
+### Crowded passages
+
+In a large world a passage can draw a crowd faster than it serves it. Each
+bot is queued and frozen where it stands once it is within
+`drop_queue_distance_m` of the launch, which is usually on the approach
+itself. Once the staging ring is full, later waiters find no spot that is not
+in a protected box, an approach lane or another waiter's place. A waiter
+without a spot is never ready, and it cannot be asked to yield, because only
+waiters on their spots yield. Ready waiters behind it then stay blocked, and
+the passage sits idle with a full queue.
+Domination sims at 256 characters showed queues of 15-23 waiters on one passage, which
+admitted about one bot a minute.
+
+When a passage has waiters, no owner, nothing in flight and no staged waiter
+for `drop_crowd_grant_ms` (default 1500; `0` disables it), it grants the waiter
+nearest its launch along its route whose approach is clear. That waiter
+must be grounded, frozen on its route (not aborted), outside the passage's
+protected box, and must hold an approach that conflicts with no other
+passage's active lane. In a single file along the route, that is the waiter at
+the front. It resumes its frozen route through the passage. Staged waiters
+keep precedence: the fallback runs only when no staged waiter can be
+granted. The grant receipt carries `crowd: true`.
+
 When at least `wave_backlog` grounded bots are waiting for a first route or a
 staging spot, the planner uses `wave_route_queries_per_tick`,
 `wave_candidate_checks_per_tick` and `wave_planning_slice_us` (each only ever
