@@ -1326,30 +1326,36 @@ impl<W: Write> Engine<W> {
                         if let Some(packet) = &stat_packet
                             && total + packet.len() <= 24_000
                         {
-                            chosen = Some((packet.clone(), candidate));
+                            chosen = Some((packet.clone(), candidate, 0));
                             break;
                         }
                     } else if let Some(wire) = shared {
                         let sequence = sequences[index]
                             .checked_add(1)
                             .ok_or("replication_sequence_exhausted")?;
-                        let packet = for_recipient_with_profile(wire, sequence, self.wire_profile)?;
+                        let (packet, frames) = self.next_shared_packet(
+                            actor,
+                            offsets[index],
+                            wire,
+                            sequence,
+                            24_000 - total,
+                        )?;
                         if total + packet.len() <= 24_000 {
-                            chosen = Some((packet, None));
+                            chosen = Some((packet, None, frames));
                             break;
                         }
                     }
                 }
-                let Some((packet, stat)) = chosen else {
+                let Some((packet, stat, frames)) = chosen else {
                     continue;
                 };
                 total += packet.len();
-                planned.push((actor.reservation.id.clone(), packet, stat));
+                planned.push((actor.reservation.id.clone(), packet, stat, frames));
                 if let Some(stat) = stat {
                     selected_stats[index].insert(stat.slot());
                     scheduling[index] = (stat.slot().wrapping_add(1), false);
                 } else {
-                    offsets[index] += 1;
+                    offsets[index] += frames;
                     sequences[index] += 1;
                     scheduling[index].1 = true;
                 }
@@ -1374,7 +1380,7 @@ impl<W: Write> Engine<W> {
             .collect();
         let recipients: Vec<_> = planned
             .iter()
-            .map(|(id, wire, _)| {
+            .map(|(id, wire, _, _)| {
                 let actor = self
                     .active
                     .as_ref()
@@ -1396,7 +1402,7 @@ impl<W: Write> Engine<W> {
                 wall,
             )?;
         }
-        for (id, packet, stat) in planned {
+        for (id, packet, stat, frames) in planned {
             if let Some(stat) = stat {
                 self.commit_shared_statistic(&id, stat);
                 continue;
@@ -1407,16 +1413,23 @@ impl<W: Write> Engine<W> {
                 self.peers.get_mut(&id).unwrap()
             };
             actor.prefer_statistics = true;
-            let correction = crate::correction_ack::owner_position_packet(
-                &packet,
-                actor.reservation.player,
-                actor.wire_profile,
-            );
+            // A joined update never carries the recipient's own Character.
+            let correction = (frames == 1)
+                .then(|| {
+                    crate::correction_ack::owner_position_packet(
+                        &packet,
+                        actor.reservation.player,
+                        actor.wire_profile,
+                    )
+                })
+                .flatten();
             actor.remember(packet)?;
             if let Some((sequence, position)) = correction {
                 actor.tracking.bind_correction(sequence, position);
             }
-            actor.pop_shared();
+            for _ in 0..frames {
+                actor.pop_shared();
+            }
             if actor.pending_shared.is_empty() {
                 actor.ordered_health_pending = false;
             }
@@ -1427,6 +1440,65 @@ impl<W: Write> Engine<W> {
             self.report_shared_deferral(&deferred, messages.len(), total, limit, wall)?;
         }
         self.drain_notifications(messages, wall)
+    }
+    /// The next reliable frame for `actor` from its queue position `offset`
+    /// (`wire`), with `sequence`, and how many queued frames it consumes.
+    ///
+    /// With `--coalesce-character-replication`, consecutive single-Character
+    /// deltas of one tick join into one update that fits `budget` bytes (see
+    /// `character_coalescing`). The recipient's own Character, bootstrap
+    /// frames and anything unmeasured go out alone, exactly as without it.
+    fn next_shared_packet(
+        &self,
+        actor: &Active,
+        offset: usize,
+        wire: &[u8],
+        sequence: u32,
+        budget: usize,
+    ) -> Result<(Vec<u8>, usize), &'static str> {
+        use crate::character_coalescing::{CharacterRow, join};
+        let single = || {
+            Ok((
+                for_recipient_with_profile(wire, sequence, self.wire_profile)?,
+                1,
+            ))
+        };
+        if !self.coalesce_character_replication {
+            return single();
+        }
+        let profile = self.wire_profile;
+        let joinable = |position: usize, frame: &[u8]| {
+            (!actor.hospital_bootstrap.contains(&position)
+                && !actor.smoke_bootstrap.contains(&position))
+            .then(|| CharacterRow::measure(frame, profile))
+            .flatten()
+            .filter(|row| row.object != actor.reservation.player)
+        };
+        let Some(first) = joinable(offset, wire) else {
+            return single();
+        };
+        let limit = budget.min(crate::replication::MAX_UPDATE_BYTES);
+        let mut rows = vec![first];
+        let mut wires = vec![wire];
+        let mut row_bits = first.bits();
+        for (position, frame) in actor.pending_shared.iter().enumerate().skip(offset + 1) {
+            let Some(row) = joinable(position, frame) else {
+                break;
+            };
+            if row.timestamp_ms != first.timestamp_ms
+                || rows.iter().any(|seen| seen.object == row.object)
+                || CharacterRow::update_bytes(row_bits + row.bits(), profile) > limit
+            {
+                break;
+            }
+            row_bits += row.bits();
+            rows.push(row);
+            wires.push(frame);
+        }
+        if rows.len() == 1 {
+            return single();
+        }
+        Ok((join(&wires, &rows, sequence, profile)?, rows.len()))
     }
     /// Count one budget-limited reply and report the running count at most
     /// once per wall second, with the deepest queue against its bound.
