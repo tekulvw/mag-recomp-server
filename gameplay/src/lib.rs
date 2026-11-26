@@ -117,6 +117,8 @@ mod melee_death_tests;
 pub mod navmesh;
 mod navmesh_structure_gates;
 #[cfg(test)]
+mod owner_skills_tests;
+#[cfg(test)]
 mod platoon_ability_engine_tests;
 #[cfg(test)]
 mod platoon_ability_publication_tests;

@@ -227,6 +227,8 @@ impl Active {
                 np_identity: claimed.np_identity,
             },
             mag_info: self.mag_info(c.progression.unwrap_or_default().level),
+            // Peers receive this snapshot; owned skills are owner-only.
+            skills: None,
         };
         let mut inventory = self.equipped_loadout();
         if let (Some(kit), Some(handle)) = (&mut inventory, self.current_inventory_handle) {

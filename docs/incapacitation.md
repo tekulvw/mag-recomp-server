@@ -120,6 +120,27 @@ source index−1 and false head/vehicle flags. It reaches the union of their act
 squads once per recipient. Other squads do not receive a fabricated team-wide
 revive notification.
 
+## What lets a medic's client offer a revive
+
+A client sends `Resuscitate` only after it decides, by itself, that its own
+player may revive a downed teammate it can see. The downed body is a
+revive target when its last field8 has zero health, the incapacitated condition
+bit (2) set, and the body is not yet fully dead. The medic qualifies when its
+kit holds a first-aid item and its own character modifiers give a positive
+`kCharModResuscitatePercent`. When both hold, the medkit and the revive prompt
+target the body. When the medic does not qualify, the medkit treats only living
+characters below full health, which is usually the medic itself.
+
+The client builds the modifiers for its own player once, when its Character is
+created, from the owned-skill record in Character field20. That field is five
+32-bit words in word order, one bit per skill (skill N is bit N mod 32 of word
+N / 32). It goes from the server to the owner only. The owner's creation in the
+`ClientReady` snapshot therefore carries the character's stored skill record.
+Snapshots of that character sent to other players leave the field out. Without
+field20, every client's own skill modifiers stay zero, and no player is ever
+offered a revive, whatever skills they own. The server's own revive check uses
+the same stored record through the skill catalog.
+
 ## Accounting and current boundary
 
 The initial lethal hit owns the ordinary death/kill statistics and supported
