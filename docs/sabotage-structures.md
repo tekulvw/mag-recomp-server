@@ -75,8 +75,8 @@ current state with the slot it has placed:
   then placed again from the new states.
 - Standing packs are placed once for the whole match.
 
-Each change is recorded as `sabotage_structures`, with the object index, the
-state, the slot and the number of packs placed.
+Each change is recorded as `sabotage_structures`, with `object_index`, `state`, `slot` and
+`packs` (the number of packs placed).
 
 The packs go into a `SequenceCollisionState`, the same one Acquisition and Domination structures use. So bot
 body sweeps, ground rays and navmesh route gating
