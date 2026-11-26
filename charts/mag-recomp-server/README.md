@@ -168,6 +168,8 @@ Medius adopts a worker that restarts on its own, or that was unreachable when Me
 - `draining` is excluded from those checksums. Kubernetes updates the mounted registry file in place (typically within a minute) and Medius reloads drain flags each second without restarting.
 - The `wait-for-workers` init container holds Medius until every worker Service accepts a TCP connection, for up to `worldRegistry.workerWaitSeconds` (default 300; 0 disables it). It opens and closes one connection per worker, which the worker logs as an incomplete request. After the limit Medius starts with the workers it can reach.
 
+`gameplayShutdown.drainSeconds` and `receiptFlushSeconds` (default `null`) set how long a gameplay Pod drains on `SIGTERM` and its `terminationGracePeriodSeconds`; see [docs/worker-shutdown.md](../../docs/worker-shutdown.md), which also describes draining a world before restarting it.
+
 A worker restart outside Helm (a crash, OOM kill, eviction or node drain) is adopted without restarting Medius. Medius logs `Configured worker adopted`, or why it refused (`Configured worker adoption refused`, `Configured worker adoption cap reached`); only then restart Medius, for example with `kubectl rollout restart deployment/<release>-mag-recomp-server-medius`, which disconnects every world, so drain first when there is time. A crashed worker's unsent rewards are not recovered; the ones it had reported are logged as lost.
 
 ## Optional portal game tickets

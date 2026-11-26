@@ -211,6 +211,15 @@ adminApi:
   # Required when enabled: namespaces whose pods may call the API, for example
   # {matchLabels: {kubernetes.io/metadata.name: mag-portal}}.
   allowedNamespaceSelector: {}
+# Shutdown of every gameplay Pod (docs/worker-shutdown.md; gameplay images with --drain-seconds).
+# On SIGTERM a worker admits no one, tells Medius, waits up to drainSeconds for its humans to
+# leave (the match ends and results are delivered), then up to receiptFlushSeconds for Medius to
+# acknowledge rewards already reported, and exits. Any players still in its match then return to
+# the menu. null keeps the image defaults (0 and 5 s) and the Kubernetes 30 s grace period; a set
+# value also sets terminationGracePeriodSeconds to drainSeconds + receiptFlushSeconds + 15.
+gameplayShutdown:
+  drainSeconds: null
+  receiptFlushSeconds: null
 logs:
   sizeLimit: 2Gi
   # Optional gameplay event-log and tick-telemetry rotation (gameplay images that
