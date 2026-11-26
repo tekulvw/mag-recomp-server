@@ -149,6 +149,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     let mut bot_names_path: Option<PathBuf> = None;
     let mut bot_fill_total: usize = 0;
     let mut bot_perception: Option<bool> = None;
+    let mut bot_cover: Option<(bool, Option<bool>)> = None;
     let mut initial_spawn_delay_ms: Option<[u32; 2]> = None;
     let mut match_profiles_path: Option<PathBuf> = None;
     let mut party_reservations = false;
@@ -242,6 +243,24 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                         _ => {
                             return Err(io::Error::other(
                                 "invalid --bot-perception (use on or off)",
+                            ));
+                        }
+                    },
+                );
+            }
+            "--bot-cover" => {
+                bot_cover = Some(
+                    match args
+                        .next()
+                        .ok_or_else(|| io::Error::other("--bot-cover requires on, crouch or off"))?
+                        .as_str()
+                    {
+                        "on" => (true, None),
+                        "crouch" => (true, Some(true)),
+                        "off" => (false, None),
+                        _ => {
+                            return Err(io::Error::other(
+                                "invalid --bot-cover (use on, crouch or off)",
                             ));
                         }
                     },
@@ -653,7 +672,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             }
             _ => {
                 return Err(io::Error::other(
-                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--match-profiles /absolute/MATCH_PROFILES.json] [--party-reservations] [--active-abilities /absolute/ACTIVE_ABILITIES.json] [--squad-orders /absolute/ORDERS.json] [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--dynamic-bodies /absolute/BODIES.json] [--static-partition /absolute/PARTITION.json] [--acquisition-gameplay /absolute/GAMEPLAY.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--firearm-assist-rules /absolute/ASSISTS.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--smoke-grenade-rules /absolute/SMOKE.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--worker-id ID] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json [--collision-coverage COVERAGE.json]] [--navmesh-world MESH.mag-nav] [--regional-walk-coverage /absolute/COVERAGE.json] [--movement-profile /absolute/MOVEMENT.json] [--bot-body-profile /absolute/BODY.json] [--bot-fill-total N --bot-population POPULATION.json] [--bot-perception on|off] [--bot-names /absolute/NAMES.json] [--bot-resupply-catalog /absolute/SUPPLY.json] [--bot-resupply-approach-policy /absolute/APPROACH.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS] [--coalesce-character-replication] [--per-recipient-reply-budget] [--voice-routing] [--log-segment-bytes BYTES [--log-retention-s SECONDS]] [--drain-seconds SECONDS] [--receipt-flush-seconds SECONDS]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
+                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--match-profiles /absolute/MATCH_PROFILES.json] [--party-reservations] [--active-abilities /absolute/ACTIVE_ABILITIES.json] [--squad-orders /absolute/ORDERS.json] [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--dynamic-bodies /absolute/BODIES.json] [--static-partition /absolute/PARTITION.json] [--acquisition-gameplay /absolute/GAMEPLAY.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--firearm-assist-rules /absolute/ASSISTS.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--smoke-grenade-rules /absolute/SMOKE.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--worker-id ID] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json [--collision-coverage COVERAGE.json]] [--navmesh-world MESH.mag-nav] [--regional-walk-coverage /absolute/COVERAGE.json] [--movement-profile /absolute/MOVEMENT.json] [--bot-body-profile /absolute/BODY.json] [--bot-fill-total N --bot-population POPULATION.json] [--bot-perception on|off] [--bot-cover on|crouch|off] [--bot-names /absolute/NAMES.json] [--bot-resupply-catalog /absolute/SUPPLY.json] [--bot-resupply-approach-policy /absolute/APPROACH.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS] [--coalesce-character-replication] [--per-recipient-reply-budget] [--voice-routing] [--log-segment-bytes BYTES [--log-retention-s SECONDS]] [--drain-seconds SECONDS] [--receipt-flush-seconds SECONDS]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
                 ));
             }
         }
@@ -2244,6 +2263,8 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                 .map_err(io::Error::other)?;
         }
         engine.set_bot_perception_override(bot_perception);
+        engine.set_bot_cover_override(bot_cover.map(|c| c.0));
+        engine.set_bot_cover_crouch_override(bot_cover.and_then(|c| c.1));
         if let Some(seconds) = headless_sim_seconds {
             // LOCAL DIAGNOSTIC: a virtual-time match with never-spawning observers.
             let options =

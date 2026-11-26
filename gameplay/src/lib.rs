@@ -44,6 +44,9 @@ pub mod blast_visibility;
 pub mod bootstrap_loadouts;
 mod bot_armed_objectives;
 mod bot_blast;
+mod bot_cover;
+#[cfg(test)]
+mod bot_cover_tests;
 mod bot_demolition;
 mod bot_firearm_kd;
 pub mod bot_firearms;
@@ -1413,6 +1416,7 @@ pub struct Engine<W: Write> {
     world_epoch: Option<Duration>,
     bot_registry: bot_registry::BotRegistry,
     bot_perception: bot_perception::World,
+    bot_cover: bot_cover::World,
     bot_names: bot_names::Catalog,
     /// Opt-in varied bot kits; bots keep the bootstrap kit when absent.
     bot_kits: Option<std::sync::Arc<bot_kits::Catalog>>,

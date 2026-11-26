@@ -11,6 +11,8 @@ pub enum Phase {
     /// Incapacitation timers and Acquisition ground registration.
     Incapacitation,
     Perception,
+    /// Bot cover selection and peek cycles.
+    Cover,
     /// The whole bot step, including the three sub-phases below.
     Bots,
     /// Population reconcile and per-recipient bot creation snapshots.
@@ -38,10 +40,11 @@ pub enum Phase {
 }
 
 impl Phase {
-    pub const ALL: [Phase; 17] = [
+    pub const ALL: [Phase; 18] = [
         Phase::Peers,
         Phase::Incapacitation,
         Phase::Perception,
+        Phase::Cover,
         Phase::Bots,
         Phase::BotsPopulation,
         Phase::BotsDrops,
@@ -63,6 +66,7 @@ impl Phase {
             Phase::Peers => "peers",
             Phase::Incapacitation => "incapacitation",
             Phase::Perception => "perception",
+            Phase::Cover => "cover",
             Phase::Bots => "bots",
             Phase::BotsPopulation => "bots.population",
             Phase::BotsDrops => "bots.drops",

@@ -2730,6 +2730,8 @@ impl<W: Write> Engine<W> {
                 }
             }
         }
+        let mut covered = self.bot_cover.controlled_ids();
+        let mut preempted = Vec::new();
         for (&id, bot) in &mut self.bot_registry.bots {
             let r = bot.target.runtime.unwrap();
             if bot.health == 0 {
@@ -2762,8 +2764,11 @@ impl<W: Write> Engine<W> {
                         > 2
                 });
             let operator = target.is_some_and(|index| operators.get(&index) == Some(&id));
-            if t.objective != target || t.wide != wide || t.operator != operator || t.armed != armed
-            {
+            let changed = t.objective != target
+                || t.wide != wide
+                || t.operator != operator
+                || t.armed != armed;
+            if changed {
                 if t.operator != operator {
                     receipts.push(json!({"op":"bot_objective_operator","object_index":id,"generation":r.generation,"objective":target,"selected":operator,"timestamp_ms":now.as_millis()as u64}));
                 }
@@ -2805,6 +2810,16 @@ impl<W: Write> Engine<W> {
                     bot.target.pending_move = None;
                     bot.target.runtime.as_mut().unwrap().phase = BotPhase::Complete;
                     receipts.push(json!({"op":"bot_objective_task","timestamp_ms":now.as_millis()as u64,"object_index":id,"objective":duty.objective,"destination_role":duty.duty.code(),"role":if duty.duty == crate::bot_armed_objectives::Duty::Converge {"defend"} else {"attack"},"goal":r.position,"held_position":true}));
+                }
+            }
+            // A bot fighting from cover keeps its task; a new duty, operator
+            // selection or objective takes it back (its route is reset above).
+            if covered.contains(&id) {
+                if changed {
+                    preempted.push(id);
+                } else {
+                    t.progress_at = now;
+                    continue;
                 }
             }
             if let Some(y) = bot.traffic_yield.as_mut() {
@@ -2868,6 +2883,10 @@ impl<W: Write> Engine<W> {
                 continue;
             }
         }
+        for id in preempted {
+            covered.remove(&id);
+            self.preempt_cover(id, now, wall)?;
+        }
         // A spawn wave puts dozens of bots on the planner at once: each needs a
         // first route and then a queue staging spot. Under that backlog the
         // shared per-tick budget is raised so the wave leaves together instead
@@ -2916,6 +2935,10 @@ impl<W: Write> Engine<W> {
             let mut fresh = Vec::new();
             let mut retry = Vec::new();
             for (&id, b) in &self.bot_registry.bots {
+                // Cover owns its bots' movement until it hands them back.
+                if covered.contains(&id) {
+                    continue;
+                }
                 let supply_passage = b.supply_passage_seek();
                 if b.has_supply_action() && supply_passage.is_none() {
                     continue;
