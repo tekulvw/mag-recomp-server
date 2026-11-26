@@ -10,7 +10,8 @@ reports with their logs: see [launcher reports](../docs/portal-reports.md). The 
 friends list (requests, blocks) at `/friends`, and game clients relay presence through the
 portal: see [friends and presence](../docs/portal-social.md).
 
-The site is server-rendered HTML with no JavaScript. It stores accounts in PostgreSQL and
+The site is server-rendered HTML. Its only JavaScript, `static/status.js`, keeps the home and
+status pages' server status current without a reload; every page works without it. It stores accounts in PostgreSQL and
 never passes Google tokens on to the game or the game server.
 
 ## Build and test

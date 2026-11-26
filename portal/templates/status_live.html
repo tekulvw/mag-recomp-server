@@ -1,0 +1,11 @@
+{# The status block's live parts. status.js refreshes them from /api/v1/status; without scripts
+   they stay as rendered here. #}
+<div id="status-live" data-url="/api/v1/status" data-refresh="{{ view.refresh_seconds }}" data-generated="{{ view.generated_at }}">
+  {% if configured %}
+  <div id="status-servers">{% include "status_servers.html" %}</div>
+  {% else %}
+  <p class="quiet">This site does not show game server status.</p>
+  {% endif %}
+  <p id="status-updated" class="quiet" aria-live="polite"></p>
+</div>
+<script src="/status.js?v={{ crate::status::script_version() }}" defer></script>

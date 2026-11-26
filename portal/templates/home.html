@@ -1,9 +1,7 @@
 {% extends "base.html" %}
 {% block title %}MAG, playable again{% endblock %}
 {% block content %}
-{% if let Some(b) = view.banner %}
-<p class="banner" role="status"><strong>Notice:</strong> {{ b.message }}{% if let Some(t) = b.restart_text %} <span class="quiet">Back by {{ t }}.</span>{% endif %}</p>
-{% endif %}
+<div id="status-banner">{% if let Some(b) = view.banner %}<p class="banner" role="status"><strong>Notice:</strong> {{ b.message }}{% if let Some(t) = b.restart_text %} <span class="quiet">Back by {{ t }}.</span>{% endif %}</p>{% endif %}</div>
 <section class="hero">
   <div>
     <p class="eyebrow">Community server · play.magtest.online</p>
@@ -31,13 +29,9 @@
 </section>
 
 <section id="status" class="server-status">
-  <h2>Server status: {{ crate::status::headline(view.state) }}</h2>
-  {% if configured %}
-  {% include "status_servers.html" %}
-  <p class="quiet">Counts only, never who is playing. Updated every {{ view.refresh_seconds }} seconds: reload for the latest, or see <a href="/status">the status page</a>, which reloads itself, and <a href="/api/v1/status">its JSON</a>.</p>
-  {% else %}
-  <p class="quiet">This site does not show game server status.</p>
-  {% endif %}
+  <h2>Server status: <span id="status-headline">{{ view.headline }}</span></h2>
+  {% include "status_live.html" %}
+  <p class="quiet">Counts only, never who is playing. Updates itself every {{ view.refresh_seconds }} seconds (reload if scripts are off). Also on <a href="/status">its own page</a> and as <a href="/api/v1/status">JSON</a>.</p>
 </section>
 
 <section id="play">

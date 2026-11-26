@@ -152,8 +152,9 @@ async fn security_headers(mut response: Response) -> Response {
     set(
         h,
         header::CONTENT_SECURITY_POLICY,
-        "default-src 'none'; style-src 'self'; img-src 'self'; font-src 'self'; \
-         form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+        "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self'; \
+         img-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; \
+         base-uri 'none'",
     );
     set(h, header::X_CONTENT_TYPE_OPTIONS, "nosniff");
     set(h, header::REFERRER_POLICY, "same-origin");

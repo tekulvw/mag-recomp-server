@@ -174,6 +174,10 @@ pub struct ServerStatus {
     #[serde(default)]
     pub queued_by_game_type: Vec<u32>,
     pub dme_ports: DmePorts,
+    /// Humans the whole server holds at once, across every world (the DME port cap); `None`
+    /// when unbounded or from a game server that predates it.
+    #[serde(default)]
+    pub human_limit: Option<u32>,
     pub worlds: Vec<WorldStatus>,
 }
 
@@ -191,7 +195,18 @@ pub struct WorldStatus {
     pub state: String,
     #[serde(default)]
     pub game_types: Vec<u8>,
+    /// The configured row and profile cap on humans, before the server-wide DME port cap.
     pub human_capacity: u32,
+    /// Humans the world can actually hold: `human_capacity` within the DME port cap. `None`
+    /// from a game server that predates it.
+    #[serde(default)]
+    pub human_limit: Option<u32>,
+    /// Characters in the world, humans and bots.
+    #[serde(default)]
+    pub world_size: Option<u32>,
+    /// The population bots fill the world to, humans included; `None` without bot fill.
+    #[serde(default)]
+    pub bot_fill: Option<u32>,
     /// Humans placed on this world and not admitted yet.
     #[serde(default)]
     pub pending: u32,
@@ -209,7 +224,12 @@ pub struct MatchStatus {
     pub attacking_humans: u32,
     pub defending_humans: u32,
     pub human_capacity: u32,
+    /// As [`WorldStatus::human_limit`], for the match.
+    #[serde(default)]
+    pub human_limit: Option<u32>,
     pub bots: u32,
+    #[serde(default)]
+    pub bot_fill: Option<u32>,
     pub world_capacity: u32,
 }
 
