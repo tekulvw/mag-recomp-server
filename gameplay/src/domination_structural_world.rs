@@ -1515,7 +1515,12 @@ pub struct SequenceCollisionState {
     hulks: BTreeMap<u16, SequenceSurface>,
     hospitals: BTreeMap<u16, SequenceSurface>,
     helos: BTreeMap<u16, SequenceSurface>,
+    /// Process-unique stamp of the structures, hospitals and hulks; zero
+    /// while none was ever placed. Clones keep it, so equal stamps mean equal
+    /// standing geometry. Helicopters move every tick and do not change it.
+    revision: u64,
 }
+static SEQUENCE_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 #[derive(Clone)]
 pub(crate) struct SequenceSurface {
     projectile: Option<SurfaceBinding>,
@@ -1914,6 +1919,58 @@ impl HeloCollisionAssets {
 }
 
 impl SequenceCollisionState {
+    fn touch(&mut self) {
+        self.revision = SEQUENCE_REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Stamp of the standing geometry `movement_obstacles` returns.
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Placed geometry a character's movement collides with, for movement
+    /// filter `row`: structural sequence packs whose root and child layers the
+    /// row collides with (a pack without a qualified binding is solid), and
+    /// the hulk (layer 17) and operational hospital (layer 22) overlays when
+    /// the row includes their layer. Helicopters are left out.
+    pub(crate) fn movement_obstacles(
+        &self,
+        row: u32,
+    ) -> Vec<(String, Pose, collision::CollisionWorld)> {
+        let mut out = Vec::new();
+        for ((objective, event), rows) in &self.active {
+            for (slot, surface) in rows.iter().enumerate() {
+                let solid = surface
+                    .sequence_filter_layers()
+                    .map_or(true, |(root, child)| {
+                        row & (1 << root) != 0 && row & (1 << child) != 0
+                    });
+                if solid {
+                    out.push((
+                        format!("objective-{objective}-{event}-{slot}"),
+                        surface.pose,
+                        surface.mesh.clone(),
+                    ));
+                }
+            }
+        }
+        for (label, surfaces, layer) in
+            [("hulk", &self.hulks, 17), ("hospital", &self.hospitals, 22)]
+        {
+            if row & (1 << layer) == 0 {
+                continue;
+            }
+            for (index, surface) in surfaces {
+                out.push((
+                    format!("{label}-{index}"),
+                    surface.pose,
+                    surface.mesh.clone(),
+                ));
+            }
+        }
+        out
+    }
+
     pub(crate) fn bot_regional_bounds(
         &self,
         budget: &mut usize,
@@ -2254,6 +2311,7 @@ impl SequenceCollisionState {
             self.active.remove(&(objective, creation.event_index));
         }
         self.active.extend(placements);
+        self.touch();
         Ok(())
     }
 
@@ -2277,11 +2335,14 @@ impl SequenceCollisionState {
                 projectile: Some(SurfaceBinding::HospitalHulk { layer: hulk.layer }),
             },
         );
+        self.touch();
         Ok(())
     }
 
     pub fn remove_hospital_hulk(&mut self, index: u16) {
-        self.hulks.remove(&index);
+        if self.hulks.remove(&index).is_some() {
+            self.touch();
+        }
     }
 
     pub(crate) fn install_operational_hospital(
@@ -2308,11 +2369,14 @@ impl SequenceCollisionState {
                     .map(SurfaceBinding::Hospital),
             },
         );
+        self.touch();
         Ok(())
     }
 
     pub(crate) fn remove_operational_hospital(&mut self, index: u16) {
-        self.hospitals.remove(&index);
+        if self.hospitals.remove(&index).is_some() {
+            self.touch();
+        }
     }
 
     pub(crate) fn place_helo(
@@ -2529,6 +2593,40 @@ impl SequenceCollisionState {
 
 #[cfg(test)]
 impl SequenceCollisionState {
+    /// Place `mesh` as objective `objective`'s structure (event 0) at `pose`,
+    /// on pack layer `collision_tag` (None: no qualified binding).
+    pub(crate) fn synthetic_structure_mesh(
+        &mut self,
+        objective: u16,
+        pose: Pose,
+        mesh: collision::CollisionWorld,
+        collision_tag: Option<u8>,
+    ) {
+        let projectile = collision_tag.map(|collision_tag| {
+            SurfaceBinding::Sequence(SequenceBinding {
+                source_sha256: "c".repeat(64),
+                neutral_sha256: mesh.source_sha256().to_owned(),
+                collision_tag,
+                part_ids: vec!["structure".into()],
+            })
+        });
+        self.active.insert(
+            (objective, 0),
+            vec![SequenceSurface {
+                projectile,
+                pose,
+                mesh,
+            }],
+        );
+        self.touch();
+    }
+
+    /// Stop objective `objective`'s structure, as a destroying sequence does.
+    pub(crate) fn synthetic_remove_structure(&mut self, objective: u16) {
+        self.active.remove(&(objective, 0));
+        self.touch();
+    }
+
     /// A placed structure like the live packs: a neutral mesh with no
     /// per-leaf collision properties, filtered by its pack collision tag.
     /// `None` leaves the pack without a projectile binding.

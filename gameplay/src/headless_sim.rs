@@ -374,6 +374,10 @@ impl<W: Write> Engine<W> {
 
     /// Record every live bot's position and drop state (`sim_bot_snapshot`).
     fn headless_sim_snapshot(&mut self, now: Duration, wall: u64) -> Result<(), &'static str> {
+        let structures = self
+            .collision_world
+            .as_ref()
+            .and_then(|w| w.bot_structures_arc().cloned());
         let bots: Vec<_> = self
             .bot_registry
             .bots
@@ -382,6 +386,11 @@ impl<W: Write> Engine<W> {
             .filter_map(|(&id, b)| {
                 let r = b.target.runtime?;
                 let p = r.physical_position();
+                // A body standing inside a placed structure's solid.
+                let in_structure = structures.as_ref().map(|s| {
+                    s.body_penetrates(p, crate::bot_physics::Body::default())
+                        .unwrap_or(true)
+                });
                 Some(json!({
                     "id": id,
                     "p": [(p[0] * 10.).round() / 10., (p[1] * 10.).round() / 10., (p[2] * 10.).round() / 10.],
@@ -390,6 +399,7 @@ impl<W: Write> Engine<W> {
                     "permit": b.drop_permit,
                     "holding": b.drop_holding_goal.map(|g| [g.x, g.y, g.z]),
                     "goal": b.task.goal.map(|g| [g.x, g.y, g.z]),
+                    "in_structure": in_structure,
                 }))
             })
             .collect();

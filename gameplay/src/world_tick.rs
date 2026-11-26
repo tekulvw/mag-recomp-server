@@ -25,6 +25,12 @@ impl<W: Write> Engine<W> {
                 self.tick_incapacitation(now, wall)?;
                 self.tick_acquisition_ground_registration(wall)
             })?;
+            // Bots move and plan against the structures standing now.
+            timed!(
+                self,
+                Phase::Bots,
+                self.refresh_bot_structure_obstacles(wall)
+            )?;
             timed!(self, Phase::Perception, self.tick_bot_perception(now, wall))?;
             messages.extend(timed!(self, Phase::Bots, self.tick_bots(now, wall))?);
             timed!(self, Phase::Waves, {

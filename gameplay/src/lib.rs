@@ -63,6 +63,7 @@ mod bot_spawn_selection;
 #[cfg(test)]
 mod bot_squad_packing_tests;
 mod bot_stat_publication;
+mod bot_structure_collision;
 #[cfg(test)]
 mod bot_teammate_healing_tests;
 mod bot_traffic_costs;
@@ -109,6 +110,7 @@ pub mod leadership_runtime;
 #[cfg(test)]
 mod melee_death_tests;
 pub mod navmesh;
+mod navmesh_structure_gates;
 #[cfg(test)]
 mod platoon_ability_engine_tests;
 #[cfg(test)]
