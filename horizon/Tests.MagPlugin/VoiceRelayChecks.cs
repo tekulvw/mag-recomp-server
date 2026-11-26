@@ -197,6 +197,36 @@ internal static class VoiceRelayChecks
             if (!Decide(Squad, 1, 20, budget: flood, bytes: 111, now: t).Relayed) floodDrops++;
         Check(floodDrops > 50, $"three times the nominal rate kept: {floodDrops} drops");
 
+        // Proximity: every frame also goes to the talker's own proximity group, 83 + its DME client index.
+        Check(VoiceGroupNumbers.ProximityGroup(0) == 83 && VoiceGroupNumbers.ProximityGroup(255) == 338 &&
+              VoiceGroupNumbers.ProximityGroup(256) == -1 && VoiceGroupNumbers.ProximityGroup(-1) == -1, "proximity group numbers");
+        Drops(Decide(All, 1, 84), VoiceDropReason.ProximityOff, "proximity off: the talker's own copy");
+        Drops(Decide(Squad, 6, 89), VoiceDropReason.ProximityOff, "proximity off in the squad tier too");
+        Drops(Decide(All, 1, 85), VoiceDropReason.NotAllowedGroup, "another client's proximity group");
+        Drops(Decide(All, 1, 84, muted: true), VoiceDropReason.Muted, "a muted talker's proximity copy");
+        Drops(Decide(All, 9, 92), VoiceDropReason.Unbound, "an unknown talker's proximity copy");
+        // With a proximity source, listeners near the talker hear its group, enemies included.
+        var near = new VoiceRelayTable(new VoiceGroupsFrame(4, new[]
+        {
+            Entry(1, 0, new[] { 0, 12, 20 }, new[] { 20, 84 }),
+            Entry(2, 0, new[] { 0, 12, 20 }, new[] { 20, 85 }),
+            Entry(3, 0, new[] { 0, 4, 12, 21, 84 }, new[] { 4, 21, 86 }),
+            Entry(6, 1, new[] { 1, 16, 36, 84 }, new[] { 36, 89 }),
+        }));
+        Relays(Decide(All, 1, 84, table: near), new[] { 3, 6 }, "proximity reaches nearby listeners on both sides");
+        Relays(Decide(Squad, 1, 84, table: near), new[] { 3, 6 }, "proximity does not depend on the static tier");
+        Relays(Decide(All, 2, 85, table: near), Array.Empty<int>(), "proximity with nobody near");
+        Drops(Decide(All, 1, 85, table: near), VoiceDropReason.NotAllowedGroup, "never on another talker's proximity group");
+        Relays(Decide(All, 1, 84, table: near, recipients: member => member.PlayerId != 6), new[] { 3 }, "bound proximity listeners only");
+        // Each copy has its own budget, so the paired copies of one stream never starve each other.
+        var paired = new VoiceTalkerBudget();
+        for (long t = 0; t < 10_000; t += 40)
+        {
+            Check(Decide(All, 1, 20, table: near, budget: paired, bytes: 51, now: t).Relayed, $"channel copy dropped at {t} ms");
+            Check(Decide(All, 1, 84, table: near, budget: paired, bytes: 51, now: t).Relayed, $"proximity copy dropped at {t} ms");
+        }
+        paired.Forget(1);
+
         // Counters by reason.
         var counters = new VoiceRelayCounters();
         counters.Record(Decide(Squad, 1, 20), 37);
@@ -208,6 +238,8 @@ internal static class VoiceRelayChecks
               counters.Dropped(VoiceDropReason.NotAllowedGroup) == 1 && counters.Dropped(VoiceDropReason.OverBudget) == 0,
               "counters: " + counters);
         Check(counters.ToString().Contains("relay_off=1") && counters.ToString().Contains("not_allowed_group=1"), "counter line: " + counters);
+        counters.Record(Decide(All, 1, 84), 51);
+        Check(counters.Dropped(VoiceDropReason.ProximityOff) == 1 && counters.ToString().Contains("proximity_off=1"), "proximity_off counter: " + counters);
     }
 
     public static void Subscription() => SubscriptionAsync().GetAwaiter().GetResult();

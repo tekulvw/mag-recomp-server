@@ -13,13 +13,21 @@ namespace Server.Dme
     /// Lab receipts for the voice capture (docs/superpowers/specs/2026-11-25-voice-relay-design.md).
     /// Off unless MAG_VOICE_DIAG=1; never set on live. For each client message it keeps a count per
     /// signature (client, transport message, plugin, first two body bytes), logs the first samples of
-    /// each signature with their leading bytes and where a lab voice block starts, and logs the counts
-    /// every ten seconds. It only observes: traffic is never changed, delayed or dropped.
+    /// each signature with their leading bytes and where a lab voice block starts, then one sample in
+    /// every <see cref="SampleEvery"/> for as long as the signature lasts, and logs the counts every
+    /// ten seconds. Messages that parse as voice packets (<see cref="VoicePacketHeader"/>) also feed
+    /// a stream per client and group, whose counts line carries the data bytes, the data length
+    /// range, packets holding more than one lab block, and sequence gaps and steps back. It only
+    /// observes: traffic is never changed, delayed or dropped.
     /// </summary>
     public sealed class VoiceDiagnostics
     {
         public const string Variable = "MAG_VOICE_DIAG";
         public const int SamplesPerSignature = 20;
+        /// <summary>After the first samples, one sample per this many messages of a signature
+        /// (about one every eight seconds for one voice group).</summary>
+        public const int SampleEvery = 100;
+        public const int MaxStreams = 512;
         public const int MaxSignatures = 512;
         public const int SampleBytes = 64;
         public const long CountIntervalMs = 10_000;
@@ -36,9 +44,38 @@ namespace Server.Dme
         readonly object _gate = new object();
         readonly Dictionary<(int client, string transport, byte rt, int plugin, int lead), Signature> _signatures = new();
         long _nextCounts = -1;
+        readonly Dictionary<(int client, int group), VoiceStream> _streams = new();
         long _overflow;
+        long _streamOverflow;
 
         sealed class Signature { public long Total; public long SinceLast; public int Samples; }
+
+        sealed class VoiceStream
+        {
+            public long Total, Recent, RecentBytes, TotalBytes, RecentMultiBlock, RecentGaps, TotalGaps, RecentBack, TotalBack;
+            public int RecentMin = int.MaxValue, RecentMax = -1;
+            public int? LastSequence;
+
+            public void Add(VoicePacketHeader header)
+            {
+                Total++; Recent++; RecentBytes += header.DataLength; TotalBytes += header.DataLength;
+                RecentMin = Math.Min(RecentMin, header.DataLength); RecentMax = Math.Max(RecentMax, header.DataLength);
+                if (header.DataLength > LabBlockSize) RecentMultiBlock++;
+                if (LastSequence is int last)
+                {
+                    int step = (header.Sequence - last) & 0xFFFF;
+                    if (step == 0 || step >= 0x8000) { RecentBack++; TotalBack++; }
+                    else { RecentGaps += step - 1; TotalGaps += step - 1; }
+                }
+                LastSequence = header.Sequence;
+            }
+
+            public void Reset()
+            {
+                Recent = RecentBytes = RecentMultiBlock = RecentGaps = RecentBack = 0;
+                RecentMin = int.MaxValue; RecentMax = -1;
+            }
+        }
 
         public bool Enabled { get; }
 
@@ -98,7 +135,7 @@ namespace Server.Dme
                 {
                     signature.Total++;
                     signature.SinceLast++;
-                    if (signature.Samples < SamplesPerSignature)
+                    if (signature.Samples < SamplesPerSignature || signature.Total % SampleEvery == 0)
                     {
                         signature.Samples++;
                         var shown = Math.Min(body.Length, SampleBytes);
@@ -107,6 +144,16 @@ namespace Server.Dme
                                  $"lead=0x{(lead < 0 ? 0 : lead):X4} block_at={FindVoiceBlock(body, LabBlockSize)} " +
                                  $"bytes={Convert.ToHexString(body, 0, shown)}";
                     }
+                }
+                if (VoicePacketHeader.TryParse(body, out var header))
+                {
+                    var streamKey = (client, header.Group);
+                    if (!_streams.TryGetValue(streamKey, out var stream))
+                    {
+                        if (_streams.Count >= MaxStreams) { _streamOverflow++; stream = null; }
+                        else _streams[streamKey] = stream = new VoiceStream();
+                    }
+                    stream?.Add(header);
                 }
                 if (_nextCounts < 0) _nextCounts = nowMs + CountIntervalMs;
                 else if (nowMs >= _nextCounts)
@@ -119,7 +166,15 @@ namespace Server.Dme
                                      $"recent={s.Value.SinceLast} total={s.Value.Total}")
                         .ToList();
                     if (_overflow > 0) counts.Add($"voice_diag counts ms={nowMs} unrecorded_signatures={_overflow}");
+                    counts.AddRange(_streams.Where(s => s.Value.Recent > 0).OrderBy(s => s.Key.client).ThenBy(s => s.Key.group)
+                        .Select(s => $"voice_diag counts ms={nowMs} client={s.Key.client} voice_group={s.Key.group} " +
+                                     $"recent={s.Value.Recent} total={s.Value.Total} data_bytes={s.Value.RecentBytes} " +
+                                     $"data_bytes_total={s.Value.TotalBytes} data_min={s.Value.RecentMin} data_max={s.Value.RecentMax} " +
+                                     $"multi_block={s.Value.RecentMultiBlock} seq_gaps={s.Value.RecentGaps} seq_gaps_total={s.Value.TotalGaps} " +
+                                     $"seq_back={s.Value.RecentBack} seq_back_total={s.Value.TotalBack}"));
+                    if (_streamOverflow > 0) counts.Add($"voice_diag counts ms={nowMs} unrecorded_voice_streams={_streamOverflow}");
                     foreach (var s in _signatures.Values) s.SinceLast = 0;
+                    foreach (var s in _streams.Values) s.Reset();
                 }
             }
             if (sample != null) _sink(sample);
