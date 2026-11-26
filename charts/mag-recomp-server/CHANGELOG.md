@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.1](https://github.com/tekulvw/mag-recomp-server/compare/chart-v0.12.0...chart-v0.12.1) (2026-11-26)
+
+
+### Bug Fixes
+
+* **medius:** expire abandoned open reward rows so they cannot fill the character store ([#305](https://github.com/tekulvw/mag-recomp-server/issues/305)) ([3219c3e](https://github.com/tekulvw/mag-recomp-server/commit/3219c3ec122f64b852e095c05eba12691d6cfd57))
+
 ## [0.12.0](https://github.com/tekulvw/mag-recomp-server/compare/chart-v0.11.0...chart-v0.12.0) (2026-11-25)
 
 

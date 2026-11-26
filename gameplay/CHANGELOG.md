@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.14.3](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.14.2...gameplay-v0.14.3) (2026-11-26)
+
+
+### Bug Fixes
+
+* **gameplay:** keep Acquisition bots planning after the first capture ([#302](https://github.com/tekulvw/mag-recomp-server/issues/302)) ([63648df](https://github.com/tekulvw/mag-recomp-server/commit/63648dfda91e6d6196113a21221a53454d3a7ad7))
+* **gameplay:** open the Acquisition Escort enclosure after a capture ([#303](https://github.com/tekulvw/mag-recomp-server/issues/303)) ([d14b0c4](https://github.com/tekulvw/mag-recomp-server/commit/d14b0c42fb40633608ea9a3abc06a9673ede226c))
+* **gameplay:** respawn dead players at their last selected spawn without a new confirm ([#304](https://github.com/tekulvw/mag-recomp-server/issues/304)) ([176f4ff](https://github.com/tekulvw/mag-recomp-server/commit/176f4ff45c6ebbc929270c52503c17a2b38eab92))
+* **gameplay:** stop bot sight and shots at placed structures ([#307](https://github.com/tekulvw/mag-recomp-server/issues/307)) ([e4bfec3](https://github.com/tekulvw/mag-recomp-server/commit/e4bfec32835eb5bec362968f1c5982715b126310))
+
 ## [0.14.2](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.14.1...gameplay-v0.14.2) (2026-11-25)
 
 
