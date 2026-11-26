@@ -79,7 +79,14 @@ fn beside(
 fn fits(world: &CollisionWorld, feet: replication::CharacterPosition, body: Body) -> bool {
     let terrain = WorldTerrain::new(Some(world), MAP).unwrap();
     terrain
-        .start_motion([f64::from(feet.x), f64::from(feet.y) + 0.5, f64::from(feet.z)], body)
+        .start_motion(
+            [
+                f64::from(feet.x),
+                f64::from(feet.y) + 0.5,
+                f64::from(feet.z),
+            ],
+            body,
+        )
         .is_ok()
 }
 
@@ -134,7 +141,11 @@ fn a_spot_that_already_fits_is_unchanged() {
 /// of (10, 10) in x and z and `height` tall, as the mode places an
 /// objective's console, crate or shell.
 fn placed(half: f64, height: f64) -> CollisionWorld {
-    let shape = mesh("structure", &[([-half, 0., -half], [half, height, half])], false);
+    let shape = mesh(
+        "structure",
+        &[([-half, 0., -half], [half, height, half])],
+        false,
+    );
     let structures = std::sync::Arc::new(
         crate::bot_structure_collision::StructureObstacles::from_surfaces(
             (1, 1),
@@ -206,7 +217,15 @@ fn a_spot_with_no_room_within_two_metres_stays_obstructed() {
     // A 6 m block: every ring column is inside it.
     let world = placed(3., 1.2);
     assert_eq!(
-        supported_beside(Some(&world), MAP, at([10., 1., 10.]), 0., 4., Body::default(), |_| true),
+        supported_beside(
+            Some(&world),
+            MAP,
+            at([10., 1., 10.]),
+            0.,
+            4.,
+            Body::default(),
+            |_| true
+        ),
         Err(OBSTRUCTED)
     );
 }
@@ -294,10 +313,21 @@ fn malformed_and_unsupported_queries_are_refused_without_a_search() {
         Err(PhysicsError::Unavailable.code())
     );
     assert_eq!(
-        supported_beside(Some(&world), "another_map", at([5., 0.5, 10.]), 1., 8., body, |_| true),
+        supported_beside(
+            Some(&world),
+            "another_map",
+            at([5., 0.5, 10.]),
+            1.,
+            8.,
+            body,
+            |_| true
+        ),
         Err(PhysicsError::MapMismatch.code())
     );
-    assert_eq!(beside(&world, [5., 30., 10.], body), Err("bot_objective_unsupported"));
+    assert_eq!(
+        beside(&world, [5., 30., 10.], body),
+        Err("bot_objective_unsupported")
+    );
     let uncovered = mesh("arena", &[([0., -0.5, 0.], [20., 0., 20.])], false);
     assert_eq!(
         beside(&uncovered, [5., 0.5, 10.], body),
