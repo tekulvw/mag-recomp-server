@@ -74,6 +74,69 @@ internal static class VoiceDiagnosticsChecks
         // Signatures are bounded.
         var bounded = VoiceDiagnostics.FromEnvironment(name => name == VoiceDiagnostics.Variable ? "1" : null, _ => { });
         for (var client = 0; client < VoiceDiagnostics.MaxSignatures + 10; client++) bounded.Observe(client, "udp", 61, 3, framed, 0);
+
+        Streams();
+    }
+
+    // A synthetic voice packet in the observed client layout: 14-byte header, then the data.
+    internal static byte[] VoicePacket(int group, ushort sequence, int dataLength, byte fill = 0x5A)
+    {
+        var packet = new byte[VoicePacketHeader.Length + dataLength];
+        packet[0] = 0x81; packet[1] = (byte)group; packet[3] = 1;
+        packet[4] = 0; packet[5] = (byte)VoicePacketHeader.Kind;
+        packet[6] = (byte)group; packet[7] = 1;
+        packet[8] = (byte)(dataLength >> 8); packet[9] = (byte)dataLength;
+        packet[10] = (byte)(sequence >> 8); packet[11] = (byte)sequence;
+        for (var i = VoicePacketHeader.Length; i < packet.Length; i++) packet[i] = fill;
+        return packet;
+    }
+
+    static void Streams()
+    {
+        // Sampling continues at a steady low rate after the first samples.
+        var lines = new List<string>();
+        var diag = new VoiceDiagnostics(true, lines.Add);
+        for (var i = 1; i <= 3 * VoiceDiagnostics.SampleEvery; i++)
+            diag.Observe(4, "udp", 53, null, VoicePacket(40, (ushort)i, VoiceDiagnostics.LabBlockSize), i);
+        var samples = lines.Count(l => l.StartsWith("voice_diag sample"));
+        Check(samples == VoiceDiagnostics.SamplesPerSignature + 3, $"steady sampling: {samples}");
+
+        // Per client and group: data bytes and range, multi-block packets, sequence gaps and steps back.
+        lines.Clear();
+        diag = new VoiceDiagnostics(true, lines.Add);
+        void Send(int client, int group, ushort sequence, int length, long ms) =>
+            diag.Observe(client, "udp", 53, null, VoicePacket(group, sequence, length), ms);
+        Send(4, 40, 1, 37, 0);           // the first message arms the counts interval
+        Send(4, 40, 2, 37, 10);
+        Send(4, 40, 5, 74, 20);          // two lost (3, 4) and a two-block packet
+        Send(4, 40, 5, 37, 30);          // a repeat
+        Send(4, 40, 0xFFFF, 37, 40);     // a step back
+        Send(4, 40, 0x0001, 37, 50);     // a wrap: one lost (0)
+        Send(4, 83, 9, 37, 60);          // another group of the same client is its own stream
+        Send(5, 40, 7, 37, 70);          // and another client
+        diag.Observe(4, "udp", 53, null, new byte[] { 0x81, 40, 0, 1, 0, 0x2E, 40, 1, 0, 1, 0, 1, 0, 0, 9 }, 80); // not voice
+        diag.Observe(4, "udp", 53, null, VoicePacket(40, 2, 37)[..30], 90);                                     // length mismatch
+        Send(4, 40, 2, 37, VoiceDiagnostics.CountIntervalMs + 1);
+        var stream = lines.Where(l => l.Contains("voice_group=")).ToList();
+        Check(stream.Count == 3, "stream lines: " + string.Join(" | ", stream));
+        var first = stream.Single(l => l.Contains("client=4 voice_group=40 "));
+        Check(first.Contains("recent=7 ") && first.Contains("total=7 ") && first.Contains($"data_bytes={37 * 6 + 74} ") &&
+              first.Contains("data_min=37 ") && first.Contains("data_max=74 ") && first.Contains("multi_block=1 ") &&
+              first.Contains("seq_gaps=3 ") && first.Contains("seq_back=2 "), "stream counters: " + first);
+        Check(stream.Any(l => l.Contains("client=4 voice_group=83 recent=1 ")) && stream.Any(l => l.Contains("client=5 voice_group=40 recent=1 ")),
+              "streams per client and group: " + string.Join(" | ", stream));
+        // Recent counters restart each interval; totals carry on.
+        lines.Clear();
+        Send(4, 40, 3, 37, 2 * VoiceDiagnostics.CountIntervalMs + 2);
+        var next = lines.Single(l => l.Contains("voice_group="));
+        Check(next.Contains("client=4 voice_group=40 recent=1 total=8 ") && next.Contains("seq_gaps=0 seq_gaps_total=3 ") &&
+              next.Contains("seq_back=0 seq_back_total=2"), "next interval: " + next);
+        Check(VoicePacketHeader.TryParse(VoicePacket(83, 2, 37), out var header) && header.Group == 83 && header.MediaType == 1 &&
+              header.DataLength == 37 && header.Sequence == 2, "voice header parse");
+        var mismatch = VoicePacket(36, 1, 37); mismatch[6] = 37;
+        Check(!VoicePacketHeader.TryParse(mismatch, out _), "the two group bytes must agree");
+        Check(!VoicePacketHeader.TryParse(VoicePacket(36, 1, 37)[..13], out _), "a short header is not voice");
+        Check(VoicePacketHeader.TryParse(VoicePacket(36, 1, 0), out header) && header.DataLength == 0, "an empty voice packet");
     }
 
     static byte CrcReference(byte[] bytes)
