@@ -317,6 +317,9 @@ namespace Server.Dme
             // Get ScertClient data
             var scertClient = clientChannel.GetAttribute(Server.Pipeline.Constants.SCERT_CLIENT).Get();
             var enableEncryption = Program.GetAppSettingsOrDefault(data.ApplicationId).EnableDmeEncryption;
+            var voiceDiagnostics = VoiceDiagnostics.Instance;
+            if (voiceDiagnostics.Enabled)
+                voiceDiagnostics.Observe(data.ClientObject?.DmeId ?? -1, "tcp", message, scertClient.MediusVersion, Environment.TickCount64);
             scertClient.CipherService.EnableEncryption = enableEncryption;
 
             if (Program.LocalGameplay != null && data.ClientObject != null && !Program.LocalGameplay.CanUse(data.ClientObject))
