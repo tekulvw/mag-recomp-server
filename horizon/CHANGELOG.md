@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.1](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.13.0...medius-v0.13.1) (2026-11-26)
+
+
+### Bug Fixes
+
+* **medius:** keep voice traffic visible in the DME lab receipts and parse its header ([#382](https://github.com/tekulvw/mag-recomp-server/issues/382)) ([e7f17b6](https://github.com/tekulvw/mag-recomp-server/commit/e7f17b6c025ac7173edf1b0f002082d6be107f70))
+
 ## [0.13.0](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.12.0...medius-v0.13.0) (2026-11-26)
 
 

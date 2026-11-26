@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.17.1](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.17.0...gameplay-v0.17.1) (2026-11-26)
+
+
+### Bug Fixes
+
+* **gameplay:** drop stale vehicle-wave entries so a repaired motor pool cannot freeze the world ([#381](https://github.com/tekulvw/mag-recomp-server/issues/381)) ([e26b4a2](https://github.com/tekulvw/mag-recomp-server/commit/e26b4a210bc9322af00c6db57560d31687d69c80))
+* **gameplay:** move bot spots a body would start inside to the nearest free spot beside them ([#377](https://github.com/tekulvw/mag-recomp-server/issues/377)) ([6fb3327](https://github.com/tekulvw/mag-recomp-server/commit/6fb332753090d14b5934efa388ec25b05bf9a0ac))
+* **gameplay:** never down a player on a lethal kinetic-response hit ([#380](https://github.com/tekulvw/mag-recomp-server/issues/380)) ([cd2b095](https://github.com/tekulvw/mag-recomp-server/commit/cd2b095abe75d87694069a74bdc8f241f7e82379))
+* **gameplay:** put the owner's skill record behind --owner-skills-record ([#378](https://github.com/tekulvw/mag-recomp-server/issues/378)) ([fbb53e1](https://github.com/tekulvw/mag-recomp-server/commit/fbb53e1a2f462af1f836a38f874d66cd0cebca8e))
+
 ## [0.17.0](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.16.0...gameplay-v0.17.0) (2026-11-26)
 
 
