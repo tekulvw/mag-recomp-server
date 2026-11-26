@@ -207,3 +207,63 @@ fn no_automatic_queue_once_the_match_has_ended() {
     owner_update(&mut engine, 220);
     assert!(actor(&engine).pending_spawn_deadline.is_none());
 }
+
+fn world_tick(engine: &mut Engine<Vec<u8>>, now_ms: u64) {
+    let response = engine.tick_world(Duration::from_millis(now_ms), 1, "synthetic-tick".into());
+    assert!(response.ok, "{:?}", response.error);
+}
+
+fn next_wave(engine: &Engine<Vec<u8>>, now_ms: u64) -> Duration {
+    engine.team_waves[usize::from(actor(engine).team())]
+        .expect("the first life started the team clock")
+        .next_after(Duration::from_millis(now_ms))
+        .unwrap()
+}
+
+#[test]
+fn a_death_just_before_a_wave_spawns_on_that_wave_without_waiting_for_an_owner_update() {
+    let mut engine = engine_with_first_life();
+    engine.enable_world_ticks();
+    die(&mut engine);
+    let died_ms = 210;
+    let wave = next_wave(&engine, died_ms);
+    // The world tick that first sees the death queues it for that wave.
+    world_tick(&mut engine, died_ms + 10);
+    assert_eq!(actor(&engine).pending_spawn_deadline, Some(wave));
+    // A dead client reports about once a second; its first update after the
+    // wave starts the new life instead of queueing for the following one.
+    owner_update(&mut engine, wave.as_millis() as u64 + 30);
+    assert_alive_at(&engine, 2, POINT_1);
+}
+
+#[test]
+fn the_world_tick_leaves_a_cancelled_or_first_life_character_out_of_the_queue() {
+    let mut engine = operator();
+    engine.enable_world_ticks();
+    // Before the first confirmation the world clock queues nothing.
+    world_tick(&mut engine, 40);
+    assert!(actor(&engine).pending_spawn_deadline.is_none());
+    first_life_at_point_1(&mut engine);
+    die(&mut engine);
+    cancel(&mut engine, 205);
+    for now in [210, 260, 310, 360] {
+        world_tick(&mut engine, now);
+    }
+    assert!(actor(&engine).pending_spawn_deadline.is_none());
+    assert!(!actor(&engine).life.is_alive());
+}
+
+#[test]
+fn the_world_tick_does_not_queue_once_the_match_has_ended() {
+    let mut engine = engine_with_first_life();
+    engine.enable_world_ticks();
+    die(&mut engine);
+    engine.match_terminal = Some(match_flow::MatchTerminal {
+        world_id: 1,
+        match_id: "synthetic-ending".into(),
+        reason: "synthetic".into(),
+        reservation_ids: vec![actor(&engine).reservation.id.clone()],
+    });
+    let _ = engine.tick_world(Duration::from_millis(220), 1, "synthetic-tick".into());
+    assert!(actor(&engine).pending_spawn_deadline.is_none());
+}

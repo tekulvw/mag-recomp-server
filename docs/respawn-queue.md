@@ -27,6 +27,12 @@ Behaviour of the replacement server, described in our own words.
   once it is dead (a downed character only after bleed-out, finishing damage
   or give-up). It needs no new selection and no new confirmation. A
   confirmation is still accepted and simply joins the same wave.
+- The world clock does this rejoining, at the first world tick that sees the
+  character dead. It does not wait for the client's next update: a dead client
+  reports only about once a second, so a wave that fell between the death and
+  that report used to go by, and the player waited a whole extra period after
+  the countdown reached zero. The client's first update after the wave starts
+  the new life. Embeddings without world ticks still rejoin on that update.
 - A downed character cannot join the queue. The retail client sends its
   confirmation while the map is open, which may be while downed, and does not
   resend it after bleeding out. The server therefore does not wait for one.
@@ -36,5 +42,6 @@ Behaviour of the replacement server, described in our own words.
 
 Server-owned bots keep their own respawn scheduling and are not affected.
 
-The object-update audit records `automatic_respawn_deadline_ms` when a dead
-character rejoined the queue without a confirmation.
+The world log records `automatic_respawn_queued` (reservation, team and
+deadline) when the world clock queues a dead character. The object-update audit
+records `automatic_respawn_deadline_ms` when an owner update did it instead.
