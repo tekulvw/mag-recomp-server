@@ -634,19 +634,13 @@ impl<W: Write> Engine<W> {
                     }
                 }
                 plan.packet = Some(
-                    replication::CharacterDamageUpdate {
-                        sequence: 2,
-                        timestamp_ms: now.as_millis() as u32,
-                        object_index: target.character_id as u16,
+                    self.character_damage_update(
+                        2,
+                        now.as_millis() as u32,
+                        target.character_id as u16,
                         damage,
-                        forced_state: (damage.health_quarter_points == 0).then_some(
-                            replication::CharacterState {
-                                state: 7,
-                                stance: 0,
-                                user_data: [0; 3],
-                            },
-                        ),
-                    }
+                        damage.health_quarter_points == 0,
+                    )
                     .encode_with_profile(self.wire_profile)?,
                 );
                 audit["damage_publication_hex"] =

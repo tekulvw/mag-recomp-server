@@ -1041,6 +1041,7 @@ impl<W: Write> Engine<W> {
         now: Duration,
     ) -> Result<(), &'static str> {
         let packet = replication::CharacterDamageUpdate {
+            seated_exit: None,
             sequence: 2,
             timestamp_ms: now.as_millis() as u32,
             object_index: id,

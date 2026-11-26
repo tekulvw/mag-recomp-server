@@ -770,8 +770,22 @@ impl CharacterLevelUpdate {
     }
 }
 
+/// Where a seated character's body goes when its death releases the seat.
+/// See docs/seated-death-dismount.md.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TerminalSeatExit {
+    pub position: CharacterPosition,
+    pub packed_yaw: u16,
+    /// Family13 ownership after the release, published in the same packet.
+    pub bunker_ownership: Option<(u16, AlphaVehicleOwnership)>,
+    /// Ground driving authority returned in the same packet: (vehicle, owner).
+    pub ground_owner: Option<(u16, u16)>,
+}
+
 /// Character damage and optional server-forced state. Native dead characters
 /// publish CS_DEATH7 alongside HP0; field8 alone does not leave the active state.
+/// A seated character also needs `seated_exit`: build lethal human updates with
+/// `Engine::character_damage_update` so the seat release cannot be forgotten.
 #[derive(Clone, Copy, Debug)]
 pub struct CharacterDamageUpdate {
     pub sequence: u32,
@@ -779,6 +793,7 @@ pub struct CharacterDamageUpdate {
     pub object_index: u16,
     pub damage: CharacterDamage,
     pub forced_state: Option<CharacterState>,
+    pub seated_exit: Option<TerminalSeatExit>,
 }
 impl CharacterDamageUpdate {
     pub fn encode(&self) -> Result<Vec<u8>, &'static str> {
@@ -791,20 +806,43 @@ impl CharacterDamageUpdate {
         if self.object_index == u16::MAX || self.sequence <= 1 {
             return Err("invalid_damage_delta");
         }
+        let exit = self.seated_exit;
+        if let Some(exit) = exit {
+            if self.forced_state.is_none_or(|state| state.state != 7) {
+                return Err("seated_exit_requires_state7");
+            }
+            if exit.packed_yaw >= 1024 {
+                return Err("invalid_exit_yaw");
+            }
+            if exit.bunker_ownership.is_some_and(|(index, _)| index >= 16) {
+                return Err("invalid_bunker_index");
+            }
+        }
+        let bunker = exit.and_then(|exit| exit.bunker_ownership);
+        let ground = exit.and_then(|exit| exit.ground_owner);
         let mut bits = BitWriter::with_profile(profile);
         UpdateHeader {
             sequence: self.sequence,
             nak_sequence: 0,
             client_index: 0,
-            object_type_mask: 1 << 3,
+            object_type_mask: (1 << 3)
+                | (u32::from(ground.is_some()) << 1)
+                | (u32::from(bunker.is_some()) << 13),
             timestamp_ms: self.timestamp_ms,
         }
         .encode(&mut bits)?;
+        if let Some((vehicle, owner)) = ground {
+            crate::ground_vehicles::write_owner_field(&mut bits, vehicle, owner)?;
+        }
         bits.write(1, 1)?;
         bits.write(self.object_index.into(), 16)?;
         for field in 0..22 {
             bits.write(
-                u32::from(field == 8 || (field == 4 && self.forced_state.is_some())),
+                u32::from(
+                    field == 8
+                        || (field == 4 && self.forced_state.is_some())
+                        || (exit.is_some() && [5, 7].contains(&field)),
+                ),
                 1,
             )?;
             if field == 4
@@ -812,11 +850,22 @@ impl CharacterDamageUpdate {
             {
                 state.encode(&mut bits)?;
             }
+            if let Some(exit) = exit {
+                if field == 5 {
+                    exit.position.encode(&mut bits)?;
+                }
+                if field == 7 {
+                    bits.write(exit.packed_yaw.into(), 10)?;
+                }
+            }
             if field == 8 {
                 self.damage.encode(&mut bits)?;
             }
         }
         bits.write(0, 1)?;
+        if let Some((index, ownership)) = bunker {
+            ownership.encode_at(index, None, &mut bits)?;
+        }
         Ok(bits.finish())
     }
 }
@@ -1869,7 +1918,7 @@ impl AlphaSeatTransition {
 }
 
 /// Shared stationary-emplacement authority; passengers use Character seat state.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AlphaVehicleOwnership {
     pub owner: u16,
     pub turret_owner: u16,

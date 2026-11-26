@@ -427,20 +427,16 @@ pub(super) fn hit<W: Write>(
                         1,
                     ));
                 }
-                let packet = replication::CharacterDamageUpdate {
-                    sequence: next_sequence,
-                    timestamp_ms: now.as_millis() as u32,
-                    object_index: request.defender as u16,
-                    damage,
-                    forced_state: (damage.health_quarter_points == 0).then_some(
-                        replication::CharacterState {
-                            state: 7,
-                            stance: 0,
-                            user_data: [0; 3],
-                        },
-                    ),
-                }
-                .encode_with_profile(ctx.engine.wire_profile)?;
+                let packet = ctx
+                    .engine
+                    .character_damage_update(
+                        next_sequence,
+                        now.as_millis() as u32,
+                        request.defender as u16,
+                        damage,
+                        damage.health_quarter_points == 0,
+                    )
+                    .encode_with_profile(ctx.engine.wire_profile)?;
                 applied = Some(json!({"amount_hp":amount,
                     "health_before_quarter_points":target_health,
                     "health_after_quarter_points":damage.health_quarter_points,
@@ -997,18 +993,18 @@ pub(super) fn kill_self<W: Write>(
                 ctx.engine
                     .plan_self_kill_death(active, damage, association.unwrap())?;
             plan.combat.new_damage_model = Some(damage);
-            let update = replication::CharacterDamageUpdate {
-                sequence: next_sequence,
-                timestamp_ms: now.as_millis() as u32,
-                object_index: active.reservation.player,
-                forced_state: Some(replication::CharacterState {
-                    state: 7,
-                    stance: 0,
-                    user_data: [0; 3],
-                }),
+            let update = ctx.engine.character_damage_update(
+                next_sequence,
+                now.as_millis() as u32,
+                active.reservation.player,
                 damage,
+                true,
+            );
+            if let Some(exit) = update.seated_exit {
+                plan.session.server_position =
+                    Some((exit.position, player_tracking::PositionOrigin::ServerExit));
             }
-            .encode_with_profile(ctx.engine.wire_profile)?;
+            let update = update.encode_with_profile(ctx.engine.wire_profile)?;
             plan.combat.clear_pending_damage = true;
             plan.helo_runtime = staged_helo;
             plan.hospital_redeploy_ownership = staged_hospital_ownership;

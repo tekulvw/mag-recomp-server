@@ -318,6 +318,7 @@ impl<W: Write> Engine<W> {
             let packet = (!ticks.is_empty())
                 .then(|| {
                     replication::CharacterDamageUpdate {
+                        seated_exit: None,
                         sequence: 2,
                         timestamp_ms: now.as_millis() as u32,
                         object_index: index,
@@ -724,6 +725,7 @@ impl<W: Write> Engine<W> {
             ..patient.last_damage
         };
         let packet = replication::CharacterDamageUpdate {
+            seated_exit: None,
             sequence: 2,
             timestamp_ms: now.as_millis() as u32,
             object_index: player,
@@ -875,6 +877,7 @@ impl<W: Write> Engine<W> {
                 state.effect = remaining;
                 if !ticks.is_empty() {
                     let packet = replication::CharacterDamageUpdate {
+                        seated_exit: None,
                         sequence: 2,
                         timestamp_ms: now.as_millis() as u32,
                         object_index: id,

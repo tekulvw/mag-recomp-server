@@ -97,6 +97,7 @@ impl<W: Write> Engine<W> {
                     ..victim.last_damage
                 };
                 let packet = replication::CharacterDamageUpdate {
+                    seated_exit: None,
                     sequence: 2,
                     timestamp_ms: now.as_millis() as u32,
                     object_index: victim.reservation.player,

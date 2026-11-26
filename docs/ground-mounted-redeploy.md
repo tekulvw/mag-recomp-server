@@ -7,8 +7,9 @@ planning terminal damage. Conflicting mount families and unbound seats refuse
 without changing the character. Other mounted families retain their separate
 support boundary.
 
-A terminal redeploy uses the existing zero-health and state7 publication. The
-recorded commit clears the actor's seat and self-owned pending effects, releases
+A terminal redeploy publishes zero health and state7 together with the seat exit
+position and facing, as every seated death does
+([seated-death-dismount.md](seated-death-dismount.md)). The recorded commit clears the actor's seat and self-owned pending effects, releases
 driver ownership and revokes a gunner's equipment grant. Another human can use
 the freed seat. The vehicle retains its current position and health; the player
 uses the ordinary team spawn wave afterward. No geometry-dependent manual exit

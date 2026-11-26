@@ -13,7 +13,7 @@ pub(crate) struct BodyBasis {
 }
 
 impl BodyBasis {
-    fn packed_yaw(self) -> u16 {
+    pub(crate) fn packed_yaw(self) -> u16 {
         let rad = self.forward[0]
             .atan2(self.forward[2])
             .rem_euclid(std::f32::consts::TAU);

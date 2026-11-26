@@ -513,6 +513,7 @@ impl<W: Write> Engine<W> {
             if changed {
                 if let Some(damage) = health_update {
                     let packet = replication::CharacterDamageUpdate {
+                        seated_exit: None,
                         sequence: 2,
                         timestamp_ms: now.as_millis() as u32,
                         object_index: actor.reservation.player,
@@ -1136,6 +1137,7 @@ mod tests {
         let prime = engine.tick_world(Duration::from_millis(250), 1, "prime".into());
         assert!(prime.ok, "{:?}", prime.error);
         let filler = replication::CharacterDamageUpdate {
+            seated_exit: None,
             sequence: 2,
             timestamp_ms: 1000,
             object_index: engine.active.as_ref().unwrap().reservation.player,

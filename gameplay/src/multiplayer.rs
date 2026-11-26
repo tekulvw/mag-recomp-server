@@ -93,10 +93,7 @@ impl Active {
             self.clear_live_projectiles(now)?;
             self.last_exit = None;
             self.pending_spawn_deadline = None;
-            self.mounted_seat = None;
-            self.mounted_bunker = None;
-            self.ground_seat = None;
-            self.helo_seat = None;
+            self.release_seat_on_death();
             CharacterLife::AwaitingRespawn { generation }
         } else {
             CharacterLife::Alive {

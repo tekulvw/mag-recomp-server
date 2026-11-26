@@ -349,6 +349,7 @@ impl Target {
                     runtime.phase = BotPhase::Dead;
                     runtime.since = now;
                     let packet = replication::CharacterDamageUpdate {
+                        seated_exit: None,
                         sequence,
                         timestamp_ms,
                         object_index: self.object_index,
