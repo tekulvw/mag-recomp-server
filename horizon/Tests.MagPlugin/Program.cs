@@ -93,6 +93,7 @@ Test("open matches overflowing the store give a clear reason", LeadershipProgres
 Test("abandoned open match rows expire after the TTL and compact", LeadershipProgressionChecks.RewardLedgerAbandonedRowExpiry);
 Test("late rewards for abandoned match rows are credited once", LeadershipProgressionChecks.RewardLedgerLateRewardForAbandonedRow);
 Test("open match row TTL setting", LeadershipProgressionChecks.RewardLedgerOpenRowTtlSetting);
+Test("undated rows of ended matches are dated by any reward and expire", LeadershipProgressionChecks.RewardLedgerUndatedRowExpiry);
 Test("FRAGO authored coefficient validation", LeadershipProgressionChecks.FragoCatalogValidation);
 Test("FRAGO admission omits the field for older gameplay workers", LeadershipProgressionChecks.FragoOlderWorkerAdmission);
 Test("FRAGO admission capability and zero award", LeadershipProgressionChecks.FragoAdmissionCapability);

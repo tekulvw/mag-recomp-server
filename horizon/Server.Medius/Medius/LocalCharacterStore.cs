@@ -240,7 +240,7 @@ namespace Server.Medius
             // Older schema-three matches have no end receipt and remain open.
             public bool Finalized { get; set; }
             // Unix seconds of the row's last committed reward. Rows written before this field existed
-            // are stamped with the time of the next reward commit (see Commit).
+            // are all stamped at the next reward commit to any row (see Commit).
             [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public long? LastRewardAt { get; set; }
         }
         private sealed class Document
@@ -809,8 +809,9 @@ namespace Server.Medius
                 document.RewardReceipts = document.RewardReceipts ?? new Dictionary<string, RewardReceipt>(StringComparer.Ordinal);
                 document.MatchRewardProgress = document.MatchRewardProgress ?? new Dictionary<string, MatchRewardProgress>(StringComparer.Ordinal);
                 foreach (var character in all) { character.Experience = character.Experience ?? 0; character.Level = character.Level ?? 1; }
-                // On a reward commit, undated rows (written before rows were dated) start their TTL now, and a
-                // date in the future, from a clock that moved back, is clamped so no row can postpone its expiry
+                // On a reward commit to any row, every undated row in the store (written before rows were
+                // dated, possibly for a match that will never reward again) starts its TTL now. A date in the
+                // future, from a clock that moved back, is clamped so no row can postpone its expiry
                 // indefinitely. Other saves leave the ledger as it is; an undated row is never compactable.
                 if (touchedProgress != null)
                     foreach (var row in document.MatchRewardProgress.Values)

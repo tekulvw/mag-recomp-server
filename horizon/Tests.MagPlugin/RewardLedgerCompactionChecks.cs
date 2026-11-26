@@ -281,4 +281,40 @@ internal static partial class LeadershipProgressionChecks
         catch (ArgumentOutOfRangeException) { unbounded = true; }
         Check(unbounded, "The store accepted a zero TTL");
     });
+
+    // An undated row whose match never rewards again is dated by another row's reward and expires one TTL later.
+    public static void RewardLedgerUndatedRowExpiry() => WithDirectory(directory =>
+    {
+        var fixture = SeedLedger(directory);
+        AddLedgerRow(fixture, "undated-ended", false, 20, undated: true);
+        PadTo(fixture, LocalCharacterStore.LedgerCompactionTriggerBytes / 2);
+        int sequence = 0;
+        void Reward() => Check(fixture.Store().ApplyRewardForAccount("alpha", 1, $"template-action-{++sequence}", OpenTemplate, "enemy_killed", 1).Result ==
+            MagNetResult.Success, "A reward to another row was refused");
+
+        // A preference save leaves the undated row undated; a reward to another row dates it.
+        Check(fixture.Store().SaveNominationsForAccount("alpha", 1, 1).Reason == "nominations-committed" &&
+            RowRewardedAt(LedgerFixture.Read(fixture.Path), "undated-ended") == null, "A non-reward save dated a reward row");
+        long dated = fixture.Now.ToUnixTimeSeconds();
+        Reward();
+        Check(RowRewardedAt(LedgerFixture.Read(fixture.Path), "undated-ended") == dated, "Another row's reward did not date an undated row");
+
+        // Later, newer finalized rows fill the store past the trigger; the undated row is never rewarded again.
+        fixture.Now += fixture.Ttl - TimeSpan.FromMinutes(1);
+        fixture.Document = LedgerFixture.Read(fixture.Path);
+        for (int i = 0; i < LocalCharacterStore.RetainedFinalizedMatchRows; i++) AddLedgerRow(fixture, $"recent-final-{i}", true, 4, fixture.Now);
+        PadTo(fixture, LocalCharacterStore.MaximumStoreBytes / 10 * 9);
+        Reward();
+        Check(fixture.Messages.Count == 0 && RowMatches(LedgerFixture.Read(fixture.Path)).Contains("undated-ended"),
+            "A once-undated row was evicted inside its TTL");
+
+        // One TTL after it was dated, the next reward to another row compacts it, ahead of the newer retained rows.
+        fixture.Now += TimeSpan.FromMinutes(2);
+        Reward();
+        var after = LedgerFixture.Read(fixture.Path);
+        Check(fixture.Messages.Count == 1 && fixture.Messages[0].Contains("1 abandoned open") && !RowMatches(after).Contains("undated-ended") &&
+            ReceiptsOf(after, "undated-ended").Length == 0, "An undated row from an ended match never expired");
+        Check(Enumerable.Range(0, LocalCharacterStore.RetainedFinalizedMatchRows).All(i => RowMatches(after).Contains($"recent-final-{i}")),
+            "Expiring the undated row evicted retained finalized rows");
+    });
 }
