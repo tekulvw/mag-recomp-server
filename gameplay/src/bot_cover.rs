@@ -1455,6 +1455,12 @@ impl<W: Write> Engine<W> {
             if let Some(bot) = self.bot_registry.bots.get_mut(&id) {
                 bot.stance = STANCE_STANDING;
             }
+            *self.bot_cover.ends.entry("died").or_default() += 1;
+            receipts.push(json!({"op":"bot_cover_end","timestamp_ms":now.as_millis() as u64,
+                "object_index":id,"generation":e.life.1,"reason":"died","state":e.state,
+                "attacker":e.attacker,"structure":e.spot.structure,"cycles":e.cycle,"bounds":e.bound,
+                "in_cover_ms":e.arrived.map_or(0, |a| now.saturating_sub(a).as_millis() as u64),
+                "episode_ms":now.saturating_sub(e.started).as_millis() as u64}));
             return Ok(());
         }
         let r = r.unwrap();

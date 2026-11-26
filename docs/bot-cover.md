@@ -116,6 +116,8 @@ It leaves cover when:
 - a move into or out of cover fails (`move_failed`, `peek_unreachable`,
   `hide_unreachable`).
 
+A bot that dies or is downed in cover ends its episode as `died`.
+
 On leaving, a crouched bot stands, the route resumes, and perception does not
 pause the route again for 6 s, except for a hit.
 
