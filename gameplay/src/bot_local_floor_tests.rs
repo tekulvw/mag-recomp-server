@@ -116,6 +116,9 @@ fn canopy_engine() -> (Engine<Vec<u8>>, u16) {
 fn deployed_policy() -> ObjectivePolicy {
     let mut policy = ObjectivePolicy::bundled();
     policy.ground_search_m = 8.;
+    // The widest planning slice, so a slow test machine does not end a
+    // planning pass before its route query.
+    policy.planning_slice_us = 10_000;
     assert_eq!(policy.validate(), Ok(()));
     policy
 }
