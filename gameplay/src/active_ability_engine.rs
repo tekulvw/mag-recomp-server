@@ -774,13 +774,7 @@ impl<W: Write> Engine<W> {
         for bot in self.bot_combat_snapshots() {
             targets.push(Target {
                 index: bot.object_index,
-                squad: (0..32)
-                    .find(|s| {
-                        self.bot_registry
-                            .members(*s)
-                            .any(|id| id == bot.object_index)
-                    })
-                    .unwrap_or(u16::MAX),
+                squad: self.bot_registry.squad_of(bot.object_index),
                 team: bot.team,
                 identity: format!("bot:{}:{}", bot.object_index, bot.generation),
                 position: [bot.position.x, bot.position.y, bot.position.z],
@@ -969,7 +963,7 @@ impl<W: Write> Engine<W> {
                     .chain(self.peers.values())
                     .filter(|a| a.initial_objects.is_some())
                     .count()
-                    + self.bot_combat_snapshots().len();
+                    + self.bot_combat_snapshot_count();
                 let slots = state.cursor.take(
                     u16::try_from(allocated)
                         .map_err(|_| "active_ability_character_pool_overflow")?,
@@ -1541,10 +1535,9 @@ impl<W: Write> Engine<W> {
             for (&index, detection) in &next.detected {
                 let current = actors.iter().any(|a| {
                     a.reservation.player == index && detection_identity(a) == detection.identity
-                }) || self.bot_combat_snapshots().iter().any(|b| {
-                    b.object_index == index
-                        && format!("bot:{}:{}", b.object_index, b.generation) == detection.identity
-                });
+                }) || self
+                    .bot_combat_generations(index)
+                    .any(|generation| format!("bot:{index}:{generation}") == detection.identity);
                 let value = detection.detected && current;
                 if published
                     .detections

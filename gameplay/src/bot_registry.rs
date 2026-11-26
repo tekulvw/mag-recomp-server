@@ -499,6 +499,15 @@ impl BotRegistry {
         let stalled = now.saturating_sub(owner.progress_at).as_secs_f64();
         Some((service - elapsed).max(stalled).clamp(0., maximum))
     }
+    /// The first of the 32 squads whose [`Self::members`] include bot `index`
+    /// (its own squad), or `u16::MAX`, without scanning every squad.
+    pub(crate) fn squad_of(&self, index: u16) -> u16 {
+        self.bots
+            .get(&index)
+            .map(|b| b.target.squad.squad_index())
+            .filter(|squad| *squad < 32)
+            .unwrap_or(u16::MAX)
+    }
     pub(crate) fn members(&self, squad: u16) -> impl Iterator<Item = u16> + '_ {
         self.bots
             .iter()
@@ -1030,6 +1039,41 @@ impl<W: Write> Engine<W> {
             }
         }
         result
+    }
+    /// `(object_index, generation)` of every combat snapshot for Character
+    /// `index`, in [`Self::bot_combat_snapshots`] order, without building the
+    /// snapshot of every other bot.
+    pub(crate) fn bot_combat_generations(&self, index: u16) -> impl Iterator<Item = u32> + '_ {
+        let bot = self
+            .bot_registry
+            .bots
+            .get(&index)
+            .map(|b| b.target.runtime.unwrap().generation);
+        let dummies = self
+            .active
+            .iter()
+            .chain(self.peers.values())
+            .filter_map(move |a| {
+                let t = a.development_target.as_ref().filter(|_| a.dummy_created)?;
+                let r = t.runtime?;
+                (t.object_index == index).then_some(r.generation)
+            });
+        bot.into_iter().chain(dummies)
+    }
+    /// The number of [`Self::bot_combat_snapshots`].
+    pub(crate) fn bot_combat_snapshot_count(&self) -> usize {
+        self.bot_registry.bots.len()
+            + self
+                .active
+                .iter()
+                .chain(self.peers.values())
+                .filter(|a| {
+                    a.dummy_created
+                        && a.development_target
+                            .as_ref()
+                            .is_some_and(|t| t.runtime.is_some())
+                })
+                .count()
     }
     /// External damage admission publishes once; planned events use commit_bot_damage
     /// after their audit record and provide their own already-staged publication.
@@ -3283,6 +3327,40 @@ pub(crate) mod identity_tests {
             .reconcile_bot_population(Duration::ZERO, 1, &mut Default::default())
             .unwrap();
         engine
+    }
+
+    #[test]
+    fn indexed_combat_generations_match_the_full_snapshot_scan() {
+        let mut engine = populated_engine("Synthetic Generations");
+        let first = *engine.bot_registry.bots.keys().next().unwrap();
+        // A second life changes the identity a detection must match.
+        let bot = engine.bot_registry.bots.get_mut(&first).unwrap();
+        let mut runtime = bot.target.runtime.unwrap();
+        runtime.generation += 4;
+        bot.target.runtime = Some(runtime);
+        let snapshots = engine.bot_combat_snapshots();
+        assert!(snapshots.len() >= 2);
+        assert_eq!(engine.bot_combat_snapshot_count(), snapshots.len());
+        for index in 0..=u16::from(u8::MAX) {
+            let scanned: Vec<_> = snapshots
+                .iter()
+                .filter(|b| b.object_index == index)
+                .map(|b| b.generation)
+                .collect();
+            assert_eq!(
+                engine.bot_combat_generations(index).collect::<Vec<_>>(),
+                scanned,
+                "{index}"
+            );
+            assert_eq!(
+                engine.current_detection_identity(index),
+                scanned.first().map(|g| format!("bot:{index}:{g}"))
+            );
+            let squad = (0..32)
+                .find(|s| engine.bot_registry.members(*s).any(|id| id == index))
+                .unwrap_or(u16::MAX);
+            assert_eq!(engine.bot_registry.squad_of(index), squad, "{index}");
+        }
     }
 
     #[test]
