@@ -1203,17 +1203,19 @@ impl<W: Write> Engine<W> {
             }
         }
         self.install_runtime_spawn_publication(&spawn_writes);
+        // A party member still on its deploy screen when another member's
+        // entry starts the round keeps this state; nothing re-sends it later.
         for packet in spawn_packets {
-            self.broadcast_bot_packet(packet);
+            self.broadcast_spawn_packet(packet);
         }
         for packet in transition_packets {
-            self.broadcast_bot_packet(packet);
+            self.broadcast_objective_packet(packet);
         }
         if let Some(packet) = packet {
-            self.broadcast_bot_packet(packet);
+            self.broadcast_objective_packet(packet);
         }
         for packet in sequence_packets {
-            self.broadcast_bot_packet(packet);
+            self.broadcast_objective_packet(packet);
         }
         if let Some(packet) = ground_packet {
             self.broadcast_bot_packet(packet);
