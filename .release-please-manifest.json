@@ -1,6 +1,6 @@
 {
   "horizon": "0.10.2",
-  "gameplay": "0.14.4",
+  "gameplay": "0.14.5",
   "charts/mag-recomp-server": "0.12.1",
   "portal": "0.5.1"
 }

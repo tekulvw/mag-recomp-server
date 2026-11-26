@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.5](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.14.4...gameplay-v0.14.5) (2026-11-26)
+
+
+### Bug Fixes
+
+* **gameplay:** keep the bot body moving over steep lips, under lintels and along overhangs ([#313](https://github.com/tekulvw/mag-recomp-server/issues/313)) ([7cbab61](https://github.com/tekulvw/mag-recomp-server/commit/7cbab61a0338580de41c3ff00fe0941bc9e0a3b0))
+
 ## [0.14.4](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.14.3...gameplay-v0.14.4) (2026-11-26)
 
 
