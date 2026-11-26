@@ -372,22 +372,35 @@ pub(crate) struct Structures<'a> {
     pub(crate) row: u32,
 }
 impl Structures<'_> {
-    /// `Err` is a failed or over-budget query, never a clear line.
-    pub(crate) fn blocks(
+    /// `Err` is a failed or over-budget query, never a clear line. A
+    /// prefetched answer is taken when the remaining work covers it.
+    pub(crate) fn blocks_with(
         self,
+        prefetch: Option<&crate::bot_sight_prefetch::SightPrefetch>,
         from: [f64; 3],
         to: [f64; 3],
         work: &mut usize,
     ) -> Result<bool, &'static str> {
-        self.sequences
-            .blocks_ray(from, to, self.row, work)
-            .map_err(|_| {
+        crate::bot_sight_prefetch::structures_blocked(prefetch, self, from, to, work).map_err(
+            |_| {
                 if *work == 0 {
                     "geometry_query_budget"
                 } else {
                     "structure_query_failed"
                 }
-            })
+            },
+        )
+    }
+}
+impl Structures<'_> {
+    /// The geometry's own answer, before `blocks` names a failure.
+    pub(crate) fn raw_blocks(
+        self,
+        from: [f64; 3],
+        to: [f64; 3],
+        work: &mut usize,
+    ) -> Result<bool, &'static str> {
+        self.sequences.blocks_ray(from, to, self.row, work)
     }
 }
 impl<W: Write> Engine<W> {
@@ -405,11 +418,19 @@ impl<W: Write> Engine<W> {
         })
     }
 }
+/// What a sight line is checked against: the static world and the map it
+/// must belong to, the mode's placed structures, and any answers prefetched
+/// for this phase.
+#[derive(Clone, Copy)]
+pub(crate) struct SightGeometry<'a> {
+    pub(crate) world: Option<&'a collision::CollisionWorld>,
+    pub(crate) structures: Option<Structures<'a>>,
+    pub(crate) map: &'a str,
+    pub(crate) prefetch: Option<&'a crate::bot_sight_prefetch::SightPrefetch>,
+}
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn visible(
-    world: Option<&collision::CollisionWorld>,
-    structures: Option<Structures<'_>>,
-    map: &str,
+    geometry: SightGeometry<'_>,
     from: [f64; 3],
     to: [f64; 3],
     shooter: u16,
@@ -418,6 +439,12 @@ pub(crate) fn visible(
     rays: &mut usize,
     work: &mut usize,
 ) -> Result<(), &'static str> {
+    let SightGeometry {
+        world,
+        structures,
+        map,
+        prefetch,
+    } = geometry;
     let world = world.ok_or("geometry_unavailable")?;
     if world.metadata().map_name != map {
         return Err("geometry_map_mismatch");
@@ -433,17 +460,13 @@ pub(crate) fn visible(
         return Err("geometry_coverage_unknown");
     }
     // A shot crosses what the retail projectile row collides with.
-    let row = world.query_row(crate::collision::PROJECTILE_QUERY_LAYER);
-    if world
-        .raycast_row_bounded(from, to, row, work)
+    if crate::bot_sight_prefetch::world_blocked(prefetch, world, from, to, work)
         .map_err(|_| "geometry_query_budget")?
-        .nearest
-        .is_some()
     {
         return Err("world_blocked");
     }
     if let Some(structures) = structures
-        && structures.blocks(from, to, work)?
+        && structures.blocks_with(prefetch, from, to, work)?
     {
         return Err("structure_blocked");
     }
@@ -460,6 +483,36 @@ pub(crate) fn visible(
         }
     }
     Ok(())
+}
+/// Enemies a searching bot checks this tick, in order: `preferred` first,
+/// then nearest, at most `max_candidates_per_bot`.
+fn acquisition_candidates<'a>(
+    actors: &'a [Actor],
+    team: u8,
+    from: [f64; 3],
+    yaw: u16,
+    policy: &Policy,
+    weapon_range: f64,
+    preferred: Option<u16>,
+) -> Vec<&'a Actor> {
+    let yaw = f64::from(yaw) * std::f64::consts::TAU / 1024.;
+    let mut candidates: Vec<_> = actors
+        .iter()
+        .filter(|a| {
+            a.team != team
+                && a.health > 0
+                && a.armor.is_some()
+                && policy.can_acquire(from, torso(a.feet), yaw, weapon_range)
+        })
+        .collect();
+    candidates.sort_by(|a, b| {
+        (Some(b.life.id) == preferred)
+            .cmp(&(Some(a.life.id) == preferred))
+            .then(length(from, torso(a.feet)).total_cmp(&length(from, torso(b.feet))))
+            .then(a.life.id.cmp(&b.life.id))
+    });
+    candidates.truncate(policy.max_candidates_per_bot);
+    candidates
 }
 /// The order bots spend this tick's shared ray budget in: round robin from
 /// `cursor`, with every bot already holding a target ahead of every bot still
@@ -542,6 +595,84 @@ pub(crate) fn validate_weapon_recoil(
     recoil::Profile::from_weapon(items.weapon_parameters(profile.item_id())?).map(|_| ())
 }
 impl<W: Write> Engine<W> {
+    /// With bot workers, answer ahead the sight lines this tick's searching
+    /// bots will check, in the order they will spend the ray budget, until
+    /// the budget would be spent. Engaged bots' shot lines depend on aim this
+    /// tick and stay on the tick thread. A prediction that differs from what
+    /// the loop then asks only costs a direct query.
+    #[allow(clippy::too_many_arguments)]
+    fn prefetch_firearm_sight(
+        &self,
+        ids: &[u16],
+        actors: &[Actor],
+        now: Duration,
+        policy: &Policy,
+        perception: Option<&crate::bot_perception::Policy>,
+        holds: &std::collections::BTreeSet<u16>,
+        items: &item_catalog::ItemCatalog,
+        catalog: &retail_combat::RetailCombatCatalog,
+    ) -> Option<crate::bot_sight_prefetch::SightPrefetch> {
+        let world = self
+            .collision_world
+            .as_ref()
+            .filter(|_| self.bot_threads > 1)?;
+        let mut lines = Vec::new();
+        for &id in ids {
+            if lines.len() >= policy.max_rays_per_tick {
+                break;
+            }
+            let bot = &self.bot_registry.bots[&id];
+            if bot.firearm.target.is_some()
+                || now < bot.firearm.next_perception
+                || !(safe_for_supply_observation(bot)
+                    || holds.contains(&id) && safe_while_held(bot))
+            {
+                continue;
+            }
+            let Some(me) = actors.iter().find(|a| a.life.id == id && a.health > 0) else {
+                continue;
+            };
+            let kit = &bot.target.loadout;
+            let Some(range) = retail_combat::RetailBulletProfile::from_equipped_with_items(
+                items,
+                kit,
+                kit.primary,
+                kit.primary.gear_slot,
+                kit.primary.ammo_pool,
+                true,
+            )
+            .ok()
+            .and_then(|p| catalog.bullet_metadata(p.item_id()))
+            .map(|m| m.max_range) else {
+                continue;
+            };
+            let policy = match perception {
+                Some(p) => &Policy {
+                    max_engagement_distance_m: crate::bot_perception::bot_sight_range(
+                        p, items, bot,
+                    ),
+                    ..policy.clone()
+                },
+                None => policy,
+            };
+            let preferred = self
+                .armed_priority_target(bot)
+                .or_else(|| self.bot_perception.threat_enemy(id, now));
+            let from = muzzle(me.feet);
+            lines.extend(
+                acquisition_candidates(actors, me.team, from, bot.yaw, policy, range, preferred)
+                    .into_iter()
+                    .map(|a| (from, torso(a.feet))),
+            );
+        }
+        Some(crate::bot_sight_prefetch::SightPrefetch::compute(
+            world,
+            self.bot_sight_structures(),
+            policy.geometry_work_per_tick,
+            &lines,
+            self.bot_threads,
+        ))
+    }
     pub(crate) fn tick_bot_firearms(
         &mut self,
         now: Duration,
@@ -661,6 +792,16 @@ impl<W: Write> Engine<W> {
         let map = self.map_name().to_owned();
         let ids = visit_order(&self.bot_registry.bots, self.bot_registry.firearm_cursor);
         let base_policy = policy;
+        let prefetch = self.prefetch_firearm_sight(
+            &ids,
+            &actors,
+            now,
+            &base_policy,
+            perception.as_ref(),
+            &perception_holds,
+            &items,
+            catalog,
+        );
         for id in ids {
             if rays == 0 || work == 0 {
                 self.bot_registry.firearm_cursor = id;
@@ -818,34 +959,25 @@ impl<W: Write> Engine<W> {
             // periodic reacquisition; every actual shot still gets fresh LOS.
             if state.target.is_none() && (now >= state.next_perception || service_due) {
                 state.next_perception = now + Duration::from_millis(policy.perception_interval_ms);
-                let mut candidates: Vec<_> = actors
-                    .iter()
-                    .filter(|a| {
-                        a.team != me.team
-                            && a.health > 0
-                            && a.armor.is_some()
-                            && policy.can_acquire(
-                                from,
-                                torso(a.feet),
-                                f64::from(self.bot_registry.bots[&id].yaw) * std::f64::consts::TAU
-                                    / 1024.,
-                                metadata.max_range,
-                            )
-                    })
-                    .collect();
-                candidates.sort_by(|a, b| {
-                    (Some(b.life.id) == preferred)
-                        .cmp(&(Some(a.life.id) == preferred))
-                        .then(length(from, torso(a.feet)).total_cmp(&length(from, torso(b.feet))))
-                        .then(a.life.id.cmp(&b.life.id))
-                });
+                let candidates = acquisition_candidates(
+                    &actors,
+                    me.team,
+                    from,
+                    self.bot_registry.bots[&id].yaw,
+                    policy,
+                    metadata.max_range,
+                    preferred,
+                );
                 let mut selected = None;
                 let mut confirmed_quiet = true;
-                for candidate in candidates.into_iter().take(policy.max_candidates_per_bot) {
+                for candidate in candidates {
                     match visible(
-                        self.collision_world.as_ref(),
-                        self.bot_sight_structures(),
-                        &map,
+                        SightGeometry {
+                            world: self.collision_world.as_ref(),
+                            structures: self.bot_sight_structures(),
+                            map: &map,
+                            prefetch: prefetch.as_ref(),
+                        },
                         from,
                         torso(candidate.feet),
                         id,
@@ -990,9 +1122,12 @@ impl<W: Write> Engine<W> {
                         seed,
                     );
                     match visible(
-                        self.collision_world.as_ref(),
-                        self.bot_sight_structures(),
-                        &map,
+                        SightGeometry {
+                            world: self.collision_world.as_ref(),
+                            structures: self.bot_sight_structures(),
+                            map: &map,
+                            prefetch: prefetch.as_ref(),
+                        },
                         from,
                         shot_end,
                         id,
@@ -1291,6 +1426,7 @@ impl<W: Write> Engine<W> {
                 self.broadcast_bot_packet(packet);
             }
         }
+        self.record_sight_usage(prefetch);
         self.tick_bot_resupply(now, wall, &resupply_observations)?;
         Ok(messages)
     }

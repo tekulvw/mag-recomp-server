@@ -263,6 +263,8 @@ impl<W: Write> Engine<W> {
             world_tick_enabled: false,
             last_world_tick: None,
             tick_timing: None,
+            bot_threads: 1,
+            bot_sight_usage: Default::default(),
             bot_structure_analysis: None,
             bot_structure_analysed: None,
             automatic_repair: Default::default(),

@@ -89,6 +89,9 @@ before `MAG_SIM_WARMUP_S` (default `0`) are left out of it.
     after each tick;
   - `evicted_at_ms`, when it was evicted.
 - `total_sent_packets_per_s`, `total_sent_bytes_per_s` and `evictions`.
+- `bot_threads` and `sight_prefetch`: the `--bot-threads` count, and sight
+  lines answered ahead (`prefetched`), then used (`hits`) or asked directly
+  (`misses`). All zero with one thread.
 
 `MAG_SIM_TICKS=PATH` also writes one JSON line per tick, warmup included:
 `t_ms`, `tick_ns`, `phases_ns`, `bots`, `bots_alive`, `event_drains`,
