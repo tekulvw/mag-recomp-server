@@ -6,7 +6,7 @@ use crate::{
     },
     objective_catalog::{NativeClass, ObjectiveCatalog},
     objective_control::{NativeEntry, ObjectiveWorld},
-    replication::{MatchPhase, ObjectiveSequenceDelta},
+    replication::{MatchPhase, ObjectiveSequenceDelta, ObjectiveState},
     spawn_catalog::SpawnCatalog,
 };
 use std::collections::BTreeMap;
@@ -186,11 +186,15 @@ pub struct Structural {
     catalog: Catalog,
     tokens: BTreeMap<u16, (u32, NativeClass)>,
     selected: BTreeMap<u16, ObjectiveSequenceDelta>,
+    /// Controller objectives whose sequences are published, never replayed.
+    published: BTreeMap<u16, u32>,
+    published_selected: BTreeMap<u16, ObjectiveSequenceDelta>,
 }
 
 impl Structural {
     pub(crate) fn reset(&mut self) {
         self.selected.clear();
+        self.published_selected.clear();
     }
 
     pub(crate) fn blast_properties(&self, index: u16) -> Result<BlastProperties, &'static str> {
@@ -233,8 +237,51 @@ impl Structural {
         self.catalog.material_penetration_costs()
     }
 
+    /// Replayed and published selections in object-index order.
     pub(crate) fn current_sequences(&self) -> Vec<ObjectiveSequenceDelta> {
-        self.selected.values().copied().collect()
+        let mut sequences: Vec<_> = self
+            .selected
+            .values()
+            .chain(self.published_selected.values())
+            .copied()
+            .collect();
+        sequences.sort_unstable_by_key(|sequence| sequence.object_index);
+        sequences
+    }
+
+    pub(crate) fn published_objectives(&self) -> impl Iterator<Item = (u16, u32)> + '_ {
+        self.published.iter().map(|(&index, &token)| (index, token))
+    }
+
+    /// Select the authored sequence a published objective enters with
+    /// `state`. Keep, an unauthored state and the already selected index
+    /// publish nothing; nothing selected counts as stopped (-1).
+    pub(crate) fn prepare_published_sequence(
+        &mut self,
+        index: u16,
+        state: ObjectiveState,
+        game_time_ms: u32,
+    ) -> Result<Option<ObjectiveSequenceDelta>, &'static str> {
+        let Some(&token) = self.published.get(&index) else {
+            return Ok(None);
+        };
+        let Some(target) = self.catalog.published_sequence_index(token, state)? else {
+            return Ok(None);
+        };
+        let current = self
+            .published_selected
+            .get(&index)
+            .map_or(-1, |delta| delta.sequence_index);
+        if current == i32::from(target) {
+            return Ok(None);
+        }
+        let delta = ObjectiveSequenceDelta {
+            object_index: index,
+            sequence_index: i32::from(target),
+            start_time_ms: game_time_ms,
+        };
+        self.published_selected.insert(index, delta);
+        Ok(Some(delta))
     }
 
     pub fn from_json(
@@ -252,6 +299,9 @@ impl Structural {
             || catalog.level_clv_sha256 != level_clv_sha256
         {
             return Err("domination_structural_effect_source_mismatch");
+        }
+        if catalog.published_objectives().next().is_some() {
+            return Err("domination_published_objective_sequences_unsupported");
         }
         let mut tokens = BTreeMap::new();
         for (token, index) in objectives.bound_objects() {
@@ -271,6 +321,8 @@ impl Structural {
             catalog,
             tokens,
             selected: BTreeMap::new(),
+            published: BTreeMap::new(),
+            published_selected: BTreeMap::new(),
         })
     }
 
@@ -286,10 +338,21 @@ impl Structural {
             catalog.blast_properties(token)?;
             tokens.insert(index, (token, NativeClass::Structural));
         }
+        let mut published = BTreeMap::new();
+        for token in catalog.published_objectives() {
+            let (index, _) = objectives
+                .binding(token)
+                .ok_or("acquisition_published_sequence_objective_mismatch")?;
+            if tokens.contains_key(&index) || published.insert(index, token).is_some() {
+                return Err("acquisition_published_sequence_objective_mismatch");
+            }
+        }
         Ok(Self {
             catalog,
             tokens,
             selected: BTreeMap::new(),
+            published,
+            published_selected: BTreeMap::new(),
         })
     }
 

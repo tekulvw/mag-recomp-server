@@ -24,6 +24,37 @@ pub struct Catalog {
     definitions: BTreeMap<String, Definition>,
     placements: Vec<Placement>,
     sequences: BTreeMap<String, Sequence>,
+    /// Non-Structural objectives whose authored per-state sequences the
+    /// server publishes without replaying their objects or collision.
+    #[serde(default)]
+    published_sequences: Vec<PublishedSequence>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublishedSequence {
+    objective_token: String,
+    /// Deserialization admits only the controller classes; it is provenance.
+    #[allow(dead_code)]
+    class: PublishedClass,
+    definition_sha256: String,
+    state_sequence_indices: BTreeMap<String, i8>,
+    sequences: Vec<PublishedSource>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+enum PublishedClass {
+    #[serde(rename = "ObjectiveSecureAndHoldProperties")]
+    SecureAndHold,
+    #[serde(rename = "ObjectiveArrivalProperties")]
+    Arrival,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublishedSource {
+    source_sha256: String,
+    events: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -373,7 +404,70 @@ impl Catalog {
         if qualified != collision_tokens {
             return Err("incomplete_domination_structural_collision_references");
         }
+        self.validate_published(objective_tokens)
+    }
+
+    /// A published row names a distinct objective outside the placements, one
+    /// index per state within its non-empty sequence list, and event kinds
+    /// recorded only as names.
+    fn validate_published<'a>(
+        &'a self,
+        mut objective_tokens: BTreeSet<&'a str>,
+    ) -> Result<(), &'static str> {
+        if self.published_sequences.len() > 128 {
+            return Err("invalid_published_objective_sequences");
+        }
+        for row in &self.published_sequences {
+            let token = row.objective_token.strip_prefix("0x");
+            if !token.is_some_and(|token| hex(token, 8) && objective_tokens.insert(token))
+                || !hex(&row.definition_sha256, 64)
+                || row.sequences.is_empty()
+                || row.sequences.len() > 127
+                || row.state_sequence_indices.len() != STATE_NAMES.len()
+                || STATE_NAMES.iter().any(|state| {
+                    row.state_sequence_indices.get(*state).is_none_or(|&index| {
+                        index < -2 || index >= 0 && index as usize >= row.sequences.len()
+                    })
+                })
+                || row.sequences.iter().any(|sequence| {
+                    !hex(&sequence.source_sha256, 64)
+                        || sequence.events.len() > 128
+                        || sequence.events.iter().any(|kind| {
+                            kind.is_empty()
+                                || kind.len() > 64
+                                || !kind.bytes().all(|b| b.is_ascii_alphanumeric())
+                        })
+                })
+            {
+                return Err("invalid_published_objective_sequences");
+            }
+        }
         Ok(())
+    }
+
+    /// Controller objectives with authored sequences the server publishes.
+    pub(crate) fn published_objectives(&self) -> impl Iterator<Item = u32> + '_ {
+        self.published_sequences.iter().map(|row| {
+            u32::from_str_radix(&row.objective_token[2..], 16).expect("validated objective token")
+        })
+    }
+
+    /// The authored index a published objective selects on entering `state`.
+    /// None keeps the current sequence: the slot is -2 or the state has none.
+    pub(crate) fn published_sequence_index(
+        &self,
+        objective_token: u32,
+        state: ObjectiveState,
+    ) -> Result<Option<i8>, &'static str> {
+        let key = format!("0x{objective_token:08x}");
+        let row = self
+            .published_sequences
+            .iter()
+            .find(|row| row.objective_token == key)
+            .ok_or("unbound_published_objective_sequence")?;
+        Ok(authored_state_name(state)
+            .map(|name| row.state_sequence_indices[name])
+            .filter(|&index| index != -2))
     }
 
     fn placement(&self, objective_token: u32) -> Result<&Placement, &'static str> {
@@ -451,22 +545,8 @@ impl Catalog {
         state: ObjectiveState,
         current_index: i8,
     ) -> Result<SequencePlan<'_>, &'static str> {
-        use ObjectiveState::*;
-        let state_name = match state {
-            Inactive => "Inactive",
-            Deactivated => "Deactivated",
-            Activating => "Activating",
-            Activated => "Activated",
-            Deactivating => "Deactivating",
-            Completed => "Completed",
-            Repairing => "Repairing",
-            Repaired => "Repaired",
-            Locked => "Locked",
-            Retaking => "Retaking",
-            Retaken => "Retaken",
-            CancelRetaken => "CancelRetaken",
-            Failed => return Err("unsupported_domination_structural_sequence_state"),
-        };
+        let state_name =
+            authored_state_name(state).ok_or("unsupported_domination_structural_sequence_state")?;
         let definition = self.definition(objective_token)?;
         let target = definition.state_sequence_indices[state_name];
         if target == -2 {
@@ -505,6 +585,27 @@ impl Catalog {
             change,
         })
     }
+}
+
+/// Authored objective definitions name one sequence slot per entered state.
+/// `Failed` has no authored slot.
+pub(crate) fn authored_state_name(state: ObjectiveState) -> Option<&'static str> {
+    use ObjectiveState::*;
+    Some(match state {
+        Inactive => "Inactive",
+        Deactivated => "Deactivated",
+        Activating => "Activating",
+        Activated => "Activated",
+        Deactivating => "Deactivating",
+        Completed => "Completed",
+        Repairing => "Repairing",
+        Repaired => "Repaired",
+        Locked => "Locked",
+        Retaking => "Retaking",
+        Retaken => "Retaken",
+        CancelRetaken => "CancelRetaken",
+        Failed => return None,
+    })
 }
 
 /// A native level's resident terrain masks reduced to selected material slots

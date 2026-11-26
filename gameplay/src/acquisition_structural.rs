@@ -40,6 +40,10 @@ pub(crate) mod connected_tests;
 #[path = "acquisition_structural_runtime_tests.rs"]
 mod runtime_tests;
 
+#[cfg(test)]
+#[path = "acquisition_published_sequence_tests.rs"]
+mod published_sequence_tests;
+
 const LEGACY_BINDINGS: &str = "mag_acquisition_structural_bindings_v1";
 const NATIVE_BINDINGS: &str = "mag_acquisition_structural_bindings_v2";
 
@@ -143,6 +147,19 @@ pub struct Setup {
 impl Setup {
     pub(crate) fn projectile_sequence_assets(&self) -> &SequenceCollisionAssets {
         &self.assets
+    }
+
+    /// Published controller sequences in (object index, token) order. None
+    /// may share an index with a bound Structural or passive spawn row.
+    pub(crate) fn published_objectives(&self) -> Result<Vec<(u16, u32)>, &'static str> {
+        let published: Vec<_> = self.playback.published_objectives().collect();
+        if published
+            .iter()
+            .any(|(index, _)| self.bindings.rows.contains_key(index))
+        {
+            return Err("acquisition_published_sequence_overlaps_structural");
+        }
+        Ok(published)
     }
 
     pub(crate) fn validate_frag_character_inputs(
@@ -688,6 +705,19 @@ impl Runtime {
 
     pub(crate) fn sequences(&self) -> Vec<ObjectiveSequenceDelta> {
         self.setup.playback.current_sequences()
+    }
+
+    /// Publish (never replay) the authored sequence a committed controller
+    /// state selects. Other objectives and unchanged selections yield None.
+    pub(crate) fn stage_published_sequence(
+        &mut self,
+        index: u16,
+        state: ObjectiveState,
+        game_time_ms: u32,
+    ) -> Result<Option<ObjectiveSequenceDelta>, &'static str> {
+        self.setup
+            .playback
+            .prepare_published_sequence(index, state, game_time_ms)
     }
 
     pub(crate) fn advances_native_objectives(&self) -> bool {

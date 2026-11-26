@@ -186,6 +186,15 @@ impl Setup {
     ) -> Result<(), &'static str> {
         if let Some(structural) = &self.structural {
             structural.validate_native_objectives(catalog)?;
+            for (index, token) in structural.published_objectives()? {
+                if self
+                    .state
+                    .objective(token)
+                    .is_none_or(|control| control.replication.object_index != index)
+                {
+                    return Err("acquisition_published_sequence_not_controller");
+                }
+            }
         }
         for object in catalog
             .objects
@@ -961,6 +970,14 @@ impl<W: Write> Engine<W> {
                 } else {
                     runtime.state.commit_state(token, state, actor_index, now.as_millis() as u32)?
                 };
+                // The entered state's authored sequence follows the state
+                // change as the same fields 9/10 the Structural path uses.
+                if let Some(structural) = &mut runtime.structural
+                    && let Some(sequence) = structural.stage_published_sequence(
+                        delta.object_index, delta.state_actor.state, now.as_millis() as u32)?
+                {
+                    sequence_deltas.insert(delta.object_index, sequence);
+                }
                 transition_packets.push(replication::ObjectiveControlSnapshot {
                     sequence: 1,
                     timestamp_ms: now.as_millis() as u32,
@@ -1482,6 +1499,11 @@ pub(crate) mod test_support {
         Arc::get_mut(&mut runtime.setup).unwrap().structural = Some(setup.clone());
         runtime.structural = Some(crate::acquisition_structural::Runtime::new(setup));
         runtime.started = true;
+    }
+
+    /// Let the next objective tick run the match-start entries.
+    pub(crate) fn unstart(runtime: &mut Runtime) {
+        runtime.started = false;
     }
 }
 
