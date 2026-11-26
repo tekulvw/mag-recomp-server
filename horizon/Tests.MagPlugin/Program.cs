@@ -78,6 +78,9 @@ Test("mag-admin raises levels safely and honours live logins", AdminCliChecks.Ru
 Test("admin API is off by default and validates its configuration", AdminApiChecks.Settings);
 Test("admin API signs requests like the portal vectors", AdminApiChecks.Vectors);
 Test("admin API authenticates requests and shares the mag-admin rules", AdminApiChecks.Run);
+Test("admin kill replies parse strictly and admin_kill_v1 is read from a hello", AdminKillChecks.Codec);
+Test("admin kill reaches only the owning world, refuses each case and needs admin_kill_v1", AdminKillChecks.Run);
+Test("mag-admin character kill acts through the admin API", AdminKillChecks.Cli);
 Test("admin API reports DME ports in use against the cap", AdminApiChecks.DmePorts);
 Test("server status world states and match counts", ServerStatusChecks.Describe);
 Test("server status effective human limit within the DME port cap", ServerStatusChecks.HumanLimit);

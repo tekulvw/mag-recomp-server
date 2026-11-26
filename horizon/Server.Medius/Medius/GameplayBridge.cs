@@ -70,6 +70,9 @@ namespace Server.Medius {
   public Task<GameplayBridgeResponse> RequestProgressionAsync(object request) => ExchangeAsync(request,true);
   public Task<GameplayBridgeResponse> RequestProgressionRefreshAsync(object request) => ExchangeAsync(request,true);
   public Task<GameplayBridgeResponse> RequestReleaseAsync(object request) => ExchangeAsync(request,true);
+  /// <summary>An operator kill (admin_kill_v1). Its reply may carry the victim's replies like an event's,
+  /// so it shares the event deadline and reply codec.</summary>
+  public Task<GameplayBridgeResponse> RequestAdminKillAsync(object request) => ExchangeAsync(request,true,EventDeadline);
   // This connection owns only unsolicited world ticks. Ordinary requests retain
   // their existing request/reply path and are never replayed after a timeout.
   public Task SubscribeWorldAsync(uint worldId,string requestId,Func<GameplayBridgeResponse,Task> receive,CancellationToken cancellationToken)=>
@@ -239,7 +242,7 @@ namespace Server.Medius {
     using var sent=JsonDocument.Parse(body);var root=sent.RootElement;
     string id=root.GetProperty("request_id").GetString();
     var op=root.GetProperty("op").GetString();
-    if(root.GetProperty("v").GetInt32()!=2 || (eventReply ? op is not ("event" or "release" or "progression_committed" or "refresh_progression" or "loadout_selection_settled" or "hello") : op=="event"))return Failed(GameplayBridgeFailure.InvalidRequest);
+    if(root.GetProperty("v").GetInt32()!=2 || (eventReply ? op is not ("event" or "release" or "progression_committed" or "refresh_progression" or "loadout_selection_settled" or "hello" or "admin_kill") : op=="event"))return Failed(GameplayBridgeFailure.InvalidRequest);
     bool hello=op=="hello";
     if(_expectedWorkerId!=null) {
      var identity=WorkerIdentity;

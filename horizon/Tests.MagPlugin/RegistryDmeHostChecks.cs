@@ -360,6 +360,9 @@ internal static partial class LeadershipProgressionChecks
         // Advertise control_plane_rebind_v1 and worker_drain_v1.
         public bool SupportsControlPlane;
         public bool SupportsDrain;
+        // Advertise admin_kill_v1; AdminKillReply shapes its answer (default: killed).
+        public bool SupportsAdminKill;
+        public Func<JsonObject, JsonObject> AdminKillReply;
         public Func<JsonObject, Task> BeforePartyReply;
         public volatile bool DropNextPartyReply;
         // Reserve_party replies still to drop after recording them (int.MaxValue: never answer).
@@ -463,6 +466,7 @@ internal static partial class LeadershipProgressionChecks
                             }
                             if (SupportsControlPlane) response["capabilities"]!.AsArray().Add("control_plane_rebind_v1");
                             if (SupportsDrain) response["capabilities"]!.AsArray().Add("worker_drain_v1");
+                            if (SupportsAdminKill) response["capabilities"]!.AsArray().Add("admin_kill_v1");
                             if (SupportsBotFill)
                             {
                                 response["capabilities"]!.AsArray().Add("bot_fill_v1");
@@ -482,6 +486,10 @@ internal static partial class LeadershipProgressionChecks
                             break;
                         case "progression_committed":
                             PendingReward = null;
+                            break;
+                        case "admin_kill":
+                            if (AdminKillReply != null) response = AdminKillReply(request);
+                            else response["admin_kill"] = new JsonObject { ["result"] = "killed" };
                             break;
                         case "select_match_profile":
                             SelectedProfile = request["profile_id"]!.GetValue<string>();

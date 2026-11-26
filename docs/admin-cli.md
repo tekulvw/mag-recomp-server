@@ -12,6 +12,8 @@ kubectl exec -n <namespace> $M -c medius -- mag-admin accounts list
 kubectl exec -n <namespace> $M -c medius -- mag-admin character show <account>
 kubectl exec -n <namespace> $M -c medius -- mag-admin character set-level <account> 3           # dry run
 kubectl exec -n <namespace> $M -c medius -- mag-admin character set-level <account> 3 --apply
+kubectl exec -n <namespace> $M -c medius -- mag-admin character kill <account> --reason "stuck in a parachute"           # dry run
+kubectl exec -n <namespace> $M -c medius -- mag-admin character kill <account> --reason "stuck in a parachute" --apply
 ```
 
 ## Commands
@@ -21,6 +23,7 @@ kubectl exec -n <namespace> $M -c medius -- mag-admin character set-level <accou
 | `accounts list` | Every account's character with level, XP, skill points and session state (`online`, `offline`, or `unknown` when no session marker exists). |
 | `character show <account>` | One character in detail, including the XP needed for the next level. |
 | `character set-level <account> <level> [--apply]` | Raises the character to `<level>` the way earned progression would. XP becomes that level's catalog threshold, and each gained level's `SkillPointsGained` is added. Without `--apply` it only prints the planned change. |
+| `character kill <account> [--reason TEXT] [--operator NAME] [--apply]` | Kills the account's player in its running match, exactly as if it had pressed Kill Self (see [Operator kill](#operator-kill)). Without `--apply` it only names the player, world and worker. It works through the running server's [admin API](#admin-api), so it needs `adminApi.enabled`. |
 
 Exit codes: `0` success or dry run, `1` refused or failed, `2` usage or
 configuration error. `--config DIR` selects a medius config directory other than
@@ -50,6 +53,54 @@ configuration error. `--config DIR` selects a medius config directory other than
 
 Medius re-reads the store at each login, so the client shows the new level on
 its next login; no restart is needed.
+
+## Operator kill
+
+`character kill` frees a live player who is stuck, for example in a parachute that
+never lands or in a vehicle seat that no longer exists. Players have no key bound
+to Kill Self, so the operator sends it for them. It is the only command that acts on
+the running match rather than the character store, and it changes no stored data.
+
+- **The same death as Kill Self.** Medius finds the account's placed player, asks
+  the gameplay worker that owns that world, and the worker applies the player's own
+  Kill Self (`0x0215`): the same death and death notice, the seat exit for a seated
+  player, a downed player's give-up, then the ordinary respawn wave. Anything else a
+  Kill Self death ends, such as an objective interaction in progress, ends the same
+  way. The client sees an ordinary suicide. The match scoreboard
+  counts a death and a suicide, as retail Kill Self does (a downed player's give-up
+  counts no second death); no experience or stored statistic changes.
+- **Through the running server.** The kill must reach the server that admitted the
+  player, so the CLI signs a request to this container's own admin API with the same
+  `MAG_ADMIN_API_LISTEN` and `MAG_ADMIN_API_SECRET_FILE` (connecting to loopback when
+  it listens on every address). Without them it exits 2 and says so.
+- **Audited.** `--operator` names the staff member (default `mag-admin:$USER`, or
+  `mag-admin`); it becomes the API's actor. Medius logs every applied or refused kill
+  with the actor, account, worker, world, player and reason, and the worker's event
+  log records an `admin_kill` row with the operator and reason before the Kill Self
+  event it applies.
+- **Workers that can do it.** Medius only asks a worker whose hello lists
+  `admin_kill_v1` ([retail-runtime.md](retail-runtime.md#operator-kill-admin_kill_v1)).
+  An older worker is refused at Medius with `worker_unsupported` and never sees the
+  request.
+- **Never retried.** A request still waiting behind the player's queued events after
+  2 s is withdrawn unsent. If the worker does not answer, the result is
+  `worker_unanswered`: the kill may or may not have applied, so look at the player
+  before retrying.
+
+Refusals print `refused (<code>)` and exit 1:
+
+| Code | When |
+| --- | --- |
+| `not_found` | No character has that account name |
+| `not_online` | The account holds no live login lease |
+| `not_in_match` | Online, but not a placed, connected player of a running match: in the lobby or queue, still joining, on the results screen, or leaving |
+| `not_alive` | Already dead or waiting for its first spawn; it needs no kill |
+| `match_finished` | The match has ended; the player moves to results anyway |
+| `worker_unsupported` | The worker that owns the player does not advertise `admin_kill_v1` |
+| `worker_unavailable` | The world stream is down, or the request could not be queued or sent; nothing changed |
+| `worker_unanswered` | Sent, but no valid answer; the outcome is unknown |
+| `kill_refused` | The worker applied the request but denied the Kill Self itself (for example `mounted_death_not_supported`); `worker_reason` names the denial |
+| `worker_refused` | The worker refused the request with another code, named in `worker_reason` |
 
 ## PostgreSQL character store
 
@@ -115,7 +166,7 @@ before the rollback, which the export already carried into the JSON store.
 
 ## Admin API
 
-The same list, show and set-level operations are also available over an internal HTTP
+The same list, show, set-level and kill operations are also available over an internal HTTP
 API, so the accounts portal can offer them to staff. It runs inside the main medius
 process (never MAPS) and calls the same code as `mag-admin`: the same rules,
 session check, lock, backup and commit.
@@ -155,6 +206,7 @@ Anything else is `401 {"error":"unauthorized"}`; the log records only the reason
 | `GET /admin/v1/accounts` | `200 {"accounts":[{"account","level","experience","skill_points","session"}]}` |
 | `GET /admin/v1/characters/{account}` | `200 {"account","level","experience","skill_points","next_level_experience","session"}`; `next_level_experience` is null at the maximum level |
 | `POST /admin/v1/characters/{account}/level` with `{"level":N,"apply":bool}` | `200 {"applied","account","from_level","to_level","experience_before","experience_after","skill_points_before","skill_points_after","backup"}`; `backup` is the backup file name, or null for a dry run |
+| `POST /admin/v1/characters/{account}/kill` with `{"apply":bool,"reason":text}` | `200 {"applied","account","worker_id","world_id","player_id","result","reason"}`: the [operator kill](#operator-kill). `result` is `killed` or `gave_up` (a downed player), null for a dry run. `reason` is optional, printable ASCII, at most 256 characters; the actor header is the operator |
 | `GET /admin/v1/dme-ports` | `200 {"capacity","in_use","available","first_port","last_port","source","udp_ports_bound"}`: humans holding a DME UDP port across all worlds against the [cap](configured-world-registry.md#dme-port-capacity). `capacity`, `available` and `last_port` are null when unbounded; `source` is `port_range`, `override` or `unbounded`; `udp_ports_bound` counts sockets actually bound |
 | `GET /admin/v1/status` | `200`: the read-only server status below, for the portal's public status page |
 
@@ -210,6 +262,12 @@ Set-level refusals are `409 {"error":code,"message":text}`:
 | `same_level` | already at that level (the CLI's `unchanged` no-op) |
 | `level_out_of_range` | outside 1 to the catalog's maximum (`level-out-of-range`) |
 | `no_progression_catalog` | the store has no progression catalog (`progression-catalog-unavailable`) |
+
+Kill refusals use the codes in [Operator kill](#operator-kill), as
+`{"error":code,"message":text,"worker_id","world_id","player_id","worker_reason"}` (the
+location fields are null until the player is found): `404 {"error":"not_found"}` for an unknown
+account, `503` for `worker_unavailable` and `worker_unanswered`, and `409` for the others. A
+kill body with fields other than `apply` and `reason` is `400`.
 
 A dry run while the account is online still answers `200` with `applied: false`. A bad
 body is `400 {"error":"invalid_request"}`, an unknown account or path `404

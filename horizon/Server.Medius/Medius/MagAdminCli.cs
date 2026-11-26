@@ -21,6 +21,10 @@ namespace Server.Medius
   character set-level <account> <level>      Raise a character to <level> as earned progression would:
         [--apply]                            XP becomes the level threshold and each gained level's skill
                                              points are added. Without --apply this is a dry run.
+  character kill <account>                   Kill the account's player in its running match, as if it had
+        [--reason TEXT] [--operator NAME]    pressed Kill Self (for a player stuck in a parachute or a seat).
+        [--apply]                            Needs the running server's admin API (MAG_ADMIN_API_LISTEN and
+                                             MAG_ADMIN_API_SECRET_FILE). Without --apply this is a dry run.
 
   character-store status                     The configured backend (MAG_CHARACTER_STORE), its schema, row counts,
                                              contents digest and last import.
@@ -83,19 +87,40 @@ a level is refused. Applied changes first copy the store to .maintenance-backups
                     Program.CreateJsonCharacterStore, Console.Out, Console.Error);
             string backups = MagAdminOperations.BackupDirectory(storePath);
             string markers = MagAdminOperations.MarkerDirectory();
-            return Run(rest.ToArray(), store, backups, markers, DateTime.UtcNow, Console.Out, Console.Error);
+            MagAdminApiClient api;
+            try { api = MagAdminApiClient.FromEnvironment(); }
+            catch (ArgumentException e) { Console.Error.WriteLine("mag-admin: admin API configuration failed: " + e.Message); return 2; }
+            return Run(rest.ToArray(), store, backups, markers, DateTime.UtcNow, Console.Out, Console.Error, api);
         }
 
         /// <summary>Exit codes: 0 success or dry run, 1 refused or failed, 2 usage.</summary>
         public static int Run(string[] args, LocalCharacterStore store, string backupDirectory, string markerDirectory,
-            DateTime now, TextWriter output, TextWriter error)
+            DateTime now, TextWriter output, TextWriter error, MagAdminApiClient api = null)
         {
             bool apply = args.Contains("--apply");
-            var words = args.Where(a => a != "--apply").ToArray();
+            string reason = null, operatorName = null;
+            var words = new List<string>();
+            for (int i = 0; i < args.Length; i++)
+            {
+                if (args[i] == "--apply") continue;
+                if (args[i] == "--reason" || args[i] == "--operator")
+                {
+                    if (i + 1 >= args.Length) { error.WriteLine(Usage); return 2; }
+                    if (args[i] == "--reason") reason = args[++i]; else operatorName = args[++i];
+                    continue;
+                }
+                words.Add(args[i]);
+            }
+            bool killOptions = reason != null || operatorName != null;
             try
             {
-                switch (words)
+                switch (words.ToArray())
                 {
+                    case ["character", "kill", var account]:
+                        return Kill(api, account, apply, reason, operatorName, now, output, error);
+                    case var _ when killOptions:
+                        error.WriteLine(Usage);
+                        return 2;
                     case ["accounts", "list"]:
                         return List(store, markerDirectory, now, output);
                     case ["character", "show", var account]:
@@ -248,6 +273,60 @@ a level is refused. Applied changes first copy the store to .maintenance-backups
                     : "next level:   maximum level reached");
             output.WriteLine($"session:      {c.Session}");
             return 0;
+        }
+
+        /// <summary>Default operator name for the API's actor header and the worker's admin_kill row.</summary>
+        static string DefaultOperator()
+        {
+            string user = Environment.GetEnvironmentVariable("USER") ?? Environment.GetEnvironmentVariable("LOGNAME");
+            return string.IsNullOrWhiteSpace(user) ? "mag-admin" : "mag-admin:" + user.Trim();
+        }
+
+        private static int Kill(MagAdminApiClient api, string account, bool apply, string reason, string operatorName, DateTime now,
+            TextWriter output, TextWriter error)
+        {
+            if (api == null)
+            {
+                error.WriteLine($"mag-admin: character kill acts on the running server through its admin API; set {MagAdminApiSettings.ListenVariable} " +
+                    $"and {MagAdminApiSettings.SecretFileVariable} (chart adminApi.enabled) and run it in the main medius container");
+                return 2;
+            }
+            if (!MagDevelopmentAccountPolicy.ValidAccount(account)) { error.WriteLine($"mag-admin: account {account} has no character"); return 1; }
+            if (!MagAdminKill.ValidReason(reason))
+            { error.WriteLine($"mag-admin: --reason must be printable ASCII of at most {MagAdminKill.MaximumReasonLength} characters"); return 2; }
+            string actor = operatorName ?? DefaultOperator();
+            if (actor.Length == 0 || actor.Length > MagAdminKill.MaximumOperatorLength || actor.Any(c => c < 0x20 || c > 0x7e))
+            { error.WriteLine($"mag-admin: --operator must be 1 to {MagAdminKill.MaximumOperatorLength} printable ASCII characters"); return 2; }
+            var body = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new { apply, reason });
+            (int status, System.Text.Json.JsonElement? json) reply;
+            try { reply = api.Send("POST", $"/admin/v1/characters/{account}/kill", body, actor, now); }
+            catch (Exception e) when (e is System.Net.Sockets.SocketException || e is IOException || e is OperationCanceledException || e is InvalidDataException)
+            {
+                error.WriteLine("mag-admin: the admin API could not be reached: " + e.Message);
+                return 1;
+            }
+            string Field(string name) =>
+                reply.json is System.Text.Json.JsonElement root && root.ValueKind == System.Text.Json.JsonValueKind.Object &&
+                root.TryGetProperty(name, out var value) && value.ValueKind != System.Text.Json.JsonValueKind.Null ? value.ToString() : null;
+            string Where() => $"player {Field("player_id")} in world {Field("world_id")} on worker {Field("worker_id")}";
+            switch (reply.status)
+            {
+                case 200 when Field("applied") == "True":
+                    output.WriteLine($"applied: {account} {(Field("result") == "gave_up" ? "gave up its downed life" : "was killed")} ({Where()})");
+                    output.WriteLine("  the player respawns with the next wave; the worker log records the admin_kill");
+                    return 0;
+                case 200:
+                    output.WriteLine($"dry run (add --apply to kill): {account} is {Where()}");
+                    return 0;
+                case 404:
+                    error.WriteLine($"mag-admin: refused (not_found): account {account} has no character");
+                    return 1;
+                default:
+                    string code = Field("error") ?? "unknown";
+                    string message = Field("message");
+                    error.WriteLine($"mag-admin: refused ({code}): {message ?? $"the admin API answered {reply.status}"}");
+                    return 1;
+            }
         }
 
         private static int SetLevel(LocalCharacterStore store, string account, byte level, bool apply, string backupDirectory,

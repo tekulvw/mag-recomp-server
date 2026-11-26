@@ -93,6 +93,10 @@ namespace Server.Medius
             MagServerStatus.Describe(slot.Config.WorkerId, slot.Faulted || slot.WrittenOff || slot.Bridge.HasWorkerIdentityFault,
                 slot.Host.GetPlacement(), _portBudget.Capacity)).ToArray());
 
+        /// <summary>Every configured world's current host, for the operator kill (docs/admin-cli.md).</summary>
+        public IReadOnlyList<MagAdminGameplayHost> AdminGameplayHosts() =>
+            Array.AsReadOnly(_slots.Where(slot => !slot.WrittenOff).Select(slot => new MagAdminGameplayHost(slot.Config.WorkerId, slot.Host)).ToArray());
+
         /// <summary>Humans waiting in the global queue for a world, by requested game type (0 to 2).</summary>
         public int[] QueuedByGameType()
         {
