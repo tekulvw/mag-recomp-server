@@ -1599,7 +1599,7 @@ impl<W: Write> Engine<W> {
                 {
                     return Err("traffic_yield_protected");
                 }
-                if actors.occupied(id, point(goal), Default::default())?
+                if actors.occupied(id, point(goal), actors.probe())?
                     || self.bot_registry.bots.iter().any(|(&other, b)| {
                         other != id
                             && b.health > 0
@@ -1884,7 +1884,7 @@ impl<W: Write> Engine<W> {
                         .chain(b.task.goal)
                         .any(|g| distance(g, goal) < policy.reservation_spacing_m)
             });
-            match actors.occupied(id, point(goal), body) {
+            match actors.occupied(id, point(goal), actors.probe()) {
                 Ok(false) if !reserved => {
                     // Prefer a spot the bot can reach without walking through
                     // another body (two waiters swapping sides in a one-body
@@ -2115,7 +2115,7 @@ impl<W: Write> Engine<W> {
                             .into_iter()
                             .chain(b.task.goal)
                             .any(|g| distance(g, goal) < policy.reservation_spacing_m)
-                }) || actors.occupied(id, point(goal), body)?
+                }) || actors.occupied(id, point(goal), actors.probe())?
                 {
                     return Err("holding_occupied");
                 }
@@ -3222,7 +3222,7 @@ impl<W: Write> Engine<W> {
                 if reservations
                     .iter()
                     .any(|p| distance(*p, goal) < policy.reservation_spacing_m)
-                    || actors.occupied(id, point(goal), Default::default())?
+                    || actors.occupied(id, point(goal), actors.probe())?
                 {
                     return Err("bot_objective_occupied");
                 }

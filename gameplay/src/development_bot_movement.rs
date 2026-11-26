@@ -1057,7 +1057,11 @@ impl Target {
         }
         movement.validate_from(runtime.position)?;
         let target = point(movement.destination);
-        if (target[0] - initial.position[0]).hypot(target[2] - initial.position[2]) > maximum_m
+        // Recovery candidates sit on a ring of exactly `maximum_m` (and the
+        // nearest mesh point within it); single-precision positions put them
+        // a few micrometres past it, which must not refuse them.
+        let reach = maximum_m + RECOVERY_REACH_SLACK_M;
+        if (target[0] - initial.position[0]).hypot(target[2] - initial.position[2]) > reach
             || mesh.component_id(target).is_err()
         {
             return Err("bot_ground_recovery_goal_not_local_mesh");
@@ -1069,15 +1073,15 @@ impl Target {
             runtime.position,
             &movement,
             body,
-            maximum_m,
+            reach,
         ) {
             Ok(route) => route,
             Err("bot_navigation_unreachable") => NavigationMove::supported_recovery_prefix(
-                world, map, initial, &movement, maximum_m, body,
+                world, map, initial, &movement, reach, body,
             )?,
             Err(e) => return Err(e),
         };
-        if navigation.length > maximum_m {
+        if navigation.length > reach {
             return Err("bot_ground_recovery_route_too_long");
         }
         if navigation
@@ -1708,6 +1712,8 @@ const NAVIGATION_SOLVER_SLICE_SECONDS: f64 = 0.25;
 /// Longest a capsule bot keeps its course against a higher-index bot before it
 /// steers round that bot too.
 const CAPSULE_HOLD_SECONDS: f64 = 2.0;
+/// Rounding slack on a ground recovery's reach (see `begin_registry_ground_recovery`).
+const RECOVERY_REACH_SLACK_M: f64 = 1e-3;
 /// How long a capsule bot that backed off keeps giving way, and how far ahead
 /// (in seconds of its own motion) it looks for the bot it gives way to.
 const CAPSULE_YIELD_SECONDS: f64 = 1.0;
@@ -2473,13 +2479,11 @@ impl NavigationMove {
             });
         }
         if let Some(tolerance) = goal_tolerance
-            && point(movement.destination)
-                .iter()
-                .zip(route.projected_goal)
-                .map(|(a, b)| (a - b).powi(2))
-                .sum::<f64>()
-                .sqrt()
-                > tolerance
+            && goal_projection_offset(
+                point(movement.destination),
+                route.projected_goal,
+                mesh.body(),
+            ) > tolerance
         {
             return Err("bot_objective_projection_too_far");
         }
@@ -2860,7 +2864,7 @@ impl NavigationMove {
                                     query.actor,
                                     pair[0].position,
                                     pair[1].position,
-                                    bot_physics::Body::default(),
+                                    query.grid.probe(),
                                     &mut budget,
                                 )? {
                                     blocker = Some(hit.id);
@@ -2900,7 +2904,7 @@ impl NavigationMove {
                         query.actor,
                         route.projected_goal,
                         route.projected_goal,
-                        bot_physics::Body::default(),
+                        query.grid.probe(),
                         &mut 256,
                     )?
                 {
@@ -3058,7 +3062,7 @@ impl NavigationMove {
                         query.actor,
                         route.projected_goal,
                         route.projected_goal,
-                        bot_physics::Body::default(),
+                        query.grid.probe(),
                         &mut 256,
                     )?
                     .is_some()
@@ -3336,6 +3340,27 @@ impl NavigationMove {
     }
 }
 
+/// How far a goal (a body's feet) lies from its navmesh projection. A capsule
+/// standing on authored ground may rest with its feet up to its settle lift
+/// above that ground (`Body::settle_lift`: its rounded bottom on a lip or a
+/// slope), so that much of the height above the mesh does not count; the
+/// box's offset is the plain distance.
+fn goal_projection_offset(
+    goal: bot_physics::Point,
+    projected: bot_physics::Point,
+    body: bot_physics::Body,
+) -> f64 {
+    let across = (goal[0] - projected[0]).hypot(goal[2] - projected[2]);
+    let mut rise = goal[1] - projected[1];
+    if let Some(lift) = body.settle_lift() {
+        rise = if rise > 0. {
+            (rise - lift).max(0.)
+        } else {
+            rise
+        };
+    }
+    across.hypot(rise)
+}
 fn point(p: replication::CharacterPosition) -> bot_physics::Point {
     [f64::from(p.x), f64::from(p.y), f64::from(p.z)]
 }

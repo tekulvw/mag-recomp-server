@@ -119,7 +119,7 @@ pub(super) fn approach_blocker(
             let end = std::array::from_fn(|axis| {
                 from[axis] + (to[axis] - from[axis]) * i as f64 / pieces as f64
             });
-            if let Some(hit) = actors.sweep(actor, start, end, Body::default(), budget)? {
+            if let Some(hit) = actors.sweep(actor, start, end, actors.probe(), budget)? {
                 return Ok(Some(hit.id));
             }
             start = end;

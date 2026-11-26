@@ -238,17 +238,18 @@ impl<W: Write> Engine<W> {
             .get(slot)
             .cloned()
             .ok_or("bot_population_slot")?;
-        let body = bot_physics::Body::default();
         let slot_choice = |actors: &crate::actor_collision::ActorGrid| {
-            Ok::<_, &'static str>(if actors.occupied(actor, point(bound.position), body)? {
-                LifeSpawnChoice::Wait
-            } else {
-                LifeSpawnChoice::Spawn(LifeSpawn {
-                    position: bound.position,
-                    spawn_point: bound.source_spawn,
-                    arrival: Arrival::PopulationSlot,
-                })
-            })
+            Ok::<_, &'static str>(
+                if actors.occupied(actor, point(bound.position), actors.probe())? {
+                    LifeSpawnChoice::Wait
+                } else {
+                    LifeSpawnChoice::Spawn(LifeSpawn {
+                        position: bound.position,
+                        spawn_point: bound.source_spawn,
+                        arrival: Arrival::PopulationSlot,
+                    })
+                },
+            )
         };
         let Some(home) = bound
             .source_spawn
@@ -313,7 +314,7 @@ impl<W: Write> Engine<W> {
                 .map_err(|e| e.code())?;
         let movement_body = self.bot_movement_body();
         for &position in positions {
-            if !actors.occupied(actor, point(position), bot_physics::Body::default())?
+            if !actors.occupied(actor, point(position), actors.probe())?
                 && terrain.start_motion(point(position), movement_body).is_ok()
             {
                 return Ok(Some(position));
