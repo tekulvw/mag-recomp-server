@@ -9,6 +9,8 @@
 {{- $worker := $pod.worker }}
 {{- $medius := eq $component "medius" }}
 {{- $registry := and $medius (not (empty $root.Values.gameplayWorkers)) }}
+{{- $shutdown := $root.Values.gameplayShutdown | default dict }}
+{{- $graceful := and (not $medius) (or (not (kindIs "invalid" $shutdown.drainSeconds)) (not (kindIs "invalid" $shutdown.receiptFlushSeconds))) }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -52,6 +54,10 @@ spec:
         {{- end }}
     spec:
       automountServiceAccountToken: false
+      {{- if $graceful }}
+      {{- /* The worker drains on SIGTERM; give it the whole drain, its receipt flush and a margin. */}}
+      terminationGracePeriodSeconds: {{ add (int64 ($shutdown.drainSeconds | default 0)) (int64 (ternary 5 $shutdown.receiptFlushSeconds (kindIs "invalid" $shutdown.receiptFlushSeconds))) 15 }}
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -270,7 +276,7 @@ spec:
           args:
             - |
               run_dir=$(mktemp -d /logs/run.XXXXXXXXXX)
-              exec /usr/local/bin/mag-gameplay --bind 0.0.0.0:31000 --log "$run_dir/events.jsonl"{{ with $root.Values.logs.rotation }}{{ if .segmentBytes }} --log-segment-bytes {{ int64 .segmentBytes }}{{ end }}{{ if .retentionSeconds }} --log-retention-s {{ int64 .retentionSeconds }}{{ end }}{{ end }} --item-catalog "$ITEMS" --spawn-catalog "$SPAWNS"{{ with $root.Values.runtime.initialSpawnDelayMs }} --initial-spawn-delay-ms {{ if kindIs "slice" . }}{{ index . 0 | int64 }},{{ index . 1 | int64 }}{{ else }}{{ int64 . }}{{ end }}{{ end }} --wire-profiles "$WIRES" --skill-catalog "$SKILLS"{{ if $files.botNames }} --bot-names "$BOT_NAMES"{{ end }}{{ if eq (int $root.Values.runtime.applicationId) 20231 }} --application-id 20231 --character-blast-rules "$BLAST" --bootstrap-loadouts "$BOOTSTRAP" --retail-combat-metadata "$COMBAT" --retail-armory-catalog "$ARMORY" --fall-damage-rules "$FALL"{{ end }}{{ if $worker }} --worker-id "$WORKER_ID" --match-profiles "$MATCH_PROFILES"{{ end }} "$@"
+              exec /usr/local/bin/mag-gameplay --bind 0.0.0.0:31000 --log "$run_dir/events.jsonl"{{ with $root.Values.logs.rotation }}{{ if .segmentBytes }} --log-segment-bytes {{ int64 .segmentBytes }}{{ end }}{{ if .retentionSeconds }} --log-retention-s {{ int64 .retentionSeconds }}{{ end }}{{ end }} --item-catalog "$ITEMS" --spawn-catalog "$SPAWNS"{{ with $root.Values.runtime.initialSpawnDelayMs }} --initial-spawn-delay-ms {{ if kindIs "slice" . }}{{ index . 0 | int64 }},{{ index . 1 | int64 }}{{ else }}{{ int64 . }}{{ end }}{{ end }} --wire-profiles "$WIRES" --skill-catalog "$SKILLS"{{ if $files.botNames }} --bot-names "$BOT_NAMES"{{ end }}{{ if eq (int $root.Values.runtime.applicationId) 20231 }} --application-id 20231 --character-blast-rules "$BLAST" --bootstrap-loadouts "$BOOTSTRAP" --retail-combat-metadata "$COMBAT" --retail-armory-catalog "$ARMORY" --fall-damage-rules "$FALL"{{ end }}{{ if $worker }} --worker-id "$WORKER_ID" --match-profiles "$MATCH_PROFILES"{{ end }}{{ with $shutdown }}{{ if not (kindIs "invalid" .drainSeconds) }} --drain-seconds {{ int64 .drainSeconds }}{{ end }}{{ if not (kindIs "invalid" .receiptFlushSeconds) }} --receipt-flush-seconds {{ int64 .receiptFlushSeconds }}{{ end }}{{ end }} "$@"
             - mag-gameplay
             {{- range $pod.extraArgs }}
             - {{ . | quote }}

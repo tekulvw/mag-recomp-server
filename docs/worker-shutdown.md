@@ -46,6 +46,27 @@ exited are lost, as on a crash. Restart adoption logs them (`Gameplay receipt
 lost with worker incarnation`); see
 [configured world registry](configured-world-registry.md#worker-restart-adoption).
 
+## Helm values
+
+```yaml
+gameplayShutdown:
+  drainSeconds: 900        # let a running match finish (up to 15 minutes)
+  receiptFlushSeconds: 10
+```
+
+Both default to `null`, which passes no flags (the image defaults are 0 and 5)
+and keeps the Kubernetes 30-second grace period. A set value also sets each
+gameplay Pod's `terminationGracePeriodSeconds` to
+`drainSeconds + receiptFlushSeconds + 15`. With the default `Recreate`
+strategy, the replacement Pod starts only after the old one exits, so a long
+drain delays that mode's return by up to `drainSeconds`. No `preStop` hook is
+needed, because the worker itself acts on `SIGTERM`. The flags are chart-managed
+and cannot be set in `extraArgs`.
+
+Suggested values for the live server: `drainSeconds: 0` (the default) for
+routine rollouts that may interrupt a match, or the longest expected match for
+a rollout that should let matches end, with `receiptFlushSeconds: 10`.
+
 ## Operator flow: drain a world, then restart it
 
 To restart a worker without cutting a match short:
@@ -65,10 +86,9 @@ To restart a worker without cutting a match short:
    only (see [restart adoption](configured-world-registry.md#worker-restart-adoption)).
 4. **Reopen.** Set `draining: false` again.
 
-Without step 1, run the worker with `--drain-seconds` set to a match length,
-and give its Pod a termination grace period longer than the drain and the
-receipt flush. The `SIGTERM` itself then stops placement and lets the match
-finish, at the cost of holding up the rollout.
+Without step 1, set `gameplayShutdown.drainSeconds` to a match length. The
+`SIGTERM` itself then stops placement and lets the match finish, at the cost of
+holding up the rollout.
 
 A Helm upgrade that changes a worker's Deployment also restarts Medius, which
 disconnects every world (see the chart README). A worker that keeps running

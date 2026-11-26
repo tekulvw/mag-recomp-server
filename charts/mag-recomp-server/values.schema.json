@@ -931,6 +931,14 @@
         }
       ]
     },
+    "gameplayShutdown": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "drainSeconds": {"type": ["integer", "null"], "minimum": 0, "maximum": 86400},
+        "receiptFlushSeconds": {"type": ["integer", "null"], "minimum": 0, "maximum": 600}
+      }
+    },
     "logs": {
       "type": "object",
       "additionalProperties": false,

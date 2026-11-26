@@ -892,6 +892,39 @@ class ChartTests(unittest.TestCase):
                                  {'workerRestartAdoption': {'windowSeconds': 86401}}, {'workerRestartAdoption': {'other': 1}}):
             render(self.worker_values(worldRegistry=invalid_registry), ok=False)
 
+    def test_gameplay_shutdown_drain(self):
+        def graceful(docs):
+            return {d['metadata']['name']: d['spec']['template']['spec'].get('terminationGracePeriodSeconds')
+                    for d in docs if d['kind'] == 'Deployment'}
+        # Unset keeps the image defaults and Kubernetes' own grace period.
+        docs = render(self.worker_values())
+        self.assertTrue(all(value is None for value in graceful(docs).values()))
+        args = gameplay_arguments(docs, 'test-mag-recomp-server-gameplay-sabotage')
+        self.assertNotIn('--drain-seconds', args)
+        self.assertNotIn('--receipt-flush-seconds', args)
+
+        docs = render(self.worker_values(gameplayShutdown={'drainSeconds': 900}))
+        for name, value in graceful(docs).items():
+            with self.subTest(deployment=name):
+                if name.endswith('-medius'):
+                    self.assertIsNone(value, 'Medius has no drain of its own')
+                    continue
+                self.assertEqual(value, 900 + 5 + 15)
+                args = gameplay_arguments(docs, name)
+                self.assertEqual(args[args.index('--drain-seconds') + 1], '900')
+                self.assertNotIn('--receipt-flush-seconds', args)
+        docs = render({'gameplayShutdown': {'drainSeconds': 0, 'receiptFlushSeconds': 20}})
+        self.assertEqual(graceful(docs)['test-mag-recomp-server-gameplay'], 35)
+        args = gameplay_arguments(docs)
+        self.assertEqual(args[args.index('--receipt-flush-seconds') + 1], '20')
+        for invalid in ({'drainSeconds': -1}, {'drainSeconds': 86401}, {'receiptFlushSeconds': 601},
+                        {'drainSeconds': 'soon'}, {'other': 1}):
+            with self.subTest(values=invalid):
+                render({'gameplayShutdown': invalid}, ok=False)
+        workers = self.workers()
+        workers[0] = {**workers[0], 'extraArgs': ['--drain-seconds', '5']}
+        self.assertIn('chart-managed', render(self.worker_values(workers), ok=False))
+
     def test_wait_for_workers_script(self):
         import importlib.util
         spec = importlib.util.spec_from_file_location('wait_for_workers', CHART / 'files' / 'wait_for_workers.py')
