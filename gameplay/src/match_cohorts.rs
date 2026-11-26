@@ -78,6 +78,7 @@ impl<W: Write> Engine<W> {
             // Keep already committed world packets in their own bounded FIFO,
             // ahead of result notices. Never combine two full queues into one.
             actor.pending_spawn_deadline = None;
+            actor.respawn_screen_ready_at = None;
             actor.pending_damage = None;
             actor.healing = None;
         }

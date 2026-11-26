@@ -327,6 +327,7 @@ impl<W: Write> Engine<W> {
             squad_catalog: std::sync::Arc::new(squad_catalog),
             pending_spawn_deadline: None,
             respawn_held: false,
+            respawn_screen_ready_at: None,
             published_wave_deadline: None,
             entered_game: false,
             owner_fields: player_tracking::ClientCharacterFields::default(),

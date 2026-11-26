@@ -3,6 +3,24 @@
 //! owner's next update.
 use super::*;
 
+/// How long the original client keeps a character that bled out on its own
+/// before it opens the respawn screen and confirms by itself: the retail
+/// character gameplay setting `fRespawnTime` (see docs/incapacitation.md).
+pub(crate) const BLEED_OUT_RESPAWN_SCREEN_DELAY: Duration = Duration::from_millis(2500);
+
+impl Active {
+    /// The time from which this dead character's next wave is chosen: now, or
+    /// later while its client is still counting down to its respawn screen.
+    /// A life sent before that screen opens reaches a client that is still
+    /// playing its bleed-out, which then never leaves the state the new life
+    /// starts in (a parachute drop never lands, and the character can no
+    /// longer enter a vehicle).
+    pub(crate) fn respawn_queue_floor(&self, now: Duration) -> Duration {
+        self.respawn_screen_ready_at
+            .map_or(now, |ready| ready.max(now))
+    }
+}
+
 impl<W: Write> Engine<W> {
     /// Whether a dead character, after its first life, joins the next wave by
     /// itself. A character that cancelled after this death stays out until it
@@ -54,7 +72,11 @@ impl<W: Write> Engine<W> {
                     clock
                 }
             };
-            queued.push((actor.reservation.id.clone(), team, clock.next_after(now)?));
+            queued.push((
+                actor.reservation.id.clone(),
+                team,
+                clock.next_after(actor.respawn_queue_floor(now))?,
+            ));
         }
         if queued.is_empty() {
             return Ok(());

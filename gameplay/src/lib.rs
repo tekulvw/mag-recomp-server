@@ -1400,6 +1400,10 @@ struct Active {
     /// A dead character otherwise rejoins the queue for the next team wave
     /// on its own; only a new confirmation or the next life clears this.
     respawn_held: bool,
+    /// Earliest time this dead character's client can take a new life: set
+    /// when it bled out on its own, until its respawn screen opens. The
+    /// automatic requeue never picks a wave before it.
+    respawn_screen_ready_at: Option<Duration>,
     published_wave_deadline: Option<Duration>,
     entered_game: bool,
     owner_fields: player_tracking::ClientCharacterFields,
