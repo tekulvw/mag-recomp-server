@@ -83,6 +83,14 @@ its goal. A corridor that gets through is kept. A crossing it cannot pass is
 refused to the next search, up to four searches; a crossing sealed outright
 ends them early. Only then is the conservative rule above used.
 
+A goal a structure covers or walls off, such as a Sabotage objective whose
+console was swapped for the planted-charge console, is reached beside it: when
+the route's regions in the goal's polygon do not hold the goal itself, the
+route ends at their free cell nearest the goal, provided it lies within the
+goal radius, and counts as complete. Defender spawn routes to an armed
+objective therefore still qualify, and bots routing to defuse it stop at the
+console. Movement collision is unchanged: the console still blocks bodies.
+
 The string-pulled path can still cut across a structure inside one polygon,
 for example past a door jamb. Each straight leg the lifted body cannot follow
 is replaced by a shortest grid path over free cells inside the corridor's
