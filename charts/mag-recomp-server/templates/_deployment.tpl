@@ -179,6 +179,9 @@ spec:
             {{- with $root.Values.runtime.trainingLevel }}
             - {name: MAG_TRAINING_LEVEL, value: {{ . | int | toString | quote }}}
             {{- end }}
+            {{- with $root.Values.runtime.rewardLedgerOpenMatchTtlHours }}
+            - {name: MAG_REWARD_LEDGER_OPEN_MATCH_TTL_HOURS, value: {{ . | int | toString | quote }}}
+            {{- end }}
             {{- $portal := $root.Values.portalTickets | default dict }}
             {{- if eq ($portal.mode | default "off") "required" }}
             {{- $keys := list }}

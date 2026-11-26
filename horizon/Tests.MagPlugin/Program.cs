@@ -90,6 +90,9 @@ Test("FRAGO kill reward bridge schema", LeadershipProgressionChecks.FragoBridgeS
 Test("settled reward ledger compaction keeps open matches", LeadershipProgressionChecks.RewardLedgerCompaction);
 Test("settled reward ledger evicts retained rows only at the hard bound", LeadershipProgressionChecks.RewardLedgerHardBound);
 Test("open matches overflowing the store give a clear reason", LeadershipProgressionChecks.RewardLedgerOpenOverflow);
+Test("abandoned open match rows expire after the TTL and compact", LeadershipProgressionChecks.RewardLedgerAbandonedRowExpiry);
+Test("late rewards for abandoned match rows are credited once", LeadershipProgressionChecks.RewardLedgerLateRewardForAbandonedRow);
+Test("open match row TTL setting", LeadershipProgressionChecks.RewardLedgerOpenRowTtlSetting);
 Test("FRAGO authored coefficient validation", LeadershipProgressionChecks.FragoCatalogValidation);
 Test("FRAGO admission omits the field for older gameplay workers", LeadershipProgressionChecks.FragoOlderWorkerAdmission);
 Test("FRAGO admission capability and zero award", LeadershipProgressionChecks.FragoAdmissionCapability);

@@ -270,6 +270,17 @@ class ChartTests(unittest.TestCase):
         for invalid in (0, 256, '3', [3]):
             render({'runtime': {'trainingLevel': invalid}}, ok=False)
 
+    def test_optional_reward_ledger_open_match_ttl(self):
+        def medius_env(docs):
+            return [{e['name']: e.get('value') for e in c.get('env', [])}
+                    for d in docs if d['kind'] == 'Deployment'
+                    for c in d['spec']['template']['spec']['containers'] if c['name'] in ('medius', 'maps')]
+        self.assertTrue(all('MAG_REWARD_LEDGER_OPEN_MATCH_TTL_HOURS' not in env for env in medius_env(render())))
+        envs = medius_env(render({'runtime': {'rewardLedgerOpenMatchTtlHours': 48}}))
+        self.assertTrue(len(envs) >= 2 and all(env.get('MAG_REWARD_LEDGER_OPEN_MATCH_TTL_HOURS') == '48' for env in envs))
+        for invalid in (0, 721, '48', [48]):
+            render({'runtime': {'rewardLedgerOpenMatchTtlHours': invalid}}, ok=False)
+
     def test_optional_initial_spawn_delay_override(self):
         default = gameplay_arguments(render())
         self.assertNotIn('--initial-spawn-delay-ms', default)

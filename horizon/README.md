@@ -47,8 +47,32 @@ The MAG adapter switches in `Server.Medius/Config/ServerSettings.cs` remain opt-
 | Optional starting level for new characters | `MAG_STARTING_LEVEL` |
 | Optional minimum level after completing Training | `MAG_TRAINING_LEVEL` |
 | Character store | `MagCharacterStorePath` |
+| Optional hours before an abandoned open match reward row can be compacted (default 24) | `MAG_REWARD_LEDGER_OPEN_MATCH_TTL_HOURS` |
 
 The prototype loader optionally reads `prototype-character-grants.json` beside the externally supplied loadout-defaults file. This file is not distributed here. The loaders in `Server.Medius/Medius/Mag*Catalog.cs` define the accepted schemas; no copied game catalog is needed to compile or run offline checks. Without the required runtime catalogs, content-dependent features cannot provide the corresponding items, grants, skills or progression. No replacement catalog is silently inserted. `MAG_STARTING_LEVEL` starts new characters at that level, and `MAG_TRAINING_LEVEL` raises a character completing Training to at least that level after the Training XP bonus; both grant the level's XP threshold and every gained level's skill points, as if earned. `MAG_TRAINING_LEVEL` applies only to new Training completions (characters that completed Training earlier are unchanged) and never lowers a level or XP. Both require the progression catalog, `MAG_TRAINING_LEVEL` also the Training-completion catalog, and a level the catalogs define; otherwise startup fails naming the variable. Deployment also needs the separately configured gameplay bridge and services appropriate to its selected feature set.
+
+## Reward ledger bounds
+
+The character store (`MagCharacterStorePath`, 1 MiB hard bound) also holds the reward ledger. Each match row (`matchRewardProgress`) is one character's progress in one match: its match XP, sub-point fraction and FRAGO tally. Each receipt (`rewardReceipts`) makes a redelivered reward replay its original result. Gameplay resends every unacknowledged reward each second, so receipts must outlive any redelivery. Action XP is credited to the character when each reward commits; a match row only carries the basis for later rewards in that match, such as the match result bonus.
+
+A row is **finalized** when its match result reward commits. Gameplay sends that reward only to players still in the match at its end. Rows therefore stay **open** when:
+
+- the player leaves before the match result;
+- the match is abandoned, its world reset or torn down, or its match profile changed;
+- the gameplay worker restarts, which starts a new round with a new match key, or Medius restarts without adopting the world;
+- the round never reaches a terminal result;
+- the row was written by an older build before match results finalized rows.
+
+Medius cannot tell these apart from a quiet match in progress. The reward match key is a digest that the match terminal notice does not carry. So rows are **dated** instead: each committed reward stamps its row with `lastRewardAt` (Unix seconds). A row from an older build gets the time of the first commit that sees it, so its TTL starts then. A future date is clamped to the current time.
+
+When a commit would leave the store above 3/4 MiB, compactable rows are evicted with all their receipts, least recently rewarded first, until the store is back at 1/2 MiB. A row is compactable when it is:
+
+- finalized; or
+- **abandoned**: open, with no reward for longer than `MAG_REWARD_LEDGER_OPEN_MATCH_TTL_HOURS` (default 24, 1 to 720; otherwise startup fails naming the variable).
+
+Active open rows are never evicted, nor is the row the current commit touches. The eight most recently rewarded compactable rows are kept so that a redelivery after a lost acknowledgement still replays. They are evicted only when the store would otherwise exceed its hard bound. Each compaction logs one line, with finalized and abandoned row counts. If active open rows alone overflow the store, the commit is refused, and the reason gives their count.
+
+An abandoned row is not closed; it is only eligible for eviction. While it is kept, a late reward for it commits normally, continues its match XP and dates it again. After it is evicted, a late reward opens a fresh row and is credited once. That fresh row's match XP and fraction start at zero, so a later match result bonus for that match is computed from the fresh row only. This is never more than the full bonus. Partial progress needs no settlement: its action XP was credited as it was earned, and only a sub-point fraction is dropped. One limit remains, as for finalized rows. A reward that was committed but not acknowledged for longer than the TTL, whose row was then evicted, would be credited again on redelivery. Gameplay holds unacknowledged rewards only in memory and resends them every second, so this is not expected.
 
 ## Keys and SCERT certificate templates
 
