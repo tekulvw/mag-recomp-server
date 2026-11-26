@@ -112,3 +112,157 @@ fn an_unsupported_drop_zone_is_never_published_even_when_opened() {
     assert_eq!(open.locally_selectable(SQUAD, DROP), HOME);
     assert!(open.for_squad(SQUAD).unwrap().alpha(DROP).is_none());
 }
+
+/// SYNTHETIC two-lane map: each attacking platoon has its own anti-aircraft
+/// Structural (24 for platoon 0, 27 for platoon 1) whose hook names four
+/// passive objectives of that platoon. Here one squad per platoon owns a zone.
+mod lanes {
+    use super::*;
+
+    const LANE_SQUADS: [u16; 2] = [0, 4];
+    const LANE_HOMES: [u16; 2] = [0, 3];
+    const LANE_DROPS: [u16; 2] = [2, 5];
+    const LANE_AA: [u16; 2] = [24, 27];
+
+    fn spawns() -> SpawnCatalog {
+        let mut locations = Vec::new();
+        let mut squads = Vec::new();
+        for lane in 0..2 {
+            let home = LANE_HOMES[lane];
+            let x = 100. * lane as f64;
+            locations.push(
+                serde_json::json!({"index":home,"token":100 + home,"kind":"insertion",
+                "position":{"x":x + 10.,"y":0.,"z":10.}}),
+            );
+            locations.push(serde_json::json!({"index":home + 1,"token":101 + home,
+                "kind":"alternate","position":{"x":x + 20.,"y":0.,"z":10.}}));
+            locations.push(
+                serde_json::json!({"index":LANE_DROPS[lane],"token":100 + LANE_DROPS[lane],
+                "kind":"parachute","active":false,"position":{"x":x + 40.,"y":60.,"z":40.},
+                "parachute":{"forward":[0.,0.,1.],"spacing_m":10.,"yaw":0}}),
+            );
+            squads.push(serde_json::json!({"index":LANE_SQUADS[lane],"team":0,
+                "platoon":lane,"squad":0,"available":[home, home + 1],"default_spawn":home}));
+        }
+        SpawnCatalog::from_json(
+            &serde_json::json!({
+                "format":"mag_spawn_catalog","schema_version":1,"source":"SYNTHETIC lanes",
+                "active":{"map_name":"synthetic_acquisition","squad_index":0,"default_spawn":0,
+                    "available":[0,1]},
+                "match_profile":{"game_type":1,"has_bunkers":false,"has_objectives":false},
+                "maps":[{"name":"synthetic_acquisition","owner_faction":1,"spawn_count":6,
+                    "runtime_indices_verified":true,"runtime_indices_basis":"SYNTHETIC pool identity",
+                    "locations":locations,"squads":squads}]})
+            .to_string(),
+        )
+        .unwrap()
+    }
+
+    fn bindings() -> Bindings {
+        let mut rows = serde_json::Map::new();
+        let mut squads = serde_json::Map::new();
+        for lane in 0..2 {
+            let first = 8 + 4 * lane as u16;
+            let targets: Vec<u16> = (first..first + 4).collect();
+            let hook =
+                serde_json::json!({"function":"antiaircraft","platoon":lane,"spawns":targets});
+            rows.insert(
+                LANE_AA[lane].to_string(),
+                serde_json::json!({
+                "token":2400 + LANE_AA[lane] as u32,"class":"structural","start_deactivated":true,
+                "hooks":{"1":hook.clone(),"6":hook.clone(),"7":hook},"spawn":null}),
+            );
+            let drop = LANE_DROPS[lane];
+            for target in targets {
+                // Only the platoon's first hold has a zone in this fixture.
+                let spawn = (target == first).then(|| {
+                    serde_json::json!({"token":100 + drop,
+                    "index":drop,"team":0,"user_class":0,"spawn_type":5,"fsp_type":1,
+                    "vehicle":false})
+                });
+                rows.insert(
+                    target.to_string(),
+                    serde_json::json!({"token":800 + target as u32,
+                    "class":"secure_hold","start_deactivated":false,"hooks":{},"spawn":spawn}),
+                );
+            }
+            let home = LANE_HOMES[lane];
+            squads.insert(
+                LANE_SQUADS[lane].to_string(),
+                serde_json::json!({
+                "points":[[home,100 + home],[home + 1,101 + home],[drop,100 + drop]],
+                "category_zero":[home,100 + home]}),
+            );
+        }
+        serde_json::from_value(serde_json::json!({
+            "schema":"SYNTHETIC","map":"synthetic_acquisition",
+            "metadata_sha256":"0".repeat(64),"initial_objective_sha256":"1".repeat(64),
+            "level_archive_sha256":"2".repeat(64),"level_clv_sha256":"3".repeat(64),
+            "rows":rows,"squads":squads}))
+        .unwrap()
+    }
+
+    /// One anti-aircraft entry as the runtime stages it: its own hook's
+    /// targets take Completed (destroyed) or Deactivated (standing,
+    /// repaired), and each target's forward spawn follows.
+    fn anti_aircraft(catalog: &SpawnCatalog, lane: usize, state: ObjectiveState) -> SpawnCatalog {
+        let bindings = bindings();
+        let hook = &bindings.rows[&LANE_AA[lane]].hooks[&(state as u8)];
+        let target_state = if state == ObjectiveState::Completed {
+            ObjectiveState::Completed
+        } else {
+            ObjectiveState::Deactivated
+        };
+        let mut next = catalog.clone();
+        for target in hook.spawn_targets() {
+            let row = &bindings.rows[target];
+            let Some(spawn) = row.spawn else { continue };
+            let plan = bindings.plan_fsp(row.token, spawn, target_state).unwrap();
+            (next, ()) = fsp::stage_spawn_effects(&next, &plan)
+                .unwrap()
+                .complete(|_| Ok(()))
+                .unwrap();
+        }
+        next
+    }
+
+    fn open(catalog: &SpawnCatalog, lane: usize) -> bool {
+        let squad = catalog.for_squad(LANE_SQUADS[lane]).unwrap();
+        let drop = LANE_DROPS[lane];
+        let selectable = squad.alpha(drop).is_some();
+        assert_eq!(catalog.point_active(drop), selectable);
+        assert_eq!(
+            catalog.default_for_squad(LANE_SQUADS[lane]),
+            Some(if selectable { drop } else { LANE_HOMES[lane] })
+        );
+        selectable
+    }
+
+    #[test]
+    fn each_lanes_drop_zone_follows_only_its_own_anti_aircraft() {
+        let mut catalog = spawns();
+        bindings().configure_spawns(&mut catalog).unwrap();
+        // Mission start: both anti-aircraft structures stand.
+        let start = anti_aircraft(
+            &anti_aircraft(&catalog, 0, ObjectiveState::Deactivated),
+            1,
+            ObjectiveState::Deactivated,
+        );
+        assert_eq!([open(&start, 0), open(&start, 1)], [false, false]);
+
+        // Lane 1's anti-aircraft falls: only lane 1's zone opens and publishes.
+        let lane_one = anti_aircraft(&start, 1, ObjectiveState::Completed);
+        assert_eq!([open(&lane_one, 0), open(&lane_one, 1)], [false, true]);
+        assert_ne!(published(&lane_one), published(&start));
+
+        // Lane 0's falls too; then repairing lane 1's closes only lane 1's.
+        let both = anti_aircraft(&lane_one, 0, ObjectiveState::Completed);
+        assert_eq!([open(&both, 0), open(&both, 1)], [true, true]);
+        let repaired = anti_aircraft(&both, 1, ObjectiveState::Repaired);
+        assert_eq!([open(&repaired, 0), open(&repaired, 1)], [true, false]);
+
+        // Lane 0 alone from the start matches, whatever lane 1 does.
+        let lane_zero = anti_aircraft(&start, 0, ObjectiveState::Completed);
+        assert_eq!(published(&lane_zero), published(&repaired));
+    }
+}
