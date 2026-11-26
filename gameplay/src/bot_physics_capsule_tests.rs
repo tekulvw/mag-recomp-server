@@ -301,3 +301,156 @@ fn a_capsule_bot_slides_past_another_capsule_and_is_blocked_head_on() {
     assert!(m.blocked && terrain.actor_contact() == Some(2), "{m:?}");
     assert!((m.position[0] - 5.2).abs() < 0.02, "{m:?}");
 }
+
+/// A capsule whose rounded bottom reaches 4 cm below its feet.
+fn low_body() -> Body {
+    Body {
+        max_slope_degrees: 54.0,
+        ..Default::default()
+    }
+    .with_shape(BodyShape::Capsule {
+        radius: 0.4,
+        half_height: 0.5,
+        centre_height: 0.86,
+    })
+}
+
+#[test]
+fn a_capsule_reaching_below_its_feet_spawns_settled_on_flat_ground_at_its_exact_y() {
+    let world = world(
+        &[floor(0.0, 12.0, 0.0, 0.0, 10.0)],
+        [-1.0, -3.0, -1.0],
+        [13.0, 5.0, 11.0],
+    );
+    let terrain = WorldTerrain::new(Some(&world), "synthetic_steep").unwrap();
+    let b = low_body();
+    assert!((b.bottom() + 0.04).abs() < 1e-12);
+    let m = terrain.start_motion([3.0, 0.0, 5.0], b).unwrap();
+    // Resting on its rounded bottom, just clear of the floor.
+    assert!(
+        m.position[1] > 0.04 && m.position[1] <= 0.04 + 2.0 * b.skin,
+        "{m:?}"
+    );
+    assert_eq!((m.position[0], m.position[2]), (3.0, 5.0));
+    let settled = terrain.advance(m, [0.0; 3], 1.0, b).unwrap();
+    assert!(settled.grounded && !settled.blocked, "{settled:?}");
+    assert!(
+        (settled.position[1] - m.position[1]).abs() < 0.02,
+        "{settled:?}"
+    );
+    // A capsule with its bottom at the feet stands there as before.
+    let flush = terrain.start_motion([3.0, 0.0, 5.0], body()).unwrap();
+    assert_eq!(flush.position, [3.0, 0.0, 5.0]);
+}
+
+#[test]
+fn a_capsule_spawns_settled_on_a_walkable_slope_at_its_exact_ground_y() {
+    for degrees in [20.0, 45.0, 53.5] {
+        let (world, _, _) = ramp(degrees);
+        let terrain = WorldTerrain::new(Some(&world), "synthetic_steep").unwrap();
+        // Halfway up the ramp, which starts at x = 6 and rises 4 m.
+        let x = 6.0 + 2.0 / f64::tan(f64::to_radians(degrees));
+        let on_slope = [x, 2.0, 5.0];
+        for b in [low_body(), body()] {
+            let m = terrain.start_motion(on_slope, b).unwrap();
+            assert_eq!((m.position[0], m.position[2]), (x, 5.0));
+            assert!(m.position[1] > 2.0, "{degrees}: {m:?}");
+            let settled = terrain.advance(m, [0.0; 3], 1.0, b).unwrap();
+            assert!(
+                settled.grounded && !settled.blocked,
+                "{degrees}: {settled:?}"
+            );
+            let drift = (settled.position[0] - x).hypot(settled.position[2] - 5.0);
+            assert!(drift < 0.05, "{degrees}: slid {drift} m: {settled:?}");
+        }
+    }
+}
+
+#[test]
+fn a_capsule_still_refuses_a_start_its_settle_lift_does_not_clear() {
+    // Sunk half a metre into the floor, or pressed into a wall: lifting by
+    // the settle allowance leaves it overlapping, so it is refused.
+    let world = world(
+        &[
+            floor(0.0, 12.0, 0.0, 0.0, 10.0),
+            [
+                [5.0, 0.0, 0.0],
+                [5.0, 0.0, 10.0],
+                [5.0, 3.0, 10.0],
+                [5.0, 3.0, 0.0],
+            ],
+        ],
+        [-1.0, -3.0, -1.0],
+        [13.0, 5.0, 11.0],
+    );
+    let terrain = WorldTerrain::new(Some(&world), "synthetic_steep").unwrap();
+    for b in [low_body(), body()] {
+        assert_eq!(
+            terrain.start_motion([3.0, -0.5, 5.0], b).unwrap_err(),
+            PhysicsError::InvalidQuery
+        );
+        assert_eq!(
+            terrain.start_motion([4.8, 0.0, 5.0], b).unwrap_err(),
+            PhysicsError::InvalidQuery
+        );
+    }
+}
+
+#[test]
+fn the_box_start_is_unchanged() {
+    let world = world(
+        &[floor(0.0, 12.0, 0.0, 0.0, 10.0)],
+        [-1.0, -3.0, -1.0],
+        [13.0, 5.0, 11.0],
+    );
+    let terrain = WorldTerrain::new(Some(&world), "synthetic_steep").unwrap();
+    let b = Body {
+        max_slope_degrees: 54.0,
+        ..Default::default()
+    };
+    assert_eq!(b.settle_lift(), None);
+    let m = terrain.start_motion([3.0, 0.0, 5.0], b).unwrap();
+    assert_eq!(m.position, [3.0, 0.0, 5.0]);
+    // A box sunk even slightly below the floor is refused, as before.
+    assert_eq!(
+        terrain.start_motion([3.0, -0.03, 5.0], b).unwrap_err(),
+        PhysicsError::InvalidQuery
+    );
+    let (ramp_world, _, _) = ramp(30.0);
+    let ramp_terrain = WorldTerrain::new(Some(&ramp_world), "synthetic_steep").unwrap();
+    let x = 6.0 + 2.0 / f64::tan(f64::to_radians(30.0));
+    assert_eq!(
+        ramp_terrain.start_motion([x, 2.0, 5.0], b).unwrap_err(),
+        PhysicsError::InvalidQuery
+    );
+}
+
+#[test]
+fn a_drop_launched_at_exact_ledge_y_certifies_for_a_capsule_reaching_below_its_feet() {
+    let world = world(
+        &[
+            floor(0.0, 5.0, 1.0, 0.0, 10.0),
+            [
+                [5.0, 1.0, 0.0],
+                [5.0, 1.0, 10.0],
+                [5.0, 0.0, 10.0],
+                [5.0, 0.0, 0.0],
+            ],
+            floor(5.0, 12.0, 0.0, 0.0, 10.0),
+        ],
+        [-1.0, -3.0, -1.0],
+        [13.0, 5.0, 11.0],
+    );
+    let terrain = WorldTerrain::new(Some(&world), "synthetic_steep").unwrap();
+    for b in [low_body(), body()] {
+        let trace = terrain
+            .validate_descent([4.0, 1.0, 5.0], [7.0, 0.0, 5.0], 4.5, b, 10.0)
+            .unwrap()
+            .unwrap_or_else(|| panic!("{:?} drop refused", b.shape));
+        assert!(
+            trace.launch[1] >= 1.0 && trace.launch[1] < 1.05,
+            "{trace:?}"
+        );
+        assert!(trace.landing[1] >= 0.0 && trace.landing[1] < 0.05);
+    }
+}

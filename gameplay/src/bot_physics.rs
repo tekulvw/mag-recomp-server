@@ -142,6 +142,19 @@ impl Body {
     fn is_capsule(self) -> bool {
         self.shape != BodyShape::Box
     }
+    /// How far a capsule starting with its feet on the ground may need to
+    /// rise to clear it: the depth its lower hemisphere reaches into a plane
+    /// through the feet at the slope limit (on flat ground, just its reach
+    /// below the feet), at most a step, plus the skin. None for the box,
+    /// which starts only where it stands free.
+    fn settle_lift(self) -> Option<f64> {
+        let (capsule, centre) = self.shape.capsule()?;
+        let sphere = centre - capsule.half_height;
+        let depth = (capsule.radius / self.slope_cos() - sphere)
+            .max(0.0)
+            .min(self.max_step);
+        (depth > 0.0).then_some(depth + self.skin)
+    }
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Motion {
@@ -280,16 +293,38 @@ impl<'a> WorldTerrain<'a> {
     }
     /// Refuses known initial penetration. Surface tangency is allowed; no
     /// depenetration/ground plane is invented to make an invalid spawn usable.
+    ///
+    /// A capsule's rounded bottom can overlap the ground its feet point stands
+    /// on: below the feet when the capsule reaches under them, and on any
+    /// walkable slope. Such a capsule starts settled instead: lifted by at most
+    /// `Body::settle_lift` (its rounded bottom's reach below the feet on ground
+    /// at the slope limit), which must be free, then swept back down onto the
+    /// ground. Any other overlap is still refused, and the box is unchanged.
     pub fn start_motion(&self, position: Point, body: Body) -> Result<Motion, PhysicsError> {
         body.validate()?;
         if !valid(position) {
             return Err(PhysicsError::InvalidQuery);
         }
         let mut budget = WORK_LIMIT;
-        if self.sweep(position, position, body, &mut budget)?.is_some() {
+        if self.sweep(position, position, body, &mut budget)?.is_none() {
+            return Ok(Motion::new(position));
+        }
+        let Some(lift) = body.settle_lift() else {
+            return Err(PhysicsError::InvalidQuery);
+        };
+        let up = [position[0], position[1] + lift, position[2]];
+        if self.sweep(up, up, body, &mut budget)?.is_some() {
             return Err(PhysicsError::InvalidQuery);
         }
-        Ok(Motion::new(position))
+        let hit = self
+            .sweep(up, position, body, &mut budget)?
+            .ok_or(PhysicsError::InvalidQuery)?;
+        Ok(Motion::new(stop_before(
+            up,
+            position,
+            hit.fraction,
+            body.skin,
+        )))
     }
     pub fn metadata(&self) -> &crate::collision::WorldMetadata {
         self.world.metadata()
@@ -326,10 +361,13 @@ impl<'a> WorldTerrain<'a> {
         }
         self.require_horizontal_coverage(launch, landing, b)?;
         let mut m = self.start_motion(launch, b)?;
-        // Verify stable source support instead of trusting a navmesh vertex Y.
+        // Verify stable source support instead of trusting a navmesh vertex Y,
+        // measured from where the body starts (a capsule starts settled just
+        // above the vertex; the box exactly at it).
+        let settled = m.position;
         for _ in 0..20 {
             m = self.advance(m, [0.0; 3], SUBSTEP, b)?;
-            if m.blocked || length(sub(m.position, launch)) > 0.05 {
+            if m.blocked || length(sub(m.position, settled)) > 0.05 {
                 return Ok(None);
             }
         }
