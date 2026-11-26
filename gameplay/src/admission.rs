@@ -292,6 +292,7 @@ impl<W: Write> Engine<W> {
             talk_channel: None,
             hospital_bootstrap: 0..0,
             smoke_bootstrap: 0..0,
+            state_frames: Default::default(),
             ordered_health_pending: false,
             replication_backlogged: false,
             shared_queue_limit: self.shared_queue_limit(),

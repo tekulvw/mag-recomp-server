@@ -1314,6 +1314,9 @@ struct Active {
     /// Contiguous one-time hospital bootstrap inside the reliable FIFO.
     hospital_bootstrap: std::ops::Range<usize>,
     smoke_bootstrap: std::ops::Range<usize>,
+    /// FIFO frame numbers (counted like `shared_frames_drained`) of queued
+    /// objective and spawn state, which nothing re-sends; it has its own bound.
+    state_frames: std::collections::VecDeque<u64>,
     /// Health replies must join the FIFO until scheduled health drains.
     ordered_health_pending: bool,
     replication_backlogged: bool,

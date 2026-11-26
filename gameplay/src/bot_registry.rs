@@ -1287,7 +1287,7 @@ impl<W: Write> Engine<W> {
         }
         .encode_with_profile(self.wire_profile)?;
         self.commit_bot_damage(id, generation, damage, now)?;
-        self.broadcast_bot_packet(packet);
+        self.broadcast_bot_state_packet(packet);
         Ok(())
     }
     pub(crate) fn commit_bot_damage(
@@ -1374,11 +1374,11 @@ impl<W: Write> Engine<W> {
         Err("bot_not_found")
     }
     pub(super) fn broadcast_bot_packet(&mut self, packet: Vec<u8>) {
-        // Bot deltas go only to recipients that tick_bots also snapshots. A client
-        // that is loading (not ready_for_updates) is not drained, and it receives
-        // one fresh snapshot per bot once it is ready again, so queuing deltas for
-        // it would only fill its bounded reliable queue until a populated world
-        // evicted it as replication_backlogged within seconds of joining.
+        // Shared character deltas (human lives, vehicles, damage a bot deals) for
+        // ready clients. A loading client (not ready_for_updates) is not drained
+        // and is re-snapshotted when ready, so queuing these for it would only
+        // fill its bounded reliable queue. A bot's own state uses
+        // `broadcast_bot_state_packet`, which also waits for the drain gate.
         for recipient in self
             .peers
             .values_mut()
@@ -1400,7 +1400,7 @@ impl<W: Write> Engine<W> {
             .chain(self.active.iter_mut())
             .filter(|a| a.receives_objective_state())
         {
-            recipient.queue_shared(packet.clone());
+            recipient.queue_state_shared(packet.clone());
         }
     }
     /// Shared spawn availability deltas. The initial objects carry the squad
@@ -1412,6 +1412,21 @@ impl<W: Write> Engine<W> {
             .values_mut()
             .chain(self.active.iter_mut())
             .filter(|a| a.initial_objects.is_some())
+        {
+            recipient.queue_state_shared(packet.clone());
+        }
+    }
+    /// A bot's own movement, life or removal, for the recipients that hold the
+    /// current bot snapshots (the set [`Self::tick_bots`] snapshots). Any other
+    /// recipient receives a fresh snapshot per bot once its FIFO drains, so these
+    /// deltas would only fill its bounded queue.
+    pub(super) fn broadcast_bot_state_packet(&mut self, packet: Vec<u8>) {
+        let gate = self.shared_drain_gate();
+        for recipient in self
+            .peers
+            .values_mut()
+            .chain(self.active.iter_mut())
+            .filter(|a| a.initial_objects.is_some() && gate.admits(a))
         {
             recipient.queue_shared(packet.clone());
         }
@@ -1461,7 +1476,7 @@ impl<W: Write> Engine<W> {
                 player: index,
             }
             .encode_with_profile(self.wire_profile)?;
-            self.broadcast_bot_packet(packet);
+            self.broadcast_bot_state_packet(packet);
             for known in self.bot_registry.known.values_mut() {
                 known.remove(&index);
             }
@@ -1550,12 +1565,17 @@ impl<W: Write> Engine<W> {
         let mut actors = self.actor_grid(now)?;
         let population = self.tick_timing_start();
         self.reconcile_bot_population(now, wall, &mut actors)?;
-        // New recipients get one coherent creation+inventory+current-life snapshot per bot.
+        // New recipients get one coherent creation+inventory+current-life snapshot per bot,
+        // once their shared FIFO drains. A late joiner into a full world stays
+        // ready but undrained while its hospital and vehicle creations arrive one
+        // client update at a time; 255 snapshots plus every bot's deltas would
+        // fill its bounded queue and evict it before its first spawn.
+        let gate = self.shared_drain_gate();
         let recipients: Vec<_> = self
             .peers
             .values()
             .chain(self.active.iter())
-            .filter(|a| a.ready_for_updates && a.initial_objects.is_some())
+            .filter(|a| a.initial_objects.is_some() && gate.admits(a))
             .map(|a| a.reservation.id.clone())
             .collect();
         self.bot_registry
@@ -1983,7 +2003,7 @@ impl<W: Write> Engine<W> {
             self.record(receipt, wall)?;
         }
         for packet in packets {
-            self.broadcast_bot_packet(packet);
+            self.broadcast_bot_state_packet(packet);
         }
         Ok(Vec::new())
     }
@@ -4064,6 +4084,13 @@ pub(crate) mod healing_reward_relationship_tests;
 pub(crate) struct CharacterDamageCandidate {
     bots: BTreeMap<u16, WorldBot>,
     reservations: BTreeMap<u16, (crate::actor_collision::Reservation, Duration)>,
+}
+#[cfg(test)]
+impl BotRegistry {
+    /// The bots a recipient holds snapshots of, if it has been snapshotted.
+    pub(crate) fn known_bots(&self, reservation_id: &str) -> Option<&BTreeSet<u16>> {
+        self.known.get(reservation_id)
+    }
 }
 impl BotRegistry {
     pub(crate) fn character_damage_candidate(&self) -> CharacterDamageCandidate {

@@ -22,6 +22,28 @@ pub(crate) struct SharedDeferral {
     last_report: Option<u64>,
 }
 
+/// The readiness a recipient needs before its shared FIFO is drained. Shared
+/// character frames can refer to an indexed hospital or a ground vehicle, so
+/// their creation replies, which arrive one per client update while it loads,
+/// precede the FIFO. Until then nothing drains, so bounded traffic that will be
+/// re-snapshotted (bots) must wait for this gate rather than fill the queue.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SharedDrainGate {
+    requires_hospital_creation: bool,
+    /// Ground vehicle creation batches every recipient must have received.
+    ground_vehicle_batches: Option<usize>,
+}
+
+impl SharedDrainGate {
+    pub(crate) fn admits(self, actor: &Active) -> bool {
+        actor.ready_for_updates
+            && self
+                .ground_vehicle_batches
+                .is_none_or(|batches| actor.ground_vehicle_batch >= batches)
+            && (!self.requires_hospital_creation || actor.emplacement_creation.is_some())
+    }
+}
+
 impl Active {
     /// Reliable packets cannot be discarded or coalesced without traced ACK rules.
     /// Bound memory now; retire this recipient through recorded lifecycle cleanup
@@ -40,8 +62,28 @@ impl Active {
         self.initial_objects.is_some() && (self.ready_for_updates || self.objective_delta.is_some())
     }
 
+    /// Queues objective or spawn state that is never re-sent, such as a delta
+    /// for a client on its deploy screen. It does not count toward the ordinary
+    /// bound, so a full world's bot traffic cannot evict the client by way of
+    /// these few frames, nor can they evict it alone below their own bound.
+    pub(crate) fn queue_state_shared(&mut self, packet: Vec<u8>) {
+        if self.state_frames.len() >= self.shared_queue_limit {
+            self.replication_backlogged = true;
+        } else if !self.replication_backlogged {
+            let frame = self
+                .shared_frames_drained
+                .saturating_add(self.pending_shared.len() as u64);
+            self.state_frames.push_back(frame);
+            self.pending_shared.push_back(packet);
+        }
+    }
+
     pub(super) fn ordinary_shared_len(&self) -> usize {
-        self.pending_shared.len() - self.hospital_bootstrap.len() - self.smoke_bootstrap.len()
+        self.pending_shared
+            .len()
+            .saturating_sub(self.hospital_bootstrap.len())
+            .saturating_sub(self.smoke_bootstrap.len())
+            .saturating_sub(self.state_frames.len())
     }
 
     pub(super) fn queue_hospital_bootstrap(&mut self, packets: Vec<Vec<u8>>) {
@@ -66,6 +108,9 @@ impl Active {
 
     pub(super) fn pop_shared(&mut self) {
         if self.pending_shared.pop_front().is_some() {
+            if self.state_frames.front() == Some(&self.shared_frames_drained) {
+                self.state_frames.pop_front();
+            }
             self.shared_frames_drained = self.shared_frames_drained.saturating_add(1);
         }
         self.hospital_bootstrap.start = self.hospital_bootstrap.start.saturating_sub(1);
@@ -1254,6 +1299,20 @@ impl<W: Write> Engine<W> {
         Ok((limit, total))
     }
 
+    /// Which recipients [`Self::drain_shared`] may release shared frames to.
+    pub(crate) fn shared_drain_gate(&self) -> SharedDrainGate {
+        SharedDrainGate {
+            requires_hospital_creation: self.has_hospital_turrets(),
+            ground_vehicle_batches: self.ground_vehicles.as_ref().map(|catalog| {
+                if self.ground_runtime.is_some() {
+                    catalog.batch_count()
+                } else {
+                    usize::MAX
+                }
+            }),
+        }
+    }
+
     pub(super) fn drain_shared(
         &mut self,
         mut messages: Vec<OutboundMessage>,
@@ -1273,23 +1332,19 @@ impl<W: Write> Engine<W> {
         let byte_limit = budget.payload_bytes;
         self.publish_inherited_leadership(wall)?;
         let mut planned = Vec::new();
-        // Shared character frames can already refer to an indexed hospital.
-        // Its direct creation reply precedes the existing FIFO and bootstrap.
-        let requires_hospital_creation = self.has_hospital_turrets();
+        let gate = self.shared_drain_gate();
         let mut ready: Vec<_> = self
             .peers
             .values()
             .chain(self.active.iter())
             .filter(|a| {
-                a.ready_for_updates
+                gate.admits(a)
                     && (!a.pending_shared.is_empty()
                         || self
                             .bot_registry
                             .stats_publication
                             .pending(a, &self.bot_registry.bots)
                         || self.human_assists_pending(a))
-                    && self.ground_vehicle_creation_complete(a.ground_vehicle_batch)
-                    && (!requires_hospital_creation || a.emplacement_creation.is_some())
             })
             .collect();
         ready.sort_unstable_by_key(|a| a.reservation.player);

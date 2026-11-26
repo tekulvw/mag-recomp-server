@@ -1262,7 +1262,11 @@ impl<W: Write> Engine<W> {
             if publish {
                 bot.yaw = yaw;
             }
-            for packet in owner_packet.into_iter().chain(damage_packet) {
+            // The shooter's own pose follows its snapshot; damage can be to a human.
+            if let Some(packet) = owner_packet {
+                self.broadcast_bot_state_packet(packet);
+            }
+            if let Some(packet) = damage_packet {
                 self.broadcast_bot_packet(packet);
             }
         }
