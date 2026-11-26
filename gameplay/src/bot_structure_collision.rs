@@ -494,28 +494,31 @@ fn start_analysis(
     snapshot: Arc<StructureObstacles>,
     mesh: Option<Arc<crate::navmesh::NavMesh>>,
 ) -> Analysis {
-    let job = std::thread::spawn(move || {
-        let began = std::time::Instant::now();
-        let interiors_analysed = analyse_interiors(&snapshot);
-        let (gated_polygons, reused_polygons, gate_error) = match &mesh {
-            Some(mesh) => {
-                match crate::navmesh_structure_gates::install_now(mesh, Some(&snapshot)) {
-                    Ok(Some((gated, reused))) => (Some(gated), reused, None),
-                    Ok(None) => (None, 0, None),
-                    Err(error) => (None, 0, Some(error)),
+    let job = std::thread::Builder::new()
+        .name(crate::JOINED_JOB_THREADS[2].into())
+        .spawn(move || {
+            let began = std::time::Instant::now();
+            let interiors_analysed = analyse_interiors(&snapshot);
+            let (gated_polygons, reused_polygons, gate_error) = match &mesh {
+                Some(mesh) => {
+                    match crate::navmesh_structure_gates::install_now(mesh, Some(&snapshot)) {
+                        Ok(Some((gated, reused))) => (Some(gated), reused, None),
+                        Ok(None) => (None, 0, None),
+                        Err(error) => (None, 0, Some(error)),
+                    }
                 }
+                None => (None, 0, None),
+            };
+            AnalysisReport {
+                key: snapshot.key(),
+                interiors_analysed,
+                gated_polygons,
+                reused_polygons,
+                gate_error,
+                analysis_us: began.elapsed().as_micros() as u64,
             }
-            None => (None, 0, None),
-        };
-        AnalysisReport {
-            key: snapshot.key(),
-            interiors_analysed,
-            gated_polygons,
-            reused_polygons,
-            gate_error,
-            analysis_us: began.elapsed().as_micros() as u64,
-        }
-    });
+        })
+        .expect("bot structure analysis thread");
     Analysis { job }
 }
 

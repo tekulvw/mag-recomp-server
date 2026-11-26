@@ -286,6 +286,14 @@ use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
 pub const BRIDGE_VERSION: u8 = 2;
+/// Background job threads whose owners join them and handle a panic as an
+/// ordinary failure. A served worker treats a panic on any other thread as
+/// fatal to the process.
+pub const JOINED_JOB_THREADS: [&str; 3] = [
+    "bot-cover-map",
+    "bot-cover-structures",
+    "bot-structure-analysis",
+];
 pub const MAX_LINE: usize = 65_536;
 pub const MAX_PAYLOAD: usize = 16_384;
 pub const MAX_LOG: u64 = 64 * 1024 * 1024;
