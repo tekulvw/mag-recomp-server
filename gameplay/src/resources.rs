@@ -322,6 +322,8 @@ impl<W: Write> Engine<W> {
             round_participants: Default::default(),
             match_terminal: None,
             results_cohorts: Default::default(),
+            control_plane: None,
+            draining: false,
             released_reservations: Default::default(),
             release_order: Default::default(),
             bunker_world: resources.bunker_world,

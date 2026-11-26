@@ -79,6 +79,7 @@ pub mod collision;
 pub mod collision_coverage;
 #[cfg(test)]
 mod command_ability_world_tests;
+pub mod control_plane;
 mod convex_penetration;
 pub mod correction_ack;
 pub mod damage;
@@ -266,6 +267,7 @@ pub mod turret;
 pub mod underbarrel_launchers;
 pub mod vehicle_exit;
 pub mod wire_profile;
+pub mod worker_drain;
 pub mod worker_identity;
 pub mod world_capacity;
 #[cfg(test)]
@@ -699,6 +701,10 @@ pub struct Response {
     /// World-stream relay table, sent only to subscribers that ask (`voice_groups_v1`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice_groups: Option<voice_routing::VoiceGroups>,
+    /// The worker is shutting down and admits no one, sent only to subscribers
+    /// that ask (`worker_drain_v1`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_draining: Option<bool>,
 }
 impl Response {
     pub fn success(request_id: String) -> Self {
@@ -718,6 +724,7 @@ impl Response {
             worker_identity: None,
             world_stream: None,
             voice_groups: None,
+            worker_draining: None,
         }
     }
 
@@ -1483,6 +1490,10 @@ pub struct Engine<W: Write> {
         std::collections::BTreeMap<progression::ParticipantKey, progression::RoundParticipation>,
     match_terminal: Option<match_flow::MatchTerminal>,
     results_cohorts: std::collections::BTreeMap<String, match_cohorts::ResultsCohort>,
+    /// The Horizon process that last subscribed (`control_plane_rebind_v1`).
+    control_plane: Option<String>,
+    /// Set once on SIGTERM: no new admissions (`worker_drain_v1`).
+    draining: bool,
     released_reservations: std::collections::BTreeSet<String>,
     release_order: std::collections::VecDeque<String>,
     bunker_world: Option<structures::BunkerWorld>,
@@ -1898,6 +1909,9 @@ impl<W: Write> Engine<W> {
             )
         {
             return Response::error(request_id, "match_not_configured");
+        }
+        if self.refuses_while_draining(&request) {
+            return Response::error(request_id, worker_drain::REFUSAL);
         }
         if let Some(result) = self.handle_party_request(&request, now, wall_secs) {
             return match result {
