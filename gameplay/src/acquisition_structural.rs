@@ -813,6 +813,9 @@ pub(crate) struct Frame<'a, W: Write> {
     /// and the family-13 updates their forward spawns produce.
     pub(crate) hospitals: &'a mut Option<crate::structures::BunkerWorld>,
     pub(crate) hospital_packets: &'a mut Vec<Vec<u8>>,
+    /// The team vehicle waves, once started. A motor-pool activation cancels
+    /// the entry of the vehicle it respawns directly.
+    pub(crate) vehicle_waves: Option<&'a mut crate::acquisition_vehicle_waves::VehicleWaves>,
     pub(crate) now: Duration,
 }
 
@@ -1433,7 +1436,7 @@ impl<W: Write> Frame<'_, W> {
         Ok(())
     }
 
-    fn stage_vehicle(
+    pub(crate) fn stage_vehicle(
         &mut self,
         request: fsp::VehicleRequest,
         index: u16,
@@ -1478,6 +1481,16 @@ impl<W: Write> Frame<'_, W> {
             },
             false,
         )?;
+        if let Some((team, queued)) = self
+            .vehicle_waves
+            .as_deref_mut()
+            .and_then(|waves| waves.cancel(key.index))
+        {
+            self.audit.push(
+                json!({"op":"acquisition_structural_motor_pool_wave_entry_cancelled",
+                "vehicle":key.object_id(),"team":team,"queued_generation":queued.generation}),
+            );
+        }
         for event in events {
             self.audit.push(json!({"op":"acquisition_structural_motor_pool", "vehicle":event.vehicle.object_id(),
                 "effect":format!("{:?}",event.effect)}));

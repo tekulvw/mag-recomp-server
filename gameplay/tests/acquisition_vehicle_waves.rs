@@ -61,3 +61,20 @@ fn interval_changes_take_effect_only_when_the_advertised_wave_renews() {
     assert_eq!(waves.tick(41_000), [None, Some(vec![])]);
     assert_eq!(waves.next_timestamp(1), Ok(81_000));
 }
+
+#[test]
+fn cancel_withdraws_one_vehicle_from_whichever_team_queued_it() {
+    let mut waves = VehicleWaves::start(0, [100, 100]).unwrap();
+    waves.queue(0, vehicle(3)).unwrap();
+    waves.queue(0, vehicle(1)).unwrap();
+    waves.queue(1, vehicle(8)).unwrap();
+    assert_eq!(waves.cancel(8), Some((1, vehicle(8))));
+    assert_eq!(waves.cancel(8), None);
+    assert_eq!(waves.cancel(3), Some((0, vehicle(3))));
+    // The vehicle can queue again, and the remaining order is kept.
+    waves.queue(1, vehicle(8)).unwrap();
+    assert_eq!(
+        waves.tick(100),
+        [Some(vec![vehicle(1)]), Some(vec![vehicle(8)])]
+    );
+}

@@ -1095,6 +1095,18 @@ impl<W: Write> Provider<'_, W> {
             },
             false,
         )?;
+        // The activation (a repaired motor pool) respawns a queued vehicle
+        // directly, so its wave entry no longer names a waiting vehicle.
+        if let Some((team, queued)) = self
+            .state
+            .vehicle_waves
+            .as_mut()
+            .and_then(|waves| waves.cancel(key.index))
+        {
+            self.audit
+                .push(json!({"op":"domination_motor_pool_wave_entry_cancelled",
+                "vehicle":key.object_id(),"team":team,"queued_generation":queued.generation}));
+        }
         let mut changes = BTreeMap::new();
         for event in events {
             self.audit.push(json!({"op":"domination_motor_pool_effect","vehicle":event.vehicle.object_id(),"effect":format!("{:?}",event.effect)}));

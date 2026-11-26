@@ -60,6 +60,18 @@ impl VehicleWaves {
         Ok(())
     }
 
+    /// Withdraw a vehicle's pending entry, whichever team queued it. A
+    /// spawner activation that respawns the vehicle directly calls this, so
+    /// the next wave does not find an entry for a vehicle already in service.
+    pub fn cancel(&mut self, index: u16) -> Option<(u8, Key)> {
+        for (team, entries) in self.queued.iter_mut().enumerate() {
+            if let Some(position) = entries.iter().position(|entry| entry.index == index) {
+                return Some((team as u8, entries.remove(position)));
+            }
+        }
+        None
+    }
+
     /// One manager update. Equality is due and a late tick publishes one
     /// advancement from current network time, without replaying missed waves.
     /// The caller retries source-controlled spawn denials by requeueing.
