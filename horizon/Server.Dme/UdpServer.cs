@@ -162,6 +162,9 @@ namespace Server.Dme
         protected void ProcessMessage(ScertDatagramPacket packet)
         {
             var message = packet.Message;
+            var voiceDiagnostics = VoiceDiagnostics.Instance;
+            if (voiceDiagnostics.Enabled)
+                voiceDiagnostics.Observe(ClientObject?.DmeId ?? -1, "udp", message, ClientObject?.MediusVersion ?? 0, Environment.TickCount64);
 
             //
             switch (message)

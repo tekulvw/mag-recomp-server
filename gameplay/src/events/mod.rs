@@ -403,9 +403,9 @@ fn plan_message<W: Write>(
                 json!({"type":"rocket_lock_state","target":report.target,"state":report.state,"accepted":plan.guided_warnings.is_some()}),
             )
         }
-        Ok(protocol::GameMessage::Unknown { message_type, .. }) => {
-            Ok(json!({"type":"unknown","message_type":message_type}))
-        }
+        Ok(protocol::GameMessage::Unknown { message_type, body }) => Ok(
+            crate::voice_diagnostics::unknown_message(message_type, body),
+        ),
         Err(code) => Ok(json!({"type":"malformed","error":code})),
     }
 }

@@ -2579,3 +2579,4 @@ mod script_objective_reward_tests;
 mod objective_action_timing_event_tests;
 
 mod inherited_leadership;
+pub mod voice_diagnostics;

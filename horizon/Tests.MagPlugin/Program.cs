@@ -38,6 +38,7 @@ if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(RealRegistryWo
     Test("configured registry real workers large world", RealRegistryWorkerChecks.RunLargeWorld);
 }
 Test("registry DME host world and lease isolation", RegistryDmeHostChecks.Run);
+Test("voice diagnostics are off by default, sample bounded and find lab voice blocks", VoiceDiagnosticsChecks.Run);
 Test("DME port capacity configuration and leases", DmePortCapacityChecks.Budget);
 Test("DME port capacity bounds placement and keeps parties whole", DmePortCapacityChecks.Placement);
 Test("DME port capacity refuses standalone admission and frees ports on release", DmePortCapacityChecks.Admission);
