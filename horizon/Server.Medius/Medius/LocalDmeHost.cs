@@ -763,8 +763,8 @@ namespace Server.Medius
                         // The next connection may reach a restarted worker.
                         _gameplayConfigured = false;
                         // A refusal of the request itself, not of this world's state.
-                        bool unsupported = !acknowledged && error is InvalidDataException &&
-                            !(error is GameplayWorldSubscriptionRefusedException { Reason: "subscription_world_mismatch" });
+                        bool unsupported = !acknowledged && (error is InvalidDataException ||
+                            error is GameplayWorldSubscriptionRefusedException { Reason: not "subscription_world_mismatch" });
                         if (positions && unsupported)
                         {
                             // A worker without positions refuses the request outright
@@ -833,7 +833,8 @@ namespace Server.Medius
         bool RetainThroughWorldStreamGap(Exception error)
         {
             bool resumable = !InRegistry && !_disposed && _supportsWorldStreamResume && _worldStreamPosition != null &&
-                !(error is InvalidDataException) && !(error is GameplayWorkerIdentityException);
+                !(error is InvalidDataException) && !(error is GameplayWorldSubscriptionRefusedException) &&
+                !(error is GameplayWorkerIdentityException);
             if (resumable && !_worldStreamResuming)
             {
                 _worldStreamResuming = true;

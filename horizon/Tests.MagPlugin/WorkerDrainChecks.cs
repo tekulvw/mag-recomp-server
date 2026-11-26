@@ -35,8 +35,7 @@ internal static class WorkerDrainChecks
             throw new Exception("worker_draining was accepted as false or on a refusal");
 
         var refusal = new GameplayWorldSubscriptionRefusedException("subscription_world_mismatch");
-        InvalidDataException asData = refusal;
-        if (asData.Message.Length == 0 || refusal.Reason != "subscription_world_mismatch" ||
+        if (refusal.Message.Length == 0 || refusal.Reason != "subscription_world_mismatch" ||
             new GameplayWorldSubscriptionRefusedException("not a code\nline").Reason != "unspecified")
             throw new Exception("A subscription refusal lost its reason or kept unvalidated worker text");
         if (!GameplayWorldSubscription.IsValidControlPlane(Guid.NewGuid().ToString("N")) ||

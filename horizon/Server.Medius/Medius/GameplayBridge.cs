@@ -274,9 +274,9 @@ namespace Server.Medius {
    value.All(c=>char.IsAsciiLetterOrDigit(c)||c=='-'||c=='_');
  }
  /// <summary>The worker answered subscribe_world with an error, for example
- /// subscription_world_mismatch: it still holds players of another world ID. An
- /// <see cref="InvalidDataException"/>, as before, with the worker's reason kept.</summary>
- public sealed class GameplayWorldSubscriptionRefusedException : InvalidDataException {
+ /// subscription_world_mismatch: it still holds players of another world ID. Like a
+ /// malformed stream, it is never resumed; the worker's validated reason is kept.</summary>
+ public sealed class GameplayWorldSubscriptionRefusedException : IOException {
   public string Reason { get; }
   public GameplayWorldSubscriptionRefusedException(string reason) : base($"Gameplay worker refused the world subscription: {Describe(reason)}.") { Reason=Describe(reason); }
   // The reason comes from the worker; keep only a short identifier in logs.
