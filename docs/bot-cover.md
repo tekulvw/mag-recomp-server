@@ -99,7 +99,8 @@ Once there the bot cycles:
   stands up (low cover) and the weapon controller fights as for any standing
   bot. It goes back early when its magazine runs dry.
 
-While hidden it checks every 500 ms that the threat still cannot see it.
+While hidden it checks every 500 ms that the threat still cannot see it; two
+checks in a row that find it visible count as exposed.
 
 It leaves cover when:
 

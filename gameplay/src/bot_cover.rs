@@ -575,6 +575,8 @@ pub(crate) struct Episode {
     last_threat: Duration,
     /// Departure held this long for a squadmate's covering fire.
     waiting_since: Option<Duration>,
+    /// Consecutive re-checks that found the hidden pose visible.
+    seen_checks: u8,
 }
 
 #[derive(Default, Clone, Copy, Serialize)]
@@ -760,8 +762,25 @@ impl<W: Write> Engine<W> {
         })
     }
 
+    /// Headless simulation: wait (outside the timed cover phase) for spot
+    /// builds still running, so virtual time does not run ahead of them.
+    pub(crate) fn wait_bot_cover_builds(&self) {
+        if !self.bot_cover.blocking_builds {
+            return;
+        }
+        let running = |w: &World| {
+            w.job.as_ref().is_some_and(|(_, j)| !j.is_finished())
+                || w.structure_job
+                    .as_ref()
+                    .is_some_and(|(_, j)| !j.is_finished())
+        };
+        while running(&self.bot_cover) {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
     /// Keep the static and structure spot maps current; builds run on a
-    /// worker thread (waited for in tests and headless simulation).
+    /// worker thread (inline in tests).
     fn refresh_cover_maps(&mut self, wall: u64) -> Result<(), &'static str> {
         let (Some(world), Some(mesh)) =
             (self.collision_world.as_ref(), self.navmesh_world.as_ref())
@@ -807,7 +826,7 @@ impl<W: Write> Engine<W> {
                             .name("bot-cover-map".into())
                             .spawn(move || build_static(&w, &m))
                             .map_err(|_| "bot_cover_thread_unavailable")?;
-                        if cfg!(test) || self.bot_cover.blocking_builds {
+                        if cfg!(test) {
                             while !job.is_finished() {
                                 std::thread::sleep(Duration::from_millis(2));
                             }
@@ -839,7 +858,7 @@ impl<W: Write> Engine<W> {
                         .name("bot-cover-structures".into())
                         .spawn(move || build_structures(&w, &m, &snapshot))
                         .map_err(|_| "bot_cover_thread_unavailable")?;
-                    if cfg!(test) || self.bot_cover.blocking_builds {
+                    if cfg!(test) {
                         while !job.is_finished() {
                             std::thread::sleep(Duration::from_millis(2));
                         }
@@ -1385,6 +1404,7 @@ impl<W: Write> Engine<W> {
                 bound: 0,
                 last_threat: threat.last,
                 waiting_since: None,
+                seen_checks: 0,
             },
         );
         receipts.push(json!({"op":"bot_cover_start","timestamp_ms":now.as_millis() as u64,
@@ -1598,6 +1618,12 @@ impl<W: Write> Engine<W> {
                         &mut budget.rays,
                         &mut budget.work,
                     ) {
+                        Ok(true) if e.seen_checks == 0 => {
+                            // Seen once: a passing glimpse or a threat point
+                            // that just moved; look again next check.
+                            self.bot_cover.stats.rays += (before - budget.rays) as u64;
+                            e.seen_checks = 1;
+                        }
                         Ok(true) => {
                             self.bot_cover.stats.rays += (before - budget.rays) as u64;
                             // Flanked, or the cover is gone: find another.
@@ -1616,7 +1642,10 @@ impl<W: Write> Engine<W> {
                             self.bot_cover.next_try.remove(&id);
                             return Ok(());
                         }
-                        Ok(false) => self.bot_cover.stats.rays += (before - budget.rays) as u64,
+                        Ok(false) => {
+                            self.bot_cover.stats.rays += (before - budget.rays) as u64;
+                            e.seen_checks = 0;
+                        }
                         Err(()) => {
                             self.bot_cover.stats.deferred += 1;
                             e.next_check = now;
