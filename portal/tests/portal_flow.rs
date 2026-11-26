@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration as StdDuration;
 
 use axum::extract::{Form, State};
 use axum::routing::{get, post};
@@ -16,6 +17,8 @@ use mag_portal::db::{self, AssignOutcome, ClaimOutcome};
 use mag_portal::game_admin::GameAdmin;
 use mag_portal::oidc::{self, OidcClient, ProviderConfig};
 use mag_portal::reports::Reports;
+use mag_portal::status::{StatusServer, StatusService};
+
 use mag_portal::ticket::{self, VerifyingKeys};
 use mag_portal::web::{self, AppState, FLOW_COOKIE, SESSION_COOKIE};
 use p256::ecdsa::{SigningKey, VerifyingKey};
@@ -128,6 +131,17 @@ async fn harness_full(
     reports: Option<Arc<Reports>>,
     limits: web::Limits,
 ) -> Harness {
+    let status = Arc::new(StatusService::new(Vec::new(), StdDuration::from_secs(15)));
+    harness_status(pool, game_admin, reports, limits, status).await
+}
+
+async fn harness_status(
+    pool: PgPool,
+    game_admin: Option<GameAdmin>,
+    reports: Option<Arc<Reports>>,
+    limits: web::Limits,
+    status: Arc<StatusService>,
+) -> Harness {
     let rsa_key = rsa::PrivateKey::new(&mut rand::rng(), 2048).unwrap();
     let der = rsa_key.to_pkcs1_der().unwrap();
     let jwks = json!({ "keys": [{
@@ -187,6 +201,7 @@ async fn harness_full(
         settings,
         limits,
         reports,
+        status,
     });
     let addr = serve(web::router(state)).await;
     Harness {
@@ -1952,6 +1967,8 @@ struct MediusState {
     characters: HashMap<String, FakeCharacter>,
     nonces: std::collections::HashSet<String>,
     actors: Vec<String>,
+    /// Signed `GET /admin/v1/status` requests answered.
+    status_calls: u32,
     /// (account, level, apply) for each signed level request.
     level_calls: Vec<(String, u32, bool)>,
 }
@@ -2018,6 +2035,10 @@ async fn fake_medius(
     st.actors.push(actor);
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     match (method.as_str(), segments.as_slice()) {
+        ("GET", ["admin", "v1", "status"]) => {
+            st.status_calls += 1;
+            reply(StatusCode::OK, fake_status())
+        }
         ("GET", ["admin", "v1", "accounts"]) => {
             let accounts: Vec<Value> = st
                 .characters
@@ -2096,6 +2117,24 @@ async fn fake_medius(
         }
         _ => reply(StatusCode::NOT_FOUND, json!({"error": "not_found"})),
     }
+}
+
+/// A registry with an open Sabotage world in a match and a faulted Acquisition world; counts
+/// only, as the Medius contract promises.
+fn fake_status() -> Value {
+    json!({
+        "medius_version": "9.8.7", "gameplay_version": "6.5.4", "started_at": "2026-11-26T10:00:00Z",
+        "uptime_seconds": 7260, "mode": "registry", "players_online": 4, "queued": 2,
+        "queued_by_game_type": [2, 0, 0], "dme_ports": {"capacity": 32, "in_use": 4},
+        "worlds": [
+            {"worker_id": "sabotage", "state": "open", "game_types": [0], "human_capacity": 32,
+             "pending": 0, "match": {"profile_id": "synthetic-sab-raven-sver", "game_type": 0,
+             "attacking_faction": 1, "defending_faction": 2, "humans": 3, "attacking_humans": 2,
+             "defending_humans": 1, "human_capacity": 32, "bots": 61, "world_capacity": 64}},
+            {"worker_id": "acquisition", "state": "faulted", "game_types": [1],
+             "human_capacity": 32, "pending": 0, "match": null}
+        ]
+    })
 }
 
 async fn fake_medius_server() -> (Arc<FakeMedius>, String) {
@@ -3658,5 +3697,255 @@ async fn api_failures_answer_json(_: PgPoolOptions, connect: PgConnectOptions) {
     let (status, body) = h.ticket(&token).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(body, json!({ "error": "server_error" }));
+    test_db.close().await;
+}
+
+// ---- Server status on the home page, /status and /api/v1/status ----
+
+fn status_server(id: &str, url: &str, staff_only: bool) -> StatusServer {
+    StatusServer {
+        id: id.into(),
+        name: format!("Server {id}"),
+        host: Some(format!("{id}.example.test")),
+        staff_only,
+        admin: GameAdmin::new(url, GAME_SECRET.to_vec()).unwrap(),
+    }
+}
+
+#[sqlx::test]
+async fn server_status_is_public_cached_and_names_nobody(
+    _: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let (pool, test_db) = support::pool(connect).await;
+    let (medius, url) = fake_medius_server().await;
+    let status = Arc::new(StatusService::new(
+        vec![
+            status_server("live", &url, false),
+            // Nothing listens on the discard port: this server is down.
+            status_server("modes", "http://127.0.0.1:9", false),
+            status_server("lab", &url, true),
+        ],
+        StdDuration::from_secs(15),
+    ));
+    let h = harness_status(
+        pool.clone(),
+        Some(GameAdmin::new(&url, GAME_SECRET.to_vec()).unwrap()),
+        None,
+        web::Limits::default(),
+        status.clone(),
+    )
+    .await;
+    let calls = || medius.state.lock().unwrap().status_calls;
+
+    // Before the first poll the home page still renders, and says it is checking.
+    let (code, page) = body(h.get("/", None).await).await;
+    assert_eq!(code, StatusCode::OK);
+    assert!(
+        page.contains("id=\"status\"") && page.contains("Checking"),
+        "{page}"
+    );
+
+    status.refresh(&pool).await;
+    assert_eq!(calls(), 2, "one poll each for live and the staff-only lab");
+
+    // Anonymous: no cookie at all. The status block is on the home page itself.
+    let (code, page) = body(h.get("/", None).await).await;
+    assert_eq!(code, StatusCode::OK);
+    assert!(page.contains("id=\"status\""), "{page}");
+    for shown in [
+        "Server live",
+        "live.example.test",
+        "Some servers or worlds are closed",
+        "Degraded",
+        "Sabotage",
+        "Raven</strong> attacking <strong>SVER",
+        "3 of 32",
+        "synthetic-sab-raven-sver",
+        "Acquisition",
+        "9.8.7",
+        "6.5.4",
+        "2 h 1 min",
+        "4 of 32",
+        "Server modes",
+        "The game server did not answer.",
+    ] {
+        assert!(page.contains(shown), "home page lacks {shown:?}");
+    }
+    // Counts only: the fake game server's characters never appear, nor do admin links or the
+    // staff-only server, nor the game servers' addresses.
+    for hidden in [
+        "alpha",
+        "bravo",
+        "charlie",
+        "/admin",
+        "Server lab",
+        "127.0.0.1",
+        &url,
+    ] {
+        assert!(!page.contains(hidden), "home page shows {hidden:?}");
+    }
+
+    let (code, page) = body(h.get("/status", None).await).await;
+    assert_eq!(code, StatusCode::OK);
+    assert!(page.contains("http-equiv=\"refresh\"") && page.contains("synthetic-sab-raven-sver"));
+    assert!(!page.contains("alpha") && !page.contains("Server lab"));
+
+    let r = h.get("/api/v1/status", None).await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let text = r.text().await.unwrap();
+    for hidden in ["alpha", "bravo", "charlie", "lab", "127.0.0.1"] {
+        assert!(!text.contains(hidden), "JSON shows {hidden:?}: {text}");
+    }
+    let json: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(json["state"], "degraded");
+    let live = &json["servers"][0];
+    assert_eq!(live["state"], "degraded");
+    assert_eq!(live["players_online"], 4);
+    assert_eq!(live["dme_ports"]["in_use"], 4);
+    assert_eq!(live["worlds"][0]["queued"], 2);
+    assert_eq!(live["worlds"][0]["match"]["bots"], 61);
+    assert_eq!(live["worlds"][0]["match"]["attackers"], "Raven");
+    assert_eq!(live["worlds"][1]["open"], false);
+    assert_eq!(json["servers"][1]["state"], "down");
+    assert_eq!(json["servers"].as_array().unwrap().len(), 2);
+
+    // Public traffic reads the cache: many page views, no new game server requests.
+    for path in ["/", "/status", "/api/v1/status"] {
+        for _ in 0..5 {
+            assert_eq!(h.get(path, None).await.status(), StatusCode::OK);
+        }
+    }
+    assert_eq!(calls(), 2, "page views reached the game server");
+
+    // Staff see the staff-only server on the admin status page; players do not.
+    let u = h.sign_in("player").await;
+    assert_eq!(
+        h.get("/admin/status", Some(&u)).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    let (_, page) = body(h.get("/", Some(&u)).await).await;
+    assert!(page.contains("id=\"status\"") && !page.contains("Server lab"));
+    let o = h.sign_in("owner").await;
+    let (code, page) = body(h.get("/admin/status", Some(&o)).await).await;
+    assert_eq!(code, StatusCode::OK);
+    assert!(page.contains("Server lab") && page.contains("Server live"));
+    assert!(!page.contains("alpha"));
+    test_db.close().await;
+}
+
+#[sqlx::test]
+async fn maintenance_banner(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
+    let status = Arc::new(StatusService::new(Vec::new(), StdDuration::from_secs(15)));
+    let h = harness_status(
+        pool.clone(),
+        None,
+        None,
+        web::Limits::default(),
+        status.clone(),
+    )
+    .await;
+    let message = "Restarting the game servers for an update";
+    let (_, page) = body(h.get("/", None).await).await;
+    assert!(!page.contains("class=\"banner\""));
+
+    // Only admins and owners set it.
+    let u = h.sign_in("player").await;
+    let csrf_u = h.csrf(&u).await;
+    let r = h
+        .post_form(
+            "/admin/status/banner",
+            &u,
+            &[("csrf", &csrf_u), ("message", message), ("restart_at", "")],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    assert!(
+        mag_portal::status::load_banner(&pool)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let o = h.sign_in("owner").await;
+    let csrf_o = h.csrf(&o).await;
+    let r = h
+        .post_form(
+            "/admin/status/banner",
+            &o,
+            &[("csrf", &csrf_o), ("message", "   "), ("restart_at", "")],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    let r = h
+        .post_form(
+            "/admin/status/banner",
+            &o,
+            &[
+                ("csrf", &csrf_o),
+                ("message", message),
+                ("restart_at", "soon"),
+            ],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    let r = h
+        .post_form(
+            "/admin/status/banner",
+            &o,
+            &[("csrf", "wrong"), ("message", message), ("restart_at", "")],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    let r = h
+        .post_form(
+            "/admin/status/banner",
+            &o,
+            &[
+                ("csrf", &csrf_o),
+                ("message", message),
+                ("restart_at", "2030-01-02T18:30"),
+            ],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+
+    // Shown publicly at once, without signing in.
+    for path in ["/", "/status"] {
+        let (_, page) = body(h.get(path, None).await).await;
+        assert!(
+            page.contains(message) && page.contains("2030-01-02 18:30 UTC"),
+            "{path}: {page}"
+        );
+    }
+    let json: Value = h.get("/api/v1/status", None).await.json().await.unwrap();
+    assert_eq!(json["banner"]["message"], message);
+    assert_eq!(
+        json["banner"]["restart_expected_at"],
+        "2030-01-02T18:30:00Z"
+    );
+    let (_, dashboard) = body(h.get("/admin", Some(&o)).await).await;
+    assert!(dashboard.contains("set status banner"));
+
+    // A restarted portal loads it from the database.
+    let fresh = StatusService::new(Vec::new(), StdDuration::from_secs(15));
+    fresh.refresh(&pool).await;
+    assert_eq!(fresh.banner().unwrap().message, message);
+
+    let r = h
+        .post_form("/admin/status/banner/clear", &o, &[("csrf", &csrf_o)])
+        .await;
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+    let (_, page) = body(h.get("/", None).await).await;
+    assert!(!page.contains(message));
+    assert!(
+        mag_portal::status::load_banner(&pool)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let (_, dashboard) = body(h.get("/admin", Some(&o)).await).await;
+    assert!(dashboard.contains("clear status banner"));
     test_db.close().await;
 }

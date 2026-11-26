@@ -6,6 +6,7 @@
 <meta name="color-scheme" content="dark">
 <title>{% block title %}MAG community server{% endblock %} · magtest.online</title>
 <link rel="stylesheet" href="/style.css?v={{ crate::web::style_version() }}">
+{% block head %}{% endblock %}
 </head>
 <body>
 <header class="site-header">
@@ -13,6 +14,7 @@
   {% if let Some(csrf) = nav_csrf %}
   <nav aria-label="Site">
     <a href="/#play">How to play</a>
+    <a href="/#status">Status</a>
     <a href="/friends">Friends</a>
     <a href="/account">Account</a>
     <form method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="link">Sign out</button></form>
@@ -20,6 +22,7 @@
   {% else %}
   <nav aria-label="Site">
     <a href="/#play">How to play</a>
+    <a href="/#status">Status</a>
     <a href="/#projects">Projects</a>
     <a class="button" href="/auth/google">Sign in</a>
   </nav>
