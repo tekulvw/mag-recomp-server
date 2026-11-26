@@ -63,6 +63,7 @@ pub mod bot_resupply;
 pub mod bot_resupply_approach_policy;
 pub mod bot_resupply_catalog;
 mod bot_spawn_selection;
+mod bot_squad_orders;
 #[cfg(test)]
 mod bot_squad_packing_tests;
 mod bot_stat_publication;

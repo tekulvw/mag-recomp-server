@@ -324,6 +324,7 @@ pub(super) struct Director {
     staging_cache: BTreeMap<(u32, [u32; 3]), Result<replication::CharacterPosition, &'static str>>,
     pub(super) armed: crate::bot_armed_objectives::Book,
     pub(super) demolition: crate::bot_demolition::Book,
+    pub(super) squad_orders: crate::bot_squad_orders::Book,
 }
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct CandidateKey {
@@ -414,7 +415,7 @@ impl Task {
         self.retry_at = now;
     }
 }
-fn eligible(state: replication::ObjectiveState) -> bool {
+pub(crate) fn eligible(state: replication::ObjectiveState) -> bool {
     use replication::ObjectiveState::*;
     !matches!(state, Inactive | Completed | Locked)
 }
@@ -452,7 +453,7 @@ fn assignment(
 }
 /// Supported shared actions only. A/B defenders have no capture action; they
 /// may only deactivate an attacker capture inside its completion window.
-pub(super) fn operator_action<'a>(
+pub(crate) fn operator_action<'a>(
     object: &'a objective_catalog::Objective,
     state: replication::ObjectiveState,
     team: u8,
@@ -2602,16 +2603,9 @@ impl<W: Write> Engine<W> {
             self.bot_registry.director.cache_world = world;
         }
         let mut receipts = Vec::new();
-        // Resolve once per authored squad, rather than making each bot choose lanes.
-        let assigned: BTreeMap<_, _> = self
-            .bot_registry
-            .bots
-            .values()
-            .map(|b| b.target.squad.squad_index())
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .map(|squad| (squad, self.bot_squad_lane(squad)))
-            .collect();
+        // Resolve once per authored squad, rather than making each bot choose
+        // lanes: its human leader's FRAGO, else its lane (bot_squad_orders).
+        let assigned = self.bot_squad_objectives(now, wall)?;
         let mut duties = self.plan_armed_duties(&policy.armed, now, &mut receipts);
         // Attackers inside an armed charge's blast leave it (bot_blast).
         let zones = self.armed_blast_zones();

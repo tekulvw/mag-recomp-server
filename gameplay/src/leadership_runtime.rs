@@ -370,6 +370,12 @@ impl Active {
     }
 }
 impl<W: Write> Engine<W> {
+    /// Whether a human holds the squad's leader role (native leadership only).
+    pub(crate) fn squad_has_held_leader(&self, squad: u16) -> bool {
+        self.leadership.as_ref().is_some_and(|runtime| {
+            runtime.policy.native().is_some() && runtime.squad_leaders.contains_key(&squad)
+        })
+    }
     pub(crate) fn held_squad_order_leader(&self, actor: &Active) -> bool {
         self.leadership.as_ref().is_some_and(|runtime| {
             runtime.policy.native().is_some()
