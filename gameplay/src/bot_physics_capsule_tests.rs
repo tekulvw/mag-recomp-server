@@ -454,3 +454,113 @@ fn a_drop_launched_at_exact_ledge_y_certifies_for_a_capsule_reaching_below_its_f
         assert!(trace.landing[1] >= 0.0 && trace.landing[1] < 0.05);
     }
 }
+
+fn walled_floor() -> CollisionWorld {
+    world(
+        &[
+            floor(0.0, 12.0, 0.0, 0.0, 10.0),
+            // A wall across x = 0, facing +x.
+            [
+                [0.0, 0.0, 0.0],
+                [0.0, 3.0, 0.0],
+                [0.0, 3.0, 10.0],
+                [0.0, 0.0, 10.0],
+            ],
+        ],
+        [-1.0, -3.0, -1.0],
+        [13.0, 5.0, 11.0],
+    )
+}
+
+#[test]
+fn overlapping_capsule_bots_part_but_never_into_static_geometry() {
+    let world = walled_floor();
+    let b = body();
+    // A stands 5 cm off the wall; B overlaps it by 0.25 m on the open side.
+    // (Neither could start there: `start_motion` refuses an overlap.)
+    let (a, c) = ([0.45, 0.0, 5.0], [1.0, 0.0, 5.0]);
+    let mut grid = ActorGrid::default();
+    grid.insert_reserved_body(2, c, b).unwrap();
+    let terrain = WorldTerrain::new(Some(&world), "synthetic_steep")
+        .unwrap()
+        .with_actors(Query {
+            grid: &grid,
+            actor: 1,
+        });
+    let mut m = Motion::new(a);
+    for _ in 0..4 {
+        m = terrain.advance(m, [0.0; 3], 0.25, b).unwrap();
+        assert!(m.position[0] >= 0.4, "pushed into the wall: {m:?}");
+    }
+    assert!(m.grounded && (m.position[0] - 0.4).abs() < 0.01, "{m:?}");
+    // The open side gives way instead.
+    let a = m.position;
+    let mut grid = ActorGrid::default();
+    grid.insert_reserved_body(1, a, b).unwrap();
+    let terrain = WorldTerrain::new(Some(&world), "synthetic_steep")
+        .unwrap()
+        .with_actors(Query {
+            grid: &grid,
+            actor: 2,
+        });
+    let mut m = Motion::new(c);
+    m = terrain.advance(m, [0.0; 3], 0.25, b).unwrap();
+    let parted = m.position[0] - a[0];
+    assert!(m.grounded && (0.79..0.85).contains(&parted), "{m:?}");
+    assert_eq!(m.position[2], 5.0);
+    // Parted bodies stay put.
+    let before = m.position;
+    m = terrain.advance(m, [0.0; 3], 0.25, b).unwrap();
+    assert_eq!(m.position, before);
+}
+
+#[test]
+fn a_capsule_bot_cannot_walk_through_a_capsule_it_overlaps() {
+    let world = world(
+        &[floor(0.0, 12.0, 0.0, 0.0, 10.0)],
+        [-1.0, -3.0, -1.0],
+        [13.0, 5.0, 11.0],
+    );
+    let b = body();
+    let mut grid = ActorGrid::default();
+    grid.insert_reserved_body(2, [5.5, 0.0, 5.0], b).unwrap();
+    let terrain = WorldTerrain::new(Some(&world), "synthetic_steep")
+        .unwrap()
+        .with_actors(Query {
+            grid: &grid,
+            actor: 1,
+        });
+    let mut m = Motion::new([5.0, 0.0, 5.0]);
+    for _ in 0..12 {
+        m = terrain.advance(m, [4.5, 0.0, 0.0], 0.25, b).unwrap();
+        assert!(m.position[0] < 5.0 + 1e-9, "{m:?}");
+    }
+    // Pressed against it, the bot ends touching from its own side.
+    assert!(m.blocked && terrain.actor_contact() == Some(2), "{m:?}");
+    assert!((m.position[0] - 4.7).abs() < 0.02, "{m:?}");
+}
+
+#[test]
+fn overlapping_box_bodies_are_not_parted() {
+    let world = world(
+        &[floor(0.0, 12.0, 0.0, 0.0, 10.0)],
+        [-1.0, -3.0, -1.0],
+        [13.0, 5.0, 11.0],
+    );
+    let b = Body {
+        max_slope_degrees: 54.0,
+        ..Default::default()
+    };
+    let mut grid = ActorGrid::default();
+    grid.insert_reserved(2, crate::actor_collision::Bounds::body([5.4, 0.0, 5.0], b))
+        .unwrap();
+    let terrain = WorldTerrain::new(Some(&world), "synthetic_steep")
+        .unwrap()
+        .with_actors(Query {
+            grid: &grid,
+            actor: 1,
+        });
+    let start = Motion::new([5.0, 0.0, 5.0]);
+    let m = terrain.advance(start, [0.0; 3], 1.0, b).unwrap();
+    assert_eq!([m.position[0], m.position[2]], [5.0, 5.0]);
+}
