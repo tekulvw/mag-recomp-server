@@ -49,7 +49,9 @@ impl<'a> BitReader<'a> {
         Ok(value)
     }
 }
-const MAX_UPDATE_BITS: usize = 1397 * 8;
+/// Largest native update, the unfragmented plugin message limit.
+pub(crate) const MAX_UPDATE_BYTES: usize = 1397;
+const MAX_UPDATE_BITS: usize = MAX_UPDATE_BYTES * 8;
 
 pub(crate) struct BitWriter {
     pub profile: crate::wire_profile::WireProfile,

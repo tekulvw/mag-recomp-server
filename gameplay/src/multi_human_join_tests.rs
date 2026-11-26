@@ -218,3 +218,139 @@ fn second_human_reserve_reply_carries_no_peer_messages() {
     assert!(streamed.ok, "{:?}", streamed.error);
     assert!(streamed.messages.iter().any(|m| m.player_id == 0));
 }
+
+/// Drain every queued shared frame and return, per recipient, the Character
+/// updates stamped `stamps` in the order they were released.
+fn drain_stamped(engine: &mut Engine<Vec<u8>>, stamps: &[u32]) -> BTreeMap<String, Vec<Vec<u8>>> {
+    let mut out = BTreeMap::<String, Vec<Vec<u8>>>::new();
+    for _ in 0..64 {
+        for message in engine.drain_shared(Vec::new(), 1).unwrap() {
+            let wire = protocol::decode_hex(&message.payload_hex);
+            if replication::ObjectUpdate::decode_with_profile(&wire, engine.wire_profile)
+                .is_ok_and(|update| stamps.contains(&update.header.timestamp_ms))
+            {
+                out.entry(message.reservation_id).or_default().push(wire);
+            }
+        }
+        if engine
+            .peers
+            .values()
+            .chain(engine.active.iter())
+            .all(|actor| actor.pending_shared.is_empty())
+        {
+            return out;
+        }
+    }
+    panic!("shared queues did not drain");
+}
+
+#[test]
+fn coalesced_drain_joins_one_ticks_character_deltas_per_recipient() {
+    let movement = |engine: &Engine<Vec<u8>>, player: u16, stamp: u32| {
+        let fields = player_tracking::ClientCharacterFields {
+            position: Some(replication::CharacterPosition {
+                x: f32::from(player),
+                y: 1.,
+                z: 3.,
+            }),
+            yaw: Some(100),
+            ..Default::default()
+        };
+        replication::multiplayer::CharacterOwnerDelta {
+            sequence: 2,
+            timestamp_ms: stamp,
+            player,
+            fields: &fields,
+        }
+        .encode_with_profile(engine.wire_profile)
+        .unwrap()
+    };
+    let objects = |engine: &Engine<Vec<u8>>, wire: &[u8]| {
+        crate::character_coalescing::objects(wire, engine.wire_profile)
+    };
+    let mut released = Vec::new();
+    let mut profile = None;
+    for coalesce in [false, true] {
+        let mut engine = populated_engine("Synthetic Coalesce");
+        engine.maximum_players = 8;
+        engine.coalesce_character_replication = coalesce;
+        profile = Some(engine.wire_profile);
+        assert!(reserve(&mut engine, 0, A, Duration::ZERO).ok);
+        ready(actor(&mut engine, A).unwrap());
+        assert!(reserve(&mut engine, 1, B, Duration::ZERO).ok);
+        ready(actor(&mut engine, B).unwrap());
+        drain_stamped(&mut engine, &[]);
+        let level = replication::CharacterLevelUpdate {
+            sequence: 2,
+            timestamp_ms: 500,
+            object_index: 100,
+            mag_info: replication::MagCharacterInfo {
+                nominations: 0,
+                level: 4,
+                leadership_level: 0,
+                skill_specialty: 0,
+                head_id: 0,
+                voice_id: 0,
+            },
+        }
+        .encode_with_profile(engine.wire_profile)
+        .unwrap();
+        // One tick's ten bot deltas, a row the coalescer does not measure, a
+        // repeat of the first bot, then the next tick: two bots and A itself.
+        let mut queued: Vec<_> = (100..110).map(|p| movement(&engine, p, 500)).collect();
+        queued.push(level);
+        queued.push(movement(&engine, 100, 500));
+        queued.extend([110, 111, 0].map(|p| movement(&engine, p, 550)));
+        for packet in &queued {
+            for id in [A, B] {
+                actor(&mut engine, id).unwrap().queue_shared(packet.clone());
+            }
+        }
+        let first = [A, B].map(|id| actor(&mut engine, id).unwrap().outbound_sequence);
+        let out = drain_stamped(&mut engine, &[500, 550]);
+        for (index, id) in [A, B].into_iter().enumerate() {
+            let updates = &out[id];
+            let rows: Vec<_> = updates.iter().map(|wire| objects(&engine, wire)).collect();
+            if coalesce {
+                let mut expected =
+                    vec![Some((100..110).collect::<Vec<_>>()), None, Some(vec![100])];
+                // The recipient's own Character goes out alone.
+                expected.extend(if id == A {
+                    vec![Some(vec![110, 111]), Some(vec![0])]
+                } else {
+                    vec![Some(vec![110, 111, 0])]
+                });
+                assert_eq!(rows, expected, "{id}");
+            } else {
+                assert_eq!(updates.len(), queued.len(), "{id}");
+            }
+            // Released updates use the recipient's consecutive sequences and
+            // are what its NAK history replays.
+            let actor = actor(&mut engine, id).unwrap();
+            for (offset, wire) in updates.iter().enumerate() {
+                let header =
+                    replication::ObjectUpdate::decode_with_profile(wire, actor.wire_profile)
+                        .unwrap()
+                        .header;
+                assert_eq!(header.sequence, first[index] + 1 + offset as u32);
+                assert!(actor.replication_history.contains(wire));
+            }
+            assert!(actor.pending_shared.is_empty());
+            released.push((coalesce, id, updates.clone()));
+        }
+    }
+    // Every row reaches each recipient exactly once either way.
+    let rows = |coalesce: bool, id: &str| -> usize {
+        released
+            .iter()
+            .filter(|(c, i, _)| *c == coalesce && *i == id)
+            .flat_map(|(_, _, updates)| updates)
+            .map(|wire| {
+                crate::character_coalescing::objects(wire, profile.unwrap()).map_or(1, |o| o.len())
+            })
+            .sum()
+    };
+    for id in [A, B] {
+        assert_eq!(rows(false, id), rows(true, id));
+    }
+}

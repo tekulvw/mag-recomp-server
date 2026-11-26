@@ -165,6 +165,7 @@ pub fn drop_passages_exclusive(
 mod acquisition_frag_ground;
 pub mod async_log;
 mod ballistic_projectile_motion;
+mod character_coalescing;
 pub mod character_damage_rules;
 mod character_frag_damage;
 pub mod domination_helo;
@@ -1393,6 +1394,9 @@ pub struct Engine<W: Write> {
     team_waves: [Option<TeamWaveClock>; 2],
     shared_drain_cursor: u16,
     shared_deferral: multiplayer::SharedDeferral,
+    /// `--coalesce-character-replication`: join consecutive queued Character
+    /// deltas into one update per recipient (see `character_coalescing`).
+    coalesce_character_replication: bool,
     last_published_rosters: std::collections::BTreeMap<u16, ([u16; 8], u16)>,
     sequence: u64,
     written: u64,
@@ -1733,6 +1737,12 @@ impl<W: Write> Engine<W> {
         self
     }
     /// Explicit lab opt-in. Bridge is never published on a host/game port.
+    /// Opt in to joining consecutive queued Character deltas into one update
+    /// per recipient when the shared queues drain.
+    pub fn with_character_replication_coalescing(mut self) -> Self {
+        self.coalesce_character_replication = true;
+        self
+    }
     pub fn with_development_grenade_radius(mut self) -> Self {
         self.development_grenade_radius = true;
         self

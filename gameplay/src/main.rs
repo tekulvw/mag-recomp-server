@@ -178,6 +178,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     let mut development_dummy_position = None;
     let mut development_control = false;
     let mut development_grenade_radius = false;
+    let mut coalesce_character_replication = false;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -570,6 +571,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             "--development-dummy" => development_dummy = true,
             "--development-control" => development_control = true,
             "--development-grenade-radius" => development_grenade_radius = true,
+            "--coalesce-character-replication" => coalesce_character_replication = true,
             "--worker-id" => {
                 let id = args
                     .next()
@@ -610,7 +612,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             }
             _ => {
                 return Err(io::Error::other(
-                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--match-profiles /absolute/MATCH_PROFILES.json] [--party-reservations] [--active-abilities /absolute/ACTIVE_ABILITIES.json] [--squad-orders /absolute/ORDERS.json] [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--dynamic-bodies /absolute/BODIES.json] [--static-partition /absolute/PARTITION.json] [--acquisition-gameplay /absolute/GAMEPLAY.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--firearm-assist-rules /absolute/ASSISTS.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--smoke-grenade-rules /absolute/SMOKE.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--worker-id ID] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json [--collision-coverage COVERAGE.json]] [--navmesh-world MESH.mag-nav] [--regional-walk-coverage /absolute/COVERAGE.json] [--movement-profile /absolute/MOVEMENT.json] [--bot-fill-total N --bot-population POPULATION.json] [--bot-perception on|off] [--bot-names /absolute/NAMES.json] [--bot-resupply-catalog /absolute/SUPPLY.json] [--bot-resupply-approach-policy /absolute/APPROACH.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS] [--log-segment-bytes BYTES [--log-retention-s SECONDS]]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
+                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--match-profiles /absolute/MATCH_PROFILES.json] [--party-reservations] [--active-abilities /absolute/ACTIVE_ABILITIES.json] [--squad-orders /absolute/ORDERS.json] [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--dynamic-bodies /absolute/BODIES.json] [--static-partition /absolute/PARTITION.json] [--acquisition-gameplay /absolute/GAMEPLAY.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--firearm-assist-rules /absolute/ASSISTS.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--smoke-grenade-rules /absolute/SMOKE.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--worker-id ID] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json [--collision-coverage COVERAGE.json]] [--navmesh-world MESH.mag-nav] [--regional-walk-coverage /absolute/COVERAGE.json] [--movement-profile /absolute/MOVEMENT.json] [--bot-fill-total N --bot-population POPULATION.json] [--bot-perception on|off] [--bot-names /absolute/NAMES.json] [--bot-resupply-catalog /absolute/SUPPLY.json] [--bot-resupply-approach-policy /absolute/APPROACH.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS] [--coalesce-character-replication] [--log-segment-bytes BYTES [--log-retention-s SECONDS]]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
                 ));
             }
         }
@@ -2096,6 +2098,9 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         }
         if development_control {
             engine = engine.with_development_control();
+        }
+        if coalesce_character_replication {
+            engine = engine.with_character_replication_coalescing();
         }
         if development_grenade_radius {
             engine = engine.with_development_grenade_radius();

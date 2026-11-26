@@ -270,6 +270,7 @@ impl<W: Write> Engine<W> {
             team_waves: [None; 2],
             shared_drain_cursor: 0,
             shared_deferral: Default::default(),
+            coalesce_character_replication: false,
             last_published_rosters: Default::default(),
             sequence: 0,
             written: 0,
