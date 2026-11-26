@@ -150,17 +150,18 @@ fn placed(half: f64, height: f64) -> CollisionWorld {
     world
 }
 
-/// A 2 m square machine 2.5 m tall in the middle of the floor.
+/// A 2 m square console 1.2 m tall in the middle of the floor: lower than
+/// a body, so a body over its footprint stands through its top.
 fn machine() -> CollisionWorld {
-    placed(1., 2.5)
+    placed(1., 1.2)
 }
 
 #[test]
 fn a_spot_inside_a_prop_moves_out_beside_it() {
     let world = machine();
-    // The trigger-centre case: the column is inside the machine. A search
+    // The trigger-centre case: the column is inside the console. A search
     // from below its top finds the floor under it, where no body fits.
-    let raw = [10., 2., 10.];
+    let raw = [10., 1., 10.];
     let body = Body::default();
     assert_eq!(
         supported_interval(Some(&world), MAP, at(raw), 0., 4., body),
@@ -176,19 +177,19 @@ fn a_spot_inside_a_prop_moves_out_beside_it() {
 fn an_operator_approach_moves_beside_its_prop_but_stays_in_range() {
     let world = machine();
     // A trigger hugging the machine: 1.2 m either side of its centre in x,
-    // 2.5 m in z, from the floor to 2 m.
+    // 2.5 m in z, from the floor to 1 m (below the console's top).
     let volumes = [crate::objective_range::TriggerBox {
-        centre: [10., 1., 10.],
+        centre: [10., 0.5, 10.],
         axes: [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]],
-        half_extents: [1.2, 1., 2.5],
+        half_extents: [1.2, 0.5, 2.5],
     }];
     let range = crate::objective_range::ObjectiveRange {
-        position: [10., 1., 10.],
+        position: [10., 0.5, 10.],
         maximum_distance_m: 3.,
         volumes: &volumes,
     };
     let raw = at(range.approach(0));
-    assert_eq!(point(raw), [10., 2., 10.]);
+    assert_eq!(point(raw), [10., 1., 10.]);
     let body = Body::default();
     // Unfiltered, the first free spot is east of the machine, outside the
     // trigger; the operator's spot is the first one inside it.
@@ -203,9 +204,9 @@ fn an_operator_approach_moves_beside_its_prop_but_stays_in_range() {
 #[test]
 fn a_spot_with_no_room_within_two_metres_stays_obstructed() {
     // A 6 m block: every ring column is inside it.
-    let world = placed(3., 2.5);
+    let world = placed(3., 1.2);
     assert_eq!(
-        supported_beside(Some(&world), MAP, at([10., 2., 10.]), 0., 4., Body::default(), |_| true),
+        supported_beside(Some(&world), MAP, at([10., 1., 10.]), 0., 4., Body::default(), |_| true),
         Err(OBSTRUCTED)
     );
 }
