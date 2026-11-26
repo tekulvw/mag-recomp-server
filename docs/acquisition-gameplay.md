@@ -74,6 +74,43 @@ replication. Bound native infantry spawn types 4, 5 and 8 use the authored
 category-zero point for local character insertion until their physical routes
 are qualified.
 
+### Controller objective sequences
+
+Capture and Arrival objectives are run by the ordered controller, not by the
+Structural provider, but their definitions can still name one authored
+sequence per entered state. A capture objective typically names one sequence
+for its deactivated state, which builds the closed enclosure around the
+Escort, and another for its completed state, which rebuilds that enclosure and
+plays its opening. Clients only change an objective's sequence when the
+objective's sequence fields (fields 9 and 10: a signed index and the game time
+it started) change, so the server must publish them.
+
+With `--mode GameType128`, `project-retail-domination-structural-effects.py`
+adds a `published_sequences` list to the effects catalog. Each row names a
+non-Structural objective whose definition has a non-empty sequence list: its
+class, definition hash, the sequence index for each of the twelve states (-2
+keeps the current sequence, -1 stops it) and, for each sequence, its source
+hash and event kinds. Definitions without sequences are left out.
+
+At load, every published objective must bind to a controller objective that
+has no Structural row. Each time the controller commits a state for such an
+objective, the server looks up that state's index. It publishes nothing for
+-2, for a state with no authored slot, or when that index is already selected;
+otherwise it selects the index, stamps it with the commit's game time and
+publishes fields 9 and 10 with that tick's Structural sequence updates. The
+selection joins the Structural sequences in late-join replication, so a client
+that joins after a capture receives the completed sequence with its original
+start time. A new round clears it. Catalogs without `published_sequences` keep
+the previous behaviour.
+
+The server only publishes these sequences; it does not replay them. It adds no
+collision for the objects they create and models none of their animation. The
+enclosure's collision and its opening exist only on clients, and the server's
+collision world never holds the enclosure. Nothing on the server therefore
+keeps the Escort inside, and the server has nothing to remove when the
+enclosure opens. Server-side bot and projectile queries still pass through the
+enclosure walls, as before.
+
 Profiles with Structural area damage require complete authored occupant visibility
 for every admitted ground seat. Run `project-retail-ground-seat-visibility.py`
 against the original game archive and the selected ground catalog to add that

@@ -85,6 +85,18 @@ pub(super) fn fixture_with_structural_team(
     area_damage: f32,
     owner_team: u8,
 ) -> crate::Engine<Vec<u8>> {
+    structural_fixture(damage, area_radius, area_damage, owner_team, None)
+}
+
+/// `published` adds controller sequence rows to the effects catalog and lets
+/// the first tick start the match, so the initial captures enter Deactivated.
+pub(super) fn structural_fixture(
+    damage: f32,
+    area_radius: f32,
+    area_damage: f32,
+    owner_team: u8,
+    published: Option<Value>,
+) -> crate::Engine<Vec<u8>> {
     let mut engine = crate::spawn_progression::tests::dynamic_bodies::acquisition_gameplay_tests::capture_fixture();
     let catalog = engine.objective_catalog.as_mut().unwrap();
     let object = catalog
@@ -140,7 +152,7 @@ pub(super) fn fixture_with_structural_team(
     indices.insert("Deactivated", 0);
     indices.insert("Repaired", 0);
     indices.insert("Completed", 1);
-    let effects = Catalog::from_json(&json!({
+    let mut effects = json!({
         "schema":"mag_domination_structural_effect_inputs_v1","map":"synthetic_arena",
         "metadata_sha256":"0".repeat(64),"level_archive_sha256":"a".repeat(64),"level_clv_sha256":"a".repeat(64),
         "global_data_sha256":"a".repeat(64),"physics_sha256":"a".repeat(64),
@@ -153,7 +165,11 @@ pub(super) fn fixture_with_structural_team(
             "pose":{"translation":[10.,3.,10.],"rotation":[[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]]}}],
         "sequences":{"00000001":{"source_sha256":"a".repeat(64),"events":[]},
             "00000002":{"source_sha256":"a".repeat(64),"events":[]}}
-    }).to_string()).unwrap();
+    });
+    if let Some(rows) = &published {
+        effects["published_sequences"] = rows.clone();
+    }
+    let effects = Catalog::from_json(&effects.to_string()).unwrap();
     let (assets, terrain) = terrain_and_assets(&effects);
     let playback =
         Structural::from_acquisition_catalog(effects, engine.objective_catalog.as_ref().unwrap())
@@ -206,6 +222,11 @@ pub(super) fn fixture_with_structural_team(
         engine.acquisition_gameplay.as_mut().unwrap(),
         setup,
     );
+    if published.is_some() {
+        acquisition_gameplay_engine::test_support::unstart(
+            engine.acquisition_gameplay.as_mut().unwrap(),
+        );
+    }
     engine.match_started = true;
     engine.match_epoch = Some(Duration::ZERO);
     engine

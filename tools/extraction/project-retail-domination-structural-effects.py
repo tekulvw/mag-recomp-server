@@ -23,6 +23,9 @@ BLAST_FIELDS = ('FullDamageRadius', 'HalfDamageRadius', 'DamageValue', 'Material
 SEQUENCE_CONTROL = {'PlayDependentSequenceEventDef', 'PlayIndependentSequenceEventDef', 'StopSequencesEventDef'}
 VISUAL_EVENTS = {'PrintEventDef', 'ParticleEventDef', 'SoundEventDef', 'ExplosionEventDef'}
 EVENT_CLASSES = SEQUENCE_CONTROL | VISUAL_EVENTS | {'AnimObjectCreationEventDef'}
+# Acquisition controller objectives whose authored sequences are published,
+# never replayed, by the server.
+PUBLISHED_CLASSES = ('ObjectiveSecureAndHoldProperties', 'ObjectiveArrivalProperties')
 
 
 def require(condition, message):
@@ -34,7 +37,13 @@ def sha(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
-def sequence_events(data):
+def sequence_event_kinds(data):
+    """Event class names in order, for a sequence the server only publishes."""
+    return [event for event, _ in sequence_event_fields(data)]
+
+
+def sequence_event_fields(data, known=None):
+    """Bounded (event class, raw typed fields) pairs of one sequence resource."""
     def word(offset):
         require(0 <= offset <= len(data) - 4, 'Truncated sequence')
         return struct.unpack_from('>I', data, offset)[0]
@@ -45,6 +54,34 @@ def sequence_events(data):
         require(1 < size <= 128 and end <= limit and data[end - 1] == 0, 'Invalid sequence string')
         return data[start:end - 1].decode('ascii'), end
 
+    count = word(0)
+    require(count <= 128, 'Excess sequence events')
+    cursor, result = 4, []
+    for _ in range(count):
+        end = cursor + word(cursor)
+        require(cursor + 21 < end <= len(data)
+                and word(cursor + 4) == 3
+                and data[cursor + 12:cursor + 20] == bytes.fromhex('deadbeef00000003'),
+                'Invalid sequence event boundary')
+        event, pos = string(cursor + 20, end)
+        require(event in known if known is not None
+                else 0 < len(event) <= 64 and event.isalnum(), f'Unsupported sequence event {event}')
+        fields = {}
+        while pos < end and data[pos] == 1:
+            key, pos = string(pos + 1, end)
+            kind, pos = string(pos, end)
+            size = word(pos)
+            require(key not in fields and 4 <= size <= end - pos, f'Invalid sequence field {key}')
+            fields[key] = (kind, data[pos + 4:pos + size])
+            pos += size
+        require(pos == end - 1 and data[pos] == 0, 'Invalid sequence event terminator')
+        result.append((event, fields))
+        cursor = end
+    require(len(data) - cursor < 16 and not any(data[cursor:]), 'Unexpected sequence header tail')
+    return result
+
+
+def sequence_events(data):
     def typed(fields, key, kind, size, default=None):
         if key not in fields and default is not None:
             return default
@@ -66,26 +103,8 @@ def sequence_events(data):
     def token(fields, key, default=None):
         return typed(fields, key, 'util::Token', 4, default).hex()
 
-    count = word(0)
-    require(count <= 128, 'Excess sequence events')
-    cursor, result = 4, []
-    for _ in range(count):
-        end = cursor + word(cursor)
-        require(cursor + 21 < end <= len(data)
-                and word(cursor + 4) == 3
-                and data[cursor + 12:cursor + 20] == bytes.fromhex('deadbeef00000003'),
-                'Invalid sequence event boundary')
-        event, pos = string(cursor + 20, end)
-        require(event in EVENT_CLASSES, f'Unsupported sequence event {event}')
-        fields = {}
-        while pos < end and data[pos] == 1:
-            key, pos = string(pos + 1, end)
-            kind, pos = string(pos, end)
-            size = word(pos)
-            require(key not in fields and 4 <= size <= end - pos, f'Invalid sequence field {key}')
-            fields[key] = (kind, data[pos + 4:pos + size])
-            pos += size
-        require(pos == end - 1 and data[pos] == 0, 'Invalid sequence event terminator')
+    result = []
+    for event, fields in sequence_event_fields(data, EVENT_CLASSES):
         if event == 'AnimObjectCreationEventDef':
             require(set(fields) <= {'objectName', 'geometry', 'collision', 'skeletonDef',
                                     'position', 'rotation', 'start', 'dur'}, 'Unsupported creation field')
@@ -109,8 +128,6 @@ def sequence_events(data):
                            'sequence_token': token(fields, name_field)})
         else:
             result.append({'event_index': len(result), 'kind': event})
-        cursor = end
-    require(len(data) - cursor < 16 and not any(data[cursor:]), 'Unexpected sequence header tail')
     return result
 
 
@@ -146,6 +163,54 @@ def qualify_visual_sequence_controls(projected, sequence_records):
                 del event['sequence_token']
 
     return missing_stop_targets
+
+
+def sequence_slots(fields, sequence_records):
+    """An authored definition's sequence tokens and its index for each state."""
+    require(fields['SequenceOwnerObjective']['raw_hex'] == '00000000',
+            'Linked sequence owner requires a separate root pose')
+    table = bytes.fromhex(fields['Sequences']['raw_hex'])
+    version, length = struct.unpack_from('>2I', table)
+    require(version == 1 and length <= 127 and len(table) == 8 + 4 * length,
+            'Invalid source sequence vector')
+    tokens = [table[offset:offset + 4].hex() for offset in range(8, len(table), 4)]
+    indices = {state: fields[state + 'SequenceIndex']['value'] for state in STATES}
+    require(all(-2 <= index < len(tokens) for index in indices.values()), 'Invalid sequence index')
+    require(all(token in sequence_records for token in tokens), 'Unresolved sequence resource')
+    return tokens, indices
+
+
+def published_sequences(graph, sequence_records):
+    """Per-state sequence choices of controller objectives with authored sequences.
+
+    The server publishes these indices but replays none of their objects, so
+    each sequence keeps only its source hash and event class names.
+    """
+    rows = {}
+    for definition in graph['definitions']:
+        if definition['class_name'] not in PUBLISHED_CLASSES:
+            continue
+        tokens, indices = sequence_slots(definition['fields'], sequence_records)
+        if not tokens:
+            continue
+        sources = []
+        for token in tokens:
+            record = sequence_records[token]
+            require(record['resource_version'] == 3, 'Unsupported sequence version')
+            raw = bytes.fromhex(record['unparsed_resource_header_hex'])
+            sources.append({'source_sha256': sha(raw), 'events': sequence_event_kinds(raw)})
+        rows[definition['definition_token']] = {
+            'class': definition['class_name'],
+            'definition_sha256': definition['source_sha256'],
+            'state_sequence_indices': indices,
+            'sequences': sources,
+        }
+    published = [{'objective_token': obj['name_token'], **rows[obj['definition_token']]}
+                 for obj in graph['instances'] if obj['definition_token'] in rows]
+    require(len(published) <= 128
+            and len({row['objective_token'] for row in published}) == len(published),
+            'Invalid published sequence objective count')
+    return published
 
 
 def penetration_costs(main, game, header_parser):
@@ -235,16 +300,7 @@ def project(archive_path, metadata_path, collision_output=None, main_archive=Non
             continue
         structural = definition['class_name'] == 'ObjectiveDemolitionStructuralProperties'
         fields = definition['fields']
-        require(fields['SequenceOwnerObjective']['raw_hex'] == '00000000',
-                'Linked sequence owner requires a separate root pose')
-        table = bytes.fromhex(fields['Sequences']['raw_hex'])
-        version, length = struct.unpack_from('>2I', table)
-        require(version == 1 and length <= 127 and len(table) == 8 + 4 * length,
-                'Invalid source sequence vector')
-        tokens = [table[offset:offset + 4].hex() for offset in range(8, len(table), 4)]
-        indices = {state: fields[state + 'SequenceIndex']['value'] for state in STATES}
-        require(all(-2 <= index < len(tokens) for index in indices.values()), 'Invalid sequence index')
-        require(all(token in sequence_records for token in tokens), 'Unresolved sequence resource')
+        tokens, indices = sequence_slots(fields, sequence_records)
         for token in tokens:
             if token in projected:
                 continue
@@ -300,6 +356,9 @@ def project(archive_path, metadata_path, collision_output=None, main_archive=Non
             'pose': {'translation': translation, 'rotation': list(zip(*basis))},
         })
     require(placements and len(placements) <= 128, 'Invalid structural placement count')
+    published = None
+    if mode == 'GameType128':
+        published = published_sequences(graph, sequence_records)
     result = {
         'schema': 'mag_domination_structural_effect_inputs_v1',
         'map': row['map']['map'],
@@ -314,6 +373,8 @@ def project(archive_path, metadata_path, collision_output=None, main_archive=Non
         'placements': placements,
         'sequences': projected,
     }
+    if published is not None:
+        result['published_sequences'] = published
 
     require(not missing_stop_targets or main_archive is not None and game_archive is not None,
             'Original shared archives are required for missing stop sequence targets')

@@ -79,6 +79,79 @@ class StructuralSequenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Nested sequence touches collision'):
             qualify({'00000011': {'events': parse(start)}}, {token: record})
 
+    def test_event_kinds_accept_any_named_class_but_keep_boundaries(self):
+        kinds = PROJECTOR['sequence_event_kinds']
+        raw = sequence('AnimEventDef', field('objectName', 'util::Token', bytes(4)))
+        self.assertEqual(kinds(raw), ['AnimEventDef'])
+        with self.assertRaises(ValueError):
+            PROJECTOR['sequence_events'](raw)
+        for bad in (raw[:-1], raw + b'\0' * 16, sequence('Bad-Name')):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                kinds(bad)
+
+
+def definition(token, class_name, sequences, indices, owner='00000000'):
+    fields = {
+        'Sequences': {'raw_hex': (struct.pack('>2I', 1, len(sequences))
+                                  + b''.join(bytes.fromhex(t) for t in sequences)).hex()},
+        'SequenceOwnerObjective': {'raw_hex': owner},
+    }
+    for state in PROJECTOR['STATES']:
+        fields[state + 'SequenceIndex'] = {'value': indices.get(state, -2)}
+    return {'definition_token': token, 'class_name': class_name, 'fields': fields,
+            'source_sha256': token[2:] * 8}
+
+
+class PublishedSequenceTests(unittest.TestCase):
+    def records(self):
+        closed = sequence('PrintEventDef')
+        opening = sequence('AnimEventDef')
+        return {token: {'resource_version': 3, 'unparsed_resource_header_hex': raw.hex()}
+                for token, raw in (('000000a1', closed), ('000000a2', opening))}
+
+    def graph(self, *definitions):
+        return {'definitions': list(definitions),
+                'instances': [{'name_token': '0x0000001%d' % index,
+                               'definition_token': row['definition_token']}
+                              for index, row in enumerate(definitions)]}
+
+    def test_publishes_authored_controller_sequences_and_skips_empty_or_structural(self):
+        capture = definition('0x00000c01', 'ObjectiveSecureAndHoldProperties',
+                             ['000000a1', '000000a2'], {'Deactivated': 0, 'Completed': 1})
+        arrival = definition('0x00000c02', 'ObjectiveArrivalProperties',
+                             ['000000a1'], {'Inactive': 0, 'CancelRetaken': -1})
+        passive = definition('0x00000c03', 'ObjectiveSecureAndHoldProperties', [],
+                             {state: -1 for state in PROJECTOR['STATES']})
+        structural = definition('0x00000c04', 'ObjectiveDemolitionStructuralProperties',
+                                ['000000a1'], {'Deactivated': 0})
+        rows = PROJECTOR['published_sequences'](
+            self.graph(capture, arrival, passive, structural), self.records())
+        self.assertEqual([row['objective_token'] for row in rows], ['0x00000010', '0x00000011'])
+        first, second = rows
+        self.assertEqual(first['class'], 'ObjectiveSecureAndHoldProperties')
+        self.assertEqual(first['definition_sha256'], '00000c01' * 8)
+        self.assertEqual((first['state_sequence_indices']['Deactivated'],
+                          first['state_sequence_indices']['Completed'],
+                          first['state_sequence_indices']['Activating']), (0, 1, -2))
+        self.assertEqual([s['events'] for s in first['sequences']],
+                         [['PrintEventDef'], ['AnimEventDef']])
+        self.assertEqual(len(first['sequences'][1]['source_sha256']), 64)
+        self.assertEqual(second['state_sequence_indices']['CancelRetaken'], -1)
+
+    def test_rejects_linked_owner_bad_index_and_missing_resource(self):
+        publish = PROJECTOR['published_sequences']
+        cases = (
+            (definition('0x00000c01', 'ObjectiveArrivalProperties', ['000000a1'], {},
+                        owner='00000001'), 'Linked sequence owner'),
+            (definition('0x00000c01', 'ObjectiveArrivalProperties', ['000000a1'],
+                        {'Completed': 1}), 'Invalid sequence index'),
+            (definition('0x00000c01', 'ObjectiveArrivalProperties', ['000000ff'], {}),
+             'Unresolved sequence resource'),
+        )
+        for row, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                publish(self.graph(row), self.records())
+
 
 if __name__ == '__main__':
     unittest.main()
