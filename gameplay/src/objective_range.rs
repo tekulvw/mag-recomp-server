@@ -106,8 +106,10 @@ impl TriggerBox {
     }
 }
 
-/// Approach candidate fractions inside a box, centre first.
-const BOX_CANDIDATES: [[f64; 2]; 9] = [
+/// Approach candidate fractions inside a box, centre first, then a ring just
+/// inside its usable edge, where a body may fit beside a placed prop or wall
+/// inside the box (a charge crate, a bunker shell).
+const BOX_CANDIDATES: [[f64; 2]; 25] = [
     [0.0, 0.0],
     [0.5, 0.0],
     [-0.5, 0.0],
@@ -117,6 +119,22 @@ const BOX_CANDIDATES: [[f64; 2]; 9] = [
     [-0.5, -0.5],
     [0.5, -0.5],
     [-0.5, 0.5],
+    [0.95, 0.0],
+    [-0.95, 0.0],
+    [0.0, 0.95],
+    [0.0, -0.95],
+    [0.95, 0.95],
+    [-0.95, -0.95],
+    [0.95, -0.95],
+    [-0.95, 0.95],
+    [0.95, 0.5],
+    [-0.95, -0.5],
+    [0.5, -0.95],
+    [-0.5, 0.95],
+    [0.95, -0.5],
+    [-0.95, 0.5],
+    [0.5, 0.95],
+    [-0.5, -0.95],
 ];
 
 #[derive(Clone, Copy, Debug)]
@@ -292,6 +310,22 @@ mod tests {
         // After a 90 degree yaw the long axis runs along world z.
         assert!(r.contains(at(10.0, 4.5, -5.0)));
         assert!(!r.contains(at(12.0, 4.5, -3.0)));
+    }
+
+    #[test]
+    fn approach_candidates_reach_near_the_usable_edge_of_the_box() {
+        let volumes = [yaw_box(0.0)];
+        let r = range(&volumes);
+        let usable = 2.5 - Body::default().radius;
+        let reach = (0..BOX_CANDIDATES.len())
+            .map(|attempt| (r.approach(attempt)[0] - 10.0).abs())
+            .fold(0.0, f64::max);
+        assert!((reach - 0.95 * usable).abs() < 1e-6, "{reach}");
+        for attempt in 0..BOX_CANDIDATES.len() {
+            let mut p = r.approach(attempt);
+            p[1] = 4.5;
+            assert!(r.contains_planned(p), "{attempt}");
+        }
     }
 
     #[test]
