@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.2](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.10.1...medius-v0.10.2) (2026-11-26)
+
+
+### Bug Fixes
+
+* **medius:** compact settled reward history so the character store keeps accepting rewards ([#301](https://github.com/tekulvw/mag-recomp-server/issues/301)) ([26df337](https://github.com/tekulvw/mag-recomp-server/commit/26df337f1cc4f1571cdeece156644a8d104b342a))
+* **medius:** expire abandoned open reward rows so they cannot fill the character store ([#305](https://github.com/tekulvw/mag-recomp-server/issues/305)) ([3219c3e](https://github.com/tekulvw/mag-recomp-server/commit/3219c3ec122f64b852e095c05eba12691d6cfd57))
+
 ## [0.10.1](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.10.0...medius-v0.10.1) (2026-11-25)
 
 
