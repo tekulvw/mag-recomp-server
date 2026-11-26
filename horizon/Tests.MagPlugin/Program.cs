@@ -87,6 +87,9 @@ Test("committed loadout selection persistence", LoadoutSelectionChecks.Run);
 
 Test("optional finishing and revive reward catalog fields", ReviveRewardChecks.Run);
 Test("FRAGO kill reward bridge schema", LeadershipProgressionChecks.FragoBridgeSchema);
+Test("settled reward ledger compaction keeps open matches", LeadershipProgressionChecks.RewardLedgerCompaction);
+Test("settled reward ledger evicts retained rows only at the hard bound", LeadershipProgressionChecks.RewardLedgerHardBound);
+Test("open matches overflowing the store give a clear reason", LeadershipProgressionChecks.RewardLedgerOpenOverflow);
 Test("FRAGO authored coefficient validation", LeadershipProgressionChecks.FragoCatalogValidation);
 Test("FRAGO admission omits the field for older gameplay workers", LeadershipProgressionChecks.FragoOlderWorkerAdmission);
 Test("FRAGO admission capability and zero award", LeadershipProgressionChecks.FragoAdmissionCapability);

@@ -68,7 +68,7 @@ namespace Server.Medius
             SkillCatalog = Settings.EnableMagCharacterCatalogs || (Settings.MagApplicationId == 20231 && SkillCatalog?.ApplicationId == 20231) ? SkillCatalog : null,
             ProgressionCatalog = Settings.MagApplicationId == 20231 || Settings.EnableMagCharacterCatalogs ? ProgressionCatalog : null,
             InitialSkillPoints = Settings.EnableMagCharacterCatalogs ? InitialSkillPoints : (byte)0,
-            StartingLevel = StartingLevel, TrainingLevel = TrainingLevel };
+            StartingLevel = StartingLevel, TrainingLevel = TrainingLevel, LedgerMaintenance = message => Logger.Info(message) };
         /// <summary>Fail fast on a starting level the progression catalog cannot represent.</summary>
         public static byte? ParseStartingLevel(string value, MagProgressionCatalog catalog) =>
             ParseOperatorLevel("MAG_STARTING_LEVEL", value, catalog, catalog?.InitialLevel ?? 1);
