@@ -101,8 +101,11 @@ check the transmit set, which only refuses what the menu never offers.
   before the local-gameplay event path, so voice never reaches the gameplay bridge.
 - **Checks, in order:** voice relay enabled for this world; the talker is a bound, admitted client; the
   talker's account is not voice-muted or voice-banned; the packet's group is in the talker's transmit
-  set; the talker's packet rate is within a budget of twice the nominal voice byte rate (excess
-  dropped). A packet failing a check is dropped and counted, never forwarded.
+  set; the talker's byte rate is within a budget of twice the nominal voice byte rate, with one second
+  of burst (excess dropped). The budget counts bytes, not packets, and there is no per-packet size limit
+  below the game's own 248 data bytes, because a game that falls behind packs several blocks into one
+  packet (up to six 37-byte blocks, 222 data bytes, seen in the lab) and the catch-up must pass. A
+  packet failing a check is dropped and counted, never forwarded.
 - **Proximity copies.** A packet to a proximity group is allowed only on the talker's own group
   (83 + its DME client index); any other proximity group is refused as `not_allowed_group`. While
   gameplay lists no proximity group in the talker's transmit set (the default, since nothing produces
@@ -156,7 +159,14 @@ evidence store; these are the conclusions.
   capped by the block rate. The DME showed no decode errors, its receive queue has no cap, and both
   groups lost exactly the same share, which loss in transit would not produce. So the shortfall is on
   the sending side: either the game packs more than one block into a packet (harmless) or its own
-  buffer drops the surplus. The diagnostic receipts now tell the two apart (below).
+  buffer drops the surplus.
+- **Rate settled (14:23 to 14:26 UTC, with the per-group receipts).** The client handed the game 2,125
+  blocks. The DME received 2,092 squad packets carrying 78,699 data bytes (2,127 blocks of 37) and
+  2,088 proximity packets carrying 78,736 (2,128 blocks), with no sequence gaps, no steps back and no
+  length mismatches. The largest packets held 222 and 185 data bytes (six and five blocks); 26 and 32
+  packets held more than one block. So every block arrives: when the game's send loop runs slower than
+  the block rate it packs the waiting blocks into one packet. The packet count understates the voice;
+  the byte count is exact. The relay forwards such packets as they are.
 
 ## Moderation
 
