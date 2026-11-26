@@ -1060,3 +1060,48 @@ fn a_bled_out_patient_rejoins_the_next_wave_at_the_point_chosen_while_downed() {
     let stored = actor.tracking.sample.unwrap().position;
     assert_eq!([stored.x, stored.y, stored.z], [120., 3., 100.]);
 }
+
+#[test]
+fn a_bleed_out_just_before_a_wave_spawns_on_that_wave() {
+    use crate::replication::{ObjectUpdate, UpdateHeader};
+    let mut engine = two_actors(0.4);
+    engine.enable_world_ticks();
+    engine.match_started = true;
+    down_patient(&mut engine, Duration::ZERO);
+    // The patient lives on a running team clock whose wave falls 100 ms
+    // after the 7 s bleed-out, well inside a dead client's update interval.
+    let team = usize::from(patient(&engine).team());
+    engine.team_waves[team] = Some(TeamWaveClock {
+        first_deadline: Duration::from_millis(7100),
+        period: Duration::from_secs(20),
+    });
+    let response = engine.tick_world(Duration::from_secs(7), 1, "synthetic-tick".into());
+    assert!(response.ok, "{:?}", response.error);
+    let queued = patient(&engine);
+    assert!(matches!(
+        queued.life,
+        CharacterLife::AwaitingRespawn { generation: 4 }
+    ));
+    assert_eq!(
+        queued.pending_spawn_deadline,
+        Some(Duration::from_millis(7100))
+    );
+    let healer = engine.active.take().unwrap();
+    engine.active = engine.peers.remove("synthetic-reservation-0000");
+    engine.peers.insert(healer.reservation.id.clone(), healer);
+    let header = UpdateHeader {
+        sequence: engine.active.as_ref().unwrap().latest_owner_sequence + 1,
+        nak_sequence: 0,
+        client_index: 0,
+        object_type_mask: 0,
+        timestamp_ms: 7800,
+    };
+    let bytes = ObjectUpdate { header, wire: &[] }
+        .encode_empty_with_profile(engine.wire_profile)
+        .unwrap();
+    dispatch(&mut engine, &bytes, 7800).unwrap();
+    assert!(matches!(
+        engine.active.as_ref().unwrap().life,
+        CharacterLife::Alive { generation: 5, .. }
+    ));
+}

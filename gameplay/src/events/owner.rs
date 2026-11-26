@@ -1495,13 +1495,9 @@ fn plan_update_reply<W: Write>(
     // selection without a new selection or confirmation, unless the player
     // left the queue after this death. The first life still waits for the
     // client's confirmation, and a downed character is not dead yet.
-    let rejoin_queue = matches!(active.life, CharacterLife::AwaitingRespawn { .. })
-        && !active.respawn_held
-        && ctx.engine.match_started
-        && ctx.engine.match_terminal.is_none()
-        && !(ctx.engine.maximum_players == 1
-            && active.replication_history.len() + 2 > MAX_REPLICATION_HISTORY)
-        && update_actions::respawn_point(ctx.engine, active).is_some();
+    // The world tick normally queues it first (see `respawn_queue`); this
+    // covers embeddings that run without world ticks.
+    let rejoin_queue = ctx.engine.rejoins_respawn_queue(active);
     // While the picker is open, publish rollover. A queued due spawn has
     // priority above; never move its deadline forward before the character
     // can consume that wave.

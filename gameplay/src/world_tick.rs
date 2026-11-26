@@ -35,6 +35,7 @@ impl<W: Write> Engine<W> {
             messages.extend(timed!(self, Phase::Bots, self.tick_bots(now, wall))?);
             timed!(self, Phase::Waves, {
                 self.advance_strategic_player_waves(now, wall)?;
+                self.queue_dead_humans_for_next_wave(now, wall)?;
                 self.queue_team_wave_deadlines(now, wall)
             })?;
             messages.extend(timed!(
