@@ -206,6 +206,18 @@ most 64 sounds per tick against each live bot (a distance check, plus a
 segment distance for shots). The synthetic 64-bot check confirms the ray
 budget per tick and that the round robin reaches every bot.
 
+The weapon controller has its own per-tick budget, the firearm policy's
+`max_rays_per_tick` (default 64) and `geometry_work_per_tick` (65,536). Bots
+spend it in round-robin order, every bot already holding a target ahead of
+every bot still searching: a held target needs one ray per shot, a search up
+to `max_candidates_per_bot`. Served in plain round-robin order, a 256-bot
+Domination match spent the budget on searches, reached each engaged bot about
+every 500 ms and so fired about two shots a second instead of at the weapon's
+refire rate. A full lobby also wants a larger budget: in a 256-bot headless
+Domination run, `max_rays_per_tick` 256, `geometry_work_per_tick` 262,144 and
+`max_candidates_per_bot` 4 raised an engaged bot's median from 8.5 to 10 shots
+a second (the refire cap) for about 0.2 ms more firearm time per tick.
+
 `bot_perception_summary` records cumulative interrupts, resumes, sounds, near
 misses, sight rays, deferred checks and perception CPU time every 10 s.
 
