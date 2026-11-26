@@ -30,6 +30,11 @@ pub(crate) const CHARACTER_QUERY_LAYER: usize = 1;
 /// Work units one structure query may spend, separate from the static budget.
 pub(crate) const STRUCTURE_WORK_LIMIT: usize = 16_384;
 
+/// A sweep's nearest structure contact: (fraction, contact normal, obstacle label).
+pub(crate) type SweepContact<'a> = (f64, [f64; 3], &'a str);
+/// A segment's nearest structure crossing: (fraction, position, normal).
+pub(crate) type RayCrossing = (f64, [f64; 3], [f64; 3]);
+
 pub(crate) struct Obstacle {
     pub(crate) label: String,
     pub(crate) pose: Pose,
@@ -112,10 +117,10 @@ impl StructureObstacles {
         end: [f64; 3],
         half: [f64; 3],
         budget: &mut usize,
-    ) -> Result<Option<(f64, [f64; 3], &str)>, &'static str> {
+    ) -> Result<Option<SweepContact<'_>>, &'static str> {
         let min = std::array::from_fn(|i| start[i].min(end[i]) - half[i]);
         let max = std::array::from_fn(|i| start[i].max(end[i]) + half[i]);
-        let mut nearest: Option<(f64, [f64; 3], &str)> = None;
+        let mut nearest: Option<SweepContact<'_>> = None;
         for obstacle in self.near(min, max) {
             if let Some((fraction, normal)) =
                 obstacle
@@ -163,10 +168,10 @@ impl StructureObstacles {
         start: [f64; 3],
         end: [f64; 3],
         budget: &mut usize,
-    ) -> Result<Option<(f64, [f64; 3], [f64; 3])>, &'static str> {
+    ) -> Result<Option<RayCrossing>, &'static str> {
         let min = std::array::from_fn(|i| start[i].min(end[i]));
         let max = std::array::from_fn(|i| start[i].max(end[i]));
-        let mut nearest: Option<(f64, [f64; 3], [f64; 3])> = None;
+        let mut nearest: Option<RayCrossing> = None;
         for obstacle in self.near(min, max) {
             if let Some(hit) = obstacle
                 .mesh
