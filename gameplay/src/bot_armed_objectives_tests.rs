@@ -1050,3 +1050,71 @@ fn an_unplaceable_lane_cannot_starve_the_shared_planner() {
     let slices = records(&e, "bot_planning_slice");
     assert_eq!(slices.last().unwrap()["wave"], false, "{:?}", slices.last());
 }
+
+#[test]
+fn bot_led_squads_tag_their_lane_objective_and_move_it_on_completion() {
+    // SYNTHETIC: Sabotage-style squad orders without leadership, so every
+    // squad is bot-led (bot_squad_orders).
+    let mut e = engine(&SLOTS, true);
+    e.squad_orders = Some(squad_order_engine::Runtime::new(squad_orders::Rules {
+        squad_order_cooldown_ms: 1000,
+    }));
+    assert!(e.sabotage_squad_assignments());
+    plan_tick(&mut e, 100);
+    let tag = |e: &Engine<Vec<u8>>, squad| e.squad_orders.as_ref().unwrap().state.manual_tag(squad);
+    for squad in [0, 1, 16, 17] {
+        assert_eq!(tag(&e, squad), 0x0c80_0000 | u32::from(LANE));
+    }
+    assert!(
+        e.bot_registry
+            .bots
+            .values()
+            .all(|b| b.task.objective == Some(LANE))
+    );
+    let written = records(&e, "bot_squad_orders");
+    assert_eq!(written.len(), 1);
+    assert_eq!(written[0]["squads"].as_array().unwrap().len(), 4);
+    assert!(
+        written[0]["squads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["applied"] == true && s["source"] == "lane")
+    );
+    // Unchanged objectives write nothing more.
+    plan_tick(&mut e, 200);
+    assert_eq!(records(&e, "bot_squad_orders").len(), 1);
+    // The lane objective is destroyed: lanes move on to the next uncompleted
+    // objective, and the tags follow.
+    let world = e.objective_world.as_mut().unwrap();
+    world
+        .development_arm(LANE, Duration::from_millis(250))
+        .unwrap();
+    world.tick(Duration::from_millis(30_400), &Default::default());
+    assert_eq!(world.state(LANE), Some(ObjectiveState::Completed));
+    plan_tick(&mut e, 30_500);
+    for squad in [0, 1, 16, 17] {
+        assert_eq!(tag(&e, squad), 0x0c80_0000 | u32::from(PLANTED));
+    }
+    assert!(
+        e.bot_registry
+            .bots
+            .values()
+            .all(|b| b.task.objective == Some(PLANTED))
+    );
+    // With automatic orders off the tags stay where they are.
+    e.bot_registry
+        .config
+        .as_mut()
+        .unwrap()
+        .squad_orders
+        .automatic_orders = false;
+    let world = e.objective_world.as_mut().unwrap();
+    world
+        .development_arm(PLANTED, Duration::from_millis(30_600))
+        .unwrap();
+    world.tick(Duration::from_millis(61_000), &Default::default());
+    plan_tick(&mut e, 61_100);
+    assert_eq!(tag(&e, 0), 0x0c80_0000 | u32::from(PLANTED));
+    assert_eq!(records(&e, "bot_squad_orders").len(), 2);
+}

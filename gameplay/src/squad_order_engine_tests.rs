@@ -713,3 +713,49 @@ fn sabotage_primary_objective_rewards_carry_the_frago_fact_only_when_admitted() 
     assert!(!rewards.is_empty());
     assert!(rewards.iter().all(|reward| reward.frago.is_none()));
 }
+
+#[test]
+fn automatic_bot_tags_skip_leader_authority_and_the_set_gate_until_a_leader_tags() {
+    const AUTOMATIC: u32 = 0x0c80_000a;
+    const LEADER_TAG: u32 = 0x0c80_000b;
+    let mut engine = sabotage_fixture(true);
+    assert!(engine.squad_has_held_leader(SABOTAGE_SQUAD));
+    assert!(!engine.squad_has_held_leader(0));
+    // An unknown target is reported per squad and changes nothing.
+    let (candidate, results) = engine
+        .plan_automatic_squad_tags(&[(SABOTAGE_SQUAD, 0x0c80_0063)])
+        .unwrap();
+    assert!(candidate.is_none());
+    assert_eq!(
+        results[&SABOTAGE_SQUAD],
+        Err("squad_order_target_unavailable")
+    );
+    let (candidate, results) = engine
+        .plan_automatic_squad_tags(&[(SABOTAGE_SQUAD, AUTOMATIC)])
+        .unwrap();
+    assert_eq!(results[&SABOTAGE_SQUAD], Ok(()));
+    engine.install_squad_order_candidate(candidate.unwrap());
+    assert_eq!(
+        engine.squad_order_tags(SABOTAGE_SQUAD),
+        Some((AUTOMATIC, AUTOMATIC))
+    );
+    engine
+        .queue_squad_orders(Duration::from_millis(500), 1)
+        .unwrap();
+    assert_eq!(
+        published_tag(&engine, SABOTAGE_MEMBER, SABOTAGE_SQUAD),
+        Some(AUTOMATIC)
+    );
+    // The inherited tag stays the server's until the held leader tags.
+    let mut book = crate::bot_squad_orders::Book::default();
+    book.set(SABOTAGE_SQUAD, AUTOMATIC);
+    assert!(!book.human_order(SABOTAGE_SQUAD, true, AUTOMATIC));
+    // No set gate was stamped: the leader may tag at once.
+    assert_eq!(
+        tag_as(&mut engine, SABOTAGE_LEADER, LEADER_TAG, 501)["accepted"],
+        true
+    );
+    let (_, manual) = engine.squad_order_tags(SABOTAGE_SQUAD).unwrap();
+    assert_eq!(manual, LEADER_TAG);
+    assert!(book.human_order(SABOTAGE_SQUAD, true, manual));
+}
