@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.13.0](https://github.com/tekulvw/mag-recomp-server/compare/chart-v0.12.1...chart-v0.13.0) (2026-11-26)
+
+
+### Features
+
+* **medius:** keep characters in PostgreSQL behind MAG_CHARACTER_STORE ([#315](https://github.com/tekulvw/mag-recomp-server/issues/315)) ([2e79200](https://github.com/tekulvw/mag-recomp-server/commit/2e792009dd3571fe64d137f7421d985321f33d20))
+
+
+### Performance Improvements
+
+* give each recipient its own bridge reply allowance behind a worker flag ([#318](https://github.com/tekulvw/mag-recomp-server/issues/318)) ([d12d67f](https://github.com/tekulvw/mag-recomp-server/commit/d12d67f2da4afb8e52c8a73ca5f409341828c8b9))
+
 ## [0.12.1](https://github.com/tekulvw/mag-recomp-server/compare/chart-v0.12.0...chart-v0.12.1) (2026-11-26)
 
 

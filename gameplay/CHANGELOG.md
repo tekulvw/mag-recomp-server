@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.15.0](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.14.5...gameplay-v0.15.0) (2026-11-26)
+
+
+### Features
+
+* **gameplay:** add a capsule sweep for bot bodies ([#316](https://github.com/tekulvw/mag-recomp-server/issues/316)) ([93ce22c](https://github.com/tekulvw/mag-recomp-server/commit/93ce22cdcef1cf04c9054450ebefbe9f7894d5f7))
+* **gameplay:** add an opt-in capsule body for bot locomotion ([#321](https://github.com/tekulvw/mag-recomp-server/issues/321)) ([32d7139](https://github.com/tekulvw/mag-recomp-server/commit/32d7139381ac93f3da48d4c32ad51845f91cd40e))
+* **gameplay:** bind Acquisition field-hospital turrets ([#331](https://github.com/tekulvw/mag-recomp-server/issues/331)) ([a31b97f](https://github.com/tekulvw/mag-recomp-server/commit/a31b97f060d5b791eb454ff2aa4983e9aa03fb07))
+* **gameplay:** keep attacking bots out of an armed charge's blast ([#326](https://github.com/tekulvw/mag-recomp-server/issues/326)) ([3188b48](https://github.com/tekulvw/mag-recomp-server/commit/3188b4888c343b75113d52d730beb5a6b60d659e))
+* **gameplay:** make bots collide with what Sabotage objectives place ([#333](https://github.com/tekulvw/mag-recomp-server/issues/333)) ([1d79097](https://github.com/tekulvw/mag-recomp-server/commit/1d790977ca18f0d0d24c1b4858f9936eb09c2a4c))
+* **gameplay:** send bot demolition teams to the other side's structures ([#325](https://github.com/tekulvw/mag-recomp-server/issues/325)) ([1d73fd6](https://github.com/tekulvw/mag-recomp-server/commit/1d73fd6b9558df26555a33c616dadbd083310ac9))
+
+
+### Bug Fixes
+
+* **gameplay:** deliver the Escort when its driver reports the Arrival ([#323](https://github.com/tekulvw/mag-recomp-server/issues/323)) ([ff0d94a](https://github.com/tekulvw/mag-recomp-server/commit/ff0d94a6f6ad913692e7f961c25f3735ce41df51))
+* **gameplay:** grant the front waiter when a crowd stalls a drop passage ([#337](https://github.com/tekulvw/mag-recomp-server/issues/337)) ([85f4da8](https://github.com/tekulvw/mag-recomp-server/commit/85f4da8b029e1b171d5b94b244acb1e03947cd12))
+* **gameplay:** hold squad APC seats for the squads that spawn there ([#340](https://github.com/tekulvw/mag-recomp-server/issues/340)) ([1d4395a](https://github.com/tekulvw/mag-recomp-server/commit/1d4395a3fa7fd510f5739f2b507503cb30104370))
+* **gameplay:** leave the seat when a seated character dies ([#336](https://github.com/tekulvw/mag-recomp-server/issues/336)) ([89fd751](https://github.com/tekulvw/mag-recomp-server/commit/89fd7515d6a50e2b71265ce6b1e60e61ffbc91bc))
+* **gameplay:** let capsule bots slide past each other ([#338](https://github.com/tekulvw/mag-recomp-server/issues/338)) ([28203cc](https://github.com/tekulvw/mag-recomp-server/commit/28203cca4a1238887f2245b1bf761665d290aff7))
+* **gameplay:** let Domination players change squads within their platoon ([#339](https://github.com/tekulvw/mag-recomp-server/issues/339)) ([be55be8](https://github.com/tekulvw/mag-recomp-server/commit/be55be886f115dbf104e9964783239f0561342a3))
+* **gameplay:** make bot movement and routes respect standing structures ([#332](https://github.com/tekulvw/mag-recomp-server/issues/332)) ([a4a5d21](https://github.com/tekulvw/mag-recomp-server/commit/a4a5d210ab565ce6ef2779635073b4df80ed540b))
+* **gameplay:** open Acquisition parachute drops when the anti-aircraft falls ([#329](https://github.com/tekulvw/mag-recomp-server/issues/329)) ([e769022](https://github.com/tekulvw/mag-recomp-server/commit/e76902299ab251910186c6816ed25829e9fb53ad))
+* **gameplay:** start a capsule bot settled on the ground it spawns on ([#324](https://github.com/tekulvw/mag-recomp-server/issues/324)) ([92f3f6b](https://github.com/tekulvw/mag-recomp-server/commit/92f3f6b9f4fc727604bda5dba02ac03f33a500fa))
+
+
+### Performance Improvements
+
+* **gameplay:** coalesce one tick's Character deltas per recipient behind a flag ([#317](https://github.com/tekulvw/mag-recomp-server/issues/317)) ([67113e4](https://github.com/tekulvw/mag-recomp-server/commit/67113e47ebee390e55183ebd07679a4648cc3292))
+* **gameplay:** find active-ability targets' squads and detections by index ([#322](https://github.com/tekulvw/mag-recomp-server/issues/322)) ([763f135](https://github.com/tekulvw/mag-recomp-server/commit/763f1350f1915017a5b12494ed64a7a0a6a833bf))
+* give each recipient its own bridge reply allowance behind a worker flag ([#318](https://github.com/tekulvw/mag-recomp-server/issues/318)) ([d12d67f](https://github.com/tekulvw/mag-recomp-server/commit/d12d67f2da4afb8e52c8a73ca5f409341828c8b9))
+
 ## [0.14.5](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.14.4...gameplay-v0.14.5) (2026-11-26)
 
 
