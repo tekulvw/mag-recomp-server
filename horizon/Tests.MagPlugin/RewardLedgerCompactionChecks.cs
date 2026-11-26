@@ -195,7 +195,7 @@ internal static partial class LeadershipProgressionChecks
         string[] rows = RowMatches(after);
         Check(rows.Contains("active-quiet") && rows.Contains("undated-open") && rows.Contains(OpenTemplate) &&
             activeReceipts.All(id => after["rewardReceipts"]!.AsObject().ContainsKey(id)), "An active open row or one of its receipts was evicted");
-        Check(RowRewardedAt(after, "undated-open") == fixture.Now.ToUnixTimeSeconds(), "An undated row did not start its TTL at the next commit");
+        Check(RowRewardedAt(after, "undated-open") == fixture.Now.ToUnixTimeSeconds(), "An undated row did not start its TTL at the next reward commit");
         var kept = Enumerable.Range(0, 20).Where(i => rows.Contains($"abandoned-{i:D2}")).ToArray();
         Check(kept.Length >= LocalCharacterStore.RetainedFinalizedMatchRows && kept.Length < 20, "Abandoned rows were not compacted");
         Check(kept.SequenceEqual(Enumerable.Range(20 - kept.Length, kept.Length)), "Expiry did not evict the least recently rewarded rows first");

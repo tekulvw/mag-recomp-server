@@ -63,7 +63,7 @@ A row is **finalized** when its match result reward commits. Gameplay sends that
 - the round never reaches a terminal result;
 - the row was written by an older build before match results finalized rows.
 
-Medius cannot tell these apart from a quiet match in progress. The reward match key is a digest that the match terminal notice does not carry. So rows are **dated** instead: each committed reward stamps its row with `lastRewardAt` (Unix seconds). A row from an older build gets the time of the first commit that sees it, so its TTL starts then. A future date is clamped to the current time.
+Medius cannot tell these apart from a quiet match in progress. The reward match key is a digest that the match terminal notice does not carry. So rows are **dated** instead: each committed reward stamps its row with `lastRewardAt` (Unix seconds). A row from an older build gets the time of the next reward commit, so its TTL starts then; until then it is never compactable. At each reward commit a future date is clamped to the current time. Other saves leave the ledger unchanged.
 
 When a commit would leave the store above 3/4 MiB, compactable rows are evicted with all their receipts, least recently rewarded first, until the store is back at 1/2 MiB. A row is compactable when it is:
 
