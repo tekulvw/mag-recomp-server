@@ -43,11 +43,53 @@ configuration error. `--config DIR` selects a medius config directory other than
   `.maintenance-backups/characters.before-admin-set-level-<account>-<level>-<sha12>.json`
   next to the store. To revert, copy that file back over the store while the
   account is logged out.
+  With the PostgreSQL store, the character row before and after the change is
+  recorded in `mag.admin_changes` in the same transaction instead.
 - **Serialized with the server.** Changes happen under the store's own lock, so a
   concurrent reward or loadout save is applied before or after, never lost.
 
 Medius re-reads the store at each login, so the client shows the new level on
 its next login; no restart is needed.
+
+## PostgreSQL character store
+
+With `MAG_CHARACTER_STORE=postgres` (chart `characterStore.backend: postgres`), the
+commands above work unchanged against PostgreSQL. `character-store` commands
+manage that database. They print counts, a digest of the canonical contents, and
+record and field names; never player data or credentials.
+
+| Command | Effect |
+| --- | --- |
+| `character-store status` | The backend and, for PostgreSQL, its host, database and schema version. |
+| `character-store migrate` | Apply pending schema migrations (main Medius also does this at startup). |
+| `character-store import --from <json>` | Copy a JSON store into the **empty** PostgreSQL store in one transaction, then verify. The JSON file stays locked meanwhile. A non-empty database, or a JSON store with fields this build doesn't know, is refused. |
+| `character-store verify --json <json>` | Compare a JSON store with PostgreSQL: characters (unset XP and level read as 0 and 1), receipts and match rows (without their dates). Differences are listed by record and field name; exit 1 if any. |
+| `character-store export --to <json> [--replace]` | Write PostgreSQL to a JSON store, the rollback path. Settled history is compacted to fit the JSON bound. An existing file is replaced only with `--replace`, which first keeps it as `<json>.before-export-<UTC time>`. |
+| `character-store prune` | Run reward-ledger retention now (main Medius runs it hourly). |
+
+Cutover, with no matches running:
+
+1. Stage the database while the server stays on JSON: set
+   `characterStore.postgres.existingSecret` (and `caSecret`) but keep
+   `characterStore.backend: json`. The chart then mounts the database settings
+   without switching the store.
+2. Keep a copy, migrate and import:
+
+   ```sh
+   M=deploy/<release>-mag-recomp-server-medius
+   kubectl exec -n <namespace> $M -c medius -- cp /accounts/characters.json /accounts/characters.before-postgres.json
+   kubectl exec -n <namespace> $M -c medius -- env MAG_CHARACTER_STORE=postgres mag-admin character-store migrate
+   kubectl exec -n <namespace> $M -c medius -- env MAG_CHARACTER_STORE=postgres mag-admin character-store import --from /accounts/characters.json
+   ```
+
+3. Just before switching, run `verify --json /accounts/characters.json` the same
+   way. It must report no differences; anything committed to the JSON store after
+   the import shows up here.
+4. Set `characterStore.backend: postgres` and roll Medius.
+
+To roll back, stop play, run
+`mag-admin character-store export --to /accounts/characters.json --replace`, then
+set `characterStore.backend: json`.
 
 ## Admin API
 

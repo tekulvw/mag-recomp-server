@@ -7,9 +7,24 @@ RUN dotnet restore Horizon.Server.sln \
     && dotnet restore Tests.MagPlugin/Tests.MagPlugin.csproj \
     && dotnet build Tests.MagPlugin/Tests.MagPlugin.csproj -c Release --no-restore
 
-# Offline synthetic tests only. This target never starts a server or a game.
+# Offline synthetic tests only. This target never starts a server or a game. The PostgreSQL
+# character-store checks run against a throwaway local server, reached over a Unix socket and
+# discarded with this stage; durability is pointless for it, so fsync is off.
 FROM build AS check
-RUN dotnet run --project Tests.MagPlugin/Tests.MagPlugin.csproj -c Release --no-build
+RUN apt-get update -q \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends postgresql \
+    && rm -rf /var/lib/apt/lists/*
+RUN pg="$(ls -d /usr/lib/postgresql/*/bin | sort -V | tail -n1)" \
+    && install -d -o postgres -m 0700 /tmp/mag-pg \
+    && install -d -o postgres -m 0755 /tmp/mag-pg-socket \
+    && su postgres -c "$pg/initdb -D /tmp/mag-pg/data -U postgres --auth=trust >/dev/null" \
+    && su postgres -c "$pg/pg_ctl -D /tmp/mag-pg/data -w -l /tmp/mag-pg/server.log -o '-k /tmp/mag-pg-socket -c listen_addresses= -p 55432 -c fsync=off -c synchronous_commit=off -c full_page_writes=off -c max_connections=100' start" \
+    && status=0 \
+    && MAG_TEST_POSTGRES='Host=/tmp/mag-pg-socket;Port=55432;Username=postgres;Database=postgres' MAG_REQUIRE_POSTGRES_CHECKS=1 \
+       dotnet run --project Tests.MagPlugin/Tests.MagPlugin.csproj -c Release --no-build || status=$? \
+    && su postgres -c "$pg/pg_ctl -D /tmp/mag-pg/data -m fast -w stop" \
+    && rm -rf /tmp/mag-pg /tmp/mag-pg-socket \
+    && exit $status
 
 FROM check AS publish
 RUN dotnet publish Server.Medius/Server.Medius.csproj -c Release --no-restore -o /out/medius \

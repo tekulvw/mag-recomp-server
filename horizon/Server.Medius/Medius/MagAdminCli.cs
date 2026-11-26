@@ -22,6 +22,14 @@ namespace Server.Medius
         [--apply]                            XP becomes the level threshold and each gained level's skill
                                              points are added. Without --apply this is a dry run.
 
+  character-store status                     The configured backend (MAG_CHARACTER_STORE) and its schema.
+  character-store migrate                    Apply pending PostgreSQL schema migrations.
+  character-store import --from <json>       Copy a JSON store into the empty PostgreSQL store, then verify.
+  character-store verify --json <json>       Compare a JSON store with PostgreSQL by record and field name.
+  character-store export --to <json>         Write PostgreSQL to a JSON store (rollback); --replace keeps
+        [--replace]                          a timestamped copy of an existing file and replaces it.
+  character-store prune                      Run PostgreSQL reward-ledger retention now.
+
 --config defaults to /config/main (the medius config directory). A write is refused while the
 account has a live login (session markers in $MAG_ACTIVE_ACCOUNTS_DIR, default /tmp), and lowering
 a level is refused. Applied changes first copy the store to .maintenance-backups/ beside it.";
@@ -42,6 +50,7 @@ a level is refused. Applied changes first copy the store to .maintenance-backups
             }
             LocalCharacterStore store;
             string storePath;
+            bool storeCommand = rest.Count > 0 && rest[0] == "character-store";
             try
             {
                 string file = Path.Combine(config, "medius.json");
@@ -54,6 +63,8 @@ a level is refused. Applied changes first copy the store to .maintenance-backups
                 storePath = settings.MagCharacterStorePath;
                 if (string.IsNullOrWhiteSpace(storePath)) { Console.Error.WriteLine("mag-admin: MagCharacterStorePath is not configured"); return 2; }
                 Program.LoadCharacterCatalog();
+                // Maintenance commands manage the schema themselves; everything else needs it current.
+                Program.ConfigureCharacterBackend(storeCommand ? Program.CharacterSchemaPolicy.None : Program.CharacterSchemaPolicy.Require);
                 store = Program.CreateCharacterStore();
             }
             catch (Exception e) when (e is IOException || e is InvalidDataException || e is JsonException || e is ArgumentException || e is UnauthorizedAccessException)
@@ -61,6 +72,9 @@ a level is refused. Applied changes first copy the store to .maintenance-backups
                 Console.Error.WriteLine("mag-admin: configuration failed: " + e.Message);
                 return 2;
             }
+            if (storeCommand)
+                return RunCharacterStore(rest.Skip(1).ToArray(), Program.CharacterDatabase, Program.CreateCharacterStore,
+                    Program.CreateJsonCharacterStore, Console.Out, Console.Error);
             string backups = MagAdminOperations.BackupDirectory(storePath);
             string markers = MagAdminOperations.MarkerDirectory();
             return Run(rest.ToArray(), store, backups, markers, DateTime.UtcNow, Console.Out, Console.Error);
@@ -93,6 +107,76 @@ a level is refused. Applied changes first copy the store to .maintenance-backups
                 error.WriteLine("mag-admin: " + e.Message);
                 return 1;
             }
+        }
+
+        /// <summary>
+        /// <c>character-store</c> maintenance (docs/admin-cli.md). Prints counts, digests and record or field
+        /// names only, never player data or credentials. Exit codes as for <see cref="Run"/>.
+        /// </summary>
+        public static int RunCharacterStore(string[] args, PostgresCharacterDatabase database, Func<LocalCharacterStore> configured,
+            Func<string, LocalCharacterStore> json, TextWriter output, TextWriter error)
+        {
+            string Option(string name)
+            {
+                int index = Array.IndexOf(args, name);
+                return index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
+            }
+            string command = args.Length > 0 ? args[0] : null;
+            if (command != "status" && database == null)
+            {
+                error.WriteLine("mag-admin: character-store commands other than status need MAG_CHARACTER_STORE=postgres");
+                return 2;
+            }
+            try
+            {
+                switch (command)
+                {
+                    case "status":
+                        if (database == null) { output.WriteLine("backend: json"); return 0; }
+                        output.WriteLine($"backend: postgres {database.Target}{(database.ReadOnly ? " (read-only)" : "")}");
+                        output.WriteLine($"schema:  {database.SchemaVersion()} of {database.LatestSchemaVersion}");
+                        return 0;
+                    case "migrate":
+                        int applied = database.Migrate();
+                        output.WriteLine($"migrated: {applied} applied, schema {database.SchemaVersion()} of {database.LatestSchemaVersion}");
+                        return 0;
+                    case "import" when Option("--from") is string from:
+                    {
+                        database.RequireCurrentSchema();
+                        var target = configured(); var source = json(from);
+                        output.WriteLine($"target: {database.Target}");
+                        output.WriteLine("imported: " + target.ImportFrom(source).Describe());
+                        return Report(target.CompareWith(source), output, error);
+                    }
+                    case "verify" when Option("--json") is string path:
+                        database.RequireCurrentSchema();
+                        return Report(configured().CompareWith(json(path)), output, error);
+                    case "export" when Option("--to") is string to:
+                        database.RequireCurrentSchema();
+                        output.WriteLine("exported: " + configured().ExportTo(json(to), args.Contains("--replace")).Describe());
+                        return 0;
+                    case "prune":
+                        database.RequireCurrentSchema();
+                        output.WriteLine(database.PruneLedger(Program.LedgerRetention).Describe());
+                        return 0;
+                    default:
+                        error.WriteLine(Usage);
+                        return 2;
+                }
+            }
+            catch (Exception e) when (e is IOException || e is InvalidDataException || e is UnauthorizedAccessException || e is InvalidOperationException)
+            {
+                error.WriteLine("mag-admin: " + e.Message);
+                return 1;
+            }
+        }
+
+        private static int Report(IReadOnlyList<string> differences, TextWriter output, TextWriter error)
+        {
+            if (differences.Count == 0) { output.WriteLine("verified: the JSON and PostgreSQL stores agree"); return 0; }
+            foreach (var difference in differences) error.WriteLine("difference: " + difference);
+            error.WriteLine($"mag-admin: {differences.Count} difference(s) between the stores");
+            return 1;
         }
 
         private static int List(LocalCharacterStore store, string markerDirectory, DateTime now, TextWriter output)

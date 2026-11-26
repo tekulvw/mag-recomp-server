@@ -182,6 +182,21 @@ spec:
             {{- with $root.Values.runtime.rewardLedgerOpenMatchTtlHours }}
             - {name: MAG_REWARD_LEDGER_OPEN_MATCH_TTL_HOURS, value: {{ . | int | toString | quote }}}
             {{- end }}
+            {{- with (include "mag.characterDatabase" $root | fromJson) }}
+            {{- if eq .backend "postgres" }}
+            - {name: MAG_CHARACTER_STORE, value: postgres}
+            {{- end }}
+            - {name: MAG_CHARACTER_DB_SECRET_DIR, value: /character-db}
+            {{- if .caSecret }}
+            - {name: MAG_CHARACTER_DB_CA_FILE, value: /character-db-ca/ca.crt}
+            {{- end }}
+            {{- if not $main }}
+            - {name: MAG_CHARACTER_DB_READ_ONLY, value: "1"}
+            {{- end }}
+            {{- with .ledgerRetentionDays }}
+            - {name: MAG_REWARD_LEDGER_RETENTION_DAYS, value: {{ . | int | toString | quote }}}
+            {{- end }}
+            {{- end }}
             {{- $portal := $root.Values.portalTickets | default dict }}
             {{- if eq ($portal.mode | default "off") "required" }}
             {{- $keys := list }}
@@ -239,6 +254,12 @@ spec:
             {{- end }}
             {{- if and $main $registry }}
             - {name: world-registry, mountPath: /world-registry, readOnly: true}
+            {{- end }}
+            {{- with (include "mag.characterDatabase" $root | fromJson) }}
+            - {name: character-db, mountPath: /character-db, readOnly: true}
+            {{- if .caSecret }}
+            - {name: character-db-ca, mountPath: /character-db-ca, readOnly: true}
+            {{- end }}
             {{- end }}
         {{- end }}
         {{- else }}
@@ -340,6 +361,24 @@ spec:
         - name: world-registry
           configMap:
             name: {{ include "mag.name" $root }}-world-registry
+        {{- end }}
+        {{- with (include "mag.characterDatabase" $root | fromJson) }}
+        - name: character-db
+          secret:
+            secretName: {{ .existingSecret }}
+            items:
+              {{- range $key := list "host" "port" "dbname" "user" "password" }}
+              - {key: {{ $key }}, path: {{ $key }}}
+              {{- end }}
+            defaultMode: 0440
+        {{- if .caSecret }}
+        - name: character-db-ca
+          secret:
+            secretName: {{ .caSecret }}
+            items:
+              - {key: ca.crt, path: ca.crt}
+            defaultMode: 0440
+        {{- end }}
         {{- end }}
         {{- end }}
 {{- end -}}

@@ -47,11 +47,24 @@ The MAG adapter switches in `Server.Medius/Config/ServerSettings.cs` remain opt-
 | Optional starting level for new characters | `MAG_STARTING_LEVEL` |
 | Optional minimum level after completing Training | `MAG_TRAINING_LEVEL` |
 | Character store | `MagCharacterStorePath` |
-| Optional hours before an abandoned open match reward row can be compacted (default 24) | `MAG_REWARD_LEDGER_OPEN_MATCH_TTL_HOURS` |
+| Optional hours before an abandoned open match reward row can be compacted (default 24; JSON store only) | `MAG_REWARD_LEDGER_OPEN_MATCH_TTL_HOURS` |
+| Character store backend: `json` (default, the file above) or `postgres` | `MAG_CHARACTER_STORE` |
+| PostgreSQL connection files `host`, `port`, `dbname`, `user`, `password` (required with `postgres`) | `MAG_CHARACTER_DB_SECRET_DIR` |
+| Optional PostgreSQL server CA; the certificate is then verified (otherwise TLS is required but unverified) | `MAG_CHARACTER_DB_CA_FILE` |
+| Optional `1` for read-only PostgreSQL sessions (MAPS) | `MAG_CHARACTER_DB_READ_ONLY` |
+| Optional days PostgreSQL keeps settled reward receipts and match rows (default 7, 1 to 90) | `MAG_REWARD_LEDGER_RETENTION_DAYS` |
 
 The prototype loader optionally reads `prototype-character-grants.json` beside the externally supplied loadout-defaults file. This file is not distributed here. The loaders in `Server.Medius/Medius/Mag*Catalog.cs` define the accepted schemas; no copied game catalog is needed to compile or run offline checks. Without the required runtime catalogs, content-dependent features cannot provide the corresponding items, grants, skills or progression. No replacement catalog is silently inserted. `MAG_STARTING_LEVEL` starts new characters at that level, and `MAG_TRAINING_LEVEL` raises a character completing Training to at least that level after the Training XP bonus; both grant the level's XP threshold and every gained level's skill points, as if earned. `MAG_TRAINING_LEVEL` applies only to new Training completions (characters that completed Training earlier are unchanged) and never lowers a level or XP. Both require the progression catalog, `MAG_TRAINING_LEVEL` also the Training-completion catalog, and a level the catalogs define; otherwise startup fails naming the variable. Deployment also needs the separately configured gameplay bridge and services appropriate to its selected feature set.
 
+## PostgreSQL character store
+
+With `MAG_CHARACTER_STORE=postgres`, Medius keeps characters, reward receipts and match progress in PostgreSQL instead of the JSON file. Every rule (creation, loadouts, purchases, nominations, rewards, Training and `mag-admin` level changes) is the same code for both backends; PostgreSQL only replaces how the state is loaded and saved. Each operation is one transaction that locks only its own character's row, so commits from different worlds and characters no longer wait on one file lock, and there is no size bound. A reward is acknowledged to gameplay only after its transaction commits; gameplay resends unacknowledged rewards every second, and a resend replays its receipt (`reward_id` is the receipt's primary key), so XP is never lost or doubled across Medius restarts or database failovers. While the database is unreachable, Medius logs `Gameplay reward persistence deferred` and the rewards land when it returns; after a failure, calls fail fast for one second.
+
+Main Medius applies the schema migrations at startup (`horizon/Server.Medius/CharacterStore/Migrations`, checksummed, under an advisory lock) and refuses a schema that is newer than the build or whose applied migration differs. MAPS (`MAG_CHARACTER_DB_READ_ONLY=1`) and `mag-admin` only check the version. Instead of size-based compaction, main Medius prunes hourly: each match row whose last reward is older than `MAG_REWARD_LEDGER_RETENTION_DAYS` is deleted together with all its receipts, and a summary is kept in `mag.match_history`. `mag-admin character-store import`, `verify` and `export` move a JSON store into PostgreSQL and back; see [docs/admin-cli.md](../docs/admin-cli.md). The design is [docs/superpowers/specs/2026-11-25-postgres-character-store-design.md](../docs/superpowers/specs/2026-11-25-postgres-character-store-design.md).
+
 ## Reward ledger bounds
+
+This section describes the JSON character store.
 
 The character store (`MagCharacterStorePath`, 1 MiB hard bound) also holds the reward ledger. Each match row (`matchRewardProgress`) is one character's progress in one match: its match XP, sub-point fraction and FRAGO tally. Each receipt (`rewardReceipts`) makes a redelivered reward replay its original result. Gameplay resends every unacknowledged reward each second, so receipts must outlive any redelivery. Action XP is credited to the character when each reward commits; a match row only carries the basis for later rewards in that match, such as the match result bonus.
 

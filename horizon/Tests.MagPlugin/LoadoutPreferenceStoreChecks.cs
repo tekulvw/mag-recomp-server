@@ -211,7 +211,7 @@ internal static class LoadoutPreferenceStoreChecks
     }
 
     // Invented retail catalogs: faction-local wire ids (1024 + n) whose ownership index is n.
-    static (MagLoadoutCatalog Armory, MagSkillCatalog Skills) RetailSkillCatalogs(string directory)
+    internal static (MagLoadoutCatalog Armory, MagSkillCatalog Skills) RetailSkillCatalogs(string directory)
     {
         object Item(int bit, string name, int? ammo) => new {
             wire_id = 1024 + bit, name, authored_ref = "synthetic:" + bit, available_bit = bit, factions = new[] { 0, 1, 2 }, primary_ammo = ammo };

@@ -281,6 +281,51 @@ class ChartTests(unittest.TestCase):
         for invalid in (0, 721, '48', [48]):
             render({'runtime': {'rewardLedgerOpenMatchTtlHours': invalid}}, ok=False)
 
+    def test_optional_postgres_character_store(self):
+        def containers(docs):
+            return [(d, c) for d in docs if d['kind'] == 'Deployment'
+                    for c in d['spec']['template']['spec']['containers'] if c['name'] in ('medius', 'maps')]
+        default = render()
+        self.assertEqual(default, render({'characterStore': {'backend': 'json'}}))
+        for _, container in containers(default):
+            names = {e['name'] for e in container.get('env', [])}
+            self.assertFalse(any(n.startswith('MAG_CHARACTER_') or n == 'MAG_REWARD_LEDGER_RETENTION_DAYS' for n in names))
+            self.assertFalse(any(m['name'].startswith('character-db') for m in container['volumeMounts']))
+        docs = render({'characterStore': {'backend': 'postgres', 'postgres': {
+            'existingSecret': 'mag-test-characters-app', 'caSecret': 'mag-test-characters-ca', 'ledgerRetentionDays': 14}}})
+        pairs = containers(docs)
+        self.assertEqual(sorted(c['name'] for _, c in pairs), ['maps', 'medius'])
+        for deployment, container in pairs:
+            env = {e['name']: e.get('value') for e in container['env']}
+            self.assertEqual(env['MAG_CHARACTER_STORE'], 'postgres')
+            self.assertEqual(env['MAG_CHARACTER_DB_SECRET_DIR'], '/character-db')
+            self.assertEqual(env['MAG_CHARACTER_DB_CA_FILE'], '/character-db-ca/ca.crt')
+            self.assertEqual(env['MAG_REWARD_LEDGER_RETENTION_DAYS'], '14')
+            self.assertEqual(env.get('MAG_CHARACTER_DB_READ_ONLY'), None if container['name'] == 'medius' else '1')
+            mounts = {m['name']: m for m in container['volumeMounts']}
+            self.assertTrue(mounts['character-db']['readOnly'] and mounts['character-db-ca']['readOnly'])
+            volumes = {v['name']: v for v in deployment['spec']['template']['spec']['volumes']}
+            self.assertEqual(volumes['character-db']['secret']['secretName'], 'mag-test-characters-app')
+            self.assertEqual({i['key'] for i in volumes['character-db']['secret']['items']}, {'host', 'port', 'dbname', 'user', 'password'})
+            # Never the CA's private key.
+            self.assertEqual(volumes['character-db-ca']['secret']['items'], [{'key': 'ca.crt', 'path': 'ca.crt'}])
+        gameplay = [c for d in docs if d['kind'] == 'Deployment' for c in d['spec']['template']['spec']['containers'] if c['name'] == 'gameplay']
+        self.assertTrue(gameplay and all(not any(e['name'].startswith('MAG_CHARACTER_') for e in c.get('env', [])) for c in gameplay))
+        without_ca = containers(render({'characterStore': {'backend': 'postgres', 'postgres': {'existingSecret': 'db-app'}}}))
+        for _, container in without_ca:
+            self.assertNotIn('MAG_CHARACTER_DB_CA_FILE', {e['name'] for e in container['env']})
+            self.assertNotIn('MAG_REWARD_LEDGER_RETENTION_DAYS', {e['name'] for e in container['env']})
+        # A Secret staged under backend json mounts the database for import but keeps the JSON store.
+        for _, container in containers(render({'characterStore': {'postgres': {'existingSecret': 'db-app'}}})):
+            env = {e['name']: e.get('value') for e in container['env']}
+            self.assertNotIn('MAG_CHARACTER_STORE', env)
+            self.assertEqual(env['MAG_CHARACTER_DB_SECRET_DIR'], '/character-db')
+        render({'characterStore': {'backend': 'postgres'}}, ok=False)
+        render({'characterStore': {'backend': 'postgres', 'postgres': {'existingSecret': ''}}}, ok=False)
+        render({'characterStore': {'backend': 'sqlite'}}, ok=False)
+        for invalid in (0, 91, '7', [7]):
+            render({'characterStore': {'backend': 'postgres', 'postgres': {'existingSecret': 'db-app', 'ledgerRetentionDays': invalid}}}, ok=False)
+
     def test_optional_initial_spawn_delay_override(self):
         default = gameplay_arguments(render())
         self.assertNotIn('--initial-spawn-delay-ms', default)
