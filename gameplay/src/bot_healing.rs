@@ -894,7 +894,7 @@ impl<W: Write> Engine<W> {
             }
             if let Some((resolved, packet)) = publication {
                 self.commit_bot_healing(id, generation, before, resolved, maximum)?;
-                self.broadcast_bot_packet(packet);
+                self.broadcast_bot_state_packet(packet);
             }
             self.bot_registry.bots.get_mut(&id).unwrap().healing = state;
         }

@@ -218,7 +218,7 @@ impl<W: Write> Engine<W> {
             .chain(self.active.iter_mut())
             .filter(|a| a.receives_objective_state())
         {
-            recipient.queue_shared(packet.clone());
+            recipient.queue_state_shared(packet.clone());
         }
         Ok(())
     }
@@ -286,7 +286,7 @@ impl<W: Write> Engine<W> {
         self.objective_world = Some(world);
         for recipient in self.peers.values_mut().chain(self.active.iter_mut()) {
             if recipient.receives_objective_state() {
-                recipient.queue_shared(packet.clone());
+                recipient.queue_state_shared(packet.clone());
             }
         }
         Ok(Vec::new())
@@ -531,7 +531,7 @@ impl<W: Write> Engine<W> {
         self.advance_forward_spawns(now)?;
         for recipient in self.peers.values_mut().chain(self.active.iter_mut()) {
             if recipient.receives_objective_state() {
-                recipient.queue_shared(packet.clone());
+                recipient.queue_state_shared(packet.clone());
             }
             let next = self.objective_catalog.as_ref().and_then(|catalog| {
                 self.objective_world.as_ref().and_then(|world| {
