@@ -33,10 +33,20 @@ Behaviour of the replacement server, described in our own words.
   that report used to go by, and the player waited a whole extra period after
   the countdown reached zero. The client's first update after the wave starts
   the new life. Embeddings without world ticks still rejoin on that update.
-- A downed character cannot join the queue. The retail client sends its
-  confirmation while the map is open, which may be while downed, and does not
-  resend it after bleeding out. The server therefore does not wait for one.
-- `CancelRespawn` (`0x0213`) takes a dead character out of the queue. It then
+- A downed character gives up its downed life when it confirms: the
+  confirmation clears the downed state (the death keeps the attribution of the
+  hit that downed it, as a bleed-out does, and the character can no longer be
+  revived) and joins the next wave in the same step. Retail's confirmation
+  handler does the same: it clears the incapacitated condition before its
+  dead check. The retail client sends this confirmation by itself when its
+  respawn screen opens, about 2.5 s after the player presses Bleed out, and
+  the bleed-out press has normally given the life up already (see
+  [incapacitation.md](incapacitation.md)).
+- No reply is sent to a confirmation. The retail server sends none, and the
+  client only logs one; its deploy button toggles between confirm and cancel
+  on each press by itself.
+- `CancelRespawn` (`0x0213`) takes a dead character out of the queue, including
+  one that gave up its downed life with a confirmation. It then
   stays out until the player confirms again. The next death clears this hold.
 - The queue is not joined once the match has ended.
 

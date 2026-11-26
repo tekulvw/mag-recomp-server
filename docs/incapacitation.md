@@ -3,9 +3,10 @@
 Retail human characters can enter a downed life state after an eligible lethal
 hit. They retain their existing object, pose and inventory. The server owns the
 deadline and the separate finishing-damage accumulator; downed characters cannot
-fire, heal themselves, mount seats or enter the respawn queue. Expiry, finishing
-damage or an owned give-up request makes the character eligible for the normal
-team spawn wave.
+fire, heal themselves or mount seats. Expiry, finishing damage, an owned give-up
+request (`KillSelf`), the client's bleed-out report or a respawn confirmation
+ends the downed life and makes the character eligible for the normal team spawn
+wave.
 
 This feature is opt-in. Supply an absolute `--incapacitation-rules` path alongside
 the normal retail catalogs. With the flag absent, the existing terminal-death
@@ -65,6 +66,33 @@ packaging a new data bundle.
 The Helm chart can pass this optional flag through `data.gameplayExtraArgs`, using
 an operator-supplied file under `/data`. No deployment or data bundle is implied
 by enabling the source feature.
+
+## Bleeding out early
+
+A downed player can give up instead of waiting for a medic. The retail client
+sends no message for the Bleed out press. It moves its death state into its
+bleeding-out substate, which its next owner update reports as the downed
+character state (7) with 3 in the first state-userdata byte, and shortens its
+own remaining downed time to the authored `fRespawnTime` (2.5 s in the retail
+character gameplay settings). When that runs out it opens the respawn screen and,
+with `bRespawnWaitsForButtonPress` false, confirms its respawn by itself.
+
+The server gives the downed life up on the first of these it sees:
+
+- the bleeding-out report in an owner update (retail
+  `SimCharacter::UpdateState` clears the incapacitated condition on it), or
+- a respawn confirmation (`0x0211`) while still downed (retail
+  `SimCharacter::RecvMessageConfirmRespawn` clears the condition before its
+  dead check), which also joins the next wave in the same step.
+
+The give-up publishes the same body as an expiry: the downed hit's attribution
+with the downed condition bits cleared. It adds no death notice or statistics,
+and the character can no longer be revived. The world tick then queues it for
+the next team wave, as for any death (see [respawn-queue.md](respawn-queue.md)).
+Other substates in a downed report leave the deadline alone. An owner update
+whose direct reply slot is already taken defers the give-up (audited as
+`downed_give_up_deferred`); the client's automatic confirmation still ends the
+downed life.
 
 ## Typed requests and replication
 

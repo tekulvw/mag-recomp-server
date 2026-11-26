@@ -369,6 +369,11 @@ pub(super) fn confirm_respawn<W: Write>(
     let active = ctx.active;
     let now = ctx.now;
     let next_sequence = ctx.next_sequence;
+    // Retail SimCharacter::RecvMessageConfirmRespawn clears the incapacitated
+    // condition of a downed character before its dead check, so the
+    // confirmation gives up the downed life and then joins the queue.
+    let gave_up = super::combat::plan_downed_give_up(ctx, plan)?;
+    let life = plan.combat.new_life.unwrap_or(active.life);
     let eligible = active.entered_game
         && active.ready_for_updates
         && active
@@ -382,7 +387,7 @@ pub(super) fn confirm_respawn<W: Write>(
             .is_some()
         && active.emplacement_creation.is_some()
         && ctx.engine.actor_matches_team(active)
-        && active.life.next_generation().is_some();
+        && life.next_generation().is_some();
     if eligible && active.pending_spawn_deadline.is_none() {
         // Reserve room for both the deadline and its physical spawn.
         if ctx.engine.maximum_players == 1
@@ -393,27 +398,35 @@ pub(super) fn confirm_respawn<W: Write>(
             let team = active.team();
             let clock = team_wave_clock(ctx.engine, team, now)?;
             let deadline = clock.next_after(now)?;
-            let packet = replication::TeamSpawnDeadline {
-                sequence: next_sequence,
-                timestamp_ms: now.as_millis() as u32,
-                object_index: 0,
-                team,
-                deadline_ms: deadline.as_millis() as u32,
+            if gave_up.is_some() {
+                // The direct reply already carries the death. Queue now; the
+                // owner's next update or the world tick publishes the deadline.
+                plan.session.new_spawn_deadline = Some(deadline);
+                plan.session.new_team_wave = Some(clock);
+            } else {
+                let packet = replication::TeamSpawnDeadline {
+                    sequence: next_sequence,
+                    timestamp_ms: now.as_millis() as u32,
+                    object_index: 0,
+                    team,
+                    deadline_ms: deadline.as_millis() as u32,
+                }
+                .encode_with_profile(ctx.engine.wire_profile)?;
+                plan.outgoing = Some(packet.clone());
+                plan.replication.wave_delta = Some(packet);
+                plan.session.new_spawn_deadline = Some(deadline);
+                plan.session.published_wave_deadline = Some(deadline);
+                plan.session.new_team_wave = Some(clock);
             }
-            .encode_with_profile(ctx.engine.wire_profile)?;
-            plan.outgoing = Some(packet.clone());
-            plan.replication.wave_delta = Some(packet);
-            plan.session.new_spawn_deadline = Some(deadline);
-            plan.session.published_wave_deadline = Some(deadline);
-            plan.session.new_team_wave = Some(clock);
         }
     }
     Ok(
         json!({"type":"confirm_respawn","eligible":eligible,"spawn_sent":false,
+        "downed_give_up_generation":gave_up,
         "already_spawned":active.life.is_alive(),
         "queued":plan.session.new_spawn_deadline.or(active.pending_spawn_deadline).is_some(),
         "deadline_ms":plan.session.new_spawn_deadline.or(active.pending_spawn_deadline).map(|d|d.as_millis() as u32),
-        "replication_sequence":if plan.replication.wave_delta.is_some(){Some(next_sequence)}else{None},
+        "replication_sequence":if plan.replication.wave_delta.is_some() || plan.replication.damage_delta.is_some(){Some(next_sequence)}else{None},
         "spawn_point_index":active.selected_spawn.map_or(active.squad_spawn,|s|s.spawn_point_index),
         "policy":"authored_match_side_spawn_wave"}),
     )
