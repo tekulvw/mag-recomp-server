@@ -2482,7 +2482,8 @@ fn serve(
                     let wait_us = waiting.elapsed().as_micros() as u64;
                     let processing = Instant::now();
                     let event_id = match &request {
-                        Request::Event { request_id, .. } => Some(request_id.clone()),
+                        Request::Event { request_id, .. }
+                        | Request::AdminKill { request_id, .. } => Some(request_id.clone()),
                         _ => None,
                     };
                     let response = handle_once(event_replies, event_id, || {
@@ -2515,7 +2516,7 @@ fn serve(
         // Served-worker bridge features; in-process engines do not offer them.
         // Horizon accepts at most 32 capabilities; a full discovery reply with
         // these four, worker_registry_v1, world_capacity_v1 and
-        // reply_budget_per_recipient_v1 lists 20.
+        // reply_budget_per_recipient_v1 lists 21.
         response.capabilities.extend([
             world_stream::CAPABILITY.to_owned(),
             world_stream::EVENT_REPLAY_CAPABILITY.to_owned(),

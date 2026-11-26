@@ -36,6 +36,7 @@ mod active_ability_publication_tests;
 pub mod active_ability_sensor;
 pub mod active_ability_state;
 mod actor_collision;
+pub mod admin_kill;
 mod admission;
 pub mod armor;
 pub mod ballistics;
@@ -614,6 +615,17 @@ pub enum Request {
         target_object_id: u32,
         amount_hp: f32,
     },
+    /// Operator kill of one admitted human (see `admin_kill`).
+    AdminKill {
+        v: u8,
+        request_id: String,
+        reservation_id: String,
+        world_id: u32,
+        player_id: u16,
+        operator: String,
+        #[serde(default)]
+        reason: Option<String>,
+    },
     Release {
         v: u8,
         request_id: String,
@@ -659,6 +671,7 @@ impl Request {
             | Self::DevelopmentDamage { v, request_id, .. }
             | Self::DevelopmentArmDemolition { v, request_id, .. }
             | Self::DevelopmentStructureDamage { v, request_id, .. }
+            | Self::AdminKill { v, request_id, .. }
             | Self::Release { v, request_id, .. } => (*v, request_id),
         }
     }
@@ -710,6 +723,9 @@ pub struct Response {
     /// that ask (`worker_drain_v1`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_draining: Option<bool>,
+    /// What an applied `admin_kill` did, sent only in its own reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_kill: Option<admin_kill::Outcome>,
 }
 impl Response {
     pub fn success(request_id: String) -> Self {
@@ -730,6 +746,7 @@ impl Response {
             world_stream: None,
             voice_groups: None,
             worker_draining: None,
+            admin_kill: None,
         }
     }
 
@@ -949,6 +966,17 @@ impl Request {
                     return Err("invalid_reservation_id");
                 }
                 validate_payload_hex(payload_hex)?;
+            }
+            Request::AdminKill {
+                reservation_id,
+                operator,
+                reason,
+                ..
+            } => {
+                if !identifier(reservation_id, 16) {
+                    return Err("invalid_reservation_id");
+                }
+                admin_kill::validate(operator, reason.as_deref())?;
             }
             Request::RefreshLoadouts {
                 reservation_id,
@@ -1413,6 +1441,8 @@ pub struct Engine<W: Write> {
     require_match_configuration: bool,
     /// Wall time of the request being handled, for records made outside a plan.
     last_wall_secs: u64,
+    /// The last planned event's gameplay denial, read back by `admin_kill`.
+    last_gameplay_denial: Option<&'static str>,
     world_epoch: Option<Duration>,
     bot_registry: bot_registry::BotRegistry,
     bot_perception: bot_perception::World,
@@ -1929,6 +1959,26 @@ impl<W: Write> Engine<W> {
         if self.refuses_while_draining(&request) {
             return Response::error(request_id, worker_drain::REFUSAL);
         }
+        if let Request::AdminKill {
+            reservation_id,
+            world_id,
+            player_id,
+            operator,
+            reason,
+            ..
+        } = request
+        {
+            return self.admin_kill(
+                request_id,
+                reservation_id,
+                world_id,
+                player_id,
+                operator,
+                reason,
+                now,
+                wall_secs,
+            );
+        }
         if let Some(result) = self.handle_party_request(&request, now, wall_secs) {
             return match result {
                 Ok(reply) => Response {
@@ -2029,6 +2079,7 @@ impl<W: Write> Engine<W> {
             objective_rewards::EXTENDED_CAPABILITY.into(),
             repair_rewards::CAPABILITY.into(),
             firearm_assists::XP_CAPABILITY.into(),
+            admin_kill::CAPABILITY.into(),
         ];
         if self.per_recipient_reply_budget {
             capabilities.push(reply_budget::CAPABILITY.into());
@@ -2164,7 +2215,8 @@ impl<W: Write> Engine<W> {
             Request::ProgressionCommitted { .. }
             | Request::RefreshProgression { .. }
             | Request::LoadoutSelectionSettled { .. }
-            | Request::RefreshLoadouts { .. } => {
+            | Request::RefreshLoadouts { .. }
+            | Request::AdminKill { .. } => {
                 unreachable!("handled before actor selection")
             }
             Request::ConfigureMatch {

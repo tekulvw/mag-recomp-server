@@ -255,6 +255,7 @@ impl<W: Write> Engine<W> {
             match_configured: false,
             require_match_configuration: false,
             last_wall_secs: 0,
+            last_gameplay_denial: None,
             world_epoch: None,
             bot_registry: Default::default(),
             bot_perception: Default::default(),

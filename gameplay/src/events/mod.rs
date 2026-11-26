@@ -736,6 +736,7 @@ impl<W: Write> Engine<W> {
                 None
             }
         });
+        self.last_gameplay_denial = plan.gameplay_denial;
         // This is the final direct batch, including the owner reply and clock.
         // Deny atomically here; drain_shared must never discover an oversized
         // direct batch after terminal, facing, ammo or history state committed.
