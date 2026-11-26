@@ -1337,9 +1337,7 @@ fn plan_update_reply<W: Write>(
         }
         .encode_with_bunkers_with_profile(
             active.reservation.player,
-            if ctx.engine.match_profile().game_type == 2
-                && ctx.engine.match_profile().auto_assign_teams
-            {
+            if ctx.engine.indexed_hospital_seats() {
                 None
             } else {
                 ctx.engine.alpha_owner()

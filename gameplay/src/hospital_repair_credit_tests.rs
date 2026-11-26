@@ -33,12 +33,13 @@ fn fixture() -> Engine<Vec<u8>> {
     actor.observed_primary.as_mut().unwrap().gear_slot = 3;
     actor.reservation.character.account_id = Some("synthetic-engineer".into());
     let world = engine.bunker_world.as_mut().unwrap();
-    world.domination_spawn_sha256 = Some("qualified synthetic profile".into());
+    world.hospital_spawn_sha256 = Some("qualified synthetic profile".into());
     let hospital = world.bunkers.get_mut(&0).unwrap();
-    hospital.domination = Some(DominationHospitalAccess {
+    hospital.hospital = Some(HospitalAccess {
         mount_radii: vec![],
         max_occupancy: 12,
         passenger_seats: 12,
+        direct_damage: true,
     });
     hospital.exit = Some(vehicle_exit::BunkerExitPolicy {
         transform: vehicle_exit::BunkerTransform {

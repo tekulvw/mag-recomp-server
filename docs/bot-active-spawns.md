@@ -36,8 +36,11 @@ navmesh route (walking or certified drops) from the point to the lane
 objective:
 
 - the squad's usable points above, including the population source spawn;
-- in Domination, the squad's hospital (bunker passenger point) while its point
-  is active and the hospital is operational and belongs to the squad's side.
+- the squad's hospital (bunker passenger point) while its point is active and
+  the hospital is operational and belongs to the squad's side. This covers
+  every Domination hospital and an Acquisition field hospital whose profile
+  binds its emplacement (see
+  [Acquisition field hospitals](acquisition-gameplay.md#field-hospitals)).
   Bots arrive on foot at the hospital's authored exits, or a 1 m cell further
   out, instead of taking a seat;
 - in Acquisition, the field hospital the structural objective routes the
@@ -46,7 +49,8 @@ objective:
   category-zero point there; bots stand on routed ground within 6 m of the
   authored point. A catalog that makes the field hospitals selectable needs no
   fallback: the structural spawn scope then leaves them alone and they rank
-  like any other point.
+  like any other point. A catalog that binds them as bunker passenger points
+  uses the hospital rule above.
 
 A point whose placements do not route to the objective is skipped and reported
 once. Points within 20 m of the shortest route are rotated per bot, so a

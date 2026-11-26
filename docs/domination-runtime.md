@@ -220,6 +220,11 @@ receipt records the change as `spawn_fallback`, and the rule matches
 selection the squad lost is replaced, when the life starts, by the squad's first
 usable point that is not destroyed.
 
+The same indexed hospital seating, exits and occupant rules serve Acquisition's
+field hospitals when an Acquisition profile binds their emplacements; there the
+Structural objective's forward spawn drives the body and direct hits do not
+damage it. See [Acquisition field hospitals](acquisition-gameplay.md#field-hospitals).
+
 The optional aircraft scope is `core_with_helo_insertion`. It requires a complete
 `core.helo` object containing `fleet`, `models`, `paths`, `damage` and an explicit
 operator `random_seed`. Its fleet binds the exact spawn bytes and three original

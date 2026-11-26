@@ -445,7 +445,7 @@ fn guided_constructor_anchors_and_static_target_identity_follow_current_roots() 
         .bunker_world
         .as_ref()
         .unwrap()
-        .domination_bunker(5)
+        .hospital(5)
         .unwrap()
         .position
         .y;
@@ -479,18 +479,18 @@ fn guided_constructor_anchors_and_static_target_identity_follow_current_roots() 
         .bunker_world
         .as_ref()
         .unwrap()
-        .domination_bunker(5)
+        .hospital(5)
         .unwrap()
         .spawn_index;
     e.bunker_world
         .as_mut()
         .unwrap()
-        .apply_domination_cycle(spawn, false, 0)
+        .apply_hospital_cycle(spawn, false, 0)
         .unwrap();
     e.bunker_world
         .as_mut()
         .unwrap()
-        .apply_domination_cycle(spawn, true, 0)
+        .apply_hospital_cycle(spawn, true, 0)
         .unwrap();
     assert_eq!(e.guided_target(1, 0x0d00_0005).unwrap(), hospital);
 }

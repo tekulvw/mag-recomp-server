@@ -185,8 +185,8 @@ fn indexed_hospital_grants_never_reuse_versions_across_rebuild() {
     enable_synthetic_hospital_turrets(&mut engine);
     equip_synthetic_hospital_turret(&mut engine, 5);
     let world = engine.bunker_world.as_mut().unwrap();
-    world.apply_domination_cycle(1, false, u32::MAX).unwrap();
-    world.apply_domination_cycle(1, true, u32::MAX).unwrap();
+    world.apply_hospital_cycle(1, false, u32::MAX).unwrap();
+    world.apply_hospital_cycle(1, true, u32::MAX).unwrap();
     assert!(world.hospital_turrets[&5].grant.is_none());
     let actor = engine.active.as_ref().unwrap();
     for version in 4..=u8::MAX {

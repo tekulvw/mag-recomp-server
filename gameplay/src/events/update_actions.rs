@@ -415,7 +415,7 @@ fn spawn_point_blocked<W: Write>(engine: &Engine<W>, index: u16) -> bool {
         Some(spawn_catalog::SpawnKind::BunkerPassenger) => engine
             .bunker_world
             .as_ref()
-            .and_then(|world| world.domination_bunker_at_spawn(index))
+            .and_then(|world| world.hospital_at_spawn(index))
             .is_some_and(|hospital| !hospital.operational),
         Some(spawn_catalog::SpawnKind::VehiclePassenger) => engine
             .ground_vehicles
@@ -503,13 +503,13 @@ fn ground_spawn_seat<W: Write>(
 fn hospital_spawn_seat<'a, W: Write>(
     ctx: &PlanningContext<'a, W>,
     index: u16,
-) -> Result<(crate::structures::DominationBunker<'a>, u8), &'static str> {
+) -> Result<(crate::structures::IndexedHospital<'a>, u8), &'static str> {
     let active = ctx.active;
     let hospital = ctx
         .engine
         .bunker_world
         .as_ref()
-        .and_then(|world| world.domination_bunker_at_spawn(index))
+        .and_then(|world| world.hospital_at_spawn(index))
         .ok_or("bunker_spawn_binding_required")?;
     if !hospital.operational
         || hospital.team != active.team()
@@ -664,9 +664,7 @@ pub(super) fn plan_respawn<W: Write>(
         plan.gameplay_denial = Some("parachute_spawn_requires_inventory");
         return Ok(());
     }
-    let indexed = bunker
-        && ctx.engine.match_profile().game_type == 2
-        && ctx.engine.match_profile().auto_assign_teams;
+    let indexed = bunker && ctx.engine.indexed_hospital_seats();
     let mut hospital_seat = None;
     if indexed {
         match hospital_spawn_seat(ctx, point.index) {

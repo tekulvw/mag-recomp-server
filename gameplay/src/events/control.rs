@@ -473,8 +473,12 @@ pub(super) fn change_player_squad<W: Write>(
             catalog.set_runtime_default(inherited).ok()?;
             Some(catalog)
         });
+    // The bunker restriction predates indexed hospitals. An Acquisition
+    // profile that binds its field hospitals keeps the squad changes it
+    // allows without them; each squad's hospital point seats its own lives.
     let bunker_supported = candidate.as_ref().is_some_and(|c| {
         !c.match_profile().has_bunkers
+            || (c.match_profile().game_type == 1 && ctx.engine.indexed_hospital_seats())
             || target == ctx.engine.spawn_catalog.as_ref().unwrap().squad_index()
     });
     let accepted = active.initial_objects.is_some()

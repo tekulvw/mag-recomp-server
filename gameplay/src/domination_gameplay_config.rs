@@ -559,7 +559,7 @@ impl Configuration {
             .ok_or_else(|| io::Error::other("domination_gameplay_requires_explicit_core_scope"))?;
         core.validate_scope()?;
         bunkers
-            .validate_domination_profile(spawns)
+            .validate_hospital_profile(spawns)
             .map_err(io::Error::other)?;
         let sources =
             self.load_sources(objectives.clone(), spawns, NonZeroUsize::new(128).unwrap())?;
@@ -787,7 +787,7 @@ impl Configuration {
             spawns.map_name(),
             native_elf,
             bunkers
-                .domination_structure_sha256()
+                .hospital_structure_sha256()
                 .ok_or_else(|| io::Error::other("domination_hospital_structure_source_missing"))?,
         )
         .map_err(io::Error::other)?;
@@ -815,7 +815,7 @@ impl Configuration {
         let mut initial_collisions = SequenceCollisionState::default();
         for index in 0..16 {
             let bunker = bunkers
-                .domination_bunker(index)
+                .hospital(index)
                 .ok_or_else(|| io::Error::other("domination_hospital_index_missing"))?;
             let yaw =
                 hospital_doc["factions"][bunker.faction.to_string()]["initial_turret_yaw_rad"]

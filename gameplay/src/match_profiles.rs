@@ -331,12 +331,17 @@ impl Registry {
             let policy = spawns.match_profile();
             if !matches!(policy.game_type, 0..=2)
                 || !policy.auto_assign_teams
-                || (policy.has_bunkers && policy.game_type != 2)
+                || (policy.has_bunkers && !matches!(policy.game_type, 1 | 2))
                 || (policy.game_type == 2 && spawns.map_pool().squads.len() != 32)
                 || policy.attacking_faction == policy.defending_faction
                 || spawns.map_pool().owner_faction != Some(policy.defending_faction)
             {
                 return Err(io::Error::other("unsupported_match_profile_policy"));
+            }
+            if policy.game_type == 1 && policy.has_bunkers && source.acquisition_gameplay.is_none()
+            {
+                // Field hospitals follow their Structural objectives' forward spawns.
+                return Err(io::Error::other("acquisition_hospitals_require_gameplay"));
             }
             let bunkers = match (
                 policy.has_bunkers,
@@ -345,7 +350,7 @@ impl Registry {
                 source.bunker_allocation.as_ref(),
             ) {
                 (true, Some(placement), Some(structure), Some(allocation)) => {
-                    Some(structures::BunkerWorld::load_domination(
+                    Some(structures::BunkerWorld::load_hospitals(
                         placement, structure, allocation, &spawns,
                     )?)
                 }
@@ -529,6 +534,16 @@ impl Registry {
                 setup
                     .validate_projectile_contact_static(Some(world))
                     .map_err(io::Error::other)?;
+                if let Some(hospitals) = &bunkers {
+                    setup
+                        .structural
+                        .as_ref()
+                        .ok_or_else(|| {
+                            io::Error::other("acquisition_hospitals_require_structural_objectives")
+                        })?
+                        .validate_hospitals(hospitals)
+                        .map_err(io::Error::other)?;
+                }
                 setup
                     .validate_ground_drivers(ground)
                     .map_err(io::Error::other)?;

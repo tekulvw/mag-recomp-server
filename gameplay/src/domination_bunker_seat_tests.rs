@@ -3,6 +3,12 @@ use super::*;
 use crate::spawn_progression::dispatch;
 
 pub(crate) fn fixture() -> Engine<Vec<u8>> {
+    fixture_for_mode(2)
+}
+
+/// SYNTHETIC: two indexed hospitals (5 at point 1, 6 at point 2) for the
+/// defending squads of a Domination (2) or Acquisition (1) profile.
+pub(crate) fn fixture_for_mode(game_type: u8) -> Engine<Vec<u8>> {
     let mut engine = bunker_team_tests::fixture(1, 1, true);
     engine.wire_profile = engine.wire_profiles.profile(20231).unwrap();
     let squads: Vec<_> = (0..32)
@@ -15,7 +21,7 @@ pub(crate) fn fixture() -> Engine<Vec<u8>> {
     let spawns=spawn_catalog::SpawnCatalog::from_json(&json!({
         "format":"mag_spawn_catalog","schema_version":1,"source":"synthetic hospital events",
         "active":{"map_name":"hospital_test","squad_index":16,"default_spawn":1,"available":[1,2]},
-        "match_profile":{"game_type":2,"auto_assign_teams":true,"attacking_faction":1,
+        "match_profile":{"game_type":game_type,"auto_assign_teams":true,"attacking_faction":1,
             "has_bunkers":true,"has_objectives":false,"maximum_points":[111,222]},
         "maps":[{"name":"hospital_test","owner_faction":0,"spawn_count":3,
             "runtime_indices_verified":true,"runtime_indices_basis":"synthetic",
@@ -59,10 +65,11 @@ pub(crate) fn fixture() -> Engine<Vec<u8>> {
             position_offset: [2., 0., 0.],
         }],
     });
-    bunker.domination = Some(DominationHospitalAccess {
+    bunker.hospital = Some(HospitalAccess {
         mount_radii: vec![2.],
         max_occupancy: 12,
         passenger_seats: 12,
+        direct_damage: game_type == 2,
     });
     bunker.spawn = 1;
     world.bunkers.insert(5, bunker.clone());
@@ -165,7 +172,7 @@ fn source_hospital_mount_preserves_side_health_range_and_supported_seat_guards()
     }
 }
 
-fn occupant_fixture() -> (
+pub(crate) fn occupant_fixture() -> (
     Engine<Vec<u8>>,
     BTreeMap<u32, acquisition_character_effects::NativeState>,
 ) {
@@ -201,7 +208,7 @@ fn occupant_fixture() -> (
 fn hospital_occupant_damage_records_before_install_and_preserves_the_other_hospital() {
     let (mut engine, mut native) = occupant_fixture();
     let candidate = engine
-        .prepare_domination_bunker_occupants(5, u32::MAX, &native, Duration::from_secs(1))
+        .prepare_hospital_occupants(5, u32::MAX, &native, Duration::from_secs(1))
         .unwrap();
     assert_eq!(candidate.audit().len(), 1);
     assert_eq!(candidate.audit()[0]["bunker_index"], 5);
@@ -229,7 +236,7 @@ fn late_occupant_resolution_failure_rolls_back_health_seats_and_publications() {
     let before = engine.writer.len();
     assert_eq!(
         engine
-            .prepare_domination_bunker_occupants(5, u32::MAX, &native, Duration::from_secs(1))
+            .prepare_hospital_occupants(5, u32::MAX, &native, Duration::from_secs(1))
             .err(),
         Some("bunker_occupant_native_state_missing")
     );
@@ -246,7 +253,7 @@ fn late_occupant_resolution_failure_rolls_back_health_seats_and_publications() {
 fn failed_occupant_evidence_record_leaves_authority_mounted_and_alive() {
     let (mut engine, mut native) = occupant_fixture();
     let candidate = engine
-        .prepare_domination_bunker_occupants(5, u32::MAX, &native, Duration::from_secs(1))
+        .prepare_hospital_occupants(5, u32::MAX, &native, Duration::from_secs(1))
         .unwrap();
     engine.max_log = engine.written;
     assert!(
@@ -539,7 +546,7 @@ fn a_destroyed_selected_hospital_respawns_the_player_at_the_alternate_insertion(
         .bunker_world
         .as_mut()
         .unwrap()
-        .apply_domination_cycle(2, false, u32::MAX)
+        .apply_hospital_cycle(2, false, u32::MAX)
         .unwrap();
     tick_until_alive(&mut engine);
     let actor = engine.active.as_ref().unwrap();
@@ -578,7 +585,7 @@ fn a_hospital_destroyed_by_damage_retires_its_spawn_until_restored() {
         .unwrap()
     };
     assert!(retire(&mut spawns, &world).is_empty());
-    world.apply_domination_cycle(2, false, u32::MAX).unwrap();
+    world.apply_hospital_cycle(2, false, u32::MAX).unwrap();
     assert_eq!(retire(&mut spawns, &world), [2]);
     assert!(!spawns.point_active(2));
     assert!(spawns.point_active(1));
@@ -590,7 +597,7 @@ fn a_hospital_destroyed_by_damage_retires_its_spawn_until_restored() {
     assert!(retire(&mut spawns, &world).is_empty());
     assert_eq!(spawns.default_for_squad(0), Some(0));
     // The FSP activation that restores the hospital reactivates its point.
-    world.apply_domination_cycle(2, true, u32::MAX).unwrap();
+    world.apply_hospital_cycle(2, true, u32::MAX).unwrap();
     spawns.set_runtime_point_active(2, 102, true).unwrap();
     spawns.set_runtime_squad_default(17, 2).unwrap();
     assert!(retire(&mut spawns, &world).is_empty());

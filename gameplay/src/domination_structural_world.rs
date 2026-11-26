@@ -1184,7 +1184,7 @@ impl<W: Write> Engine<W> {
                 && actor.reservation.player == target.character_id as u16
         }) {
             if let (Some(index), Some(seat)) = (actor.mounted_bunker, actor.mounted_seat) {
-                let position = self.domination_bunker_seat_position(index, seat)?;
+                let position = self.hospital_seat_position(index, seat)?;
                 return Ok([position.x, position.y, position.z]);
             }
             if actor.helo_seat.is_some() {
@@ -1524,7 +1524,7 @@ pub(crate) struct SequenceSurface {
 }
 
 fn operational_hospital_pose(
-    hospital: &structures::DominationBunker<'_>,
+    hospital: &structures::IndexedHospital<'_>,
 ) -> Result<Pose, &'static str> {
     let transform = hospital.exit_policy.transform;
     let columns = [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]].map(|axis| transform.rotate(axis));
@@ -2286,7 +2286,7 @@ impl SequenceCollisionState {
 
     pub(crate) fn install_operational_hospital(
         &mut self,
-        hospital: crate::structures::DominationBunker<'_>,
+        hospital: crate::structures::IndexedHospital<'_>,
         assets: &HospitalHulkAssets,
     ) -> Result<(), &'static str> {
         let mesh = assets

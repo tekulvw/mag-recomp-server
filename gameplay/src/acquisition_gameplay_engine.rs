@@ -57,6 +57,8 @@ struct ObjectiveCommit {
     native: BTreeMap<u32, NativeState>,
     leadership: Option<leadership_runtime::LeadershipPlan>,
     refresh_assignments: bool,
+    hospitals: Option<crate::structures::BunkerWorld>,
+    hospital_packets: Vec<Vec<u8>>,
     audit: Value,
 }
 
@@ -589,6 +591,8 @@ impl<W: Write> Engine<W> {
             .ok_or("acquisition_structural_spawn_catalog_required")?;
         let mut ground_changes = BTreeMap::new();
         let mut sequence_deltas = BTreeMap::new();
+        let mut hospitals = None;
+        let mut hospital_packets = Vec::new();
         let native = self.owned_acquisition_characters();
         let characters =
             self.prepare_acquisition_character_callback(&native, now, |engine, native| {
@@ -611,6 +615,8 @@ impl<W: Write> Engine<W> {
                     filter_rows: &runtime.setup.filter_rows,
                     physics: runtime.setup.physics,
                     ground_policy: runtime.setup.ground_damage.as_ref(),
+                    hospitals: &mut hospitals,
+                    hospital_packets: &mut hospital_packets,
                     now,
                 };
                 for entry in world.take_native_entries() {
@@ -652,6 +658,8 @@ impl<W: Write> Engine<W> {
                 characters,
                 native,
                 leadership: Some(leadership),
+                hospitals,
+                hospital_packets,
                 audit,
             },
             now,
@@ -783,6 +791,8 @@ impl<W: Write> Engine<W> {
         let mut ground_changes = BTreeMap::new();
         let mut transition_packets = Vec::new();
         let mut sequence_deltas = BTreeMap::new();
+        let mut hospitals = None;
+        let mut hospital_packets = Vec::new();
         let mut structural_spawns = if runtime.structural.is_some() {
             Some(
                 self.spawn_catalog
@@ -842,6 +852,8 @@ impl<W: Write> Engine<W> {
                     filter_rows: &setup.filter_rows,
                     physics: setup.physics,
                     ground_policy: setup.ground_damage.as_ref(),
+                    hospitals: &mut hospitals,
+                    hospital_packets: &mut hospital_packets,
                     now,
                 };
                 changed.extend(structural.stage_world(&mut world, &mut frame, starting)?);
@@ -1036,6 +1048,8 @@ impl<W: Write> Engine<W> {
                 native,
                 leadership: None,
                 refresh_assignments,
+                hospitals,
+                hospital_packets,
                 audit,
             },
             now,
@@ -1063,6 +1077,8 @@ impl<W: Write> Engine<W> {
             mut native,
             leadership,
             refresh_assignments,
+            hospitals,
+            hospital_packets,
             mut audit,
         } = candidate;
         let packet = if changed.is_empty() {
@@ -1134,6 +1150,14 @@ impl<W: Write> Engine<W> {
                 .collect::<Vec<_>>()
         );
         audit["ground_update"] = json!(ground_packet.as_ref().map(|p| protocol::encode_hex(p)));
+        if !hospital_packets.is_empty() {
+            audit["hospital_updates"] = json!(
+                hospital_packets
+                    .iter()
+                    .map(|p| protocol::encode_hex(p))
+                    .collect::<Vec<_>>()
+            );
+        }
         self.record(audit, wall)?;
         let messages = self.install_character_effects_after_record(characters, &mut native);
         self.ground_runtime = Some(ground);
@@ -1166,6 +1190,21 @@ impl<W: Write> Engine<W> {
         }
         if let Some(packet) = ground_packet {
             self.broadcast_bot_packet(packet);
+        }
+        if let Some(hospitals) = hospitals {
+            self.bunker_world = Some(hospitals);
+        }
+        // A client learns each emplacement from its creation batch, which
+        // already carries the current state; only those recipients get deltas.
+        for packet in hospital_packets {
+            for recipient in self
+                .peers
+                .values_mut()
+                .chain(self.active.iter_mut())
+                .filter(|a| a.emplacement_creation.is_some())
+            {
+                recipient.queue_shared(packet.clone());
+            }
         }
         if refresh_assignments {
             for actor in self.active.iter_mut().chain(self.peers.values_mut()) {

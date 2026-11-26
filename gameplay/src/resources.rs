@@ -124,7 +124,7 @@ impl EngineResources {
         if spawn_catalog.match_profile().has_bunkers {
             let world = bunker_world.as_ref().ok_or("bunker_world_required")?;
             if application_id == 20231 {
-                world.validate_domination_profile(&spawn_catalog)?;
+                world.validate_hospital_profile(&spawn_catalog)?;
             }
         }
         if !spawn_catalog.match_profile().has_bunkers {

@@ -54,10 +54,11 @@ The spawn catalog determines the summary, sides and map. Registry mode supports
 Sabotage (`game_type: 0`), Acquisition (`game_type: 1`) and Domination
 (`game_type: 2`) with automatic team assignment, two distinct factions and
 defender-owned map metadata. Domination uses all 32 squad bindings, with up to
-eight members per squad (the retail size), and may supply
-the three per-profile hospital inputs together: `bunker_placement`,
-`bunker_structure` and `bunker_allocation`. Other modes retain their existing
-no-bunker profile restriction.
+eight members per squad (the retail size). Domination and Acquisition may
+supply the three per-profile hospital inputs together: `bunker_placement`,
+`bunker_structure` and `bunker_allocation`. An Acquisition profile with them
+also needs its `acquisition_gameplay` configuration, whose Structural objectives
+own the field hospitals. Sabotage keeps its no-bunker profile restriction.
 Both sides must have enough authored squad capacity for the declared team
 capacity. `maximum_players` is twice that capacity: the world's character
 capacity, humans and bots together. It cannot exceed 256, the client's
@@ -96,7 +97,7 @@ Registry mode rejects development role bindings, the global
 `--bot-population`/`--bot-resupply-*` arguments, global bunker arguments and
 development dummy settings. A bot population and its resupply providers are
 bound to one map, so each profile supplies its own (see below). Per-profile
-Domination hospitals are supported.
+Domination and Acquisition hospitals are supported.
 
 ## Bot-filled profiles
 

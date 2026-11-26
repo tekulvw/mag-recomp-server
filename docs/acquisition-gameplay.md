@@ -139,7 +139,7 @@ recording succeeds. Cadence-only observations produce no empty evidence record.
 Current and late-join recipients see the resulting health.
 
 This first consumer admits operational, living, noncritical Escorts. Other
-Ground source types, hospitals, aircraft and destruction/rebuild repair remain
+Ground source types, field-hospital emplacements, aircraft and destruction/rebuild repair remain
 separate work. Preserving the previous published source field is an explicit
 bounded policy; the native outgoing builder's transient source-field provenance
 and exact native publication timing remain unqualified. Automatic character
@@ -249,3 +249,55 @@ occupants and revokes grants before the existing Ground reinforcement cycle.
 The stock infantry rocket and ordinary frag paths can damage operational APCs
 when their source-backed resources are active. The Acquisition direct bullet
 target and manual repair scopes continue to cover Escort only.
+
+## Field hospitals
+
+Each defending squad's field hospital ("FORWARD SPAWN: Bunker", spawn type 8,
+category 2) is the forward spawn of one Structural objective: the bunker the
+attackers destroy. In the original game the point carries a mountable
+defensive emplacement, the same vehicle type as a Domination hospital. A life
+due there is seated in it and leaves through its authored exits by the doors.
+
+A profile that supplies the three hospital inputs (`bunker_placement`,
+`bunker_structure` and `bunker_allocation`, see
+[worker match profiles](worker-match-profiles.md)) binds those emplacements, and
+its spawn catalog lists the field hospitals as bunker passenger points. The
+runtime then uses the Domination hospital insertion unchanged:
+
+- a respawn at the point takes the highest-numbered free passenger seat of that
+  hospital's emplacement, and the client receives the emplacement with the
+  other initial objects (late joiners get its current state);
+- a life that cannot be seated (destroyed hospital, wrong side, full) starts on
+  foot at the squad's alternate insertion, else at the point, as described in
+  [apc-insertion.md](apc-insertion.md#when-the-apc-cannot-seat-a-new-life);
+- the player leaves by a clear authored exit, nearest the camera heading first;
+  clearance also checks the current Structural sequence bodies;
+- bots arrive on foot at the same exits
+  ([bot-active-spawns.md](bot-active-spawns.md#defending-squads)).
+
+The emplacement follows its Structural objective's forward spawn, the way a
+Domination hospital follows its FSP. When the bunker is destroyed, its point
+goes inactive and the squads routed there fall back to their category-zero
+point. In the same transaction the emplacement is destroyed, its seated
+occupants die through the shared vehicle-occupant death rule, and a family-13
+update reaches every client that has the emplacement
+(`acquisition_hospital_cycle`). The FSP activation that follows a repair
+restores the body. No hulk or destruction blast is bound for Acquisition; the
+Structural objective's own sequence supplies the wreck. Direct hits on the
+emplacement do not damage it in Acquisition: the Structural objective's damage
+governs the bunker. Hospital turrets (seat 0) are not bound for Acquisition.
+
+Without the three inputs every point behaves as before, and profile loading
+refuses hospital inputs without the Acquisition gameplay configuration or for a
+bound hospital that is not a type-8 Structural forward spawn.
+
+`tools/extraction/project-retail-domination-hospitals.py --mode acquisition`
+writes the inputs from an Acquisition spawn catalog, the structure catalog,
+externally qualified field-hospital exit rows (format
+`private_acquisition_field_hospital_exits_v1`), qualified Domination hospital
+placements on the same structure catalog (for each emplacement model's mounts,
+seats and passenger pose binding) and the conditional fresh-load allocation
+model. Each field hospital takes the lowest free family-13 index in spawn
+order. It also writes the promoted spawn catalog; rebind every resource that
+pins the old catalog's SHA-256. The client's acceptance of these emplacements
+(seating and exits on a live client) remains a lab check.

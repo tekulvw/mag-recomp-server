@@ -86,7 +86,7 @@ pub(crate) fn install_hospital_fixture(engine: &mut Engine<Vec<u8>>, enabled: bo
     for index in [TARGET, 6] {
         state
             .collisions
-            .install_operational_hospital(bunkers.domination_bunker(index).unwrap(), &assets)
+            .install_operational_hospital(bunkers.hospital(index).unwrap(), &assets)
             .unwrap();
     }
     state.hospital_hulks = Some(Arc::new(assets));
@@ -206,7 +206,7 @@ fn ordinary_frag_hospital_uses_current_rotated_area_and_friendly_scaling() {
     state
         .collisions
         .install_operational_hospital(
-            bunkers.domination_bunker(TARGET).unwrap(),
+            bunkers.hospital(TARGET).unwrap(),
             state.hospital_hulks.as_deref().unwrap(),
         )
         .unwrap();
@@ -490,7 +490,7 @@ fn ordinary_frag_hospital_defers_lethal_state_until_vehicle_update() {
     assert!(update.destroys_turret());
     assert_eq!(*attacker, 0x0380_0000);
     let rebuild = bunkers
-        .apply_domination_cycle(original.spawn_point_index, true, u32::MAX)
+        .apply_hospital_cycle(original.spawn_point_index, true, u32::MAX)
         .unwrap();
     assert!(rebuild.restores_turret());
     assert_eq!(damage(&engine).health_quarter_points, 800);
