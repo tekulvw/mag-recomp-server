@@ -38,12 +38,18 @@ pub struct Policy {
     pub follow_orders: bool,
     /// Squads without a human leader tag the objective their bots work on.
     pub automatic_orders: bool,
+    /// Every squad's bot lives start at the points nearest (by route) the
+    /// objective the squad works on now (`bot_squad_current_objective`).
+    /// `false` restores the earlier rule: only defending squads rank their
+    /// points, toward their lane objective.
+    pub spawn_at_current_objective: bool,
 }
 impl Default for Policy {
     fn default() -> Self {
         Self {
             follow_orders: true,
             automatic_orders: true,
+            spawn_at_current_objective: true,
         }
     }
 }
@@ -156,7 +162,7 @@ pub(crate) fn automatic_tag(current: u32, choice: Choice) -> Option<u32> {
 pub(crate) struct Book {
     automatic: BTreeMap<u16, u32>,
     /// The objective each bot squad worked on at the last bot tick.
-    current: BTreeMap<u16, Option<u16>>,
+    pub(crate) current: BTreeMap<u16, Option<u16>>,
     /// The last tag the mode refused per squad, not asked for again.
     refused: BTreeMap<u16, u32>,
 }
@@ -358,8 +364,7 @@ impl<W: Write> Engine<W> {
     /// lane objective (in Acquisition the lane defence it breaks first), else
     /// the nearest objective of its team, as chosen at the last bot tick.
     /// Before a squad's first bot tick, or for a squad without bots, its lane.
-    /// Bot spawn ranking reads it (its change lands separately).
-    #[allow(dead_code)]
+    /// Bot spawn ranking ranks toward it (bot_spawn_selection).
     pub(crate) fn bot_squad_current_objective(&self, squad: u16) -> Option<u16> {
         match self.bot_registry.director.squad_orders.current.get(&squad) {
             Some(&current) => current,

@@ -24,16 +24,18 @@ kind is insertion, alternate, on-foot or parachute. Bunker, vehicle and
 helicopter passenger points and unsupported points are never used by bots,
 except for the defender hospitals below.
 
-## Defending squads
+## Ranking toward the current objective
 
-A squad defends when the objective its bots work on (its lane: the Sabotage
+Each bot life ranks the points its squad may use now by the length of a
+complete navmesh route (walking or certified drops) from the point to the
+objective the squad works on now ([bot-squad-orders.md](bot-squad-orders.md)):
+its human leader's open FRAGO, else its lane objective (the Sabotage
 progression or catalog assignment, the Acquisition catalog assignment, or the
-Domination runtime assignment; before lanes exist, the authored initial
-assignment) belongs to its own team. Defending bots do not keep their
-population slot just because the squad's default is unchanged. Instead each
-life ranks every point the squad may use now by the length of a complete
-navmesh route (walking or certified drops) from the point to the lane
-objective:
+Domination runtime assignment, or while the lane's defences stand the defence
+the squad breaks first), else the nearest objective of its team. Before
+the first bot tick, and before lanes exist, the lane objective or the authored
+initial assignment stands in. This applies to attacking and defending squads,
+at their first lives and at every respawn wave. The candidates are:
 
 - the squad's usable points above, including the population source spawn;
 - the squad's hospital (bunker passenger point) while its point is active and
@@ -53,19 +55,35 @@ objective:
   uses the hospital rule above.
 
 Forward spawns come first whenever they route to the objective: the hospital
-or field hospital above, and any point the squad gained at runtime (a forward
-spawn the match opened for it). The squad's other points follow. Within each
-group the shorter route goes first, so a standing forward spawn is used even
-when a rear point is nearer the objective (an Acquisition squad's prototype
-sits in its rear base, behind its field hospital). Once the hospital falls,
-its point goes inactive and the rear points take over.
+or field hospital above, any point the squad gained at runtime (a forward
+spawn the match opened for it), and the squad's runtime default once the mode
+moved it off the authored default (an Acquisition LALO drop zone, which is
+active only while its platoon's anti-aircraft is down). The squad's other
+points follow. Within each group the shorter route goes first, so a standing
+forward spawn is used even when a rear point is nearer the objective (an
+Acquisition squad's prototype sits in its rear base, behind its field
+hospital). Once the hospital falls, its point goes inactive and the rear
+points take over.
 
 A point whose placements do not route to the objective is skipped and reported
 once. Points within 20 m of their group's shortest route are rotated per bot,
 so a squad spreads over equally forward points. A human squad member's shared
 spawn, once it differs from the authored default, goes first when it routes.
-The population slot stays the final fallback. Attacking squads keep the order
-above.
+The population slot stays the final fallback.
+
+When no point routes to the current objective (a FRAGO off the walking
+network, say), the lane objective is ranked toward instead: the lane defence
+the squad breaks first ([bot-breach-order.md](bot-breach-order.md)), then the
+mode's own lane objective behind it. When nothing routes to those either, the
+active-spawn order above applies. A new FRAGO
+ranks toward the new objective at the next life; route qualifications are
+cached per point and objective, so changing back reuses them.
+
+The population file's `squad_orders.spawn_at_current_objective` (default
+`true`) controls this. `false` restores the earlier rule: only defending
+squads (whose lane objective their own team owns) rank their points, toward
+the lane objective, without the moved-default forward spawn; attacking squads
+keep the active-spawn order.
 
 Routes respect the structures standing now
 ([bot-structure-collision.md](bot-structure-collision.md)), so every cached
@@ -158,7 +176,9 @@ their slot.
   (`population_slot`, `authored_point` or `parachute_landing`) and `position`.
 - `bot_spawn_point_qualified` (`placements`) or `bot_spawn_point_unusable`
   (`reason`) is written once per point and population source spawn.
-- Defenders: `bot_lane_spawn_qualified` (`route_m`, `placements`, `arrival`)
-  or `bot_lane_spawn_unusable` (`reason`), once per point, lane objective and
-  whether the point is the bot's own population slot. Arrivals add
-  `hospital_exit` and `field_hospital`.
+- Ranked lives: `bot_lane_spawn_qualified` (`route_m`, `placements`,
+  `arrival`) or `bot_lane_spawn_unusable` (`reason`), once per point,
+  `objective` and whether the point is the bot's own population slot. Arrivals
+  add `hospital_exit` and `field_hospital`. `bot_population_spawn` and
+  `bot_respawn` add the `objective` the life was ranked toward and the chosen
+  point's `objective_route_m` (both `null` when unranked).

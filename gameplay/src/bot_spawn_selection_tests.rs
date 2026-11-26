@@ -428,6 +428,16 @@ fn defend(engine: &mut Engine<Vec<u8>>) {
         "objects":[{"token":"0x00000005","object_index":5,"initial_state":1,
             "interaction":{"owner_team":1,"activate_ms":100,"complete_ms":20_000,"deactivate_ms":100,
                 "can_deactivate":true,"position":[44.,0.,50.],"trigger_count":1,
+                "maximum_distance_m":3.,"distance_policy":"development_point_distance"}},
+            // FRAGO targets outside every lane: one near the defenders'
+            // population slot, one off the walking network.
+            {"token":"0x00000006","object_index":NEAR_HOME_FRAGO,"initial_state":1,
+            "interaction":{"owner_team":0,"activate_ms":100,"complete_ms":20_000,"deactivate_ms":100,
+                "can_deactivate":true,"position":[4.,0.,58.],"trigger_count":1,
+                "maximum_distance_m":3.,"distance_policy":"development_point_distance"}},
+            {"token":"0x00000007","object_index":OFF_MESH_FRAGO,"initial_state":1,
+            "interaction":{"owner_team":0,"activate_ms":100,"complete_ms":20_000,"deactivate_ms":100,
+                "can_deactivate":true,"position":[58.,0.,10.],"trigger_count":1,
                 "maximum_distance_m":3.,"distance_policy":"development_point_distance"}}],
         "squads":(0..2u16).flat_map(|team| (0..4u16).map(move |slot| json!({
             "team":team,"squad_index":team*16+slot,"initial_objective_index":5,
@@ -530,13 +540,168 @@ fn a_full_forward_point_overflows_to_the_next_forward_point() {
 }
 
 #[test]
-fn attackers_keep_the_existing_order() {
-    // Squad 0's lane is owned by the other side: it attacks, so its bots keep
-    // their population slot while the authored default stands.
+fn attackers_rank_their_points_toward_their_objective() {
+    // Squad 0's lane (objective 5) is owned by the other side: it attacks.
+    // Both of its points route there within the spread, so its bots spread
+    // over them by route instead of keeping their population slot.
     let mut engine = engine_with_defence();
+    let mut used = std::collections::BTreeSet::new();
+    for actor in [200, 201] {
+        let mut receipts = Vec::new();
+        let spawn = spawned(
+            engine
+                .choose_bot_life_spawn(actor, SQUAD, 0, &Default::default(), &mut receipts)
+                .unwrap(),
+        );
+        assert_eq!(spawn.objective.map(|o| o.0), Some(5));
+        used.insert(spawn.spawn_point);
+    }
+    assert_eq!(used, [Some(HOME), Some(ALTERNATE)].into());
+}
+
+#[test]
+fn attackers_keep_the_existing_order_with_the_switch_off() {
+    let mut engine = engine_with_defence();
+    engine
+        .bot_registry
+        .config
+        .as_mut()
+        .unwrap()
+        .squad_orders
+        .spawn_at_current_objective = false;
     let spawn = spawned(choose(&mut engine, &Default::default()).0);
     assert_eq!(spawn.arrival, Arrival::PopulationSlot);
     assert_eq!(spawn.spawn_point, Some(HOME));
+    assert_eq!(spawn.objective, None);
+    // Defenders still rank toward their lane objective, ignoring a FRAGO.
+    order(&mut engine, DEFENDERS, Some(NEAR_HOME_FRAGO));
+    let (spawn, _) = choose_defender(&mut engine, 200, &Default::default());
+    assert!(
+        matches!(spawn.spawn_point, Some(NORTH | SOUTH)),
+        "{spawn:?}"
+    );
+    assert_eq!(spawn.objective.map(|o| o.0), Some(5));
+}
+
+const NEAR_HOME_FRAGO: u16 = 6;
+const OFF_MESH_FRAGO: u16 = 7;
+
+/// The objective the squad worked on at the last bot tick (its FRAGO here).
+fn order(engine: &mut Engine<Vec<u8>>, squad: u16, objective: Option<u16>) {
+    let current = &mut engine.bot_registry.director.squad_orders.current;
+    match objective {
+        Some(_) => current.insert(squad, objective),
+        None => current.remove(&squad),
+    };
+}
+
+#[test]
+fn a_frago_far_from_the_lane_moves_lives_to_the_point_nearest_it() {
+    let mut engine = engine_with_defence();
+    order(&mut engine, DEFENDERS, Some(NEAR_HOME_FRAGO));
+    for actor in [200, 201] {
+        let (spawn, receipts) = choose_defender(&mut engine, actor, &Default::default());
+        assert_eq!(spawn.spawn_point, Some(DEFENDER_HOME), "{receipts:?}");
+        assert_eq!(spawn.arrival, Arrival::PopulationSlot);
+        let (objective, route_m) = spawn.objective.unwrap();
+        assert_eq!(objective, NEAR_HOME_FRAGO);
+        assert!(route_m < 13., "{route_m}");
+    }
+    // Clearing the FRAGO returns the squad to its lane objective.
+    order(&mut engine, DEFENDERS, None);
+    let (spawn, _) = choose_defender(&mut engine, 200, &Default::default());
+    assert!(
+        matches!(spawn.spawn_point, Some(NORTH | SOUTH)),
+        "{spawn:?}"
+    );
+    assert_eq!(spawn.objective.map(|o| o.0), Some(5));
+}
+
+#[test]
+fn a_frago_no_point_routes_to_falls_back_to_the_lane_objective() {
+    let mut engine = engine_with_defence();
+    order(&mut engine, DEFENDERS, Some(OFF_MESH_FRAGO));
+    let (spawn, receipts) = choose_defender(&mut engine, 200, &Default::default());
+    assert!(
+        matches!(spawn.spawn_point, Some(NORTH | SOUTH)),
+        "{spawn:?}"
+    );
+    assert_eq!(spawn.objective.map(|o| o.0), Some(5));
+    assert!(
+        receipts
+            .iter()
+            .any(|r| r["op"] == "bot_lane_spawn_unusable" && r["objective"] == OFF_MESH_FRAGO)
+    );
+    // Nothing routable at all: the earlier active-spawn order applies.
+    order(&mut engine, SQUAD, Some(OFF_MESH_FRAGO));
+    deactivate(&mut engine, ALTERNATE);
+    engine.objective_catalog = None;
+    engine.objective_world = None;
+    let spawn = spawned(choose(&mut engine, &Default::default()).0);
+    assert_eq!(spawn.spawn_point, Some(HOME));
+    assert_eq!(spawn.objective, None);
+}
+
+#[test]
+fn the_forward_tier_still_comes_first_toward_a_frago() {
+    // The hospital (~38 m from the FRAGO) is forward; the population slot
+    // (~10 m) is not.
+    let mut engine = engine_with_defence();
+    engine.spawn_catalog = Some(spawns_with_hospital());
+    engine.bunker_world = Some(crate::structures::BunkerWorld::synthetic_hospital(
+        HOSPITAL,
+        1,
+        2,
+        replication::CharacterPosition {
+            x: 30.,
+            y: 0.,
+            z: 30.,
+        },
+    ));
+    order(&mut engine, DEFENDERS, Some(NEAR_HOME_FRAGO));
+    let (spawn, receipts) = choose_defender(&mut engine, 200, &Default::default());
+    assert_eq!(spawn.spawn_point, Some(HOSPITAL), "{receipts:?}");
+    assert_eq!(spawn.objective.map(|o| o.0), Some(NEAR_HOME_FRAGO));
+    // Once the hospital falls, the point nearest the FRAGO takes over.
+    deactivate(&mut engine, HOSPITAL);
+    let (spawn, _) = choose_defender(&mut engine, 200, &Default::default());
+    assert_eq!(spawn.spawn_point, Some(DEFENDER_HOME));
+}
+
+#[test]
+fn a_moved_squad_default_is_forward_for_attackers() {
+    // An Acquisition LALO zone becomes the squad's default while its
+    // platoon's anti-aircraft is down; here a point the squad already had.
+    let mut engine = engine_with_defence();
+    order(&mut engine, SQUAD, Some(NEAR_HOME_FRAGO));
+    set_runtime_default(&mut engine, CAPTURED);
+    let spawn = spawned(choose(&mut engine, &Default::default()).0);
+    assert_eq!(spawn.spawn_point, Some(CAPTURED));
+    assert_eq!(spawn.objective.map(|o| o.0), Some(NEAR_HOME_FRAGO));
+    // Closing it (the anti-aircraft repaired) returns to the nearest points.
+    deactivate(&mut engine, CAPTURED);
+    let spawn = spawned(choose(&mut engine, &Default::default()).0);
+    assert!(
+        matches!(spawn.spawn_point, Some(HOME | ALTERNATE)),
+        "{spawn:?}"
+    );
+}
+
+#[test]
+fn the_current_objective_comes_from_the_last_bot_tick_else_the_lane() {
+    let mut engine = engine_with_defence();
+    assert_eq!(engine.bot_squad_current_objective(DEFENDERS), Some(5));
+    order(&mut engine, DEFENDERS, Some(NEAR_HOME_FRAGO));
+    assert_eq!(
+        engine.bot_squad_current_objective(DEFENDERS),
+        Some(NEAR_HOME_FRAGO)
+    );
+    let goals: Vec<u16> = engine
+        .bot_spawn_goals(DEFENDERS)
+        .into_iter()
+        .map(|g| g.0)
+        .collect();
+    assert_eq!(goals, [NEAR_HOME_FRAGO, 5]);
 }
 
 #[test]
