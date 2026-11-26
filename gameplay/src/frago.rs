@@ -141,7 +141,7 @@ impl<W: Write> Engine<W> {
             0x0d80_0000 => self
                 .bunker_world
                 .as_ref()?
-                .domination_bunker(index)
+                .hospital(index)
                 .map(|b| (point(b.position), rules.vehicle_range)),
             _ => None,
         }

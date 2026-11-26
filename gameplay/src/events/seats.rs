@@ -9,7 +9,7 @@ pub(super) fn mount_seat<W: Write>(
     if request.vehicle_id >> 24 == 1 {
         return ground_mount(ctx, plan, request);
     }
-    if ctx.engine.match_profile().game_type == 2 && ctx.engine.match_profile().auto_assign_teams {
+    if ctx.engine.indexed_hospital_seats() {
         return super::bunker_seats::mount(ctx, plan, request);
     }
     let active = ctx.active;
@@ -93,7 +93,7 @@ pub(super) fn dismount_seat<W: Write>(
     if request.vehicle_id >> 24 == 1 {
         return ground_dismount(ctx, plan, request);
     }
-    if ctx.engine.match_profile().game_type == 2 && ctx.engine.match_profile().auto_assign_teams {
+    if ctx.engine.indexed_hospital_seats() {
         return super::bunker_seats::dismount(ctx, plan, request);
     }
     let active = ctx.active;

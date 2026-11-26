@@ -122,7 +122,7 @@ impl Rules {
         let combat = items.retail_combat()?;
         if self.schema != "mag_domination_hospital_turrets_v1"
             || !self.source.matches(
-                bunkers.domination_structure_sha256(),
+                bunkers.hospital_structure_sha256(),
                 native_elf,
                 bunkers.vehicle_type_token(),
                 combat.provenance(),
@@ -199,7 +199,7 @@ impl Rules {
             .iter()
             .map(|row| {
                 let bunker = bunkers
-                    .domination_bunker(row.object_index)
+                    .hospital(row.object_index)
                     .ok_or("hospital_turret_placement_mismatch")?;
                 let variant = variants[&row.faction];
                 if (bunker.faction, bunker.spawn_index) != (row.faction, row.spawn_index)
@@ -445,7 +445,7 @@ impl<W: Write> Engine<W> {
             .as_ref()
             .ok_or("hospital_turret_world_required")?;
         let bunker = world
-            .domination_bunker(index)
+            .hospital(index)
             .ok_or("hospital_turret_unknown_index")?;
         let turret = world
             .hospital_turrets
@@ -540,7 +540,7 @@ impl<W: Write> Engine<W> {
         let bunker = self
             .bunker_world
             .as_ref()
-            .and_then(|world| world.domination_bunker(index))
+            .and_then(|world| world.hospital(index))
             .ok_or("hospital_turret_unknown_index")?;
         Ok(QualifiedSecondary {
             index,
@@ -593,7 +593,7 @@ impl<W: Write> Engine<W> {
                             .map(|(_, grant)| grant)
                     });
                 let operational = world
-                    .domination_bunker(index)
+                    .hospital(index)
                     .is_some_and(|bunker| bunker.operational);
                 let mut fields = if operational {
                     turret.aim

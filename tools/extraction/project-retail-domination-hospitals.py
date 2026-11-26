@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Project a Domination hospital world from qualified placement and allocation evidence."""
+"""Project a hospital world from qualified placement and allocation evidence.
+
+The default mode projects Domination's 16 hospitals. ``--mode acquisition``
+projects an Acquisition map's defending field hospitals (spawn type 8) into the
+same placement schema, so the runtime seats their lives the same way.
+"""
 import argparse
 import hashlib
 import json
@@ -200,13 +205,208 @@ def project(spawn_raw, structure_raw, authored_raw, clearance_raw, allocation_ra
                 placements=sorted(placements, key=lambda placement: placement['object_index']))
 
 
+ACQUISITION_EXITS = 'private_acquisition_field_hospital_exits_v1'
+ALLOCATION = 'mag_domination_hospital_allocation_v1'
+PLACEMENTS = 'mag_domination_hospital_placements_v1'
+
+
+def field_hospitals(exits, map_name):
+    """Externally qualified Acquisition field-hospital rows for one map."""
+    require(exits.get('format') == ACQUISITION_EXITS and exits.get('map') == map_name,
+            'field-hospital rows describe a different map')
+    rows = rows_by_key(exits['field_hospitals'], 'spawn_index')
+    require(rows and len(rows) <= 16, 'unsupported field-hospital count')
+    for row in rows.values():
+        policy = row['bunker_exit_policy']
+        position = policy['transform']['position']
+        origin = [position[axis] for axis in 'xyz']
+        rotation = policy['transform']['rotation_xyzw']
+        require((row['spawn_type'], row['category'], row['team']) == (8, 2, 1)
+                and row['active'] is True and row['vehicle_mountable'] is True
+                and token(row['vehicle_type_token']) != 0
+                and origin == row['emplacement_origin_xyz']
+                and len(rotation) == 4 and abs(sum(v*v for v in rotation) - 1.) < 0.001
+                and all(math.isfinite(v) for v in origin + rotation)
+                and policy['candidates']
+                and all(len(c['ranking_offset']) == len(c['position_offset']) == 3
+                        and all(math.isfinite(v) for v in c['ranking_offset'] + c['position_offset'])
+                        for c in policy['candidates']),
+                'unqualified field-hospital row')
+    return rows
+
+
+def acquisition_allocation(spawn_raw, exits_raw, model_raw):
+    """Apply the conditional fresh-load allocation model to one Acquisition map.
+
+    The model's premises (a fresh family-13 pool in which every initial class-4
+    creation succeeds and nothing else is created first) say each hospital
+    takes the lowest free index in serialized spawn order. The model's own maps
+    must already follow that order; the Acquisition map inherits it.
+    """
+    catalog, exits, model = map(json.loads, (spawn_raw, exits_raw, model_raw))
+    provenance = json.loads(catalog['source'])
+    map_name = catalog['active']['map_name']
+    require(catalog['match_profile']['game_type'] == 1, 'require an Acquisition spawn profile')
+    require(model['format'] == ALLOCATION and model['allocation_scope'] == SCOPE
+            and model['fresh_family13_pool'] is True
+            and model['all_initial_class4_creations_succeed'] is True
+            and model['production_without_early_other_class4_creations'] is True
+            and model['retail_elf_sha256'] == provenance['native_elf_sha256'],
+            'unqualified hospital allocation model')
+    for level in model['maps']:
+        ordered = sorted(level['objects'], key=lambda row: row['spawn_index'])
+        require([row['object_index'] for row in ordered] == list(range(len(ordered))),
+                'allocation model does not follow spawn order')
+    rows = field_hospitals(exits, map_name)
+    result = {key: value for key, value in model.items() if key != 'maps'}
+    result['description'] = ('Conditional source model applied to an Acquisition map: each defending '
+                             'field hospital takes the lowest free family-13 index in spawn order.')
+    result['maps'] = [dict(map=map_name, level_archive_sha256=provenance['level_archive_sha256'],
+                           level_clv_sha256=provenance['level_clv_sha256'],
+                           objects=[dict(object_index=rank, spawn_index=index,
+                                         spawn_token='0x%08x' % token(rows[index]['spawn_token']))
+                                    for rank, index in enumerate(sorted(rows))])]
+    return encode(result)
+
+
+def promote_acquisition_spawns(spawn_raw, exits_raw, allocation_raw):
+    """Route an Acquisition profile's field-hospital points to their emplacements."""
+    catalog, exits = map(json.loads, (spawn_raw, exits_raw))
+    provenance = json.loads(catalog['source'])
+    active = catalog['active']
+    name = active['map_name']
+    require(catalog['match_profile']['game_type'] == 1 and catalog['match_profile']['has_bunkers'] is False,
+            'expected an unpromoted Acquisition spawn profile')
+    pool = rows_by_key(catalog['maps'], 'name')[name]
+    points = rows_by_key(pool['locations'], 'index')
+    squads = rows_by_key(pool['squads'], 'index')
+    rows = field_hospitals(exits, name)
+    links = rows_by_key(provenance['unsupported_spawn_links'], 'index')
+    type8 = {index for index, link in links.items() if link['spawn_type'] == 8}
+    require(type8 == set(rows), 'field-hospital rows differ from the spawn type-8 inventory')
+    for index, row in rows.items():
+        point, link = points[index], links[index]
+        require(point['token'] == token(row['spawn_token']) and point.get('active') is True
+                and point['kind'] in ('alternate', 'unsupported')
+                and link['user_class'] == 0 and link['category'] == 2
+                and len(link['squad_links']) == 1 and link['squad_links'][0][0] == 1,
+                'field-hospital promotion differs from original spawn membership')
+        _, platoon, squad, slot = link['squad_links'][0]
+        available = squads[16 + 4 * platoon + squad]['available']
+        if index not in available:
+            require(slot <= len(available), 'invalid field-hospital display order')
+            available.insert(slot, index)
+        require(available.index(index) == slot, 'field-hospital display order differs')
+        point['kind'] = 'bunker_passenger'
+    if active['squad_index'] in squads:
+        active['available'] = squads[active['squad_index']]['available']
+    provenance['unsupported_spawn_links'] = [row for row in provenance['unsupported_spawn_links']
+                                             if row['index'] not in rows]
+    provenance['hospital_allocation_sha256'] = sha(allocation_raw)
+    catalog['source'] = json.dumps(provenance, sort_keys=True, separators=(',', ':'))
+    catalog['match_profile']['has_bunkers'] = True
+    return encode(catalog)
+
+
+def project_acquisition(spawn_raw, structure_raw, exits_raw, allocation_raw, seat_raws):
+    """Project bound field hospitals; seats and mounts come from qualified
+    placement worlds built on the same structure catalog and properties."""
+    spawns, structures, exits, allocation = map(
+        json.loads, (spawn_raw, structure_raw, exits_raw, allocation_raw))
+    references = [json.loads(raw) for raw in seat_raws]
+    policy = spawns['match_profile']
+    require(spawns['format'] == 'mag_spawn_catalog' and policy['game_type'] == 1
+            and policy['auto_assign_teams'] is True and policy['has_bunkers'] is True,
+            'require a promoted Acquisition spawn profile')
+    require(structures['application_id'] == 20231 and references
+            and all(seats['format'] == PLACEMENTS and seats['allocation_scope'] == SCOPE
+                    and seats['passenger_pose_scope'] == PASSENGER_SCOPE
+                    and seats['structure_catalog_sha256'] == sha(structure_raw)
+                    and (seats['passenger_pose_sha256'], seats['vehicle_type_token'])
+                    == (references[0]['passenger_pose_sha256'], references[0]['vehicle_type_token'])
+                    for seats in references),
+            'seat reference uses a different structure catalog')
+    seats = references[0]
+    require(allocation['format'] == ALLOCATION and allocation['allocation_scope'] == SCOPE
+            and json.loads(spawns['source'])['hospital_allocation_sha256'] == sha(allocation_raw),
+            'unbound field-hospital allocation')
+    map_name = spawns['active']['map_name']
+    pool = rows_by_key(spawns['maps'], 'name')[map_name]
+    points = rows_by_key([point for point in pool['locations'] if point['kind'] == 'bunker_passenger'], 'index')
+    rows = field_hospitals(exits, map_name)
+    objects = rows_by_key(rows_by_key(allocation['maps'], 'map')[map_name]['objects'], 'spawn_index')
+    require(set(points) == set(rows) == set(objects), 'incomplete Acquisition hospital sources')
+    reference = {}
+    for row in (row for seats in references for row in seats['placements']):
+        value = dict(mounts=row['mounts'], max_occupancy=row['max_occupancy'],
+                     passenger_seats=row['passenger_seats'])
+        require(reference.setdefault(row['properties_source'], value) == value,
+                'seat reference disagrees for one properties source')
+    placements, tokens = [], set()
+    for index, row in rows.items():
+        member = 'vehicle/' + row['properties_file']
+        require(member in structures['source_sha256'] and member in reference
+                and points[index]['token'] == token(row['spawn_token'])
+                and objects[index]['spawn_token'] == '0x%08x' % token(row['spawn_token']),
+                'field hospital differs from its sources')
+        tokens.add(token(row['vehicle_type_token']))
+        placements.append(dict(object_index=objects[index]['object_index'], spawn_index=index,
+                               spawn_token=token(row['spawn_token']), properties_source=member,
+                               **reference[member], exit=row['bunker_exit_policy']))
+    require(tokens == {seats['vehicle_type_token']}, 'field-hospital vehicle type differs')
+    return dict(format=PLACEMENTS, map_name=map_name,
+                spawn_catalog_sha256=sha(spawn_raw), structure_catalog_sha256=sha(structure_raw),
+                source_proof_sha256=sha(allocation_raw), allocation_scope=SCOPE,
+                passenger_pose_sha256=seats['passenger_pose_sha256'], passenger_pose_scope=PASSENGER_SCOPE,
+                vehicle_type_token=seats['vehicle_type_token'],
+                placements=sorted(placements, key=lambda placement: placement['object_index']))
+
+
+def write_outputs(pairs, inputs, check):
+    resolved = [path.resolve() for path, _ in pairs]
+    require(len(set(resolved)) == len(pairs)
+            and not set(resolved).intersection(path.resolve() for path in inputs),
+            'hospital output is an input or duplicate path')
+    for path, data in pairs:
+        if check:
+            require(path.read_bytes() == data, f'hospital output differs at {path}')
+        else:
+            with path.open('xb') as stream:
+                stream.write(data)
+
+
+def main_acquisition(args):
+    required = ('spawn_catalog', 'structures', 'field_hospitals', 'allocation_model', 'seat_reference',
+                'allocation_output', 'qualified_spawn_output', 'output')
+    missing = [name for name in required if getattr(args, name) is None]
+    require(not missing, 'acquisition mode requires ' + ', '.join('--' + m.replace('_', '-') for m in missing))
+    inputs = (args.spawn_catalog, args.structures, args.field_hospitals, args.allocation_model,
+              *args.seat_reference)
+    spawn, structures, exits, model, *seats = (path.read_bytes() for path in inputs)
+    allocation = acquisition_allocation(spawn, exits, model)
+    spawn = promote_acquisition_spawns(spawn, exits, allocation)
+    output = encode(project_acquisition(spawn, structures, exits, allocation, seats))
+    write_outputs([(args.allocation_output, allocation), (args.qualified_spawn_output, spawn),
+                   (args.output, output)], inputs, args.check)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ('spawn-catalog', 'structures', 'authored-hospitals', 'clearance', 'allocation', 'passenger-pose', 'output'):
-        parser.add_argument('--' + name, type=Path, required=True)
-    parser.add_argument('--qualified-spawn-output', type=Path)
+    parser.add_argument('--mode', choices=('domination', 'acquisition'), default='domination')
+    for name in ('spawn-catalog', 'structures', 'authored-hospitals', 'clearance', 'allocation', 'passenger-pose',
+                 'output', 'qualified-spawn-output', 'field-hospitals', 'allocation-model', 'allocation-output'):
+        parser.add_argument('--' + name, type=Path)
+    parser.add_argument('--seat-reference', type=Path, action='append',
+                        help='qualified hospital placements on the same structure catalog (repeatable)')
     parser.add_argument('--check', action='store_true')
     args = parser.parse_args()
+    if args.mode == 'acquisition':
+        return main_acquisition(args)
+    required = ('spawn_catalog', 'structures', 'authored_hospitals', 'clearance', 'allocation',
+                'passenger_pose', 'output')
+    missing = [name for name in required if getattr(args, name) is None]
+    if missing:
+        parser.error('domination mode requires ' + ', '.join('--' + m.replace('_', '-') for m in missing))
     paths = (args.spawn_catalog, args.structures, args.authored_hospitals, args.clearance, args.allocation,
              args.passenger_pose)
     spawn, structures, authored, clearance, allocation, passenger_pose = (path.read_bytes() for path in paths)

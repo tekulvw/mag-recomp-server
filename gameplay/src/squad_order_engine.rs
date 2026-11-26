@@ -235,7 +235,7 @@ impl<W: Write> Engine<W> {
             0x0d80_0000 => self
                 .bunker_world
                 .as_ref()
-                .is_some_and(|world| world.domination_bunker(index).is_some()),
+                .is_some_and(|world| world.hospital(index).is_some()),
             _ => false,
         }
     }

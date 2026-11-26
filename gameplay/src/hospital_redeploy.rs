@@ -26,7 +26,7 @@ impl<W: Write> Engine<W> {
             .as_ref()
             .ok_or("hospital_redeploy_world_required")?;
         let bunker = world
-            .domination_bunker(index)
+            .hospital(index)
             .ok_or("hospital_redeploy_index_unbound")?;
         if actor.emplacement_creation.is_none()
             || bunker.seat_position(seat).is_none()

@@ -9,7 +9,7 @@ pub(super) fn mount<W: Write>(
     let active = ctx.active;
     let index = request.vehicle_id as u16;
     let world = ctx.engine.bunker_world.as_ref();
-    let bunker = world.and_then(|world| world.domination_bunker(index));
+    let bunker = world.and_then(|world| world.hospital(index));
     let seat = request.seat_id as u8;
     let duplicate = active.mounted_bunker == Some(index) && active.mounted_seat == Some(seat);
     let denial = if !ctx.accepted_client_route || !ctx.engine.round_combat_allowed(ctx.now) {

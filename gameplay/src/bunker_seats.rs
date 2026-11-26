@@ -2,6 +2,18 @@
 use crate::*;
 
 impl<W: Write> Engine<W> {
+    /// Hospital points seat a life in their own indexed emplacement: always in
+    /// Domination, and in Acquisition once the profile binds its field
+    /// hospitals' emplacements. Otherwise the legacy single Alpha bunker rules.
+    pub(crate) fn indexed_hospital_seats(&self) -> bool {
+        let profile = self.match_profile();
+        (profile.game_type == 2 && profile.auto_assign_teams)
+            || self
+                .bunker_world
+                .as_ref()
+                .is_some_and(structures::BunkerWorld::has_indexed_hospitals)
+    }
+
     pub(crate) fn bunker_ownership_after(
         &self,
         index: u16,
@@ -56,7 +68,7 @@ impl<W: Write> Engine<W> {
 
     /// Prepare real current hospital occupants through the existing normal
     /// character-damage/death/reward transaction. No authority is installed here.
-    pub fn prepare_domination_bunker_occupants(
+    pub fn prepare_hospital_occupants(
         &mut self,
         index: u16,
         last_attacker: u32,
@@ -79,7 +91,7 @@ impl<W: Write> Engine<W> {
         let bunker = self
             .bunker_world
             .as_ref()
-            .and_then(|world| world.domination_bunker(index))
+            .and_then(|world| world.hospital(index))
             .ok_or("bunker_occupant_body_required")?;
         let vehicle_vector = [bunker.position.x, bunker.position.y, bunker.position.z];
         let mut occupants: Vec<_> = self
@@ -128,7 +140,7 @@ impl<W: Write> Engine<W> {
 
     pub(crate) fn bunker_passenger_seat(
         &self,
-        bunker: &structures::DominationBunker<'_>,
+        bunker: &structures::IndexedHospital<'_>,
         player: u16,
     ) -> Result<u8, &'static str> {
         let occupied: Vec<_> = self
@@ -160,7 +172,7 @@ impl<W: Write> Engine<W> {
         let bunker = self
             .bunker_world
             .as_ref()
-            .and_then(|world| world.domination_bunker(index))
+            .and_then(|world| world.hospital(index))
             .ok_or("bunker_exit_policy_required")?;
         let policy = bunker.exit_policy;
         let preferred = policy.exit(camera)?;
@@ -212,6 +224,18 @@ impl<W: Write> Engine<W> {
                     half_extents,
                     &mut static_budget,
                 )?
+            {
+                continue;
+            }
+            // Acquisition's Structural sequences (standing or wrecked
+            // objective bodies) block an exit the same way.
+            if let Some(collision) = self
+                .acquisition_gameplay
+                .as_ref()
+                .and_then(|runtime| runtime.blast_collision())
+                && collision
+                    .sequences
+                    .positive_box_hit(centre, half_extents, &mut static_budget)?
             {
                 continue;
             }

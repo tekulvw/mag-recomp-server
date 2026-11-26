@@ -131,37 +131,37 @@ struct Source {
     properties_zip_member: String,
 }
 #[derive(Deserialize)]
-struct DominationHospitalAllocation {
+struct HospitalAllocation {
     format: String,
     allocation_scope: String,
     fresh_family13_pool: bool,
     all_initial_class4_creations_succeed: bool,
     production_without_early_other_class4_creations: bool,
-    maps: Vec<DominationHospitalAllocationMap>,
+    maps: Vec<HospitalAllocationMap>,
 }
 
 #[derive(Deserialize)]
-struct DominationHospitalAllocationMap {
+struct HospitalAllocationMap {
     map: String,
-    objects: Vec<DominationHospitalIdentity>,
+    objects: Vec<HospitalIdentity>,
 }
 
 #[derive(Deserialize)]
-struct DominationHospitalIdentity {
+struct HospitalIdentity {
     object_index: u16,
     spawn_index: u16,
     spawn_token: String,
 }
 
-impl DominationHospitalAllocation {
-    fn validate(&self, placements: &DominationHospitalPlacements) -> io::Result<()> {
+impl HospitalAllocation {
+    fn validate(&self, placements: &HospitalPlacements) -> io::Result<()> {
         let mut maps = self
             .maps
             .iter()
             .filter(|map| map.map == placements.map_name);
         let map = maps
             .next()
-            .ok_or_else(|| invalid("missing qualified Domination allocation"))?;
+            .ok_or_else(|| invalid("missing qualified hospital allocation"))?;
         if self.format != "mag_domination_hospital_allocation_v1"
             || self.allocation_scope != placements.allocation_scope
             || !self.fresh_family13_pool
@@ -170,7 +170,7 @@ impl DominationHospitalAllocation {
             || maps.next().is_some()
             || map.objects.len() != placements.placements.len()
         {
-            return Err(invalid("Domination hospital allocation scope mismatch"));
+            return Err(invalid("hospital allocation scope mismatch"));
         }
         let mut observed = BTreeMap::new();
         for object in &map.objects {
@@ -183,7 +183,7 @@ impl DominationHospitalAllocation {
                 .insert(object.object_index, (object.spawn_index, token))
                 .is_some()
             {
-                return Err(invalid("duplicate Domination hospital allocation index"));
+                return Err(invalid("duplicate hospital allocation index"));
             }
         }
         if placements
@@ -191,7 +191,7 @@ impl DominationHospitalAllocation {
             .iter()
             .any(|row| observed.get(&row.object_index) != Some(&(row.spawn_index, row.spawn_token)))
         {
-            return Err(invalid("Domination hospital allocation identity mismatch"));
+            return Err(invalid("hospital allocation identity mismatch"));
         }
         Ok(())
     }
@@ -199,7 +199,7 @@ impl DominationHospitalAllocation {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct DominationHospitalPlacements {
+struct HospitalPlacements {
     format: String,
     map_name: String,
     spawn_catalog_sha256: String,
@@ -209,17 +209,17 @@ struct DominationHospitalPlacements {
     passenger_pose_scope: String,
     allocation_scope: String,
     vehicle_type_token: u32,
-    placements: Vec<DominationHospitalPlacement>,
+    placements: Vec<HospitalPlacement>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct DominationHospitalPlacement {
+struct HospitalPlacement {
     object_index: u16,
     spawn_index: u16,
     spawn_token: u32,
     properties_source: String,
-    mounts: Vec<DominationMount>,
+    mounts: Vec<HospitalMount>,
     max_occupancy: u8,
     passenger_seats: u8,
     exit: vehicle_exit::BunkerExitPolicy,
@@ -227,19 +227,23 @@ struct DominationHospitalPlacement {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct DominationMount {
+struct HospitalMount {
     local_offset: [f32; 3],
     radius: f32,
 }
 
 #[derive(Clone)]
-struct DominationHospitalAccess {
+struct HospitalAccess {
     mount_radii: Vec<f32>,
     max_occupancy: u8,
     passenger_seats: u8,
+    /// Domination hospitals take direct vehicle damage and decay. An
+    /// Acquisition field hospital follows only its structural objective's
+    /// forward spawn, so direct hits never change its body.
+    direct_damage: bool,
 }
 
-pub struct DominationBunker<'a> {
+pub struct IndexedHospital<'a> {
     pub index: u16,
     pub spawn_index: u16,
     pub team: u8,
@@ -255,7 +259,7 @@ pub struct DominationBunker<'a> {
     mount_radii: &'a [f32],
 }
 
-impl DominationBunker<'_> {
+impl IndexedHospital<'_> {
     /// Original hospital passenger seats use the vehicle transform directly
     /// because the shared empty node name never resolves in these models.
     pub fn seat_position(&self, seat: u8) -> Option<replication::CharacterPosition> {
@@ -290,7 +294,7 @@ impl DominationBunker<'_> {
     }
 }
 
-impl DominationHospitalPlacements {
+impl HospitalPlacements {
     fn validate(&self, spawns: &spawn_catalog::SpawnCatalog) -> io::Result<()> {
         let policy = spawns.match_profile();
         if self.format != "mag_domination_hospital_placements_v1"
@@ -304,13 +308,14 @@ impl DominationHospitalPlacements {
                 .all(u8::is_ascii_hexdigit)
             || self.map_name != spawns.map_name()
             || spawns.source_sha256() != Some(self.spawn_catalog_sha256.as_str())
-            || policy.game_type != 2
+            || !matches!(policy.game_type, 1 | 2)
             || !policy.auto_assign_teams
             || !policy.has_bunkers
             || self.vehicle_type_token == 0
-            || self.placements.len() != 16
+            || self.placements.is_empty()
+            || (policy.game_type == 2 && self.placements.len() != 16)
         {
-            return Err(invalid("invalid Domination hospital source binding"));
+            return Err(invalid("invalid hospital source binding"));
         }
         let mut indices = BTreeSet::new();
         let mut spawn_indices = BTreeSet::new();
@@ -339,7 +344,7 @@ impl DominationHospitalPlacements {
                             .any(|v| !v.is_finite() || v.abs() >= 2048.)
                 })
             {
-                return Err(invalid("invalid Domination hospital placement"));
+                return Err(invalid("invalid hospital placement"));
             }
             placement.exit.validate().map_err(invalid)?;
         }
@@ -350,7 +355,7 @@ impl DominationHospitalPlacements {
             .filter(|location| matches!(location.kind, spawn_catalog::SpawnKind::BunkerPassenger))
             .any(|location| !spawn_indices.contains(&location.index))
         {
-            return Err(invalid("incomplete Domination hospital coverage"));
+            return Err(invalid("incomplete hospital coverage"));
         }
         Ok(())
     }
@@ -368,14 +373,16 @@ struct Bunker {
     health: BunkerHealth,
     damage: VehicleDamage,
     exit: Option<vehicle_exit::BunkerExitPolicy>,
-    domination: Option<DominationHospitalAccess>,
+    hospital: Option<HospitalAccess>,
     vehicle_state: VehicleState,
     turret_destruction_started: bool,
 }
 
 impl Bunker {
     fn domination_damageable(&self) -> bool {
-        self.domination.is_some()
+        self.hospital
+            .as_ref()
+            .is_some_and(|access| access.direct_damage)
             && self.vehicle_state == VehicleState::Operational
             && !self.health.destroyed
             && self.health.conditions() & 4 == 0
@@ -411,8 +418,8 @@ pub struct BunkerWorld {
     catalog: StructureCatalog,
     bunkers: BTreeMap<u16, Bunker>,
     vehicle_token: u32,
-    domination_spawn_sha256: Option<String>,
-    domination_structure_sha256: Option<String>,
+    hospital_spawn_sha256: Option<String>,
+    hospital_structure_sha256: Option<String>,
     pub(crate) hospital_turrets: BTreeMap<u16, crate::hospital_turrets::Runtime>,
     pending_placements: usize,
     commands: BTreeMap<String, (u16, f32)>,
@@ -587,7 +594,7 @@ impl BunkerWorld {
                         last_user_data: 0,
                     },
                     exit: None,
-                    domination: None,
+                    hospital: None,
                     vehicle_state: VehicleState::Operational,
                     turret_destruction_started: false,
                 },
@@ -600,21 +607,23 @@ impl BunkerWorld {
             catalog,
             bunkers,
             vehicle_token,
-            domination_spawn_sha256: None,
-            domination_structure_sha256: None,
+            hospital_spawn_sha256: None,
+            hospital_structure_sha256: None,
             hospital_turrets: Default::default(),
             pending_placements,
             commands: Default::default(),
         })
     }
-    /// Load independently qualified placements for this exact Domination spawn profile.
-    pub fn load_domination(
+    /// Load independently qualified hospital placements for this exact spawn
+    /// profile: a Domination or Acquisition profile whose defenders' field
+    /// hospitals (spawn type 8) carry a mountable defensive emplacement.
+    pub fn load_hospitals(
         placements: impl AsRef<Path>,
         structures: impl AsRef<Path>,
         source_proof: impl AsRef<Path>,
         spawns: &spawn_catalog::SpawnCatalog,
     ) -> io::Result<Self> {
-        let raw: DominationHospitalPlacements =
+        let raw: HospitalPlacements =
             serde_json::from_reader(std::fs::File::open(placements)?).map_err(invalid)?;
         raw.validate(spawns)?;
         let structures = std::fs::read(structures)?;
@@ -622,15 +631,16 @@ impl BunkerWorld {
         if raw.structure_catalog_sha256 != format!("{:x}", Sha256::digest(&structures))
             || raw.source_proof_sha256 != format!("{:x}", Sha256::digest(&source))
         {
-            return Err(invalid("Domination hospital prerequisite digest mismatch"));
+            return Err(invalid("hospital prerequisite digest mismatch"));
         }
-        let allocation: DominationHospitalAllocation = serde_json::from_slice(&source)?;
+        let allocation: HospitalAllocation = serde_json::from_slice(&source)?;
         allocation.validate(&raw)?;
         let catalog = StructureCatalog::from_value_for_application(
             serde_json::from_slice(&structures)?,
             20231,
         )?;
         let faction = spawns.match_profile().defending_faction;
+        let direct_damage = spawns.match_profile().game_type == 2;
         let mut bunkers = BTreeMap::new();
         for placement in raw.placements {
             let profile = catalog
@@ -638,7 +648,7 @@ impl BunkerWorld {
                 .map_err(invalid)?
                 .clone();
             if profile.faction != faction {
-                return Err(invalid("wrong Domination hospital faction"));
+                return Err(invalid("wrong hospital faction"));
             }
             let health = BunkerHealth::for_profile(&profile, &catalog).map_err(invalid)?;
             let repair_points = placement
@@ -674,10 +684,11 @@ impl BunkerWorld {
                         last_user_data: 0,
                     },
                     exit: Some(placement.exit),
-                    domination: Some(DominationHospitalAccess {
+                    hospital: Some(HospitalAccess {
                         mount_radii: placement.mounts.iter().map(|mount| mount.radius).collect(),
                         max_occupancy: placement.max_occupancy,
                         passenger_seats: placement.passenger_seats,
+                        direct_damage,
                     }),
                     vehicle_state: VehicleState::Operational,
                     turret_destruction_started: false,
@@ -688,23 +699,31 @@ impl BunkerWorld {
             catalog,
             bunkers,
             vehicle_token: raw.vehicle_type_token,
-            domination_spawn_sha256: Some(raw.spawn_catalog_sha256),
-            domination_structure_sha256: Some(raw.structure_catalog_sha256),
+            hospital_spawn_sha256: Some(raw.spawn_catalog_sha256),
+            hospital_structure_sha256: Some(raw.structure_catalog_sha256),
             hospital_turrets: Default::default(),
             pending_placements: 0,
             commands: BTreeMap::new(),
         })
     }
-    pub(crate) fn validate_domination_profile(
+    pub(crate) fn validate_hospital_profile(
         &self,
         spawns: &spawn_catalog::SpawnCatalog,
     ) -> Result<(), &'static str> {
-        if self.domination_spawn_sha256.as_deref().is_none()
-            || self.domination_spawn_sha256.as_deref() != spawns.source_sha256()
+        if self.hospital_spawn_sha256.as_deref().is_none()
+            || self.hospital_spawn_sha256.as_deref() != spawns.source_sha256()
         {
-            return Err("bunker_world_domination_profile_mismatch");
+            return Err("bunker_world_hospital_profile_mismatch");
         }
         Ok(())
+    }
+
+    /// True when this world holds source-bound hospitals addressed by their
+    /// own family-13 index, rather than the legacy single Alpha bunker.
+    pub(crate) fn has_indexed_hospitals(&self) -> bool {
+        self.bunkers
+            .values()
+            .any(|bunker| bunker.hospital.is_some())
     }
 
     /// The per-emplacement exit is addressed by the family-13 pool index.
@@ -716,8 +735,8 @@ impl BunkerWorld {
         self.vehicle_token
     }
 
-    pub(crate) fn domination_structure_sha256(&self) -> Option<&str> {
-        self.domination_structure_sha256.as_deref()
+    pub(crate) fn hospital_structure_sha256(&self) -> Option<&str> {
+        self.hospital_structure_sha256.as_deref()
     }
     pub(crate) fn repair_tool_profile(&self) -> crate::structure_catalog::RepairParameters {
         self.catalog.repair()
@@ -736,11 +755,11 @@ impl BunkerWorld {
         attacker: u32,
         request: &bullet_hit::NetMessageHit,
         now: Duration,
-    ) -> Result<Option<DominationBunkerUpdate>, &'static str> {
+    ) -> Result<Option<HospitalUpdate>, &'static str> {
         let bunker = self
             .bunkers
             .get_mut(&index)
-            .filter(|bunker| bunker.domination.is_some())
+            .filter(|bunker| bunker.hospital.is_some())
             .ok_or("unknown_domination_hospital_bullet_target")?;
         if !bunker.domination_damageable() {
             return Err("domination_hospital_bullet_target_not_damageable");
@@ -756,7 +775,7 @@ impl BunkerWorld {
                 request.client_data,
                 now,
             )?
-            .map(|damage| DominationBunkerUpdate {
+            .map(|damage| HospitalUpdate {
                 object_index: index,
                 state: None,
                 damage: Some(damage),
@@ -772,13 +791,19 @@ impl BunkerWorld {
             .is_some_and(Bunker::domination_damageable)
     }
 
+    pub(crate) fn hospitals(&self) -> impl Iterator<Item = IndexedHospital<'_>> {
+        self.bunkers
+            .keys()
+            .filter_map(|&index| self.hospital(index))
+    }
+
     pub(crate) fn damageable_domination_hospitals(
         &self,
-    ) -> impl Iterator<Item = DominationBunker<'_>> {
+    ) -> impl Iterator<Item = IndexedHospital<'_>> {
         self.bunkers.iter().filter_map(|(&index, bunker)| {
             bunker
                 .domination_damageable()
-                .then(|| self.domination_bunker(index))
+                .then(|| self.hospital(index))
                 .flatten()
         })
     }
@@ -792,7 +817,7 @@ impl BunkerWorld {
         let bunker = self
             .bunkers
             .get_mut(&index)
-            .filter(|bunker| bunker.domination.is_some())
+            .filter(|bunker| bunker.hospital.is_some())
             .ok_or("unknown_domination_hospital_blast_target")?;
         if !bunker.domination_damageable() {
             return Ok(None);
@@ -857,11 +882,16 @@ impl BunkerWorld {
     pub(crate) fn advance_domination_hospital_damage(
         &mut self,
         now: Duration,
-    ) -> Result<Vec<(DominationBunkerUpdate, u32)>, &'static str> {
+    ) -> Result<Vec<(HospitalUpdate, u32)>, &'static str> {
         let mut changes = Vec::new();
         let mut deaths = Vec::new();
         for (&index, bunker) in &mut self.bunkers {
-            if bunker.domination.is_none() || bunker.vehicle_state != VehicleState::Operational {
+            if !bunker
+                .hospital
+                .as_ref()
+                .is_some_and(|access| access.direct_damage)
+                || bunker.vehicle_state != VehicleState::Operational
+            {
                 continue;
             }
             let previous = bunker.damage;
@@ -880,7 +910,7 @@ impl BunkerWorld {
                 || previous.conditions != bunker.damage.conditions
             {
                 changes.push((
-                    DominationBunkerUpdate {
+                    HospitalUpdate {
                         object_index: index,
                         state: None,
                         damage: Some(bunker.damage),
@@ -893,19 +923,16 @@ impl BunkerWorld {
             }
         }
         for (spawn, attacker) in deaths {
-            changes.push((
-                self.apply_domination_cycle(spawn, false, attacker)?,
-                attacker,
-            ));
+            changes.push((self.apply_hospital_cycle(spawn, false, attacker)?, attacker));
         }
         Ok(changes)
     }
 
-    pub fn domination_bunker(&self, index: u16) -> Option<DominationBunker<'_>> {
+    pub fn hospital(&self, index: u16) -> Option<IndexedHospital<'_>> {
         let bunker = self.bunkers.get(&index)?;
         let exit = bunker.exit.as_ref()?;
-        let domination = bunker.domination.as_ref()?;
-        Some(DominationBunker {
+        let access = bunker.hospital.as_ref()?;
+        Some(IndexedHospital {
             index,
             spawn_index: bunker.spawn,
             team: bunker.team,
@@ -915,18 +942,18 @@ impl BunkerWorld {
             operational: bunker.vehicle_state == VehicleState::Operational
                 && !bunker.health.destroyed,
             position: exit.transform.position,
-            max_occupancy: domination.max_occupancy,
-            passenger_seats: domination.passenger_seats,
+            max_occupancy: access.max_occupancy,
+            passenger_seats: access.passenger_seats,
             exit_policy: exit,
             mount_points: &bunker.repair_points,
-            mount_radii: &domination.mount_radii,
+            mount_radii: &access.mount_radii,
         })
     }
 
-    pub fn domination_bunker_at_spawn(&self, spawn_index: u16) -> Option<DominationBunker<'_>> {
+    pub fn hospital_at_spawn(&self, spawn_index: u16) -> Option<IndexedHospital<'_>> {
         self.bunkers.iter().find_map(|(&index, bunker)| {
             (bunker.spawn == spawn_index)
-                .then(|| self.domination_bunker(index))
+                .then(|| self.hospital(index))
                 .flatten()
         })
     }
@@ -934,12 +961,12 @@ impl BunkerWorld {
     /// Apply the type-13 body mutation to a staged world. The caller must stage
     /// occupant and turret destruction in the same transaction before installing
     /// this world or transmitting the update.
-    pub fn apply_domination_cycle(
+    pub fn apply_hospital_cycle(
         &mut self,
         spawn_index: u16,
         enabled: bool,
         damage_attribution: u32,
-    ) -> Result<DominationBunkerUpdate, &'static str> {
+    ) -> Result<HospitalUpdate, &'static str> {
         let (&object_index, bunker) = self
             .bunkers
             .iter_mut()
@@ -975,7 +1002,7 @@ impl BunkerWorld {
         }
         bunker.damage.health_quarter_points = bunker.health.wire_health();
         bunker.damage.conditions = bunker.health.conditions();
-        Ok(DominationBunkerUpdate {
+        Ok(HospitalUpdate {
             object_index,
             state: state_changed.then_some(state),
             damage: (!enabled || state_changed).then_some(bunker.damage),
@@ -992,8 +1019,8 @@ impl BunkerWorld {
             catalog: StructureCatalog::load(structures)?,
             bunkers: BTreeMap::new(),
             vehicle_token: 0,
-            domination_spawn_sha256: None,
-            domination_structure_sha256: None,
+            hospital_spawn_sha256: None,
+            hospital_structure_sha256: None,
             hospital_turrets: Default::default(),
             pending_placements: 0,
             commands: Default::default(),
@@ -1077,7 +1104,7 @@ impl BunkerWorld {
     }
 }
 #[derive(Clone, Copy, Debug)]
-pub struct DominationBunkerUpdate {
+pub struct HospitalUpdate {
     object_index: u16,
     state: Option<VehicleState>,
     damage: Option<VehicleDamage>,
@@ -1086,7 +1113,7 @@ pub struct DominationBunkerUpdate {
     restores_turret: bool,
 }
 
-impl DominationBunkerUpdate {
+impl HospitalUpdate {
     pub fn object_index(self) -> u16 {
         self.object_index
     }
@@ -1195,7 +1222,7 @@ impl<W: Write> Engine<W> {
             && (!self.pending_bunker_damage.is_empty()
                 || self.bunker_world.as_ref().is_some_and(|world| {
                     world.bunkers.values().any(|b| {
-                        b.domination.is_none()
+                        b.hospital.is_none()
                             && !b.health.destroyed
                             && b.health.conditions() & 4 != 0
                             && now > b.last_health_update
@@ -1219,7 +1246,7 @@ impl<W: Write> Engine<W> {
         };
         let mut changes = Vec::new();
         for (&index, bunker) in &world.bunkers {
-            if bunker.domination.is_some()
+            if bunker.hospital.is_some()
                 || bunker.health.destroyed
                 || bunker.health.conditions() & 4 == 0
                 || now <= bunker.last_health_update
@@ -1421,7 +1448,7 @@ impl<W: Write> Engine<W> {
             && let Some(index) = self.bunker_world.as_ref().and_then(|world| {
                 world
                     .index(request.defender)
-                    .filter(|&i| world.domination_bunker(i).is_some())
+                    .filter(|&i| world.hospital(i).is_some())
             })
         {
             return self.event_domination_hospital_hit(request, index, now, wall);
@@ -1459,13 +1486,13 @@ impl<W: Write> Engine<W> {
             // Indexed hospitals are changed by the recorded Domination vehicle
             // lifecycle. Legacy hit/pending-damage handling cannot supply its
             // occupant, hulk and peer-publication effects.
-            if bunker.domination.is_some() && !repair {
+            if bunker.hospital.is_some() && !repair {
                 return Err("domination_hospital_damage_consumer_required");
             }
             let retail_hospital_repair = repair
                 && self.runtime_application_id == Some(20231)
-                && w.domination_spawn_sha256.is_some()
-                && bunker.domination.is_some();
+                && w.hospital_spawn_sha256.is_some()
+                && bunker.hospital.is_some();
             if !active.entered_game
                 || !active.ready_for_updates
                 || (!pending && !critical && !active.life.is_alive())
@@ -1571,7 +1598,7 @@ impl<W: Write> Engine<W> {
                         active.team(),
                     )
                 {
-                    let position = w.domination_bunker(index).map(|b| frago::point(b.position));
+                    let position = w.hospital(index).map(|b| frago::point(b.position));
                     repair_credit_input = Some((modifier, position));
                 }
             } else {
@@ -1766,7 +1793,7 @@ mod domination_placement_tests {
                 "runtime_indices_verified":true,"runtime_indices_basis":"synthetic",
                 "squads":squads,"locations":locations}],
         }).to_string()).unwrap();
-        let mut raw = DominationHospitalPlacements {
+        let mut raw = HospitalPlacements {
             format: "mag_domination_hospital_placements_v1".into(),
             spawn_catalog_sha256: catalog.source_sha256().unwrap().into(),
             map_name: catalog.map_name().into(),
@@ -1778,12 +1805,12 @@ mod domination_placement_tests {
             vehicle_type_token: 1,
             placements: (0..16)
                 .rev()
-                .map(|object_index| DominationHospitalPlacement {
+                .map(|object_index| HospitalPlacement {
                     object_index,
                     spawn_index: object_index + 1,
                     spawn_token: 101 + u32::from(object_index),
                     properties_source: "synthetic".into(),
-                    mounts: vec![DominationMount {
+                    mounts: vec![HospitalMount {
                         local_offset: [0., 0., 0.],
                         radius: 2.0,
                     }],
@@ -1819,6 +1846,88 @@ mod domination_placement_tests {
         raw.placements.pop();
         assert!(raw.validate(&catalog).is_err());
     }
+    #[test]
+    fn acquisition_bindings_cover_each_field_hospital_without_domination_count() {
+        let profile = |game_type: u8| {
+            let squads: Vec<_> = (0..32)
+                .map(|index| {
+                    json!({
+                        "index":index,"team":index/16,"platoon":index%16/4,"squad":index%4,
+                        "faction":if index <16 {None} else {Some(0)},"available":[0],
+                        "default_spawn":0,
+                    })
+                })
+                .collect();
+            let locations: Vec<_> = (0..9)
+                .map(|index| {
+                    json!({
+                        "index":index,"token":100+index,
+                        "kind":if index == 0 { "insertion" } else { "bunker_passenger" },
+                        "position":{"x":0.,"y":0.,"z":0.},
+                    })
+                })
+                .collect();
+            spawn_catalog::SpawnCatalog::from_json(&json!({
+                "format":"mag_spawn_catalog","schema_version":1,"source":"synthetic",
+                "active":{"map_name":"hospital_test","squad_index":0,"default_spawn":0,"available":[0]},
+                "match_profile":{"game_type":game_type,"auto_assign_teams":true,"attacking_faction":1,
+                    "has_bunkers":true,"has_objectives":false},
+                "maps":[{"name":"hospital_test","owner_faction":0,"spawn_count":9,
+                    "runtime_indices_verified":true,"runtime_indices_basis":"synthetic",
+                    "squads":squads,"locations":locations}],
+            }).to_string())
+        };
+        assert!(profile(0).is_err_and(|error| {
+            error
+                .to_string()
+                .contains("automatic_bunker_assignment_unsupported")
+        }));
+        let catalog = profile(1).unwrap();
+        let mut raw = HospitalPlacements {
+            format: "mag_domination_hospital_placements_v1".into(),
+            spawn_catalog_sha256: catalog.source_sha256().unwrap().into(),
+            map_name: catalog.map_name().into(),
+            structure_catalog_sha256: "a".repeat(64),
+            source_proof_sha256: "b".repeat(64),
+            passenger_pose_sha256: "c".repeat(64),
+            passenger_pose_scope: "retail_unresolved_passenger_node_zero_local_pose".into(),
+            allocation_scope: "successful_production_fresh_level_load".into(),
+            vehicle_type_token: 1,
+            placements: (0..8)
+                .map(|object_index| HospitalPlacement {
+                    object_index,
+                    spawn_index: object_index + 1,
+                    spawn_token: 101 + u32::from(object_index),
+                    properties_source: "synthetic".into(),
+                    mounts: vec![HospitalMount {
+                        local_offset: [0., 0., 0.],
+                        radius: 2.0,
+                    }],
+                    max_occupancy: 12,
+                    passenger_seats: 12,
+                    exit: vehicle_exit::BunkerExitPolicy {
+                        transform: vehicle_exit::BunkerTransform {
+                            position: replication::CharacterPosition {
+                                x: 1.,
+                                y: 0.,
+                                z: 1.,
+                            },
+                            rotation_xyzw: [0., 0., 0., 1.],
+                        },
+                        candidates: vec![vehicle_exit::ExitCandidate {
+                            ranking_offset: [1., 0., 0.],
+                            position_offset: [1., 0., 0.],
+                        }],
+                    },
+                })
+                .collect(),
+        };
+        raw.validate(&catalog).unwrap();
+        // Every hospital point still needs its own emplacement.
+        raw.placements.pop();
+        assert!(raw.validate(&catalog).is_err());
+    }
+
     fn hospital_world() -> BunkerWorld {
         let mut world = bunker_team_tests::fixture(1, 1, true)
             .bunker_world
@@ -1839,10 +1948,11 @@ mod domination_placement_tests {
                 position_offset: [1., 0., 0.],
             }],
         });
-        bunker.domination = Some(DominationHospitalAccess {
+        bunker.hospital = Some(HospitalAccess {
             mount_radii: vec![],
             max_occupancy: 12,
             passenger_seats: 12,
+            direct_damage: true,
         });
         world.bunkers.insert(11, bunker);
         world
@@ -1908,24 +2018,24 @@ mod domination_placement_tests {
     #[test]
     fn domination_cycle_restores_damage_and_reports_external_destruction() {
         let mut world = hospital_world();
-        let disable = world.apply_domination_cycle(0, false, 0x0c800007).unwrap();
+        let disable = world.apply_hospital_cycle(0, false, 0x0c800007).unwrap();
         assert_eq!(disable.object_index(), 11);
         assert!(disable.kills_occupants());
         assert!(disable.destroys_turret());
         assert_eq!(disable.state, Some(VehicleState::Destroyed));
         assert_eq!(world.bunkers[&11].health.hp(), 0.0);
         assert_eq!(world.bunkers[&11].damage.last_attacker, 0x0c800007);
-        let repeated = world.apply_domination_cycle(0, false, 0x0c800007).unwrap();
+        let repeated = world.apply_hospital_cycle(0, false, 0x0c800007).unwrap();
         assert!(!repeated.destroys_turret());
-        let restore = world.apply_domination_cycle(0, true, 0x0c800007).unwrap();
+        let restore = world.apply_hospital_cycle(0, true, 0x0c800007).unwrap();
         assert!(!restore.kills_occupants());
         assert!(restore.restores_turret());
         assert_eq!(restore.state, Some(VehicleState::Operational));
         assert_eq!(world.bunkers[&11].health.hp(), 200.0);
         assert_eq!(world.bunkers[&11].damage.conditions, 0);
         assert_eq!(world.bunkers[&11].damage.last_attacker, u32::MAX);
-        assert!(world.apply_domination_cycle(1, false, 0x0c800007).is_err());
-        let again = world.apply_domination_cycle(0, false, 0x0c800007).unwrap();
+        assert!(world.apply_hospital_cycle(1, false, 0x0c800007).is_err());
+        let again = world.apply_hospital_cycle(0, false, 0x0c800007).unwrap();
         assert!(again.kills_occupants());
         assert!(again.destroys_turret());
     }

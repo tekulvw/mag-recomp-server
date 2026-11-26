@@ -182,6 +182,15 @@ impl Setup {
         Ok(())
     }
 
+    /// Every bound field hospital must be the forward spawn of one of this
+    /// map's Structural objectives, whose FSP then drives its emplacement.
+    pub(crate) fn validate_hospitals(
+        &self,
+        hospitals: &crate::structures::BunkerWorld,
+    ) -> Result<(), &'static str> {
+        self.bindings.validate_hospitals(hospitals)
+    }
+
     pub(crate) fn validate_ground_area_seats(
         &self,
         vehicles: &crate::ground_vehicles::Catalog,
@@ -371,6 +380,26 @@ impl Hook {
 }
 
 impl Bindings {
+    fn validate_hospitals(
+        &self,
+        hospitals: &crate::structures::BunkerWorld,
+    ) -> Result<(), &'static str> {
+        for hospital in hospitals.hospitals() {
+            let bound = self.rows.values().any(|row| {
+                row.class == NativeClass::Structural
+                    && row.spawn.is_some_and(|spawn| {
+                        spawn.index == hospital.spawn_index
+                            && spawn.team == hospital.team
+                            && (spawn.user_class, spawn.spawn_type, spawn.vehicle) == (0, 8, false)
+                    })
+            });
+            if !bound {
+                return Err("acquisition_hospital_forward_spawn_unbound");
+            }
+        }
+        Ok(())
+    }
+
     fn configure_spawns(&self, spawns: &mut SpawnCatalog) -> Result<(), &'static str> {
         // Structural forward spawns (the defenders' field hospitals) a spawn
         // catalog leaves unsupported fall back locally to each squad's
@@ -722,6 +751,10 @@ pub(crate) struct Frame<'a, W: Write> {
     pub(crate) filter_rows: &'a [u32; 32],
     pub(crate) physics: Settings,
     pub(crate) ground_policy: Option<&'a crate::acquisition_ground_damage::Policy>,
+    /// The staged field-hospital emplacements (copied on their first change)
+    /// and the family-13 updates their forward spawns produce.
+    pub(crate) hospitals: &'a mut Option<crate::structures::BunkerWorld>,
+    pub(crate) hospital_packets: &'a mut Vec<Vec<u8>>,
     pub(crate) now: Duration,
 }
 
@@ -1254,9 +1287,11 @@ impl Runtime {
             .bindings
             .plan_fsp(token, spawn, entry.delta.state_actor.state)?;
         let (spawns, ()) = fsp::stage_spawn_effects(frame.spawns, &plan)?.complete(|requests| {
-            if spawn.vehicle {
-                for &request in requests {
+            for &request in requests {
+                if spawn.vehicle {
                     frame.stage_vehicle(request, entry.delta.object_index)?;
+                } else {
+                    frame.stage_hospital(request, entry.delta.object_index)?;
                 }
             }
             Ok(())
@@ -1279,6 +1314,64 @@ impl<W: Write> Frame<'_, W> {
         }
         self.audit.extend(commit.audit);
         self.messages.extend(commit.messages);
+        Ok(())
+    }
+
+    /// A field hospital's forward spawn drives its emplacement the way a
+    /// Domination hospital's does: deactivation destroys the body and kills
+    /// its seated occupants through the shared character pipeline, and
+    /// activation restores it. Points without a bound emplacement have no
+    /// vehicle work.
+    fn stage_hospital(
+        &mut self,
+        request: fsp::VehicleRequest,
+        objective: u16,
+    ) -> Result<(), &'static str> {
+        let spawn = request.point.native_id as u16;
+        // Stage a copy of the emplacements only once a bound one changes.
+        if self.hospitals.is_none() {
+            *self.hospitals = self
+                .engine
+                .bunker_world
+                .as_ref()
+                .filter(|world| world.hospital_at_spawn(spawn).is_some())
+                .cloned();
+        }
+        let Some(hospitals) = self
+            .hospitals
+            .as_mut()
+            .filter(|world| world.hospital_at_spawn(spawn).is_some())
+        else {
+            return Ok(());
+        };
+        let operational = request.hook == VehicleHook::OnFspActivate;
+        let damage_id = 0x0c80_0000 | u32::from(objective);
+        let update = hospitals.apply_hospital_cycle(spawn, operational, damage_id)?;
+        if update.kills_occupants() {
+            let previous = self.engine.bunker_world.replace(hospitals.clone());
+            let result = self.engine.stage_bunker_occupants(
+                update.object_index(),
+                damage_id,
+                self.native,
+                self.now,
+            );
+            self.engine.bunker_world = previous;
+            let (audit, messages) = result?;
+            self.audit.extend(audit);
+            self.messages.extend(messages);
+        }
+        let packet = update.encode(1, self.now.as_millis() as u32, self.engine.wire_profile)?;
+        if packet.is_some() || update.kills_occupants() {
+            // No hulk or destruction blast is bound for Acquisition: the
+            // Structural objective's own sequence supplies the wreck.
+            self.audit.push(json!({
+                "op":"acquisition_hospital_cycle", "objective":objective,
+                "spawn_point_index":spawn, "bunker_index":update.object_index(),
+                "operational":operational, "occupants_killed":update.kills_occupants(),
+                "hulk":"structural_sequence",
+            }));
+        }
+        self.hospital_packets.extend(packet);
         Ok(())
     }
 

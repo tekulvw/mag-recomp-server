@@ -197,7 +197,7 @@ impl<W: Write> Engine<W> {
             && self
                 .bunker_world
                 .as_ref()
-                .and_then(|world| world.domination_bunker_at_spawn(index))
+                .and_then(|world| world.hospital_at_spawn(index))
                 .is_some_and(|h| h.operational && h.team == team && h.faction == faction)
     }
 
@@ -540,7 +540,7 @@ impl<W: Write> Engine<W> {
                 let hospital = self
                     .bunker_world
                     .as_ref()
-                    .and_then(|world| world.domination_bunker_at_spawn(index))
+                    .and_then(|world| world.hospital_at_spawn(index))
                     .ok_or("bot_spawn_hospital_unbound")?;
                 let origin = hospital.position;
                 let away = |p: replication::CharacterPosition| {

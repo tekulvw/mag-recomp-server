@@ -510,7 +510,7 @@ pub(crate) fn retire_destroyed_hospital_spawns(
             matches!(p.kind, crate::spawn_catalog::SpawnKind::BunkerPassenger)
                 && spawns.point_active(p.index)
                 && bunkers
-                    .domination_bunker_at_spawn(p.index)
+                    .hospital_at_spawn(p.index)
                     .is_some_and(|hospital| !hospital.operational)
         })
         .map(|p| (p.index, p.token))
@@ -539,7 +539,7 @@ impl<W: Write> Provider<'_, W> {
 
     fn stage_hospital_update(
         &mut self,
-        update: crate::structures::DominationBunkerUpdate,
+        update: crate::structures::HospitalUpdate,
         damage_id: u32,
     ) -> Result<(), &'static str> {
         let mut bunkers = self
@@ -554,7 +554,7 @@ impl<W: Write> Provider<'_, W> {
     fn stage_hospital_presence(
         &mut self,
         bunkers: &mut BunkerWorld,
-        update: crate::structures::DominationBunkerUpdate,
+        update: crate::structures::HospitalUpdate,
         damage_id: u32,
     ) -> Result<(), &'static str> {
         if update.kills_occupants() {
@@ -577,7 +577,7 @@ impl<W: Write> Provider<'_, W> {
                 .as_ref()
                 .ok_or("domination_hospital_hulk_assets_required")?;
             let bunker = bunkers
-                .domination_bunker(update.object_index())
+                .hospital(update.object_index())
                 .ok_or("domination_hospital_body_source_missing")?;
             self.state
                 .collisions
@@ -602,7 +602,7 @@ impl<W: Write> Provider<'_, W> {
                 })
                 .ok_or("domination_hospital_turret_yaw_required")?;
             let bunker = bunkers
-                .domination_bunker(update.object_index())
+                .hospital(update.object_index())
                 .ok_or("domination_hospital_hulk_source_missing")?;
             let faction = bunker.faction;
             let transform = bunker
@@ -1208,10 +1208,10 @@ impl<W: Write> ExternalEffects for Provider<'_, W> {
             let Some(bunkers) = self.bunkers.as_mut() else {
                 return Err("domination_fsp_vehicle_world_required");
             };
-            if bunkers.domination_bunker_at_spawn(spawn).is_none() {
+            if bunkers.hospital_at_spawn(spawn).is_none() {
                 return Err("domination_fsp_linked_vehicle_backend_required");
             }
-            let update = bunkers.apply_domination_cycle(
+            let update = bunkers.apply_hospital_cycle(
                 spawn,
                 request.hook == VehicleHook::OnFspActivate,
                 damage_id,

@@ -428,7 +428,9 @@ impl SpawnCatalog {
             return Err("invalid_match_admission_policy");
         }
         if profile.auto_assign_teams {
-            if profile.has_bunkers && profile.game_type != 2 {
+            // Domination and Acquisition seat field-hospital lives in their
+            // own indexed emplacements; other modes have no such points.
+            if profile.has_bunkers && !matches!(profile.game_type, 1 | 2) {
                 return Err("automatic_bunker_assignment_unsupported");
             }
             for team in 0..2 {

@@ -112,14 +112,14 @@ pub(crate) fn vehicle_pose(v: &ground_vehicles::Creation) -> Pose {
     }
 }
 impl<W: Write> Engine<W> {
-    pub(super) fn domination_bunker_seat_position(
+    pub(super) fn hospital_seat_position(
         &self,
         index: u16,
         seat: u8,
     ) -> Result<replication::CharacterPosition, &'static str> {
         self.bunker_world
             .as_ref()
-            .and_then(|world| world.domination_bunker(index))
+            .and_then(|world| world.hospital(index))
             .and_then(|bunker| bunker.seat_position(seat))
             .ok_or("dynamic_body_mount_pose_unqualified")
     }
@@ -333,7 +333,7 @@ impl<W: Write> Engine<W> {
                     ground.ok_or("dynamic_body_mount_vehicle_unavailable")?,
                 )?)
             } else if let (Some(index), Some(seat)) = (actor.mounted_bunker, actor.mounted_seat) {
-                point(self.domination_bunker_seat_position(index, seat)?)
+                point(self.hospital_seat_position(index, seat)?)
             } else if actor.helo_seat.is_some() {
                 point(Self::domination_helo_passenger_position(actor)?)
             } else if actor.mounted_seat.is_some() {

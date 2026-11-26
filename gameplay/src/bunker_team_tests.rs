@@ -103,14 +103,14 @@ pub(super) fn fixture(actor_team: u8, bunker_team: u8, same_faction: bool) -> En
                     last_user_data: 0,
                 },
                 exit: None,
-                domination: None,
+                hospital: None,
                 vehicle_state: VehicleState::Operational,
                 turret_destruction_started: false,
             },
         )]),
         vehicle_token: 1,
-        domination_spawn_sha256: None,
-        domination_structure_sha256: None,
+        hospital_spawn_sha256: None,
+        hospital_structure_sha256: None,
         hospital_turrets: Default::default(),
         pending_placements: 0,
         commands: BTreeMap::new(),
@@ -382,11 +382,12 @@ fn retail_hospital_repair_requires_bound_wire_tool_and_fans_out() {
     actor.wire_profile = engine.wire_profile;
     actor.emplacement_creation = Some(Vec::new());
     let world = engine.bunker_world.as_mut().unwrap();
-    world.domination_spawn_sha256 = Some("qualified synthetic profile".into());
-    world.bunkers.get_mut(&0).unwrap().domination = Some(DominationHospitalAccess {
+    world.hospital_spawn_sha256 = Some("qualified synthetic profile".into());
+    world.bunkers.get_mut(&0).unwrap().hospital = Some(HospitalAccess {
         mount_radii: vec![],
         max_occupancy: 12,
         passenger_seats: 12,
+        direct_damage: true,
     });
 
     let retail = crate::resources::tests::retail_items();

@@ -210,7 +210,7 @@ impl<W: Write> Engine<W> {
                 let b = self
                     .bunker_world
                     .as_ref()
-                    .and_then(|w| w.domination_bunker(index))
+                    .and_then(|w| w.hospital(index))
                     .ok_or("guided_target_unavailable")?;
                 (
                     0,
@@ -268,10 +268,7 @@ impl<W: Write> Engine<W> {
                 )
             }
             13 => {
-                let b = self
-                    .bunker_world
-                    .as_ref()?
-                    .domination_bunker(target.index)?;
+                let b = self.bunker_world.as_ref()?.hospital(target.index)?;
                 (
                     [b.position.x, b.position.y, b.position.z].map(f64::from),
                     anchors.hospital,
