@@ -258,14 +258,23 @@ namespace Server.Medius
         }
         private static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions
         { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, WriteIndented = true };
-        private const int MaximumStoreBytes = 1048576; // 128 accounts with five complete inventories each.
+        public const int MaximumStoreBytes = 1048576; // 128 accounts with five complete inventories each.
+        // Settled reward history is bounded: once a commit would leave the store above the trigger, whole
+        // finalized match rows are evicted (least recently touched first) until it is back at the target.
+        public const int LedgerCompactionTriggerBytes = MaximumStoreBytes / 4 * 3;
+        public const int LedgerCompactionTargetBytes = MaximumStoreBytes / 2;
+        // Finalized rows kept for redelivery after a lost acknowledgement; evicted only to fit the hard bound.
+        public const int RetainedFinalizedMatchRows = 8;
         private readonly string _path;
         public MagLoadoutCatalog LoadoutCatalog { get; set; }
         public MagSkillCatalog SkillCatalog { get; set; }
         public MagProgressionCatalog ProgressionCatalog { get; set; }
         public MagTrainingCompletionCatalog TrainingCompletionCatalog { get; set; }
-        // Local receipt bound: reject new awards when full; never evict replay protection.
+        // Local receipt bound: reject new awards when full. Open matches keep every receipt; only
+        // finalized matches, which accept no further award, are compacted (see CompactRewardLedger).
         public const int MaximumRewardReceipts = 4096;
+        /// <summary>Receives a one-line operator summary after the reward ledger is compacted.</summary>
+        public Action<string> LedgerMaintenance { get; set; }
         // Explicit local development policy, supplied by the caller; authored starter data grants no blanket unlock.
         public byte InitialSkillPoints { get; set; }
         // Operator policy: new characters start at this level as if they had earned it
@@ -661,10 +670,12 @@ namespace Server.Medius
             character.Experience = experience; character.Level = level; character.SkillPoints = points;
             progress.Experience = outcome.MatchExperience; progress.Fraction = fraction; progress.Finalized = final;
             progress.FragoPoints = matchFragoPoints ?? progress.FragoPoints;
-            document.MatchRewardProgress[progressKey] = progress;
+            // Row order records recency: the touched row moves last, so compaction evicts stale rows first.
+            document.MatchRewardProgress = document.MatchRewardProgress.Where(e => e.Key != progressKey)
+                .Append(new KeyValuePair<string, MatchRewardProgress>(progressKey, progress)).ToDictionary(e => e.Key, e => e.Value, StringComparer.Ordinal);
             document.RewardReceipts.Add(rewardId, new RewardReceipt { Account = account, CharacterId = characterId,
                 MatchKey = matchKey, Kind = kind, Units = units, Snapshot = outcome.Copy(false), Leadership = leadership, Frago = frago });
-            Commit(path, document.Characters, document);
+            Commit(path, document.Characters, document, progressKey);
             return outcome.Copy(false);
         }
         private static LeadershipRewardOutcome UpdateLeadership(StoredCharacter character, MagProgressionCatalog catalog, byte characterLevel,
@@ -766,7 +777,7 @@ namespace Server.Medius
             change.Applied = true; change.Reason = "applied";
             return change;
         }
-        private void Commit(string path, List<StoredCharacter> all, Document document = null)
+        private void Commit(string path, List<StoredCharacter> all, Document document = null, string touchedProgress = null)
         {
             document = document ?? ReadDocument();
             document.Characters = all;
@@ -778,8 +789,60 @@ namespace Server.Medius
                 foreach (var character in all) { character.Experience = character.Experience ?? 0; character.Level = character.Level ?? 1; }
             }
             var contents = JsonSerializer.SerializeToUtf8Bytes(document, JsonOptions);
-            if (contents.Length > MaximumStoreBytes) throw new InvalidDataException("Character store exceeds local bound.");
+            string compaction = null;
+            if (document.SchemaVersion == 3 && contents.Length > LedgerCompactionTriggerBytes)
+                contents = CompactRewardLedger(document, touchedProgress, contents, out compaction);
+            if (contents.Length > MaximumStoreBytes) throw new InvalidDataException(DescribeOverflow(document, contents.Length));
             _committer.WriteAtomically(path, contents);
+            if (compaction != null) LedgerMaintenance?.Invoke(compaction);
+        }
+        /// <summary>
+        /// Evicts settled history so the store keeps accepting rewards. A finalized match row accepts no
+        /// further award, so it and its receipts are dropped together, least recently touched first, until
+        /// the store is at the compaction target. Open rows are never evicted, nor is the row this commit
+        /// touches. The most recently touched finalized rows stay for redelivery after a lost
+        /// acknowledgement and are evicted only when the store would otherwise exceed its hard bound.
+        /// </summary>
+        private static byte[] CompactRewardLedger(Document document, string touchedProgress, byte[] contents, out string summary)
+        {
+            int beforeBytes = contents.Length, beforeReceipts = document.RewardReceipts.Count, beforeRows = document.MatchRewardProgress.Count;
+            var receiptsByRow = document.RewardReceipts
+                .GroupBy(e => MatchProgressKey(e.Value.Account, e.Value.CharacterId, e.Value.MatchKey), StringComparer.Ordinal)
+                .ToDictionary(g => g.Key, g => g.Select(e => e.Key).ToList(), StringComparer.Ordinal);
+            var settled = document.MatchRewardProgress.Where(e => e.Value.Finalized && e.Key != touchedProgress).Select(e => e.Key).ToList();
+            int retainedFrom = Math.Max(0, settled.Count - RetainedFinalizedMatchRows), next = 0;
+            long Evict(string row)
+            {
+                var receipts = receiptsByRow.TryGetValue(row, out var ids) ? ids : new List<string>();
+                long size = JsonSerializer.SerializeToUtf8Bytes(new { row = document.MatchRewardProgress[row],
+                    receipts = receipts.ToDictionary(id => id, id => document.RewardReceipts[id], StringComparer.Ordinal) }, JsonOptions).Length;
+                foreach (var id in receipts) document.RewardReceipts.Remove(id);
+                document.MatchRewardProgress.Remove(row);
+                return size;
+            }
+            foreach (var (limit, goal) in new[] { (retainedFrom, LedgerCompactionTargetBytes), (settled.Count, MaximumStoreBytes) })
+                while (contents.Length > goal && next < limit)
+                {
+                    long estimate = contents.Length;
+                    while (estimate > goal && next < limit) estimate -= Evict(settled[next++]);
+                    // Rebuilt without free slots, so rows added later still serialize last.
+                    document.RewardReceipts = document.RewardReceipts.ToDictionary(e => e.Key, e => e.Value, StringComparer.Ordinal);
+                    document.MatchRewardProgress = document.MatchRewardProgress.ToDictionary(e => e.Key, e => e.Value, StringComparer.Ordinal);
+                    contents = JsonSerializer.SerializeToUtf8Bytes(document, JsonOptions);
+                }
+            summary = next == 0 ? null : $"Character store reward ledger compacted: evicted {next} finalized match rows " +
+                $"({beforeReceipts - document.RewardReceipts.Count} receipts), {beforeBytes} -> {contents.Length} bytes, " +
+                $"{document.MatchRewardProgress.Count} of {beforeRows} match rows kept";
+            return contents;
+        }
+        private static string DescribeOverflow(Document document, int bytes)
+        {
+            if (document.SchemaVersion != 3) return $"Character store exceeds local bound: {bytes} of {MaximumStoreBytes} bytes.";
+            var open = document.MatchRewardProgress.Where(e => !e.Value.Finalized).Select(e => e.Key).ToHashSet(StringComparer.Ordinal);
+            int openReceipts = document.RewardReceipts.Values.Count(r => open.Contains(MatchProgressKey(r.Account, r.CharacterId, r.MatchKey)));
+            return $"Character store exceeds local bound: {bytes} of {MaximumStoreBytes} bytes after evicting settled matches; " +
+                $"{open.Count} open match rows hold {openReceipts} of {document.RewardReceipts.Count} reward receipts " +
+                $"and {document.MatchRewardProgress.Count - open.Count} finalized rows remain.";
         }
         private static CharacterCreationOutcome Outcome(MagNetResult result, string reason) => new CharacterCreationOutcome { Result = result, Reason = reason };
         private static FileStream AcquireLock(string path)

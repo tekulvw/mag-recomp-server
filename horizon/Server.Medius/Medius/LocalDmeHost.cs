@@ -1095,7 +1095,8 @@ namespace Server.Medius
                         Logger.Info($"Gameplay reward committed: player={owner.Client.DmeId} kind={reward.Kind} units={reward.Units} xp={result.Experience} level={result.Level} skill_points={result.SkillPoints} match_xp={result.MatchExperience} duplicate={result.Duplicate}");
                     }
                     catch (Exception e) when (e is IOException || e is InvalidDataException || e is UnauthorizedAccessException)
-                    { retry = true; Logger.Warn($"Gameplay reward persistence deferred: player={owner.Client.DmeId} error={e.GetType().Name}"); break; }
+                    { retry = true; Logger.Warn($"Gameplay reward persistence deferred: player={owner.Client.DmeId} error={e.GetType().Name}" +
+                        (e is InvalidDataException ? $" reason={e.Message}" : "")); break; }
                 }
                 lock (_gate) _rewardRetry = (_independentMatchCohorts && _rewardRetry) || retry || pending;
             }
