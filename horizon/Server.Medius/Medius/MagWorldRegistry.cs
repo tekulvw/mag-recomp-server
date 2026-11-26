@@ -91,7 +91,7 @@ namespace Server.Medius
         /// reported as faulted rather than draining.</summary>
         public IReadOnlyList<MagWorldStatus> StatusWorlds() => Array.AsReadOnly(_slots.Select(slot =>
             MagServerStatus.Describe(slot.Config.WorkerId, slot.Faulted || slot.WrittenOff || slot.Bridge.HasWorkerIdentityFault,
-                slot.Host.GetPlacement())).ToArray());
+                slot.Host.GetPlacement(), _portBudget.Capacity)).ToArray());
 
         /// <summary>Humans waiting in the global queue for a world, by requested game type (0 to 2).</summary>
         public int[] QueuedByGameType()

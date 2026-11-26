@@ -166,10 +166,12 @@ the portal can publish it:
 ```json
 {"medius_version":"0.11.0","gameplay_version":"0.15.0","started_at":"2026-11-26T10:00:00Z",
  "uptime_seconds":7200,"mode":"registry","players_online":12,"queued":1,"queued_by_game_type":[1,0,0],
- "dme_ports":{"capacity":32,"in_use":9},
- "worlds":[{"worker_id":"sabotage","state":"open","game_types":[0],"human_capacity":32,"pending":0,
+ "dme_ports":{"capacity":32,"in_use":9},"human_limit":32,
+ "worlds":[{"worker_id":"sabotage","state":"open","game_types":[0],"human_capacity":64,"human_limit":32,
+   "world_size":64,"bot_fill":64,"pending":0,
    "match":{"profile_id":"…","game_type":0,"attacking_faction":1,"defending_faction":2,"humans":8,
-            "attacking_humans":5,"defending_humans":3,"human_capacity":32,"bots":56,"world_capacity":64}}]}
+            "attacking_humans":5,"defending_humans":3,"human_capacity":64,"human_limit":32,"bots":56,
+            "bot_fill":64,"world_capacity":64}}]}
 ```
 
 - `medius_version` and `gameplay_version` are the newest releases in the Medius changelog built
@@ -190,6 +192,14 @@ the portal can publish it:
 - `match` is null unless humans are in a match. Factions are 0 Valor, 1 Raven, 2 SVER; game
   types 0 Sabotage, 1 Acquisition, 2 Domination. `bots` is the profile's bot fill less the
   humans, the population the worker tops the world up to; 0 without bot fill.
+- Human limits. The top-level `human_limit` is the server-wide cap on humans at once across every
+  world: the DME port capacity (`dme_ports.capacity`), null when unbounded. A world's (and its
+  match's) `human_limit` is the humans it can actually hold: its configured row and profile cap,
+  within that server-wide cap. `human_capacity` keeps the row and profile cap alone for older
+  readers: a 64-Character Sabotage row reports 64 there although 32 DME ports hold only 32
+  humans. `world_size` is the world's Characters, humans and bots (the running match's, else the
+  largest profile's); `bot_fill` is the population bots fill it to, humans included, or null
+  without bot fill.
 Set-level refusals are `409 {"error":code,"message":text}`:
 
 | Code | When (`mag-admin` reason) |
