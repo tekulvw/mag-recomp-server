@@ -258,6 +258,11 @@ pub struct CharacterCreation {
     pub owner_index: u16,
     pub info: CharacterInfo,
     pub mag_info: MagCharacterInfo,
+    /// Native field20: the owned-skill record, five 32-bit words in order.
+    /// The client builds its own CharacterModifiers from it once, when the
+    /// Character is created, so only the owner's own creation carries it.
+    /// Peers and server-owned characters leave it at the constructor zero.
+    pub skills: Option<[u32; 5]>,
 }
 #[derive(Clone, Debug)]
 pub struct SquadCreation {
@@ -348,6 +353,12 @@ impl CharacterCreation {
                 18 => {
                     bits.write(1, 1)?;
                     self.mag_info.encode(bits)?;
+                }
+                20 if self.skills.is_some() => {
+                    bits.write(1, 1)?;
+                    for word in self.skills.unwrap() {
+                        bits.write(word, 32)?;
+                    }
                 }
                 _ => bits.write(0, 1)?, // unchanged constructor value; no untraced payload
             }

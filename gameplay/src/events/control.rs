@@ -122,6 +122,9 @@ pub(super) fn client_ready<W: Write>(
                             .unwrap_or_default()
                             .level,
                     ),
+                    // The owner's client derives its own skill modifiers (for
+                    // example the resuscitation gate) only from this creation.
+                    skills: character.skills,
                 },
                 squad: replication::SquadCreation {
                     object_index: squad_address.squad_index(),
