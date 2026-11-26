@@ -62,13 +62,27 @@ namespace Server.Medius
         public static byte? StartingLevel { get; private set; }
         /// <summary>Optional operator minimum level reached on completing Training (MAG_TRAINING_LEVEL).</summary>
         public static byte? TrainingLevel { get; private set; }
+        /// <summary>Hours an open match reward row may go without a reward before it can be compacted
+        /// (MAG_REWARD_LEDGER_OPEN_MATCH_TTL_HOURS).</summary>
+        public static TimeSpan OpenMatchRowTtl { get; private set; } = LocalCharacterStore.DefaultOpenMatchRowTtl;
         public static LocalCharacterStore CreateCharacterStore() => new LocalCharacterStore(Settings.MagCharacterStorePath)
         { TrainingCompletionCatalog = Settings.MagApplicationId == 20231 ? TrainingCompletionCatalog : null,
             LoadoutCatalog = Settings.EnableMagCharacterCatalogs || (Settings.MagApplicationId == 20231 && LoadoutCatalog?.ApplicationId == 20231) ? LoadoutCatalog : null,
             SkillCatalog = Settings.EnableMagCharacterCatalogs || (Settings.MagApplicationId == 20231 && SkillCatalog?.ApplicationId == 20231) ? SkillCatalog : null,
             ProgressionCatalog = Settings.MagApplicationId == 20231 || Settings.EnableMagCharacterCatalogs ? ProgressionCatalog : null,
             InitialSkillPoints = Settings.EnableMagCharacterCatalogs ? InitialSkillPoints : (byte)0,
-            StartingLevel = StartingLevel, TrainingLevel = TrainingLevel, LedgerMaintenance = message => Logger.Info(message) };
+            StartingLevel = StartingLevel, TrainingLevel = TrainingLevel, OpenMatchRowTtl = OpenMatchRowTtl,
+            LedgerMaintenance = message => Logger.Info(message) };
+        /// <summary>Fail fast on an open match row TTL outside whole hours from one hour to thirty days.</summary>
+        public static TimeSpan ParseOpenMatchRowTtl(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return LocalCharacterStore.DefaultOpenMatchRowTtl;
+            int minimum = (int)LocalCharacterStore.MinimumOpenMatchRowTtl.TotalHours, maximum = (int)LocalCharacterStore.MaximumOpenMatchRowTtl.TotalHours;
+            if (!int.TryParse(value.Trim(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out int hours) ||
+                hours < minimum || hours > maximum)
+                throw new InvalidDataException($"MAG_REWARD_LEDGER_OPEN_MATCH_TTL_HOURS must be a whole number of hours between {minimum} and {maximum}.");
+            return TimeSpan.FromHours(hours);
+        }
         /// <summary>Fail fast on a starting level the progression catalog cannot represent.</summary>
         public static byte? ParseStartingLevel(string value, MagProgressionCatalog catalog) =>
             ParseOperatorLevel("MAG_STARTING_LEVEL", value, catalog, catalog?.InitialLevel ?? 1);
@@ -103,6 +117,7 @@ namespace Server.Medius
             ProgressionCatalog = string.IsNullOrEmpty(progressionCatalog) ? null : MagProgressionCatalog.Load(progressionCatalog, Settings.MagApplicationId);
             StartingLevel = ParseStartingLevel(Environment.GetEnvironmentVariable("MAG_STARTING_LEVEL"), ProgressionCatalog);
             TrainingLevel = ParseTrainingLevel(Environment.GetEnvironmentVariable("MAG_TRAINING_LEVEL"), ProgressionCatalog, TrainingCompletionCatalog);
+            OpenMatchRowTtl = ParseOpenMatchRowTtl(Environment.GetEnvironmentVariable("MAG_REWARD_LEDGER_OPEN_MATCH_TTL_HOURS"));
             // Retail purchases are independent of prototype kit/grant activation.
             string retailSkills = Environment.GetEnvironmentVariable("MAG_RETAIL_SKILL_CATALOG");
             if (!string.IsNullOrEmpty(retailSkills) && (Settings.MagApplicationId != 20231 || !Path.IsPathFullyQualified(retailSkills)))
