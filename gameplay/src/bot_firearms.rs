@@ -637,7 +637,10 @@ impl<W: Write> Engine<W> {
                     sample.position.y.into(),
                     sample.position.z.into(),
                 ],
-                height: bot_physics::Body::default().height,
+                height: bot_physics::stance_height(
+                    self.bot_movement_body(),
+                    bot_physics::Stance::Standing,
+                ),
                 health: health_quarter_points,
                 armor,
             });
@@ -655,7 +658,7 @@ impl<W: Write> Engine<W> {
                 },
                 team: bot.target.squad.team(),
                 feet: r.physical_position(),
-                height: self.bot_cover.body_height(id),
+                height: self.bot_cover.body_height(id, self.bot_movement_body()),
                 health: bot.health,
                 armor: armor::ArmorProfile::from_retail_loadout(&bot.target.loadout, catalog).ok(),
             });

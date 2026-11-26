@@ -255,8 +255,13 @@ fn human_sees_bot(engine: &Engine<Vec<u8>>, human: [f64; 3], bot: u16) -> bool {
         engine.collision_world.as_ref(),
         None,
         engine.map_name(),
-        crate::bot_perception::torso(human),
-        crate::bot_perception::torso_at(feet, engine.bot_cover.body_height(bot)),
+        crate::bot_perception::torso(human, engine.bot_movement_body()),
+        crate::bot_perception::torso_at(
+            feet,
+            engine
+                .bot_cover
+                .body_height(bot, engine.bot_movement_body()),
+        ),
         &mut rays,
         &mut work,
     )

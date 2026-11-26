@@ -149,9 +149,10 @@ const PEEK_OFFSET_M: f64 = 0.8;
 const GRID_M: f64 = 8.;
 /// A surface steeper than this (normal's vertical part below it) is a wall.
 const WALL_NORMAL_Y: f64 = 0.7;
-/// Body height of a crouched bot; its torso (aim point and muzzle) is at
-/// 60% of it, as a standing body's is.
-pub(crate) const CROUCH_HEIGHT_M: f64 = 1.2;
+/// Body height of a crouched box bot; its torso (aim point and muzzle) is at
+/// 60% of it, as a standing body's is. Other shapes scale it
+/// (`bot_physics::stance_height`).
+pub(crate) const CROUCH_HEIGHT_M: f64 = bot_physics::CROUCH_HEIGHT_M;
 /// The client's Character stance codes (standing, crouched).
 const STANCE_STANDING: u8 = 0;
 const STANCE_CROUCHED: u8 = 1;
@@ -637,13 +638,15 @@ impl World {
     pub(crate) fn controls(&self, id: u16) -> bool {
         self.episodes.contains_key(&id)
     }
-    /// Body height the bot presents to shots and sight lines.
-    pub(crate) fn body_height(&self, id: u16) -> f64 {
-        if self.crouched.contains_key(&id) {
-            CROUCH_HEIGHT_M
+    /// Body height a bot of the runtime `body` presents to shots and sight
+    /// lines in its current stance.
+    pub(crate) fn body_height(&self, id: u16, body: bot_physics::Body) -> f64 {
+        let stance = if self.crouched.contains_key(&id) {
+            bot_physics::Stance::Crouched
         } else {
-            bot_physics::Body::default().height
-        }
+            bot_physics::Stance::Standing
+        };
+        bot_physics::stance_height(body, stance)
     }
     pub(crate) fn controlled_ids(&self) -> BTreeSet<u16> {
         self.episodes.keys().copied().collect()
@@ -671,12 +674,16 @@ impl Episode {
     }
 }
 
-/// The torso a bot hides at a spot: crouched behind low cover.
-fn hidden_torso(s: &Spot) -> [f64; 3] {
+/// The torso a bot of the runtime `body` hides at a spot: crouched behind
+/// low cover.
+fn hidden_torso(s: &Spot, body: bot_physics::Body) -> [f64; 3] {
     if s.high {
-        torso(s.feet)
+        torso(s.feet, body)
     } else {
-        crate::bot_perception::torso_at(s.feet, CROUCH_HEIGHT_M)
+        crate::bot_perception::torso_at(
+            s.feet,
+            bot_physics::stance_height(body, bot_physics::Stance::Crouched),
+        )
     }
 }
 fn hdist(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -921,7 +928,7 @@ impl<W: Write> Engine<W> {
             .and_then(|e| bodies.get(&e))
             .filter(|(t, _)| *t != team);
         let point = match (live, view) {
-            (Some((_, feet)), _) => torso(*feet),
+            (Some((_, feet)), _) => torso(*feet, self.bot_movement_body()),
             (None, Some(v)) => v.point,
             (None, None) => return None,
         };
@@ -1023,7 +1030,7 @@ impl<W: Write> Engine<W> {
                 self.bot_sight_structures(),
                 &map_name,
                 threat,
-                hidden_torso(&s),
+                hidden_torso(&s, self.bot_movement_body()),
                 &mut budget.rays,
                 &mut budget.work,
             )?;
@@ -1041,7 +1048,7 @@ impl<W: Write> Engine<W> {
                     self.collision_world.as_ref(),
                     self.bot_sight_structures(),
                     &map_name,
-                    torso(*p),
+                    torso(*p, self.bot_movement_body()),
                     threat,
                     &mut budget.rays,
                     &mut budget.work,
@@ -1629,7 +1636,7 @@ impl<W: Write> Engine<W> {
                         self.bot_sight_structures(),
                         &map_name,
                         e.threat,
-                        hidden_torso(&e.spot),
+                        hidden_torso(&e.spot, self.bot_movement_body()),
                         &mut budget.rays,
                         &mut budget.work,
                     ) {
