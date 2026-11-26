@@ -1439,6 +1439,10 @@ pub struct Engine<W: Write> {
     /// `--coalesce-character-replication`: join consecutive queued Character
     /// deltas into one update per recipient (see `character_coalescing`).
     coalesce_character_replication: bool,
+    /// `--owner-skills-record`: write the owner's stored skill record as
+    /// Character field20 in its own creation. Off by default until a lab run
+    /// shows the client's downed timer is unaffected (docs/incapacitation.md).
+    owner_skills_record: bool,
     /// `--per-recipient-reply-budget`: each recipient gets its own allowance
     /// of shared frames per reply (see `reply_budget`).
     per_recipient_reply_budget: bool,
@@ -1795,6 +1799,12 @@ impl<W: Write> Engine<W> {
     /// per recipient when the shared queues drain.
     pub fn with_character_replication_coalescing(mut self) -> Self {
         self.coalesce_character_replication = true;
+        self
+    }
+    /// Opt in to sending the owner's stored skill record (Character field20)
+    /// in its own creation, which the client needs to offer revives.
+    pub fn with_owner_skills_record(mut self) -> Self {
+        self.owner_skills_record = true;
         self
     }
     /// Opt in to a shared-frame allowance per recipient in every reply, and

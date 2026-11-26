@@ -275,6 +275,7 @@ impl<W: Write> Engine<W> {
             shared_drain_cursor: 0,
             shared_deferral: Default::default(),
             coalesce_character_replication: false,
+            owner_skills_record: false,
             per_recipient_reply_budget: false,
             voice: None,
             last_published_rosters: Default::default(),
