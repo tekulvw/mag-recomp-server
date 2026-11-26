@@ -2383,6 +2383,47 @@ impl SequenceCollisionState {
         Ok(false)
     }
 
+    /// Whether a sight line or bullet path between two points crosses placed
+    /// objective geometry (structures, hospitals, hulks and helicopters) that
+    /// the given query row collides with. A crossed structure without a
+    /// qualified filter binding is solid: an unknown wall still hides.
+    pub(crate) fn blocks_ray(
+        &self,
+        start: [f64; 3],
+        end: [f64; 3],
+        row: u32,
+        budget: &mut usize,
+    ) -> Result<bool, &'static str> {
+        let crosses = |surface: &SequenceSurface, budget: &mut usize| {
+            surface
+                .mesh
+                .material_ray_hits(surface.local(start), surface.local(end), budget)
+                .map(|hits| hits.iter().any(|h| h.fraction > 0. && h.fraction < 1.))
+                .map_err(|_| "structure_ray_failed")
+        };
+        for surface in self.active.values().flatten() {
+            let solid = surface
+                .sequence_filter_layers()
+                .map_or(true, |(root, child)| {
+                    row & (1 << root) != 0 && row & (1 << child) != 0
+                });
+            if solid && crosses(surface, budget)? {
+                return Ok(true);
+            }
+        }
+        for (surfaces, layer) in [(&self.hulks, 17), (&self.hospitals, 22), (&self.helos, 22)] {
+            if row & (1 << layer) == 0 {
+                continue;
+            }
+            for surface in surfaces.values() {
+                if crosses(surface, budget)? {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
     fn filtered_ray_hits(
         &self,
         start: [f64; 3],

@@ -42,13 +42,22 @@ const FROM: [f64; 3] = [5., 1.5, 5.];
 const TO: [f64; 3] = [15., 1.5, 5.];
 
 fn sight(world: &CollisionWorld) -> bool {
-    crate::bot_perception::clear_view(Some(world), "synthetic", FROM, TO, &mut 4, &mut 10_000)
-        .unwrap()
+    crate::bot_perception::clear_view(
+        Some(world),
+        None,
+        "synthetic",
+        FROM,
+        TO,
+        &mut 4,
+        &mut 10_000,
+    )
+    .unwrap()
 }
 
 fn shot(world: &CollisionWorld) -> Result<(), &'static str> {
     crate::bot_firearms::visible(
         Some(world),
+        None,
         "synthetic",
         FROM,
         TO,
@@ -115,6 +124,70 @@ fn static_world_unlabelled_or_rowless_sheets_still_block() {
         assert!(!sight(&world));
         assert_eq!(shot(&world), Err("world_blocked"));
         assert_eq!(blast_samples(&world), 0);
+    }
+}
+
+/// A mode's placed structures (bunkers, field hospitals) are not part of the
+/// static map. Bot sight and shots must still stop at them, filtered by the
+/// same projectile row; a structure without a filter binding is solid.
+#[test]
+fn placed_structures_block_bot_sight_and_shots_on_the_projectile_row() {
+    use crate::bot_firearms::Structures;
+    use crate::domination_structural_world::SequenceCollisionState;
+    // The static sheet lets projectiles through, so only the structure decides.
+    let world = sheet(Some(VEHICLE_ONLY)).with_filter_rows(Some(rows()));
+    let (from, to) = ([5., 3., 5.], [15., 0.5, 5.]);
+    let check = |structures: Option<Structures<'_>>| {
+        let sight = crate::bot_perception::clear_view(
+            Some(&world),
+            structures,
+            "synthetic",
+            from,
+            to,
+            &mut 4,
+            &mut 10_000,
+        );
+        let shot = crate::bot_firearms::visible(
+            Some(&world),
+            structures,
+            "synthetic",
+            from,
+            to,
+            1,
+            2,
+            &[],
+            &mut 4,
+            &mut 10_000,
+        );
+        (sight, shot)
+    };
+    assert_eq!(check(None), (Ok(true), Ok(())));
+    for (tag, blocked) in [
+        (Some(STATIC_WORLD as u8), true),
+        (None, true),
+        (Some(VEHICLE_ONLY as u8), false),
+    ] {
+        let mut sequences = SequenceCollisionState::default();
+        // A roof slab the sight line descends through at x = 10.
+        sequences.synthetic_structure_roof(7, [10., 1.75, 5.], 3., tag);
+        let structures = Some(Structures {
+            sequences: &sequences,
+            row: rows()[PROJECTILE_QUERY_LAYER],
+        });
+        let expected = if blocked {
+            (Ok(false), Err("structure_blocked"))
+        } else {
+            (Ok(true), Ok(()))
+        };
+        assert_eq!(check(structures), expected, "{tag:?}");
+        // Elsewhere on the map the structure hides nothing.
+        let mut away = SequenceCollisionState::default();
+        away.synthetic_structure_roof(7, [10., 1.75, 50.], 3., tag);
+        let structures = Some(Structures {
+            sequences: &away,
+            row: rows()[PROJECTILE_QUERY_LAYER],
+        });
+        assert_eq!(check(structures), (Ok(true), Ok(())), "{tag:?}");
     }
 }
 

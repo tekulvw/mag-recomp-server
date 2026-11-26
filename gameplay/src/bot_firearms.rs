@@ -363,9 +363,51 @@ fn intersects(from: [f64; 3], to: [f64; 3], bounds: Bounds) -> bool {
     }
     true
 }
+/// Placed objective geometry a sight line or bullet must not cross: the mode's
+/// structures, hospitals and helicopters, with the mode's projectile row.
+#[derive(Clone, Copy)]
+pub(crate) struct Structures<'a> {
+    pub(crate) sequences: &'a crate::domination_structural_world::SequenceCollisionState,
+    pub(crate) row: u32,
+}
+impl Structures<'_> {
+    /// `Err` is a failed or over-budget query, never a clear line.
+    pub(crate) fn blocks(
+        self,
+        from: [f64; 3],
+        to: [f64; 3],
+        work: &mut usize,
+    ) -> Result<bool, &'static str> {
+        self.sequences
+            .blocks_ray(from, to, self.row, work)
+            .map_err(|_| {
+                if *work == 0 {
+                    "geometry_query_budget"
+                } else {
+                    "structure_query_failed"
+                }
+            })
+    }
+}
+impl<W: Write> Engine<W> {
+    /// The current mode's placed structures, if it has any. Sabotage and
+    /// development worlds have only the static map.
+    pub(crate) fn bot_sight_structures(&self) -> Option<Structures<'_>> {
+        let collision = match (&self.acquisition_gameplay, &self.domination_gameplay) {
+            (Some(runtime), _) => runtime.blast_collision()?,
+            (None, Some(world)) => world.frag_blast_collision(),
+            (None, None) => return None,
+        };
+        Some(Structures {
+            sequences: collision.sequences,
+            row: collision.filter_rows[crate::collision::PROJECTILE_QUERY_LAYER],
+        })
+    }
+}
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn visible(
     world: Option<&collision::CollisionWorld>,
+    structures: Option<Structures<'_>>,
     map: &str,
     from: [f64; 3],
     to: [f64; 3],
@@ -398,6 +440,11 @@ pub(crate) fn visible(
         .is_some()
     {
         return Err("world_blocked");
+    }
+    if let Some(structures) = structures
+        && structures.blocks(from, to, work)?
+    {
+        return Err("structure_blocked");
     }
     for actor in actors
         .iter()
@@ -774,6 +821,7 @@ impl<W: Write> Engine<W> {
                 for candidate in candidates.into_iter().take(policy.max_candidates_per_bot) {
                     match visible(
                         self.collision_world.as_ref(),
+                        self.bot_sight_structures(),
                         &map,
                         from,
                         torso(candidate.feet),
@@ -788,7 +836,10 @@ impl<W: Write> Engine<W> {
                             break;
                         }
                         Err(reason) => {
-                            confirmed_quiet &= matches!(reason, "world_blocked" | "body_blocked");
+                            confirmed_quiet &= matches!(
+                                reason,
+                                "world_blocked" | "structure_blocked" | "body_blocked"
+                            );
                             blocked = Some(reason);
                             if deferred(reason) {
                                 state.next_perception = now;
@@ -917,6 +968,7 @@ impl<W: Write> Engine<W> {
                     );
                     match visible(
                         self.collision_world.as_ref(),
+                        self.bot_sight_structures(),
                         &map,
                         from,
                         shot_end,
