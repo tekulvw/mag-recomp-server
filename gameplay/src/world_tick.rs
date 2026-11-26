@@ -186,6 +186,7 @@ impl<W: Write> Engine<W> {
             rewards: self.pending_reward_batch(),
             loadout_selections: self.pending_loadout_selections(),
             match_terminal: self.match_terminal.clone(),
+            worker_draining: self.draining.then_some(true),
             ..Response::success(request_id)
         }
     }
