@@ -631,6 +631,10 @@ impl ObjectiveCatalog {
             })
             .collect())
     }
+    /// Every squad index the catalog configures.
+    pub(crate) fn squad_indices(&self) -> impl Iterator<Item = u16> + '_ {
+        self.squads.iter().map(|s| s.squad_index)
+    }
     /// The objectives a squad's authored list names, when the catalog has it.
     pub(crate) fn authored_objectives(&self, squad_index: u16) -> Option<Vec<u16>> {
         self.squads

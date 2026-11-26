@@ -155,6 +155,8 @@ pub(crate) fn automatic_tag(current: u32, choice: Choice) -> Option<u32> {
 #[derive(Default)]
 pub(crate) struct Book {
     automatic: BTreeMap<u16, u32>,
+    /// The objective each bot squad worked on at the last bot tick.
+    current: BTreeMap<u16, Option<u16>>,
     /// The last tag the mode refused per squad, not asked for again.
     refused: BTreeMap<u16, u32>,
 }
@@ -260,6 +262,7 @@ impl<W: Write> Engine<W> {
                 entry.2 += 1;
             }
         }
+        self.refresh_breach(now, wall)?;
         let playing = self.match_started && self.match_terminal.is_none();
         let mut inputs = Vec::with_capacity(members.len());
         let mut manual = BTreeMap::new();
@@ -343,10 +346,25 @@ impl<W: Write> Engine<W> {
                 }
             }
         }
-        Ok(chosen
+        let current: BTreeMap<u16, Option<u16>> = chosen
             .into_iter()
             .map(|(squad, choice)| (squad, choice.map(|(index, _)| index)))
-            .collect())
+            .collect();
+        self.bot_registry.director.squad_orders.current = current.clone();
+        Ok(current)
+    }
+
+    /// The objective a squad works on now: its human leader's FRAGO, else its
+    /// lane objective (in Acquisition the lane defence it breaks first), else
+    /// the nearest objective of its team, as chosen at the last bot tick.
+    /// Before a squad's first bot tick, or for a squad without bots, its lane.
+    /// Bot spawn ranking reads it (its change lands separately).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn bot_squad_current_objective(&self, squad: u16) -> Option<u16> {
+        match self.bot_registry.director.squad_orders.current.get(&squad) {
+            Some(&current) => current,
+            None => self.bot_squad_lane(squad),
+        }
     }
 }
 

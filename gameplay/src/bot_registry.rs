@@ -48,6 +48,8 @@ pub struct BotPopulation {
     #[serde(default)]
     pub squad_orders: crate::bot_squad_orders::Policy,
     #[serde(default)]
+    pub breach: crate::bot_breach::Policy,
+    #[serde(default)]
     pub regional_collision: Option<RegionalCollision>,
     #[serde(default)]
     pub regional_team: Option<u8>,
@@ -96,6 +98,7 @@ impl BotPopulation {
         self.repair.validate()?;
         self.demolition.validate()?;
         self.blast.validate()?;
+        self.breach.validate()?;
         if let Some(policy) = &self.objective_policy {
             policy.validate()?;
         }

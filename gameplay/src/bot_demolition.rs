@@ -511,7 +511,11 @@ impl<W: Write> Engine<W> {
             .bot_demolition_policy()
             .filter(|_| self.match_started && self.match_terminal.is_none());
         let duties = if let Some(policy) = policy {
-            let targets = self.demolition_targets(&policy.values);
+            let mut targets = self.demolition_targets(&policy.values);
+            // Defences whole attacking squads already break (bot_breach) are
+            // left to them, so teams take other structures.
+            let breached = self.bot_registry.director.breach.attacked();
+            targets.retain(|t| !breached.contains(&t.index));
             let bots: Vec<Candidate> = self
                 .bot_registry
                 .bots
