@@ -36,6 +36,12 @@ and its replication exactly as for a player. Bots earn no repair XP. A
 refused submission is recorded and retried after 2 s. The tool is not shown
 equipped on the bot's model, which keeps its weapon in hand.
 
+Attacking bots destroy these structures with demolition teams
+([bot-demolition.md](bot-demolition.md)).
+
+An engineer that is the chosen operator of the objective it repairs walks to a
+spot inside the objective's repair range.
+
 ## Configuration
 
 The population file's `repair` object; omitted fields use the defaults:

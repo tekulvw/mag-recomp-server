@@ -173,7 +173,10 @@ fn domination_apc_startup_gate_requires_visibility_only_for_active_structural_ar
     );
 }
 
-fn repair(engine: &mut Engine<Vec<u8>>, now_ms: u64) -> Result<Vec<OutboundMessage>, &'static str> {
+pub(crate) fn repair(
+    engine: &mut Engine<Vec<u8>>,
+    now_ms: u64,
+) -> Result<Vec<OutboundMessage>, &'static str> {
     let wire = [0x02, 0x1d, 0x0c, 0x80, 0x00, 0x00];
     let actor = engine.active.as_ref().unwrap();
     let event = crate::events::EventInput {

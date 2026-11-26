@@ -40,6 +40,8 @@ pub struct BotPopulation {
     #[serde(default)]
     pub repair: crate::bot_repair::Policy,
     #[serde(default)]
+    pub demolition: crate::bot_demolition::Policy,
+    #[serde(default)]
     pub regional_collision: Option<RegionalCollision>,
     #[serde(default)]
     pub regional_team: Option<u8>,
@@ -85,6 +87,7 @@ impl BotPopulation {
         self.healing.validate()?;
         self.perception.validate()?;
         self.repair.validate()?;
+        self.demolition.validate()?;
         if let Some(policy) = &self.objective_policy {
             policy.validate()?;
         }
@@ -194,6 +197,8 @@ pub(super) struct WorldBot {
     pub(super) resupply_planning_retry_at: Duration,
     pub(super) healing: crate::bot_healing::State,
     pub(super) received_healing: Option<crate::bot_healing::Received>,
+    /// The spawn point this life started at, when it used one.
+    pub(super) life_spawn: Option<u16>,
     pub(super) move_attempted: bool,
     due_respawn_wave: Option<(u32, Duration)>,
     respawn_wait: Option<Duration>,
@@ -1487,6 +1492,7 @@ impl<W: Write> Engine<W> {
                 bot.resupply_planning_retry_at = Duration::ZERO;
                 bot.healing = Default::default();
                 bot.received_healing = None;
+                bot.life_spawn = spawn.spawn_point;
                 bot.damage = initial_damage();
                 bot.move_attempted = false;
                 bot.task = Default::default();
@@ -3220,6 +3226,7 @@ impl<W: Write> Engine<W> {
                     resupply_planning_retry_at: Duration::ZERO,
                     healing: Default::default(),
                     received_healing: None,
+                    life_spawn: spawn.spawn_point,
                     move_attempted: false,
                     due_respawn_wave: None,
                     respawn_wait: None,
