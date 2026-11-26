@@ -49,7 +49,7 @@ fn physics_error(error: crate::bot_physics::PhysicsError) -> QueryError {
         PhysicsError::Unavailable | PhysicsError::MapMismatch | PhysicsError::CoverageUnknown => {
             QueryError::Unavailable
         }
-        PhysicsError::InvalidQuery => QueryError::Invalid,
+        PhysicsError::InvalidQuery | PhysicsError::Obstructed => QueryError::Invalid,
         PhysicsError::QueryFailed => QueryError::Failed,
         PhysicsError::RegionalBlocked => QueryError::Unavailable,
     }

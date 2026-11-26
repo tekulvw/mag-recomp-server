@@ -2056,7 +2056,9 @@ fn navigation_physics_error(error: bot_physics::PhysicsError) -> &'static str {
         | bot_physics::PhysicsError::CoverageUnknown => "bot_navigation_geometry_unavailable",
         bot_physics::PhysicsError::RegionalBlocked => error.code(),
         bot_physics::PhysicsError::QueryFailed => "bot_navigation_query_failed",
-        bot_physics::PhysicsError::InvalidQuery => "bot_navigation_invalid_request",
+        bot_physics::PhysicsError::InvalidQuery | bot_physics::PhysicsError::Obstructed => {
+            "bot_navigation_invalid_request"
+        }
     }
 }
 impl NavigationMove {

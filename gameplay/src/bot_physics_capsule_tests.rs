@@ -387,11 +387,11 @@ fn a_capsule_still_refuses_a_start_its_settle_lift_does_not_clear() {
     for b in [low_body(), body()] {
         assert_eq!(
             terrain.start_motion([3.0, -0.5, 5.0], b).unwrap_err(),
-            PhysicsError::InvalidQuery
+            PhysicsError::Obstructed
         );
         assert_eq!(
             terrain.start_motion([4.8, 0.0, 5.0], b).unwrap_err(),
-            PhysicsError::InvalidQuery
+            PhysicsError::Obstructed
         );
     }
 }
@@ -414,14 +414,14 @@ fn the_box_start_is_unchanged() {
     // A box sunk even slightly below the floor is refused, as before.
     assert_eq!(
         terrain.start_motion([3.0, -0.03, 5.0], b).unwrap_err(),
-        PhysicsError::InvalidQuery
+        PhysicsError::Obstructed
     );
     let (ramp_world, _, _) = ramp(30.0);
     let ramp_terrain = WorldTerrain::new(Some(&ramp_world), "synthetic_steep").unwrap();
     let x = 6.0 + 2.0 / f64::tan(f64::to_radians(30.0));
     assert_eq!(
         ramp_terrain.start_motion([x, 2.0, 5.0], b).unwrap_err(),
-        PhysicsError::InvalidQuery
+        PhysicsError::Obstructed
     );
 }
 
