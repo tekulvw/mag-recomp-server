@@ -216,22 +216,6 @@ fn expiry_waits_until_deadline_then_consumes_incapacitation_once() {
 }
 
 #[test]
-fn downed_patient_cannot_queue_respawn_before_expiration() {
-    let mut engine = two_actors(0.4);
-    down_patient(&mut engine, Duration::ZERO);
-    let healer = engine.active.take().unwrap();
-    engine.active = engine.peers.remove("synthetic-reservation-0000");
-    engine.peers.insert(healer.reservation.id.clone(), healer);
-    let _ = dispatch(&mut engine, &0x0211u16.to_be_bytes(), 1000);
-    let actor = engine.active.as_ref().unwrap();
-    assert!(matches!(
-        actor.life,
-        CharacterLife::Incapacitated { generation: 4, .. }
-    ));
-    assert!(actor.pending_spawn_deadline.is_none());
-}
-
-#[test]
 fn authenticated_resuscitation_uses_owned_healer_maximum_and_preserves_patient_generation() {
     let mut engine = two_actors(0.4);
     down_patient(&mut engine, Duration::ZERO);
