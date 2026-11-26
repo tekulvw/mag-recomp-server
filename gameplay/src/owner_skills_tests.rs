@@ -171,7 +171,14 @@ fn owner_creation_writes_owned_skills_as_field20_words_in_order() {
 }
 
 fn owner_with_skills(skills: Option<[u32; 5]>) -> Engine<Vec<u8>> {
+    owner_with_skills_switch(skills, true)
+}
+
+fn owner_with_skills_switch(skills: Option<[u32; 5]>, enabled: bool) -> Engine<Vec<u8>> {
     let mut engine = engine();
+    if enabled {
+        engine = engine.with_owner_skills_record();
+    }
     reserve(&mut engine, 0);
     let actor = engine.active.as_mut().unwrap();
     actor.reservation.character.skills = skills;
@@ -225,6 +232,15 @@ fn the_owners_own_creation_carries_its_skill_record() {
         character_rows(&snapshot, engine.wire_profile)[0].skills,
         None
     );
+}
+
+#[test]
+fn without_the_switch_the_owners_creation_omits_field20() {
+    let mut engine = owner_with_skills_switch(Some(SKILLS), false);
+    let snapshot = client_ready(&mut engine);
+    let rows = character_rows(&snapshot, engine.wire_profile);
+    assert_eq!(rows[0].object, 0);
+    assert!(!rows[0].present.contains(&20), "{:?}", rows[0].present);
 }
 
 #[test]

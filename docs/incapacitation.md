@@ -141,6 +141,14 @@ field20, every client's own skill modifiers stay zero, and no player is ever
 offered a revive, whatever skills they own. The server's own revive check uses
 the same stored record through the skill catalog.
 
+Sending field20 is opt-in with the worker flag `--owner-skills-record`; it is
+off by default. In a lab run on gameplay 0.17.0, which sent it unconditionally,
+a downed client with an empty skill record showed the incapacitated HUD and
+then went to the respawn screen about 2.5 s later, as if its downed time were
+zero. Until a lab A/B shows the flag leaves the client's downed timer intact,
+keep it off. With it off, the owner's creation is the same as before 0.17.0,
+and clients are again not offered revives.
+
 ## Accounting and current boundary
 
 The initial lethal hit owns the ordinary death/kill statistics and supported

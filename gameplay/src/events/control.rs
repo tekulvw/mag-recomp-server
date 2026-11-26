@@ -124,7 +124,8 @@ pub(super) fn client_ready<W: Write>(
                     ),
                     // The owner's client derives its own skill modifiers (for
                     // example the resuscitation gate) only from this creation.
-                    skills: character.skills,
+                    // Opt-in: with it, lab clients lost their downed time.
+                    skills: character.skills.filter(|_| ctx.engine.owner_skills_record),
                 },
                 squad: replication::SquadCreation {
                     object_index: squad_address.squad_index(),
