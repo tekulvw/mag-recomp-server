@@ -54,7 +54,8 @@ A bot considers cover when it reacts to a threat
 
 It must also be free of every task that owns its body: a passage, queue,
 holding spot, traffic yield, supply task, recovery or objective interaction,
-and not grounded on another character. An attacker within 15 m of its
+and not grounded on another character. An attacker takes cover only after
+being hit (not on sight or a near miss), and one within 20 m of its
 destination keeps pushing instead, and a bot that just left cover waits 5 s
 before taking cover again (a hit lets a walking bot do it at once).
 
@@ -184,7 +185,8 @@ The population file's `cover` object; omitted fields use the defaults:
   "min_threat_distance_m": 5,
   "facing_degrees": 60,
   "attacker_goal_slack_m": 3,
-  "attacker_push_m": 15,
+  "attacker_push_m": 20,
+  "attacker_requires_hit": true,
   "bound_gain_m": 4,
   "attacker_dwell_ms": 6000,
   "defender_dwell_ms": 20000,

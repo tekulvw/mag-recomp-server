@@ -30,6 +30,9 @@ pub struct Policy {
     pub attacker_goal_slack_m: f64,
     /// An attacker this close to its destination keeps pushing instead.
     pub attacker_push_m: f64,
+    /// Attackers take cover only after being hit, not on sight or a near
+    /// miss, so cover does not stall an attack.
+    pub attacker_requires_hit: bool,
     /// Bounding forward from cover needs cover at least this much closer to
     /// the attacker's destination.
     pub bound_gain_m: f64,
@@ -74,7 +77,8 @@ impl Default for Policy {
             min_threat_distance_m: 5.,
             facing_degrees: 60.,
             attacker_goal_slack_m: 3.,
-            attacker_push_m: 15.,
+            attacker_push_m: 20.,
+            attacker_requires_hit: true,
             bound_gain_m: 4.,
             attacker_dwell_ms: 6000,
             defender_dwell_ms: 20_000,
@@ -1352,6 +1356,9 @@ impl<W: Write> Engine<W> {
         }
         let me = r.physical_position();
         let role = self.cover_role(bot);
+        if role.0 && policy.attacker_requires_hit && !damaged {
+            return Ok(());
+        }
         if role.0
             && role
                 .1
