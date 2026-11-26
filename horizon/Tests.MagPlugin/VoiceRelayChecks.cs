@@ -227,6 +227,22 @@ internal static class VoiceRelayChecks
         }
         paired.Forget(1);
 
+        // A game that falls behind packs up to six 37-byte blocks into one packet (222 data bytes,
+        // 236 on the wire). Such packets parse, and their catch-up passes the byte budget.
+        var sixBlocks = VoiceDiagnosticsChecks.VoicePacket(20, 7, 6 * 37);
+        Check(VoicePacketHeader.TryParse(sixBlocks, out var packed) && packed.DataLength == 222 && sixBlocks.Length == 236,
+              "a six-block packet parses");
+        var packedBudget = new VoiceTalkerBudget();
+        // Twice the lab block rate (25 blocks a second) arriving only as six-block packets, on both copies.
+        for (long t = 0; t < 10_000; t += 240)
+        {
+            Check(Decide(All, 1, 20, table: near, budget: packedBudget, bytes: sixBlocks.Length, now: t).Relayed, $"packed channel copy dropped at {t} ms");
+            Check(Decide(All, 1, 84, table: near, budget: packedBudget, bytes: sixBlocks.Length, now: t).Relayed, $"packed proximity copy dropped at {t} ms");
+        }
+        // After a one-second stall, four packed packets back to back (a second of blocks at that rate) pass.
+        for (int i = 0; i < 4; i++)
+            Check(Decide(All, 1, 20, table: near, budget: packedBudget, bytes: sixBlocks.Length, now: 11_000).Relayed, $"catch-up packet {i} dropped");
+
         // Counters by reason.
         var counters = new VoiceRelayCounters();
         counters.Record(Decide(Squad, 1, 20), 37);
