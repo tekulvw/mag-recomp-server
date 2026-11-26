@@ -47,6 +47,10 @@ namespace Server.Medius {
   int _workerIdentityFault;
   public GameplayWorkerIdentity WorkerIdentity => Volatile.Read(ref _workerIdentity);
   public bool HasWorkerIdentityFault => Volatile.Read(ref _workerIdentityFault)!=0;
+  int _perRecipientReplies;
+  /// <summary>Reply bounds for this worker: per-recipient once its latest successful hello advertised
+  /// <see cref="GameplayReplyLimits.PerRecipientCapability"/>, otherwise the legacy shared bounds.</summary>
+  public GameplayReplyLimits ReplyLimits => Volatile.Read(ref _perRecipientReplies)!=0?GameplayReplyLimits.PerRecipient:GameplayReplyLimits.Legacy;
   public GameplayBridge(string host,int port) { if(string.IsNullOrWhiteSpace(host)||port<1||port>65535) throw new ArgumentException("Invalid gameplay endpoint."); _host=host;_port=port; }
   public GameplayBridge(string host,int port,string expectedWorkerId) : this(host,port) {
    if(!GameplayWorkerIdentity.IsValidIdentifier(expectedWorkerId))throw new ArgumentException("Invalid gameplay worker ID.",nameof(expectedWorkerId));
@@ -91,6 +95,8 @@ namespace Server.Medius {
    // Keep framing bounds and a fresh deadline for each heartbeat/frame. A peer
    // that sends partial bytes forever cannot keep a stale world marked ready.
    var buffer=new byte[8192];int offset=0,available=0;
+   // The subscription keeps the bounds of the hello that preceded it.
+   var limits=ReplyLimits;
    while(true) {
     using var deadline=CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);deadline.CancelAfter(WorldFrameDeadline);
     using var line=new MemoryStream();
@@ -101,11 +107,11 @@ namespace Server.Medius {
      }
      int end=Array.IndexOf(buffer,(byte)10,offset,available-offset);
      int count=(end<0?available:end)-offset;
-     if(line.Length+count>GameplayBridgeResponseCodec.MaximumResponseBytes)throw new InvalidDataException("Gameplay world stream frame too large.");
+     if(line.Length+count>limits.ResponseBytes)throw new InvalidDataException("Gameplay world stream frame too large.");
      line.Write(buffer,offset,count);offset+=count;
      if(end>=0){offset++;break;}
     }
-    if(!GameplayBridgeResponseCodec.TryParse(line.ToArray(),requestId,true,out var reply))throw new InvalidDataException("Invalid gameplay world stream response.");
+    if(!GameplayBridgeResponseCodec.TryParse(line.ToArray(),requestId,true,limits,out var reply))throw new InvalidDataException("Invalid gameplay world stream response.");
     if(identity!=null&&!VerifyWorkerReply(reply,false))throw new GameplayWorkerIdentityException();
     if(!reply.Ok) {
      if(reply.Error=="world_resume_unavailable")throw new GameplayWorldResumeRefusedException();
@@ -232,9 +238,12 @@ namespace Server.Medius {
     sending=true;
     await stream.WriteAsync(body,deadline.Token); await stream.WriteAsync(new byte[]{10},deadline.Token);
     using var line=new MemoryStream(); var one=new byte[1];
-    while(true) { if(await stream.ReadAsync(one,deadline.Token)!=1) return Failed(GameplayBridgeFailure.Unavailable); if(one[0]==10) break; if(line.Length==GameplayBridgeResponseCodec.MaximumResponseBytes) return Failed(GameplayBridgeFailure.MalformedResponse); line.WriteByte(one[0]); }
-    if(!GameplayBridgeResponseCodec.TryParse(line.ToArray(),id,eventReply,out var reply))return Failed(GameplayBridgeFailure.MalformedResponse);
+    var limits=ReplyLimits;
+    while(true) { if(await stream.ReadAsync(one,deadline.Token)!=1) return Failed(GameplayBridgeFailure.Unavailable); if(one[0]==10) break; if(line.Length==limits.ResponseBytes) return Failed(GameplayBridgeFailure.MalformedResponse); line.WriteByte(one[0]); }
+    if(!GameplayBridgeResponseCodec.TryParse(line.ToArray(),id,eventReply,limits,out var reply))return Failed(GameplayBridgeFailure.MalformedResponse);
     if(_expectedWorkerId!=null&&!VerifyWorkerReply(reply,hello))return Failed(GameplayBridgeFailure.WorkerIdentityMismatch);
+    // A restarted worker answers a new hello; its capabilities set the bounds from then on.
+    if(hello&&reply.Ok)Volatile.Write(ref _perRecipientReplies,reply.SupportsPerRecipientReplyBudget?1:0);
     reply.ElapsedMilliseconds=elapsed.ElapsedMilliseconds;return reply;
    } catch(OperationCanceledException) { return Failed(GameplayBridgeFailure.Timeout); }
    catch(Exception e) when(e is IOException || e is SocketException) { return Failed(GameplayBridgeFailure.Unavailable); }

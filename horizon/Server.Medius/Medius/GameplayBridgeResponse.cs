@@ -91,9 +91,20 @@ namespace Server.Medius {
   public bool SupportsWorldStreamResume => Capabilities.Contains("world_stream_resume_v1",StringComparer.Ordinal);
   public bool SupportsEventReplay => Capabilities.Contains("event_replay_v1",StringComparer.Ordinal);
   public bool SupportsWorldCapacity => Capabilities.Contains(MagWorldCapacity.Capability,StringComparer.Ordinal);
+  public bool SupportsPerRecipientReplyBudget => Capabilities.Contains(GameplayReplyLimits.PerRecipientCapability,StringComparer.Ordinal);
   public GameplayWorldStreamPosition WorldStream {get; internal set;}
   internal GameplayBridgeResponse(bool ok,string error,IReadOnlyList<GameplayBridgeMessage> messages,GameplayBridgeFailure failure=GameplayBridgeFailure.None,IReadOnlyList<GameplayReward> rewards=null,GameplayMatchTerminal matchTerminal=null,IReadOnlyList<GameplayLoadoutSelection> loadoutSelections=null,IReadOnlyList<string> capabilities=null,IReadOnlyList<MagMatchProfile> matchProfiles=null,GameplaySelectedMatch selectedMatch=null,GameplayWorkerIdentity workerIdentity=null,GameplayPartyReservation partyReservation=null){PartyReservation=partyReservation;MatchProfiles=matchProfiles??Array.Empty<MagMatchProfile>();SelectedMatch=selectedMatch;WorkerIdentity=workerIdentity;LoadoutSelections=loadoutSelections??Array.Empty<GameplayLoadoutSelection>();Capabilities=capabilities??Array.Empty<string>();Ok=ok;Error=error;Messages=messages;Failure=failure;Rewards=rewards??Array.Empty<GameplayReward>();MatchTerminal=matchTerminal;}
   internal static GameplayBridgeResponse Failed(GameplayBridgeFailure failure,long elapsed)=>new GameplayBridgeResponse(false,null,Array.Empty<GameplayBridgeMessage>(),failure){ElapsedMilliseconds=elapsed};
+ }
+ /// <summary>Bounds on one gameplay reply. <see cref="Legacy"/> is shared by every recipient. A worker
+ /// that advertises <see cref="PerRecipientCapability"/> in its hello gives each recipient its own
+ /// allowance of shared frames, so its replies may use <see cref="PerRecipient"/>.</summary>
+ public sealed record GameplayReplyLimits(int Messages,int PayloadBytes,int ResponseBytes) {
+  public const string PerRecipientCapability="reply_budget_per_recipient_v1";
+  public static readonly GameplayReplyLimits Legacy=new(128,24000,131072);
+  // 32 recipients x 16 messages / 6,144 bytes, plus a direct reply; the hex
+  // payload and per-message fields of 262,144 payload bytes stay below 1 MiB.
+  public static readonly GameplayReplyLimits PerRecipient=new(1024,262144,1048576);
  }
  /// <summary>Strict bridge v2 reply codec. Event and release replies may carry bounded, independently addressed reliable messages.</summary>
  public static class GameplayBridgeResponseCodec {
@@ -117,8 +128,10 @@ namespace Server.Medius {
    leadership=new GameplayLeadershipResult(role,new GameplayLeadershipBaseline(level,nominations,recency));
    return leadership.IsValid;
   }
-  public static bool TryParse(byte[] line,string requestId,bool eventReply,out GameplayBridgeResponse response) {
-   response=null;if(line==null||line.Length>MaximumResponseBytes||string.IsNullOrEmpty(requestId))return false;
+  public static bool TryParse(byte[] line,string requestId,bool eventReply,out GameplayBridgeResponse response)=>
+   TryParse(line,requestId,eventReply,GameplayReplyLimits.Legacy,out response);
+  public static bool TryParse(byte[] line,string requestId,bool eventReply,GameplayReplyLimits limits,out GameplayBridgeResponse response) {
+   response=null;if(line==null||limits==null||line.Length>limits.ResponseBytes||string.IsNullOrEmpty(requestId))return false;
    try {
     using var document=JsonDocument.Parse(line);var root=document.RootElement;
     bool hasRewards=root.TryGetProperty("rewards",out var rewards);
@@ -144,7 +157,7 @@ namespace Server.Medius {
     var ok=root.GetProperty("ok");if(ok.ValueKind!=JsonValueKind.True&&ok.ValueKind!=JsonValueKind.False)return false;
     var error=root.GetProperty("error");if(error.ValueKind!=JsonValueKind.Null&&error.ValueKind!=JsonValueKind.String)return false;
     bool success=ok.GetBoolean();if(success&&error.ValueKind!=JsonValueKind.Null)return false;
-    var messages=root.GetProperty("messages");if(messages.ValueKind!=JsonValueKind.Array||messages.GetArrayLength()>MaximumMessages||
+    var messages=root.GetProperty("messages");if(messages.ValueKind!=JsonValueKind.Array||messages.GetArrayLength()>limits.Messages||
      ((!success||!eventReply)&&messages.GetArrayLength()!=0))return false;
     var parsed=new List<GameplayBridgeMessage>();int totalBytes=0;
     foreach(var message in messages.EnumerateArray()) {
@@ -154,7 +167,7 @@ namespace Server.Medius {
       !message.GetProperty("world_id").TryGetUInt32(out var world)||!message.GetProperty("player_id").TryGetUInt16(out var player)||
       !message.GetProperty("plugin_id").TryGetByte(out var plugin)||plugin!=1)return false;
      string text=hex.GetString();if(text.Length==0||text.Length>MaximumMessageBytes*2||text.Length%2!=0)return false;
-     totalBytes+=text.Length/2;if(totalBytes>24000)return false;
+     totalBytes+=text.Length/2;if(totalBytes>limits.PayloadBytes)return false;
      parsed.Add(new GameplayBridgeMessage(reservation.GetString(),world,player,plugin,Convert.FromHexString(text)));
     }
     var parsedRewards=new List<GameplayReward>();var rewardIds=new HashSet<string>(StringComparer.Ordinal);

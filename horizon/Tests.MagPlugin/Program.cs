@@ -54,6 +54,8 @@ Test("world capacity matchmaking caps humans per side and per world", WorldCapac
 Test("world capacity grouped cohort masks at the human side bound", WorldCapacityChecks.GroupedCohortBound);
 Test("world capacity placement, late join and late parties use human caps", WorldCapacityChecks.Placement);
 Test("world capacity registry rows and host options", WorldCapacityChecks.Registry);
+Test("per-recipient reply budget codec bounds", ReplyBudgetChecks.Codec);
+Test("per-recipient reply budget follows the worker hello", ReplyBudgetChecks.Bridge);
 Test("gameplay worker identity fencing", GameplayWorkerIdentityChecks.Run);
 Test("retail waiting and cancellation wire", QueueWireChecks.Run);
 Test("retail compact party wire", PartyWireChecks.Run);
