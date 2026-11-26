@@ -661,3 +661,99 @@ fn a_full_hospital_starts_the_life_at_the_alternate_insertion() {
     let at = actor.tracking.sample.unwrap().position;
     assert_eq!((at.x, at.z), (11., 13.));
 }
+
+fn claim(engine: &mut Engine<Vec<u8>>, game_type: i8) {
+    let actor = engine.active.as_mut().unwrap();
+    actor.claimed = Some(Claimed {
+        wire: Vec::new(),
+        np_identity: [0; 36],
+        game_info: protocol::GameInfo {
+            client_index: actor.reservation.player,
+            level_name: "hospital_test".into(),
+            start_time_ms: 0,
+            attacking_faction: 1,
+            defending_faction: 0,
+            maximum_points: [111, 222],
+            current_points: [111, 222],
+            game_type,
+        },
+    });
+}
+
+fn change_squad(engine: &mut Engine<Vec<u8>>, squad: u8) -> Option<bool> {
+    let mut wire = 0x0202u16.to_be_bytes().to_vec();
+    wire.push(squad);
+    dispatch(engine, &wire, 1000)
+        .unwrap()
+        .iter()
+        .map(|frame| protocol::decode_hex(&frame.payload_hex))
+        .find(|payload| payload.len() == 3 && payload[..2] == [0x02, 0x03])
+        .map(|payload| payload[2] & 0x80 != 0)
+}
+
+fn squad_member(engine: &mut Engine<Vec<u8>>, player: u16, squad: u16) {
+    let mut actor = fixture().active.take().unwrap();
+    actor.reservation.id = format!("synthetic-squad-member-{player}");
+    actor.reservation.player = player;
+    actor.squad_catalog = std::sync::Arc::new(actor.squad_catalog.for_squad(squad).unwrap());
+    actor.squad_spawn = actor.squad_catalog.default_spawn();
+    engine.peers.insert(actor.reservation.id.clone(), actor);
+}
+
+#[test]
+fn a_domination_player_can_join_another_squad_in_the_same_platoon() {
+    let mut engine = fixture();
+    claim(&mut engine, 2);
+    assert!(engine.indexed_hospital_seats());
+    assert_eq!(change_squad(&mut engine, 17), Some(true));
+    let actor = engine.active.as_ref().unwrap();
+    assert_eq!(actor.squad_catalog.squad_index(), 17);
+    assert_eq!(actor.squad_spawn, 1);
+    // And back again: the change is not a one-way exception.
+    assert_eq!(change_squad(&mut engine, 16), Some(true));
+    assert_eq!(
+        engine.active.as_ref().unwrap().squad_catalog.squad_index(),
+        16
+    );
+}
+
+#[test]
+fn a_domination_squad_change_keeps_the_platoon_and_capacity_rules() {
+    let mut engine = fixture();
+    claim(&mut engine, 2);
+    // The current squad, another platoon and the other side are refused.
+    for target in [16, 20, 1] {
+        assert_eq!(change_squad(&mut engine, target), Some(false), "{target}");
+        assert_eq!(
+            engine.active.as_ref().unwrap().squad_catalog.squad_index(),
+            16
+        );
+    }
+    // A target squad already at the configured capacity (at most eight) is
+    // refused; a squad with one free place admits the change.
+    let capacity = engine.match_profile().squad_capacity as u16;
+    assert!(capacity <= 8);
+    for player in 1..capacity {
+        squad_member(&mut engine, player, 18);
+    }
+    for player in capacity..2 * capacity {
+        squad_member(&mut engine, player, 19);
+    }
+    assert_eq!(change_squad(&mut engine, 19), Some(false));
+    assert_eq!(change_squad(&mut engine, 18), Some(true));
+    assert_eq!(
+        engine.active.as_ref().unwrap().squad_catalog.squad_index(),
+        18
+    );
+}
+
+#[test]
+fn an_acquisition_profile_with_field_hospitals_still_allows_squad_changes() {
+    let mut engine = fixture_for_mode(1);
+    claim(&mut engine, 1);
+    assert_eq!(change_squad(&mut engine, 17), Some(true));
+    assert_eq!(
+        engine.active.as_ref().unwrap().squad_catalog.squad_index(),
+        17
+    );
+}
