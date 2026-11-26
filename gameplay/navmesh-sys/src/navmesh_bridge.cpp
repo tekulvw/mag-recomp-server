@@ -549,8 +549,14 @@ static uint64_t gate_regions_near(const StructureGate& g, float x, float z) {
 // along that edge (an ungated polygon is one region); the last polygon's
 // regions must hold `goal`. This resolves an entry edge that a wall crosses,
 // which `gate_passes` must otherwise treat as possibly either side.
+// A goal that a structure covers or walls off (an objective inside the
+// console a charge was planted on) is reached at the free cell of those
+// regions nearest `target`, when one lies within `radius` of it; that cell
+// is written to `arrival` and `moved` is set.
 static int gate_tracked_violation(const MagNav* h, const unsigned long long* refs, int count,
-                                  const float* start, const float* goal) {
+                                  const float* start, const float* goal, const float* target = nullptr,
+                                  float radius = 0.f, float* arrival = nullptr, bool* moved = nullptr) {
+    if (moved) *moved = false;
     if (h->gates.empty() || count <= 0) return -1;
     constexpr uint64_t All = ~uint64_t(0);
     const auto gate_of = [&](dtPolyRef ref) -> const StructureGate* {
@@ -588,7 +594,20 @@ static int gate_tracked_violation(const MagNav* h, const unsigned long long* ref
         if (!reach) return i;
     }
     const StructureGate* last = gate_of(static_cast<dtPolyRef>(refs[count - 1]));
-    if (last && !(reach & gate_point_regions(*last, goal))) return count - 1;
+    if (!last || (reach & gate_point_regions(*last, goal))) return -1;
+    if (!target || !arrival || !moved) return count - 1;
+    float best = radius * radius;
+    for (int z = 0; z < last->nz; ++z) for (int x = 0; x < last->nx; ++x) {
+        const int label = last->labels[x + z * last->nx];
+        if (!label || !(reach & (uint64_t(1) << (label - 1)))) continue;
+        const float px = last->ox + (x + .5f) * last->cell, pz = last->oz + (z + .5f) * last->cell;
+        const float d = (px - target[0]) * (px - target[0]) + (pz - target[2]) * (pz - target[2]);
+        if (d <= best) { best = d; arrival[0] = px; arrival[1] = goal[1]; arrival[2] = pz; *moved = true; }
+    }
+    if (!*moved) return count - 1;
+    float height = arrival[1];
+    if (dtStatusSucceed(h->query->getPolyHeight(static_cast<dtPolyRef>(refs[count - 1]), arrival, &height)))
+        arrival[1] = height;
     return -1;
 }
 // The point of polygon `ref`'s entry regions nearest `goal`, for a corridor
@@ -942,7 +961,12 @@ static int route_impl(MagNav* h,const float* start,const float* goal,float radiu
 // `gated` 0 plans on the static mesh alone (a start inside a structure's
 // enclosed room, which no opening leaves).
 int mag_nav_route(MagNav* h,const float* start,const float* goal,float radius,float* projected_start,float* projected_goal,
-                  float* points,int* point_count,unsigned long long* refs,int* ref_count,int* nodes,int* stages,int gated) {
+                  float* points,int* point_count,unsigned long long* refs,int* ref_count,int* nodes,int* stages,int options) {
+    // Bit 0: gate by the standing structures. Bit 1: a goal they wall off is
+    // reached beside it (see `gate_tracked_violation`); callers that must
+    // stand at the goal itself (an interaction range) leave it clear.
+    const int gated=options&1;
+    const bool beside=(options&2)!=0;
     if(gated && !h->gates.empty()) {
         std::vector<std::array<dtPolyRef,3>> refused;
         for(int attempt=0; attempt<RelaxedGateAttempts; ++attempt) {
@@ -950,7 +974,19 @@ int mag_nav_route(MagNav* h,const float* start,const float* goal,float radius,fl
                                          nodes,stages,true,true,&refused);
             if(relaxed==4 || relaxed==5 || relaxed==6 || *ref_count<=0) return relaxed;
             const float* reached = *point_count>0 ? points+3*(*point_count-1) : projected_goal;
-            const int at=gate_tracked_violation(h,refs,*ref_count,projected_start,reached);
+            float arrival[3]; bool moved=false;
+            const int at=beside
+                ? gate_tracked_violation(h,refs,*ref_count,projected_start,reached,goal,radius,arrival,&moved)
+                : gate_tracked_violation(h,refs,*ref_count,projected_start,reached);
+            if(at<0 && moved) {
+                // The goal is walled off: end at the nearest reachable free cell within the goal radius.
+                std::vector<dtPolyRef> corridor(refs,refs+*ref_count);
+                std::vector<unsigned char> flags(MaxRouteCorridor);std::vector<dtPolyRef> pointrefs(MaxRouteCorridor);
+                const dtStatus straight=h->query->findStraightPath(projected_start,arrival,corridor.data(),
+                    static_cast<int>(corridor.size()),points,flags.data(),pointrefs.data(),point_count,MaxRouteCorridor,0);
+                if(dtStatusFailed(straight)) return 6;
+                rcVcopy(projected_goal,arrival);
+            }
             if(at<0) return relaxed;
             const std::array<dtPolyRef,3> crossing{at ? static_cast<dtPolyRef>(refs[at-1]) : 0, static_cast<dtPolyRef>(refs[at]),
                                                    at+1<*ref_count ? static_cast<dtPolyRef>(refs[at+1]) : 0};

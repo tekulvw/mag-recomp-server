@@ -1020,6 +1020,8 @@ fn parachute_without_resolved_inventory_keeps_the_pending_wave_without_consumpti
 
 #[path = "acquisition_entry_tests.rs"]
 mod acquisition_entry;
+#[path = "control_plane_tests.rs"]
+mod control_plane_rebind;
 #[path = "ground_vehicle_runtime_tests.rs"]
 pub(crate) mod ground_vehicle_runtime;
 #[path = "reservation_eviction_tests.rs"]

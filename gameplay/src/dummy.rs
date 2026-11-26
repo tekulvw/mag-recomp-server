@@ -178,6 +178,7 @@ fn server_character(
             head_id: 0,
             voice_id: 0,
         },
+        skills: None,
     }
 }
 

@@ -481,7 +481,9 @@ impl<W: Write> Engine<W> {
                 break;
             }
             attempts += 1;
-            match self.bot_route(&mesh, point(candidate), goal, LANE_GOAL_RADIUS_M) {
+            // Near the objective is enough: a planted charge's console may
+            // wall off the objective's own point.
+            match self.bot_route(&mesh, point(candidate), goal, LANE_GOAL_RADIUS_M, true) {
                 Ok(route) if route.status == navmesh::Status::Complete => {
                     routed = Some((component, route.length_m));
                     break;
@@ -508,12 +510,17 @@ impl<W: Write> Engine<W> {
         from: [f64; 3],
         to: [f64; 3],
         radius: f64,
+        beside: bool,
     ) -> Result<navmesh::Route, &'static str> {
         if let Some(rules) = &self.fall_damage_rules {
-            mesh.route_with_drops(from, to, radius, rules, 400)
-                .map_err(|e| e.0)
+            if beside {
+                mesh.route_with_drops_beside(from, to, radius, rules, 400)
+            } else {
+                mesh.route_with_drops(from, to, radius, rules, 400)
+            }
+            .map_err(|e| e.0)
         } else if mesh.artifact().drop_links.is_empty() {
-            mesh.route(from, to, radius).map_err(|e| e.0)
+            mesh.route_to(from, to, radius, beside).map_err(|e| e.0)
         } else {
             Err("bot_navmesh_fall_rules_required")
         }
@@ -689,7 +696,7 @@ impl<W: Write> Engine<W> {
                 break;
             }
             attempts += 1;
-            match self.bot_route(&mesh, point(home_position), point(candidate), 0.5) {
+            match self.bot_route(&mesh, point(home_position), point(candidate), 0.5, false) {
                 Ok(route) if route.status == navmesh::Status::Complete => {
                     routed = Some(component);
                     break;

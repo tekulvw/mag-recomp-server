@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
@@ -81,14 +82,22 @@ namespace Server.Medius {
    SubscribeWorldAsync(worldId,requestId,positions,resumeAfter,false,receive,cancellationToken);
   /// <summary>As above; with <paramref name="voiceGroups"/> (only toward a worker that advertised
   /// voice_groups_v1) its frames may also carry the world's voice relay table.</summary>
-  public async Task SubscribeWorldAsync(uint worldId,string requestId,bool positions,GameplayWorldStreamPosition resumeAfter,bool voiceGroups,Func<GameplayBridgeResponse,Task> receive,CancellationToken cancellationToken) {
-   if(string.IsNullOrEmpty(requestId)||receive==null)throw new ArgumentException("Invalid world subscription.");
+  public Task SubscribeWorldAsync(uint worldId,string requestId,bool positions,GameplayWorldStreamPosition resumeAfter,bool voiceGroups,Func<GameplayBridgeResponse,Task> receive,CancellationToken cancellationToken)=>
+   SubscribeWorldAsync(worldId,requestId,new GameplayWorldSubscription(positions,resumeAfter,voiceGroups),receive,cancellationToken);
+  /// <summary>Subscribe with every option. A refusal names the worker's reason in
+  /// <see cref="GameplayWorldSubscriptionRefusedException"/>.</summary>
+  public async Task SubscribeWorldAsync(uint worldId,string requestId,GameplayWorldSubscription options,Func<GameplayBridgeResponse,Task> receive,CancellationToken cancellationToken) {
+   if(string.IsNullOrEmpty(requestId)||receive==null||options==null)throw new ArgumentException("Invalid world subscription.");
+   bool positions=options.Positions;var resumeAfter=options.ResumeAfter;bool voiceGroups=options.VoiceGroups;
+   if(options.ControlPlane!=null&&!GameplayWorldSubscription.IsValidControlPlane(options.ControlPlane))throw new ArgumentException("Invalid control plane.");
    var identity=WorkerIdentity;
    if(_expectedWorkerId!=null&&(identity==null||HasWorkerIdentityFault))throw new GameplayWorkerIdentityException();
    var request=new Dictionary<string,object>{["v"]=2,["request_id"]=requestId,["op"]="subscribe_world",["world_id"]=worldId};
    if(positions||resumeAfter!=null)request["positions"]=true;
    if(resumeAfter!=null)request["resume"]=new Dictionary<string,object>{["epoch"]=resumeAfter.Epoch,["after"]=resumeAfter.Sequence};
    if(voiceGroups)request["voice_groups"]=true;
+   if(options.ControlPlane!=null)request["control_plane"]=options.ControlPlane;
+   if(options.DrainNotices)request["drain_notices"]=true;
    var body=identity==null?JsonSerializer.SerializeToUtf8Bytes(request):AttachWorkerIdentity(JsonSerializer.SerializeToElement(request),identity);
    TcpClient connected;
    using(var connect=CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)) {
@@ -122,7 +131,7 @@ namespace Server.Medius {
      if(reply.Error=="world_resume_unavailable")throw new GameplayWorldResumeRefusedException();
      // The previous subscription has not been retired yet; try again shortly.
      if(reply.Error=="world_subscription_exists")throw new IOException("Gameplay world subscription is still held.");
-     throw new InvalidDataException("Invalid gameplay world stream response.");
+     throw new GameplayWorldSubscriptionRefusedException(reply.Error);
     }
     cancellationToken.ThrowIfCancellationRequested();await receive(reply);
    }
@@ -254,6 +263,24 @@ namespace Server.Medius {
    catch(Exception e) when(e is IOException || e is SocketException) { return Failed(GameplayBridgeFailure.Unavailable); }
    catch(Exception e) when(e is JsonException || e is InvalidOperationException || e is FormatException) { return Failed(GameplayBridgeFailure.InvalidRequest); }
   }
+ }
+ /// <summary>Options of one subscribe_world. <see cref="ControlPlane"/> names the subscribing Horizon
+ /// process (only toward a worker that advertised control_plane_rebind_v1): a worker that last served
+ /// another one releases what that process admitted. <see cref="DrainNotices"/> asks for
+ /// worker_draining on frames (worker_drain_v1).</summary>
+ public sealed record GameplayWorldSubscription(bool Positions=false,GameplayWorldStreamPosition ResumeAfter=null,bool VoiceGroups=false,
+  string ControlPlane=null,bool DrainNotices=false) {
+  public static bool IsValidControlPlane(string value)=>value!=null&&value.Length>=16&&value.Length<=64&&
+   value.All(c=>char.IsAsciiLetterOrDigit(c)||c=='-'||c=='_');
+ }
+ /// <summary>The worker answered subscribe_world with an error, for example
+ /// subscription_world_mismatch: it still holds players of another world ID. Like a
+ /// malformed stream, it is never resumed; the worker's validated reason is kept.</summary>
+ public sealed class GameplayWorldSubscriptionRefusedException : IOException {
+  public string Reason { get; }
+  public GameplayWorldSubscriptionRefusedException(string reason) : base($"Gameplay worker refused the world subscription: {Describe(reason)}.") { Reason=Describe(reason); }
+  // The reason comes from the worker; keep only a short identifier in logs.
+  static string Describe(string reason)=>reason!=null&&reason.Length<=64&&reason.All(c=>char.IsAsciiLetterOrDigit(c)||c=='_'||c=='-')?reason:"unspecified";
  }
  /// <summary>The worker cannot replay the requested frames: it is another process, or
  /// the frames are no longer retained. Sessions that depended on them must end.</summary>

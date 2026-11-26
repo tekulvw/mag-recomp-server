@@ -25,6 +25,9 @@ namespace Server.Medius
             public volatile bool Faulted;
             // Set once this slot's incarnation was written off; a replacement slot takes its index.
             public volatile bool WrittenOff;
+            // Its host never started (for example its world stream was refused), so it admitted
+            // no one: the same incarnation may be started again without a write-off.
+            public volatile bool StartupFailed;
         }
         static readonly IInternalLogger Logger = InternalLoggerFactory.GetInstance<MagWorldRegistry>();
         readonly MagWorldRegistryConfig _config;
@@ -83,10 +86,30 @@ namespace Server.Medius
                 slot.WrittenOff || slot.Host.World?.Destroyed != false ? null : slot.Host.World.WorldId, state.Ready && !slot.Faulted, state.Draining || slot.Faulted, state.LiveCount, state.PendingQueueCount);
         }).ToArray());
 
+        /// <summary>Each configured world for the server status: admission state, running match and
+        /// counts. A worker fault (a failed slot, a written-off incarnation or an identity fault) is
+        /// reported as faulted rather than draining.</summary>
+        public IReadOnlyList<MagWorldStatus> StatusWorlds() => Array.AsReadOnly(_slots.Select(slot =>
+            MagServerStatus.Describe(slot.Config.WorkerId, slot.Faulted || slot.WrittenOff || slot.Bridge.HasWorkerIdentityFault,
+                slot.Host.GetPlacement())).ToArray());
+
+        /// <summary>Humans waiting in the global queue for a world, by requested game type (0 to 2).</summary>
+        public int[] QueuedByGameType()
+        {
+            var counts = new int[3];
+            QueueEntry[] waiting;
+            lock (_gate) waiting = _humans.Snapshot().Select(e => e.Value).Where(e => e.Assigned == null && e.Alive).ToArray();
+            foreach (var entry in waiting)
+                if (entry.Request.Value < (uint)counts.Length) counts[entry.Request.Value] += entry.Party?.Length ?? 1;
+            return counts;
+        }
+
         /// <summary>Initialize worker worlds without opening the shared DME listener.</summary>
         public async Task InitializeAsync()
         {
             lock (_gate) { if (_initialized || _disposed) throw new InvalidOperationException("Registry already initialized or disposed."); _initialized = true; }
+            // World IDs in configuration order, before the concurrent worker handshakes.
+            foreach (var slot in _slots) slot.Host.ReserveRegistryWorld(_manager);
             await Task.WhenAll(_slots.Select(InitializeSlotAsync));
             for (int i = 0; i < _slots.Length; i++)
                 if (!_slots[i].Faulted && _slots[i].Host.WorkerContract is MagWorkerContract contract) _entries[i].Contract = contract;
@@ -100,7 +123,10 @@ namespace Server.Medius
         {
             try { await slot.Host.StartInRegistryAsync(_manager); }
             catch (Exception error) when (error is IOException || error is ArgumentException || error is InvalidOperationException)
-            { slot.Faulted = true; Logger.Warn($"Configured worker unavailable: worker={slot.Config.WorkerId} error={error.GetType().Name}"); }
+            {
+                slot.StartupFailed = true; slot.Faulted = true;
+                Logger.Warn($"Configured worker unavailable: worker={slot.Config.WorkerId} error={error.GetType().Name} reason=\"{error.Message}\"");
+            }
         }
         public async Task StartAsync()
         {

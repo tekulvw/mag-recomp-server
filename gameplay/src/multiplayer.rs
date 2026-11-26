@@ -227,6 +227,8 @@ impl Active {
                 np_identity: claimed.np_identity,
             },
             mag_info: self.mag_info(c.progression.unwrap_or_default().level),
+            // Peers receive this snapshot; owned skills are owner-only.
+            skills: None,
         };
         let mut inventory = self.equipped_loadout();
         if let (Some(kit), Some(handle)) = (&mut inventory, self.current_inventory_handle) {
@@ -1056,12 +1058,24 @@ impl<W: Write> Engine<W> {
         now: Duration,
         wall: u64,
     ) -> Result<Vec<OutboundMessage>, &'static str> {
+        self.expire_world_peers_with(now, wall, &std::collections::BTreeSet::new())
+    }
+    /// Expire idle or backlogged actors, and every actor named in `detached`
+    /// (its control plane is gone), through the same removal path.
+    pub(super) fn expire_world_peers_with(
+        &mut self,
+        now: Duration,
+        wall: u64,
+        detached: &std::collections::BTreeSet<String>,
+    ) -> Result<Vec<OutboundMessage>, &'static str> {
         let expired: Vec<_> = self
             .peers
             .iter()
             .chain(self.active.iter().map(|a| (&a.reservation.id, a)))
-            .filter(|(_, a)| {
-                a.replication_backlogged || now.saturating_sub(a.last_event) >= IDLE_TIMEOUT
+            .filter(|(id, a)| {
+                detached.contains(*id)
+                    || a.replication_backlogged
+                    || now.saturating_sub(a.last_event) >= IDLE_TIMEOUT
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -1073,7 +1087,12 @@ impl<W: Write> Engine<W> {
                 .get(&id)
                 .or_else(|| self.active.as_ref().filter(|a| a.reservation.id == id))
                 .unwrap();
-            if actor.replication_backlogged {
+            if detached.contains(&id) {
+                self.record(
+                    json!({"op":"expired","reservation_id":id,"cause":"control_plane_rebound"}),
+                    wall,
+                )?;
+            } else if actor.replication_backlogged {
                 // Name the full queue so a live eviction can be attributed.
                 self.record(
                     json!({"op":"replication_backlog_released","reservation_id":id,

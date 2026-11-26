@@ -38,6 +38,8 @@ pub struct BotPopulation {
     #[serde(default)]
     pub perception: crate::bot_perception::Policy,
     #[serde(default)]
+    pub cover: crate::bot_cover::Policy,
+    #[serde(default)]
     pub repair: crate::bot_repair::Policy,
     #[serde(default)]
     pub demolition: crate::bot_demolition::Policy,
@@ -90,6 +92,7 @@ impl BotPopulation {
         self.firearms.validate()?;
         self.healing.validate()?;
         self.perception.validate()?;
+        self.cover.validate()?;
         self.repair.validate()?;
         self.demolition.validate()?;
         self.blast.validate()?;
@@ -202,6 +205,8 @@ pub(super) struct WorldBot {
     pub(super) damage_revision: u64,
     pub(super) damage: replication::CharacterDamage,
     pub(super) yaw: u16,
+    /// Published Character stance (0 standing, 1 crouched).
+    pub(super) stance: u8,
     pub(super) firearm: crate::bot_firearms::State,
     pub(super) resupply: Option<crate::bot_resupply::Session>,
     pub(super) resupply_seek: Option<crate::bot_resupply::Seek>,
@@ -714,7 +719,7 @@ impl WorldBot {
             object_index: self.target.object_index,
             state: replication::CharacterState {
                 state: if self.health == 0 { 7 } else { 1 },
-                stance: 0,
+                stance: if self.health == 0 { 0 } else { self.stance },
                 user_data: [0; 3],
             },
             position: runtime.position,
@@ -1649,7 +1654,9 @@ impl<W: Write> Engine<W> {
             .regional_collision
             .clone();
         let respawn_delays = self.match_profile().spawn_wave_ms;
-        let perception_holds = self.bot_perception.held_ids();
+        let mut perception_holds = self.bot_perception.held_ids();
+        // A bot the cover layer is moving keeps walking.
+        perception_holds.retain(|id| !self.bot_cover.controls(*id));
         let ids: Vec<_> = self.bot_registry.bots.keys().copied().collect();
         for id in ids {
             // Capture after previous candidates have updated Character state.
@@ -1723,6 +1730,7 @@ impl<W: Write> Engine<W> {
                 bot.target.runtime = Some(runtime);
                 bot.due_respawn_wave = None;
                 bot.health = 400;
+                bot.stance = 0;
                 bot.damage_revision = 0;
                 bot.firearm = Default::default();
                 bot.resupply = None;
@@ -3542,6 +3550,7 @@ impl<W: Write> Engine<W> {
                 index,
                 WorldBot {
                     name_index,
+                    stance: 0,
                     allocation_generation: generation,
                     firearm_kd: Default::default(),
                     target: Target {

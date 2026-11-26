@@ -77,7 +77,10 @@ namespace Server.Medius
             {
                 Host = Read("host"), Port = port, Database = Read("dbname"), Username = Read("user"), Password = Read("password"),
                 ApplicationName = "mag-medius", Timeout = 2, CommandTimeout = 3, MaxPoolSize = 8,
-                SslMode = SslMode.Require
+                SslMode = SslMode.Require,
+                // TLS protects the connection. Npgsql's default (Prefer) first tries GSSAPI encryption,
+                // which the image has no library for: every process logged a libgssapi_krb5 load error.
+                GssEncryptionMode = GssEncryptionMode.Disable
             };
             if (!string.IsNullOrWhiteSpace(caFile))
             {
@@ -264,6 +267,30 @@ namespace Server.Medius
             if (version != KnownMigrations.Count)
                 throw new InvalidDataException($"Character database schema is at version {version}; this build needs {KnownMigrations.Count}. " +
                     "Run 'mag-admin character-store migrate' or start main Medius.");
+        }
+
+        /// <summary>Tables reported by <c>character-store status</c>, in schema order.</summary>
+        internal static readonly string[] StatusTables =
+            { "characters", "character_loadouts", "match_progress", "reward_receipts", "match_history", "admin_changes" };
+
+        /// <summary>Row count of each table in <see cref="StatusTables"/>, and when the last import wrote (null if never).</summary>
+        public (IReadOnlyList<(string Table, long Rows)> Tables, DateTime? LastImportAt) RowCounts()
+        {
+            try
+            {
+                using var connection = OpenConnection();
+                var tables = new List<(string, long)>();
+                foreach (string table in StatusTables)
+                {
+                    using var count = new NpgsqlCommand($"SELECT count(*) FROM mag.{table}", connection) { CommandTimeout = MaintenanceCommandTimeoutSeconds };
+                    tables.Add((table, (long)count.ExecuteScalar()));
+                }
+                using var marker = new NpgsqlCommand("SELECT max(at) FROM mag.admin_changes WHERE operation = @operation", connection);
+                marker.Parameters.AddWithValue("operation", LocalCharacterStore.ImportOperation);
+                object at = marker.ExecuteScalar();
+                return (tables, at is DateTime value ? DateTime.SpecifyKind(value, DateTimeKind.Utc) : null);
+            }
+            catch (Exception e) { throw Translate(e); }
         }
 
         // ---- Retention ----

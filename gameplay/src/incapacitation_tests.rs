@@ -216,22 +216,6 @@ fn expiry_waits_until_deadline_then_consumes_incapacitation_once() {
 }
 
 #[test]
-fn downed_patient_cannot_queue_respawn_before_expiration() {
-    let mut engine = two_actors(0.4);
-    down_patient(&mut engine, Duration::ZERO);
-    let healer = engine.active.take().unwrap();
-    engine.active = engine.peers.remove("synthetic-reservation-0000");
-    engine.peers.insert(healer.reservation.id.clone(), healer);
-    let _ = dispatch(&mut engine, &0x0211u16.to_be_bytes(), 1000);
-    let actor = engine.active.as_ref().unwrap();
-    assert!(matches!(
-        actor.life,
-        CharacterLife::Incapacitated { generation: 4, .. }
-    ));
-    assert!(actor.pending_spawn_deadline.is_none());
-}
-
-#[test]
 fn authenticated_resuscitation_uses_owned_healer_maximum_and_preserves_patient_generation() {
     let mut engine = two_actors(0.4);
     down_patient(&mut engine, Duration::ZERO);
@@ -1014,12 +998,11 @@ fn a_bled_out_patient_rejoins_the_next_wave_at_the_point_chosen_while_downed() {
     let healer = engine.active.take().unwrap();
     engine.active = engine.peers.remove("synthetic-reservation-0000");
     engine.peers.insert(healer.reservation.id.clone(), healer);
-    // The map is open while downed: the choice is stored and the
-    // confirmation cannot queue a downed character.
+    // The map is open while downed: the choice is stored without queueing.
+    // (A confirmation would give up the downed life; see the tests below.)
     let mut select = 0x0219u16.to_be_bytes().to_vec();
     select.extend(1u16.to_be_bytes());
     dispatch(&mut engine, &select, 1000).unwrap();
-    let _ = dispatch(&mut engine, &0x0211u16.to_be_bytes(), 1000);
     let actor = engine.active.as_ref().unwrap();
     assert_eq!(actor.selected_spawn.unwrap().spawn_point_index, 1);
     assert!(actor.pending_spawn_deadline.is_none());
@@ -1059,4 +1042,230 @@ fn a_bled_out_patient_rejoins_the_next_wave_at_the_point_chosen_while_downed() {
     ));
     let stored = actor.tracking.sample.unwrap().position;
     assert_eq!([stored.x, stored.y, stored.z], [120., 3., 100.]);
+}
+
+#[test]
+fn a_bleed_out_just_before_a_wave_spawns_on_that_wave() {
+    use crate::replication::{ObjectUpdate, UpdateHeader};
+    let mut engine = two_actors(0.4);
+    engine.enable_world_ticks();
+    engine.match_started = true;
+    down_patient(&mut engine, Duration::ZERO);
+    // The patient lives on a running team clock whose wave falls 100 ms
+    // after the 7 s bleed-out, well inside a dead client's update interval.
+    let team = usize::from(patient(&engine).team());
+    engine.team_waves[team] = Some(TeamWaveClock {
+        first_deadline: Duration::from_millis(7100),
+        period: Duration::from_secs(20),
+    });
+    let response = engine.tick_world(Duration::from_secs(7), 1, "synthetic-tick".into());
+    assert!(response.ok, "{:?}", response.error);
+    let queued = patient(&engine);
+    assert!(matches!(
+        queued.life,
+        CharacterLife::AwaitingRespawn { generation: 4 }
+    ));
+    assert_eq!(
+        queued.pending_spawn_deadline,
+        Some(Duration::from_millis(7100))
+    );
+    let healer = engine.active.take().unwrap();
+    engine.active = engine.peers.remove("synthetic-reservation-0000");
+    engine.peers.insert(healer.reservation.id.clone(), healer);
+    let header = UpdateHeader {
+        sequence: engine.active.as_ref().unwrap().latest_owner_sequence + 1,
+        nak_sequence: 0,
+        client_index: 0,
+        object_type_mask: 0,
+        timestamp_ms: 7800,
+    };
+    let bytes = ObjectUpdate { header, wire: &[] }
+        .encode_empty_with_profile(engine.wire_profile)
+        .unwrap();
+    dispatch(&mut engine, &bytes, 7800).unwrap();
+    assert!(matches!(
+        engine.active.as_ref().unwrap().life,
+        CharacterLife::Alive { generation: 5, .. }
+    ));
+}
+
+/// Make the downed patient the event owner; the healer becomes a peer.
+fn patient_owns_events(engine: &mut Engine<Vec<u8>>) {
+    let healer = engine.active.take().unwrap();
+    engine.active = engine.peers.remove("synthetic-reservation-0000");
+    engine.peers.insert(healer.reservation.id.clone(), healer);
+}
+
+/// Make the healer the event owner again.
+fn healer_owns_events(engine: &mut Engine<Vec<u8>>) {
+    let patient = engine.active.take().unwrap();
+    engine.active = engine.peers.remove("synthetic-reservation-0001");
+    engine.peers.insert(patient.reservation.id.clone(), patient);
+}
+
+/// The owner's report of its downed state (7) with a death-state substate.
+fn downed_state_report(engine: &mut Engine<Vec<u8>>, substate: u8, now_ms: u64) {
+    let actor = engine.active.as_ref().unwrap();
+    let mut bits = replication::BitWriter::with_profile(engine.wire_profile);
+    replication::UpdateHeader {
+        sequence: actor.latest_owner_sequence + 1,
+        nak_sequence: 0,
+        client_index: 0,
+        object_type_mask: 8,
+        timestamp_ms: now_ms as u32,
+    }
+    .encode(&mut bits)
+    .unwrap();
+    bits.write(1, 1).unwrap();
+    bits.write(actor.reservation.player.into(), 16).unwrap();
+    for field in 0..22 {
+        bits.write(u32::from(field == 4), 1).unwrap();
+        if field == 4 {
+            replication::CharacterState {
+                state: 7,
+                stance: 0,
+                user_data: [substate, 2, 0],
+            }
+            .encode(&mut bits)
+            .unwrap();
+        }
+    }
+    bits.write(0, 1).unwrap();
+    let wire = bits.finish();
+    dispatch(engine, &wire, now_ms).unwrap();
+}
+
+fn empty_update(engine: &mut Engine<Vec<u8>>, now_ms: u64) {
+    use crate::replication::{ObjectUpdate, UpdateHeader};
+    let header = UpdateHeader {
+        sequence: engine.active.as_ref().unwrap().latest_owner_sequence + 1,
+        nak_sequence: 0,
+        client_index: 0,
+        object_type_mask: 0,
+        timestamp_ms: now_ms as u32,
+    };
+    let bytes = ObjectUpdate { header, wire: &[] }
+        .encode_empty_with_profile(engine.wire_profile)
+        .unwrap();
+    dispatch(engine, &bytes, now_ms).unwrap();
+}
+
+/// Downed at 0 with a 7 s bleed-out; the team's waves fall at 3 s, 23 s, ...
+fn downed_owner_with_waves() -> Engine<Vec<u8>> {
+    let mut engine = two_actors(0.4);
+    engine.enable_world_ticks();
+    engine.match_started = true;
+    down_patient(&mut engine, Duration::ZERO);
+    let team = usize::from(patient(&engine).team());
+    engine.team_waves[team] = Some(TeamWaveClock {
+        first_deadline: Duration::from_secs(3),
+        period: Duration::from_secs(20),
+    });
+    patient_owns_events(&mut engine);
+    engine
+}
+
+fn assert_gave_up(actor: &Active) {
+    assert!(matches!(
+        actor.life,
+        CharacterLife::AwaitingRespawn { generation: 4 }
+    ));
+    assert_eq!(actor.last_damage.health_quarter_points, 0);
+    assert_eq!(actor.last_damage.conditions & 3, 0);
+    // The downed hit keeps the death: attribution is that of a bleed-out.
+    assert_eq!(actor.last_damage.last_attacker, 0x0380_0002);
+    assert_eq!(actor.last_damage.last_source_object, 0x0680_0002);
+}
+
+#[test]
+fn a_bleed_out_report_gives_up_at_once_and_spawns_on_the_next_wave() {
+    let mut engine = downed_owner_with_waves();
+    downed_state_report(&mut engine, 3, 1000);
+    assert_gave_up(engine.active.as_ref().unwrap());
+    // The world tick queues the dead character for the wave at 3 s.
+    let response = engine.tick_world(Duration::from_millis(1050), 1, "tick".into());
+    assert!(response.ok, "{:?}", response.error);
+    assert_eq!(
+        engine.active.as_ref().unwrap().pending_spawn_deadline,
+        Some(Duration::from_secs(3))
+    );
+    empty_update(&mut engine, 3100);
+    assert!(matches!(
+        engine.active.as_ref().unwrap().life,
+        CharacterLife::Alive { generation: 5, .. }
+    ));
+}
+
+#[test]
+fn other_downed_substates_keep_the_full_bleed_out() {
+    let mut engine = downed_owner_with_waves();
+    downed_state_report(&mut engine, 1, 1000);
+    let actor = engine.active.as_ref().unwrap();
+    assert!(matches!(
+        actor.life,
+        CharacterLife::Incapacitated { generation: 4, downed }
+            if downed.deadline == Duration::from_secs(7)
+    ));
+    assert_eq!(actor.last_damage.conditions & 2, 2);
+    engine
+        .tick_incapacitation(Duration::from_millis(6999), 1)
+        .unwrap();
+    assert!(matches!(
+        engine.active.as_ref().unwrap().life,
+        CharacterLife::Incapacitated { .. }
+    ));
+    engine
+        .tick_incapacitation(Duration::from_secs(7), 1)
+        .unwrap();
+    assert_gave_up(engine.active.as_ref().unwrap());
+}
+
+#[test]
+fn a_downed_confirmation_gives_up_queues_and_cannot_be_revived() {
+    let mut engine = downed_owner_with_waves();
+    dispatch(&mut engine, &0x0211u16.to_be_bytes(), 1000).unwrap();
+    let actor = engine.active.as_ref().unwrap();
+    assert_gave_up(actor);
+    assert_eq!(actor.pending_spawn_deadline, Some(Duration::from_secs(3)));
+    // A medic arriving after the give-up finds nobody to revive.
+    healer_owns_events(&mut engine);
+    let _ = dispatch(&mut engine, &request(0x0380_0000), 1500);
+    assert_gave_up(patient(&engine));
+    patient_owns_events(&mut engine);
+    empty_update(&mut engine, 3100);
+    assert!(matches!(
+        engine.active.as_ref().unwrap().life,
+        CharacterLife::Alive { generation: 5, .. }
+    ));
+}
+
+#[test]
+fn a_cancel_after_a_downed_confirmation_is_an_ordinary_dead_cancel() {
+    let mut engine = downed_owner_with_waves();
+    dispatch(&mut engine, &0x0211u16.to_be_bytes(), 1000).unwrap();
+    let messages = dispatch(&mut engine, &0x0213u16.to_be_bytes(), 1100).unwrap();
+    assert!(messages.iter().any(
+        |m| m.payload_hex.eq_ignore_ascii_case(&protocol::encode_hex(
+            &protocol::CancelRespawnResult { success: true }.encode()
+        ))
+    ));
+    let actor = engine.active.as_ref().unwrap();
+    assert_gave_up(actor);
+    assert!(actor.pending_spawn_deadline.is_none());
+    // Held out of the queue like any dead player until it confirms again.
+    let response = engine.tick_world(Duration::from_millis(1200), 1, "tick".into());
+    assert!(response.ok, "{:?}", response.error);
+    assert!(
+        engine
+            .active
+            .as_ref()
+            .unwrap()
+            .pending_spawn_deadline
+            .is_none()
+    );
+    dispatch(&mut engine, &0x0211u16.to_be_bytes(), 1300).unwrap();
+    assert_eq!(
+        engine.active.as_ref().unwrap().pending_spawn_deadline,
+        Some(Duration::from_secs(3))
+    );
 }

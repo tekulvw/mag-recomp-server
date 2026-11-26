@@ -19,9 +19,13 @@ namespace Server.Medius
         public static MagServerNews Current => Bundled.Value;
         public string Content { get; }
         public uint Timestamp { get; }
+        /// <summary>The newest release in the Medius changelog bundled with this build; null without one.</summary>
+        public string MediusVersion { get; }
+        /// <summary>The newest release in the gameplay image's changelog (MAG_GAMEPLAY_NEWS_PATH); null without one.</summary>
+        public string GameplayVersion { get; }
 
-        private MagServerNews(string content, uint timestamp)
-        { Content = content; Timestamp = timestamp; }
+        private MagServerNews(string content, uint timestamp, string mediusVersion = null, string gameplayVersion = null)
+        { Content = content; Timestamp = timestamp; MediusVersion = mediusVersion; GameplayVersion = gameplayVersion; }
 
         private static MagServerNews Load()
         {
@@ -48,6 +52,7 @@ namespace Server.Medius
         public static MagServerNews FromChangelogs(string medius, string gameplay)
         {
             var sections = new List<string>();
+            var versions = new Dictionary<string, string>(StringComparer.Ordinal);
             uint timestamp = 0;
             foreach (var source in new[] { (Name: "Medius", Text: medius), (Name: "Gameplay", Text: gameplay) })
             {
@@ -67,6 +72,7 @@ namespace Server.Medius
                             DateTimeStyles.AssumeUniversal, out var date) || date.ToUnixTimeSeconds() < 0 || date.ToUnixTimeSeconds() > uint.MaxValue)
                             throw new InvalidDataException("Invalid NEWS release date.");
                         heading = source.Name + " " + match.Groups["version"].Value + " (" + match.Groups["date"].Value + ")";
+                        versions[source.Name] = match.Groups["version"].Value;
                         timestamp = Math.Max(timestamp, (uint)date.ToUnixTimeSeconds());
                     }
                     else
@@ -79,9 +85,11 @@ namespace Server.Medius
                 if (heading != null) sections.Add(heading + "\n" + string.Join("\n", body).Trim());
             }
             if (sections.Count == 0) return new MagServerNews("Server update notes are unavailable for this build.", 0);
+            string mediusVersion = versions.GetValueOrDefault("Medius"), gameplayVersion = versions.GetValueOrDefault("Gameplay");
             // Reserve space for each component, so a long gameplay release cannot hide Medius (or vice versa).
             int budget = (MagMessageCodec.MaximumStringBytes - (sections.Count - 1) * 2) / sections.Count;
-            return new MagServerNews(string.Join("\n\n", sections.Select(section => Bound(section, budget))), timestamp);
+            return new MagServerNews(string.Join("\n\n", sections.Select(section => Bound(section, budget))), timestamp,
+                mediusVersion, gameplayVersion);
         }
 
         private static string Bound(string text, int budget)

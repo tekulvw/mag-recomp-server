@@ -16,6 +16,7 @@ pub(super) fn object_update<W: Write>(
         owner_fields,
         body_supported,
         accepted_stance,
+        bleed_out_reported,
     } = plan_owner_report(ctx, plan, &update)?;
     let mut flash_recipients = std::collections::BTreeMap::new();
     for terminal in std::mem::take(&mut plan.combat.flash_pending) {
@@ -81,6 +82,14 @@ pub(super) fn object_update<W: Write>(
         }
     }
     plan_update_reply(ctx, plan, h, body_supported, grenade_queue)?;
+    // Retail SimCharacter::UpdateState: a downed owner that reports its
+    // bleeding-out substate has given up; the incapacitated condition clears
+    // at once. The world tick then queues it for the next wave.
+    let downed_give_up = if bleed_out_reported && body_supported && plan.rejection.is_none() {
+        combat::plan_downed_give_up(ctx, plan)?
+    } else {
+        None
+    };
     // Owner planning selects one direct reply; shared delivery is separate.
     // Replication/replay takes priority; leave clock state untouched
     // so the next valid update catches up to absolute elapsed time.
@@ -123,6 +132,7 @@ pub(super) fn object_update<W: Write>(
         "bot_script":plan.audit.bot_script,
         "development_target_spawned":plan.combat.dummy_health.is_some() && plan.audit.bot_script.as_ref().is_none_or(|r|r["phase"]=="spawn" || r["phase"]=="respawn"),
         "team_wave_deadline_ms":plan.session.published_wave_deadline.map(|d|d.as_millis() as u32),
+        "downed_give_up_generation":downed_give_up,
         "automatic_respawn_deadline_ms":plan.session.new_spawn_deadline.filter(|_|plan.session.automatic_respawn_queue).map(|d|d.as_millis() as u32),
         "spawn_point_index":plan.audit.spawned_point,"spawn_fallback":plan.audit.spawn_fallback.map(|(selected, used, reason)| json!({"selected":selected,"used":used,"reason":reason})),"spawn_mounted_seat":plan.session.new_mounted_seat.flatten(),"spawn_mounted_bunker":plan.session.new_mounted_bunker,
         "spawn_ground_vehicle_index":plan.session.new_ground_seat.flatten().map(|s|s.vehicle_index),
@@ -189,7 +199,13 @@ struct OwnerReport {
     owner_fields: Option<Value>,
     body_supported: bool,
     accepted_stance: Option<u8>,
+    /// A newer owner report of the downed state in its bleeding-out substate.
+    bleed_out_reported: bool,
 }
+
+/// The death state's substate (first state-userdata byte) that the client
+/// enters when a downed player presses Bleed out.
+const BLEEDING_OUT_SUBSTATE: u8 = 3;
 
 fn plan_owner_report<W: Write>(
     ctx: &PlanningContext<'_, W>,
@@ -284,6 +300,7 @@ fn plan_owner_report<W: Write>(
     let mut owner_fields = None;
     let mut body_supported = true;
     let mut accepted_stance = None;
+    let mut bleed_out_reported = false;
     match fields {
         Err(
             error @ (owner_update::OwnerUpdateError::UnsupportedCharacterField
@@ -307,6 +324,11 @@ fn plan_owner_report<W: Write>(
             if h.client_index == 0 && h.nak_sequence == 0 && qualified_owner_route {
                 plan.session.new_owner_sequence =
                     Some(active.latest_owner_sequence.max(h.sequence));
+                bleed_out_reported = ctx.accepted_owner_route
+                    && h.sequence > active.latest_owner_sequence
+                    && fields
+                        .state
+                        .is_some_and(|s| s.state == 7 && s.user_data[0] == BLEEDING_OUT_SUBSTATE);
                 if ctx.accepted_owner_route
                     && h.sequence > active.latest_owner_sequence
                     && fields.state.is_some_and(|s| matches!(s.state, 7 | 14))
@@ -617,6 +639,7 @@ fn plan_owner_report<W: Write>(
         owner_fields,
         body_supported,
         accepted_stance,
+        bleed_out_reported,
     })
 }
 
@@ -1495,13 +1518,9 @@ fn plan_update_reply<W: Write>(
     // selection without a new selection or confirmation, unless the player
     // left the queue after this death. The first life still waits for the
     // client's confirmation, and a downed character is not dead yet.
-    let rejoin_queue = matches!(active.life, CharacterLife::AwaitingRespawn { .. })
-        && !active.respawn_held
-        && ctx.engine.match_started
-        && ctx.engine.match_terminal.is_none()
-        && !(ctx.engine.maximum_players == 1
-            && active.replication_history.len() + 2 > MAX_REPLICATION_HISTORY)
-        && update_actions::respawn_point(ctx.engine, active).is_some();
+    // The world tick normally queues it first (see `respawn_queue`); this
+    // covers embeddings that run without world ticks.
+    let rejoin_queue = ctx.engine.rejoins_respawn_queue(active);
     // While the picker is open, publish rollover. A queued due spawn has
     // priority above; never move its deadline forward before the character
     // can consume that wave.

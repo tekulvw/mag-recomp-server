@@ -156,6 +156,63 @@ impl Refusal {
     }
 }
 
+/// `GET /admin/v1/status`: the game server's read-only status, counts only (no account names).
+/// Fields the portal does not know are ignored, so the game server can add some.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ServerStatus {
+    pub medius_version: Option<String>,
+    pub gameplay_version: Option<String>,
+    /// RFC 3339 time the Medius process started.
+    pub started_at: Option<String>,
+    pub uptime_seconds: u64,
+    /// `registry`, `single` or `none`.
+    pub mode: String,
+    /// Accounts holding a live login lease; `None` when the game server cannot tell.
+    pub players_online: Option<u32>,
+    pub queued: u32,
+    /// Humans waiting for a world, by requested game type.
+    #[serde(default)]
+    pub queued_by_game_type: Vec<u32>,
+    pub dme_ports: DmePorts,
+    pub worlds: Vec<WorldStatus>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct DmePorts {
+    /// `None` when unbounded.
+    pub capacity: Option<u32>,
+    pub in_use: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct WorldStatus {
+    pub worker_id: String,
+    /// `open`, `draining`, `faulted` or `unavailable`.
+    pub state: String,
+    #[serde(default)]
+    pub game_types: Vec<u8>,
+    pub human_capacity: u32,
+    /// Humans placed on this world and not admitted yet.
+    #[serde(default)]
+    pub pending: u32,
+    #[serde(rename = "match")]
+    pub current: Option<MatchStatus>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct MatchStatus {
+    pub profile_id: String,
+    pub game_type: u8,
+    pub attacking_faction: u8,
+    pub defending_faction: u8,
+    pub humans: u32,
+    pub attacking_humans: u32,
+    pub defending_humans: u32,
+    pub human_capacity: u32,
+    pub bots: u32,
+    pub world_capacity: u32,
+}
+
 #[derive(Deserialize)]
 struct ErrorBody {
     error: String,
@@ -264,6 +321,27 @@ impl GameAdmin {
         }
     }
 
+    /// The game server's status. `NotFound` means it is too old to report one.
+    pub async fn status(&self, actor: &str) -> Result<ServerStatus, GameAdminError> {
+        self.status_logged(actor, true).await
+    }
+
+    /// As [`GameAdmin::status`], without a warning per failure: the status poller logs only
+    /// when a game server goes down or comes back.
+    pub async fn status_quietly(&self, actor: &str) -> Result<ServerStatus, GameAdminError> {
+        self.status_logged(actor, false).await
+    }
+
+    async fn status_logged(&self, actor: &str, warn: bool) -> Result<ServerStatus, GameAdminError> {
+        let (status, body) = self
+            .send_logged(Method::GET, "/admin/v1/status", Vec::new(), actor, warn)
+            .await?;
+        match status {
+            StatusCode::OK => parse(&body, "the server status"),
+            other => Err(failure(other, &body)),
+        }
+    }
+
     /// One character, or `None` if the game server has none for `account`.
     pub async fn character(
         &self,
@@ -325,6 +403,17 @@ impl GameAdmin {
         body: Vec<u8>,
         actor: &str,
     ) -> Result<(StatusCode, Vec<u8>), GameAdminError> {
+        self.send_logged(method, path, body, actor, true).await
+    }
+
+    async fn send_logged(
+        &self,
+        method: Method,
+        path: &str,
+        body: Vec<u8>,
+        actor: &str,
+        warn: bool,
+    ) -> Result<(StatusCode, Vec<u8>), GameAdminError> {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -358,7 +447,9 @@ impl GameAdmin {
             } else {
                 "the request failed"
             };
-            tracing::warn!(url = %self.base_url, reason, "game admin API unreachable");
+            if warn {
+                tracing::warn!(url = %self.base_url, reason, "game admin API unreachable");
+            }
             GameAdminError::Unreachable {
                 url: self.base_url.clone(),
                 reason,
@@ -381,7 +472,9 @@ impl GameAdmin {
             ));
         }
         if status == StatusCode::UNAUTHORIZED {
-            tracing::warn!(url = %self.base_url, "game admin API rejected the portal's signature");
+            if warn {
+                tracing::warn!(url = %self.base_url, "game admin API rejected the portal's signature");
+            }
             return Err(GameAdminError::Unauthorized);
         }
         Ok((status, bytes.to_vec()))

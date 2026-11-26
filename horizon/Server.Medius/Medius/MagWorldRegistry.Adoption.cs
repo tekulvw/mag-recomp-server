@@ -101,7 +101,8 @@ namespace Server.Medius
             }
             string next = probe.WorkerIdentity.IncarnationId;
             string previous = old.Bridge.WorkerIdentity?.IncarnationId;
-            if (next == previous)
+            bool retryStartup = next == previous && old.StartupFailed;
+            if (next == previous && !retryStartup)
             {
                 // The same process still answers: not a restart. Its fault keeps the entry closed as before.
                 Notice(entry, "same:" + next, () => Logger.Warn($"Configured worker fault without a restart: worker={row.WorkerId} incarnation={next}; not adopting, entry stays closed"));
@@ -109,7 +110,12 @@ namespace Server.Medius
             }
 
             // 2. Write off the old incarnation: another incarnation answers, so the old process is gone.
-            await WriteOffAsync(old, entry, next);
+            // A host that never started admitted no one and holds nothing to write off; the same
+            // process is simply started again, within the adoption cap.
+            if (retryStartup)
+                Notice(entry, "retry:" + next, () => Logger.Warn($"Configured worker startup retry: worker={row.WorkerId} incarnation={next}; its first start failed, starting it again"));
+            else
+                await WriteOffAsync(old, entry, next);
 
             // 3. Adopt the new incarnation, unless refused or capped.
             lock (_gate) if (_disposed || entry.RefusedIncarnation == next) return;

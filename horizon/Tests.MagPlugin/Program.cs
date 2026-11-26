@@ -36,6 +36,7 @@ if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(RealRegistryWo
     Test("configured registry real workers grouped", RealRegistryWorkerChecks.RunParties);
     Test("configured registry real workers restart adoption", RealRegistryWorkerChecks.RunRestart);
     Test("configured registry real workers large world", RealRegistryWorkerChecks.RunLargeWorld);
+    Test("configured registry real workers outlive a Medius restart", RealRegistryWorkerChecks.RunMediusRestart);
 }
 Test("registry DME host world and lease isolation", RegistryDmeHostChecks.Run);
 Test("voice diagnostics are off by default, sample bounded and find lab voice blocks", VoiceDiagnosticsChecks.Run);
@@ -49,6 +50,8 @@ Test("DME port capacity refuses standalone admission and frees ports on release"
 Test("DME port capacity holds registry players until transports release", DmePortCapacityChecks.Registry);
 Test("DME port capacity admits a party as a unit or refuses it", DmePortCapacityChecks.Parties);
 Test("configured registry restarted worker adoption", RegistryAdoptionChecks.Run);
+Test("worker drain notices and subscription options parse strictly", WorkerDrainChecks.Codec);
+Test("configured registry subscription options and worker drain notices", WorkerDrainChecks.Run);
 Test("bundled server NEWS formatting and bounds", ServerNewsChecks.Formatting);
 Test("bundled server NEWS and EULA wire responses", ServerNewsChecks.Run);
 
@@ -76,6 +79,10 @@ Test("admin API is off by default and validates its configuration", AdminApiChec
 Test("admin API signs requests like the portal vectors", AdminApiChecks.Vectors);
 Test("admin API authenticates requests and shares the mag-admin rules", AdminApiChecks.Run);
 Test("admin API reports DME ports in use against the cap", AdminApiChecks.DmePorts);
+Test("server status world states and match counts", ServerStatusChecks.Describe);
+Test("server status versions from the bundled changelogs", ServerStatusChecks.Versions);
+Test("server status endpoint is signed, read-only and names no account", ServerStatusChecks.Endpoint);
+Test("server status of a configured registry", ServerStatusChecks.Registry);
 Test("medius starts through Program.Main, not the admin CLI", MediusEntryPointChecks.Run);
 Test("operator starting level creates earned-equivalent characters", StartingLevelChecks.Run);
 Test("operator Training level raises new completions to an earned-equivalent minimum", TrainingLevelChecks.Run);
@@ -142,6 +149,8 @@ Test("postgres character store commits concurrent rewards and creations exactly 
 Test("postgres character store outages surface as deferrable IO failures and fail fast", LeadershipProgressionChecks.PostgresOutageDefers);
 Test("postgres reward ledger retention prunes rows with their receipts and keeps history", LeadershipProgressionChecks.PostgresLedgerRetention);
 Test("postgres character store imports, verifies and exports a JSON store", LeadershipProgressionChecks.PostgresImportVerifyExport);
+Test("postgres character store connections from a secret directory use TLS without GSSAPI", LeadershipProgressionChecks.PostgresSecretDirectoryConnection);
+Test("postgres character store import is idempotent with a dry run, counts and digests", LeadershipProgressionChecks.PostgresImportCommandLine);
 Test("retail saved loadout delete commits and compacts the owned layout", LoadoutPreferenceStoreChecks.DeleteThroughMls);
 Test("retail skill purchase owns its equipment for loadout saves", LoadoutPreferenceStoreChecks.RetailSkillPurchaseOwnsItsEquipment);
 Test("account-bound NP identity creation and persistence", NpIdentityChecks.Run);

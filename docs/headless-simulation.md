@@ -35,6 +35,9 @@ How it works:
 - The world advances in 50 ms ticks as fast as the CPU allows (roughly 30
   simulated minutes in about 10 s on a laptop) and writes the normal evidence
   log given by `--log`.
+- Bot cover spot builds ([bot-cover.md](bot-cover.md)) run on a worker thread
+  live; the simulation waits for them instead, so virtual time does not run
+  ahead without cover.
 - `MAG_SIM_SNAPSHOTS=1` records `sim_bot_snapshot` every 500 ms: each live
   bot's position, drop state and goal. In Acquisition and Domination,
   `in_structure` is true when the bot's standing body penetrates a placed

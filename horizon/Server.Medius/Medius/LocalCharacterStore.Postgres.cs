@@ -17,6 +17,31 @@ namespace Server.Medius
         public string Describe() => $"{Characters} characters, {Receipts} reward receipts, {MatchRows} match rows, digest {Digest}";
     }
 
+    /// <summary>How <c>character-store import</c> treats a database that is not empty.</summary>
+    public sealed record CharacterImportOptions(bool Replace = false, bool DiscardPostgresChanges = false);
+
+    public enum CharacterImportAction
+    {
+        /// <summary>The database is empty: copy the JSON store in.</summary>
+        Import,
+        /// <summary>The database already holds exactly the JSON contents: write nothing.</summary>
+        Unchanged,
+        /// <summary>Delete the database's rows and copy the JSON store in (<c>--replace</c>).</summary>
+        Replace,
+        /// <summary>Write nothing and fail; <see cref="CharacterImportPlan.Reason"/> says why.</summary>
+        Refused,
+    }
+
+    /// <summary>
+    /// What an import does: both stores' counts and digests (<see cref="Target"/> null when the database is
+    /// empty), the last recorded import, whether the server wrote after it, and how many records differ.
+    /// </summary>
+    public sealed record CharacterImportPlan(CharacterStoreSummary Source, CharacterStoreSummary Target, CharacterImportAction Action,
+        DateTime? LastImportAt, bool ChangedSinceImport, int Differences, string Reason);
+
+    /// <summary>An import's plan and the database's contents after it.</summary>
+    public sealed record CharacterImportResult(CharacterImportPlan Plan, CharacterStoreSummary After);
+
     public sealed partial class LocalCharacterStore
     {
         /// <summary>A store over PostgreSQL. Rules, catalogs and policy properties behave exactly as for the
@@ -399,28 +424,34 @@ namespace Server.Medius
             {
                 using var connection = pg.Database.OpenConnection();
                 using var transaction = connection.BeginTransaction(System.Data.IsolationLevel.RepeatableRead);
-                using var characters = new NpgsqlCommand("SELECT " + CharacterColumns + " FROM mag.characters ORDER BY id", connection, transaction);
-                var list = ReadCharacters(characters);
-                LoadLoadouts(connection, transaction, list);
-                foreach (var character in list) PrepareLoaded(character);
-                var accounts = list.ToDictionary(c => c.Id, c => c.Account);
-                using var rows = new NpgsqlCommand("SELECT character_id, match_key, experience, fraction, frago_points, finalized, last_reward_at " +
-                    "FROM mag.match_progress ORDER BY last_reward_at, character_id, match_key", connection, transaction)
-                    { CommandTimeout = PostgresCharacterDatabase.MaintenanceCommandTimeoutSeconds };
-                var progress = new Dictionary<string, MatchRewardProgress>(StringComparer.Ordinal);
-                foreach (var row in ReadProgress(rows, id => accounts[id]))
-                    progress[MatchProgressKey(row.Account, row.CharacterId, row.MatchKey)] = row;
-                using var receipts = new NpgsqlCommand("SELECT r.reward_id, c.account, r.character_id, r.match_key, r.kind, r.units, " +
-                    "r.leadership::text, r.frago, r.outcome::text FROM mag.reward_receipts r JOIN mag.characters c ON c.id = r.character_id " +
-                    "ORDER BY r.committed_at, r.reward_id", connection, transaction)
-                    { CommandTimeout = PostgresCharacterDatabase.MaintenanceCommandTimeoutSeconds };
-                var receiptMap = new Dictionary<string, RewardReceipt>(StringComparer.Ordinal);
-                foreach (var (id, receipt) in ReadReceipts(receipts)) receiptMap[id] = receipt;
+                var document = LoadPostgresDocument(pg, connection, transaction);
                 transaction.Commit();
-                return new Document { SchemaVersion = 3, Account = "player", DisplayName = "Player", Characters = list,
-                    RewardReceipts = receiptMap, MatchRewardProgress = progress };
+                return document;
             }
             catch (Exception e) { throw pg.Database.Translate(e); }
+        }
+
+        private Document LoadPostgresDocument(PostgresBackend pg, NpgsqlConnection connection, NpgsqlTransaction transaction)
+        {
+            using var characters = new NpgsqlCommand("SELECT " + CharacterColumns + " FROM mag.characters ORDER BY id", connection, transaction);
+            var list = ReadCharacters(characters);
+            LoadLoadouts(connection, transaction, list);
+            foreach (var character in list) PrepareLoaded(character);
+            var accounts = list.ToDictionary(c => c.Id, c => c.Account);
+            using var rows = new NpgsqlCommand("SELECT character_id, match_key, experience, fraction, frago_points, finalized, last_reward_at " +
+                "FROM mag.match_progress ORDER BY last_reward_at, character_id, match_key", connection, transaction)
+                { CommandTimeout = PostgresCharacterDatabase.MaintenanceCommandTimeoutSeconds };
+            var progress = new Dictionary<string, MatchRewardProgress>(StringComparer.Ordinal);
+            foreach (var row in ReadProgress(rows, id => accounts[id]))
+                progress[MatchProgressKey(row.Account, row.CharacterId, row.MatchKey)] = row;
+            using var receipts = new NpgsqlCommand("SELECT r.reward_id, c.account, r.character_id, r.match_key, r.kind, r.units, " +
+                "r.leadership::text, r.frago, r.outcome::text FROM mag.reward_receipts r JOIN mag.characters c ON c.id = r.character_id " +
+                "ORDER BY r.committed_at, r.reward_id", connection, transaction)
+                { CommandTimeout = PostgresCharacterDatabase.MaintenanceCommandTimeoutSeconds };
+            var receiptMap = new Dictionary<string, RewardReceipt>(StringComparer.Ordinal);
+            foreach (var (id, receipt) in ReadReceipts(receipts)) receiptMap[id] = receipt;
+            return new Document { SchemaVersion = 3, Account = "player", DisplayName = "Player", Characters = list,
+                RewardReceipts = receiptMap, MatchRewardProgress = progress };
         }
 
         private Document LoadWholeDocument() => _backend is PostgresBackend pg ? LoadPostgresDocument(pg) : ReadDocument();
@@ -437,24 +468,73 @@ namespace Server.Medius
                 throw new InvalidDataException($"The JSON store has fields this build does not know (in a {field}); import refuses to drop them.");
         }
 
+        /// <summary>Recorded in mag.admin_changes by every import that wrote rows.</summary>
+        internal const string ImportOperation = "character-store-import";
+
         /// <summary>
-        /// One-time import of a JSON store into this (empty) PostgreSQL store, in one transaction. The JSON
-        /// file is read with its own validation and stays locked, so no JSON writer can run meanwhile.
+        /// What an import would do, without writing (<c>import --dry-run</c>). The JSON store is read
+        /// unlocked with its own validation; unknown fields are refused exactly as by the import.
         /// </summary>
-        public CharacterStoreSummary ImportFrom(LocalCharacterStore source)
+        public CharacterImportPlan PlanImport(LocalCharacterStore source, CharacterImportOptions options = null)
         {
+            options ??= new CharacterImportOptions();
+            if (_backend is not PostgresBackend pg) throw new InvalidOperationException("Import needs a PostgreSQL target store.");
+            if (source?._backend is not JsonBackend) throw new InvalidOperationException("Import needs a JSON source store.");
+            var document = source.ReadDocument();
+            RequireNoExtensionData(document);
+            try
+            {
+                using var connection = pg.Database.OpenConnection();
+                using var transaction = connection.BeginTransaction(System.Data.IsolationLevel.RepeatableRead);
+                var plan = Plan(pg, connection, transaction, document, options);
+                transaction.Commit();
+                return plan;
+            }
+            catch (Exception e) { throw pg.Database.Translate(e); }
+        }
+
+        /// <summary>
+        /// Imports a JSON store into this PostgreSQL store, in one transaction (<c>import</c>). The JSON file
+        /// is read with its own validation and stays locked, so no JSON writer can run meanwhile. Idempotent:
+        /// an empty database is filled; one that already holds exactly the JSON contents is left untouched; one
+        /// that differs is refused unless <see cref="CharacterImportOptions.Replace"/>, which replaces its rows
+        /// only if nothing was written since the last import (or with
+        /// <see cref="CharacterImportOptions.DiscardPostgresChanges"/>). Each write records its counts and
+        /// digest, never player data, in mag.admin_changes.
+        /// </summary>
+        public CharacterImportResult ImportFrom(LocalCharacterStore source, CharacterImportOptions options = null)
+        {
+            options ??= new CharacterImportOptions();
             if (_backend is not PostgresBackend pg) throw new InvalidOperationException("Import needs a PostgreSQL target store.");
             if (source?._backend is not JsonBackend) throw new InvalidOperationException("Import needs a JSON source store.");
             using var session = source._backend.Open(new StoreScope(null, CreateDirectory: false));
             var document = session.Document;
             RequireNoExtensionData(document);
             DateTime now = Clock().UtcDateTime;
+            CharacterImportPlan plan;
             try
             {
                 using var connection = pg.Database.OpenConnection();
                 using var transaction = connection.BeginTransaction();
-                using (var count = new NpgsqlCommand("SELECT count(*) FROM mag.characters", connection, transaction))
-                    if ((long)count.ExecuteScalar() != 0) throw new InvalidDataException("The PostgreSQL character store is not empty; import refuses to merge.");
+                // Blocks every character write (each store operation updates its character row) until commit;
+                // readers, including the comparison below, continue.
+                using (var exclusive = new NpgsqlCommand("LOCK TABLE mag.characters IN EXCLUSIVE MODE", connection, transaction)
+                    { CommandTimeout = PostgresCharacterDatabase.MaintenanceCommandTimeoutSeconds })
+                    exclusive.ExecuteNonQuery();
+                plan = Plan(pg, connection, transaction, document, options);
+                switch (plan.Action)
+                {
+                    case CharacterImportAction.Unchanged:
+                        transaction.Commit();
+                        return new CharacterImportResult(plan, Summarize());
+                    case CharacterImportAction.Refused:
+                        throw new InvalidDataException(plan.Reason);
+                    case CharacterImportAction.Replace:
+                        using (var clear = new NpgsqlCommand("DELETE FROM mag.characters", connection, transaction)
+                            { CommandTimeout = PostgresCharacterDatabase.MaintenanceCommandTimeoutSeconds })
+                            clear.ExecuteNonQuery(); // loadouts, match rows, receipts and history cascade
+                        break;
+                }
                 foreach (var character in document.Characters)
                 {
                     if (document.SchemaVersion == 3) { character.Experience ??= 0; character.Level ??= 1; }
@@ -475,16 +555,78 @@ namespace Server.Medius
                 foreach (var (id, receipt) in receipts)
                     if (!InsertReceipt(connection, transaction, id, receipt, now))
                         throw new InvalidDataException("Duplicate reward receipt in the JSON store.");
-                if (document.Characters.Count > 0)
-                    using (var sequence = new NpgsqlCommand("SELECT setval('mag.character_ids', @max)", connection, transaction))
-                    {
+                using (var sequence = new NpgsqlCommand(document.Characters.Count > 0
+                    ? "SELECT setval('mag.character_ids', @max)" : "SELECT setval('mag.character_ids', 1, false)", connection, transaction))
+                {
+                    if (document.Characters.Count > 0)
                         sequence.Parameters.Add(Typed("max", NpgsqlDbType.Bigint, (long)document.Characters.Max(c => c.Id)));
-                        sequence.ExecuteScalar();
-                    }
+                    sequence.ExecuteScalar();
+                }
+                using (var audit = new NpgsqlCommand("INSERT INTO mag.admin_changes (operation, account, before, after) " +
+                    "VALUES (@operation, '*', @before, @after)", connection, transaction))
+                {
+                    audit.Parameters.Add(Text("operation", ImportOperation));
+                    audit.Parameters.Add(Typed("before", NpgsqlDbType.Jsonb, JsonSerializer.Serialize(plan.Target ?? new CharacterStoreSummary(0, 0, 0, null), JsonOptions)));
+                    audit.Parameters.Add(Typed("after", NpgsqlDbType.Jsonb, JsonSerializer.Serialize(plan.Source, JsonOptions)));
+                    audit.ExecuteNonQuery();
+                }
                 transaction.Commit();
             }
             catch (Exception e) { throw pg.Database.Translate(e); }
-            return Summarize();
+            return new CharacterImportResult(plan, Summarize());
+        }
+
+        private CharacterImportPlan Plan(PostgresBackend pg, NpgsqlConnection connection, NpgsqlTransaction transaction, Document source,
+            CharacterImportOptions options)
+        {
+            var sourceSummary = Summarize(source);
+            long Count(string sql)
+            {
+                using var command = new NpgsqlCommand(sql, connection, transaction) { CommandTimeout = PostgresCharacterDatabase.MaintenanceCommandTimeoutSeconds };
+                return (long)command.ExecuteScalar();
+            }
+            DateTime? importedAt = null; long importId = 0;
+            using (var marker = new NpgsqlCommand("SELECT id, at FROM mag.admin_changes WHERE operation = @operation ORDER BY id DESC LIMIT 1",
+                connection, transaction))
+            {
+                marker.Parameters.Add(Text("operation", ImportOperation));
+                using var reader = marker.ExecuteReader();
+                if (reader.Read()) { importId = reader.GetInt64(0); importedAt = DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc); }
+            }
+            if (Count("SELECT count(*) FROM mag.characters") == 0)
+                return new CharacterImportPlan(sourceSummary, null, CharacterImportAction.Import, importedAt, false, 0, null);
+            // The target's own rows, read in this transaction: after the lock taken by an import, nothing can change them.
+            var target = LoadPostgresDocument(pg, connection, transaction);
+            var targetSummary = Summarize(target);
+            var differences = CompareCanonical(Canonical(target), Canonical(source), "postgres", "json");
+            if (differences.Count == 0)
+                return new CharacterImportPlan(sourceSummary, targetSummary, CharacterImportAction.Unchanged, importedAt, false, 0, null);
+            // Rows the server wrote after the last import: every store operation updates (revision) or creates its
+            // character row, retention writes history, and operator changes are audited.
+            bool changed = importedAt == null;
+            if (!changed)
+                using (var since = new NpgsqlCommand(
+                    "SELECT (SELECT count(*) FROM mag.characters WHERE revision > 1 OR created_at > @at OR updated_at > @at) + " +
+                    "(SELECT count(*) FROM mag.match_history) + (SELECT count(*) FROM mag.admin_changes WHERE id > @marker)", connection, transaction)
+                    { CommandTimeout = PostgresCharacterDatabase.MaintenanceCommandTimeoutSeconds })
+                {
+                    since.Parameters.Add(Typed("at", NpgsqlDbType.TimestampTz, importedAt.Value));
+                    since.Parameters.Add(Typed("marker", NpgsqlDbType.Bigint, importId));
+                    changed = (long)since.ExecuteScalar() > 0;
+                }
+            string reason;
+            if (!options.Replace)
+                reason = $"The PostgreSQL character store is not empty and differs from the JSON store ({differences.Count} difference(s)); " +
+                    "import refuses to merge. Pass --replace to replace its rows with the JSON store.";
+            else if (changed && !options.DiscardPostgresChanges)
+                reason = importedAt == null
+                    ? "The PostgreSQL character store was not filled by an import; --replace refuses to discard it. " +
+                      "Export it first, then add --discard-postgres-changes."
+                    : "The PostgreSQL character store has changes made after its last import (the server has used it); " +
+                      "--replace refuses to discard them. Export it first, then add --discard-postgres-changes.";
+            else
+                return new CharacterImportPlan(sourceSummary, targetSummary, CharacterImportAction.Replace, importedAt, changed, differences.Count, null);
+            return new CharacterImportPlan(sourceSummary, targetSummary, CharacterImportAction.Refused, importedAt, changed, differences.Count, reason);
         }
 
         /// <summary>
@@ -513,9 +655,10 @@ namespace Server.Medius
         }
 
         /// <summary>Counts and a digest of the canonical contents (see <see cref="CompareWith"/>).</summary>
-        public CharacterStoreSummary Summarize()
+        public CharacterStoreSummary Summarize() => Summarize(LoadWholeDocument());
+
+        private static CharacterStoreSummary Summarize(Document document)
         {
-            var document = LoadWholeDocument();
             var canonical = Canonical(document);
             using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
             foreach (var (key, value) in canonical) hash.AppendData(Encoding.UTF8.GetBytes(key + "\t" + value.ToJsonString() + "\n"));
@@ -529,14 +672,16 @@ namespace Server.Medius
         /// without their dates, which only PostgreSQL keeps exactly. Empty means the stores agree.
         /// </summary>
         public IReadOnlyList<string> CompareWith(LocalCharacterStore other)
+            => CompareCanonical(Canonical(LoadWholeDocument()), Canonical(other.LoadWholeDocument()), BackendName, other.BackendName);
+
+        private static IReadOnlyList<string> CompareCanonical(SortedDictionary<string, JsonObject> mine, SortedDictionary<string, JsonObject> theirs,
+            string myName, string theirName)
         {
-            var mine = Canonical(LoadWholeDocument());
-            var theirs = Canonical(other.LoadWholeDocument());
             var differences = new List<string>();
             foreach (var key in mine.Keys.Union(theirs.Keys).OrderBy(k => k, StringComparer.Ordinal))
             {
-                if (!mine.TryGetValue(key, out var a)) { differences.Add($"{key}: only in the {other.BackendName} store"); continue; }
-                if (!theirs.TryGetValue(key, out var b)) { differences.Add($"{key}: only in the {BackendName} store"); continue; }
+                if (!mine.TryGetValue(key, out var a)) { differences.Add($"{key}: only in the {theirName} store"); continue; }
+                if (!theirs.TryGetValue(key, out var b)) { differences.Add($"{key}: only in the {myName} store"); continue; }
                 var fields = a.Select(e => e.Key).Union(b.Select(e => e.Key))
                     .Where(name => !JsonNode.DeepEquals(a[name], b[name])).OrderBy(n => n, StringComparer.Ordinal).ToArray();
                 if (fields.Length > 0) differences.Add($"{key}: {string.Join(", ", fields)} differ");

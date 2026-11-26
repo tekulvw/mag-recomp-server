@@ -358,10 +358,11 @@ namespace Server.Medius
             var settings = MagAdminApiSettings.FromEnvironment();
             if (settings == null) return;
             MagAdminApiSettings.RequireMainRole(Settings);
-            string storePath = Settings.MagCharacterStorePath;
+            string storePath = Settings.MagCharacterStorePath, markers = MagAdminOperations.MarkerDirectory();
+            // The status reads the registry or local world when asked, so it follows their start.
             AdminApi = new MagAdminApi(settings.Listen, settings.Secret, CreateCharacterStore(),
-                MagAdminOperations.BackupDirectory(storePath), MagAdminOperations.MarkerDirectory(), () => DateTime.UtcNow, message => Logger.Info(message),
-                DmePortBudget);
+                MagAdminOperations.BackupDirectory(storePath), markers, () => DateTime.UtcNow, message => Logger.Info(message),
+                DmePortBudget, now => MagServerStatus.Capture(WorldRegistry, LocalDme, DmePortBudget, markers, now));
             AdminApi.Start();
             Logger.Info($"Admin API listening on {AdminApi.LocalEndPoint}.");
         }

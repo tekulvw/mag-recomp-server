@@ -32,9 +32,12 @@ impl<W: Write> Engine<W> {
                 self.refresh_bot_structure_obstacles(wall)
             )?;
             timed!(self, Phase::Perception, self.tick_bot_perception(now, wall))?;
+            self.wait_bot_cover_builds();
+            timed!(self, Phase::Cover, self.tick_bot_cover(now, wall))?;
             messages.extend(timed!(self, Phase::Bots, self.tick_bots(now, wall))?);
             timed!(self, Phase::Waves, {
                 self.advance_strategic_player_waves(now, wall)?;
+                self.queue_dead_humans_for_next_wave(now, wall)?;
                 self.queue_team_wave_deadlines(now, wall)
             })?;
             messages.extend(timed!(
@@ -186,6 +189,7 @@ impl<W: Write> Engine<W> {
             rewards: self.pending_reward_batch(),
             loadout_selections: self.pending_loadout_selections(),
             match_terminal: self.match_terminal.clone(),
+            worker_draining: self.draining.then_some(true),
             ..Response::success(request_id)
         }
     }
