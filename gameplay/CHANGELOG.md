@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.17.0](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.16.0...gameplay-v0.17.0) (2026-11-26)
+
+
+### Features
+
+* **gameplay:** let bots take and fight from cover (opt-in) ([#347](https://github.com/tekulvw/mag-recomp-server/issues/347)) ([2fceb04](https://github.com/tekulvw/mag-recomp-server/commit/2fceb045c008d0e6981523fcb5fcf123781e56e1))
+
+
+### Bug Fixes
+
+* **gameplay:** keep spots beside a bot on its own floor under a roof ([#376](https://github.com/tekulvw/mag-recomp-server/issues/376)) ([05a36be](https://github.com/tekulvw/mag-recomp-server/commit/05a36bec8630dd48bf9eff5c16115d75c9c88295))
+* **gameplay:** send the owner's skill record so medics can revive teammates ([#369](https://github.com/tekulvw/mag-recomp-server/issues/369)) ([db94e74](https://github.com/tekulvw/mag-recomp-server/commit/db94e741424aae4de241dd54ac7b3a45b09a1bcb))
+* **gameplay:** take bot torso, eye and muzzle heights from the runtime body ([#372](https://github.com/tekulvw/mag-recomp-server/issues/372)) ([0ebbd05](https://github.com/tekulvw/mag-recomp-server/commit/0ebbd05d6b3bee940eee063eed468290fda5907a))
+
 ## [0.16.0](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.15.0...gameplay-v0.16.0) (2026-11-26)
 
 

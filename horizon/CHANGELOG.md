@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.13.0](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.12.0...medius-v0.13.0) (2026-11-26)
+
+
+### Features
+
+* **voice:** treat proximity copies as proximity_off and keep sampling lab receipts ([#375](https://github.com/tekulvw/mag-recomp-server/issues/375)) ([971a386](https://github.com/tekulvw/mag-recomp-server/commit/971a3868bd98482e9ce8a61bfe95d2bfd33a0a90))
+
+
+### Bug Fixes
+
+* **medius:** report each world's effective human limit in the server status ([#371](https://github.com/tekulvw/mag-recomp-server/issues/371)) ([f972a92](https://github.com/tekulvw/mag-recomp-server/commit/f972a921d5854bba2a7bc4521f23437a98db24aa))
+
 ## [0.12.0](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.11.0...medius-v0.12.0) (2026-11-26)
 
 
