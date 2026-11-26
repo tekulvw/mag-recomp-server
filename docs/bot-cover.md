@@ -148,6 +148,56 @@ While crouched, the bot's body is 1.2 m tall: enemy bots aim at its torso at
 What clients see therefore matches what the server tests. Human Characters
 are still treated as standing by bot weapons and sight.
 
+## Measured effect
+
+Headless bot-only runs (`--bot-cover off|on|crouch`) on the live private
+bundles. Each 64-player profile (63 bots) ran 900 s in three variants (one or
+two observers, 0 or 10 Hz event drains); figures are means of the three, or
+the per-run counts. Deterministic, but small changes in a run's course move
+objective counts a lot, so they are noisy. An engagement is a bot firing or
+being fired at, merged over 5 s gaps; "stuck" is a living bot that is walking
+yet moved under 0.5 m in 10 s, without the time objective planning spends
+unable to route it (`navmesh_no_survivable_drop_route` and similar), which
+varies by run and is not caused by cover.
+
+| | off | on (high cover) | crouch (high + low) |
+| --- | --- | --- | --- |
+| **Baku (Domination)** deaths per engagement | 0.349 | 0.320 | 0.310 |
+| engaged time in cover | – | 11% | 14% |
+| objectives completed, per run | 7 / 9 / 8 | 24 / 9 / 23 | 22 / 15 / 22 |
+| points secured, per run | 50 / 64 / 51 | 56 / 53 / 48 | 32 / 83 / 64 |
+| kills | 407 | 358 | 341 |
+| stuck bot-seconds | 826 | 912 | 974 |
+| **VOZ (Acquisition)** deaths per engagement | 0.378 | 0.329 | 0.328 |
+| engaged time in cover | – | 7% | 9% |
+| objectives completed, per run | 1 / 1 / 1 | 1 / 1 / 1 | 1 / 1 / 0 |
+| kills | 433 | 373 | 370 |
+| stuck bot-seconds | 710 | 1228 | 1082 |
+| **Kennicott (Sabotage)** deaths per engagement | 0.298 | 0.328 | 0.295 |
+| engaged time in cover | – | 5% | 6% |
+| objectives completed, per run | 2 / 2 / 2 | 2 / 2 / 2 | 2 / 2 / 2 |
+| kills | 177 | 159 | 132 |
+| stuck bot-seconds | 536 | 258 | 437 |
+| **Cover phase, mean per tick** | – | 0.05–0.11 ms | 0.04–0.59 ms |
+
+At 256 players (Baku with 254–255 bots, two runs, crouching on):
+
+| | off | crouch |
+| --- | --- | --- |
+| deaths per engagement | 0.353 / 0.347 | 0.296 / 0.297 |
+| engaged time in cover | – | 12% / 11% |
+| objectives completed | 30 / 24 | 43 / 36 |
+| points secured | 93 / 39 | 70 / 42 |
+| cover phase, mean (slowest) per tick | – | 0.46 ms (25 ms) / 0.40 ms (19 ms) |
+| whole tick, mean | 22.5 / 26.5 ms | 23.3 / 24.0 ms |
+
+Whole-tick times are from a shared, loaded node and vary more between runs
+than cover costs. The slowest cover ticks are rare ones where several route
+queries met a busy navmesh.
+
+Building the static spots for Baku took about 1 s (24,400 boundary edges,
+4,251 spots, 2,780 of them high).
+
 ## Cost
 
 Cover runs once per world tick, after perception and before bot movement
