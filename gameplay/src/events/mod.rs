@@ -508,6 +508,21 @@ impl<W: Write> Engine<W> {
         // Preserve the sequence-exhaustion gate for every authenticated event,
         // including opaque transport payloads that produce no native reply.
         let next_sequence = active.next_sequence()?;
+        // The retail client reports an Arrival contact as an Activate sent by
+        // the mounted driver. On-foot requests keep the generic objective rules.
+        if self.acquisition_gameplay.is_some()
+            && self.match_started
+            && self.match_terminal.is_none()
+            && event.rt_type == 0x3d
+            && event.plugin_id == Some(1)
+            && matches!(event.direction, Direction::ClientToServer)
+            && let Ok(protocol::GameMessage::ObjectiveInteraction(request)) = &decoded.message
+            && matches!(request.kind, protocol::ObjectiveInteractionKind::Activate)
+            && active.is_mounted()
+            && let Some(chain) = self.acquisition_arrival_chain(request.target_object_id)
+        {
+            return self.event_acquisition_arrival_request(&event, *request, chain, now, wall_secs);
+        }
         if (self.domination_gameplay.is_some() || self.acquisition_gameplay.is_some())
             && self.match_started
             && self.match_terminal.is_none()

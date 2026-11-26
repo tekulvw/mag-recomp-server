@@ -161,11 +161,44 @@ index. Vehicle dynamics require the currently held driver seat, a fresh owner
 sequence, operational life and the configured movement budget. Exits at moved
 poses use current static support, clearance and dynamic occupancy.
 
-Arrival requires the linked Escort, an admitted current driver, actual chassis
-overlap and a positive upward five-metre raw24 ray. A static source witness or
-current dynamic root can establish that positive. Lack of a witness is not a
-claim about a complete native-world miss. Every occupant needs a supported,
-distinct exit before delivery commits. Delivery revokes ownership, enters
+### Arrival
+
+In the original game the client detects the Arrival. When the Escort it is
+driving touches the Arrival trigger, the client sends an Activate for that
+Arrival objective from the driver. The server checks that the driver's vehicle
+is the Escort linked to that Arrival, then casts a five-metre ray upwards from
+the vehicle with raw filter 24. The ray must hit something, normally the roof of
+the extraction container.
+
+The server accepts that Activate only from the current driver of the linked,
+operational Escort, while the capture is complete and the Arrival is still
+Deactivated. It answers with an Ack and records `acquisition_arrival_request`.
+Otherwise it answers with a Nak, giving one of these reasons:
+
+- `acquisition_arrival_actor_not_driver`
+- `acquisition_arrival_vehicle_not_linked`
+- `acquisition_arrival_unavailable`
+
+An Activate from an actor on foot still goes through the ordinary objective
+rules, which have no interaction for an Arrival. An accepted contact stays
+pending until the Escort is delivered, replaced by another incarnation, or the
+Arrival leaves Deactivated. The next objective tick then tries the delivery,
+and the `rule` field of the `acquisition_delivery` row records which test passed:
+
+- `retail_ray`: the server holds collision above the trigger (a static witness
+  that a ray from the trigger's highest point upwards hits), so the retail
+  upward ray from the vehicle root decides.
+- `trigger_overlap`: no such collision exists, so the chassis must overlap the
+  authored trigger. On the retail maps the container often exists only on
+  clients, created by the Arrival's own sequence. The server adds no collision
+  for sequence objects, so the retail ray would never hit.
+- `server_contact`: there was no client contact. The server still needs both
+  chassis overlap and a positive upward ray. A static source witness or current
+  dynamic root can establish that positive. Lack of a witness is not a claim
+  about a complete native-world miss.
+
+Whichever rule applies, every occupant needs a supported, distinct exit before
+delivery commits. Delivery revokes ownership, enters
 vehicle state8 with the configured inert timer, and applies the source objective
 award once. The A/B awards in the qualified profiles are600/400 against1000
 defending points. Timer expiry moves the delivered vehicle to inert7.

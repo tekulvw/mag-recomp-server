@@ -4,25 +4,40 @@ use crate::ground_vehicles::arrival_static::Binding;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub(crate) fn delivery_fixture() -> Engine<Vec<u8>> {
+    delivery_fixture_with_container(true)
+}
+
+/// `container` adds the synthetic roof over the first two Arrival triggers.
+fn delivery_fixture_with_container(container: bool) -> Engine<Vec<u8>> {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let path = std::env::temp_dir().join(format!(
         "mag-delivery-fixture-{}-{}.json",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(&path, json!({
-        "format":"mag_collision_world", "schema_version":1, "coordinate_space":"world",
-        "metadata":{"map_name":"synthetic_arena","build":"synthetic","provenance":["synthetic"],
-            "unknowns":[],"coverage":"provisional"},
-        "instances":[
-            {"id":"invented-floor", "vertices_xyz":[[950.,2.,980.],[1120.,2.,980.],[950.,2.,1080.],[1120.,2.,1080.]],
-             "triangles":[[0,1,2],[1,2,3]]},
-            {"id":"invented-witness", "vertices_xyz":[[999.5,7.,1039.5],[1000.5,7.,1039.5],[1000.,7.,1040.5]],
-             "triangles":[[0,1,2]]},
-            {"id":"invented-second-witness", "vertices_xyz":[[1029.5,7.,1039.5],[1030.5,7.,1039.5],[1030.,7.,1040.5]],
-             "triangles":[[0,1,2]]}
-        ]
-    }).to_string()).unwrap();
+    let mut instances = vec![
+        json!({"id":"invented-floor", "vertices_xyz":[[950.,2.,980.],[1120.,2.,980.],[950.,2.,1080.],[1120.,2.,1080.]],
+             "triangles":[[0,1,2],[1,2,3]]}),
+    ];
+    if container {
+        instances.extend([
+            json!({"id":"invented-witness", "vertices_xyz":[[999.5,7.,1039.5],[1000.5,7.,1039.5],[1000.,7.,1040.5]],
+                 "triangles":[[0,1,2]]}),
+            json!({"id":"invented-second-witness", "vertices_xyz":[[1029.5,7.,1039.5],[1030.5,7.,1039.5],[1030.,7.,1040.5]],
+                 "triangles":[[0,1,2]]}),
+        ]);
+    }
+    std::fs::write(
+        &path,
+        json!({
+            "format":"mag_collision_world", "schema_version":1, "coordinate_space":"world",
+            "metadata":{"map_name":"synthetic_arena","build":"synthetic","provenance":["synthetic"],
+                "unknowns":[],"coverage":"provisional"},
+            "instances":instances,
+        })
+        .to_string(),
+    )
+    .unwrap();
     let world = collision::CollisionWorld::load(&path, Default::default()).unwrap();
     let binding = Binding {
         path: path.clone(),
@@ -626,4 +641,229 @@ fn escort_delivery_records_gunner_revoke_with_state_and_rolls_back_on_failure() 
                 })
         );
     }
+}
+
+fn arrival_contact(
+    engine: &mut Engine<Vec<u8>>,
+    arrival: u16,
+    now_ms: u64,
+) -> Vec<OutboundMessage> {
+    let request = protocol::ObjectiveInteraction {
+        kind: protocol::ObjectiveInteractionKind::Activate,
+        target_object_id: 0x0c80_0000 | u32::from(arrival),
+        actor_index: engine.active.as_ref().unwrap().reservation.player,
+        trigger_index: 0,
+    };
+    dispatch(engine, &request.encode(), now_ms).unwrap()
+}
+
+fn reply_kind(messages: &[OutboundMessage]) -> protocol::ObjectiveInteractionKind {
+    let bytes = protocol::decode_hex(&messages.last().unwrap().payload_hex);
+    protocol::ObjectiveInteraction::decode(&bytes).unwrap().kind
+}
+
+fn last_record(engine: &Engine<Vec<u8>>, op: &str) -> Value {
+    String::from_utf8_lossy(&engine.writer)
+        .lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|row| {
+            row["op"] == op
+                || row["effects"]
+                    .as_array()
+                    .is_some_and(|effects| effects.iter().any(|effect| effect["op"] == op))
+        })
+        .unwrap_or_else(|| panic!("no {op} record"))
+}
+
+fn delivery_rule(engine: &Engine<Vec<u8>>) -> Value {
+    let row = last_record(engine, "acquisition_delivery");
+    row["effects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|effect| effect["op"] == "acquisition_delivery")
+        .unwrap()
+        .clone()
+}
+
+fn vehicle_state(engine: &Engine<Vec<u8>>, index: u16) -> u8 {
+    engine
+        .ground_runtime
+        .as_ref()
+        .unwrap()
+        .get(index)
+        .unwrap()
+        .state
+}
+
+#[test]
+fn driver_arrival_contact_delivers_by_trigger_overlap_without_container_collision() {
+    let mut engine = delivery_fixture_with_container(false);
+    let a = FIRST_CAPTURE;
+    let b = FIRST_CAPTURE + 2;
+    position(&mut engine, 1000., 1040.);
+    // Overlap alone, without the client contact, keeps the server-contact rule
+    // that also needs the upward ray, and nothing is above this trigger.
+    engine
+        .tick_acquisition_objectives(Duration::from_millis(3300), 3)
+        .unwrap();
+    assert_eq!(vehicle_state(&engine, 4), 2);
+    assert_eq!(
+        engine.objective_world.as_ref().unwrap().state(a + 1),
+        Some(ObjectiveState::Deactivated)
+    );
+
+    let reply = arrival_contact(&mut engine, a + 1, 3350);
+    assert_eq!(reply_kind(&reply), protocol::ObjectiveInteractionKind::Ack);
+    let request = last_record(&engine, "acquisition_arrival_request");
+    assert_eq!(request["accepted"], true);
+    assert_eq!(request["vehicle"], 0x0100_0004);
+    engine
+        .tick_acquisition_objectives(Duration::from_millis(3400), 4)
+        .unwrap();
+    assert_eq!(vehicle_state(&engine, 4), 8);
+    let delivery = delivery_rule(&engine);
+    assert_eq!(delivery["rule"], "trigger_overlap");
+    assert_eq!(delivery["requested"], true);
+    assert_eq!(delivery["driver"], 0);
+    // The delivery counts against the defenders and opens the next stage.
+    assert_eq!(
+        engine.acquisition_round.as_ref().unwrap().points(),
+        [1200, 400]
+    );
+    assert_eq!(
+        engine.objective_world.as_ref().unwrap().state(a + 1),
+        Some(ObjectiveState::Locked)
+    );
+    assert_eq!(
+        engine.objective_world.as_ref().unwrap().state(b),
+        Some(ObjectiveState::Deactivated)
+    );
+    assert_eq!(primary_assignment(&engine), b);
+    assert!(engine.active.as_ref().unwrap().ground_seat.is_none());
+    assert!(
+        engine
+            .acquisition_gameplay
+            .as_ref()
+            .unwrap()
+            .arrival_requests
+            .is_empty()
+    );
+}
+
+#[test]
+fn early_arrival_contact_waits_for_the_chassis_to_reach_the_trigger() {
+    let mut engine = delivery_fixture_with_container(false);
+    let arrival = FIRST_CAPTURE + 1;
+    position(&mut engine, 1000., 1020.);
+    let reply = arrival_contact(&mut engine, arrival, 3300);
+    assert_eq!(reply_kind(&reply), protocol::ObjectiveInteractionKind::Ack);
+    engine
+        .tick_acquisition_objectives(Duration::from_millis(3350), 3)
+        .unwrap();
+    assert_eq!(vehicle_state(&engine, 4), 2);
+    assert_eq!(
+        engine.objective_world.as_ref().unwrap().state(arrival),
+        Some(ObjectiveState::Deactivated)
+    );
+    position(&mut engine, 1000., 1040.);
+    engine
+        .tick_acquisition_objectives(Duration::from_millis(3400), 4)
+        .unwrap();
+    assert_eq!(vehicle_state(&engine, 4), 8);
+    assert_eq!(delivery_rule(&engine)["rule"], "trigger_overlap");
+}
+
+#[test]
+fn arrival_contact_keeps_the_retail_ray_when_the_container_has_collision() {
+    let mut engine = delivery_fixture();
+    let arrival = FIRST_CAPTURE + 1;
+    // Inside the trigger but outside the roof witness: the retail ray misses.
+    position(&mut engine, 1001.5, 1040.);
+    let reply = arrival_contact(&mut engine, arrival, 3300);
+    assert_eq!(reply_kind(&reply), protocol::ObjectiveInteractionKind::Ack);
+    engine
+        .tick_acquisition_objectives(Duration::from_millis(3350), 3)
+        .unwrap();
+    assert_eq!(vehicle_state(&engine, 4), 2);
+    position(&mut engine, 1000., 1040.);
+    engine
+        .tick_acquisition_objectives(Duration::from_millis(3400), 4)
+        .unwrap();
+    assert_eq!(vehicle_state(&engine, 4), 8);
+    assert_eq!(delivery_rule(&engine)["rule"], "retail_ray");
+}
+
+#[test]
+fn arrival_contact_from_a_passenger_or_on_foot_actor_does_not_deliver() {
+    let mut engine = delivery_fixture_with_container(false);
+    let arrival = FIRST_CAPTURE + 1;
+    position(&mut engine, 1000., 1040.);
+    engine
+        .active
+        .as_mut()
+        .unwrap()
+        .ground_seat
+        .as_mut()
+        .unwrap()
+        .seat = 2;
+    let reply = arrival_contact(&mut engine, arrival, 3300);
+    assert_eq!(reply_kind(&reply), protocol::ObjectiveInteractionKind::Nak);
+    let request = last_record(&engine, "acquisition_arrival_request");
+    assert_eq!(request["accepted"], false);
+    assert_eq!(request["reason"], "acquisition_arrival_actor_not_driver");
+
+    // On foot, the request takes the generic objective route, where an
+    // Arrival has no interaction.
+    let active = engine.active.as_mut().unwrap();
+    active.ground_seat = None;
+    let records = engine.writer.len();
+    let reply = arrival_contact(&mut engine, arrival, 3350);
+    assert_eq!(reply_kind(&reply), protocol::ObjectiveInteractionKind::Nak);
+    assert!(
+        !String::from_utf8_lossy(&engine.writer[records..]).contains("acquisition_arrival_request")
+    );
+    engine
+        .tick_acquisition_objectives(Duration::from_millis(3400), 4)
+        .unwrap();
+    assert_eq!(vehicle_state(&engine, 4), 2);
+    assert!(
+        engine
+            .acquisition_gameplay
+            .as_ref()
+            .unwrap()
+            .arrival_requests
+            .is_empty()
+    );
+}
+
+#[test]
+fn arrival_contact_for_another_chain_or_outside_the_trigger_is_refused_or_waits() {
+    let mut engine = delivery_fixture_with_container(false);
+    // The second chain's capture is not complete, so its Arrival is closed.
+    let reply = arrival_contact(&mut engine, FIRST_CAPTURE + 3, 3300);
+    assert_eq!(reply_kind(&reply), protocol::ObjectiveInteractionKind::Nak);
+    assert_eq!(
+        last_record(&engine, "acquisition_arrival_request")["reason"],
+        "acquisition_arrival_unavailable"
+    );
+    // Far from the trigger, an admitted contact never delivers.
+    position(&mut engine, 1000., 1000.);
+    let reply = arrival_contact(&mut engine, FIRST_CAPTURE + 1, 3350);
+    assert_eq!(reply_kind(&reply), protocol::ObjectiveInteractionKind::Ack);
+    for (step, now) in [3400, 3500, 3600].into_iter().enumerate() {
+        engine
+            .tick_acquisition_objectives(Duration::from_millis(now), 4 + step as u64)
+            .unwrap();
+        assert_eq!(vehicle_state(&engine, 4), 2);
+    }
+    assert_eq!(
+        engine
+            .objective_world
+            .as_ref()
+            .unwrap()
+            .state(FIRST_CAPTURE + 1),
+        Some(ObjectiveState::Deactivated)
+    );
 }

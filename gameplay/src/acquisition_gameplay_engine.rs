@@ -279,6 +279,8 @@ pub(crate) struct Runtime {
     pub(crate) last_ground_update: Option<Duration>,
     pub(crate) vehicle_waves: Option<acquisition_vehicle_waves::VehicleWaves>,
     structural: Option<crate::acquisition_structural::Runtime>,
+    /// Admitted client Arrival contacts by Arrival token, consumed by delivery.
+    pub(crate) arrival_requests: BTreeMap<u32, crate::acquisition_delivery::ArrivalRequest>,
 }
 impl Runtime {
     pub(crate) fn from_setup(setup: Arc<Setup>) -> Self {
@@ -292,6 +294,7 @@ impl Runtime {
             started: false,
             last_ground_update: None,
             vehicle_waves: None,
+            arrival_requests: BTreeMap::new(),
         }
     }
     pub(crate) fn bot_regional_structural_bounds(
@@ -319,11 +322,15 @@ impl Runtime {
         })
     }
 
+    pub(crate) fn started(&self) -> bool {
+        self.started
+    }
     pub(crate) fn reset(&mut self) {
         self.state = self.setup.state.clone();
         self.started = false;
         self.last_ground_update = None;
         self.vehicle_waves = None;
+        self.arrival_requests.clear();
         self.structural = self
             .setup
             .structural
