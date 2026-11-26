@@ -18,6 +18,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+mod fatal_panic;
 mod worker_shutdown;
 
 fn parse_application_id(value: &str) -> io::Result<u32> {
@@ -2311,6 +2312,8 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         engine.require_match_configuration();
         // From here on SIGTERM drains instead of being ignored by PID 1.
         worker_shutdown::install();
+        // A panic poisons the shared engine; exit so the pod restarts.
+        fatal_panic::install(journal_writer.clone());
         let engine = Arc::new(Mutex::new(engine));
         let listener = TcpListener::bind(bind)?;
         let started = Instant::now();
@@ -2353,14 +2356,17 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             }
             let context = Arc::clone(&context);
             let active = Arc::clone(&active);
-            std::thread::spawn(move || {
-                let slot = ConnectionSlot(Some(active));
-                if let Err(failure) = serve(stream, &context, slot) {
-                    // Fixed categories only: no payload, request ID, credentials or
-                    // operating-system error text can reach this diagnostic.
-                    let _ = writeln!(io::stderr().lock(), "{}", failure.diagnostic());
-                }
-            });
+            std::thread::Builder::new()
+                .name("bridge-connection".into())
+                .spawn(move || {
+                    let slot = ConnectionSlot(Some(active));
+                    if let Err(failure) = serve(stream, &context, slot) {
+                        // Fixed categories only: no payload, request ID, credentials or
+                        // operating-system error text can reach this diagnostic.
+                        let _ = writeln!(io::stderr().lock(), "{}", failure.diagnostic());
+                    }
+                })
+                .expect("bridge connection thread");
         }
         Ok(())
     })
@@ -2921,82 +2927,85 @@ fn spawn_world_scheduler(
     telemetry: Option<TickRecorder>,
     budget: Option<u64>,
 ) {
-    std::thread::spawn(move || {
-        let interval = Duration::from_millis(50);
-        let mut deadline = Instant::now() + interval;
-        let mut heartbeat = Instant::now();
-        loop {
-            std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
-            let now = Instant::now();
-            // Skip missed deadlines: never run an unbounded burst of catch-up steps.
-            deadline += interval;
-            if deadline <= now {
-                deadline = now + interval;
-            }
-            let target = subscriber.lock().ok().and_then(|s| {
-                s.as_ref()
-                    .map(|s| (s.generation, s.world_id, s.request_id.clone()))
-            });
-            let Some((generation, world_id, request_id)) = target else {
-                continue;
-            };
-            let wall = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let waiting = Instant::now();
-            let start_us = started.elapsed().as_micros() as u64;
-            let (response, wait_us, engine_us, failure) = match engine.lock() {
-                Ok(mut engine) => {
-                    let wait = waiting.elapsed().as_micros() as u64;
-                    let processing = Instant::now();
-                    let now = started.elapsed();
-                    let response = engine.tick_world(now, wall, request_id);
-                    let elapsed = processing.elapsed().as_micros() as u64;
-                    // Name the cause before the stream gap releases the world.
-                    let failure = (!response.ok).then(|| {
-                        engine.record_world_tick_failure(
-                            world_id,
-                            response.error.as_deref().unwrap_or("unknown"),
-                            now,
-                            wall,
-                        )
-                    });
-                    (response, wait, elapsed, failure)
+    let scheduler = std::thread::Builder::new().name("world-scheduler".into());
+    scheduler
+        .spawn(move || {
+            let interval = Duration::from_millis(50);
+            let mut deadline = Instant::now() + interval;
+            let mut heartbeat = Instant::now();
+            loop {
+                std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                let now = Instant::now();
+                // Skip missed deadlines: never run an unbounded burst of catch-up steps.
+                deadline += interval;
+                if deadline <= now {
+                    deadline = now + interval;
                 }
-                Err(_) => continue,
-            };
-            if let Some(failure) = failure {
-                let _ = writeln!(io::stdout().lock(), "{failure}");
-            }
-            if let Some(recorder) = telemetry.as_ref() {
-                recorder.record(
-                    TickSample::new(true, start_us, wait_us, engine_us, response.ok, budget)
-                        .independent(),
-                );
-            }
-            let mismatch = response.messages.iter().any(|m| m.world_id != world_id);
-            if mismatch || !response.ok {
-                if let Ok(mut guard) = subscriber.lock()
-                    && guard.as_ref().is_some_and(|s| s.generation == generation)
+                let target = subscriber.lock().ok().and_then(|s| {
+                    s.as_ref()
+                        .map(|s| (s.generation, s.world_id, s.request_id.clone()))
+                });
+                let Some((generation, world_id, request_id)) = target else {
+                    continue;
+                };
+                let wall = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let waiting = Instant::now();
+                let start_us = started.elapsed().as_micros() as u64;
+                let (response, wait_us, engine_us, failure) = match engine.lock() {
+                    Ok(mut engine) => {
+                        let wait = waiting.elapsed().as_micros() as u64;
+                        let processing = Instant::now();
+                        let now = started.elapsed();
+                        let response = engine.tick_world(now, wall, request_id);
+                        let elapsed = processing.elapsed().as_micros() as u64;
+                        // Name the cause before the stream gap releases the world.
+                        let failure = (!response.ok).then(|| {
+                            engine.record_world_tick_failure(
+                                world_id,
+                                response.error.as_deref().unwrap_or("unknown"),
+                                now,
+                                wall,
+                            )
+                        });
+                        (response, wait, elapsed, failure)
+                    }
+                    Err(_) => continue,
+                };
+                if let Some(failure) = failure {
+                    let _ = writeln!(io::stdout().lock(), "{failure}");
+                }
+                if let Some(recorder) = telemetry.as_ref() {
+                    recorder.record(
+                        TickSample::new(true, start_us, wait_us, engine_us, response.ok, budget)
+                            .independent(),
+                    );
+                }
+                let mismatch = response.messages.iter().any(|m| m.world_id != world_id);
+                if mismatch || !response.ok {
+                    if let Ok(mut guard) = subscriber.lock()
+                        && guard.as_ref().is_some_and(|s| s.generation == generation)
+                    {
+                        *guard = None;
+                    }
+                    continue;
+                }
+                let due = heartbeat.elapsed() >= Duration::from_secs(1);
+                if response.messages.is_empty()
+                    && response.rewards.is_empty()
+                    && response.match_terminal.is_none()
+                    && response.voice_groups.is_none()
+                    && !due
                 {
-                    *guard = None;
+                    continue;
                 }
-                continue;
+                heartbeat = Instant::now();
+                publish_frame(&subscriber, &journal, response);
             }
-            let due = heartbeat.elapsed() >= Duration::from_secs(1);
-            if response.messages.is_empty()
-                && response.rewards.is_empty()
-                && response.match_terminal.is_none()
-                && response.voice_groups.is_none()
-                && !due
-            {
-                continue;
-            }
-            heartbeat = Instant::now();
-            publish_frame(&subscriber, &journal, response);
-        }
-    });
+        })
+        .expect("world scheduler thread");
 }
 
 /// Number a produced frame and deliver it to the current subscriber. A frame

@@ -832,7 +832,7 @@ impl<W: Write> Engine<W> {
                     _ => {
                         let (w, m) = (world.clone(), mesh.clone());
                         let job = std::thread::Builder::new()
-                            .name("bot-cover-map".into())
+                            .name(crate::JOINED_JOB_THREADS[0].into())
                             .spawn(move || build_static(&w, &m))
                             .map_err(|_| "bot_cover_thread_unavailable")?;
                         if cfg!(test) {
@@ -864,7 +864,7 @@ impl<W: Write> Engine<W> {
                     let (w, m) = (world.clone(), mesh.clone());
                     let k = snapshot.key();
                     let job = std::thread::Builder::new()
-                        .name("bot-cover-structures".into())
+                        .name(crate::JOINED_JOB_THREADS[1].into())
                         .spawn(move || build_structures(&w, &m, &snapshot))
                         .map_err(|_| "bot_cover_thread_unavailable")?;
                     if cfg!(test) {

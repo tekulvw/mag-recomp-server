@@ -314,6 +314,33 @@ impl PassageQueue {
         let held: Vec<_> = self.holders().map(|o| o.life).collect();
         self.waiting.retain(|life| !held.contains(life));
     }
+    /// Drop every ticket and permit object `id` holds here, whatever its life,
+    /// and return them as (life, role) with role `owner`, `departing` or
+    /// `waiting`.
+    fn forget(&mut self, id: u16) -> Vec<(PassageLife, &'static str)> {
+        let mut forgotten = Vec::new();
+        if self.owner.as_ref().is_some_and(|o| o.life.id == id) {
+            forgotten.extend(self.owner.take().map(|o| (o.life, "owner")));
+        }
+        self.departing.retain(|o| {
+            let keep = o.life.id != id;
+            if !keep {
+                forgotten.push((o.life, "departing"));
+            }
+            keep
+        });
+        self.waiting.retain(|life| {
+            let keep = life.id != id;
+            if !keep {
+                forgotten.push((*life, "waiting"));
+            }
+            keep
+        });
+        if !forgotten.is_empty() {
+            self.probe_cursor = 0;
+        }
+        forgotten
+    }
 }
 fn intersects(a: crate::actor_collision::Bounds, b: crate::actor_collision::Bounds) -> bool {
     (0..3).all(|i| a.min[i] <= b.max[i] && a.max[i] >= b.min[i])
@@ -465,6 +492,24 @@ impl BotRegistry {
             })
     }
 
+    /// Remove a departed bot from every passage queue: its permit, convoy
+    /// slot and waiting tickets. A retired body is gone from the world, so a
+    /// passage it owned is physically clear and the next waiter may be
+    /// granted. Returns (passage, life, role) for each entry removed.
+    fn forget_passage_entries(&mut self, id: u16) -> Vec<(u32, PassageLife, &'static str)> {
+        let mut forgotten = Vec::new();
+        for (&passage, queue) in &mut self.drop_queues {
+            forgotten.extend(
+                queue
+                    .forget(id)
+                    .into_iter()
+                    .map(|(life, role)| (passage, life, role)),
+            );
+        }
+        self.drop_queues
+            .retain(|_, q| q.holders().next().is_some() || !q.waiting.is_empty());
+        forgotten
+    }
     pub(super) fn traffic_protected(&self, exclude: u16) -> Vec<crate::actor_collision::Bounds> {
         self.drop_queues
             .values()
@@ -486,7 +531,11 @@ impl BotRegistry {
                 q.owner.as_ref().map(|o| o.life.id).or_else(|| {
                     q.waiting
                         .iter()
-                        .find(|life| self.bots[&life.id].drop_approach_ready)
+                        .find(|life| {
+                            self.bots
+                                .get(&life.id)
+                                .is_some_and(|b| b.drop_approach_ready)
+                        })
                         .map(|life| life.id)
                 })
             })
@@ -1485,6 +1534,16 @@ impl<W: Write> Engine<W> {
         }
         if self.bot_registry.bots.remove(&index).is_some() {
             self.bot_registry.reservations.remove(&index);
+            // A queue entry must not outlive its bot: the next admission pass
+            // reads the owner's approach lane from the registry.
+            for (drop_id, life, role) in self.bot_registry.forget_passage_entries(index) {
+                self.record(
+                    json!({"op":"bot_drop_admission","timestamp_ms":now.as_millis() as u64,
+                        "drop_id":drop_id,"object_index":life.id,"generation":life.generation,
+                        "action":"released","reason":"retired_for_human","queue_role":role}),
+                    wall,
+                )?;
+            }
             let packet = replication::multiplayer::CharacterRemoval {
                 sequence: 1,
                 timestamp_ms: now.as_millis() as u32,
@@ -2236,11 +2295,10 @@ impl<W: Write> Engine<W> {
                     q.owner
                         .as_ref()
                         .filter(|o| !o.cert_started)
-                        .map_or_else(Vec::new, |o| {
-                            self.bot_registry.bots[&o.life.id]
-                                .drop_queue_approach
-                                .clone()
-                        }),
+                        // An owner whose bot has left keeps no lane open; the
+                        // holder pass below releases it as `life_removed_noncollidable`.
+                        .and_then(|o| self.bot_registry.bots.get(&o.life.id))
+                        .map_or_else(Vec::new, |b| b.drop_queue_approach.clone()),
                 )
             })
             .collect();
@@ -4157,6 +4215,10 @@ mod multi_human_join_tests;
 #[cfg(test)]
 #[path = "queued_grenade_reward_tests.rs"]
 mod queued_grenade_reward_tests;
+
+#[cfg(test)]
+#[path = "bot_passage_retirement_tests.rs"]
+mod bot_passage_retirement_tests;
 
 #[cfg(test)]
 #[path = "healing_reward_relationship_tests.rs"]
