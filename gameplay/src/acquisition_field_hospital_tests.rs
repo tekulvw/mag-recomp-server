@@ -185,6 +185,46 @@ mod bound_emplacements {
     }
 
     #[test]
+    fn an_acquisition_hospital_occupant_leaves_by_its_clear_authored_exit() {
+        let mut engine = acquisition();
+        engine.collision_world = Some(crate::active_ability_engine_tests::strike_floor(
+            engine.map_name(),
+            true,
+        ));
+        engine.dynamic_body_resources = crate::active_ability_engine_tests::configured()
+            .with_dynamic_collision_bodies(
+                crate::dynamic_collision::Catalog::from_json(
+                    &crate::synthetic_dynamic_collision::fixture().to_string(),
+                )
+                .unwrap(),
+                crate::dynamic_collision_runtime::RuntimeBindings {
+                    character_template: "invented-character".into(),
+                    vehicles: Vec::new(),
+                },
+            )
+            .unwrap()
+            .dynamic_body_resources;
+        let actor = engine.active.as_mut().unwrap();
+        actor.mounted_bunker = Some(5);
+        actor.mounted_seat = Some(12);
+        let mut wire = 0x0217u16.to_be_bytes().to_vec();
+        wire.extend(0x0d00_0005u32.to_be_bytes());
+        wire.extend(12u32.to_be_bytes());
+        wire.extend(0x0380_0000u32.to_be_bytes());
+        wire.extend(90u32.to_be_bytes());
+        assert!(!dispatch(&mut engine, &wire, 1000).unwrap().is_empty());
+        let actor = engine.active.as_ref().unwrap();
+        assert_eq!(actor.mounted_seat, None);
+        let exit = actor.tracking.sample.unwrap();
+        assert!(matches!(
+            exit.origin,
+            crate::player_tracking::PositionOrigin::ServerExit
+        ));
+        // The fixture's one authored exit stands 2 m along +x of the body.
+        assert!((exit.position.x - 2.).abs() < 0.01 && exit.position.z.abs() < 0.01);
+    }
+
+    #[test]
     fn acquisition_hospitals_take_no_direct_vehicle_damage() {
         let engine = acquisition();
         let hospitals = engine.bunker_world.as_ref().unwrap();
