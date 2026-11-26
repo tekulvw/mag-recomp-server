@@ -214,7 +214,7 @@ namespace Server.Medius
             finally { if (File.Exists(temporary)) File.Delete(temporary); }
         }
     }
-    public sealed class LocalCharacterStore
+    public sealed partial class LocalCharacterStore
     {
         private sealed class RewardReceipt
         {
@@ -304,16 +304,19 @@ namespace Server.Medius
         // affected; the completed flag stays the receipt. Null keeps the catalog's bonus alone.
         public byte? TrainingLevel { get; set; }
         private readonly ICharacterStoreCommitter _committer;
+        // Where characters persist: the JSON file below, or PostgreSQL (LocalCharacterStore.Postgres.cs).
+        // Every rule in this class runs unchanged against either; a backend only loads and saves.
+        private readonly ICharacterBackend _backend;
         public LocalCharacterStore(string path) : this(path, new AtomicCharacterStoreCommitter()) { }
         public LocalCharacterStore(string path, ICharacterStoreCommitter committer)
-        { _path = path; _committer = committer ?? throw new ArgumentNullException(nameof(committer)); }
+        { _path = path; _committer = committer ?? throw new ArgumentNullException(nameof(committer)); _backend = new JsonBackend(this); }
         private string ValidPath()
         {
             if (string.IsNullOrWhiteSpace(_path) || !Path.IsPathFullyQualified(_path)) throw new IOException("An absolute character-store path must be configured.");
             return Path.GetFullPath(_path);
         }
         // Readers do not create directories or lock files; usable through a read-only mount.
-        public IReadOnlyList<StoredCharacter> ReadAll() => ReadDocument().Characters;
+        public IReadOnlyList<StoredCharacter> ReadAll() => _backend.ReadAll();
         private static Document EmptyDocument() => new Document { SchemaVersion = 2, Account = "player", DisplayName = "Player", Characters = new List<StoredCharacter>() };
         private Document ReadDocument()
         {
@@ -339,16 +342,17 @@ namespace Server.Medius
                 throw new InvalidDataException("Character-store schema or local account policy invalid.");
             if (document.SchemaVersion == 1) foreach (var c in document.Characters) c.Account = "player";
             ValidateRewardLedger(document);
-            // Runtime-derived starter masks/defaults enrich replies without rewriting the character JSON.
-            foreach (var character in document.Characters)
-            {
-                character.RecordCatalog = LoadoutCatalog;
-                character.RecordInitialSkillPoints = InitialSkillPoints;
-                character.RecordProgressionCatalog = ProgressionCatalog;
-                if (ProgressionCatalog != null && (character.Level ?? 1) != ProgressionCatalog.LevelForExperience(character.Experience ?? 0))
-                    throw new InvalidDataException("Persisted XP/level does not match the progression catalog.");
-            }
+            foreach (var character in document.Characters) PrepareCharacter(character);
             return document;
+        }
+        // Runtime-derived starter masks/defaults enrich replies without rewriting the stored character.
+        private void PrepareCharacter(StoredCharacter character)
+        {
+            character.RecordCatalog = LoadoutCatalog;
+            character.RecordInitialSkillPoints = InitialSkillPoints;
+            character.RecordProgressionCatalog = ProgressionCatalog;
+            if (ProgressionCatalog != null && (character.Level ?? 1) != ProgressionCatalog.LevelForExperience(character.Experience ?? 0))
+                throw new InvalidDataException("Persisted XP/level does not match the progression catalog.");
         }
         private static bool ValidName(string name) => !string.IsNullOrWhiteSpace(name) && name.Length <= 32 && name.All(c => c >= 33 && c <= 126);
         private static bool Valid(StoredCharacter c, int schema) => c != null && c.Id > 0 && ValidName(c.Name) && c.Faction <= 2 &&
@@ -360,11 +364,14 @@ namespace Server.Medius
             (schema == 1 ? c.Id == 1 && c.Name == "Player" : MagDevelopmentAccountPolicy.ValidAccount(c.Account));
         private static bool ValidLoadout(StoredLoadout row) => row?.Items != null && row.Items.Length == 22 && row.Items.All(id => id >= -1 && id < 4096);
         public IReadOnlyList<StoredCharacter> ReadForAccount(string account) => MagDevelopmentAccountPolicy.ValidAccount(account)
-            ? ReadAll().Where(c => c.Account == account).ToArray() : Array.Empty<StoredCharacter>();
+            ? _backend.ReadForAccount(account) : Array.Empty<StoredCharacter>();
         // Compatibility entry point for older local lab tools; live sessions use the account-bound API.
         public CharacterCreationOutcome Create(MagCreateCharacterRequest request) => request?.AccountName == "Player"
             ? CreateForAccount(request, "player") : Outcome(MagNetResult.NameInvalid, "invalid-legacy-name");
-        public CharacterCreationOutcome CreateForAccount(MagCreateCharacterRequest request, string account)
+        // A concurrent create in PostgreSQL can lose a unique-index race; the retry then sees the winner.
+        public CharacterCreationOutcome CreateForAccount(MagCreateCharacterRequest request, string account) =>
+            Retrying(() => CreateForAccountOnce(request, account));
+        private CharacterCreationOutcome CreateForAccountOnce(MagCreateCharacterRequest request, string account)
         {
             if (request == null || !MagDevelopmentAccountPolicy.HasZeroRsa(request) || !ValidName(request.AccountName) || !MagDevelopmentAccountPolicy.ValidAccount(account))
                 return Outcome(MagNetResult.NameInvalid, "invalid-local-name-or-header");
@@ -372,9 +379,8 @@ namespace Server.Medius
                 return Outcome(MagNetResult.Error, "unsupported-local-profile-fields");
             if (!MagDevelopmentAccountPolicy.ValidNpId(request.NpId, account))
                 return Outcome(MagNetResult.Error, "np-id-account-mismatch");
-            string path = ValidPath(); Directory.CreateDirectory(Path.GetDirectoryName(path));
-            using var lease = AcquireLock(path + ".lock");
-            var all = ReadAll().ToList();
+            using var session = _backend.Open(new StoreScope(account, Name: request.AccountName));
+            var all = session.Document.Characters;
             var existing = all.SingleOrDefault(c => c.Account == account);
             if (existing != null)
             {
@@ -386,8 +392,8 @@ namespace Server.Medius
             {
                 if (all.Any(c => string.Equals(c.Name, request.AccountName, StringComparison.OrdinalIgnoreCase)))
                     return Outcome(MagNetResult.NameTaken, "character-name-taken");
-                if (all.Count >= 128) return Outcome(MagNetResult.Error, "local-store-full");
-                uint next = all.Count == 0 ? 1u : checked(all.Max(c => c.Id) + 1u);
+                if (session.CharacterLimit is int limit && all.Count >= limit) return Outcome(MagNetResult.Error, "local-store-full");
+                uint next = session.NextCharacterId();
                 var created = new StoredCharacter { Account = account, Id = next, Name = request.AccountName, Faction = request.Faction,
                     HeadId = request.HeadId, VoiceId = request.VoiceId, UniverseId = request.UniverseId, NpId = (byte[])request.NpId.Clone() };
                 if (ProgressionCatalog != null)
@@ -406,7 +412,7 @@ namespace Server.Medius
                 all.Add(created);
             }
             // Recommit exact retries too: recover a prior uncertain directory sync before success.
-            Commit(path, all);
+            session.Commit();
             return Outcome(MagNetResult.Success, existing == null ? "local-profile-committed" : "existing-exact-profile");
         }
         // The authenticated session supplies the account; ownership is rechecked inside the durable lock.
@@ -418,9 +424,8 @@ namespace Server.Medius
             var catalog = LoadoutCatalog;
             if (catalog == null) return Outcome(MagNetResult.Error, "loadout-catalog-unavailable");
             if (!catalog.Valid(replacement.ToLoadout())) return Outcome(MagNetResult.Error, "invalid-authored-loadout");
-            string path = ValidPath(); Directory.CreateDirectory(Path.GetDirectoryName(path));
-            using var lease = AcquireLock(path + ".lock");
-            var all = ReadAll().ToList();
+            using var session = _backend.Open(new StoreScope(account, characterId));
+            var all = session.Document.Characters;
             var character = all.SingleOrDefault(c => c.Account == account && c.Id == characterId);
             if (character == null) return Outcome(MagNetResult.Error, "character-not-owned");
             if (!catalog.ValidForFaction(replacement.ToLoadout(), character.Faction))
@@ -442,7 +447,7 @@ namespace Server.Medius
                 return Outcome(MagNetResult.Error, "primary-loadout-required");
             if (!catalog.HasValidPrimary(character.Loadouts[character.LastUsedLoadout].ToLoadout()))
                 return Outcome(MagNetResult.Error, "selected-loadout-primary-required");
-            Commit(path, all); // Success is returned only after the existing atomic durable commit.
+            session.Commit(); // Success is returned only after the durable commit.
             return Outcome(MagNetResult.Success, "loadout-committed");
         }
         public CharacterCreationOutcome DeleteLoadoutForAccount(string account, uint characterId, byte loadoutIndex)
@@ -451,9 +456,8 @@ namespace Server.Medius
                 return Outcome(MagNetResult.Error, "invalid-loadout-delete");
             var catalog = LoadoutCatalog;
             if (catalog?.ApplicationId != 20231) return Outcome(MagNetResult.Error, "retail-loadout-catalog-unavailable");
-            string path = ValidPath(); Directory.CreateDirectory(Path.GetDirectoryName(path));
-            using var lease = AcquireLock(path + ".lock");
-            var all = ReadAll().ToList();
+            using var session = _backend.Open(new StoreScope(account, characterId));
+            var all = session.Document.Characters;
             var character = all.SingleOrDefault(c => c.Account == account && c.Id == characterId);
             if (character == null) return Outcome(MagNetResult.Error, "character-not-owned");
             if (character.LoadoutLayoutRevision == ulong.MaxValue) return Outcome(MagNetResult.Error, "loadout-layout-revision-exhausted");
@@ -477,7 +481,7 @@ namespace Server.Medius
             character.Loadouts = rows;
             character.LastUsedLoadout = preferred;
             character.LoadoutLayoutRevision++;
-            Commit(path, all);
+            session.Commit();
             return Outcome(MagNetResult.Success, "loadout-delete-committed");
         }
         public CharacterCreationOutcome PurchaseSkillForAccount(string account, uint characterId, int skillId)
@@ -486,9 +490,8 @@ namespace Server.Medius
                 return Outcome(MagNetResult.Error, "invalid-skill-purchase");
             var catalog = SkillCatalog;
             if (catalog == null || (catalog.ApplicationId == 20230 && LoadoutCatalog == null)) return Outcome(MagNetResult.Error, "skill-catalog-unavailable");
-            string path = ValidPath(); Directory.CreateDirectory(Path.GetDirectoryName(path));
-            using var lease = AcquireLock(path + ".lock");
-            var all = ReadAll().ToList();
+            using var session = _backend.Open(new StoreScope(account, characterId));
+            var all = session.Document.Characters;
             var character = all.SingleOrDefault(c => c.Account == account && c.Id == characterId);
             if (character == null) return Outcome(MagNetResult.Error, "character-not-owned");
             var record = character.ToRecord();
@@ -499,7 +502,7 @@ namespace Server.Medius
             character.OwnedSkills[skillId >> 5] |= 1u << (skillId & 31);
             character.UnlockedItems = character.UnlockedItems == null ? new uint[24] : (uint[])character.UnlockedItems.Clone();
             foreach (int item in equipment) character.UnlockedItems[item >> 5] |= 1u << (item & 31);
-            Commit(path, all); // Atomic durable save must finish before the session acknowledges the purchase.
+            session.Commit(); // The durable save must finish before the session acknowledges the purchase.
             return Outcome(MagNetResult.Success, "skill-purchase-committed");
         }
         // Saves the volunteer bits as sent; gameplay masks them by leadership level at admission,
@@ -511,24 +514,22 @@ namespace Server.Medius
                 return Outcome(MagNetResult.Error, "invalid-nominations-identity");
             if ((nominations & ~MagRetailNominationsUpdate.KnownBits) != 0)
                 return Outcome(MagNetResult.Error, "unsupported-nomination-bits");
-            string path = ValidPath(); Directory.CreateDirectory(Path.GetDirectoryName(path));
-            using var lease = AcquireLock(path + ".lock");
-            var all = ReadAll().ToList();
+            using var session = _backend.Open(new StoreScope(account, characterId));
+            var all = session.Document.Characters;
             var character = all.SingleOrDefault(c => c.Account == account && c.Id == characterId);
             if (character == null) return Outcome(MagNetResult.Error, "character-not-owned");
             if (character.Leadership?.Nominations == nominations) return Outcome(MagNetResult.Success, "nominations-unchanged");
             character.Leadership ??= new StoredLeadershipRecord { LeadershipLevel = 1 };
             character.Leadership.Nominations = nominations;
-            Commit(path, all); // The preference is durable before the session handles its join request.
+            session.Commit(); // The preference is durable before the session handles its join request.
             return Outcome(MagNetResult.Success, "nominations-committed");
         }
         public CharacterCreationOutcome SaveLastUsedLoadoutForAccount(string account, uint characterId, byte loadoutIndex, ulong expectedLayoutRevision = 0)
         {
             if (!MagDevelopmentAccountPolicy.ValidAccount(account) || characterId == 0 || loadoutIndex >= 5)
                 return Outcome(MagNetResult.Error, "invalid-last-used-loadout");
-            string path = ValidPath(); Directory.CreateDirectory(Path.GetDirectoryName(path));
-            using var lease = AcquireLock(path + ".lock");
-            var all = ReadAll().ToList();
+            using var session = _backend.Open(new StoreScope(account, characterId));
+            var all = session.Document.Characters;
             var character = all.SingleOrDefault(c => c.Account == account && c.Id == characterId);
             if (character == null) return Outcome(MagNetResult.Error, "character-not-owned");
             if (expectedLayoutRevision != character.LoadoutLayoutRevision) return Outcome(MagNetResult.Error, "stale-loadout-layout");
@@ -542,7 +543,7 @@ namespace Server.Medius
             if (FindUnownedLoadoutSlot(character, catalog, rows[loadoutIndex].Items) is int unowned)
                 return Outcome(MagNetResult.Error, NotOwned(rows[loadoutIndex].Items, unowned));
             character.LastUsedLoadout = loadoutIndex;
-            Commit(path, all);
+            session.Commit();
             return Outcome(MagNetResult.Success, "last-used-loadout-committed");
         }
         // Returns the first slot whose item the character does not own, or null when every item is owned.
@@ -628,7 +629,11 @@ namespace Server.Medius
         /// <summary>Commit authoritative action XP immediately as local policy. IDs must be stable
         /// across delivery retries; matchKey isolates native fractional XP between match lifetimes.</summary>
         public ProgressionRewardOutcome ApplyRewardForAccount(string account, uint characterId, string rewardId, string matchKey, string kind, int units,
-            GameplayLeadershipResult leadership = null, bool? frago = null)
+            GameplayLeadershipResult leadership = null, bool? frago = null) =>
+            // A PostgreSQL receipt-key race (the same reward id for another character) retries as a replay.
+            Retrying(() => ApplyRewardForAccountOnce(account, characterId, rewardId, matchKey, kind, units, leadership, frago));
+        private ProgressionRewardOutcome ApplyRewardForAccountOnce(string account, uint characterId, string rewardId, string matchKey, string kind, int units,
+            GameplayLeadershipResult leadership, bool? frago)
         {
             ProgressionRewardOutcome Deny(string reason) => new ProgressionRewardOutcome { Result = MagNetResult.Error, Reason = reason };
             if (!MagDevelopmentAccountPolicy.ValidAccount(account) || characterId == 0 || !ValidRewardKey(rewardId) ||
@@ -636,9 +641,8 @@ namespace Server.Medius
                 !MagProgressionCatalog.ValidFragoContext(kind, units, frago)) return Deny("invalid-progression-reward");
             var catalog = ProgressionCatalog;
             if (catalog == null) return Deny("progression-catalog-unavailable");
-            string path = ValidPath(); Directory.CreateDirectory(Path.GetDirectoryName(path));
-            using var lease = AcquireLock(path + ".lock");
-            var document = ReadDocument();
+            using var session = _backend.Open(new StoreScope(account, characterId, RewardId: rewardId, MatchKey: matchKey));
+            var document = session.Document;
             var character = document.Characters.SingleOrDefault(c => c.Account == account && c.Id == characterId);
             if (character == null) return Deny("character-not-owned");
             document.RewardReceipts = document.RewardReceipts ?? new Dictionary<string, RewardReceipt>(StringComparer.Ordinal);
@@ -696,7 +700,7 @@ namespace Server.Medius
                 .Append(new KeyValuePair<string, MatchRewardProgress>(progressKey, progress)).ToDictionary(e => e.Key, e => e.Value, StringComparer.Ordinal);
             document.RewardReceipts.Add(rewardId, new RewardReceipt { Account = account, CharacterId = characterId,
                 MatchKey = matchKey, Kind = kind, Units = units, Snapshot = outcome.Copy(false), Leadership = leadership, Frago = frago });
-            Commit(path, document.Characters, document, progressKey);
+            session.Commit(progressKey);
             return outcome.Copy(false);
         }
         private static LeadershipRewardOutcome UpdateLeadership(StoredCharacter character, MagProgressionCatalog catalog, byte characterLevel,
@@ -725,16 +729,15 @@ namespace Server.Medius
             if (!MagDevelopmentAccountPolicy.ValidAccount(account) || characterId == 0) return Deny("invalid-training-identity");
             var rules = TrainingCompletionCatalog;
             if (rules == null) return Deny("training-catalog-unavailable");
-            string path = ValidPath(); Directory.CreateDirectory(Path.GetDirectoryName(path));
-            using var lease = AcquireLock(path + ".lock");
-            var document = ReadDocument();
+            using var session = _backend.Open(new StoreScope(account, characterId));
+            var document = session.Document;
             var character = document.Characters.SingleOrDefault(c => c.Account == account && c.Id == characterId);
             if (character == null) return Deny("character-not-owned");
             if ((character.Flags & rules.CompletedFlagMask) != 0)
             {
                 // A previous rename may have become visible before directory fsync failed.
                 // Complete the durability barrier again before acknowledging this receipt.
-                Commit(path, document.Characters, document);
+                session.Commit();
                 return new TrainingCompletionOutcome { Result = MagNetResult.Success, Reason = "training-already-completed", Record = character.ToRecord() };
             }
             int previousExperience = character.Experience ?? 0;
@@ -753,7 +756,7 @@ namespace Server.Medius
             character.Flags |= rules.CompletedFlagMask;
             character.Experience = experience; character.Level = level; character.SkillPoints = points;
             UpdateLeadership(character, rules.Progression, level);
-            Commit(path, document.Characters, document);
+            session.Commit();
             // The flag is the durable receipt. A failed/uncertain save never returns a success
             // snapshot; after a rename the next request observes it and cannot reward twice.
             return new TrainingCompletionOutcome { Result = MagNetResult.Success, Reason = "training-completed", NewlyCompleted = true, Record = character.ToRecord() };
@@ -771,9 +774,8 @@ namespace Server.Medius
             if (catalog == null) return AdminLevelChange.Refused("progression-catalog-unavailable");
             if (!MagDevelopmentAccountPolicy.ValidAccount(account)) return AdminLevelChange.Refused("invalid-account");
             if (level < 1 || level > catalog.MaximumLevel) return AdminLevelChange.Refused("level-out-of-range");
-            string path = ValidPath();
-            using var lease = AcquireLock(path + ".lock");
-            var document = ReadDocument();
+            using var session = _backend.Open(new StoreScope(account, CreateDirectory: false));
+            var document = session.Document;
             var character = document.Characters.SingleOrDefault(c => c.Account == account);
             if (character == null) return AdminLevelChange.Refused("account-not-found");
             var before = character.ToRecord();
@@ -786,15 +788,10 @@ namespace Server.Medius
             if (!apply) { change.Reason = "dry-run"; return change; }
             if (string.IsNullOrWhiteSpace(backupDirectory) || !Path.IsPathFullyQualified(backupDirectory))
                 return AdminLevelChange.Refused("backup-directory-required", before);
-            byte[] current = File.ReadAllBytes(path);
-            string digest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(current)).ToLowerInvariant();
-            Directory.CreateDirectory(backupDirectory);
-            change.BackupPath = Path.Combine(backupDirectory, $"characters.before-admin-set-level-{account}-{level}-{digest.Substring(0, 12)}.json");
-            using (var backup = new FileStream(change.BackupPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
-            { backup.Write(current); backup.Flush(true); }
+            change.BackupPath = session.Backup(backupDirectory, "set-level", account, level);
             character.Experience = change.Experience; character.Level = change.Level; character.SkillPoints = change.SkillPoints;
             UpdateLeadership(character, catalog, change.Level);
-            Commit(path, document.Characters, document);
+            session.Commit();
             change.Applied = true; change.Reason = "applied";
             return change;
         }

@@ -258,3 +258,20 @@ checksum of everything Medius cannot reload live.
 {{- end -}}
 {{- toPrettyJson $registry -}}
 {{- end -}}
+
+{{- /* The PostgreSQL character store settings as JSON, with "backend", when characterStore.backend
+       is postgres or a database Secret is staged for import under backend json; otherwise an empty
+       object (the JSON file store alone renders nothing). */ -}}
+{{- define "mag.characterDatabase" -}}
+{{- $store := .Values.characterStore | default dict }}
+{{- $pg := $store.postgres | default dict }}
+{{- $backend := $store.backend | default "json" }}
+{{- if and (eq $backend "postgres") (not $pg.existingSecret) }}
+{{- fail "characterStore.backend=postgres needs characterStore.postgres.existingSecret" }}
+{{- end }}
+{{- if $pg.existingSecret }}
+{{- toJson (merge (dict "backend" $backend) $pg) }}
+{{- else -}}
+{}
+{{- end }}
+{{- end -}}

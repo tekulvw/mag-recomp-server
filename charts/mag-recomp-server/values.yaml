@@ -186,6 +186,21 @@ portalTickets:
 # served by the main medius container only. It is cluster-internal: a ClusterIP Service and a
 # NetworkPolicy admit only pods in allowedNamespaceSelector namespaces. Never route it through a
 # Gateway, Ingress or LoadBalancer.
+characterStore:
+  # Where Medius keeps characters, reward receipts and match progress (MAG_CHARACTER_STORE):
+  # json is the /accounts/characters.json file; postgres is a PostgreSQL database such as a
+  # CloudNativePG cluster. json renders nothing new.
+  backend: json
+  postgres:
+    # Required with postgres: an existing Secret with host, port, dbname, user and password
+    # (a CloudNativePG <cluster>-app Secret). Mounted read-only in main Medius and MAPS.
+    existingSecret: ""
+    # Optional Secret with the server CA as ca.crt (a CloudNativePG <cluster>-ca Secret); only
+    # ca.crt is mounted, and the server certificate is then verified. Empty requires TLS unverified.
+    caSecret: ""
+    # Optional days (1-90) settled reward receipts and match rows are kept
+    # (MAG_REWARD_LEDGER_RETENTION_DAYS). Unset keeps Medius's 7 days.
+    ledgerRetentionDays: null
 adminApi:
   enabled: false
   port: 10490

@@ -16,6 +16,8 @@
     <PackageReference Include="DotNetty.Handlers" Version="0.7.6" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.12" />
     <PackageReference Include="NReco.Logging.File" Version="1.4.0" />
+    <!-- Optional PostgreSQL character store (MAG_CHARACTER_STORE=postgres). PostgreSQL License. -->
+    <PackageReference Include="Npgsql" Version="10.0.4" />
   </ItemGroup>
 
   <ItemGroup>
@@ -32,6 +34,8 @@
   <ItemGroup>
     <!-- Release Please creates the component changelog on its first component release. -->
     <EmbeddedResource Include="../CHANGELOG.md" Condition="Exists('../CHANGELOG.md')" LogicalName="MagServerNews.MediusChangelog" />
+    <!-- Numbered PostgreSQL character-store migrations, applied in order (PostgresCharacterDatabase). -->
+    <EmbeddedResource Include="CharacterStore/Migrations/*.sql" LogicalName="MagCharacterStore.Migrations.%(Filename)%(Extension)" />
   </ItemGroup>
 
 </Project>

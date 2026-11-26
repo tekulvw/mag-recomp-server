@@ -129,6 +129,12 @@ Test("leadership nomination preference wire", LeadershipProgressionChecks.Nomina
 Test("leadership nomination preference reaches admission", LeadershipProgressionChecks.NominationPreferenceAdmission);
 Test("leadership nomination preference on legacy rows and pending sessions", LeadershipProgressionChecks.NominationPreferenceLegacyAndUnbound);
 Test("selected kit ownership and complete store preservation", LoadoutPreferenceStoreChecks.Run);
+Test("postgres character store matches the JSON store operation for operation", LeadershipProgressionChecks.PostgresMatchesJsonStore);
+Test("postgres character store migrations refuse altered and newer schemas", LeadershipProgressionChecks.PostgresMigrations);
+Test("postgres character store commits concurrent rewards and creations exactly once", LeadershipProgressionChecks.PostgresConcurrentCommits);
+Test("postgres character store outages surface as deferrable IO failures and fail fast", LeadershipProgressionChecks.PostgresOutageDefers);
+Test("postgres reward ledger retention prunes rows with their receipts and keeps history", LeadershipProgressionChecks.PostgresLedgerRetention);
+Test("postgres character store imports, verifies and exports a JSON store", LeadershipProgressionChecks.PostgresImportVerifyExport);
 Test("retail saved loadout delete commits and compacts the owned layout", LoadoutPreferenceStoreChecks.DeleteThroughMls);
 Test("retail skill purchase owns its equipment for loadout saves", LoadoutPreferenceStoreChecks.RetailSkillPurchaseOwnsItsEquipment);
 Test("account-bound NP identity creation and persistence", NpIdentityChecks.Run);

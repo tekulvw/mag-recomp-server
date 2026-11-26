@@ -26,6 +26,8 @@ The copied grouping, minimum-selection, timeout and HTTP scraping bodies are
 not part of this export. Public-IP discovery now requires explicit configuration.
 
 Cargo and NuGet dependencies are named in their manifests and retain their own
-licenses. Distributing compiled artifacts also requires retaining applicable
+licenses. Medius's optional PostgreSQL character store uses
+[Npgsql](https://github.com/npgsql/npgsql) under the PostgreSQL License; the
+Medius image copies its package notice with the other NuGet notices. Distributing compiled artifacts also requires retaining applicable
 dependency notices. No upstream author's name implies endorsement of this
 project.

@@ -65,14 +65,72 @@ namespace Server.Medius
         /// <summary>Hours an open match reward row may go without a reward before it can be compacted
         /// (MAG_REWARD_LEDGER_OPEN_MATCH_TTL_HOURS).</summary>
         public static TimeSpan OpenMatchRowTtl { get; private set; } = LocalCharacterStore.DefaultOpenMatchRowTtl;
-        public static LocalCharacterStore CreateCharacterStore() => new LocalCharacterStore(Settings.MagCharacterStorePath)
-        { TrainingCompletionCatalog = Settings.MagApplicationId == 20231 ? TrainingCompletionCatalog : null,
-            LoadoutCatalog = Settings.EnableMagCharacterCatalogs || (Settings.MagApplicationId == 20231 && LoadoutCatalog?.ApplicationId == 20231) ? LoadoutCatalog : null,
-            SkillCatalog = Settings.EnableMagCharacterCatalogs || (Settings.MagApplicationId == 20231 && SkillCatalog?.ApplicationId == 20231) ? SkillCatalog : null,
-            ProgressionCatalog = Settings.MagApplicationId == 20231 || Settings.EnableMagCharacterCatalogs ? ProgressionCatalog : null,
-            InitialSkillPoints = Settings.EnableMagCharacterCatalogs ? InitialSkillPoints : (byte)0,
-            StartingLevel = StartingLevel, TrainingLevel = TrainingLevel, OpenMatchRowTtl = OpenMatchRowTtl,
-            LedgerMaintenance = message => Logger.Info(message) };
+        /// <summary>PostgreSQL behind the character store (MAG_CHARACTER_STORE=postgres); null keeps the JSON file.</summary>
+        public static PostgresCharacterDatabase CharacterDatabase { get; private set; }
+        /// <summary>How long PostgreSQL keeps settled reward receipts and match rows (MAG_REWARD_LEDGER_RETENTION_DAYS).</summary>
+        public static TimeSpan LedgerRetention { get; private set; } = PostgresCharacterDatabase.DefaultLedgerRetention;
+        public static LocalCharacterStore CreateCharacterStore() => ConfigureCharacterStore(CharacterDatabase != null
+            ? LocalCharacterStore.ForPostgres(CharacterDatabase) : new LocalCharacterStore(Settings.MagCharacterStorePath));
+        /// <summary>A JSON store at <paramref name="path"/> with the server's catalogs and policy (import and export).</summary>
+        public static LocalCharacterStore CreateJsonCharacterStore(string path) => ConfigureCharacterStore(new LocalCharacterStore(path));
+        static LocalCharacterStore ConfigureCharacterStore(LocalCharacterStore store)
+        {
+            store.TrainingCompletionCatalog = Settings.MagApplicationId == 20231 ? TrainingCompletionCatalog : null;
+            store.LoadoutCatalog = Settings.EnableMagCharacterCatalogs || (Settings.MagApplicationId == 20231 && LoadoutCatalog?.ApplicationId == 20231) ? LoadoutCatalog : null;
+            store.SkillCatalog = Settings.EnableMagCharacterCatalogs || (Settings.MagApplicationId == 20231 && SkillCatalog?.ApplicationId == 20231) ? SkillCatalog : null;
+            store.ProgressionCatalog = Settings.MagApplicationId == 20231 || Settings.EnableMagCharacterCatalogs ? ProgressionCatalog : null;
+            store.InitialSkillPoints = Settings.EnableMagCharacterCatalogs ? InitialSkillPoints : (byte)0;
+            store.StartingLevel = StartingLevel; store.TrainingLevel = TrainingLevel; store.OpenMatchRowTtl = OpenMatchRowTtl;
+            store.LedgerMaintenance = message => Logger.Info(message);
+            return store;
+        }
+        public enum CharacterSchemaPolicy { Migrate, Require, None }
+        /// <summary>
+        /// Selects the character store from MAG_CHARACTER_STORE: json (default, the MagCharacterStorePath
+        /// file) or postgres (MAG_CHARACTER_DB_SECRET_DIR, optional MAG_CHARACTER_DB_CA_FILE and
+        /// MAG_CHARACTER_DB_READ_ONLY=1 for MAPS). Any other value, or postgres without its settings, fails.
+        /// </summary>
+        internal static void ConfigureCharacterBackend(CharacterSchemaPolicy policy)
+        {
+            string backend = Environment.GetEnvironmentVariable("MAG_CHARACTER_STORE");
+            backend = string.IsNullOrWhiteSpace(backend) ? "json" : backend.Trim();
+            if (backend == "json") { CharacterDatabase = null; return; }
+            if (backend != "postgres") throw new InvalidDataException("MAG_CHARACTER_STORE must be json or postgres.");
+            LedgerRetention = PostgresCharacterDatabase.ParseLedgerRetention(Environment.GetEnvironmentVariable("MAG_REWARD_LEDGER_RETENTION_DAYS"));
+            string readOnlyValue = Environment.GetEnvironmentVariable("MAG_CHARACTER_DB_READ_ONLY");
+            if (!string.IsNullOrEmpty(readOnlyValue) && readOnlyValue != "0" && readOnlyValue != "1")
+                throw new InvalidDataException("MAG_CHARACTER_DB_READ_ONLY must be 0 or 1.");
+            var database = new PostgresCharacterDatabase(PostgresCharacterDatabase.ConnectionStringFromSecretDirectory(
+                Environment.GetEnvironmentVariable("MAG_CHARACTER_DB_SECRET_DIR"), Environment.GetEnvironmentVariable("MAG_CHARACTER_DB_CA_FILE")),
+                readOnlyValue == "1");
+            if (policy == CharacterSchemaPolicy.Migrate && !database.ReadOnly)
+            {
+                int applied = database.Migrate();
+                if (applied > 0) Logger.Info($"Character database migrated: {applied} migration(s) applied.");
+            }
+            if (policy != CharacterSchemaPolicy.None) database.RequireCurrentSchema();
+            CharacterDatabase = database;
+        }
+        static System.Threading.Timer _ledgerRetentionTimer;
+        static int _ledgerPruning;
+        /// <summary>Hourly PostgreSQL ledger retention in main Medius, off the reward path.</summary>
+        static void StartLedgerRetention()
+        {
+            if (CharacterDatabase == null || CharacterDatabase.ReadOnly) return;
+            _ledgerRetentionTimer = new System.Threading.Timer(_ => PruneLedgerOnce(), null, TimeSpan.FromMinutes(1), TimeSpan.FromHours(1));
+        }
+        static void PruneLedgerOnce()
+        {
+            if (Interlocked.Exchange(ref _ledgerPruning, 1) == 1) return;
+            try
+            {
+                var result = CharacterDatabase.PruneLedger(LedgerRetention);
+                if (result.Skipped || result.Rows > 0) Logger.Info(result.Describe());
+            }
+            catch (Exception e) when (e is IOException || e is InvalidDataException)
+            { Logger.Warn($"Character store ledger prune deferred: {e.Message}"); }
+            finally { Interlocked.Exchange(ref _ledgerPruning, 0); }
+        }
         /// <summary>Fail fast on an open match row TTL outside whole hours from one hour to thirty days.</summary>
         public static TimeSpan ParseOpenMatchRowTtl(string value)
         {
@@ -312,6 +370,15 @@ namespace Server.Medius
         {
             int waitMs = sleepMS;
             LoadCharacterCatalog();
+            ConfigureCharacterBackend(CharacterSchemaPolicy.Migrate);
+            if (CharacterDatabase != null)
+            {
+                Logger.Info($"Character store: postgres {CharacterDatabase.Target} (schema {CharacterDatabase.LatestSchemaVersion}" +
+                    (CharacterDatabase.ReadOnly ? ", read-only)" : $", ledger retention {LedgerRetention.TotalDays:0} days)"));
+                if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("MAG_REWARD_LEDGER_OPEN_MATCH_TTL_HOURS")))
+                    Logger.Info("MAG_REWARD_LEDGER_OPEN_MATCH_TTL_HOURS applies only to the JSON character store; ignored.");
+                StartLedgerRetention();
+            }
             PortalTickets = MagPortalTicketPolicy.FromSettings(MagPortalTicketSettings.FromEnvironment());
             if (PortalTickets != null)
                 Logger.Info($"Portal tickets required: audience={PortalTickets.Settings.Audience} keys={string.Join(",", PortalTickets.Settings.Keys.Keys.OrderBy(id => id))}");
