@@ -541,13 +541,18 @@ pub struct NavMesh {
     /// That snapshot, for steering routes around structures in a polygon.
     structure_snapshot:
         Mutex<Option<std::sync::Arc<crate::bot_structure_collision::StructureObstacles>>>,
+    /// The installed gates by polygon, with the structures each came from.
+    structure_gate_cache: Mutex<std::sync::Arc<GateCache>>,
 }
+pub(crate) type GateCache =
+    std::collections::HashMap<u64, (crate::navmesh_structure_gates::GateSources, PolyGate)>;
 /// One navmesh polygon's outline and links (neighbour, shared edge).
 pub(crate) struct PolyInfo {
     pub(crate) vertices: Vec<Point>,
     pub(crate) links: Vec<(u64, Point, Point)>,
 }
 /// Placed-structure gating of one polygon; see `navmesh_structure_gates`.
+#[derive(Clone)]
 pub(crate) struct PolyGate {
     pub(crate) poly: u64,
     pub(crate) origin_xz: [f64; 2],
@@ -715,6 +720,7 @@ impl NavMesh {
             native: Mutex::new(Native(handle)),
             structure_gates: Mutex::new(None),
             structure_snapshot: Mutex::new(None),
+            structure_gate_cache: Mutex::new(Default::default()),
         };
         mesh.validate_drop_links()?;
         // A wide mesh can hold up to 128 MiB of tiles; keep one copy, not two.
@@ -796,11 +802,23 @@ impl NavMesh {
     }
     /// Replace every structure gate. Routes from then on avoid sealed
     /// crossings and end before one when nothing else reaches the goal.
+    /// The installed gates by polygon (shared; cheap to take).
+    pub(crate) fn structure_gate_cache(&self) -> std::sync::Arc<GateCache> {
+        self.structure_gate_cache
+            .lock()
+            .map(|c| c.clone())
+            .unwrap_or_default()
+    }
     pub(crate) fn set_structure_gates(
         &self,
         snapshot: Option<&std::sync::Arc<crate::bot_structure_collision::StructureObstacles>>,
         gates: &[PolyGate],
+        cache: GateCache,
     ) -> Result<(), Error> {
+        *self
+            .structure_gate_cache
+            .lock()
+            .map_err(|_| Error("navmesh_query_poisoned"))? = std::sync::Arc::new(cache);
         let key = snapshot.map(|s| s.key());
         *self
             .structure_snapshot
@@ -922,6 +940,14 @@ impl NavMesh {
         let mut nr = 0;
         let mut nodes = 0;
         let mut stages = 0;
+        // Placed structures gate the route, unless it starts in a structure's
+        // enclosed room: a life started there walks out through the walls.
+        let snapshot = self
+            .structure_snapshot
+            .lock()
+            .map_err(|_| Error("navmesh_query_poisoned"))?
+            .clone()
+            .filter(|s| !s.enclosed(start));
         let h = self
             .native
             .lock()
@@ -940,6 +966,7 @@ impl NavMesh {
                 &mut nr,
                 &mut nodes,
                 &mut stages,
+                c_int::from(snapshot.is_some()),
             )
         };
         let status = match status {
@@ -967,11 +994,6 @@ impl NavMesh {
         drop(h);
         refs.truncate(nr as usize);
         // Placed structures inside a corridor polygon: steer around them.
-        let snapshot = self
-            .structure_snapshot
-            .lock()
-            .map_err(|_| Error("navmesh_query_poisoned"))?
-            .clone();
         let waypoints = match snapshot {
             Some(snapshot) => {
                 crate::navmesh_structure_gates::refine(self, &snapshot, waypoints, &refs)?

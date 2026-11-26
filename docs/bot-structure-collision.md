@@ -36,6 +36,16 @@ A body a structure appears on is not trapped. A moving sweep ignores the
 triangles the body already penetrates at its start, and still stops at every
 other triangle.
 
+A structure can enclose a room that no opening leaves, such as a closed
+field-hospital bunker. A life started on foot inside one (a hospital spawn
+whose profile has no bunker seating) would otherwise be trapped. Each
+structure's enclosed rooms are found once per mesh: these are the cells of
+its base level where a standing body fits, but which cannot reach the mesh's
+outer bounds without crossing it. Each room also takes in its walls, up to
+1.5 m from its free space. A body inside one is not held by that structure:
+it walks out through the walls, and its routes are planned on the static mesh
+alone. Bodies outside still cannot enter.
+
 ## Routing
 
 The navmesh is baked from the static world, so its polygons run through
@@ -69,15 +79,27 @@ polygons, then shortened to the fewest straight legs. A leg that no grid path
 replaces is kept as it was, and body physics still stops at the structure.
 
 The gates are rebuilt with the snapshot, so a destroyed gate opens its road
-again and a repaired one closes it.
+again and a repaired one closes it. A polygon whose structures are unchanged
+(same placement, mesh and pose) keeps its previous gate.
+
+## Cost
+
+The world tick only takes the new snapshot, which it indexes on a 16 m
+horizontal grid. The enclosed-room analysis and the polygon gates are built
+on a worker thread. Until they are installed, routes keep the previous gates
+and newly placed structures show no rooms. Sweeps test each structure only
+where the swept body is near its bounds, in legs of at most 2 m.
 
 ## Evidence and limits
 
-`bot_structure_obstacles` is recorded on every rebuild. It carries the number
-of obstacles, the movement row, the number of gated polygons, a gate error (if
-any; routes then fall back to the static mesh), and the build time.
-`MAG_SIM_SNAPSHOTS=1` headless runs mark each bot whose standing body
-penetrates a structure with `in_structure` (see
+`bot_structure_obstacles` is recorded on every new snapshot, with each
+obstacle's label and world bounds, the movement row and the time taken on the
+tick. `bot_structure_analysis` is recorded when the worker finishes, with how
+many meshes were analysed for rooms, how many polygons were gated and of them
+reused, any gate error (routes then fall back to the static mesh), and the
+time taken. `MAG_SIM_SNAPSHOTS=1` headless runs mark each bot whose standing
+body penetrates a structure with `in_structure`, and each bot inside an
+enclosed room or its walls with `leaving_room` (see
 [headless-simulation.md](headless-simulation.md)).
 
 Gating assumes a structure stands on the polygon surface beneath it. Free

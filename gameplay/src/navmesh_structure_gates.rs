@@ -34,37 +34,50 @@ const CELL_M: f64 = 0.25;
 const MAX_CELLS_PER_AXIS: usize = 192;
 const MAX_REGIONS: usize = 64;
 
-/// Install the gates of `snapshot` on `mesh` unless they are current.
-/// Returns how many polygons were gated when it rebuilt them.
-pub(crate) fn apply(
+/// Identities of the structures a polygon's gate was computed from.
+pub(crate) type GateSources = Vec<(String, String, [u64; 12])>;
+
+/// Compute and install the gates of `snapshot` on `mesh` now, unless they
+/// are current. A polygon whose structures are unchanged since the previous
+/// gates reuses its gate. Returns (gated polygons, of them reused) when it
+/// rebuilt the gates. Runs off the world tick; routes use the previous gates
+/// until the new ones are installed.
+pub(crate) fn install_now(
     mesh: &NavMesh,
     snapshot: Option<&Arc<StructureObstacles>>,
-) -> Result<Option<usize>, &'static str> {
+) -> Result<Option<(usize, usize)>, &'static str> {
     let key = snapshot.map(|s| s.key());
     if mesh.structure_gate_key() == key {
         return Ok(None);
     }
-    let gates = match snapshot {
+    let (gates, reused) = match snapshot {
         Some(snapshot) => match gates(mesh, snapshot) {
             Ok(gates) => gates,
             Err(error) => {
                 // Never leave stale gates: routes fall back to the static mesh.
-                mesh.set_structure_gates(Some(snapshot), &[])
+                mesh.set_structure_gates(Some(snapshot), &[], Default::default())
                     .map_err(|e| e.0)?;
                 return Err(error);
             }
         },
-        None => Vec::new(),
+        None => (Vec::new(), 0),
     };
-    mesh.set_structure_gates(snapshot, &gates)
+    let count = gates.len();
+    let (gates, cache): (Vec<PolyGate>, _) = gates
+        .into_iter()
+        .map(|(sources, gate)| (gate.clone(), (gate.poly, (sources, gate))))
+        .unzip();
+    mesh.set_structure_gates(snapshot, &gates, cache)
         .map_err(|e| e.0)?;
-    Ok(Some(gates.len()))
+    Ok(Some((count, reused)))
 }
 
-pub(crate) fn gates(
+/// Every gated polygon of `snapshot`, with the structures it was computed
+/// from, and how many were reused from the installed gates.
+fn gates(
     mesh: &NavMesh,
     snapshot: &StructureObstacles,
-) -> Result<Vec<PolyGate>, &'static str> {
+) -> Result<(Vec<(GateSources, PolyGate)>, usize), &'static str> {
     let body = mesh.body();
     let reach = body.radius + 2.0 * CELL_M;
     let mut polys = BTreeSet::new();
@@ -81,13 +94,63 @@ pub(crate) fn gates(
         ];
         polys.extend(mesh.polys_in_box(min, max).map_err(|e| e.0)?);
     }
+    let previous = mesh.structure_gate_cache();
     let mut gates = Vec::new();
+    let mut reused = 0;
     for poly in polys {
-        if let Some(gate) = poly_gate(mesh, snapshot, poly, body)? {
-            gates.push(gate);
+        let info = mesh.poly_info(poly).map_err(|e| e.0)?;
+        let relevant = relevant(snapshot, &info.vertices, body);
+        if relevant.is_empty() {
+            continue;
+        }
+        let sources: GateSources = relevant.iter().map(|o| o.identity()).collect();
+        if let Some((old, gate)) = previous.get(&poly)
+            && *old == sources
+        {
+            gates.push((sources, gate.clone()));
+            reused += 1;
+            continue;
+        }
+        if let Some(gate) = poly_gate(mesh, &relevant, poly, &info, body)? {
+            gates.push((sources, gate));
         }
     }
-    Ok(gates)
+    Ok((gates, reused))
+}
+
+/// Structures that can reach a body standing anywhere on the polygon.
+fn relevant<'a>(
+    snapshot: &'a StructureObstacles,
+    vertices: &[[f64; 3]],
+    body: crate::bot_physics::Body,
+) -> Vec<&'a Obstacle> {
+    if vertices.len() < 3 {
+        return Vec::new();
+    }
+    let lo = |axis: usize| {
+        vertices
+            .iter()
+            .map(|v| v[axis])
+            .fold(f64::INFINITY, f64::min)
+    };
+    let hi = |axis: usize| {
+        vertices
+            .iter()
+            .map(|v| v[axis])
+            .fold(f64::NEG_INFINITY, f64::max)
+    };
+    snapshot
+        .obstacles()
+        .iter()
+        .filter(|o| {
+            o.min[0] <= hi(0) + body.radius
+                && o.max[0] >= lo(0) - body.radius
+                && o.min[2] <= hi(2) + body.radius
+                && o.max[2] >= lo(2) - body.radius
+                && o.min[1] <= hi(1) + body.height + 0.5
+                && o.max[1] >= lo(1) - 0.5
+        })
+        .collect()
 }
 
 fn inside_convex(vertices: &[[f64; 3]], x: f64, z: f64) -> bool {
@@ -111,14 +174,11 @@ fn inside_convex(vertices: &[[f64; 3]], x: f64, z: f64) -> bool {
 
 fn poly_gate(
     mesh: &NavMesh,
-    snapshot: &StructureObstacles,
+    relevant: &[&Obstacle],
     poly: u64,
+    info: &crate::navmesh::PolyInfo,
     body: crate::bot_physics::Body,
 ) -> Result<Option<PolyGate>, &'static str> {
-    let info = mesh.poly_info(poly).map_err(|e| e.0)?;
-    if info.vertices.len() < 3 {
-        return Ok(None);
-    }
     let fold = |axis: usize, f: fn(f64, f64) -> f64, init: f64| {
         info.vertices.iter().map(|v| v[axis]).fold(init, f)
     };
@@ -126,30 +186,10 @@ fn poly_gate(
         fold(0, f64::min, f64::INFINITY),
         fold(0, f64::max, f64::NEG_INFINITY),
     );
-    let (min_y, max_y) = (
-        fold(1, f64::min, f64::INFINITY),
-        fold(1, f64::max, f64::NEG_INFINITY),
-    );
     let (min_z, max_z) = (
         fold(2, f64::min, f64::INFINITY),
         fold(2, f64::max, f64::NEG_INFINITY),
     );
-    // Structures that can reach a body standing anywhere on this polygon.
-    let relevant: Vec<&Obstacle> = snapshot
-        .obstacles()
-        .iter()
-        .filter(|o| {
-            o.min[0] <= max_x + body.radius
-                && o.max[0] >= min_x - body.radius
-                && o.min[2] <= max_z + body.radius
-                && o.max[2] >= min_z - body.radius
-                && o.min[1] <= max_y + body.height + 0.5
-                && o.max[1] >= min_y - 0.5
-        })
-        .collect();
-    if relevant.is_empty() {
-        return Ok(None);
-    }
     let extent = (max_x - min_x).max(max_z - min_z);
     let cell = CELL_M.max(extent / MAX_CELLS_PER_AXIS as f64);
     let nx = ((max_x - min_x) / cell).ceil().max(1.0) as usize;
@@ -180,7 +220,7 @@ fn poly_gate(
         let Some(y) = height else { continue };
         let at = [*px, y + lift + half[1], *pz];
         let mut blocked = false;
-        for obstacle in &relevant {
+        for obstacle in relevant {
             let mut work = STRUCTURE_WORK_LIMIT;
             if obstacle
                 .mesh
@@ -364,7 +404,7 @@ fn detour(
 ) -> Option<Vec<[f64; 3]>> {
     const MARGIN_M: f64 = 8.0;
     const MAX_AXIS: usize = 320;
-    const MAX_EXPANSIONS: usize = 40_000;
+    const MAX_EXPANSIONS: usize = 8_000;
     let min = [a[0].min(b[0]) - MARGIN_M, a[2].min(b[2]) - MARGIN_M];
     let max = [a[0].max(b[0]) + MARGIN_M, a[2].max(b[2]) + MARGIN_M];
     let cell = CELL_M.max((max[0] - min[0]).max(max[1] - min[1]) / MAX_AXIS as f64);

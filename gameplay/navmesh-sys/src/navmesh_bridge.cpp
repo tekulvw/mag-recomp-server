@@ -474,18 +474,19 @@ static constexpr float GateBlockedCost = 1.0e7f;
 // goal; `gate_truncate` then cuts the corridor there.
 class GateFilter : public dtQueryFilter {
 public:
-    explicit GateFilter(const MagNav* h) : h(h) { setIncludeFlags(1); setExcludeFlags(0); }
+    GateFilter(const MagNav* h, bool enabled) : h(h), enabled(enabled) { setIncludeFlags(1); setExcludeFlags(0); }
     float getCost(const float* pa, const float* pb,
                   const dtPolyRef prevRef, const dtMeshTile* prevTile, const dtPoly* prevPoly,
                   const dtPolyRef curRef, const dtMeshTile* curTile, const dtPoly* curPoly,
                   const dtPolyRef nextRef, const dtMeshTile* nextTile, const dtPoly* nextPoly) const override {
         float cost = dtQueryFilter::getCost(pa, pb, prevRef, prevTile, prevPoly, curRef, curTile, curPoly,
                                             nextRef, nextTile, nextPoly);
-        if (!h->gates.empty() && !gate_passes(h, prevRef, curRef, nextRef, pa, pb)) cost += GateBlockedCost;
+        if (enabled && !h->gates.empty() && !gate_passes(h, prevRef, curRef, nextRef, pa, pb)) cost += GateBlockedCost;
         return cost;
     }
 private:
     const MagNav* h;
+    bool enabled;
 };
 // First corridor index whose crossing a standing structure seals, or -1.
 static int gate_violation(const MagNav* h, const unsigned long long* refs, int count,
@@ -781,9 +782,9 @@ private:
 // status:0 complete,1 partial,2 disconnected,3 out of nodes,4 invalid start,5 invalid goal,6 query failure.
 // `nodes` reports search nodes used and `stages` the corridor pieces of a staged route (0 when direct).
 static int route_impl(MagNav* h,const float* start,const float* goal,float radius,float* projected_start,float* projected_goal,
-                  float* points,int* point_count,unsigned long long* refs,int* ref_count,int* nodes,int* stages) {
+                  float* points,int* point_count,unsigned long long* refs,int* ref_count,int* nodes,int* stages,bool gated) {
     *point_count=0;*ref_count=0;*nodes=0;*stages=0;
-    GateFilter filter(h);
+    GateFilter filter(h,gated);
     const float se[3]={.75f,2.f,.75f}, ge[3]={radius,8.f,radius};
     dtPolyRef sr=0;
     if(dtStatusFailed(h->query->findNearestPoly(start,se,&filter,&sr,projected_start)) || !sr) return 4;
@@ -840,10 +841,12 @@ static int route_impl(MagNav* h,const float* start,const float* goal,float radiu
 // As route_impl, then cut at the first crossing a standing structure seals:
 // the corridor keeps the polygons up to it and ends in its entry regions,
 // nearest the goal, as a partial route.
+// `gated` 0 plans on the static mesh alone (a start inside a structure's
+// enclosed room, which no opening leaves).
 int mag_nav_route(MagNav* h,const float* start,const float* goal,float radius,float* projected_start,float* projected_goal,
-                  float* points,int* point_count,unsigned long long* refs,int* ref_count,int* nodes,int* stages) {
-    const int status=route_impl(h,start,goal,radius,projected_start,projected_goal,points,point_count,refs,ref_count,nodes,stages);
-    if(status==4 || status==5 || status==6 || *ref_count<=0) return status;
+                  float* points,int* point_count,unsigned long long* refs,int* ref_count,int* nodes,int* stages,int gated) {
+    const int status=route_impl(h,start,goal,radius,projected_start,projected_goal,points,point_count,refs,ref_count,nodes,stages,gated!=0);
+    if(!gated || status==4 || status==5 || status==6 || *ref_count<=0) return status;
     const float* reached = *point_count>0 ? points+3*(*point_count-1) : projected_goal;
     const int cut=gate_violation(h,refs,*ref_count,projected_start,reached);
     if(cut<0) return status;

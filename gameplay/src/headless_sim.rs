@@ -386,10 +386,14 @@ impl<W: Write> Engine<W> {
             .filter_map(|(&id, b)| {
                 let r = b.target.runtime?;
                 let p = r.physical_position();
-                // A body standing inside a placed structure's solid.
+                // A body standing inside a placed structure's solid, and one
+                // leaving the enclosed room it started in (which may cross
+                // that room's walls).
+                let leaving_room = structures.as_ref().map(|s| s.enclosed(p));
                 let in_structure = structures.as_ref().map(|s| {
-                    s.body_penetrates(p, crate::bot_physics::Body::default())
-                        .unwrap_or(true)
+                    !s.enclosed(p)
+                        && s.body_penetrates(p, crate::bot_physics::Body::default())
+                            .unwrap_or(true)
                 });
                 Some(json!({
                     "id": id,
@@ -400,6 +404,7 @@ impl<W: Write> Engine<W> {
                     "holding": b.drop_holding_goal.map(|g| [g.x, g.y, g.z]),
                     "goal": b.task.goal.map(|g| [g.x, g.y, g.z]),
                     "in_structure": in_structure,
+                    "leaving_room": leaving_room,
                 }))
             })
             .collect();

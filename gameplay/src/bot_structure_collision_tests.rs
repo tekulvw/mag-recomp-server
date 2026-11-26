@@ -260,14 +260,15 @@ fn routes_stop_at_closed_gates_use_openings_and_reopen_when_destroyed() {
     sequences.synthetic_structure_mesh(3, Pose::at([20., 0., 10.]), gate(0.), Some(PACK_LAYER));
     let closed = snapshot(&sequences);
     assert!(
-        crate::navmesh_structure_gates::apply(&mesh, Some(&closed))
+        crate::navmesh_structure_gates::install_now(&mesh, Some(&closed))
             .unwrap()
             .unwrap()
+            .0
             > 0
     );
     // Applying the same snapshot again is a no-op.
     assert_eq!(
-        crate::navmesh_structure_gates::apply(&mesh, Some(&closed)).unwrap(),
+        crate::navmesh_structure_gates::install_now(&mesh, Some(&closed)).unwrap(),
         None
     );
     let route = mesh.route(from, to, 0.5).unwrap();
@@ -280,7 +281,7 @@ fn routes_stop_at_closed_gates_use_openings_and_reopen_when_destroyed() {
     let mut sequences = SequenceCollisionState::default();
     sequences.synthetic_structure_mesh(3, Pose::at([20., 0., 10.]), gate(2.), Some(PACK_LAYER));
     let opening = snapshot(&sequences);
-    crate::navmesh_structure_gates::apply(&mesh, Some(&opening)).unwrap();
+    crate::navmesh_structure_gates::install_now(&mesh, Some(&opening)).unwrap();
     let around = mesh.route([5., 0., 3.], [35., 0., 3.], 0.5).unwrap();
     assert_eq!(around.status, Status::Complete, "{around:?}");
     let crossing = around
@@ -300,7 +301,7 @@ fn routes_stop_at_closed_gates_use_openings_and_reopen_when_destroyed() {
 
     // Destroyed: every gate is removed and the straight road is back.
     sequences.synthetic_remove_structure(3);
-    crate::navmesh_structure_gates::apply(&mesh, Some(&snapshot(&sequences))).unwrap();
+    crate::navmesh_structure_gates::install_now(&mesh, Some(&snapshot(&sequences))).unwrap();
     let open = mesh.route(from, to, 0.5).unwrap();
     assert_eq!(open.status, Status::Complete);
     assert_eq!(open.waypoints.len(), 2, "{open:?}");
@@ -313,7 +314,7 @@ fn routes_enter_and_leave_a_bunker_only_through_its_door() {
     let mut sequences = SequenceCollisionState::default();
     sequences.synthetic_structure_mesh(5, Pose::at([30., 0., 10.]), bunker(), Some(PACK_LAYER));
     let structures = snapshot(&sequences);
-    crate::navmesh_structure_gates::apply(&mesh, Some(&structures)).unwrap();
+    crate::navmesh_structure_gates::install_now(&mesh, Some(&structures)).unwrap();
     let door_x = 30. - 2.85;
     let through_door = |route: &navmesh::Route| {
         route.waypoints.windows(2).any(|w| {
@@ -340,6 +341,74 @@ fn routes_enter_and_leave_a_bunker_only_through_its_door() {
     assert!(through_door(&out), "{:?}", out.waypoints);
     assert!(clear_of(&out, &structures), "{:?}", out.waypoints);
     // Clearing the snapshot removes the gates.
-    crate::navmesh_structure_gates::apply(&mesh, None).unwrap();
+    crate::navmesh_structure_gates::install_now(&mesh, None).unwrap();
     assert_eq!(mesh.structure_gate_key(), None);
+}
+
+/// The bunker without its door: a closed room.
+fn closed_bunker() -> CollisionWorld {
+    boxes(&[
+        ([-3., 0., -3.], [3., 2.5, -2.7]),
+        ([-3., 0., 2.7], [3., 2.5, 3.]),
+        ([2.7, 0., -3.], [3., 2.5, 3.]),
+        ([-3., 0., -3.], [-2.7, 2.5, 3.]),
+        ([-3., 2.5, -3.], [3., 2.8, 3.]),
+    ])
+}
+
+#[test]
+fn a_life_started_in_a_closed_room_walks_out_and_nobody_walks_in() {
+    let floor = floor_world();
+    let mesh = floor_mesh(&floor);
+    let mut sequences = SequenceCollisionState::default();
+    sequences.synthetic_structure_mesh(
+        6,
+        Pose::at([30., 0., 10.]),
+        closed_bunker(),
+        Some(PACK_LAYER),
+    );
+    let structures = snapshot(&sequences);
+    let world = with(&floor, &structures);
+    // Before the room is analysed the shell holds the body.
+    assert!(!structures.enclosed([30., 0., 10.]));
+    assert!(analyse_interiors(&structures) >= 1);
+    assert!(structures.enclosed([30., 0., 10.]));
+    assert!(!structures.enclosed([24., 0., 10.]));
+    // Inside: walks out west through the wall.
+    let out = walk(&world, [30., 0., 10.], [-4.5, 0., 0.]);
+    assert!(out[0] < 25., "{out:?}");
+    // Outside: the wall still stops a body walking in.
+    let blocked = walk(&world, [24., 0., 10.], [4.5, 0., 0.]);
+    assert!(blocked[0] < 27. - 0.3, "{blocked:?}");
+    // Routes from the room use the static mesh; routes into it end outside.
+    crate::navmesh_structure_gates::install_now(&mesh, Some(&structures)).unwrap();
+    let leave = mesh.route([30., 0., 10.], [5., 0., 10.], 0.5).unwrap();
+    assert_eq!(leave.status, Status::Complete, "{leave:?}");
+    let enter = mesh.route([5., 0., 10.], [30., 0., 10.], 0.5).unwrap();
+    assert_eq!(enter.status, Status::Partial, "{enter:?}");
+}
+
+#[test]
+fn unchanged_structures_keep_their_polygon_gates() {
+    let floor = floor_world();
+    let mesh = floor_mesh(&floor);
+    let mut sequences = SequenceCollisionState::default();
+    sequences.synthetic_structure_mesh(3, Pose::at([10., 0., 10.]), gate(0.), Some(PACK_LAYER));
+    sequences.synthetic_structure_mesh(5, Pose::at([30., 0., 10.]), bunker(), Some(PACK_LAYER));
+    let (gated, reused) =
+        crate::navmesh_structure_gates::install_now(&mesh, Some(&snapshot(&sequences)))
+            .unwrap()
+            .unwrap();
+    assert!(gated > 0);
+    assert_eq!(reused, 0);
+    // Destroying the gate re-gates only the polygons it touched.
+    sequences.synthetic_remove_structure(3);
+    let (after, reused) =
+        crate::navmesh_structure_gates::install_now(&mesh, Some(&snapshot(&sequences)))
+            .unwrap()
+            .unwrap();
+    assert!(
+        after < gated && reused > 0 && reused <= after,
+        "{gated} {after} {reused}"
+    );
 }
