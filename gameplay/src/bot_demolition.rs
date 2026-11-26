@@ -151,6 +151,14 @@ pub(crate) struct Hint {
     pub toggles_abilities: bool,
 }
 impl Hint {
+    /// Whether destroying the structure changes only its own geometry.
+    pub(crate) fn changes_only_geometry(&self) -> bool {
+        self.closes_spawn_of.is_none()
+            && self.closes_vehicle_spawn_of.is_none()
+            && self.opens_spawn_of.is_none()
+            && !self.toggles_abilities
+    }
+
     /// The best value class that applies when `attacker` destroys a
     /// structure `owner` owns. `in_use` says whether a current life of the
     /// owners started at the spawn it closes.

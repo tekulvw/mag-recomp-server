@@ -65,6 +65,7 @@ mod bot_spawn_selection;
 #[cfg(test)]
 mod bot_squad_packing_tests;
 mod bot_stat_publication;
+mod bot_structure_blocking;
 #[cfg(test)]
 mod bot_teammate_healing_tests;
 mod bot_traffic_costs;

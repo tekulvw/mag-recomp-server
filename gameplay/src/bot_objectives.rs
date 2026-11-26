@@ -2481,6 +2481,7 @@ impl<W: Write> Engine<W> {
         let mut duties = self.plan_armed_duties(&policy.armed, now, &mut receipts);
         // Attackers inside an armed charge's blast leave it (bot_blast).
         let zones = self.armed_blast_zones();
+        let blockers = self.structure_blockers();
         self.plan_blast_evacuations(&zones, &mut duties, now, &mut receipts);
         let centers: BTreeMap<u16, [f64; 3]> = if duties.is_empty() {
             BTreeMap::new()
@@ -3277,19 +3278,44 @@ impl<W: Write> Engine<W> {
                 query_us = query_started.elapsed().as_micros() as u64;
                 result?;
                 // An attacker does not walk into a charge's blast it is not
-                // already in (bot_blast).
+                // already in (bot_blast), and no bot walks through a standing
+                // gate or barricade (bot_structure_blocking).
                 let team = bot.target.squad.team();
-                if let Some(points) = bot.target.registry_route_points() {
+                let walk = bot.target.registry_route_points().map(|points| {
                     let mut walk = vec![point(bot.target.runtime.unwrap().position)];
                     walk.extend_from_slice(points);
-                    if zones
-                        .values()
-                        .any(|zone| zone.attackers == team && zone.entered_by(&walk))
+                    walk
+                });
+                let refused = match &walk {
+                    Some(walk)
+                        if zones
+                            .values()
+                            .any(|zone| zone.attackers == team && zone.entered_by(walk)) =>
                     {
-                        bot.target.pending_move = None;
-                        bot.target.runtime.as_mut().unwrap().phase = BotPhase::Complete;
-                        return Err("bot_route_blast_zone");
+                        Some("bot_route_blast_zone")
                     }
+                    Some(walk)
+                        if !blockers.is_empty()
+                            && !matches!(
+                                crate::bot_structure_blocking::route_structure_block(
+                                    self.domination_gameplay
+                                        .as_ref()
+                                        .map(|g| &g.state.collisions),
+                                    walk,
+                                    &blockers,
+                                ),
+                                Ok(None)
+                            ) =>
+                    {
+                        Some("bot_route_structure_blocked")
+                    }
+                    _ => None,
+                };
+                let bot = self.bot_registry.bots.get_mut(&id).unwrap();
+                if let Some(reason) = refused {
+                    bot.target.pending_move = None;
+                    bot.target.runtime.as_mut().unwrap().phase = BotPhase::Complete;
+                    return Err(reason);
                 }
                 let segment_goal = bot.target.registry_move_destination().unwrap_or(goal);
                 let t = &mut bot.task;

@@ -387,6 +387,11 @@ impl Runtime {
         self.setup.category_zero_indices()
     }
 
+    #[cfg(test)]
+    pub(crate) fn clear_structure_links_for_test(&mut self) {
+        Arc::make_mut(&mut self.setup).fsp.clear_links_for_test();
+    }
+
     /// What completing each structural objective changes, for bot planning.
     pub(crate) fn structure_hints(&self) -> BTreeMap<u16, crate::bot_demolition::Hint> {
         use crate::domination_fsp::{FspType, SquadRouting};

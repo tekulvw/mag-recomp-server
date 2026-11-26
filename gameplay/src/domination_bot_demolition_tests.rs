@@ -346,3 +346,102 @@ fn the_planter_leaves_the_blast_once_its_charge_is_armed() {
     );
     assert_eq!(evacuations(&engine)[&bot].objective, 0);
 }
+
+fn block(
+    engine: &Engine<Vec<u8>>,
+    points: &[[f64; 3]],
+    blockers: &[crate::bot_structure_blocking::Blocker],
+) -> Result<Option<u16>, &'static str> {
+    crate::bot_structure_blocking::route_structure_block(
+        engine
+            .domination_gameplay
+            .as_ref()
+            .map(|g| &g.state.collisions),
+        points,
+        blockers,
+    )
+}
+
+#[test]
+fn a_standing_gate_blocks_routes_until_destroyed_and_again_once_repaired() {
+    let (mut engine, _) = demolition_fixture();
+    // Structure 0 only changes its own geometry: a gate across x = 10.
+    engine
+        .domination_gameplay
+        .as_mut()
+        .unwrap()
+        .runtime
+        .clear_structure_links_for_test();
+    let gameplay = engine.domination_gameplay.as_mut().unwrap();
+    gameplay
+        .state
+        .collisions
+        .synthetic_wall(0, [10., 0., 0.], 6.);
+    let through = [[0., 0., 0.], [20., 0., 0.]];
+    let blockers = engine.structure_blockers();
+    assert_eq!(blockers.len(), 1);
+    assert_eq!(block(&engine, &through, &blockers), Ok(Some(0)));
+    assert_eq!(
+        block(
+            &engine,
+            &[[0., 0., 0.], [0., 0., 9.], [20., 0., 9.]],
+            &blockers
+        ),
+        Ok(None),
+        "the way around stays open"
+    );
+    // Destroyed: no longer a blocker, and its sequence places only debris.
+    let mut catalog = engine.objective_catalog.clone().unwrap();
+    catalog.objects[0].initial_state = ObjectiveState::Completed as u8;
+    engine.objective_world = Some(ObjectiveWorld::new(&catalog));
+    let gameplay = engine.domination_gameplay.as_mut().unwrap();
+    gameplay.state.collisions.synthetic_clear(0);
+    assert!(engine.structure_blockers().is_empty());
+    assert_eq!(block(&engine, &through, &[]), Ok(None));
+    // Repaired: the rebuilt gate blocks again.
+    catalog.objects[0].initial_state = ObjectiveState::Repaired as u8;
+    engine.objective_world = Some(ObjectiveWorld::new(&catalog));
+    let gameplay = engine.domination_gameplay.as_mut().unwrap();
+    gameplay
+        .state
+        .collisions
+        .synthetic_wall(0, [10., 0., 0.], 6.);
+    let blockers = engine.structure_blockers();
+    assert_eq!(block(&engine, &through, &blockers), Ok(Some(0)));
+}
+
+#[test]
+fn the_structure_blocking_switch_turns_blockers_off() {
+    let (mut engine, _) = demolition_fixture();
+    engine
+        .domination_gameplay
+        .as_mut()
+        .unwrap()
+        .runtime
+        .clear_structure_links_for_test();
+    let gameplay = engine.domination_gameplay.as_mut().unwrap();
+    gameplay
+        .state
+        .collisions
+        .synthetic_wall(0, [10., 0., 0.], 6.);
+    assert_eq!(engine.structure_blockers().len(), 1);
+    engine
+        .bot_registry
+        .config
+        .as_mut()
+        .unwrap()
+        .structure_blocking
+        .enabled = false;
+    assert!(engine.structure_blockers().is_empty());
+}
+
+#[test]
+fn a_spawn_structure_is_not_a_route_blocker() {
+    let (mut engine, _) = demolition_fixture();
+    let gameplay = engine.domination_gameplay.as_mut().unwrap();
+    gameplay
+        .state
+        .collisions
+        .synthetic_wall(0, [10., 0., 0.], 6.);
+    assert!(engine.structure_blockers().is_empty());
+}

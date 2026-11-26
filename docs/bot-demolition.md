@@ -64,6 +64,27 @@ authored effects: the linked forward spawn closes and its squads fall back to
 their category-zero point, abilities switch, and sequences swap geometry. A
 repair reopens the spawn.
 
+## Standing gates and barricades
+
+The navmesh is baked from static world collision, so it knows nothing of the
+geometry a structure's sequences place, such as a gate's leaves or a
+barricade's blocks. Bots of both sides now treat that geometry as solid while
+the structure stands:
+
+- A structure whose destruction changes only its own geometry (class `other`)
+  blocks routes in every state except destroyed (`Completed`) and being
+  repaired from destroyed (`Repairing`). A repaired structure blocks again.
+- A route is sampled every 0.5 m with a standing body box lifted above step
+  height. If the box overlaps the structure's currently placed geometry, the
+  route is refused (`bot_route_structure_blocked`) and the bot plans again
+  later. Low debris and bridge decks under the body do not count. A route that
+  starts inside the geometry may leave it.
+- Emplacements whose sequences also place props at their triggers (field
+  hospitals, anti-air, artillery, sensors, motor pools) are not blockers.
+
+Only Domination supplies placed geometry so far. The population file's
+`structure_blocking` object turns it off with `{"enabled": false}`.
+
 ## Configuration
 
 The population file's `demolition` object; omitted fields use the defaults:
@@ -93,8 +114,8 @@ Teams also need `objective_policy.interactions_enabled`.
 ## Not implemented
 
 - Attacking structures with weapons. Bots only plant charges.
-- Using the structure's own geometry when it changes. Bot movement and the
-  navmesh use static collision only, so a standing gate does not block bots and
-  a destroyed one opens nothing for them.
+- Routing around a standing gate. A blocked route is refused, not replanned
+  around the gate (see below), and the bot body itself still moves through
+  placed geometry when a route was planned before a gate was repaired.
 - Acquisition and Sabotage values. Their structures are all `other`, and the
   default `game_types` leaves those modes off.

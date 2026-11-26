@@ -1976,7 +1976,70 @@ impl SequenceCollisionState {
     }
 }
 
+impl SequenceCollisionState {
+    /// Whether a world box overlaps the geometry one objective's current
+    /// sequence placed. Surfaces whose world bounds miss the box are skipped.
+    pub(crate) fn objective_box_hit(
+        &self,
+        objective: u16,
+        centre: [f64; 3],
+        half_extents: [f64; 3],
+        budget: &mut usize,
+    ) -> Result<bool, &'static str> {
+        for ((owner, _), rows) in self.active.range((objective, 0)..=(objective, u8::MAX)) {
+            debug_assert_eq!(*owner, objective);
+            for surface in rows {
+                let Some(bounds) = surface.world_bounds() else {
+                    continue;
+                };
+                if (0..3).any(|i| {
+                    bounds.max[i] < centre[i] - half_extents[i]
+                        || bounds.min[i] > centre[i] + half_extents[i]
+                }) {
+                    continue;
+                }
+                if surface
+                    .mesh
+                    .overlaps_placed_aabb(surface.pose, centre, half_extents, budget)
+                    .map_err(|_| "objective_collision_mesh_box_failed")?
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// The world bounds of one objective's placed geometry, if it has any.
+    pub(crate) fn objective_bounds(
+        &self,
+        objective: u16,
+    ) -> Option<crate::actor_collision::Bounds> {
+        self.active
+            .range((objective, 0)..=(objective, u8::MAX))
+            .flat_map(|(_, rows)| rows)
+            .filter_map(SequenceSurface::world_bounds)
+            .reduce(|a, b| a.union(b))
+    }
+}
+
 impl SequenceSurface {
+    /// The surface's local bounds carried to world space by its pose.
+    fn world_bounds(&self) -> Option<crate::actor_collision::Bounds> {
+        let local = self.mesh.stats().bounds?;
+        let center = std::array::from_fn(|i| (local.min[i] + local.max[i]) * 0.5);
+        let half: [f64; 3] = std::array::from_fn(|i| (local.max[i] - local.min[i]) * 0.5);
+        let offset = crate::dynamic_collision::geometry::rotate(self.pose, center);
+        let extent: [f64; 3] = self
+            .pose
+            .rotation
+            .map(|r| (0..3).map(|i| r[i].abs() * half[i]).sum());
+        Some(crate::actor_collision::Bounds {
+            min: std::array::from_fn(|i| self.pose.translation[i] + offset[i] - extent[i]),
+            max: std::array::from_fn(|i| self.pose.translation[i] + offset[i] + extent[i]),
+        })
+    }
+
     pub(crate) fn projectile_obstacles<'a>(
         &'a self,
         placement: &'a str,
@@ -2569,6 +2632,38 @@ impl SequenceCollisionState {
                 pose: Pose::at(centre),
                 mesh,
             });
+    }
+
+    /// A vertical wall across the z axis, `width` wide and 4 m tall, placed
+    /// by `objective`'s sequence at `centre` (its foot).
+    pub(crate) fn synthetic_wall(&mut self, objective: u16, centre: [f64; 3], width: f64) {
+        let w = width * 0.5;
+        let payload = json!({
+            "format":"mag_collision_world", "schema_version":1, "coordinate_space":"world",
+            "metadata":{"map_name":"synthetic","build":"synthetic","coverage":"provisional",
+                "provenance":["synthetic"],"unknowns":[]},
+            "instances":[{"id":"gate-leaf", "material_index":1,
+                "vertices_xyz":[[0.,0.,-w],[0.,0.,w],[0.,4.,w],[0.,4.,-w]],
+                "triangles":[[0,1,2],[0,2,3]]}]
+        });
+        let mesh = collision::CollisionWorld::from_bytes(
+            &serde_json::to_vec(&payload).unwrap(),
+            collision::CollisionLimits::default(),
+        )
+        .unwrap();
+        self.active
+            .entry((objective, 0))
+            .or_default()
+            .push(SequenceSurface {
+                projectile: None,
+                pose: Pose::at(centre),
+                mesh,
+            });
+    }
+
+    /// Remove everything `objective`'s sequence placed, as a new sequence does.
+    pub(crate) fn synthetic_clear(&mut self, objective: u16) {
+        self.active.retain(|(owner, _), _| *owner != objective);
     }
 
     /// A helicopter hull overlay at a fixed pose, for radial dose routing.

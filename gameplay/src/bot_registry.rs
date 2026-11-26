@@ -44,6 +44,8 @@ pub struct BotPopulation {
     #[serde(default)]
     pub blast: crate::bot_blast::Policy,
     #[serde(default)]
+    pub structure_blocking: crate::bot_structure_blocking::Policy,
+    #[serde(default)]
     pub regional_collision: Option<RegionalCollision>,
     #[serde(default)]
     pub regional_team: Option<u8>,

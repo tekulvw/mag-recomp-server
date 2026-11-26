@@ -217,6 +217,10 @@ impl Bindings {
             ))
         })
     }
+    #[cfg(test)]
+    pub(crate) fn clear_links_for_test(&mut self) {
+        self.links.clear();
+    }
     pub(crate) fn category_zero_indices(&self) -> Result<[u16; 32], &'static str> {
         let mut result = [0; 32];
         for (index, squad) in self.squads.iter().enumerate() {
