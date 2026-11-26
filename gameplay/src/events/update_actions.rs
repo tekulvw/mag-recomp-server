@@ -574,6 +574,11 @@ pub(super) fn plan_respawn<W: Write>(
         .as_ref()
         .alpha(respawn_point(ctx.engine, active).ok_or("respawn_point_unavailable")?)
         .unwrap();
+    // A stored selection the squad can no longer use is dropped once a life
+    // starts elsewhere; the player then follows the squad's shared spawn.
+    plan.session.clear_selected_spawn = active
+        .selected_spawn
+        .is_some_and(|s| active.squad_catalog.alpha(s.spawn_point_index).is_none());
     // Retail never refuses or holds a life whose APC or hospital cannot seat
     // it: the life starts on foot at the squad's alternate insertion in the
     // same wave, else on foot at the vehicle point itself. (Helicopter

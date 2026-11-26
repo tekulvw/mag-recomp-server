@@ -5,6 +5,9 @@ use super::*;
 #[path = "sabotage_defender_tests.rs"]
 mod sabotage_defender_tests;
 #[cfg(test)]
+#[path = "sticky_respawn_tests.rs"]
+mod sticky_respawn_tests;
+#[cfg(test)]
 #[path = "spawn_progression_tests.rs"]
 pub(crate) mod tests;
 #[cfg(test)]

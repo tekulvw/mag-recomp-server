@@ -283,9 +283,10 @@ pub(super) fn character_spawn_selection<W: Write>(
     let now = ctx.now;
     let next_sequence = ctx.next_sequence;
     let history_available = ctx.history_available;
+    // The choice is stored for the next life, so a player may change it at
+    // any time: alive, downed or dead. It applies when a life next starts.
     let accepted = active.entered_game
         && active.ready_for_updates
-        && active.life.next_generation().is_some()
         && history_available
         && active
             .squad_catalog
@@ -336,6 +337,31 @@ pub(super) fn cancel_respawn<W: Write>(
         "alive":active.life.is_alive(),"ready":active.ready_for_updates}))
 }
 
+/// The team's running wave clock, or the one its first queued character
+/// starts: the first wave after the authored initial delay, then every
+/// (strategics-adjusted) period.
+pub(super) fn team_wave_clock<W: Write>(
+    engine: &Engine<W>,
+    team: u8,
+    now: Duration,
+) -> Result<TeamWaveClock, &'static str> {
+    if let Some(clock) = engine.team_waves[usize::from(team)] {
+        return Ok(clock);
+    }
+    let policy = engine.match_profile();
+    let period = Duration::from_millis(u64::from(
+        engine.strategic_spawn_interval(team, policy.spawn_wave_ms[usize::from(team)])?,
+    ));
+    Ok(TeamWaveClock {
+        first_deadline: now
+            .checked_add(Duration::from_millis(u64::from(
+                policy.initial_spawn_delay_ms[usize::from(team)],
+            )))
+            .ok_or("wave_clock_overflow")?,
+        period,
+    })
+}
+
 pub(super) fn confirm_respawn<W: Write>(
     ctx: &PlanningContext<'_, W>,
     plan: &mut EventPlan,
@@ -365,22 +391,7 @@ pub(super) fn confirm_respawn<W: Write>(
             plan.gameplay_denial = Some("replication_history_limit");
         } else {
             let team = active.team();
-            let policy = ctx.engine.match_profile();
-            let period = Duration::from_millis(u64::from(
-                ctx.engine
-                    .strategic_spawn_interval(team, policy.spawn_wave_ms[usize::from(team)])?,
-            ));
-            let clock = match ctx.engine.team_waves[usize::from(team)] {
-                Some(clock) => clock,
-                None => TeamWaveClock {
-                    first_deadline: now
-                        .checked_add(Duration::from_millis(u64::from(
-                            policy.initial_spawn_delay_ms[usize::from(team)],
-                        )))
-                        .ok_or("wave_clock_overflow")?,
-                    period,
-                },
-            };
+            let clock = team_wave_clock(ctx.engine, team, now)?;
             let deadline = clock.next_after(now)?;
             let packet = replication::TeamSpawnDeadline {
                 sequence: next_sequence,

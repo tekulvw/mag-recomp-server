@@ -1332,6 +1332,10 @@ struct Active {
     squad_spawn: u16,
     squad_catalog: std::sync::Arc<spawn_catalog::SpawnCatalog>,
     pending_spawn_deadline: Option<Duration>,
+    /// The player left the respawn queue (CancelRespawn) after this death.
+    /// A dead character otherwise rejoins the queue for the next team wave
+    /// on its own; only a new confirmation or the next life clears this.
+    respawn_held: bool,
     published_wave_deadline: Option<Duration>,
     entered_game: bool,
     owner_fields: player_tracking::ClientCharacterFields,

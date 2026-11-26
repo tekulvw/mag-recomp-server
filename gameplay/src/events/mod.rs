@@ -131,6 +131,11 @@ struct SessionChanges {
     new_team_wave: Option<TeamWaveClock>,
     published_wave_deadline: Option<Duration>,
     cancel_pending_spawn: bool,
+    /// The dead character rejoined the respawn queue without a new
+    /// confirmation (see `plan_update_reply`).
+    automatic_respawn_queue: bool,
+    /// The stored personal selection can no longer be used by the squad.
+    clear_selected_spawn: bool,
     new_mounted_seat: Option<Option<u8>>,
     new_mounted_bunker: Option<u16>,
     new_ground_seat: Option<Option<ground_seats::PassengerSeat>>,
@@ -1195,9 +1200,16 @@ impl<W: Write> Engine<W> {
             // Commit dequeue only after the reply/evidence record was flushed.
             // Keep team timing, selection, loadout and history unchanged.
             active.pending_spawn_deadline = None;
+            // Stay out of the queue until the player confirms again.
+            active.respawn_held = true;
         }
         if let Some(deadline) = plan.session.new_spawn_deadline {
             active.pending_spawn_deadline = Some(deadline);
+            active.respawn_held = false;
+        }
+        if plan.replication.spawn_delta.is_some() {
+            // Each new death rejoins the queue on its own.
+            active.respawn_held = false;
         }
         if let Some(deadline) = plan.session.published_wave_deadline {
             active.published_wave_deadline = Some(deadline);
@@ -1320,6 +1332,10 @@ impl<W: Write> Engine<W> {
         }
         if plan.session.selected_spawn.is_some() {
             active.selected_spawn = plan.session.selected_spawn;
+        }
+        if plan.session.clear_selected_spawn {
+            // The squad lost the stored point; follow its shared spawn again.
+            active.selected_spawn = None;
         }
         active.entered_game |= plan.session.entered_game;
         if plan.session.server_position.is_some()
