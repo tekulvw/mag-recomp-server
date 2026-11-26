@@ -86,6 +86,24 @@ namespace Server.Medius
                 slot.WrittenOff || slot.Host.World?.Destroyed != false ? null : slot.Host.World.WorldId, state.Ready && !slot.Faulted, state.Draining || slot.Faulted, state.LiveCount, state.PendingQueueCount);
         }).ToArray());
 
+        /// <summary>Each configured world for the server status: admission state, running match and
+        /// counts. A worker fault (a failed slot, a written-off incarnation or an identity fault) is
+        /// reported as faulted rather than draining.</summary>
+        public IReadOnlyList<MagWorldStatus> StatusWorlds() => Array.AsReadOnly(_slots.Select(slot =>
+            MagServerStatus.Describe(slot.Config.WorkerId, slot.Faulted || slot.WrittenOff || slot.Bridge.HasWorkerIdentityFault,
+                slot.Host.GetPlacement())).ToArray());
+
+        /// <summary>Humans waiting in the global queue for a world, by requested game type (0 to 2).</summary>
+        public int[] QueuedByGameType()
+        {
+            var counts = new int[3];
+            QueueEntry[] waiting;
+            lock (_gate) waiting = _humans.Snapshot().Select(e => e.Value).Where(e => e.Assigned == null && e.Alive).ToArray();
+            foreach (var entry in waiting)
+                if (entry.Request.Value < (uint)counts.Length) counts[entry.Request.Value] += entry.Party?.Length ?? 1;
+            return counts;
+        }
+
         /// <summary>Initialize worker worlds without opening the shared DME listener.</summary>
         public async Task InitializeAsync()
         {
