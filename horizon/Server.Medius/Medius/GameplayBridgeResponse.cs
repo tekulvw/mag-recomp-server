@@ -58,6 +58,8 @@ namespace Server.Medius {
   public IReadOnlyList<string> ReservationIds {get;}
   internal GameplayMatchTerminal(uint world,string match,string reason,IReadOnlyList<string> reservations) { WorldId=world;MatchId=match;Reason=reason;ReservationIds=reservations; }
  }
+ /// <summary>An applied admin_kill: <c>killed</c>, <c>gave_up</c> or <c>refused</c> (with the planner's denial code).</summary>
+ public sealed record GameplayAdminKillOutcome(string Result, string Reason);
  /// <summary>A served world frame's place in its worker process's numbered stream.</summary>
  public sealed record GameplayWorldStreamPosition(string Epoch, ulong Sequence);
  public sealed record GameplayPartyReservation(string Status, string FormationId, string ProfileId, string CohortId,
@@ -104,6 +106,11 @@ namespace Server.Medius {
   public const string WorkerDrainCapability="worker_drain_v1";
   /// <summary>A world frame from a worker that is shutting down and admits no one (worker_drain_v1).</summary>
   public bool WorkerDraining {get; internal set;}
+  /// <summary>The worker runs an operator kill as the player's own KillSelf (admin_kill_v1).</summary>
+  public bool SupportsAdminKill => Capabilities.Contains(AdminKillCapability,StringComparer.Ordinal);
+  public const string AdminKillCapability="admin_kill_v1";
+  /// <summary>What an applied admin_kill did, only in its own reply.</summary>
+  public GameplayAdminKillOutcome AdminKill {get; internal set;}
   internal GameplayBridgeResponse(bool ok,string error,IReadOnlyList<GameplayBridgeMessage> messages,GameplayBridgeFailure failure=GameplayBridgeFailure.None,IReadOnlyList<GameplayReward> rewards=null,GameplayMatchTerminal matchTerminal=null,IReadOnlyList<GameplayLoadoutSelection> loadoutSelections=null,IReadOnlyList<string> capabilities=null,IReadOnlyList<MagMatchProfile> matchProfiles=null,GameplaySelectedMatch selectedMatch=null,GameplayWorkerIdentity workerIdentity=null,GameplayPartyReservation partyReservation=null){PartyReservation=partyReservation;MatchProfiles=matchProfiles??Array.Empty<MagMatchProfile>();SelectedMatch=selectedMatch;WorkerIdentity=workerIdentity;LoadoutSelections=loadoutSelections??Array.Empty<GameplayLoadoutSelection>();Capabilities=capabilities??Array.Empty<string>();Ok=ok;Error=error;Messages=messages;Failure=failure;Rewards=rewards??Array.Empty<GameplayReward>();MatchTerminal=matchTerminal;}
   internal static GameplayBridgeResponse Failed(GameplayBridgeFailure failure,long elapsed)=>new GameplayBridgeResponse(false,null,Array.Empty<GameplayBridgeMessage>(),failure){ElapsedMilliseconds=elapsed};
  }
@@ -139,6 +146,23 @@ namespace Server.Medius {
    leadership=new GameplayLeadershipResult(role,new GameplayLeadershipBaseline(level,nominations,recency));
    return leadership.IsValid;
   }
+  static bool TryParseAdminKill(JsonElement value,out GameplayAdminKillOutcome outcome) {
+   outcome=null;
+   bool hasReason=value.ValueKind==JsonValueKind.Object&&value.TryGetProperty("reason",out _);
+   if(!ExactFields(value,hasReason?new[]{"result","reason"}:new[]{"result"})||value.GetProperty("result").ValueKind!=JsonValueKind.String)return false;
+   string result=value.GetProperty("result").GetString();
+   string reason=null;
+   if(hasReason) {
+    var field=value.GetProperty("reason");
+    if(field.ValueKind!=JsonValueKind.String)return false;
+    reason=field.GetString();
+    if(reason.Length==0||reason.Length>64||!reason.All(c=>char.IsAsciiLetterOrDigit(c)||c=='_'||c=='-'))return false;
+   }
+   // Only a refusal names a reason.
+   if(result is not ("killed" or "gave_up" or "refused")||(result=="refused")!=(reason!=null))return false;
+   outcome=new GameplayAdminKillOutcome(result,reason);
+   return true;
+  }
   public static bool TryParse(byte[] line,string requestId,bool eventReply,out GameplayBridgeResponse response)=>
    TryParse(line,requestId,eventReply,GameplayReplyLimits.Legacy,out response);
   public static bool TryParse(byte[] line,string requestId,bool eventReply,GameplayReplyLimits limits,out GameplayBridgeResponse response) {
@@ -156,7 +180,8 @@ namespace Server.Medius {
     bool hasWorldStream=root.TryGetProperty("world_stream",out var worldStream);
     bool hasVoiceGroups=root.TryGetProperty("voice_groups",out var voiceGroups);
     bool hasDraining=root.TryGetProperty("worker_draining",out var draining);
-    var fields=new List<string>{"v","request_id","ok","error","messages"};if(hasParty)fields.Add("party_reservation");if(hasProfiles)fields.Add("match_profiles");if(hasSelectedMatch)fields.Add("selected_match");if(hasSelections)fields.Add("loadout_selections");if(hasCapabilities)fields.Add("capabilities");if(hasRewards)fields.Add("rewards");if(hasTerminal)fields.Add("match_terminal");if(hasWorkerIdentity)fields.Add("worker_identity");if(hasWorldStream)fields.Add("world_stream");if(hasVoiceGroups)fields.Add("voice_groups");if(hasDraining)fields.Add("worker_draining");
+    bool hasAdminKill=root.TryGetProperty("admin_kill",out var adminKill);
+    var fields=new List<string>{"v","request_id","ok","error","messages"};if(hasParty)fields.Add("party_reservation");if(hasProfiles)fields.Add("match_profiles");if(hasSelectedMatch)fields.Add("selected_match");if(hasSelections)fields.Add("loadout_selections");if(hasCapabilities)fields.Add("capabilities");if(hasRewards)fields.Add("rewards");if(hasTerminal)fields.Add("match_terminal");if(hasWorkerIdentity)fields.Add("worker_identity");if(hasWorldStream)fields.Add("world_stream");if(hasVoiceGroups)fields.Add("voice_groups");if(hasDraining)fields.Add("worker_draining");if(hasAdminKill)fields.Add("admin_kill");
     if(!ExactFields(root,fields.ToArray())||!root.GetProperty("v").TryGetInt32(out var version)||version!=2||
      root.GetProperty("request_id").ValueKind!=JsonValueKind.String||root.GetProperty("request_id").GetString()!=requestId)return false;
     GameplayWorkerIdentity parsedIdentity=null;
@@ -285,7 +310,9 @@ namespace Server.Medius {
     if(hasVoiceGroups&&(!success||!GameplayVoiceGroupsCodec.TryParse(voiceGroups,out parsedVoiceGroups)))return false;
     // Only ever sent as true, and only on a successful frame.
     if(hasDraining&&(!success||draining.ValueKind!=JsonValueKind.True))return false;
-    response=new GameplayBridgeResponse(success,error.ValueKind==JsonValueKind.String?error.GetString():null,parsed.AsReadOnly(),rewards:parsedRewards.AsReadOnly(),matchTerminal:parsedTerminal,loadoutSelections:parsedSelections.AsReadOnly(),capabilities:parsedCapabilities.AsReadOnly(),matchProfiles:parsedProfiles,selectedMatch:parsedMatch,workerIdentity:parsedIdentity,partyReservation:parsedParty){WorldStream=parsedPosition,VoiceGroups=parsedVoiceGroups,WorkerDraining=hasDraining};return true;
+    GameplayAdminKillOutcome parsedAdminKill=null;
+    if(hasAdminKill&&(!success||!eventReply||!TryParseAdminKill(adminKill,out parsedAdminKill)))return false;
+    response=new GameplayBridgeResponse(success,error.ValueKind==JsonValueKind.String?error.GetString():null,parsed.AsReadOnly(),rewards:parsedRewards.AsReadOnly(),matchTerminal:parsedTerminal,loadoutSelections:parsedSelections.AsReadOnly(),capabilities:parsedCapabilities.AsReadOnly(),matchProfiles:parsedProfiles,selectedMatch:parsedMatch,workerIdentity:parsedIdentity,partyReservation:parsedParty){WorldStream=parsedPosition,VoiceGroups=parsedVoiceGroups,WorkerDraining=hasDraining,AdminKill=parsedAdminKill};return true;
    }catch(Exception e)when(e is JsonException||e is InvalidOperationException||e is FormatException||e is ArgumentException||e is KeyNotFoundException){return false;}
   }
  }

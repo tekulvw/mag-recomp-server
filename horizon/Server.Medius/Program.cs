@@ -353,6 +353,11 @@ namespace Server.Medius
         /// <summary>Internal admin API (docs/admin-cli.md); off unless both MAG_ADMIN_API_* variables are set.</summary>
         public static MagAdminApi AdminApi { get; private set; }
 
+        /// <summary>The hosts an operator kill searches: every configured world, or the one local world.</summary>
+        static IReadOnlyList<MagAdminGameplayHost> AdminGameplayHosts() =>
+            WorldRegistry?.AdminGameplayHosts() ??
+            (LocalDme != null ? new[] { new MagAdminGameplayHost("gameplay", LocalDme) } : Array.Empty<MagAdminGameplayHost>());
+
         static void StartAdminApi()
         {
             var settings = MagAdminApiSettings.FromEnvironment();
@@ -362,7 +367,8 @@ namespace Server.Medius
             // The status reads the registry or local world when asked, so it follows their start.
             AdminApi = new MagAdminApi(settings.Listen, settings.Secret, CreateCharacterStore(),
                 MagAdminOperations.BackupDirectory(storePath), markers, () => DateTime.UtcNow, message => Logger.Info(message),
-                DmePortBudget, now => MagServerStatus.Capture(WorldRegistry, LocalDme, DmePortBudget, markers, now));
+                DmePortBudget, now => MagServerStatus.Capture(WorldRegistry, LocalDme, DmePortBudget, markers, now),
+                AdminGameplayHosts);
             AdminApi.Start();
             Logger.Info($"Admin API listening on {AdminApi.LocalEndPoint}.");
         }

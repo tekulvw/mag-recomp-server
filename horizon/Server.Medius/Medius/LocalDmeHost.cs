@@ -282,6 +282,7 @@ namespace Server.Medius
             _supportsVoiceGroups = hello.SupportsVoiceGroups;
             _supportsControlPlaneRebind = hello.SupportsControlPlaneRebind;
             _supportsWorkerDrain = hello.SupportsWorkerDrain;
+            _supportsAdminKill = hello.SupportsAdminKill;
             WorkerContract = MagWorkerContract.From(hello);
         }
         public static void RequireLoadoutSelectionCapability(GameplayBridgeResponse hello)
@@ -871,6 +872,11 @@ namespace Server.Medius
         {
             await foreach (var item in reader.ReadAllAsync())
             {
+                if (item.message is AdminKillWork adminKill)
+                {
+                    await RunAdminKillAsync(item.reservation, adminKill);
+                    continue;
+                }
                 lock (_gate)
                 {
                     if (!Current(item.reservation) || item.reservation.Invalidated) continue;

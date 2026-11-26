@@ -166,16 +166,19 @@ namespace Server.Medius
         private readonly Action<string> _log;
         private readonly MagDmePortBudget _portBudget;
         private readonly Func<DateTime, object> _status;
+        private readonly Func<IReadOnlyList<MagAdminGameplayHost>> _gameplayHosts;
         private readonly SemaphoreSlim _connections = new SemaphoreSlim(MaximumConnections);
         private readonly CancellationTokenSource _stop = new CancellationTokenSource();
         private TcpListener _listener;
         private Task _acceptLoop;
 
         public MagAdminApi(IPEndPoint listen, byte[] secret, LocalCharacterStore store, string backupDirectory, string markerDirectory,
-            Func<DateTime> clock, Action<string> log, MagDmePortBudget portBudget = null, Func<DateTime, object> status = null)
+            Func<DateTime> clock, Action<string> log, MagDmePortBudget portBudget = null, Func<DateTime, object> status = null,
+            Func<IReadOnlyList<MagAdminGameplayHost>> gameplayHosts = null)
         {
             _portBudget = portBudget ?? MagDmePortBudget.Unbounded();
             _status = status;
+            _gameplayHosts = gameplayHosts ?? (() => Array.Empty<MagAdminGameplayHost>());
             _listen = listen ?? throw new ArgumentNullException(nameof(listen));
             _authenticator = new MagAdminApiAuthenticator(secret);
             _store = store ?? throw new ArgumentNullException(nameof(store));
@@ -289,7 +292,8 @@ namespace Server.Medius
             string reason = response.Status switch
             {
                 200 => "OK", 400 => "Bad Request", 401 => "Unauthorized", 404 => "Not Found", 405 => "Method Not Allowed",
-                409 => "Conflict", 413 => "Content Too Large", 431 => "Request Header Fields Too Large", _ => "Internal Server Error"
+                409 => "Conflict", 413 => "Content Too Large", 431 => "Request Header Fields Too Large", 503 => "Service Unavailable",
+                _ => "Internal Server Error"
             };
             var head = new StringBuilder()
                 .Append("HTTP/1.1 ").Append(response.Status).Append(' ').Append(reason).Append("\r\n")
@@ -327,6 +331,8 @@ namespace Server.Medius
                         return request.Method != "GET" ? MethodNotAllowed("GET") : Character(account, now);
                     case ["", "admin", "v1", "characters", var account, "level"] when account.Length > 0:
                         return request.Method != "POST" ? MethodNotAllowed("POST") : SetLevel(account, request.Body, actor, now);
+                    case ["", "admin", "v1", "characters", var account, "kill"] when account.Length > 0:
+                        return request.Method != "POST" ? MethodNotAllowed("POST") : Kill(account, request.Body, actor, now);
                     case ["", "admin", "v1", "dme-ports"]:
                         return request.Method != "GET" ? MethodNotAllowed("GET") : DmePorts();
                     case ["", "admin", "v1", "status"] when _status != null:
@@ -371,6 +377,57 @@ namespace Server.Medius
             {
                 account = c.Account, level = c.Level, experience = c.Experience, skill_points = c.SkillPoints,
                 next_level_experience = c.NextLevelExperience, session = c.Session
+            });
+        }
+
+        private MagAdminApiResponse Kill(string account, byte[] body, string actor, DateTime now)
+        {
+            bool apply; string reason = null;
+            try
+            {
+                using var document = JsonDocument.Parse(body);
+                var root = document.RootElement;
+                if (root.ValueKind != JsonValueKind.Object || root.EnumerateObject().Any(p => p.Name != "apply" && p.Name != "reason") ||
+                    !root.TryGetProperty("apply", out var applyValue) || (applyValue.ValueKind != JsonValueKind.True && applyValue.ValueKind != JsonValueKind.False))
+                    return MagAdminApiResponse.Error(400, "invalid_request");
+                apply = applyValue.GetBoolean();
+                if (root.TryGetProperty("reason", out var reasonValue) && reasonValue.ValueKind != JsonValueKind.Null)
+                {
+                    if (reasonValue.ValueKind != JsonValueKind.String) return MagAdminApiResponse.Error(400, "invalid_request");
+                    reason = reasonValue.GetString();
+                }
+            }
+            catch (JsonException) { return MagAdminApiResponse.Error(400, "invalid_request"); }
+            if (!MagAdminKill.ValidReason(reason)) return MagAdminApiResponse.Error(400, "invalid_request");
+            var result = MagAdminKill.KillAsync(_store, _gameplayHosts(), account, apply, reason, actor, _markerDirectory, now)
+                .GetAwaiter().GetResult();
+            string who = JsonSerializer.Serialize(actor), why = JsonSerializer.Serialize(reason);
+            string where = $"worker={result.WorkerId ?? "none"} world={result.WorldId?.ToString() ?? "none"} player={result.PlayerId?.ToString() ?? "none"}";
+            switch (result.Refusal)
+            {
+                case MagAdminKillRefusal.None:
+                    break;
+                case MagAdminKillRefusal.NotFound:
+                    return MagAdminApiResponse.Error(404, "not_found");
+                case MagAdminKillRefusal.InvalidReason:
+                    return MagAdminApiResponse.Error(400, "invalid_request");
+                default:
+                    _log($"admin api: kill refused ({result.Code}) actor={who} account={account} {where} apply={apply} reason={why}" +
+                        (result.WorkerReason == null ? "" : $" worker_reason={result.WorkerReason}"));
+                    int status = result.Refusal is MagAdminKillRefusal.WorkerUnavailable or MagAdminKillRefusal.WorkerUnanswered ? 503 : 409;
+                    return MagAdminApiResponse.Json(status, new
+                    {
+                        error = result.Code, message = result.Message, worker_id = result.WorkerId, world_id = result.WorldId,
+                        player_id = result.PlayerId, worker_reason = result.WorkerReason
+                    });
+            }
+            _log(result.Applied
+                ? $"admin api: applied kill actor={who} account={account} {where} result={result.Result} reason={why}"
+                : $"admin api: dry-run kill actor={who} account={account} {where} reason={why}");
+            return MagAdminApiResponse.Json(200, new
+            {
+                applied = result.Applied, account = result.Account, worker_id = result.WorkerId, world_id = result.WorldId,
+                player_id = result.PlayerId, result = result.Result, reason
             });
         }
 
