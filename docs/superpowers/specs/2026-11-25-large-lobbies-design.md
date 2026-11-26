@@ -472,6 +472,7 @@ Each phase is one or more focused PRs from current main. Every PR keeps existing
 ### Phase 3: bot behaviour at scale (2 PRs)
 
 8. `fix(gameplay): scale bot perception, firearm and planning budgets with population`
+   - **Not needed (2026-11-25).** A private Domination 256 A/B with 4× perception, firearm and candidate budgets changed nothing: shots, deaths and holds were the same. The quality loss at 256 came from drop congestion (item 9).
    - Express the budgets per bot, with a global CPU guard.
    - Raise the `route_queries_per_tick` validation maximum.
    - Policy defaults keep today's values at 64.
@@ -481,6 +482,9 @@ Each phase is one or more focused PRs from current main. Every PR keeps existing
      objective tick's per-character checks. They grew 3.6× from Domination 128
      to 256.
 9. `fix(gameplay): relieve drop and spawn-exit congestion with eight-member squads`
+   - **Done in code as #337.** At 256, queued crowds froze on the approach with no staging spot. They could not be asked to yield, and the passage idled with 15-23 waiters. After `drop_crowd_grant_ms` (1500), an idle crowded passage now grants the waiter nearest its launch whose approach is clear.
+   - On Domination 256, shots per bot rose from 134-176 to 217-304, close to Domination 64's 328. Bots held at a drop for at least 60 s fell from 42 to 0-10 on Baku, 13 to 0 on Canal and 61 to 12-30 on Unalaska.
+   - The remaining Unalaska waits are mostly waiters blocked by others in the same queue, or waiters whose navigation was aborted. Two variants did not improve on #337: checking the approach from the current position, and granting through queued blockers.
    - Driven by the holding growth seen at 128.
    - May be mostly private data: more qualified exits and staggered first waves.
 
