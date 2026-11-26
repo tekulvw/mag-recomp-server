@@ -140,11 +140,16 @@ pub(crate) struct BotRegistry {
     pub(super) traffic_cursor: u16,
     pub(super) firearm_cursor: u16,
     pub(super) delay_book: crate::bot_traffic_costs::Book,
-    /// Placements per (spawn point, population source spawn); static geometry.
+    /// Sides whose bots have taken their first lives this match; a side
+    /// waits for its first wave only before then.
+    pub(super) sides_started: [bool; 2],
+    /// The structure gates the spawn caches below were routed through.
+    pub(super) spawn_route_gates: Option<(u64, u32)>,
+    /// Placements per (spawn point, population source spawn).
     pub(super) spawn_qualification:
         BTreeMap<(u16, u16), Result<crate::bot_spawn_selection::QualifiedPoint, &'static str>>,
     /// Defender placements and route lengths per (spawn point, lane objective,
-    /// whether the point is the bot's own population slot); static geometry.
+    /// whether the point is the bot's own population slot).
     pub(super) lane_spawns:
         BTreeMap<(u16, u16, bool), Result<crate::bot_spawn_selection::LaneSpawn, &'static str>>,
     /// Per squad: whether its population slots can route to any objective
@@ -1542,12 +1547,14 @@ impl<W: Write> Engine<W> {
         {
             return Ok(Vec::new());
         }
-        // Start the first population only after a real human reaches on foot.
+        // Start the first population once a real human reaches on foot, or
+        // once a side's first wave is due (see `bot_team_first_wave`).
         // Thereafter its world-owned lives/routes continue through human death.
         if self.bot_registry.bots.is_empty()
             && !self.peers.values().chain(self.active.iter()).any(|a| {
                 a.entered_game && a.ready_for_updates && a.life.is_alive() && !a.is_mounted()
             })
+            && !(0..2).any(|team| self.bot_team_first_wave(team).is_some_and(|due| due <= now))
         {
             return Ok(Vec::new());
         }
@@ -3166,6 +3173,35 @@ impl<W: Write> Engine<W> {
             })
             .map(|(&id, _)| id)
     }
+    /// The first spawn wave a side's bots wait for before their first
+    /// lives, or None when they need not wait. A side with a human confirmed
+    /// waits for its own first wave, unless one of its humans is already
+    /// alive. A side without a human or clock counts as confirmed when the
+    /// other side's first human did, so each side keeps its authored initial
+    /// spawn delay: retail defenders come in before attackers.
+    pub(crate) fn bot_team_first_wave(&self, team: u8) -> Option<Duration> {
+        let humans = |side: usize| {
+            self.peers
+                .values()
+                .chain(self.active.iter())
+                .filter(move |a| usize::from(a.team()) == side)
+        };
+        let team = usize::from(team);
+        if humans(team).any(|a| a.entered_game && a.life.is_alive()) {
+            return None;
+        }
+        if let Some(clock) = self.team_waves[team] {
+            return humans(team).next().map(|_| clock.first_deadline);
+        }
+        let other = 1 - team;
+        let delays = self.match_profile().initial_spawn_delay_ms;
+        humans(other).next()?;
+        self.team_waves[other]?
+            .first_deadline
+            .checked_sub(Duration::from_millis(u64::from(delays[other])))?
+            .checked_add(Duration::from_millis(u64::from(delays[team])))
+    }
+
     pub(crate) fn reconcile_bot_population(
         &mut self,
         now: Duration,
@@ -3272,6 +3308,15 @@ impl<W: Write> Engine<W> {
         if self.bot_registry.bots.len() < desired {
             self.cache_squad_routes(wall)?;
         }
+        // The first wave each side's bots wait for, as the humans set it;
+        // bots allocated below do not move it. A side that has started
+        // refills at any time.
+        let first_waves = [self.bot_team_first_wave(0), self.bot_team_first_wave(1)];
+        let sides_started = self.bot_registry.sides_started;
+        let started = |team: u8| {
+            sides_started[usize::from(team)]
+                || first_waves[usize::from(team)].is_none_or(|due| due <= now)
+        };
         while self.bot_registry.bots.len() < desired {
             let counts = |team| {
                 humans.iter().filter(|h| h.1 == team).count()
@@ -3282,9 +3327,25 @@ impl<W: Write> Engine<W> {
                         .filter(|b| b.target.squad.team() == team)
                         .count()
             };
-            let team = config
-                .regional_team
-                .unwrap_or_else(|| if counts(0) <= counts(1) { 0 } else { 1 });
+            // A side whose first wave is still ahead waits for it; the other
+            // side fills meanwhile, up to its half.
+            let team = match config.regional_team {
+                Some(team) => team,
+                None => {
+                    let preferred = if counts(0) <= counts(1) { 0 } else { 1 };
+                    let half = self.bot_registry.total.div_ceil(2);
+                    match [preferred, 1 - preferred]
+                        .into_iter()
+                        .find(|&team| started(team) && counts(team) < half)
+                    {
+                        Some(team) => team,
+                        None => break,
+                    }
+                }
+            };
+            if !started(team) {
+                break;
+            }
             let used: BTreeSet<_> = self.bot_registry.bots.values().map(|b| b.slot).collect();
             let catalog = self
                 .spawn_catalog
@@ -3442,12 +3503,16 @@ impl<W: Write> Engine<W> {
             // while preserving both initial bot admission and an existing phase.
             let new_clock = if self.team_waves[usize::from(team)].is_none() {
                 let policy = self.match_profile();
-                Some(TeamWaveClock {
-                    first_deadline: now
+                let first_deadline = match first_waves[usize::from(team)] {
+                    Some(due) => due,
+                    None => now
                         .checked_add(Duration::from_millis(u64::from(
                             policy.initial_spawn_delay_ms[usize::from(team)],
                         )))
                         .ok_or("wave_clock_overflow")?,
+                };
+                Some(TeamWaveClock {
+                    first_deadline,
                     period: Duration::from_millis(u64::from(self.strategic_spawn_interval(
                         team,
                         policy.spawn_wave_ms[usize::from(team)],
@@ -3469,6 +3534,7 @@ impl<W: Write> Engine<W> {
             if let Some(clock) = new_clock {
                 self.team_waves[usize::from(team)] = Some(clock);
             }
+            self.bot_registry.sides_started[usize::from(team)] = true;
             self.bot_registry.generations.insert(index, generation);
             self.bot_registry.bots.insert(
                 index,
@@ -3560,6 +3626,8 @@ impl<W: Write> Engine<W> {
         self.bot_registry.firearm_cursor = 0;
         self.bot_registry.spawn_qualification.clear();
         self.bot_registry.lane_spawns.clear();
+        self.bot_registry.spawn_route_gates = None;
+        self.bot_registry.sides_started = [false; 2];
     }
 }
 

@@ -29,9 +29,15 @@
 //!
 //! Defending squads (whose lane objective their own team owns) instead rank
 //! every point they may use now, including an operational hospital of their
-//! side and a natively routed field hospital, by navmesh route length to the
-//! lane objective; points that do not route there are skipped, near-equal
-//! points are spread per bot, and the population slot is the last fallback.
+//! side and a natively routed field hospital. Forward spawns (such a
+//! hospital, or a point the squad gained at runtime) come first whenever they
+//! route to the lane objective, then the squad's other points; within each
+//! group the shorter navmesh route goes first. Points that do not route there
+//! are skipped, near-equal points are spread per bot, and the population slot
+//! is the last fallback.
+//!
+//! Routes respect the structures standing now, so every cached qualification
+//! is dropped when the navmesh installs gates for a new structure snapshot.
 //!
 //! Parachute points: the server has no airborne descent model for bot bodies.
 //! Bots arrive landed on the first supporting surface below each authored drop
@@ -257,6 +263,7 @@ impl<W: Write> Engine<W> {
         else {
             return slot_choice(actors);
         };
+        self.refresh_spawn_route_caches();
         if self.navmesh_world.is_some()
             && let Some(lane) = self.bot_defended_lane(squad)
         {
@@ -323,12 +330,40 @@ impl<W: Write> Engine<W> {
         Ok(None)
     }
 
+    /// Cached spawn routes hold only for the structure gates they were
+    /// planned through: a destroyed or repaired structure opens or seals ways.
+    fn refresh_spawn_route_caches(&mut self) {
+        let gates = self
+            .navmesh_world
+            .as_ref()
+            .and_then(|mesh| mesh.structure_gate_key());
+        if self.bot_registry.spawn_route_gates != gates {
+            self.bot_registry.spawn_qualification.clear();
+            self.bot_registry.lane_spawns.clear();
+            self.bot_registry.spawn_route_gates = gates;
+        }
+    }
+
+    /// A defender's forward spawn: an operational hospital of its side, a
+    /// natively routed field hospital, or a point the squad gained at runtime
+    /// (a forward spawn the match opened for it).
+    fn bot_forward_spawn(&self, squad: u16, index: u16) -> bool {
+        let Some(catalog) = &self.spawn_catalog else {
+            return false;
+        };
+        self.bot_hospital_point(squad, index)
+            || catalog.native_unselectable_default(squad) == Some(index)
+            || catalog.runtime_added_points(squad).contains(&index)
+    }
+
     /// Defender policy: every point the squad may use now (including an
-    /// operational hospital of its side) that routes to the lane objective,
-    /// shortest route first. Points within `FORWARD_SPREAD_M` of the shortest
-    /// are rotated per bot so a squad spreads over equally forward points. A
-    /// human member's led squad spawn goes first when it routes. The bot's own
-    /// population slot is always last as the fallback.
+    /// operational hospital of its side) that routes to the lane objective.
+    /// Forward spawns go before the squad's other points, so defenders hold
+    /// their forward positions while they stand; within each group the
+    /// shortest route goes first. Points within `FORWARD_SPREAD_M` of the
+    /// group's shortest are rotated per bot so a squad spreads over equally
+    /// forward points. A human member's led squad spawn goes first when it
+    /// routes. The bot's own population slot is always last as the fallback.
     fn bot_defender_spawn_order(
         &mut self,
         actor: u16,
@@ -362,26 +397,27 @@ impl<W: Write> Engine<W> {
         let mut ranked = Vec::new();
         for index in points {
             if let Ok(spawn) = self.lane_spawn(index, home, home_position, lane, receipts) {
-                ranked.push((spawn.route_m, index, spawn.qualified));
+                let rear = !self.bot_forward_spawn(squad, index);
+                ranked.push((rear, spawn.route_m, index, spawn.qualified));
             }
         }
-        ranked.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-        if let Some(&(best, _, _)) = ranked.first() {
+        ranked.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)).then(a.2.cmp(&b.2)));
+        if let Some(&(rear, best, _, _)) = ranked.first() {
             let near = ranked
                 .iter()
-                .take_while(|r| r.0 <= best + FORWARD_SPREAD_M)
+                .take_while(|r| r.0 == rear && r.1 <= best + FORWARD_SPREAD_M)
                 .count();
             ranked[..near].rotate_left(usize::from(actor) % near);
         }
         if let Some(led) = self.bot_led_squad_spawn(squad)
-            && let Some(at) = ranked.iter().position(|r| r.1 == led)
+            && let Some(at) = ranked.iter().position(|r| r.2 == led)
         {
             let led = ranked.remove(at);
             ranked.insert(0, led);
         }
         let mut order: Vec<_> = ranked
             .into_iter()
-            .map(|(_, index, qualified)| (index, qualified.positions, qualified.arrival))
+            .map(|(_, _, index, qualified)| (index, qualified.positions, qualified.arrival))
             .collect();
         if !order.iter().any(|entry| entry.0 == home) {
             order.push((home, Vec::new(), Arrival::PopulationSlot));
@@ -389,8 +425,8 @@ impl<W: Write> Engine<W> {
         order
     }
 
-    /// Cached per (point, lane objective, population slot); geometry and
-    /// navmesh are static.
+    /// Cached per (point, lane objective, population slot) until the
+    /// structure gates change.
     fn lane_spawn(
         &mut self,
         index: u16,
@@ -483,7 +519,7 @@ impl<W: Write> Engine<W> {
         }
     }
 
-    /// Cached per (point, source spawn); geometry and navmesh are static.
+    /// Cached per (point, source spawn) until the structure gates change.
     fn qualify_bot_spawn(
         &mut self,
         index: u16,
