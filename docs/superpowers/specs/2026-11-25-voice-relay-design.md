@@ -125,8 +125,8 @@ One retail client with the lab pattern mode, on mag-test (gameplay 0.16.0, Mediu
 evidence store; these are the conclusions.
 
 - **Wire layout.** Each voice packet is a 14-byte header and the data: byte 1 and byte 6 both carry the
-  group, bytes 4-5 the voice message kind (47), byte 7 the media type, bytes 8-9 the data length and
-  bytes 10-11 the sequence, both big-endian. The lab client's frames were 37-byte blocks (51-byte
+  group, bytes 4-5 the voice message kind (0x00 then 0x2F, 47), byte 7 the media type, bytes 8-9 the
+  data length and bytes 10-11 the sequence, both little-endian. The lab client's frames were 37-byte blocks (51-byte
   packets), about 12.5 a second per group. Bytes 0, 2-3 and 12-13 are not interpreted. The group field
   is one byte, so how retail carried proximity groups above 255 (client indices above 172) is still
   open (U11, new and server-only); it matters only for worlds above 172 clients.

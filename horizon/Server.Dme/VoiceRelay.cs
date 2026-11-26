@@ -222,9 +222,9 @@ namespace Server.Dme
 
     /// <summary>The voice packet a client sends to the DME, as observed from the game client in the
     /// lab: a 14-byte header, then the voice data. Byte 1 and byte 6 both carry the relay group
-    /// (one byte), bytes 4-5 the voice message kind (47, big-endian), byte 7 the media type, bytes
+    /// (one byte), bytes 4-5 the voice message kind (0x00 then 0x2F), byte 7 the media type, bytes
     /// 8-9 the data length and bytes 10-11 a sequence number that counts per talker and group
-    /// (both big-endian). Bytes 0, 2-3 and 12-13 are not interpreted. How a group above 255 (a
+    /// (both little-endian). Bytes 0, 2-3 and 12-13 are not interpreted. How a group above 255 (a
     /// proximity group for a client index above 172) is carried has not been observed.</summary>
     public readonly record struct VoicePacketHeader(int Group, byte MediaType, int DataLength, ushort Sequence)
     {
@@ -239,9 +239,9 @@ namespace Server.Dme
         {
             header = default;
             if (body.Length < Length || ((body[4] << 8) | body[5]) != Kind || body[1] != body[6]) return false;
-            int length = (body[8] << 8) | body[9];
+            int length = body[8] | (body[9] << 8);
             if (Length + length != body.Length) return false;
-            header = new VoicePacketHeader(body[6], body[7], length, (ushort)((body[10] << 8) | body[11]));
+            header = new VoicePacketHeader(body[6], body[7], length, (ushort)(body[10] | (body[11] << 8)));
             return true;
         }
     }

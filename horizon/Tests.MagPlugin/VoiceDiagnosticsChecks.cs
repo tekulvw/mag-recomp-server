@@ -85,8 +85,8 @@ internal static class VoiceDiagnosticsChecks
         packet[0] = 0x81; packet[1] = (byte)group; packet[3] = 1;
         packet[4] = 0; packet[5] = (byte)VoicePacketHeader.Kind;
         packet[6] = (byte)group; packet[7] = 1;
-        packet[8] = (byte)(dataLength >> 8); packet[9] = (byte)dataLength;
-        packet[10] = (byte)(sequence >> 8); packet[11] = (byte)sequence;
+        packet[8] = (byte)dataLength; packet[9] = (byte)(dataLength >> 8);
+        packet[10] = (byte)sequence; packet[11] = (byte)(sequence >> 8);
         for (var i = VoicePacketHeader.Length; i < packet.Length; i++) packet[i] = fill;
         return packet;
     }
@@ -160,6 +160,12 @@ internal static class VoiceDiagnosticsChecks
         Check(lines.Any(l => l.StartsWith("voice_diag counts") && l.Contains("lead=0x8154 recent=2 ")) &&
               !lines.Any(l => l.Contains("rt=45")), "evicted idle signatures, own signature for the new kind: " +
               string.Join(" | ", lines.Where(l => l.StartsWith("voice_diag counts"))));
+        // The byte order as the client writes it: length 37 and sequence 1, little-endian.
+        var written = Convert.FromHexString("81240001002F24012500010000" + "00" + new string('0', 74));
+        Check(VoicePacketHeader.TryParse(written, out header) && header.Group == 0x24 && header.DataLength == 37 &&
+              header.Sequence == 1, "little-endian length and sequence");
+        Check(VoicePacketHeader.TryParse(VoicePacket(36, 0x0102, 300), out header) && header.DataLength == 300 &&
+              header.Sequence == 0x0102, "two-byte length and sequence");
         var mismatch = VoicePacket(36, 1, 37); mismatch[6] = 37;
         Check(!VoicePacketHeader.TryParse(mismatch, out _), "the two group bytes must agree");
         Check(!VoicePacketHeader.TryParse(VoicePacket(36, 1, 37)[..13], out _), "a short header is not voice");
