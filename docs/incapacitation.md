@@ -92,7 +92,9 @@ The server gives the downed life up on the first of these it sees:
 The give-up publishes the same body as an expiry: the downed hit's attribution
 with the downed condition bits cleared. It adds no death notice or statistics,
 and the character can no longer be revived. The world tick then queues it for
-the next team wave, as for any death (see [respawn-queue.md](respawn-queue.md)).
+the next team wave, as for any death, but after a bleeding-out report it
+skips any wave that falls before the client's respawn screen opens
+`fRespawnTime` (2.5 s) later (see [respawn-queue.md](respawn-queue.md)).
 Other substates in a downed report leave the deadline alone. An owner update
 whose direct reply slot is already taken defers the give-up (audited as
 `downed_give_up_deferred`); the client's automatic confirmation still ends the

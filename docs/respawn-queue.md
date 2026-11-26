@@ -33,6 +33,14 @@ Behaviour of the replacement server, described in our own words.
   that report used to go by, and the player waited a whole extra period after
   the countdown reached zero. The client's first update after the wave starts
   the new life. Embeddings without world ticks still rejoin on that update.
+- A character that bled out on its own (the bleeding-out report described in
+  [incapacitation.md](incapacitation.md)) is queued for the first wave after
+  its client's respawn screen opens: 2.5 s after the report (the retail
+  `fRespawnTime`), or as soon as the client confirms if that comes first.
+  The client is still playing its bleed-out until then. A life sent earlier
+  reaches it in that state, and the client never leaves the state the new
+  life starts in: a parachute drop falls straight down and keeps its
+  parachute after landing, and the character can no longer enter a vehicle.
 - A downed character gives up its downed life when it confirms: the
   confirmation clears the downed state (the death keeps the attribution of the
   hit that downed it, as a bleed-out does, and the character can no longer be

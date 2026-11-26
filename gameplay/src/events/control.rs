@@ -377,6 +377,9 @@ pub(super) fn confirm_respawn<W: Write>(
     // condition of a downed character before its dead check, so the
     // confirmation gives up the downed life and then joins the queue.
     let gave_up = super::combat::plan_downed_give_up(ctx, plan)?;
+    // The client confirms by itself when its respawn screen opens, so it can
+    // take a new life from now on.
+    plan.session.respawn_screen_open = true;
     let life = plan.combat.new_life.unwrap_or(active.life);
     let eligible = active.entered_game
         && active.ready_for_updates

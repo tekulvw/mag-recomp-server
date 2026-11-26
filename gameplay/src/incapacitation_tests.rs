@@ -1214,15 +1214,80 @@ fn assert_gave_up(actor: &Active) {
 #[test]
 fn a_bleed_out_report_gives_up_at_once_and_spawns_on_the_next_wave() {
     let mut engine = downed_owner_with_waves();
-    downed_state_report(&mut engine, 3, 1000);
+    // Reported 2.6 s before the wave: the client's respawn screen opens at
+    // 2.9 s, before the wave at 3 s.
+    downed_state_report(&mut engine, 3, 400);
     assert_gave_up(engine.active.as_ref().unwrap());
     // The world tick queues the dead character for the wave at 3 s.
-    let response = engine.tick_world(Duration::from_millis(1050), 1, "tick".into());
+    let response = engine.tick_world(Duration::from_millis(450), 1, "tick".into());
     assert!(response.ok, "{:?}", response.error);
     assert_eq!(
         engine.active.as_ref().unwrap().pending_spawn_deadline,
         Some(Duration::from_secs(3))
     );
+    empty_update(&mut engine, 3100);
+    assert!(matches!(
+        engine.active.as_ref().unwrap().life,
+        CharacterLife::Alive { generation: 5, .. }
+    ));
+}
+
+#[test]
+fn a_bleed_out_right_before_a_wave_waits_for_the_clients_respawn_screen() {
+    // The live case: the bleed-out is reported 250 ms before the wave. The
+    // client is still counting down to its respawn screen then, and a life
+    // sent at that wave reached it mid bleed-out: the parachute drop it
+    // started never landed and the character could not enter a vehicle.
+    let mut engine = downed_owner_with_waves();
+    downed_state_report(&mut engine, 3, 2750);
+    assert_gave_up(engine.active.as_ref().unwrap());
+    assert_eq!(
+        engine.active.as_ref().unwrap().respawn_screen_ready_at,
+        Some(Duration::from_millis(5250))
+    );
+    let response = engine.tick_world(Duration::from_millis(2800), 1, "tick".into());
+    assert!(response.ok, "{:?}", response.error);
+    assert_eq!(
+        engine.active.as_ref().unwrap().pending_spawn_deadline,
+        Some(Duration::from_secs(23)),
+        "the wave at 3 s falls before the respawn screen opens at 5.25 s"
+    );
+    empty_update(&mut engine, 3000);
+    assert!(matches!(
+        engine.active.as_ref().unwrap().life,
+        CharacterLife::AwaitingRespawn { generation: 4 }
+    ));
+    empty_update(&mut engine, 23_000);
+    let actor = engine.active.as_ref().unwrap();
+    assert!(matches!(
+        actor.life,
+        CharacterLife::Alive { generation: 5, .. }
+    ));
+    assert!(actor.respawn_screen_ready_at.is_none());
+}
+
+#[test]
+fn a_bleed_out_without_world_ticks_also_waits_for_the_respawn_screen() {
+    let mut engine = downed_owner_with_waves();
+    downed_state_report(&mut engine, 3, 2750);
+    // The owner's next update queues it instead of the world tick.
+    empty_update(&mut engine, 2900);
+    assert_eq!(
+        engine.active.as_ref().unwrap().pending_spawn_deadline,
+        Some(Duration::from_secs(23))
+    );
+}
+
+#[test]
+fn a_confirmation_after_a_bleed_out_report_joins_the_next_wave() {
+    // The client confirms by itself once its respawn screen is open, so a
+    // confirmation before the world tick queues it needs no further wait.
+    let mut engine = downed_owner_with_waves();
+    downed_state_report(&mut engine, 3, 2750);
+    dispatch(&mut engine, &0x0211u16.to_be_bytes(), 2800).unwrap();
+    let actor = engine.active.as_ref().unwrap();
+    assert_eq!(actor.pending_spawn_deadline, Some(Duration::from_secs(3)));
+    assert!(actor.respawn_screen_ready_at.is_none());
     empty_update(&mut engine, 3100);
     assert!(matches!(
         engine.active.as_ref().unwrap().life,
