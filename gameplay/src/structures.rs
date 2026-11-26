@@ -502,6 +502,14 @@ impl BunkerWorld {
             .transform = transform;
     }
 
+    /// SYNTHETIC: name the structure catalog and vehicle type that the
+    /// fixture's hospitals were placed with.
+    #[cfg(test)]
+    pub(crate) fn set_synthetic_hospital_source(&mut self, structure_sha256: &str, token: u32) {
+        self.hospital_structure_sha256 = Some(structure_sha256.into());
+        self.vehicle_token = token;
+    }
+
     pub fn load(
         placements: impl AsRef<Path>,
         structures: impl AsRef<Path>,

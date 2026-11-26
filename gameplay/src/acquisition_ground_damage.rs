@@ -238,8 +238,11 @@ impl<W: Write> Engine<W> {
         let policy = self
             .ground_damage_policy()
             .ok_or("acquisition_ground_damage_unconfigured")?;
-        let mounted_primary = self.ground_gunner_accepts_ground_target(actor)
-            || (self.domination_gameplay.is_some() && actor.is_indexed_hospital_gunner());
+        let ground_gunner = self.ground_gunner_accepts_ground_target(actor);
+        // A qualified hospital primary reaches the same Ground targets as an
+        // on-foot firearm in either mode; its authority is checked when the
+        // mounted profile resolves.
+        let mounted_primary = ground_gunner || actor.is_indexed_hospital_gunner();
         if !actor.entered_game
             || !actor.ready_for_updates
             || !actor.life.is_alive()
@@ -260,7 +263,7 @@ impl<W: Write> Engine<W> {
             if self.domination_gameplay.is_some() {
                 !matches!(source.spawn_type, 3 | 7)
             } else {
-                source.spawn_type != 9 && (source.spawn_type != 3 || mounted_primary)
+                source.spawn_type != 9 && (source.spawn_type != 3 || ground_gunner)
             }
         }) {
             return Err("unsupported_ground_bullet_target");

@@ -1172,8 +1172,9 @@ pub(crate) mod hospital_primary_tests {
     use super::*;
     use serde_json::json;
 
-    pub(crate) fn combat_catalog() -> RetailCombatCatalog {
-        let bullet = json!({
+    /// SYNTHETIC: one invented hitscan bullet row.
+    pub(crate) fn combat_catalog_bullet() -> serde_json::Value {
+        json!({
             "authored_ref":"Synthetic:2","name":"synthetic_primary","definition":{},"source":{},"item_source":{},
             "ammo":{"group":"hitscan_ammo","name":"synthetic_bullet","source":{},
                 "ammo_token_candidate":77,"ammo_token_verified_for_retail":false},
@@ -1181,7 +1182,11 @@ pub(crate) mod hospital_primary_tests {
                 "vehicleAPierce":0.0,"vehicleARedux":0.0,"objective":0.0,"objectiveAPierce":0.0,
                 "objectiveARedux":0.0,"mine":0.0},
             "effective_range":20.0,"max_range":80.0,"magazine_capacity":9,"initial_magazine_count":2
-        });
+        })
+    }
+
+    pub(crate) fn combat_catalog() -> RetailCombatCatalog {
+        let bullet = combat_catalog_bullet();
         let mut mounted_bullet = bullet.clone();
         mounted_bullet["authored_ref"] = json!("Synthetic:4");
         mounted_bullet["name"] = json!("synthetic_mounted_primary");
@@ -1510,11 +1515,17 @@ pub(crate) mod hospital_primary_tests {
     }
 
     fn indexed_hospital_combat() -> crate::Engine<Vec<u8>> {
+        indexed_hospital_combat_for_mode(2)
+    }
+
+    /// SYNTHETIC: a gunner seated in Domination (2) hospital 5 or
+    /// Acquisition (1) field hospital 5.
+    fn indexed_hospital_combat_for_mode(game_type: u8) -> crate::Engine<Vec<u8>> {
         use crate::hospital_turrets::tests::{
             enable_synthetic_hospital_turrets, equip_synthetic_hospital_turret,
         };
         let mut engine = crate::human_kill_reward_tests::fixture();
-        let hospital = crate::structures::domination_bunker_seat_tests::fixture();
+        let hospital = crate::structures::domination_bunker_seat_tests::fixture_for_mode(game_type);
         engine.bunker_world = hospital.bunker_world;
         let items = std::mem::replace(&mut engine.item_catalog, hospital.item_catalog);
         let items = std::sync::Arc::try_unwrap(items).ok().unwrap();
@@ -1656,6 +1667,38 @@ pub(crate) mod hospital_primary_tests {
                 .filter(|event| event.kind == RewardKind::EnemyKilled && event.player_id == 1)
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn acquisition_field_hospital_hit_uses_the_same_character_transaction() {
+        use crate::{CharacterLife, human_kill_reward_tests::hit};
+        let mut engine = indexed_hospital_combat_for_mode(1);
+        let victim_id = "synthetic-reservation-0000";
+        hit(&mut engine, 71, 1000).unwrap();
+        let victim = &engine.peers[victim_id];
+        assert_eq!(victim.life.damage_health(), Some((4, 6))); // As in Domination.
+        assert_eq!(victim.last_damage.last_attacker, 0x0380_0001);
+        hit(&mut engine, 72, 1001).unwrap();
+        assert!(matches!(
+            engine.peers[victim_id].life,
+            CharacterLife::Incapacitated { generation: 4, .. }
+        ));
+
+        // A destroyed field hospital disables its turret; the gunner's next
+        // round is refused and does no damage.
+        let mut engine = indexed_hospital_combat_for_mode(1);
+        engine
+            .bunker_world
+            .as_mut()
+            .unwrap()
+            .apply_hospital_cycle(1, false, 0x0c80_0007)
+            .unwrap();
+        hit(&mut engine, 73, 1000).unwrap();
+        assert_eq!(engine.peers[victim_id].life.damage_health(), Some((4, 120)));
+        assert!(
+            String::from_utf8_lossy(&engine.writer)
+                .contains("hospital_turret_requires_living_exclusive_owner")
         );
     }
 

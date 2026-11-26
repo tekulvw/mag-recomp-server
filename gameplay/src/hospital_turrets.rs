@@ -1,4 +1,8 @@
-//! Source-qualified indexed Domination hospital turret authority.
+//! Source-qualified indexed hospital turret authority.
+//!
+//! Domination hospitals and Acquisition field hospitals carry the same
+//! faction emplacement variants, so one authority serves both modes. Each
+//! mode's rules name its own six profiles under its own schema.
 
 use crate::{
     Active, CharacterLife, Engine, Write, bullet_hit,
@@ -79,6 +83,16 @@ pub(crate) fn qualify(
         .map_err(std::io::Error::other)
 }
 
+/// The rules schema for a profile's game type: Domination (2) hospitals or
+/// Acquisition (1) field hospitals.
+fn schema_for(game_type: i8) -> Option<&'static str> {
+    match game_type {
+        1 => Some("mag_acquisition_hospital_turrets_v1"),
+        2 => Some("mag_domination_hospital_turrets_v1"),
+        _ => None,
+    }
+}
+
 fn valid_hash(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -120,7 +134,7 @@ impl Rules {
         native_elf: &str,
     ) -> Result<BTreeMap<u16, Runtime>, &'static str> {
         let combat = items.retail_combat()?;
-        if self.schema != "mag_domination_hospital_turrets_v1"
+        if Some(self.schema.as_str()) != schema_for(spawns.match_profile().game_type)
             || !self.source.matches(
                 bunkers.hospital_structure_sha256(),
                 native_elf,

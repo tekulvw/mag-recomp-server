@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Project source-qualified retail Domination hospital turret rules offline."""
+"""Project source-qualified retail hospital turret rules offline.
+
+The default mode binds Domination's six profiles to the three faction
+emplacement variants. ``--mode acquisition`` binds the same three variants,
+read directly from the original archives, to the six Acquisition profiles
+whose field hospitals were projected by
+``project-retail-domination-hospitals.py --mode acquisition``.
+"""
 import argparse
 from pathlib import Path
 import re
@@ -328,6 +335,15 @@ def project_profiles(profiles, levels, variants, structure_hash, source, vehicle
             sorted(evidence, key=lambda row: (row['map_name'], row['attacking_faction'])))
 
 
+def require_structures(structures, catalog_raw, binding_raw):
+    require(structures['schema_version'] == 1 and structures['application_id'] == 20231
+            and structures['source_archive_sha256'] == GAME_ARCHIVE_SHA256
+            and structures['native_rules']['original_elf_sha256'] == RETAIL_ELF_SHA256
+            and structures['item_catalog_sha256'] == sha(catalog_raw)
+            and structures['retail_item_binding_sha256'] == sha(binding_raw),
+            'wrong original retail structure source')
+
+
 def project(sources_raw, catalog_raw, binding_raw, structure_raw, profiles,
             read_game, read_main, decode_model, native):
     source, structures = map(parse, (sources_raw, structure_raw))
@@ -336,12 +352,7 @@ def project(sources_raw, catalog_raw, binding_raw, structure_raw, profiles,
             and source['retail_game_sha256'] == GAME_ARCHIVE_SHA256
             and source['retail_main_sha256'] == MAIN_ARCHIVE_SHA256 and digest(source['spawn_binding_sha256']),
             'wrong original retail hospital source identity')
-    require(structures['schema_version'] == 1 and structures['application_id'] == 20231
-            and structures['source_archive_sha256'] == GAME_ARCHIVE_SHA256
-            and structures['native_rules']['original_elf_sha256'] == RETAIL_ELF_SHA256
-            and structures['item_catalog_sha256'] == sha(catalog_raw)
-            and structures['retail_item_binding_sha256'] == sha(binding_raw),
-            'wrong original retail structure source')
+    require_structures(structures, catalog_raw, binding_raw)
     levels = indexed(source['maps'], 'map')
     require(len(levels) == 3 and {row['owner_faction_id'] for row in levels.values()} == {0, 1, 2}
             and all(type(row['owner_faction_id']) is int
@@ -354,6 +365,17 @@ def project(sources_raw, catalog_raw, binding_raw, structure_raw, profiles,
         source, structures, catalog, ids, read_game, read_main, decode_model)
     structure_hash = sha(structure_raw)
     profiles, profile_proof = project_profiles(profiles, levels, variants, structure_hash, source, vehicle_type)
+    rules, proof = seal('mag_domination_hospital_turrets_v1', catalog_raw, binding_raw, structure_hash,
+                        variants, models, equipment, registry_hash, vehicle_type, item_members, native,
+                        profiles, profile_proof)
+    proof = {'format': 'mag_retail_domination_hospital_turret_proof_v1',
+             'hospital_sources_sha256': sha(sources_raw), **proof}
+    return rules, proof
+
+
+def seal(schema, catalog_raw, binding_raw, structure_hash, variants, models, equipment, registry_hash,
+         vehicle_type, item_members, native, profiles, profile_proof):
+    """Bind the qualified variants and profiles to their pose and wire evidence."""
     pose = {'scope': POSE_SCOPE, 'retail_elf_sha256': RETAIL_ELF_SHA256,
             'retail_main_sha256': MAIN_ARCHIVE_SHA256, 'retail_game_sha256': GAME_ARCHIVE_SHA256,
             'vehicle_registry_sha256': registry_hash, 'models': models, 'native': native['pose']}
@@ -372,16 +394,156 @@ def project(sources_raw, catalog_raw, binding_raw, structure_raw, profiles,
             'item_members_sha256': item_members, 'item_catalog_sha256': sha(catalog_raw),
             'item_bindings_sha256': sha(binding_raw), 'equipment_by_faction': equipment,
             'native': native['wire']}
-    rules = {'schema': 'mag_domination_hospital_turrets_v1',
+    rules = {'schema': schema,
              'source': {'structure_sha256': structure_hash, 'item_catalog_sha256': sha(catalog_raw),
                         'retail_elf_sha256': RETAIL_ELF_SHA256, 'retail_archive_sha256': GAME_ARCHIVE_SHA256,
                         'seat_pose_sha256': sha(encode(pose)), 'wire_proof_sha256': sha(encode(wire)),
                         'vehicle_type_token': vehicle_type},
              'variants': variants, 'profiles': profiles}
-    proof = {'format': 'mag_retail_domination_hospital_turret_proof_v1',
-             'hospital_sources_sha256': sha(sources_raw), 'structure_sha256': structure_hash,
-             'pose': pose, 'wire': wire, 'profiles': profile_proof}
+    proof = {'structure_sha256': structure_hash, 'pose': pose, 'wire': wire, 'profiles': profile_proof}
     return rules, proof
+
+
+def acquisition_sources(read_game, locate_body):
+    """Read the three faction emplacement variants straight from the original
+    registry, property members and main-archive bodies.
+
+    Acquisition field hospitals use the same registry variants as Domination
+    hospitals, so the same qualification applies to each faction's model.
+    """
+    registry_raw = read_game(MAP['VEHICLES_MEMBER'])
+    registry = MAP['vehicle_registry'](MAP['parse_zpr'](registry_raw.decode()))
+    definitions = registry[f'0x{name_token("DefensiveEmplacement"):08x}']['variants']
+    sources = {}
+    for name in FACTIONS:
+        rows = [row for row in definitions if row['faction'] == name and row['ModifierLevel'] == '0']
+        require(len(rows) == 1, f'expected one original hospital registry variant for {name}')
+        variant = rows[0]
+        member = SCRIPT_ROOT + 'vehicle/' + variant['PropertiesFileName']
+        raw = read_game(member)
+        properties = MAP['parse_zpr'](raw.decode())['DefensiveEmplacementProperties']
+        body_member, body = locate_body(name_token(variant['ModelFileName']))
+        sources[name] = {'variant': variant, 'source_member': member, 'sha256': sha(raw),
+                         'seats': properties['Seats'],
+                         'neutral_body': {'member': body_member, 'member_sha256': sha(body)}}
+    return {'faction_sources': sources, 'vehicle_registry_sha256': sha(registry_raw)}
+
+
+def project_acquisition_placements(pool, hospitals, variant, owner):
+    points = indexed([row for row in pool['locations'] if row['kind'] == 'bunker_passenger'], 'index')
+    rows = hospitals['placements']
+    by_object = indexed(rows, 'object_index')
+    by_spawn = indexed(rows, 'spawn_index')
+    require(0 < len(rows) <= 16 and set(by_spawn) == set(points),
+            'incomplete Acquisition field-hospital coverage')
+    result = []
+    for index in sorted(by_object):
+        row = by_object[index]
+        point = points[row['spawn_index']]
+        require(type(index) is int and 0 <= index < 16
+                and type(row['spawn_index']) is int and 0 <= row['spawn_index'] < 128
+                and type(row['spawn_token']) is int and row['spawn_token'] == point['token']
+                and point['active'] is True
+                and row['properties_source'] == variant['properties_source'],
+                f'Acquisition field-hospital identity differs at allocation {index}')
+        result.append({'object_index': index, 'spawn_index': row['spawn_index'],
+                       'spawn_token': row['spawn_token'], 'faction': owner})
+    return result
+
+
+def project_acquisition_profiles(profiles, variants, structure_hash, vehicle_type):
+    require(len(profiles) == 6, 'expected six Acquisition profile pairs')
+    maps, seen, hashes = {}, set(), set()
+    rules, evidence = [], []
+    for spawn_raw, hospital_raw in profiles:
+        spawns, hospitals = map(parse, (spawn_raw, hospital_raw))
+        spawn_hash = sha(spawn_raw)
+        name = spawns['active']['map_name']
+        pool, = spawns['maps']
+        policy = spawns['match_profile']
+        attacker, owner = policy['attacking_faction'], pool['owner_faction']
+        provenance = parse(spawns['source'])
+        level = (provenance['level_archive_sha256'], provenance['level_clv_sha256'])
+        require(spawns['format'] == 'mag_spawn_catalog' and spawns['schema_version'] == 1
+                and policy['game_type'] == 1 and policy['auto_assign_teams'] is True
+                and policy['has_bunkers'] is True
+                and type(attacker) is int and type(owner) is int and attacker in range(3)
+                and owner in range(3) and attacker != owner
+                and pool['name'] == name and pool['runtime_indices_verified'] is True
+                and provenance['map'] == name
+                and provenance['game_archive_sha256'] == GAME_ARCHIVE_SHA256
+                and provenance['native_elf_sha256'] == RETAIL_ELF_SHA256
+                and all(map(digest, level)),
+                f'Acquisition spawn source differs for {name}')
+        require(maps.setdefault(name, (owner, level)) == (owner, level),
+                f'Acquisition map identity differs across profiles for {name}')
+        require((name, attacker) not in seen and spawn_hash not in hashes,
+                'incomplete or duplicate Acquisition profile coverage')
+        require(hospitals['format'] == 'mag_domination_hospital_placements_v1'
+                and hospitals['map_name'] == name and hospitals['allocation_scope'] == ALLOCATION_SCOPE
+                and hospitals['passenger_pose_scope'] == PASSENGER_SCOPE
+                and digest(hospitals['passenger_pose_sha256'])
+                and hospitals['spawn_catalog_sha256'] == spawn_hash
+                and hospitals['structure_catalog_sha256'] == structure_hash
+                and digest(hospitals['source_proof_sha256'])
+                and hospitals['source_proof_sha256'] == provenance['hospital_allocation_sha256']
+                and token(hospitals['vehicle_type_token']) == vehicle_type,
+                f'unbound Acquisition field-hospital catalog for {name}')
+        placements = project_acquisition_placements(pool, hospitals, variants[owner], owner)
+        rules.append({'map_name': name, 'spawn_catalog_sha256': spawn_hash, 'placements': placements})
+        evidence.append({'map_name': name, 'attacking_faction': attacker, 'defending_faction': owner,
+                         'spawn_catalog_sha256': spawn_hash, 'hospital_placements_sha256': sha(hospital_raw),
+                         'allocation_sha256': hospitals['source_proof_sha256']})
+        seen.add((name, attacker))
+        hashes.add(spawn_hash)
+    expected = {(name, attacker) for name, (owner, _) in maps.items()
+                for attacker in range(3) if attacker != owner}
+    require(len(maps) == 3 and {owner for owner, _ in maps.values()} == {0, 1, 2} and seen == expected,
+            'incomplete Acquisition profile coverage')
+    return (sorted(rules, key=lambda row: (row['map_name'], row['spawn_catalog_sha256'])),
+            sorted(evidence, key=lambda row: (row['map_name'], row['attacking_faction'])))
+
+
+def project_acquisition(catalog_raw, binding_raw, structure_raw, profiles,
+                        read_game, read_main, decode_model, locate_body, native):
+    structures = parse(structure_raw)
+    require(native['retail_elf_sha256'] == RETAIL_ELF_SHA256, 'wrong original retail executable')
+    require_structures(structures, catalog_raw, binding_raw)
+    catalog, ids, item_members = require_item_binding(catalog_raw, binding_raw, read_game)
+    source = acquisition_sources(read_game, locate_body)
+    variants, models, equipment, registry_hash, vehicle_type = project_variants(
+        source, structures, catalog, ids, read_game, read_main, decode_model)
+    structure_hash = sha(structure_raw)
+    profiles, profile_proof = project_acquisition_profiles(profiles, variants, structure_hash, vehicle_type)
+    rules, proof = seal('mag_acquisition_hospital_turrets_v1', catalog_raw, binding_raw, structure_hash,
+                        variants, models, equipment, registry_hash, vehicle_type, item_members, native,
+                        profiles, profile_proof)
+    return rules, {'format': 'mag_retail_acquisition_hospital_turret_proof_v1', **proof}
+
+
+def body_locator(main_archive):
+    """Find the one main-archive resource holding a model's render hierarchy."""
+    sys.path.insert(0, str(ROOT / 'tools/collision'))
+    from zrb_records import parse as parse_zrb
+
+    records = {}
+    for number, name in enumerate(main_archive.names, 1):
+        if not name.endswith('.zrb'):
+            continue
+        body = main_archive.extract(number)
+        try:
+            rows = parse_zrb(body, retail13_compat=True)['records']
+        except ValueError:
+            continue  # Resource containers in other layouts hold no render hierarchy.
+        for row in rows:
+            if row['class_token'] == 'a4f4d23c':
+                records.setdefault(int(row['name_token'], 16), []).append((name, body))
+
+    def locate(model_token):
+        found = records.get(model_token, [])
+        require(len(found) == 1, 'expected one original hospital body member')
+        return found[0]
+    return locate
 
 
 def output_paths(inputs, paths):
@@ -408,35 +570,49 @@ def write_outputs(inputs, outputs, *, check):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ('elf', 'game-archive', 'main-archive', 'hospital-sources',
-                 'item-catalog', 'item-bindings', 'structures', 'output'):
+    parser.add_argument('--mode', choices=('domination', 'acquisition'), default='domination')
+    for name in ('elf', 'game-archive', 'main-archive', 'item-catalog', 'item-bindings', 'structures', 'output'):
         parser.add_argument('--' + name, type=Path, required=True)
+    parser.add_argument('--hospital-sources', type=Path, help='Domination hospital placer inputs')
     parser.add_argument('--profile', metavar=('SPAWNS', 'HOSPITALS'), type=Path, nargs=2,
-                        action='append', required=True, help='repeat once per Domination profile')
+                        action='append', required=True,
+                        help='repeat once per profile: its spawn catalog and hospital placements')
     parser.add_argument('--proof-output', type=Path)
     parser.add_argument('--check', action='store_true')
     args = parser.parse_args()
-    inputs = [args.elf, args.game_archive, args.main_archive, args.hospital_sources,
-              args.item_catalog, args.item_bindings, args.structures,
+    domination = args.mode == 'domination'
+    if domination and args.hospital_sources is None:
+        parser.error('domination mode requires --hospital-sources')
+    if not domination and args.hospital_sources is not None:
+        parser.error('acquisition mode reads the hospital variants from the original archives')
+    inputs = [args.elf, args.game_archive, args.main_archive, args.item_catalog, args.item_bindings,
+              args.structures, *([args.hospital_sources] if domination else []),
               *(path for pair in args.profile for path in pair)]
     outputs = [args.output] + ([args.proof_output] if args.proof_output else [])
     output_paths(inputs, outputs)
-    require(len(args.profile) == 6, 'expected six Domination profile pairs')
+    require(len(args.profile) == 6, f'expected six {args.mode.capitalize()} profile pairs')
     elf = NATIVE['Elf'](args.elf, 'retail')
     game_raw, main_raw = args.game_archive.read_bytes(), args.main_archive.read_bytes()
     require(sha(game_raw) == GAME_ARCHIVE_SHA256 and sha(main_raw) == MAIN_ARCHIVE_SHA256,
             'wrong original retail game or main archive')
     game, main_archive = map(NATIVE['Psarc'], (game_raw, main_raw))
-    rules, proof = project(
-        args.hospital_sources.read_bytes(), args.item_catalog.read_bytes(), args.item_bindings.read_bytes(),
-        args.structures.read_bytes(), [(a.read_bytes(), b.read_bytes()) for a, b in args.profile],
-        lambda name: archive_member(game, name), lambda name: archive_member(main_archive, name),
-        read_model, native_witness(elf))
+    read_game = lambda name: archive_member(game, name)  # noqa: E731
+    read_main = lambda name: archive_member(main_archive, name)  # noqa: E731
+    common = (args.item_catalog.read_bytes(), args.item_bindings.read_bytes(), args.structures.read_bytes(),
+              [(a.read_bytes(), b.read_bytes()) for a, b in args.profile])
+    if domination:
+        rules, proof = project(args.hospital_sources.read_bytes(), *common, read_game, read_main,
+                               read_model, native_witness(elf))
+    else:
+        rules, proof = project_acquisition(*common, read_game, read_main, read_model,
+                                           body_locator(main_archive), native_witness(elf))
     rendered = [(args.output, encode(rules))]
     if args.proof_output:
         rendered.append((args.proof_output, encode(proof)))
     write_outputs(inputs, rendered, check=args.check)
-    print('Verified 6 retail Domination profiles, 96 hospital placements and 3 turret variants')
+    placements = sum(len(row['placements']) for row in rules['profiles'])
+    print(f'Verified 6 retail {args.mode.capitalize()} profiles, {placements} hospital placements '
+          'and 3 turret variants')
 
 
 if __name__ == '__main__':
