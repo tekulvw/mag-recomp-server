@@ -85,8 +85,8 @@ internal static class VoiceDiagnosticsChecks
         packet[0] = 0x81; packet[1] = (byte)group; packet[3] = 1;
         packet[4] = 0; packet[5] = (byte)VoicePacketHeader.Kind;
         packet[6] = (byte)group; packet[7] = 1;
-        packet[8] = (byte)(dataLength >> 8); packet[9] = (byte)dataLength;
-        packet[10] = (byte)(sequence >> 8); packet[11] = (byte)sequence;
+        packet[8] = (byte)dataLength; packet[9] = (byte)(dataLength >> 8);
+        packet[10] = (byte)sequence; packet[11] = (byte)(sequence >> 8);
         for (var i = VoicePacketHeader.Length; i < packet.Length; i++) packet[i] = fill;
         return packet;
     }
@@ -123,6 +123,7 @@ internal static class VoiceDiagnosticsChecks
         Check(first.Contains("recent=7 ") && first.Contains("total=7 ") && first.Contains($"data_bytes={37 * 6 + 74} ") &&
               first.Contains("data_min=37 ") && first.Contains("data_max=74 ") && first.Contains("multi_block=1 ") &&
               first.Contains("seq_gaps=3 ") && first.Contains("seq_back=2 "), "stream counters: " + first);
+        Check(first.Contains("length_mismatch=1 ") && first.Contains("mismatch_body_max=30"), "length mismatch counted: " + first);
         Check(stream.Any(l => l.Contains("client=4 voice_group=83 recent=1 ")) && stream.Any(l => l.Contains("client=5 voice_group=40 recent=1 ")),
               "streams per client and group: " + string.Join(" | ", stream));
         // Recent counters restart each interval; totals carry on.
@@ -133,6 +134,38 @@ internal static class VoiceDiagnosticsChecks
               next.Contains("seq_back=0 seq_back_total=2"), "next interval: " + next);
         Check(VoicePacketHeader.TryParse(VoicePacket(83, 2, 37), out var header) && header.Group == 83 && header.MediaType == 1 &&
               header.DataLength == 37 && header.Sequence == 2, "voice header parse");
+        // Two packets in one message are voice by kind but not one parseable packet.
+        var pair = VoicePacket(36, 1, 37).Concat(VoicePacket(36, 2, 37)).ToArray();
+        Check(!VoicePacketHeader.TryParse(pair, out _) && VoicePacketHeader.HasVoiceKind(pair), "a two-packet message");
+        // A signature that first appears after the table is full is still counted, sampled and parsed.
+        lines.Clear();
+        var full = new VoiceDiagnostics(true, lines.Add);
+        for (var i = 0; i < VoiceDiagnostics.MaxSignatures; i++)
+            full.Observe(1, "tcp", 45, null, new byte[] { (byte)(i >> 8), (byte)i, 0 }, 0);
+        for (var i = 1; i <= VoiceDiagnostics.SampleEvery; i++)
+            full.Observe(0, "udp", 53, null, VoicePacket(83, (ushort)i, 37), 10 + i);
+        full.Observe(0, "udp", 53, null, VoicePacket(83, 101, 37), VoiceDiagnostics.CountIntervalMs + 1);
+        var late = lines.Where(l => l.Contains("rt=53")).ToList();
+        Check(late.Count(l => l.StartsWith("voice_diag sample") && l.Contains("lead=0x8153")) == VoiceDiagnostics.SamplesPerSignature + 1,
+              "late signature sampled: " + late.Count);
+        Check(late.Any(l => l.StartsWith("voice_diag counts") && l.Contains("lead=other recent=101 ")), "late signature counted as lead=other");
+        Check(lines.Any(l => l.Contains("client=0 voice_group=83 recent=101 ")) && !lines.Any(l => l.Contains("unrecorded_signatures")),
+              "late voice stream and nothing unrecorded: " + string.Join(" | ", lines.Where(l => l.StartsWith("voice_diag counts"))));
+        // Idle signatures leave the table after a quiet interval, so new kinds get their own signature again.
+        full.Observe(0, "udp", 53, null, VoicePacket(83, 102, 37), 2 * VoiceDiagnostics.CountIntervalMs + 2);
+        lines.Clear();
+        full.Observe(0, "udp", 53, null, VoicePacket(84, 1, 37), 2 * VoiceDiagnostics.CountIntervalMs + 3);
+        Check(lines.Any(l => l.StartsWith("voice_diag sample") && l.Contains("lead=0x8154")), "a new kind after eviction is sampled");
+        full.Observe(0, "udp", 53, null, VoicePacket(84, 2, 37), 3 * VoiceDiagnostics.CountIntervalMs + 3);
+        Check(lines.Any(l => l.StartsWith("voice_diag counts") && l.Contains("lead=0x8154 recent=2 ")) &&
+              !lines.Any(l => l.Contains("rt=45")), "evicted idle signatures, own signature for the new kind: " +
+              string.Join(" | ", lines.Where(l => l.StartsWith("voice_diag counts"))));
+        // The byte order as the client writes it: length 37 and sequence 1, little-endian.
+        var written = Convert.FromHexString("81240001002F24012500010000" + "00" + new string('0', 74));
+        Check(VoicePacketHeader.TryParse(written, out header) && header.Group == 0x24 && header.DataLength == 37 &&
+              header.Sequence == 1, "little-endian length and sequence");
+        Check(VoicePacketHeader.TryParse(VoicePacket(36, 0x0102, 300), out header) && header.DataLength == 300 &&
+              header.Sequence == 0x0102, "two-byte length and sequence");
         var mismatch = VoicePacket(36, 1, 37); mismatch[6] = 37;
         Check(!VoicePacketHeader.TryParse(mismatch, out _), "the two group bytes must agree");
         Check(!VoicePacketHeader.TryParse(VoicePacket(36, 1, 37)[..13], out _), "a short header is not voice");

@@ -125,8 +125,8 @@ One retail client with the lab pattern mode, on mag-test (gameplay 0.16.0, Mediu
 evidence store; these are the conclusions.
 
 - **Wire layout.** Each voice packet is a 14-byte header and the data: byte 1 and byte 6 both carry the
-  group, bytes 4-5 the voice message kind (47), byte 7 the media type, bytes 8-9 the data length and
-  bytes 10-11 the sequence, both big-endian. The lab client's frames were 37-byte blocks (51-byte
+  group, bytes 4-5 the voice message kind (0x00 then 0x2F, 47), byte 7 the media type, bytes 8-9 the
+  data length and bytes 10-11 the sequence, both little-endian. The lab client's frames were 37-byte blocks (51-byte
   packets), about 12.5 a second per group. Bytes 0, 2-3 and 12-13 are not interpreted. The group field
   is one byte, so how retail carried proximity groups above 255 (client indices above 172) is still
   open (U11, new and server-only); it matters only for worlds above 172 clients.
@@ -185,8 +185,12 @@ not ordinary gameplay traffic, the transport message type, total length, the fir
 hex and the time, for the first 20 messages of each kind and then one in every 100 for as long as it
 lasts. Every ten seconds a counts line per message kind follows, and one per talker and voice group
 with the packets, data bytes, smallest and largest data length, packets holding more than one 37-byte
-block, sequence gaps (packets the DME never saw) and sequence steps back (repeats or a restarted
-client); in gameplay, each `0x0259` with its body bytes, the player and their squad, platoon and
+block, sequence gaps (packets the DME never saw), sequence steps back (repeats or a restarted
+client) and messages with the voice kind whose length does not match one packet. A message kind that
+first appears after 512 kinds are in use (messages with random leading bytes fill the table in a
+long-lived process) is still counted and sampled, as "lead=other" under its message type, and a kind
+with no message for a whole ten-second interval leaves the table, so a long lab session never goes
+blind; in gameplay, each `0x0259` with its body bytes, the player and their squad, platoon and
 role at that moment. The receipts are runtime captures: they stay in the private evidence stores, never
 in Git, and the switch is never set on live. With pattern payloads from the client's lab mode the
 receipts contain no speech.
