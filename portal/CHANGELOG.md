@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.0](https://github.com/tekulvw/mag-recomp-server/compare/portal-v0.6.0...portal-v0.7.0) (2026-11-26)
+
+
+### Features
+
+* **portal:** accept network reports from launchers ([#374](https://github.com/tekulvw/mag-recomp-server/issues/374)) ([7eed76c](https://github.com/tekulvw/mag-recomp-server/commit/7eed76c92145faa35e2213597afa4a0520074be1))
+
+
+### Bug Fixes
+
+* **portal:** show each world's real human limit and update the status in place ([#373](https://github.com/tekulvw/mag-recomp-server/issues/373)) ([718de04](https://github.com/tekulvw/mag-recomp-server/commit/718de04f1d50cab029d424f636a0c1dea5b470ff))
+
 ## [0.6.0](https://github.com/tekulvw/mag-recomp-server/compare/portal-v0.5.1...portal-v0.6.0) (2026-11-26)
 
 
