@@ -92,7 +92,11 @@ owns world size and fills every other seat with bots. The grouped-cohort `ulong`
 masks count humans per side, and refuse a side above 62. The DME port budget
 remains the global human limit across worlds.
 
-A 128- or 256-Character world also needs the worker-to-Horizon bridge throughput
-work before real use: each reply still carries at most 128 messages and 24,000
-bytes shared by every recipient.
+A 128- or 256-Character world also needs more worker-to-Horizon bridge
+throughput than the default: each reply carries at most 128 messages and 24,000
+bytes, shared by every recipient. Run such a worker with both
+`--coalesce-character-replication`
+([character-replication-coalescing.md](character-replication-coalescing.md))
+and `--per-recipient-reply-budget` ([bridge-reply-budget.md](bridge-reply-budget.md)).
+Both are opt-in and still need a test-server client check.
 

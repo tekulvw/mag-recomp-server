@@ -1260,7 +1260,14 @@ impl<W: Write> Engine<W> {
         // takes one packet per recipient so a busy low slot cannot starve peers.
         // Larger match admission explicitly opts into the expanded message count;
         // the aggregate raw-byte budget is the same for every match size.
-        let (limit, mut total) = self.reply_budget(&messages)?;
+        let (mut limit, mut total) = self.reply_budget(&messages)?;
+        let budget = if self.per_recipient_reply_budget {
+            crate::reply_budget::PER_RECIPIENT
+        } else {
+            crate::reply_budget::Budget::legacy(self.maximum_players)
+        };
+        limit = limit.max(budget.messages);
+        let byte_limit = budget.payload_bytes;
         self.publish_inherited_leadership(wall)?;
         let mut planned = Vec::new();
         // Shared character frames can already refer to an indexed hospital.
@@ -1298,6 +1305,8 @@ impl<W: Write> Engine<W> {
             .map(|a| (a.statistics_cursor, a.prefer_statistics))
             .collect::<Vec<_>>();
         let mut selected_stats = vec![std::collections::BTreeSet::new(); ready.len()];
+        // Shared messages and payload bytes released to each recipient.
+        let mut released = vec![(0usize, 0usize); ready.len()];
         let mut next_cursor = self.shared_drain_cursor;
         'drain: loop {
             let mut progressed = false;
@@ -1305,6 +1314,13 @@ impl<W: Write> Engine<W> {
                 if messages.len() + planned.len() >= limit {
                     break 'drain;
                 }
+                // Payload bytes this recipient may still receive in this reply.
+                let room = match budget.recipient {
+                    Some((count, _)) if released[index].0 >= count => continue,
+                    Some((_, bytes)) => bytes.saturating_sub(released[index].1),
+                    None => usize::MAX,
+                }
+                .min(byte_limit - total);
                 let candidate = self.next_shared_statistic(
                     actor,
                     actor
@@ -1324,7 +1340,7 @@ impl<W: Write> Engine<W> {
                 for statistics in [prefer_stat, !prefer_stat] {
                     if statistics {
                         if let Some(packet) = &stat_packet
-                            && total + packet.len() <= 24_000
+                            && packet.len() <= room
                         {
                             chosen = Some((packet.clone(), candidate, 0));
                             break;
@@ -1333,14 +1349,9 @@ impl<W: Write> Engine<W> {
                         let sequence = sequences[index]
                             .checked_add(1)
                             .ok_or("replication_sequence_exhausted")?;
-                        let (packet, frames) = self.next_shared_packet(
-                            actor,
-                            offsets[index],
-                            wire,
-                            sequence,
-                            24_000 - total,
-                        )?;
-                        if total + packet.len() <= 24_000 {
+                        let (packet, frames) =
+                            self.next_shared_packet(actor, offsets[index], wire, sequence, room)?;
+                        if packet.len() <= room {
                             chosen = Some((packet, None, frames));
                             break;
                         }
@@ -1350,6 +1361,8 @@ impl<W: Write> Engine<W> {
                     continue;
                 };
                 total += packet.len();
+                released[index].0 += 1;
+                released[index].1 += packet.len();
                 planned.push((actor.reservation.id.clone(), packet, stat, frames));
                 if let Some(stat) = stat {
                     selected_stats[index].insert(stat.slot());
@@ -1437,7 +1450,13 @@ impl<W: Write> Engine<W> {
         self.shared_drain_cursor = next_cursor;
         messages.extend(recipients);
         if !deferred.is_empty() {
-            self.report_shared_deferral(&deferred, messages.len(), total, limit, wall)?;
+            self.report_shared_deferral(
+                &deferred,
+                messages.len(),
+                total,
+                (limit, byte_limit),
+                wall,
+            )?;
         }
         self.drain_notifications(messages, wall)
     }
@@ -1507,7 +1526,7 @@ impl<W: Write> Engine<W> {
         deferred: &[(usize, usize)],
         messages: usize,
         bytes: usize,
-        message_limit: usize,
+        (message_limit, byte_limit): (usize, usize),
         wall: u64,
     ) -> Result<(), &'static str> {
         let deferral = &mut self.shared_deferral;
@@ -1524,7 +1543,7 @@ impl<W: Write> Engine<W> {
             json!({"op":"shared_replication_deferred","recipients":deferred.len(),
                 "queued_frames":deferred.iter().map(|(queued, _)| queued).sum::<usize>(),
                 "deepest_queue":deepest,"queue_bound":bound,"messages":messages,
-                "payload_bytes":bytes,"message_limit":message_limit,"byte_limit":24_000,
+                "payload_bytes":bytes,"message_limit":message_limit,"byte_limit":byte_limit,
                 "deferred_replies":since,"deferred_replies_total":replies}),
             wall,
         )

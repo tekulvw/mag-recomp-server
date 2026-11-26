@@ -226,6 +226,7 @@ pub mod projectile_replication;
 mod projectile_scene;
 pub mod protocol;
 pub mod replication;
+pub mod reply_budget;
 pub mod retail_armory;
 pub mod retail_combat;
 #[cfg(test)]
@@ -1397,6 +1398,9 @@ pub struct Engine<W: Write> {
     /// `--coalesce-character-replication`: join consecutive queued Character
     /// deltas into one update per recipient (see `character_coalescing`).
     coalesce_character_replication: bool,
+    /// `--per-recipient-reply-budget`: each recipient gets its own allowance
+    /// of shared frames per reply (see `reply_budget`).
+    per_recipient_reply_budget: bool,
     last_published_rosters: std::collections::BTreeMap<u16, ([u16; 8], u16)>,
     sequence: u64,
     written: u64,
@@ -1743,6 +1747,12 @@ impl<W: Write> Engine<W> {
         self.coalesce_character_replication = true;
         self
     }
+    /// Opt in to a shared-frame allowance per recipient in every reply, and
+    /// advertise `reply_budget::CAPABILITY` so Horizon accepts the larger replies.
+    pub fn with_per_recipient_reply_budget(mut self) -> Self {
+        self.per_recipient_reply_budget = true;
+        self
+    }
     pub fn with_development_grenade_radius(mut self) -> Self {
         self.development_grenade_radius = true;
         self
@@ -1957,6 +1967,9 @@ impl<W: Write> Engine<W> {
             repair_rewards::CAPABILITY.into(),
             firearm_assists::XP_CAPABILITY.into(),
         ];
+        if self.per_recipient_reply_budget {
+            capabilities.push(reply_budget::CAPABILITY.into());
+        }
         let match_profiles = self
             .match_profiles
             .as_ref()

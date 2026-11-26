@@ -354,3 +354,88 @@ fn coalesced_drain_joins_one_ticks_character_deltas_per_recipient() {
         assert_eq!(rows(false, id), rows(true, id));
     }
 }
+
+#[test]
+fn per_recipient_reply_budget_gives_each_recipient_its_own_allowance() {
+    let hello = |engine: &mut Engine<Vec<u8>>| {
+        engine
+            .handle(
+                Request::Hello {
+                    v: 2,
+                    request_id: "synthetic-hello".into(),
+                },
+                Duration::ZERO,
+                1,
+            )
+            .capabilities
+            .contains(&crate::reply_budget::CAPABILITY.to_owned())
+    };
+    let players: Vec<(u16, String)> = (0..32)
+        .map(|p| (p, format!("synthetic-reservation-r{p:03}")))
+        .collect();
+    let mut released = Vec::new();
+    for per_recipient in [false, true] {
+        let mut engine = populated_engine("Synthetic Budget");
+        engine.maximum_players = 64;
+        engine.max_log = 64 << 20; // every released message is recorded
+        if per_recipient {
+            engine = engine.with_per_recipient_reply_budget();
+        }
+        assert_eq!(hello(&mut engine), per_recipient);
+        for (player, id) in &players {
+            assert!(reserve(&mut engine, *player, id, Duration::ZERO).ok);
+            ready(actor(&mut engine, id).unwrap());
+        }
+        drain_stamped(&mut engine, &[]);
+        // 40 frames per recipient that never join: level rows of distinct bots.
+        for object_index in 100..140 {
+            let packet = replication::CharacterLevelUpdate {
+                sequence: 2,
+                timestamp_ms: 700,
+                object_index,
+                mag_info: replication::MagCharacterInfo {
+                    nominations: 0,
+                    level: 3,
+                    leadership_level: 0,
+                    skill_specialty: 0,
+                    head_id: 0,
+                    voice_id: 0,
+                },
+            }
+            .encode_with_profile(engine.wire_profile)
+            .unwrap();
+            for (_, id) in &players {
+                actor(&mut engine, id).unwrap().queue_shared(packet.clone());
+            }
+        }
+        let profile = engine.wire_profile;
+        let reply: Vec<_> = engine
+            .drain_shared(Vec::new(), 1)
+            .unwrap()
+            .into_iter()
+            .filter(|m| {
+                let wire = protocol::decode_hex(&m.payload_hex);
+                replication::ObjectUpdate::decode_with_profile(&wire, profile)
+                    .is_ok_and(|update| update.header.timestamp_ms == 700)
+            })
+            .collect();
+        let mut per = BTreeMap::<String, usize>::new();
+        for message in &reply {
+            *per.entry(message.reservation_id.clone()).or_default() += 1;
+        }
+        let bytes: usize = reply.iter().map(|m| m.payload_hex.len() / 2).sum();
+        if per_recipient {
+            // Sixteen frames for every recipient in one reply.
+            assert_eq!(reply.len(), 32 * 16);
+            assert!(per.values().all(|&n| n == 16), "{per:?}");
+            assert!(bytes <= crate::reply_budget::PER_RECIPIENT.payload_bytes);
+        } else {
+            // The legacy budget is shared: 128 messages for all 32 recipients.
+            assert_eq!(reply.len(), 128);
+            assert!(per.values().all(|&n| n == 4), "{per:?}");
+            assert!(bytes <= crate::reply_budget::LEGACY_PAYLOAD_BYTES);
+        }
+        released.push(reply.len());
+    }
+    assert!(released[1] > released[0]);
+}
