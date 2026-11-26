@@ -2972,7 +2972,13 @@ impl<W: Write> Engine<W> {
                 .and_then(|c| c.default_for_squad(squad).and_then(|s| c.point(s)))
                 .map_or(bot.target.position, |s| s.position);
             let attempt = bot.task.attempts;
-            let recovering = bot.task.goal.is_some() && attempt % 2 == 1;
+            // A bot resting just off the navmesh cannot start any route, so
+            // every attempt walks it back onto the mesh first.
+            let offmesh = self
+                .navmesh_world
+                .as_ref()
+                .is_some_and(|mesh| bot.target.supported_offmesh_stop(mesh));
+            let recovering = offmesh || (bot.task.goal.is_some() && attempt % 2 == 1);
             let candidate_attempt = bot.task.candidate_attempts;
             let index = candidate_attempt % policy.candidate_offsets_m.len();
             let sector = if bot.task.wide {
@@ -3005,11 +3011,6 @@ impl<W: Write> Engine<W> {
             if recovering {
                 let p = bot.target.runtime.unwrap().position;
                 let a = f64::from((u32::from(id) + attempt / 2) % 8) * std::f64::consts::FRAC_PI_4;
-                let offmesh = bot.target.runtime.unwrap().navmesh_state.navigation_aborted
-                    && self.navmesh_world.as_ref().is_some_and(|mesh| {
-                        mesh.component_id(bot.target.runtime.unwrap().physical_position())
-                            .is_err()
-                    });
                 let radius = policy.recovery_m
                     * if offmesh {
                         1. + f64::from((attempt / 16) % 2)
@@ -3021,6 +3022,20 @@ impl<W: Write> Engine<W> {
                     y: p.y + 0.5,
                     z: p.z + (a.sin() * radius) as f32,
                 };
+                // Off the mesh, every other attempt aims at the closest mesh
+                // point on this floor; the ring covers the rest.
+                if offmesh
+                    && attempt.is_multiple_of(2)
+                    && let Some(nearest) = self.navmesh_world.as_ref().and_then(|mesh| {
+                        nearest_floor_mesh_point(
+                            mesh,
+                            bot.target.runtime.unwrap().physical_position(),
+                            2. * policy.recovery_m,
+                        )
+                    })
+                {
+                    raw = position([nearest[0], nearest[1] + 0.5, nearest[2]]);
+                }
             }
             let key = CandidateKey {
                 objective,
@@ -3140,11 +3155,7 @@ impl<W: Write> Engine<W> {
                     .navmesh_world
                     .clone()
                     .ok_or("bot_navmesh_unavailable")?;
-                let local_rejoin = recovering
-                    && bot.target.runtime.unwrap().navmesh_state.navigation_aborted
-                    && mesh
-                        .component_id(bot.target.runtime.unwrap().physical_position())
-                        .is_err();
+                let local_rejoin = recovering && offmesh;
                 let movement = BotMove {
                     mode: if local_rejoin {
                         BotMoveMode::Navigation
@@ -3328,9 +3339,30 @@ mod public_synthetic_policy_tests {
         assert!(!policy.interactions_enabled);
     }
 }
+/// The closest walking-navmesh point within `radius` horizontally of a body
+/// standing at `here`, on its own floor (at most one step up or down).
+fn nearest_floor_mesh_point(
+    mesh: &navmesh::NavMesh,
+    here: [f64; 3],
+    radius: f64,
+) -> Option<[f64; 3]> {
+    const FLOOR_BAND_M: f64 = 1.;
+    mesh.column_candidates(here, radius.clamp(0.05, 5.), FLOOR_BAND_M)
+        .ok()?
+        .into_iter()
+        .map(|(_, p)| p)
+        .min_by(|a, b| {
+            let d = |p: &[f64; 3]| (p[0] - here[0]).hypot(p[2] - here[2]);
+            d(a).total_cmp(&d(b))
+        })
+}
+
 #[cfg(test)]
 #[path = "bot_drop_holding_tests.rs"]
 mod drop_holding_tests;
+#[cfg(test)]
+#[path = "bot_offmesh_stop_tests.rs"]
+mod offmesh_stop_tests;
 #[cfg(test)]
 #[path = "bot_role_goal_tests.rs"]
 mod role_goal_tests;
