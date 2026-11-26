@@ -287,6 +287,12 @@ fn ground_mount<W: Write>(
     } else if !same_vehicle_switch && ctx.engine.ground_occupancy_full(vehicle.unwrap()) {
         Some("ground_passenger_seats_full")
     } else if !same_vehicle_switch
+        && ctx
+            .engine
+            .ground_seat_reserved_for_other_squads(vehicle.unwrap(), active)
+    {
+        Some("ground_seats_reserved_for_other_squads")
+    } else if !same_vehicle_switch
         && let Err(code) = ground_seats::authorize_mount_position(active, vehicle.unwrap(), ctx.now)
     {
         Some(code)

@@ -468,3 +468,106 @@ fn domination_apc_driver_is_revoked_by_vehicle_destruction() {
     dispatch(&mut engine, &ground_driver_relay(profile, 0, 20, 3232), 120).unwrap();
     assert_eq!(engine.current_ground_vehicle(0).unwrap().position.x, 100.);
 }
+
+/// SYNTHETIC: APC 0 is the spawn point of squad 1 only; every other squad,
+/// including squad 0 where the first human lands, uses APC 1.
+fn squad_owned_apc_engine() -> Engine<Vec<u8>> {
+    let mut engine = driver_engine(0);
+    let mut spawn = domination_apc_spawn_json(0);
+    spawn["active"]["default_spawn"] = json!(1);
+    spawn["active"]["available"] = json!([1]);
+    for squad in spawn["maps"][0]["squads"].as_array_mut().unwrap() {
+        let owns_apc_zero = squad["index"] == 1;
+        squad["default_spawn"] = json!(if owns_apc_zero { 0 } else { 1 });
+        squad["available"] = json!([if owns_apc_zero { 0 } else { 1 }]);
+    }
+    engine.spawn_catalog = Some(spawns(spawn).unwrap());
+    engine
+}
+
+fn on_foot_at_apcs(engine: &mut Engine<Vec<u8>>, now: u64) {
+    engine.active.as_mut().unwrap().tracking.server_position(
+        CharacterPosition {
+            x: 100.,
+            y: 3.,
+            z: 100.,
+        },
+        player_tracking::PositionOrigin::ServerSpawn,
+        now,
+    );
+}
+
+fn last_denial(engine: &Engine<Vec<u8>>) -> Option<String> {
+    let log = String::from_utf8(engine.writer.clone()).unwrap();
+    log.lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|record| record["decoded"]["type"] == "mount_seat")
+        .and_then(|record| record["gameplay_denial"].as_str().map(str::to_owned))
+}
+
+#[test]
+fn a_squad_apc_seats_only_its_own_squad_while_its_seats_are_held() {
+    let mut engine = squad_owned_apc_engine();
+    ready_on_foot(&mut engine, 0, 10);
+    assert_eq!(
+        engine.active.as_ref().unwrap().squad_catalog.squad_index(),
+        0
+    );
+    on_foot_at_apcs(&mut engine, 760);
+    // Squad 0 does not own APC 0: its eight held seats fill the whole APC.
+    assert!(ground_seat_event(&mut engine, true, 0x0100_0000, 2, 0, 770).is_empty());
+    assert_eq!(
+        last_denial(&engine).as_deref(),
+        Some("ground_seats_reserved_for_other_squads")
+    );
+    assert_eq!(engine.active.as_ref().unwrap().ground_seat, None);
+    // Its own APC 1 seats it.
+    assert!(!ground_seat_event(&mut engine, true, 0x0100_0001, 2, 0, 780).is_empty());
+    assert_eq!(
+        engine
+            .active
+            .as_ref()
+            .unwrap()
+            .ground_seat
+            .unwrap()
+            .vehicle_index,
+        1
+    );
+}
+
+#[test]
+fn a_member_of_the_owning_squad_can_take_a_squad_apc_seat() {
+    let mut engine = squad_owned_apc_engine();
+    ready_on_foot(&mut engine, 0, 10);
+    let actor = engine.active.as_mut().unwrap();
+    actor.squad_catalog = std::sync::Arc::new(actor.squad_catalog.for_squad(1).unwrap());
+    on_foot_at_apcs(&mut engine, 760);
+    assert!(!ground_seat_event(&mut engine, true, 0x0100_0000, 2, 0, 770).is_empty());
+    assert_eq!(
+        engine.active.as_ref().unwrap().ground_seat,
+        Some(crate::ground_seats::PassengerSeat {
+            vehicle_index: 0,
+            seat: 2,
+        })
+    );
+}
+
+#[test]
+fn an_apc_that_no_squad_spawns_at_seats_anyone_on_its_side() {
+    let mut engine = squad_owned_apc_engine();
+    ready_on_foot(&mut engine, 0, 10);
+    on_foot_at_apcs(&mut engine, 760);
+    // APC 2 is no squad's spawn point, so it holds no seats.
+    assert!(!ground_seat_event(&mut engine, true, 0x0100_0002, 2, 0, 770).is_empty());
+    assert_eq!(
+        engine
+            .active
+            .as_ref()
+            .unwrap()
+            .ground_seat
+            .unwrap()
+            .vehicle_index,
+        2
+    );
+}

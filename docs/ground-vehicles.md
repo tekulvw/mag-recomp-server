@@ -84,6 +84,20 @@ An opted-in Domination catalog requires exactly eight source-type3 driver rows, 
 
 Driving changes dismount qualification for every occupant of that APC. The runtime rechecks the candidate exit against the current rotated vehicle pose, loaded map-matched static scene and current dynamic bodies. Failed clearance retains the seat and driver grant. Reproduce and test all initial poses and moved/rotated exits using the intended collision resources; a stationary source-exit receipt alone does not establish current-pose clearance. Keep each gameplay configuration's collision world and active-ability sidecar digests synchronized when staging data.
 
+## Squad-held APC seats
+
+An APC that is a squad's spawn point holds eight seats for every squad whose
+spawn points include it. A member of one of those squads may take any free
+seat. Anyone else may take one only while more seats are free than the squads
+still hold, after subtracting the seats their members already fill. Every
+original APC carries eight people, and each Domination APC is the spawn point
+of exactly one squad. In practice, only that squad can board it on foot. The
+original client applies this rule before it shows "enter vehicle", and the
+original server checks it again. This server refuses any other manual mount
+with `ground_seats_reserved_for_other_squads`. A vehicle that is no squad's
+spawn point, such as the Acquisition Escort, holds no seats. Changing seats in
+place and spawning into the squad's own APC are unaffected.
+
 ## Changing seats in place
 
 The client's change-seat action sends an ordinary mount request for another
