@@ -658,6 +658,16 @@
       "limitations": "Promotes source LALO arrivals independently of aircraft links; no invented altitude or Helo insertion."
     },
     {
+      "output": "acquisition-lalo-spawns.json",
+      "status": "direct",
+      "command": "project-retail-acquisition-lalo.py --catalog SPAWNS --source SPAWN_EXTRACTION --output OUTPUT",
+      "inputs": "Projected Acquisition spawn catalog and the authored type5 drop-zone position, rotation, radius and squad link",
+      "dependencies": [
+        "Python 3.11+ standard library"
+      ],
+      "limitations": "Drop zones open only through the bound anti-aircraft forward spawns; authored airborne position, no terrain correction; bots land below the drop line."
+    },
+    {
       "output": "domination-structural-effects.json",
       "status": "direct",
       "command": "project-retail-domination-structural-effects.py --help",

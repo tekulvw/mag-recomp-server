@@ -36,6 +36,13 @@ How it works:
   simulated minutes in about 10 s on a laptop) and writes the normal evidence
   log given by `--log`.
 - `MAG_SIM_SNAPSHOTS=1` records `sim_bot_snapshot` every 500 ms.
+- `MAG_SIM_COMPLETE_STRUCTURALS=24@60,27@90` (Acquisition only) completes
+  each listed Structural objective (client object index) at that simulated
+  second through the same queued request an authored script makes, standing in
+  for attackers destroying it. Its authored hooks then run as they would live,
+  for example an anti-aircraft structure opening its platoon's parachute drop
+  zones. Each request is logged as `sim_structural_completion_requested`, with
+  `error` set when the profile has no such Structural objective.
 
 Pass the same arguments the server runs with, plus the flag, for example:
 

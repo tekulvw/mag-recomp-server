@@ -749,6 +749,26 @@ impl Runtime {
             .prepare_published_sequence(index, state, game_time_ms)
     }
 
+    /// LOCAL DIAGNOSTIC (headless simulation only): request a Structural
+    /// state the way an authored script request does, for the next tick.
+    pub(crate) fn queue_scripted_state(
+        &mut self,
+        index: u16,
+        state: ObjectiveState,
+    ) -> Result<(), &'static str> {
+        if !self
+            .setup
+            .bindings
+            .rows
+            .get(&index)
+            .is_some_and(|row| row.class == NativeClass::Structural)
+        {
+            return Err("acquisition_structural_entry_unbound");
+        }
+        self.queued.insert(index, (state, u16::MAX));
+        Ok(())
+    }
+
     pub(crate) fn advances_native_objectives(&self) -> bool {
         self.setup.bindings.schema == NATIVE_BINDINGS
     }
@@ -1490,3 +1510,7 @@ impl<W: Write> Frame<'_, W> {
 #[cfg(test)]
 #[path = "acquisition_field_hospital_tests.rs"]
 mod field_hospital_tests;
+
+#[cfg(test)]
+#[path = "acquisition_lalo_tests.rs"]
+mod lalo_tests;

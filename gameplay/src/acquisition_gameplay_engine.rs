@@ -704,6 +704,20 @@ impl<W: Write> Engine<W> {
         states
     }
 
+    /// LOCAL DIAGNOSTIC (headless simulation only): see
+    /// `acquisition_structural::Runtime::queue_scripted_state`.
+    pub(crate) fn queue_acquisition_structural_state(
+        &mut self,
+        index: u16,
+        state: ObjectiveState,
+    ) -> Result<(), &'static str> {
+        self.acquisition_gameplay
+            .as_mut()
+            .and_then(|runtime| runtime.structural.as_mut())
+            .ok_or("acquisition_structural_unavailable")?
+            .queue_scripted_state(index, state)
+    }
+
     pub(crate) fn tick_acquisition_objectives(
         &mut self,
         now: Duration,
