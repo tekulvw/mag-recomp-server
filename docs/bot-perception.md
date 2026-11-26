@@ -264,8 +264,9 @@ kinds, so it applies to Sabotage, Acquisition and Domination populations.
 
 ## Not implemented
 
-- Walking to investigate a last known position, taking cover and strafing.
-  A bot watches the last known position from where it paused instead.
+- Walking to investigate a last known position, and strafing. A bot watches
+  the last known position from where it paused instead, or, with cover on,
+  from cover ([bot-cover.md](bot-cover.md)).
 - Acoustic occlusion and vehicle, rocket and mounted-weapon sounds.
 - Acceptance against live clients: whether retail clients report magazine
   counts on every shot, as human gunfire detection assumes, is unverified.

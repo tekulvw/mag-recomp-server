@@ -288,6 +288,17 @@ struct Threat {
     linger: Duration,
     urgent: bool,
 }
+/// A bot's current threat as the cover layer sees it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ThreatView {
+    pub point: [f64; 3],
+    pub enemy: Option<u16>,
+    pub cause: Cause,
+    pub urgent: bool,
+    pub last: Duration,
+    /// Hit within the last two seconds.
+    pub damaged: bool,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Transition {
     Interrupt(Cause),
@@ -320,6 +331,27 @@ impl Mind {
         self.threat
             .filter(|t| now >= t.react_at)
             .and_then(|t| t.enemy)
+    }
+    /// The reacted-to threat, for the cover layer: point, enemy, cause,
+    /// whether it was urgent and when it was last stimulated.
+    pub(crate) fn threat_view(&self, now: Duration) -> Option<ThreatView> {
+        self.threat
+            .filter(|t| now >= t.react_at)
+            .map(|t| ThreatView {
+                point: t.point,
+                enemy: t.enemy,
+                cause: t.cause,
+                urgent: t.urgent,
+                last: t.last,
+                damaged: self.recently_damaged(now),
+            })
+    }
+    /// End any hold and keep the bot from being interrupted again for `ms`,
+    /// except by a hit.
+    fn calm(&mut self, now: Duration, ms: u64) {
+        self.hold_since = None;
+        self.hard_cooldown = true;
+        self.cooldown_until = self.cooldown_until.max(now + Duration::from_millis(ms));
     }
     fn recently_damaged(&self, now: Duration) -> bool {
         self.last_damaged
@@ -509,6 +541,16 @@ impl World {
     pub(crate) fn threat_enemy(&self, id: u16, now: Duration) -> Option<u16> {
         self.minds.get(&id).and_then(|m| m.threat_enemy(now))
     }
+    pub(crate) fn threat_view(&self, id: u16, now: Duration) -> Option<ThreatView> {
+        self.minds.get(&id).and_then(|m| m.threat_view(now))
+    }
+    /// After cover: walk on without a new route pause for `ms` (a hit still
+    /// interrupts).
+    pub(crate) fn calm(&mut self, id: u16, now: Duration, ms: u64) {
+        if let Some(mind) = self.minds.get_mut(&id) {
+            mind.calm(now, ms);
+        }
+    }
     #[cfg(test)]
     pub(crate) fn stats_rays(&self) -> u64 {
         self.stats.sight_rays
@@ -535,6 +577,10 @@ impl World {
     }
 }
 
+/// The torso of a body `height` tall (standing or crouched).
+pub(crate) fn torso_at(feet: [f64; 3], height: f64) -> [f64; 3] {
+    [feet[0], feet[1] + height * 0.6, feet[2]]
+}
 pub(crate) fn torso(feet: [f64; 3]) -> [f64; 3] {
     [
         feet[0],
@@ -725,6 +771,7 @@ struct Body {
     id: u16,
     team: u8,
     feet: [f64; 3],
+    height: f64,
 }
 /// The living enemy Character named by a damage record's attacker field
 /// (character objects are `0x0380_0000 | index`). Other sources, such as
@@ -820,7 +867,12 @@ impl<W: Write> Engine<W> {
             ];
             let team = a.team();
             let id = a.reservation.player;
-            bodies.push(Body { id, team, feet });
+            bodies.push(Body {
+                id,
+                team,
+                feet,
+                height: bot_physics::Body::default().height,
+            });
             present.insert(a.reservation.id.clone());
             let ear = self
                 .bot_perception
@@ -937,7 +989,12 @@ impl<W: Write> Engine<W> {
             live.insert(id);
             let feet = r.physical_position();
             let team = bot.target.squad.team();
-            bodies.push(Body { id, team, feet });
+            bodies.push(Body {
+                id,
+                team,
+                feet,
+                height: self.bot_cover.body_height(id),
+            });
             let mind = self.bot_perception.minds.entry(id).or_default();
             if mind.life != (bot.allocation_generation, r.generation) {
                 *mind = Mind {
@@ -1018,7 +1075,7 @@ impl<W: Write> Engine<W> {
             self.bot_perception.cursor = id.wrapping_add(1);
             let me = bot.target.runtime.unwrap().physical_position();
             let team = bot.target.squad.team();
-            let eye = torso(me);
+            let eye = torso_at(me, self.bot_cover.body_height(id));
             let yaw = yaw_radians(bot.yaw);
             let range = bot_sight_range(&policy, &items, bot);
             let mut candidates: Vec<_> = bodies
@@ -1042,7 +1099,7 @@ impl<W: Write> Engine<W> {
                     self.bot_sight_structures(),
                     &map,
                     eye,
-                    torso(candidate.feet),
+                    torso_at(candidate.feet, candidate.height),
                     &mut rays,
                     &mut work,
                 ) {
@@ -1085,7 +1142,9 @@ impl<W: Write> Engine<W> {
                     .map(|b| (enemy, torso(b.feet)))
             });
             let obs = Observation {
-                interruptible: interruptible(bot, guard),
+                // A bot the cover layer is moving or holding is not on its
+                // ordinary route; any hold releases at once.
+                interruptible: interruptible(bot, guard) && !self.bot_cover.controls(id),
                 engaged,
                 seen: seen.get(&id).map(|&(enemy, feet, _)| (enemy, torso(feet))),
                 sight_delay: seen.get(&id).map_or(Duration::ZERO, |&(_, _, delay)| delay),
@@ -1517,11 +1576,13 @@ mod tests {
                 id: 3,
                 team: 0,
                 feet: [1., 0., 1.],
+                height: 1.8,
             },
             Body {
                 id: 4,
                 team: 1,
                 feet: [2., 0., 2.],
+                height: 1.8,
             },
         ];
         assert_eq!(

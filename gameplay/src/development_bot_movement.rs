@@ -1003,6 +1003,55 @@ impl Target {
         true
     }
 
+    /// Walk (or sprint) an already planned complete route, such as a short
+    /// move into cover. Replaces any current route.
+    pub(super) fn begin_registry_route(
+        &mut self,
+        mesh: Arc<navmesh::NavMesh>,
+        route: navmesh::Route,
+        sprint: bool,
+        now: Duration,
+    ) -> Result<(), &'static str> {
+        let runtime = self.runtime.ok_or("bot_not_spawned")?;
+        if route.status != navmesh::Status::Complete {
+            return Err("bot_route_incomplete");
+        }
+        let movement = BotMove {
+            mode: BotMoveMode::Navmesh,
+            destination: character_position(route.projected_goal),
+            duration_ms: ((route.length_m / retail_movement::WALK_FORWARD_MPS * 1000.) as u32
+                + 4000)
+                .clamp(1000, 120_000),
+            update_ms: 250,
+            yaw: None,
+            sprint,
+        };
+        let navigation = NavigationMove::from_complete_navmesh_route(mesh, route)?;
+        self.prepare_registry_move(
+            movement,
+            navigation,
+            now,
+            format!(
+                "population-cover-{}-{}-{}",
+                self.object_index,
+                runtime.generation,
+                now.as_millis()
+            ),
+        )?
+        .install(self);
+        Ok(())
+    }
+
+    /// Stop the current route where the body stands.
+    pub(super) fn stop_registry_move(&mut self) {
+        self.pending_move = None;
+        if let Some(runtime) = &mut self.runtime
+            && matches!(runtime.phase, BotPhase::Relocating)
+        {
+            runtime.phase = BotPhase::Complete;
+        }
+    }
+
     fn prepare_registry_move(
         &self,
         mut movement: BotMove,

@@ -201,6 +201,10 @@ impl State {
             reservation: None,
         });
     }
+    /// Reloading, or bound with an empty magazine: not ready to fire.
+    pub(super) fn reloading(&self) -> bool {
+        self.reload_until.is_some() || (self.equipment.is_some() && self.magazine == 0)
+    }
     /// Object index of the enemy this weapon currently holds, if any.
     pub(super) fn target_index(&self) -> Option<u16> {
         self.target.as_ref().map(|life| life.id)
@@ -261,11 +265,26 @@ pub(crate) struct Actor {
     life: Life,
     team: u8,
     feet: [f64; 3],
+    /// Body height: standing, or crouched behind low cover.
+    height: f64,
     health: u16,
     armor: Option<armor::ArmorProfile>,
 }
 
 impl Actor {
+    /// Where shots aim and leave from: the torso at this body's height.
+    fn torso(&self) -> [f64; 3] {
+        [self.feet[0], self.feet[1] + self.height * 0.6, self.feet[2]]
+    }
+    fn bounds(&self) -> Bounds {
+        Bounds::body(
+            self.feet,
+            bot_physics::Body {
+                height: self.height,
+                ..Default::default()
+            },
+        )
+    }
     fn bot_stat_life(&self) -> bot_firearm_kd::Life {
         bot_firearm_kd::Life {
             index: self.life.id,
@@ -324,20 +343,6 @@ fn safe_for(bot: &WorldBot, allow_owned_walk: bool, held: bool) -> bool {
         && !bot.drop_retreat
         && !bot.drop_reroute
         && (standing || bot.traffic_yield.is_none())
-}
-fn torso(feet: [f64; 3]) -> [f64; 3] {
-    [
-        feet[0],
-        feet[1] + bot_physics::Body::default().height * 0.6,
-        feet[2],
-    ]
-}
-fn muzzle(feet: [f64; 3]) -> [f64; 3] {
-    [
-        feet[0],
-        feet[1] + bot_physics::Body::default().height * 0.6,
-        feet[2],
-    ]
 }
 fn length(a: [f64; 3], b: [f64; 3]) -> f64 {
     (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f64>().sqrt()
@@ -454,7 +459,7 @@ pub(crate) fn visible(
             return Err("body_query_budget");
         }
         *work -= 1;
-        if intersects(from, to, Bounds::body(actor.feet, Default::default())) {
+        if intersects(from, to, actor.bounds()) {
             return Err("body_blocked");
         }
     }
@@ -605,6 +610,7 @@ impl<W: Write> Engine<W> {
                     sample.position.y.into(),
                     sample.position.z.into(),
                 ],
+                height: bot_physics::Body::default().height,
                 health: health_quarter_points,
                 armor,
             });
@@ -622,6 +628,7 @@ impl<W: Write> Engine<W> {
                 },
                 team: bot.target.squad.team(),
                 feet: r.physical_position(),
+                height: self.bot_cover.body_height(id),
                 health: bot.health,
                 armor: armor::ArmorProfile::from_retail_loadout(&bot.target.loadout, catalog).ok(),
             });
@@ -768,7 +775,7 @@ impl<W: Write> Engine<W> {
             let reload_changed =
                 !servicing && state.reload(now, schedule, metadata.magazine_capacity);
             let reload_receipt=reload_changed.then(||json!({"op":"bot_firearm_reload","timestamp_ms":now.as_millis() as u64,"object_index":id,"generation":me.life.generation,"magazine":state.magazine,"reserve":state.reserve,"reloading":state.reload_until.is_some()}));
-            let from = muzzle(me.feet);
+            let from = me.torso();
             // An attacker hunting a disarmer looks for that enemy first.
             let priority = self.armed_priority_target(&self.bot_registry.bots[&id]);
             // Otherwise a new acquisition prefers the enemy perception last
@@ -785,7 +792,7 @@ impl<W: Write> Engine<W> {
                 !actors.iter().any(|a| {
                     a.life == *life
                         && a.health > 0
-                        && policy.within_range(length(from, torso(a.feet)), metadata.max_range)
+                        && policy.within_range(length(from, a.torso()), metadata.max_range)
                 })
             }) {
                 state.target = None;
@@ -803,7 +810,7 @@ impl<W: Write> Engine<W> {
                             && a.armor.is_some()
                             && policy.can_acquire(
                                 from,
-                                torso(a.feet),
+                                a.torso(),
                                 f64::from(self.bot_registry.bots[&id].yaw) * std::f64::consts::TAU
                                     / 1024.,
                                 metadata.max_range,
@@ -813,7 +820,7 @@ impl<W: Write> Engine<W> {
                 candidates.sort_by(|a, b| {
                     (Some(b.life.id) == preferred)
                         .cmp(&(Some(a.life.id) == preferred))
-                        .then(length(from, torso(a.feet)).total_cmp(&length(from, torso(b.feet))))
+                        .then(length(from, a.torso()).total_cmp(&length(from, b.torso())))
                         .then(a.life.id.cmp(&b.life.id))
                 });
                 let mut selected = None;
@@ -824,7 +831,7 @@ impl<W: Write> Engine<W> {
                         self.bot_sight_structures(),
                         &map,
                         from,
-                        torso(candidate.feet),
+                        candidate.torso(),
                         id,
                         candidate.life.id,
                         &actors,
@@ -902,7 +909,7 @@ impl<W: Write> Engine<W> {
                 .cloned()
             {
                 threat = bot_resupply::Threat::Enemy;
-                let to = torso(target.feet);
+                let to = target.torso();
                 let moving = !paused
                     && matches!(
                         self.bot_registry.bots[&id].target.runtime.unwrap().phase,
@@ -938,11 +945,7 @@ impl<W: Write> Engine<W> {
                     && policy.within_range(length(from, to), metadata.max_range)
                     && error <= policy.aim_tolerance_degrees.to_radians()
                     && pitch_error <= policy.aim_tolerance_degrees.to_radians()
-                    && intersects(
-                        from,
-                        aimed_end,
-                        Bounds::body(target.feet, Default::default()),
-                    )
+                    && intersects(from, aimed_end, target.bounds())
                     && now.saturating_sub(state.acquired)
                         >= Duration::from_millis(policy.reaction_ms)
                     && state.magazine > 0
@@ -982,16 +985,13 @@ impl<W: Write> Engine<W> {
                             if state.consume(now, schedule) {
                                 state.recoil = next_recoil;
                                 state.last_fired = Some(now);
-                                let hit = intersects(
-                                    from,
-                                    shot_end,
-                                    Bounds::body(target.feet, Default::default()),
-                                ) && accurate(
-                                    id,
-                                    me.life.generation,
-                                    state.shot_number,
-                                    policy.accuracy_at(length(from, to), metadata.max_range),
-                                );
+                                let hit = intersects(from, shot_end, target.bounds())
+                                    && accurate(
+                                        id,
+                                        me.life.generation,
+                                        state.shot_number,
+                                        policy.accuracy_at(length(from, to), metadata.max_range),
+                                    );
                                 let resolved = damage::resolve_character_hit(
                                     profile.raw_character_damage(length(from, to) as f32, 1., 0)?,
                                     target.armor.unwrap().with_incoming_base(
@@ -1051,9 +1051,9 @@ impl<W: Write> Engine<W> {
                 let shot_receipt = receipts.len();
                 receipts.push(json!({"op":"bot_firearm_shot","timestamp_ms":now.as_millis() as u64,"object_index":id,"generation":me.life.generation,
                     "target":target.life.id,"target_generation":target.life.generation,"weapon_item":profile.item_id(),"magazine":state.magazine,"reserve":state.reserve,
-                    "origin":from,"destination":torso(target.feet),"aim_endpoint":aimed_end,"yaw_radians":state.yaw,"pitch_radians":state.pitch,"hit":hit,"amount_hp":if hit {amount} else {0.},"damage_calculation":calculation,
+                    "origin":from,"destination":target.torso(),"aim_endpoint":aimed_end,"yaw_radians":state.yaw,"pitch_radians":state.pitch,"hit":hit,"amount_hp":if hit {amount} else {0.},"damage_calculation":calculation,
                     "recoil_pitch_degrees":state.recoil.pitch_degrees,"recoil_yaw_degrees":state.recoil.yaw_degrees,"spread_degrees":state.recoil.width_degrees(recoil_profile),"recoil_compensation_per_mille":policy.recoil_compensation_per_mille,
-                    "distance_m":length(from,torso(target.feet)),"accuracy_per_mille":policy.accuracy_at(length(from,torso(target.feet)),metadata.max_range),
+                    "distance_m":length(from,target.torso()),"accuracy_per_mille":policy.accuracy_at(length(from,target.torso()),metadata.max_range),
                     "health_before":target.health,"health_after":if hit {resolved.map_or(target.health,|d|d.health_quarter_points)} else {target.health}}));
                 if hit
                     && let Some(assists) = firearm_assists::Plan::prepare(
