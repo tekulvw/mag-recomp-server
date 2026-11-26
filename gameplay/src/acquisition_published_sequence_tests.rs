@@ -68,13 +68,60 @@ fn sequences(engine: &crate::Engine<Vec<u8>>) -> Vec<ObjectiveSequenceDelta> {
 
 /// Every standalone fields-9/10 controller row the objective ticks recorded.
 fn published(engine: &crate::Engine<Vec<u8>>) -> Vec<(u32, i32, u32)> {
+    recorded(engine, "sequence_updates")
+        .into_iter()
+        .filter(|row| row.0 != u32::from(STRUCTURAL))
+        .collect()
+}
+
+/// Every fields-9/10 row a late-join bootstrap queued.
+fn late_join_rows(engine: &crate::Engine<Vec<u8>>) -> Vec<(u32, i32, u32)> {
+    recorded(engine, "domination_sequence_batches")
+}
+
+/// Join a second, ready player and pull owner updates until it is sent the
+/// objective bootstrap.
+fn late_join(engine: &mut crate::Engine<Vec<u8>>, now: u64) {
+    super::connected_tests::defender_at(engine, 1, Duration::from_millis(now));
+    let mut claim = engine
+        .wire_profile
+        .wire_message_type(3)
+        .to_be_bytes()
+        .to_vec();
+    claim.extend([0; 48]);
+    super::connected_tests::event(engine, &claim, now, crate::Transport::Udp).unwrap();
+    let actor = engine.active.as_mut().unwrap();
+    crate::spawn_progression::ready(actor);
+    actor.objective_delta = None;
+    for now in now + 1..now + 20 {
+        let header = crate::replication::UpdateHeader {
+            sequence: engine.active.as_ref().unwrap().latest_owner_sequence + 1,
+            nak_sequence: 0,
+            client_index: 0,
+            object_type_mask: 0,
+            timestamp_ms: now as u32,
+        };
+        let wire = crate::replication::ObjectUpdate { header, wire: &[] }
+            .encode_empty_with_profile(engine.wire_profile)
+            .unwrap();
+        super::connected_tests::event(engine, &wire, now, crate::Transport::Udp).unwrap();
+        if engine.active.as_ref().unwrap().objective_delta.is_some() {
+            return;
+        }
+    }
+    panic!("late joiner never received the objective bootstrap");
+}
+
+fn recorded(engine: &crate::Engine<Vec<u8>>, key: &str) -> Vec<(u32, i32, u32)> {
     let mut rows = Vec::new();
     for record in String::from_utf8_lossy(&engine.writer)
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|row| row["op"] == "acquisition_objective_tick")
     {
-        for packet in record["sequence_updates"].as_array().unwrap() {
+        let Some(packets) = record[key].as_array() else {
+            continue;
+        };
+        for packet in packets {
             let wire = crate::protocol::decode_hex(packet.as_str().unwrap());
             let mut bits = BitReader::with_profile(&wire, engine.wire_profile);
             bits.position = engine.wire_profile.header_bits();
@@ -89,9 +136,7 @@ fn published(engine: &crate::Engine<Vec<u8>>) -> Vec<(u32, i32, u32)> {
                 let [(9, sequence), (10, start)] = fields[..] else {
                     panic!("sequence-only row carries {fields:?}");
                 };
-                if index != u32::from(STRUCTURAL) {
-                    rows.push((index, sequence as i32, start));
-                }
+                rows.push((index, sequence as i32, start));
             }
         }
     }
@@ -174,18 +219,17 @@ fn capture_publishes_closed_then_opening_sequence_and_late_join_keeps_its_start(
         start_time_ms: 3200,
     };
     assert_eq!(sequences(&engine), [opened]);
-    // Late-join history encodes the same selection with its original start.
-    let batches = crate::replication::ObjectiveSequenceDelta::encode_batches(
-        &sequences(&engine),
-        9000,
-        engine.wire_profile,
-    )
-    .unwrap();
-    assert_eq!(batches.len(), 1);
-
     // Locked (-2) and later ticks keep the opened selection.
     tick(&mut engine, 9000);
     assert_eq!(sequences(&engine), [opened]);
+
+    // A client that joins later receives the opening with its original start.
+    let before = late_join_rows(&engine).len();
+    late_join(&mut engine, 9100);
+    assert_eq!(
+        late_join_rows(&engine)[before..],
+        [(u32::from(CAPTURE), 1, 3200), (u32::from(STRUCTURAL), 0, 0)]
+    );
 
     // Structural and controller selections share one late-join batch in
     // object-index order.

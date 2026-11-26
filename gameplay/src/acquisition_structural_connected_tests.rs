@@ -246,7 +246,7 @@ fn row(engine: &crate::Engine<Vec<u8>>) -> crate::replication::ObjectiveControlD
         .find(|delta| delta.object_index == INDEX)
         .unwrap()
 }
-fn event(
+pub(super) fn event(
     engine: &mut crate::Engine<Vec<u8>>,
     wire: &[u8],
     now: u64,
