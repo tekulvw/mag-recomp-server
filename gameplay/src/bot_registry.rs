@@ -1277,6 +1277,34 @@ impl<W: Write> Engine<W> {
             recipient.queue_shared(packet.clone());
         }
     }
+    /// Objective world deltas, unlike bot frames, are never re-sent when a
+    /// client returns from its deploy screen (`ready_for_updates` false). A
+    /// client that already holds the objective bootstrap keeps receiving them
+    /// there and drains them in order once ready; one still waiting for its
+    /// bootstrap gets the current state in that snapshot instead.
+    pub(crate) fn broadcast_objective_packet(&mut self, packet: Vec<u8>) {
+        for recipient in self
+            .peers
+            .values_mut()
+            .chain(self.active.iter_mut())
+            .filter(|a| a.receives_objective_state())
+        {
+            recipient.queue_shared(packet.clone());
+        }
+    }
+    /// Shared spawn availability deltas. The initial objects carry the squad
+    /// spawns a client starts from, and a client on its deploy screen needs
+    /// every later change to choose a spawn.
+    pub(crate) fn broadcast_spawn_packet(&mut self, packet: Vec<u8>) {
+        for recipient in self
+            .peers
+            .values_mut()
+            .chain(self.active.iter_mut())
+            .filter(|a| a.initial_objects.is_some())
+        {
+            recipient.queue_shared(packet.clone());
+        }
+    }
     pub(super) fn broadcast_known_bot_heal(&mut self, index: u16, packet: Vec<u8>) {
         let known = &self.bot_registry.known;
         for recipient in self

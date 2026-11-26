@@ -1163,3 +1163,52 @@ mod match_cohorts;
 
 #[path = "domination_control_bootstrap_tests.rs"]
 mod domination_control_bootstrap;
+
+/// A member whose client holds the objective bootstrap but is on its deploy
+/// screen (not ready for updates) still gets each objective change, so the
+/// state it shows once it deploys matches everyone else's.
+#[test]
+fn objective_change_reaches_a_member_on_its_deploy_screen() {
+    let mut engine = engine();
+    for player in 0..2 {
+        reserve(&mut engine, player);
+    }
+    for actor in actors(&mut engine) {
+        ready(actor);
+        actor.life = CharacterLife::Alive {
+            generation: 1,
+            health_quarter_points: 400,
+        };
+        actor.pending_shared.clear();
+        if actor.reservation.player == 1 {
+            actor.ready_for_updates = false;
+            actor.entered_game = false;
+        }
+    }
+    start_objective(&mut engine, 10, 0);
+    engine
+        .tick_objectives(Duration::from_millis(10), 1)
+        .unwrap();
+    let objectives = |engine: &Engine<Vec<u8>>, player: u16| -> Vec<Vec<u8>> {
+        engine
+            .peers
+            .values()
+            .chain(engine.active.iter())
+            .find(|actor| actor.reservation.player == player)
+            .unwrap()
+            .pending_shared
+            .iter()
+            .filter(|packet| {
+                ObjectUpdate::decode_with_profile(packet, engine.wire_profile)
+                    .unwrap()
+                    .header
+                    .object_type_mask
+                    == 1 << 12
+            })
+            .cloned()
+            .collect()
+    };
+    let deployed = objectives(&engine, 0);
+    assert!(!deployed.is_empty());
+    assert_eq!(objectives(&engine, 1), deployed);
+}

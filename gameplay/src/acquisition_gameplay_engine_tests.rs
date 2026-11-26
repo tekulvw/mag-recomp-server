@@ -13,6 +13,8 @@ use crate::{
 use std::collections::BTreeMap;
 
 const FIRST_CAPTURE: u16 = 100;
+#[path = "acquisition_deploy_screen_tests.rs"]
+mod deploy_screen;
 #[path = "acquisition_frag_ground_damage_tests.rs"]
 mod frag_ground_damage;
 #[path = "acquisition_hold_exit_tests.rs"]

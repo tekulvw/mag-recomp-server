@@ -34,6 +34,12 @@ impl Active {
         }
     }
 
+    /// Takes objective state deltas: it is ready, or its client already holds
+    /// the objective bootstrap (for example while on its deploy screen).
+    pub(crate) fn receives_objective_state(&self) -> bool {
+        self.initial_objects.is_some() && (self.ready_for_updates || self.objective_delta.is_some())
+    }
+
     pub(super) fn ordinary_shared_len(&self) -> usize {
         self.pending_shared.len() - self.hospital_bootstrap.len() - self.smoke_bootstrap.len()
     }
