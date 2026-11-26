@@ -231,6 +231,10 @@ namespace Server.Dme
         public const int Length = 14;
         public const ushort Kind = 47;
 
+        /// <summary>The body has a voice header's kind and agreeing group bytes, whatever its length.</summary>
+        public static bool HasVoiceKind(ReadOnlySpan<byte> body) =>
+            body.Length >= Length && ((body[4] << 8) | body[5]) == Kind && body[1] == body[6];
+
         public static bool TryParse(ReadOnlySpan<byte> body, out VoicePacketHeader header)
         {
             header = default;

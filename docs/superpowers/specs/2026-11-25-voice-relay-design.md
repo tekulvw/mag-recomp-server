@@ -185,8 +185,10 @@ not ordinary gameplay traffic, the transport message type, total length, the fir
 hex and the time, for the first 20 messages of each kind and then one in every 100 for as long as it
 lasts. Every ten seconds a counts line per message kind follows, and one per talker and voice group
 with the packets, data bytes, smallest and largest data length, packets holding more than one 37-byte
-block, sequence gaps (packets the DME never saw) and sequence steps back (repeats or a restarted
-client); in gameplay, each `0x0259` with its body bytes, the player and their squad, platoon and
+block, sequence gaps (packets the DME never saw), sequence steps back (repeats or a restarted
+client) and messages with the voice kind whose length does not match one packet. A message kind that
+first appears after 512 kinds are in use (messages with random leading bytes fill the table in a
+long-lived process) is still counted and sampled, as "lead=other" under its message type; in gameplay, each `0x0259` with its body bytes, the player and their squad, platoon and
 role at that moment. The receipts are runtime captures: they stay in the private evidence stores, never
 in Git, and the switch is never set on live. With pattern payloads from the client's lab mode the
 receipts contain no speech.
