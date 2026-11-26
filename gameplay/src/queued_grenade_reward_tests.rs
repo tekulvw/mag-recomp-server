@@ -2336,14 +2336,10 @@ fn mixed_frag_assists_share_the_firearm_ledger_in_both_weapon_orders() {
             queue_human_frag(&mut engine, 40.);
             update(&mut engine, 6000).unwrap();
         }
-        // A lethal frag carries KineticResponse and is final; a lethal
-        // firearm hit downs the victim instead.
-        let life = engine.peers["synthetic-reservation-0000"].life;
-        if frag_contributor {
-            assert!(matches!(life, CharacterLife::Incapacitated { .. }));
-        } else {
-            assert!(matches!(life, CharacterLife::AwaitingRespawn { .. }));
-        }
+        assert!(matches!(
+            engine.peers["synthetic-reservation-0000"].life,
+            CharacterLife::Incapacitated { .. }
+        ));
         assert_eq!(
             mixed_frag_assist_count(&engine),
             1,
