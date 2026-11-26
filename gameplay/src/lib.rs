@@ -63,6 +63,7 @@ mod bot_spawn_selection;
 #[cfg(test)]
 mod bot_squad_packing_tests;
 mod bot_stat_publication;
+mod bot_structure_collision;
 #[cfg(test)]
 mod bot_teammate_healing_tests;
 mod bot_traffic_costs;
@@ -109,6 +110,7 @@ pub mod leadership_runtime;
 #[cfg(test)]
 mod melee_death_tests;
 pub mod navmesh;
+mod navmesh_structure_gates;
 #[cfg(test)]
 mod platoon_ability_engine_tests;
 #[cfg(test)]
@@ -1391,6 +1393,10 @@ pub struct Engine<W: Write> {
     last_world_tick: Option<Duration>,
     /// Opt-in per-phase world-tick time (headless diagnostics).
     tick_timing: Option<tick_timing::TickTiming>,
+    /// Off-tick analysis of the bot structure snapshot, while it runs.
+    bot_structure_analysis: Option<bot_structure_collision::Analysis>,
+    /// Key of the structure snapshot the last analysis was started for.
+    bot_structure_analysed: Option<(u64, u32)>,
     automatic_repair: leadership_auto_repair::State,
     automatic_heal: leadership_auto_heal::State,
     match_epoch: Option<Duration>,

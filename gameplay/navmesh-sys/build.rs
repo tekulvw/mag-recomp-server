@@ -24,6 +24,8 @@ fn main() {
                     "-fPIC",
                     "-fno-exceptions",
                     "-fno-rtti",
+                    // Structure gating derives a cost filter from dtQueryFilter.
+                    "-DDT_VIRTUAL_QUERYFILTER",
                     "-Ivendor/recastnavigation/Recast/Include",
                     "-Ivendor/recastnavigation/Detour/Include",
                     "-c"

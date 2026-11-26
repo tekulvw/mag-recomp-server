@@ -2,6 +2,10 @@
 //! Route queries never certify raw collision edges; physical movement remains authoritative.
 pub use crate::bot_physics::BodyShape;
 use mag_navmesh_sys::{
+    mag_nav_add_gate, mag_nav_clear_gates, mag_nav_poly_heights, mag_nav_poly_info,
+    mag_nav_polys_in_box,
+};
+use mag_navmesh_sys::{
     mag_nav_bake, mag_nav_column_goals, mag_nav_component, mag_nav_component_id, mag_nav_contains,
     mag_nav_contains_settlement_column, mag_nav_destroy, mag_nav_free_bytes, mag_nav_goals,
     mag_nav_load, mag_nav_route, mag_nav_tile_stats,
@@ -532,6 +536,31 @@ pub struct NavMesh {
     /// The runtime body shape the mesh was loaded for.
     body_shape: BodyShape,
     native: Mutex<Native>,
+    /// Key of the structure snapshot the installed gates came from.
+    structure_gates: Mutex<Option<(u64, u32)>>,
+    /// That snapshot, for steering routes around structures in a polygon.
+    structure_snapshot:
+        Mutex<Option<std::sync::Arc<crate::bot_structure_collision::StructureObstacles>>>,
+    /// The installed gates by polygon, with the structures each came from.
+    structure_gate_cache: Mutex<std::sync::Arc<GateCache>>,
+}
+pub(crate) type GateCache =
+    std::collections::HashMap<u64, (crate::navmesh_structure_gates::GateSources, PolyGate)>;
+/// One navmesh polygon's outline and links (neighbour, shared edge).
+pub(crate) struct PolyInfo {
+    pub(crate) vertices: Vec<Point>,
+    pub(crate) links: Vec<(u64, Point, Point)>,
+}
+/// Placed-structure gating of one polygon; see `navmesh_structure_gates`.
+#[derive(Clone)]
+pub(crate) struct PolyGate {
+    pub(crate) poly: u64,
+    pub(crate) origin_xz: [f64; 2],
+    pub(crate) cell: f64,
+    pub(crate) size: [usize; 2],
+    pub(crate) labels: Vec<u8>,
+    /// (neighbour, regions at the shared edge, those also reaching another link).
+    pub(crate) links: Vec<(u64, u64, u64)>,
 }
 impl NavMesh {
     pub fn load(artifact: Artifact, world_sha256: &str, map_name: &str) -> Result<Self, Error> {
@@ -689,11 +718,159 @@ impl NavMesh {
             regional_coverage: None,
             body_shape: body,
             native: Mutex::new(Native(handle)),
+            structure_gates: Mutex::new(None),
+            structure_snapshot: Mutex::new(None),
+            structure_gate_cache: Mutex::new(Default::default()),
         };
         mesh.validate_drop_links()?;
         // A wide mesh can hold up to 128 MiB of tiles; keep one copy, not two.
         mesh.artifact.detour_data = Vec::new();
         Ok(mesh)
+    }
+    /// Polygons whose bounds overlap the box `min`..`max`.
+    pub(crate) fn polys_in_box(&self, min: Point, max: Point) -> Result<Vec<u64>, Error> {
+        let center = std::array::from_fn::<f32, 3, _>(|i| ((min[i] + max[i]) * 0.5) as f32);
+        let half = std::array::from_fn::<f32, 3, _>(|i| ((max[i] - min[i]) * 0.5) as f32);
+        let h = self
+            .native
+            .lock()
+            .map_err(|_| Error("navmesh_query_poisoned"))?;
+        let mut out = vec![0u64; 4096];
+        let n = unsafe {
+            mag_nav_polys_in_box(h.0, center.as_ptr(), half.as_ptr(), out.as_mut_ptr(), 4096)
+        };
+        if n < 0 {
+            return err("navmesh_structure_polygons_overflow");
+        }
+        out.truncate(n as usize);
+        Ok(out)
+    }
+    pub(crate) fn poly_info(&self, poly: u64) -> Result<PolyInfo, Error> {
+        let h = self
+            .native
+            .lock()
+            .map_err(|_| Error("navmesh_query_poisoned"))?;
+        let mut verts = [0f32; 18];
+        let mut links = [0u64; 64];
+        let mut portals = [0f32; 6 * 64];
+        let (mut nv, mut nl) = (0, 0);
+        let ok = unsafe {
+            mag_nav_poly_info(
+                h.0,
+                poly,
+                verts.as_mut_ptr(),
+                &mut nv,
+                links.as_mut_ptr(),
+                portals.as_mut_ptr(),
+                64,
+                &mut nl,
+            )
+        };
+        if ok == 0 {
+            return err("navmesh_structure_polygon_invalid");
+        }
+        let at = |v: &[f32], i: usize| [v[i] as f64, v[i + 1] as f64, v[i + 2] as f64];
+        Ok(PolyInfo {
+            vertices: (0..nv as usize).map(|i| at(&verts, 3 * i)).collect(),
+            links: (0..nl as usize)
+                .map(|i| (links[i], at(&portals, 6 * i), at(&portals, 6 * i + 3)))
+                .collect(),
+        })
+    }
+    /// Polygon surface height at each XZ point; None outside the polygon.
+    pub(crate) fn poly_heights(
+        &self,
+        poly: u64,
+        xz: &[[f64; 2]],
+    ) -> Result<Vec<Option<f64>>, Error> {
+        let flat: Vec<f32> = xz.iter().flat_map(|p| [p[0] as f32, p[1] as f32]).collect();
+        let mut y = vec![0f32; xz.len()];
+        let h = self
+            .native
+            .lock()
+            .map_err(|_| Error("navmesh_query_poisoned"))?;
+        unsafe {
+            mag_nav_poly_heights(h.0, poly, flat.as_ptr(), xz.len() as c_int, y.as_mut_ptr())
+        };
+        Ok(y.into_iter()
+            .map(|v| v.is_finite().then_some(v as f64))
+            .collect())
+    }
+    /// Key of the installed structure gates (None: none installed).
+    pub(crate) fn structure_gate_key(&self) -> Option<(u64, u32)> {
+        self.structure_gates.lock().ok().and_then(|key| *key)
+    }
+    /// Replace every structure gate. Routes from then on avoid sealed
+    /// crossings and end before one when nothing else reaches the goal.
+    /// The installed gates by polygon (shared; cheap to take).
+    pub(crate) fn structure_gate_cache(&self) -> std::sync::Arc<GateCache> {
+        self.structure_gate_cache
+            .lock()
+            .map(|c| c.clone())
+            .unwrap_or_default()
+    }
+    pub(crate) fn set_structure_gates(
+        &self,
+        snapshot: Option<&std::sync::Arc<crate::bot_structure_collision::StructureObstacles>>,
+        gates: &[PolyGate],
+        cache: GateCache,
+    ) -> Result<(), Error> {
+        *self
+            .structure_gate_cache
+            .lock()
+            .map_err(|_| Error("navmesh_query_poisoned"))? = std::sync::Arc::new(cache);
+        let key = snapshot.map(|s| s.key());
+        *self
+            .structure_snapshot
+            .lock()
+            .map_err(|_| Error("navmesh_query_poisoned"))? = None;
+        let h = self
+            .native
+            .lock()
+            .map_err(|_| Error("navmesh_query_poisoned"))?;
+        let mut installed = self
+            .structure_gates
+            .lock()
+            .map_err(|_| Error("navmesh_query_poisoned"))?;
+        unsafe { mag_nav_clear_gates(h.0) };
+        *installed = None;
+        for gate in gates {
+            let refs: Vec<u64> = gate.links.iter().map(|l| l.0).collect();
+            let full: Vec<u64> = gate.links.iter().map(|l| l.1).collect();
+            let through: Vec<u64> = gate.links.iter().map(|l| l.2).collect();
+            if gate.labels.len() != gate.size[0] * gate.size[1] {
+                unsafe { mag_nav_clear_gates(h.0) };
+                return err("navmesh_structure_gate_invalid");
+            }
+            let ok = unsafe {
+                mag_nav_add_gate(
+                    h.0,
+                    gate.poly,
+                    gate.origin_xz[0] as f32,
+                    gate.origin_xz[1] as f32,
+                    gate.cell as f32,
+                    gate.size[0] as c_int,
+                    gate.size[1] as c_int,
+                    gate.labels.as_ptr(),
+                    refs.as_ptr(),
+                    full.as_ptr(),
+                    through.as_ptr(),
+                    refs.len() as c_int,
+                )
+            };
+            if ok == 0 {
+                unsafe { mag_nav_clear_gates(h.0) };
+                return err("navmesh_structure_gate_invalid");
+            }
+        }
+        *installed = key;
+        drop(installed);
+        drop(h);
+        *self
+            .structure_snapshot
+            .lock()
+            .map_err(|_| Error("navmesh_query_poisoned"))? = snapshot.cloned();
+        Ok(())
     }
     /// Runtime coverage comes from the loaded collision world, not artifact assertions.
     pub fn validate_coverage(&self, world: &crate::collision::CollisionWorld) -> Result<(), Error> {
@@ -763,6 +940,14 @@ impl NavMesh {
         let mut nr = 0;
         let mut nodes = 0;
         let mut stages = 0;
+        // Placed structures gate the route, unless it starts in a structure's
+        // enclosed room: a life started there walks out through the walls.
+        let snapshot = self
+            .structure_snapshot
+            .lock()
+            .map_err(|_| Error("navmesh_query_poisoned"))?
+            .clone()
+            .filter(|s| !s.enclosed(start));
         let h = self
             .native
             .lock()
@@ -781,6 +966,7 @@ impl NavMesh {
                 &mut nr,
                 &mut nodes,
                 &mut stages,
+                c_int::from(snapshot.is_some()),
             )
         };
         let status = match status {
@@ -805,7 +991,15 @@ impl NavMesh {
         if waypoints.iter().any(|&point| !in_region(point)) {
             return err("navmesh_route_outside_walking_coverage");
         }
+        drop(h);
         refs.truncate(nr as usize);
+        // Placed structures inside a corridor polygon: steer around them.
+        let waypoints = match snapshot {
+            Some(snapshot) => {
+                crate::navmesh_structure_gates::refine(self, &snapshot, waypoints, &refs)?
+            }
+            None => waypoints,
+        };
         let length_m = waypoints
             .windows(2)
             .map(|w| (w[1][0] - w[0][0]).hypot(w[1][2] - w[0][2]))

@@ -137,7 +137,10 @@ catalog's map and mode, and the worker rejects a policy whose map or mode
 differs from the catalog's.
 Projection uses at most 16 explicit sample offsets, each within 5 m of the
 authored center. Projection and runtime goal radii are 0.05–5 m; retry intervals
-are positive milliseconds. Multiple samples may retain
+are positive milliseconds. A bot whose seeks keep starting within 1 m of the
+previous seek's start (each walk stopped before it got anywhere, as on a
+route physically blocked at its start) waits twice the previous interval
+before each further seek, up to a minute. A seek from elsewhere resets it. Multiple samples may retain
 alternative endpoints on the same walking component; each accepted anchor must
 lie inside its referenced provider box. These are route candidates, not proof
 of physical arrival. The runtime requires a complete bounded walking corridor,

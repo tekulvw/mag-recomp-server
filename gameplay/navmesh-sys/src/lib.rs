@@ -45,6 +45,47 @@ unsafe extern "C" {
         nrefs: *mut c_int,
         nodes: *mut c_int,
         stages: *mut c_int,
+        gated: c_int,
+    ) -> c_int;
+    pub fn mag_nav_polys_in_box(
+        handle: *mut std::ffi::c_void,
+        center: *const f32,
+        half: *const f32,
+        out: *mut u64,
+        cap: c_int,
+    ) -> c_int;
+    pub fn mag_nav_poly_info(
+        handle: *mut std::ffi::c_void,
+        poly: u64,
+        verts: *mut f32,
+        vert_count: *mut c_int,
+        links: *mut u64,
+        portals: *mut f32,
+        cap: c_int,
+        link_count: *mut c_int,
+    ) -> c_int;
+    pub fn mag_nav_poly_heights(
+        handle: *mut std::ffi::c_void,
+        poly: u64,
+        xz: *const f32,
+        count: c_int,
+        y: *mut f32,
+    );
+    pub fn mag_nav_clear_gates(handle: *mut std::ffi::c_void);
+    #[allow(clippy::too_many_arguments)]
+    pub fn mag_nav_add_gate(
+        handle: *mut std::ffi::c_void,
+        poly: u64,
+        ox: f32,
+        oz: f32,
+        cell: f32,
+        nx: c_int,
+        nz: c_int,
+        labels: *const u8,
+        link_refs: *const u64,
+        full: *const u64,
+        through: *const u64,
+        link_count: c_int,
     ) -> c_int;
     pub fn mag_nav_component(
         handle: *mut std::ffi::c_void,

@@ -459,16 +459,26 @@ impl<'a> WorldTerrain<'a> {
                 max: start,
             })?;
         }
-        let hit = self
+        let mut hit = self
             .world
             .movement_raycast_bounded(start, end, budget)
             .map_err(|_| PhysicsError::QueryFailed)?
-            .nearest;
-        Ok(hit.map(|h| GroundSample {
-            position: h.position,
-            normal: h
-                .normal
-                .map(|v| v * if h.normal[1] < 0.0 { -1.0 } else { 1.0 }),
+            .nearest
+            .map(|h| (h.fraction, h.position, h.normal));
+        // Placed structures (bunker floors and roofs, ramps) carry a body too.
+        if let Some(structures) = self.world.bot_structures() {
+            let mut work = crate::bot_structure_collision::STRUCTURE_WORK_LIMIT;
+            if let Some(found) = structures
+                .raycast(start, end, &mut work)
+                .map_err(|_| PhysicsError::QueryFailed)?
+                && hit.is_none_or(|(f, ..)| found.0 < f)
+            {
+                hit = Some(found);
+            }
+        }
+        Ok(hit.map(|(_, position, normal)| GroundSample {
+            position,
+            normal: normal.map(|v| v * if normal[1] < 0.0 { -1.0 } else { 1.0 }),
         }))
     }
     fn sweep(
@@ -500,6 +510,41 @@ impl<'a> WorldTerrain<'a> {
                 .map(|hit| hit.map(|h| h.hit)),
         }
         .map_err(|_| PhysicsError::QueryFailed)?;
+        // The mode's placed structures in their current state: intact walls,
+        // gates and shells stop the body like static geometry does. Both body
+        // shapes sweep their box (radius, height): conservative for a capsule,
+        // whose lowest point may sit just below the feet.
+        if let Some(structures) = self.world.bot_structures() {
+            let mut work = crate::bot_structure_collision::STRUCTURE_WORK_LIMIT;
+            let low = if body.shape.capsule().is_some() {
+                body.bottom().min(0.0)
+            } else {
+                0.0
+            };
+            let half = (body.height - low) * 0.5;
+            let middle = |p: Point| [p[0], p[1] + low + half, p[2]];
+            if let Some((fraction, normal, label)) = structures
+                .sweep_aabb(
+                    middle(from),
+                    middle(to),
+                    [body.radius, half, body.radius],
+                    &mut work,
+                )
+                .map_err(|_| PhysicsError::QueryFailed)?
+                && nearest.as_ref().is_none_or(|h| fraction < h.fraction)
+            {
+                let mut position: Point =
+                    std::array::from_fn(|i| from[i] + (to[i] - from[i]) * fraction);
+                position[1] += lift;
+                nearest = Some(RayHit {
+                    instance_id: format!("structure:{label}"),
+                    triangle_index: 0,
+                    fraction,
+                    position,
+                    normal,
+                });
+            }
+        }
         if let Some(query) = self.actors
             && let Some(hit) = query
                 .grid

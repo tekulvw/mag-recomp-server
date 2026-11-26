@@ -52,7 +52,8 @@ when its index starts another allocation or life:
   a person from view; the weapon controller still checks body blocking before
   a shot. The weapon controller makes the same static and structure checks
   for every shot, and a shot a structure stops reports `bot_firearm_blocked`
-  with reason `structure_blocked`.
+  with reason `structure_blocked`. Movement and routing respect the same
+  structures ([bot-structure-collision.md](bot-structure-collision.md)).
 - Each bot is checked at most every 250 ms, nearest two candidates first, in
   round-robin order. A tick spends at most 32 rays and 32,768 geometry work
   units; a bot that does not fit waits for the next tick.

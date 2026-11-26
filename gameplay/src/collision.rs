@@ -255,6 +255,9 @@ pub(crate) struct MaterialRayHit {
 pub struct CollisionWorld {
     source_sha256: String,
     bot_regional_guard: Option<std::sync::Arc<crate::bot_physics::RegionalGuard>>,
+    /// The mode's placed structures in their current state, as bot movement
+    /// sees them; None outside a structural mode.
+    bot_structures: Option<std::sync::Arc<crate::bot_structure_collision::StructureObstacles>>,
     /// Static collision layers a character's movement collides with, as a
     /// retail filter-row bitmask; None keeps every triangle solid.
     movement_layers: Option<u32>,
@@ -690,6 +693,7 @@ impl CollisionWorld {
         Ok(Self {
             source_sha256,
             bot_regional_guard: None,
+            bot_structures: None,
             movement_layers: None,
             filter_rows: None,
             coverage_sidecar: None,
@@ -793,6 +797,123 @@ impl CollisionWorld {
     }
     pub(crate) fn bot_regional_guard(&self) -> Option<&crate::bot_physics::RegionalGuard> {
         self.bot_regional_guard.as_deref()
+    }
+    /// Placed structures bot movement collides with, in their current state.
+    pub(crate) fn bot_structures(
+        &self,
+    ) -> Option<&crate::bot_structure_collision::StructureObstacles> {
+        self.bot_structures.as_deref()
+    }
+    pub(crate) fn bot_structures_arc(
+        &self,
+    ) -> Option<&std::sync::Arc<crate::bot_structure_collision::StructureObstacles>> {
+        self.bot_structures.as_ref()
+    }
+    /// Replace the structure snapshot bot movement sees; geometry is shared.
+    pub(crate) fn set_bot_structures(
+        &mut self,
+        structures: Option<std::sync::Arc<crate::bot_structure_collision::StructureObstacles>>,
+    ) {
+        self.bot_structures = structures;
+    }
+    /// Sweep a world-axis-aligned box (centre `start` to `end`, half extents
+    /// `half`) against this mesh placed at `pose` (world = rotation * local +
+    /// translation). Triangles are moved into world space and tested exactly
+    /// as `sweep_aabb` tests static ones. With `escape`, a moving sweep skips
+    /// triangles the box already penetrates at `start`, so a body a structure
+    /// appeared on can leave it; it still stops at every other triangle.
+    pub(crate) fn posed_sweep_aabb(
+        &self,
+        pose: crate::dynamic_collision::Pose,
+        start: Vec3,
+        end: Vec3,
+        half: Vec3,
+        escape: bool,
+        budget: &mut usize,
+    ) -> Result<Option<(f64, Vec3)>, &'static str> {
+        if !start.iter().chain(end.iter()).all(|v| v.is_finite())
+            || half
+                .iter()
+                .any(|v| !v.is_finite() || *v <= 0.0 || *v > 100.0)
+        {
+            return Err("posed_sweep_invalid");
+        }
+        let to_local = |p: Vec3| -> Vec3 {
+            let d = sub(p, pose.translation);
+            std::array::from_fn(|axis| (0..3).map(|row| d[row] * pose.rotation[row][axis]).sum())
+        };
+        let to_world = |p: Vec3| -> Vec3 {
+            std::array::from_fn(|row| {
+                (0..3)
+                    .map(|axis| pose.rotation[row][axis] * p[axis])
+                    .sum::<f64>()
+                    + pose.translation[row]
+            })
+        };
+        // The swept box's world bounds, as a local box enclosing its corners.
+        let lo: Vec3 = std::array::from_fn(|i| start[i].min(end[i]) - half[i]);
+        let hi: Vec3 = std::array::from_fn(|i| start[i].max(end[i]) + half[i]);
+        let mut min = [f64::INFINITY; 3];
+        let mut max = [f64::NEG_INFINITY; 3];
+        for corner in 0..8 {
+            let world = [
+                if corner & 1 == 0 { lo[0] } else { hi[0] },
+                if corner & 2 == 0 { lo[1] } else { hi[1] },
+                if corner & 4 == 0 { lo[2] } else { hi[2] },
+            ];
+            let local = to_local(world);
+            for i in 0..3 {
+                min[i] = min[i].min(local[i]);
+                max[i] = max[i].max(local[i]);
+            }
+        }
+        let delta = sub(end, start);
+        let moving = delta != [0.0; 3];
+        let mut nearest: Option<(f64, Vec3)> = None;
+        for index in self.triangle_indices_in_box(min, max, budget)? {
+            let vertices = self.triangles[index].vertices.map(to_world);
+            let Some((fraction, normal)) = sweep_triangle(start, delta, half, vertices) else {
+                continue;
+            };
+            if escape
+                && moving
+                && fraction <= 0.0
+                && sweep_triangle(start, [0.0; 3], half, vertices).is_some()
+            {
+                continue;
+            }
+            if nearest.is_none_or(|(f, _)| fraction < f) {
+                nearest = Some((fraction, normal));
+            }
+        }
+        Ok(nearest)
+    }
+    /// Nearest crossing of the world segment `start`..`end` with this mesh
+    /// placed at `pose`: (fraction, world position, world unit normal).
+    pub(crate) fn posed_raycast(
+        &self,
+        pose: crate::dynamic_collision::Pose,
+        start: Vec3,
+        end: Vec3,
+        budget: &mut usize,
+    ) -> Result<Option<(f64, Vec3, Vec3)>, &'static str> {
+        let to_local = |p: Vec3| -> Vec3 {
+            let d = sub(p, pose.translation);
+            std::array::from_fn(|axis| (0..3).map(|row| d[row] * pose.rotation[row][axis]).sum())
+        };
+        let hit = self
+            .raycast_segment_bounded(to_local(start), to_local(end), budget)
+            .map_err(|_| "posed_ray_failed")?
+            .nearest;
+        Ok(hit.map(|h| {
+            let normal: Vec3 = std::array::from_fn(|row| {
+                (0..3)
+                    .map(|axis| pose.rotation[row][axis] * h.normal[axis])
+                    .sum()
+            });
+            let position = std::array::from_fn(|i| start[i] + (end[i] - start[i]) * h.fraction);
+            (h.fraction, position, normal)
+        }))
     }
     /// Share immutable geometry with a sidecar bound to this world's exact
     /// bytes and map. The disk metadata and source hash stay unchanged.

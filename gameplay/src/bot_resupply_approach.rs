@@ -17,6 +17,34 @@ struct Retry {
     next: usize,
     at: Duration,
     try_drop: bool,
+    /// Where the last seek started, and how many seeks in a row started
+    /// there: a bot whose seeks keep stopping before it moves (a blocked
+    /// route) waits longer before each further one.
+    origin: [f64; 3],
+    repeats: u32,
+}
+
+/// Seek attempts in a row from within this distance count as no progress.
+const SEEK_PROGRESS_M: f64 = 1.0;
+/// Longest wait between seeks that keep starting from the same spot.
+const SEEK_BACKOFF_CAP: Duration = Duration::from_secs(60);
+
+/// When the next seek may start after one from `origin` now, and its repeat
+/// count. The ordinary retry interval applies while the bot makes progress;
+/// each further seek from the same spot doubles it, up to a minute.
+fn seek_backoff(
+    previous: Option<(&[f64; 3], u32)>,
+    origin: [f64; 3],
+    now: Duration,
+    retry: Duration,
+) -> (Duration, u32) {
+    let repeats = previous
+        .filter(|(at, _)| (at[0] - origin[0]).hypot(at[2] - origin[2]) <= SEEK_PROGRESS_M)
+        .map_or(0, |(_, repeats)| repeats.saturating_add(1));
+    let wait = retry
+        .saturating_mul(1u32 << repeats.min(8))
+        .min(SEEK_BACKOFF_CAP.max(retry));
+    (now.saturating_add(wait), repeats)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -496,6 +524,15 @@ impl<W: Write> Engine<W> {
                     .get(&request.id)
                     .is_some_and(|attempt| attempt.try_drop);
             let (_, key, anchor) = anchors[ordinal % anchors.len()];
+            let (at, repeats) = seek_backoff(
+                approach
+                    .attempts
+                    .get(&request.id)
+                    .map(|attempt| (&attempt.origin, attempt.repeats)),
+                request.origin,
+                now,
+                policy.retry(),
+            );
             approach.attempts.insert(
                 request.id,
                 Retry {
@@ -505,8 +542,10 @@ impl<W: Write> Engine<W> {
                     } else {
                         ordinal.wrapping_add(1)
                     },
-                    at: retry_at,
+                    at: at.max(retry_at),
                     try_drop: allowed_drop_id.is_some() && !try_drop,
+                    origin: request.origin,
+                    repeats,
                 },
             );
             approach.cursor = request.id.wrapping_add(1);
@@ -698,4 +737,36 @@ impl<W: Write> Engine<W> {
 
 fn overlaps(a: Bounds, b: Bounds) -> bool {
     (0..3).all(|axis| a.min[axis] <= b.max[axis] && b.min[axis] <= a.max[axis])
+}
+
+#[cfg(test)]
+mod seek_backoff_tests {
+    use super::*;
+
+    /// A bot whose supply walks keep stopping where they started (a blocked
+    /// route) waits twice as long before each further seek, up to a minute;
+    /// moving on resets the wait.
+    #[test]
+    fn repeated_seeks_from_one_spot_back_off_and_progress_resets_them() {
+        let retry = Duration::from_millis(2500);
+        let here = [10., 0., 10.];
+        let mut now = Duration::from_secs(100);
+        let (mut at, mut repeats) = seek_backoff(None, here, now, retry);
+        assert_eq!((at, repeats), (now + retry, 0));
+        let mut waits = Vec::new();
+        for _ in 0..8 {
+            now = at;
+            // Stopped half a metre on: still no progress.
+            let origin = [10.5, 0., 10.];
+            (at, repeats) = seek_backoff(Some((&here, repeats)), origin, now, retry);
+            waits.push((at - now).as_millis());
+        }
+        assert_eq!(
+            waits,
+            [5000, 10000, 20000, 40000, 60000, 60000, 60000, 60000]
+        );
+        // A seek from somewhere else is ordinary again.
+        let (next, reset) = seek_backoff(Some((&here, repeats)), [20., 0., 10.], now, retry);
+        assert_eq!((next - now, reset), (retry, 0));
+    }
 }

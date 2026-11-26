@@ -21,6 +21,17 @@ struct StagePortal {
     dtPolyRef from_ref, to_ref;
     float point[3];
 };
+// Placed-structure gating of one polygon (computed by the caller from the
+// structures standing now). The polygon's free standing space is sampled on
+// a grid and split into connected regions (labels 1..64; 0 is blocked or
+// outside the polygon). Each link lists the regions touching its shared
+// edge (`full`) and those of them that also reach another link (`through`).
+struct StructureGate {
+    float ox, oz, cell;
+    int nx, nz;
+    std::vector<unsigned char> labels;
+    std::map<dtPolyRef, std::pair<uint64_t, uint64_t>> links;
+};
 struct MagNav {
     dtNavMesh* mesh;
     dtNavMeshQuery* query;
@@ -33,6 +44,7 @@ struct MagNav {
     std::vector<int> poly_cluster;
     std::vector<int> cluster_portals;
     std::vector<StagePortal> portals;
+    std::map<dtPolyRef, StructureGate> gates;
     ~MagNav() { dtFreeNavMeshQuery(query); dtFreeNavMesh(mesh); }
 };
 struct BakeObjects {
@@ -415,6 +427,102 @@ static int staged_route(MagNav* h, const dtQueryFilter& filter, dtPolyRef start_
     for (size_t i = 0; i < corridor.size(); ++i) refs[i] = static_cast<unsigned long long>(corridor[i]);
     return dtStatusDetail(straight, DT_BUFFER_TOO_SMALL) ? 1 : 0;
 }
+// Regions of a gated polygon a point stands in: its cell's region, else the
+// nearest labelled cell within four cells. No region nearby: every region,
+// so a point inside a wall never seals a route by itself.
+static uint64_t gate_point_regions(const StructureGate& g, const float* p) {
+    const int cx = static_cast<int>(std::floor((p[0] - g.ox) / g.cell));
+    const int cz = static_cast<int>(std::floor((p[2] - g.oz) / g.cell));
+    int best = -1; long best_d = 1L << 40;
+    for (int dz = -4; dz <= 4; ++dz) for (int dx = -4; dx <= 4; ++dx) {
+        const int x = cx + dx, z = cz + dz;
+        if (x < 0 || z < 0 || x >= g.nx || z >= g.nz) continue;
+        const int label = g.labels[x + z * g.nx];
+        const long d = static_cast<long>(dx) * dx + static_cast<long>(dz) * dz;
+        if (label && d < best_d) { best_d = d; best = label; }
+    }
+    return best > 0 ? (uint64_t(1) << (best - 1)) : ~uint64_t(0);
+}
+// Whether a route may cross polygon `cur`, entering over the link from `prev`
+// (or starting at `pa` when prev is 0) and leaving over the link to `next`
+// (or ending at `pb`). The entry and exit must share a region; an entry edge
+// touching several through regions (a wall crossing that edge) is not known
+// to be in any one of them, so every one must reach the exit.
+static bool gate_passes(const MagNav* h, dtPolyRef prev, dtPolyRef cur, dtPolyRef next,
+                        const float* pa, const float* pb) {
+    const auto found = h->gates.find(cur);
+    if (found == h->gates.end()) return true;
+    const StructureGate& g = found->second;
+    const auto side = [&](dtPolyRef ref, const float* point, bool* ambiguous_through, uint64_t* through) {
+        *ambiguous_through = false; *through = 0;
+        if (!ref) return gate_point_regions(g, point);
+        const auto link = g.links.find(ref);
+        if (link == g.links.end()) return ~uint64_t(0);
+        *through = link->second.second;
+        *ambiguous_through = (*through & (*through - 1)) != 0;
+        return link->second.first;
+    };
+    bool ambiguous = false, unused = false; uint64_t through = 0, exit_through = 0;
+    const uint64_t entry = side(prev, pa, &ambiguous, &through);
+    const uint64_t exit = side(next, pb, &unused, &exit_through);
+    if ((entry & exit) == 0) return false;
+    return !(prev && ambiguous && (through & ~exit) != 0);
+}
+static constexpr float GateBlockedCost = 1.0e7f;
+// Detour's default costs, plus a prohibitive cost on a crossing the standing
+// structures seal. A search takes one only when nothing else reaches the
+// goal; `gate_truncate` then cuts the corridor there.
+class GateFilter : public dtQueryFilter {
+public:
+    GateFilter(const MagNav* h, bool enabled) : h(h), enabled(enabled) { setIncludeFlags(1); setExcludeFlags(0); }
+    float getCost(const float* pa, const float* pb,
+                  const dtPolyRef prevRef, const dtMeshTile* prevTile, const dtPoly* prevPoly,
+                  const dtPolyRef curRef, const dtMeshTile* curTile, const dtPoly* curPoly,
+                  const dtPolyRef nextRef, const dtMeshTile* nextTile, const dtPoly* nextPoly) const override {
+        float cost = dtQueryFilter::getCost(pa, pb, prevRef, prevTile, prevPoly, curRef, curTile, curPoly,
+                                            nextRef, nextTile, nextPoly);
+        if (enabled && !h->gates.empty() && !gate_passes(h, prevRef, curRef, nextRef, pa, pb)) cost += GateBlockedCost;
+        return cost;
+    }
+private:
+    const MagNav* h;
+    bool enabled;
+};
+// First corridor index whose crossing a standing structure seals, or -1.
+static int gate_violation(const MagNav* h, const unsigned long long* refs, int count,
+                          const float* start, const float* goal) {
+    if (h->gates.empty()) return -1;
+    for (int i = 0; i < count; ++i) {
+        const dtPolyRef prev = i ? refs[i - 1] : 0, next = i + 1 < count ? refs[i + 1] : 0;
+        if (!gate_passes(h, prev, refs[i], next, start, goal)) return i;
+    }
+    return -1;
+}
+// The point of polygon `ref`'s entry regions nearest `goal`, for a corridor
+// cut at that polygon; the closest polygon point when it is not gated.
+static bool gate_endpoint(const MagNav* h, dtPolyRef prev, dtPolyRef ref, const float* start,
+                          const float* goal, float* out) {
+    if (dtStatusFailed(h->query->closestPointOnPoly(ref, goal, out, nullptr))) return false;
+    const auto found = h->gates.find(ref);
+    if (found == h->gates.end()) return true;
+    const StructureGate& g = found->second;
+    uint64_t entry = ~uint64_t(0);
+    if (!prev) entry = gate_point_regions(g, start);
+    else { const auto link = g.links.find(prev); if (link != g.links.end()) entry = link->second.first; }
+    float best = 1e30f; bool any = false; float point[3];
+    for (int z = 0; z < g.nz; ++z) for (int x = 0; x < g.nx; ++x) {
+        const int label = g.labels[x + z * g.nx];
+        if (!label || !(entry & (uint64_t(1) << (label - 1)))) continue;
+        const float px = g.ox + (x + .5f) * g.cell, pz = g.oz + (z + .5f) * g.cell;
+        const float d = (px - goal[0]) * (px - goal[0]) + (pz - goal[2]) * (pz - goal[2]);
+        if (d < best) { best = d; point[0] = px; point[1] = out[1]; point[2] = pz; any = true; }
+    }
+    if (!any) return true;
+    float height = point[1];
+    if (dtStatusSucceed(h->query->getPolyHeight(ref, point, &height))) point[1] = height;
+    rcVcopy(out, point);
+    return true;
+}
 extern "C" {
 // 0 success, 1 invalid/config, 2 bake failure, 3 allocation failure.
 static int bake_tile(const float* verts, int nv, const int* tris, int nt,
@@ -673,10 +781,10 @@ private:
 };
 // status:0 complete,1 partial,2 disconnected,3 out of nodes,4 invalid start,5 invalid goal,6 query failure.
 // `nodes` reports search nodes used and `stages` the corridor pieces of a staged route (0 when direct).
-int mag_nav_route(MagNav* h,const float* start,const float* goal,float radius,float* projected_start,float* projected_goal,
-                  float* points,int* point_count,unsigned long long* refs,int* ref_count,int* nodes,int* stages) {
+static int route_impl(MagNav* h,const float* start,const float* goal,float radius,float* projected_start,float* projected_goal,
+                  float* points,int* point_count,unsigned long long* refs,int* ref_count,int* nodes,int* stages,bool gated) {
     *point_count=0;*ref_count=0;*nodes=0;*stages=0;
-    dtQueryFilter filter; filter.setIncludeFlags(1);filter.setExcludeFlags(0);
+    GateFilter filter(h,gated);
     const float se[3]={.75f,2.f,.75f}, ge[3]={radius,8.f,radius};
     dtPolyRef sr=0;
     if(dtStatusFailed(h->query->findNearestPoly(start,se,&filter,&sr,projected_start)) || !sr) return 4;
@@ -729,6 +837,83 @@ int mag_nav_route(MagNav* h,const float* start,const float* goal,float radius,fl
     if(dtStatusDetail(straight,DT_BUFFER_TOO_SMALL)) return 1;
     if(partial) return !h->reference && count==1 ? 2 : 1;
     return 0;
+}
+// As route_impl, then cut at the first crossing a standing structure seals:
+// the corridor keeps the polygons up to it and ends in its entry regions,
+// nearest the goal, as a partial route.
+// `gated` 0 plans on the static mesh alone (a start inside a structure's
+// enclosed room, which no opening leaves).
+int mag_nav_route(MagNav* h,const float* start,const float* goal,float radius,float* projected_start,float* projected_goal,
+                  float* points,int* point_count,unsigned long long* refs,int* ref_count,int* nodes,int* stages,int gated) {
+    const int status=route_impl(h,start,goal,radius,projected_start,projected_goal,points,point_count,refs,ref_count,nodes,stages,gated!=0);
+    if(!gated || status==4 || status==5 || status==6 || *ref_count<=0) return status;
+    const float* reached = *point_count>0 ? points+3*(*point_count-1) : projected_goal;
+    const int cut=gate_violation(h,refs,*ref_count,projected_start,reached);
+    if(cut<0) return status;
+    const dtPolyRef prev = cut ? static_cast<dtPolyRef>(refs[cut-1]) : 0;
+    float endpoint[3];
+    if(!gate_endpoint(h,prev,static_cast<dtPolyRef>(refs[cut]),projected_start,projected_goal,endpoint)) return 6;
+    std::vector<dtPolyRef> corridor(refs,refs+cut+1);
+    // A staged corridor can exceed a direct one; the caller's buffers hold MaxRouteCorridor.
+    std::vector<unsigned char> flags(MaxRouteCorridor);std::vector<dtPolyRef> pointrefs(MaxRouteCorridor);
+    const dtStatus straight=h->query->findStraightPath(projected_start,endpoint,corridor.data(),static_cast<int>(corridor.size()),
+        points,flags.data(),pointrefs.data(),point_count,MaxRouteCorridor,0);
+    if(dtStatusFailed(straight)) return 6;
+    *ref_count=cut+1;
+    return 1;
+}
+// Polygons whose bounds overlap the box; -1 when more than `cap`.
+int mag_nav_polys_in_box(MagNav* h,const float* center,const float* half,unsigned long long* out,int cap) {
+    dtQueryFilter f;f.setIncludeFlags(1);
+    std::vector<dtPolyRef> refs(cap>0?cap:1);int n=0;
+    const dtStatus status=h->query->queryPolygons(center,half,&f,refs.data(),&n,cap);
+    if(dtStatusFailed(status)) return -2;
+    if(dtStatusDetail(status,DT_BUFFER_TOO_SMALL)) return -1;
+    for(int i=0;i<n;++i) out[i]=static_cast<unsigned long long>(refs[i]);
+    return n;
+}
+// A polygon's vertices (up to 6) and its links: neighbour and shared edge
+// (left then right endpoint, as Detour orders portals). 0 on failure.
+int mag_nav_poly_info(MagNav* h,unsigned long long ref,float* verts,int* vert_count,
+                      unsigned long long* links,float* portals,int cap,int* link_count) {
+    *vert_count=0;*link_count=0;
+    const dtMeshTile* tile=nullptr;const dtPoly* poly=nullptr;
+    if(dtStatusFailed(h->mesh->getTileAndPolyByRef(static_cast<dtPolyRef>(ref),&tile,&poly))) return 0;
+    for(int i=0;i<poly->vertCount;++i) for(int k=0;k<3;++k) verts[3*i+k]=tile->verts[poly->verts[i]*3+k];
+    *vert_count=poly->vertCount;
+    for(unsigned int l=poly->firstLink;l!=DT_NULL_LINK;l=tile->links[l].next){
+        const dtLink& link=tile->links[l];const dtPolyRef next=link.ref;if(!next) continue;
+        if(*link_count>=cap) return 0;
+        // The part of edge `link.edge` this link covers (a tile-border link may cover less).
+        const float* a=&tile->verts[poly->verts[link.edge]*3];
+        const float* b=&tile->verts[poly->verts[(link.edge+1)%poly->vertCount]*3];
+        float low=0.f,high=1.f;
+        if(link.side!=0xff){low=link.bmin/255.f;high=link.bmax/255.f;}
+        float* out=portals+6**link_count;
+        for(int k=0;k<3;++k){out[k]=a[k]+(b[k]-a[k])*low;out[3+k]=a[k]+(b[k]-a[k])*high;}
+        links[*link_count]=static_cast<unsigned long long>(next);++*link_count;
+    }
+    return 1;
+}
+// Detail-mesh height of polygon `ref` at each XZ pair; NaN outside it.
+void mag_nav_poly_heights(MagNav* h,unsigned long long ref,const float* xz,int n,float* y) {
+    for(int i=0;i<n;++i){
+        const float p[3]={xz[2*i],0.f,xz[2*i+1]};float height=0.f;
+        y[i]=dtStatusSucceed(h->query->getPolyHeight(static_cast<dtPolyRef>(ref),p,&height))?height:NAN;
+    }
+}
+void mag_nav_clear_gates(MagNav* h) { h->gates.clear(); }
+// Install one polygon's structure gate (see StructureGate). 0 on invalid input.
+int mag_nav_add_gate(MagNav* h,unsigned long long ref,float ox,float oz,float cell,int nx,int nz,
+                     const unsigned char* labels,const unsigned long long* link_refs,
+                     const unsigned long long* full,const unsigned long long* through,int link_count) {
+    if(nx<1 || nz<1 || nx>512 || nz>512 || !(cell>0.f) || link_count<0 || link_count>64) return 0;
+    StructureGate g;g.ox=ox;g.oz=oz;g.cell=cell;g.nx=nx;g.nz=nz;
+    g.labels.assign(labels,labels+static_cast<size_t>(nx)*nz);
+    for(unsigned char label:g.labels) if(label>64) return 0;
+    for(int i=0;i<link_count;++i) g.links[static_cast<dtPolyRef>(link_refs[i])]={full[i],through[i]};
+    h->gates[static_cast<dtPolyRef>(ref)]=std::move(g);
+    return 1;
 }
 int mag_nav_component_id(MagNav* h,const float* position) {
     dtQueryFilter f;f.setIncludeFlags(1);const float e[3]={.75f,2.f,.75f};dtPolyRef ref=0;float p[3];
