@@ -69,6 +69,7 @@ mod bot_traffic_costs;
 mod bot_traffic_flow;
 pub mod bullet_hit;
 mod bunker_seats;
+pub mod capsule_sweep;
 pub mod collision;
 pub mod collision_coverage;
 #[cfg(test)]
