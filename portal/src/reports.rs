@@ -41,12 +41,13 @@ pub const SERVICE_DAILY: i64 = 200;
 /// The most a log is inflated to for staff (CLI and panel).
 pub const MAX_DECOMPRESSED: u64 = 64 << 20;
 
-pub const TRIGGERS: [&str; 6] = [
+pub const TRIGGERS: [&str; 7] = [
     "crash",
     "launch_error",
     "halt",
     "slow_frames",
     "audio",
+    "network",
     "manual",
 ];
 pub const PLATFORMS: [&str; 3] = ["macos", "linux", "windows"];
@@ -730,6 +731,16 @@ mod tests {
         m.remove("logs");
         m.insert("session".into(), Value::Null);
         assert!(check(&minimal).unwrap().logs.is_empty());
+    }
+
+    #[test]
+    fn accepts_network_reports() {
+        let mut v = base();
+        v["trigger"] = json!("network");
+        v["metrics"] = json!({ "engine": { "timeline": [
+            { "at_s": 139.9, "kind": "network", "ms": 3100, "phase": "match",
+              "endpoint": "tcp 192.0.2.10:10473", "verdict": "network" } ] } });
+        assert_eq!(check(&v).unwrap().trigger, "network");
     }
 
     #[test]

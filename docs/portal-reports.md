@@ -27,7 +27,7 @@ as for tickets) and `Content-Type: application/json`. The body is at most 4 MiB.
 | --- | --- |
 | `schema_version` | `1`. |
 | `report_id` | A UUID version 4 the launcher generates; the idempotency key. Any case; stored lowercase. |
-| `trigger` | `crash`, `launch_error`, `halt`, `slow_frames`, `audio` or `manual`. |
+| `trigger` | `crash`, `launch_error`, `halt`, `slow_frames`, `audio`, `network` or `manual`. `network`: the game server went silent for 2 s or more during a match while the client's frames kept coming; its `metrics` carry the network section and the timeline of frame-rate dips and network gaps (mag-recomp's docs/player-settings.md, "Frame-rate dips and network gaps"). |
 | `client` | Required JSON object with `version` (a string of 1 to 64 characters) and `platform` (`macos`, `linux` or `windows`); any other fields are free-form. At most 16 KiB serialized. |
 | `session` | Optional JSON object (or `null`), free-form, such as `start`, `end` (RFC 3339), `server`, `exit_code`, `duration_s` and `user_comment` (below). At most 12 KiB serialized. |
 | `metrics` | Optional JSON object (or `null`), free-form, such as a frame-time histogram, slow-frame counts, p50/p95/p99, hitches, audio underruns and drift. At most 64 KiB serialized. |
