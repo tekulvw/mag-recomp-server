@@ -41,7 +41,7 @@ impl Policy {
         }
         Ok(())
     }
-    fn medic(&self, role_slot: u8) -> bool {
+    pub(crate) fn medic(&self, role_slot: u8) -> bool {
         self.enabled && self.teammates && self.medic_role_slots.contains(&role_slot)
     }
 }

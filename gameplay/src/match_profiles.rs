@@ -88,6 +88,10 @@ struct Source {
     bot_population: Option<PathBuf>,
     bot_fill_total: Option<usize>,
     bot_names: Option<PathBuf>,
+    /// Varied bot kits and appearance (`bot_kits::FORMAT`); bots keep the
+    /// faction bootstrap kit when absent.
+    #[serde(default)]
+    bot_kits: Option<PathBuf>,
     bot_resupply_catalog: Option<PathBuf>,
     bot_resupply_approach_policy: Option<PathBuf>,
     /// Sabotage objectives' own collision per state (`sabotage_structures::SCHEMA`).
@@ -101,6 +105,7 @@ struct ProfileBots {
     population: bot_registry::BotPopulation,
     total: Option<usize>,
     names: Option<bot_names::Catalog>,
+    kits: Option<Arc<bot_kits::Catalog>>,
     resupply: Option<bot_resupply_catalog::Catalog>,
     approach: Option<bot_resupply_approach_policy::Policy>,
     validated: bool,
@@ -110,6 +115,7 @@ impl ProfileBots {
         let Some(path) = &source.bot_population else {
             if source.bot_fill_total.is_some()
                 || source.bot_names.is_some()
+                || source.bot_kits.is_some()
                 || source.bot_resupply_catalog.is_some()
                 || source.bot_resupply_approach_policy.is_some()
             {
@@ -137,6 +143,12 @@ impl ProfileBots {
                 .bot_names
                 .as_ref()
                 .map(|path| bot_names::Catalog::load(path))
+                .transpose()
+                .map_err(|e| named(&e))?,
+            kits: source
+                .bot_kits
+                .as_ref()
+                .map(|path| bot_kits::Catalog::load(path).map(Arc::new))
                 .transpose()
                 .map_err(|e| named(&e))?,
             resupply: source
@@ -323,6 +335,7 @@ impl Registry {
                 source.bunker_allocation.as_mut(),
                 source.bot_population.as_mut(),
                 source.bot_names.as_mut(),
+                source.bot_kits.as_mut(),
                 source.bot_resupply_catalog.as_mut(),
                 source.bot_resupply_approach_policy.as_mut(),
                 source.sabotage_structures.as_mut(),
@@ -1575,6 +1588,7 @@ fn validate_profile_bots(
     scratch.navmesh_world = loaded.navmesh.clone();
     scratch.fall_damage_rules = inputs.fall_damage_rules.cloned();
     let mut scratch = scratch.with_bot_population(bots.population.clone(), total)?;
+    scratch.install_bot_kits(bots.kits.clone())?;
     if let Some(catalog) = bots.resupply.clone() {
         scratch.configure_bot_resupply_catalog(catalog)?;
     }
@@ -1849,10 +1863,13 @@ impl<W: Write> Engine<W> {
                 if let Some(names) = bots.names {
                     self.bot_names = names;
                 }
+                // Validated with this profile's population above.
+                self.bot_kits = bots.kits;
                 (bots.resupply, bots.approach)
             }
             None => {
                 self.bot_registry = Default::default();
+                self.bot_kits = None;
                 (None, None)
             }
         };
@@ -3969,6 +3986,23 @@ mod tests {
         assert_eq!(
             load_error(json!({"bot_fill_total": 2})),
             "match profile bots: match_profile_bot_settings_require_population"
+        );
+        assert_eq!(
+            load_error(json!({"bot_kits": files.0.join("kits.json")})),
+            "match profile bots: match_profile_bot_settings_require_population"
+        );
+        let kits = files.write("kits.json", json!({"format":"mag_bot_kits_v1"}));
+        let mut row = bot_ready_row(&files);
+        row["bot_kits"] = json!(kits);
+        assert_eq!(load_error(row), "match profile bots: invalid_bot_kits");
+        // A well-formed catalog is still checked against the worker's items.
+        let kits = files.write("kits.json", crate::bot_kits::tests::document());
+        let mut row = bot_ready_row(&files);
+        row["bot_kits"] = json!(kits);
+        let registry = Registry::load(bot_manifest(&files, row)).unwrap();
+        assert_eq!(
+            bot_base_engine(&files).with_match_profiles(registry).err(),
+            Some("bot_kits_require_retail_armory")
         );
         let mut row = bot_ready_row(&files);
         row["bot_resupply_approach_policy"] = json!(files.0.join("approach.json"));

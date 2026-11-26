@@ -921,6 +921,16 @@ impl ItemCatalog {
             .and_then(|items| items.get(key))
             .ok_or("unknown_saved_item")
     }
+    /// The authored item type, definition group and definition parameters of
+    /// a resolved item.
+    pub(crate) fn item_definition(&self, id: u16) -> Option<(&str, &str, &Value)> {
+        self.validate_item(id).ok()?;
+        let item = self.item(id).ok()?;
+        let group = item.pointer("/definition/group")?.as_str()?;
+        let name = item.pointer("/definition/name")?.as_str()?;
+        let parameters = self.raw["definitions"][group][name].get("parameters")?;
+        Some((item["item_type"].as_str()?, group, parameters))
+    }
     pub fn validate_item(&self, id: u16) -> Result<(), &'static str> {
         let item = self.item(id)?;
         if item.get("item_type").and_then(Value::as_str).is_none() {

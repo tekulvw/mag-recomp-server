@@ -125,12 +125,13 @@ pub(super) fn resupply_planning_ammo(
     let catalog = items.retail_combat().ok()?;
     let kit = &bot.target.loadout;
     let item = kit.primary;
-    let profile = retail_combat::RetailBulletProfile::from_equipped(
-        catalog,
+    let profile = retail_combat::RetailBulletProfile::from_equipped_with_items(
+        items,
         kit,
         item,
         item.gear_slot,
         item.ammo_pool,
+        true,
     )
     .ok()?;
     let metadata = catalog.bullet_metadata(profile.item_id())?;
@@ -503,14 +504,14 @@ pub(crate) fn validate_weapon_recoil(
     items: &item_catalog::ItemCatalog,
     kit: &replication::CharacterLoadout,
 ) -> Result<(), &'static str> {
-    let catalog = items.retail_combat()?;
     let equipped = kit.primary;
-    let profile = retail_combat::RetailBulletProfile::from_equipped(
-        catalog,
+    let profile = retail_combat::RetailBulletProfile::from_equipped_with_items(
+        items,
         kit,
         equipped,
         equipped.gear_slot,
         equipped.ammo_pool,
+        true,
     )?;
     recoil::Profile::from_weapon(items.weapon_parameters(profile.item_id())?).map(|_| ())
 }
@@ -692,12 +693,13 @@ impl<W: Write> Engine<W> {
             if servicing && current_equipment_key(bot) != bot.firearm.equipment {
                 continue;
             }
-            let profile = retail_combat::RetailBulletProfile::from_equipped(
-                catalog,
+            let profile = retail_combat::RetailBulletProfile::from_equipped_with_items(
+                &items,
                 kit,
                 equipped,
                 equipped.gear_slot,
                 equipped.ammo_pool,
+                true,
             );
             let supported = profile.and_then(|p| {
                 let metadata = catalog

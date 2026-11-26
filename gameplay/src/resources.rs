@@ -259,6 +259,7 @@ impl<W: Write> Engine<W> {
             bot_registry: Default::default(),
             bot_perception: Default::default(),
             bot_names: resources.bot_names,
+            bot_kits: None,
             world_tick_enabled: false,
             last_world_tick: None,
             tick_timing: None,
