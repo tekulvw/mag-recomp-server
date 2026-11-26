@@ -40,7 +40,7 @@ fn damage(attacker: u32) -> replication::CharacterDamage {
     }
 }
 
-fn two_actors(restore: f32) -> Engine<Vec<u8>> {
+pub(crate) fn two_actors(restore: f32) -> Engine<Vec<u8>> {
     two_actors_from_engine(
         engine().with_incapacitation_rules(rules()).unwrap(),
         restore,
@@ -70,7 +70,7 @@ pub(crate) fn two_actors_from_engine(mut engine: Engine<Vec<u8>>, restore: f32) 
     engine
 }
 
-fn patient(engine: &Engine<Vec<u8>>) -> &Active {
+pub(crate) fn patient(engine: &Engine<Vec<u8>>) -> &Active {
     &engine.peers["synthetic-reservation-0000"]
 }
 
@@ -403,7 +403,7 @@ fn failed_revive_audit_does_not_commit_patient_or_replication_changes() {
     assert_eq!(patient(&engine).last_damage.last_attacker, 0x0380_0002);
 }
 
-fn dispatch_pending_damage(engine: &mut Engine<Vec<u8>>, amount_hp: f32, now_ms: u64) {
+pub(crate) fn dispatch_pending_damage(engine: &mut Engine<Vec<u8>>, amount_hp: f32, now_ms: u64) {
     let source = engine.active.as_mut().unwrap();
     source.pending_damage = Some(PendingDamage {
         target_character_id: 0x0380_0000,

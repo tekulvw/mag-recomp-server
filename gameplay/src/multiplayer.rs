@@ -575,7 +575,8 @@ impl<W: Write> Engine<W> {
             | Request::ProgressionCommitted { .. }
             | Request::RefreshProgression { .. }
             | Request::LoadoutSelectionSettled { .. }
-            | Request::RefreshLoadouts { .. } => None,
+            | Request::RefreshLoadouts { .. }
+            | Request::AdminKill { .. } => None,
             Request::Reserve { reservation_id, .. }
             | Request::Event { reservation_id, .. }
             | Request::DevelopmentSpawnTarget { reservation_id, .. }

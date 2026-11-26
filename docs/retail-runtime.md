@@ -153,6 +153,40 @@ with the same request ID, up to three attempts in all, 250 ms apart, before any
 later event in the same queue. Without the capability Medius never repeats an
 event, because a repeat could apply an uncertain shot twice.
 
+### Operator kill (`admin_kill_v1`)
+
+A worker that lists `admin_kill_v1` in its hello accepts `admin_kill`, which
+Medius sends for [`mag-admin character kill`](admin-cli.md#operator-kill) to
+free a stuck player:
+
+```json
+{"v":2,"op":"admin_kill","request_id":"…","reservation_id":"…","world_id":2,
+ "player_id":5,"operator":"mag-admin:alice","reason":"stuck in a parachute"}
+```
+
+`operator` is 1 to 254 printable ASCII characters and the optional `reason` at
+most 256. The worker checks that the reservation is a placed character of that
+world and player slot, then records an `admin_kill` row (reservation, world,
+player, operator, reason, and whether the character was alive or downed) and
+applies exactly the event the player's own client would send for Kill Self
+(`0x0215` naming its own Character), through the ordinary event path. Death,
+death notice, seat exit, a downed player's give-up, match statistics and the
+respawn wave are therefore those of a Kill Self, and the journal's next row is
+that event. No experience is awarded or taken.
+
+The reply is an event reply: it carries the player's own replies, which Medius
+routes like an event's, and an `admin_kill` outcome, `{"result":"killed"}`,
+`{"result":"gave_up"}` for a downed character, or
+`{"result":"refused","reason":code}` when the Kill Self planner denied it (for
+example `mounted_death_not_supported`). A denial still answers `ok` because its
+replies may carry publications that must be delivered. Nothing is applied, and
+the reply is `ok: false`, for `not_in_match` (no such reservation in this world
+and slot, or not yet placed), `match_finished` (the match has ended or the
+reservation shows results) and `not_alive` (dead or waiting for a first spawn).
+A served worker answers a repeated request ID with its first reply, as for
+events. Medius sends the request in the owning world's event queue, so it is
+ordered with that world's client events, and never resends it.
+
 Do not combine the validator with `--collision-query`; diagnostic queries are a
 separate command. When an explicit application selects an optional collision
 world, its map must match the selected spawn catalog in both offline validation
