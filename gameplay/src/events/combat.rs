@@ -1022,3 +1022,65 @@ pub(super) fn kill_self<W: Write>(
         "replication_sequence":if plan.replication.damage_delta.is_some() {Some(next_sequence)} else {None}}),
     )
 }
+
+/// A downed owner gives up its life: the bleed-out press or a respawn
+/// confirmation that arrives while the server still holds it downed.
+///
+/// Retail does this in two places. The owner update handler, on a downed
+/// state (7) report whose first state-userdata byte is 3 (the death state's
+/// "bleeding out" substate, which the client enters when Bleed out is
+/// pressed), clears the incapacitated condition. The respawn confirmation
+/// handler first clears that condition on a downed character, then finds it
+/// dead and queues it. Either way the death is the one the downed hit already
+/// recorded, so this publishes the same body as a bleed-out expiry: the
+/// original attribution with the downed condition bits cleared, and no new
+/// death notice or statistics.
+///
+/// Returns the generation that is now dead, or `None` when the character is
+/// not downed or the give-up cannot be published in this event.
+pub(super) fn plan_downed_give_up<W: Write>(
+    ctx: &PlanningContext<'_, W>,
+    plan: &mut EventPlan,
+) -> Result<Option<u32>, &'static str> {
+    let active = ctx.active;
+    let CharacterLife::Incapacitated { generation, .. } = active.life else {
+        return Ok(None);
+    };
+    if !active.entered_game || !active.ready_for_updates {
+        return Ok(None);
+    }
+    if !ctx.history_available {
+        plan.gameplay_denial = Some("replication_history_limit");
+        return Ok(None);
+    }
+    if plan.outgoing.is_some()
+        || plan.replication.damage_delta.is_some()
+        || plan.combat.new_damage_model.is_some()
+        || plan.combat.new_life.is_some()
+    {
+        plan.gameplay_denial = Some("downed_give_up_deferred");
+        return Ok(None);
+    }
+    let damage = replication::CharacterDamage {
+        health_quarter_points: 0,
+        conditions: active.last_damage.conditions & !3,
+        last_location_and_type: active.last_damage.last_location_and_type & 15,
+        ..active.last_damage
+    };
+    let update = ctx
+        .engine
+        .character_damage_update(
+            ctx.next_sequence,
+            ctx.now.as_millis() as u32,
+            active.reservation.player,
+            damage,
+            true,
+        )
+        .encode_with_profile(ctx.engine.wire_profile)?;
+    plan.combat.clear_pending_damage = true;
+    plan.combat.new_damage_model = Some(damage);
+    plan.combat.new_life = Some(CharacterLife::AwaitingRespawn { generation });
+    plan.outgoing = Some(update.clone());
+    plan.replication.damage_delta = Some(update);
+    Ok(Some(generation))
+}
