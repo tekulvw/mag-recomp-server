@@ -142,7 +142,7 @@ internal static partial class LeadershipProgressionChecks
         AddLedgerRow(fixture, "settled-small", true, 1);
         fixture.Write();
         var store = fixture.Store();
-        InvalidDataException? refused = null;
+        InvalidDataException refused = null;
         byte[] before = File.ReadAllBytes(fixture.Path);
         for (int i = 0; i < 64 && refused == null; i++)
         {
