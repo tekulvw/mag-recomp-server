@@ -93,8 +93,8 @@ Teams also need `objective_policy.interactions_enabled`.
 ## Not implemented
 
 - Attacking structures with weapons. Bots only plant charges.
-- Using the structure's own geometry when it changes. Bot movement and the
-  navmesh use static collision only, so a standing gate does not block bots and
-  a destroyed one opens nothing for them.
+- Anything about the structure's own geometry. Whether a standing or destroyed
+  gate blocks bot movement and routes is decided by the bot structure
+  collision work, not here.
 - Acquisition and Sabotage values. Their structures are all `other`, and the
   default `game_types` leaves those modes off.
