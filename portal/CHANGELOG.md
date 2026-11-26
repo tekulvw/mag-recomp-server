@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/tekulvw/mag-recomp-server/compare/portal-v0.5.1...portal-v0.6.0) (2026-11-26)
+
+
+### Features
+
+* **portal:** show game server status on the home page ([#362](https://github.com/tekulvw/mag-recomp-server/issues/362)) ([8df77e0](https://github.com/tekulvw/mag-recomp-server/commit/8df77e06482f7aa8d0e53a977adaad0fac67f9a1))
+
 ## [0.5.1](https://github.com/tekulvw/mag-recomp-server/compare/portal-v0.5.0...portal-v0.5.1) (2026-11-24)
 
 
