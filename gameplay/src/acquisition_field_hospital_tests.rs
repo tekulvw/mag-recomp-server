@@ -328,6 +328,7 @@ mod bound_emplacements {
                         ground_policy: None,
                         hospitals,
                         hospital_packets: &mut packets,
+                        vehicle_waves: None,
                         now: Duration::from_secs(1),
                     };
                     for &request in requests {

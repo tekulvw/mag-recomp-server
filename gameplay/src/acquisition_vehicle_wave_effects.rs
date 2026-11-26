@@ -89,7 +89,29 @@ impl<W: Write> Engine<W> {
                     || !matches!(source_type, Some(3 | 7))
                     || current.source_spawn_type != source_type
                 {
-                    return Err("acquisition_vehicle_wave_stale_entry");
+                    // The vehicle left the queue's view since it was queued:
+                    // a spawner repair respawned it directly, it died again
+                    // and awaits its delay, or it is a newer incarnation.
+                    // This entry no longer names a waiting vehicle, so the
+                    // wave drops it once with a warning row instead of failing
+                    // the world tick (which rolls the drained queue back and
+                    // fails again at every later tick). A vehicle still
+                    // waiting under its current key is requeued for its own
+                    // team's next wave so it is never stranded in state 6; a
+                    // destroyed one queues itself again through Ground Update.
+                    let waiting = current.state == 6
+                        && matches!(source_type, Some(3 | 7))
+                        && current.source_spawn_type == source_type;
+                    let requeued = waiting && waves.queue(creation.team, current.key).is_ok();
+                    audit.push(json!({
+                        "op":"acquisition_vehicle_wave_stale_entry", "level":"warning",
+                        "team":team, "vehicle":key.object_id(),
+                        "queued_generation":key.generation,
+                        "current_generation":current.key.generation,
+                        "vehicle_team":creation.team, "state":current.state,
+                        "action":if requeued { "requeued" } else { "dropped" },
+                    }));
+                    continue;
                 }
                 let spawns = staged_spawns
                     .or(self.spawn_catalog.as_ref())

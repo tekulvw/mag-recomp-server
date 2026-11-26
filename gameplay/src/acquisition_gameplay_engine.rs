@@ -630,6 +630,7 @@ impl<W: Write> Engine<W> {
                     ground_policy: runtime.setup.ground_damage.as_ref(),
                     hospitals: &mut hospitals,
                     hospital_packets: &mut hospital_packets,
+                    vehicle_waves: runtime.vehicle_waves.as_mut(),
                     now,
                 };
                 for entry in world.take_native_entries() {
@@ -881,6 +882,7 @@ impl<W: Write> Engine<W> {
                     ground_policy: setup.ground_damage.as_ref(),
                     hospitals: &mut hospitals,
                     hospital_packets: &mut hospital_packets,
+                    vehicle_waves: runtime.vehicle_waves.as_mut(),
                     now,
                 };
                 changed.extend(structural.stage_world(&mut world, &mut frame, starting)?);
