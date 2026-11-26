@@ -6,6 +6,8 @@ use ObjectiveState::*;
 use serde_json::{Value, json};
 
 const MAP: &str = "synthetic_arena";
+/// Edits a valid index into an invalid one.
+type Mutation = fn(&mut Value);
 /// Character movement row: collides with pack layer 9, not with layer 11.
 const ROW: u32 = 1 | 1 << 9;
 const CONSOLE: u16 = 4;
@@ -292,7 +294,7 @@ fn placed_packs_block_bot_movement_through_the_structure_snapshot() {
 #[test]
 fn the_index_must_bind_to_a_sabotage_catalog_map_and_its_own_dependents() {
     assert!(assets(index()).is_ok());
-    let cases: [(&str, fn(&mut Value)); 6] = [
+    let cases: [(&str, Mutation); 6] = [
         ("sabotage_structures_source_mismatch", |v| {
             v["map"] = json!("other_map")
         }),
