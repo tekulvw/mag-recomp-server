@@ -775,7 +775,7 @@ fn each_side_starts_its_bots_at_its_own_first_wave() {
         teams.sort_unstable();
         teams
     };
-    let mut reconcile = |engine: &mut Engine<Vec<u8>>, secs| {
+    let reconcile = |engine: &mut Engine<Vec<u8>>, secs| {
         engine
             .reconcile_bot_population(Duration::from_secs(secs), 1, &mut Default::default())
             .unwrap()
