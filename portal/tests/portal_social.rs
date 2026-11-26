@@ -63,6 +63,10 @@ async fn harness_with(pool: PgPool, limits: web::Limits) -> Harness {
         settings,
         limits,
         reports: None,
+        status: Arc::new(mag_portal::status::StatusService::new(
+            Vec::new(),
+            std::time::Duration::from_secs(15),
+        )),
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

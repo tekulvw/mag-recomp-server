@@ -12,7 +12,7 @@ use mag_portal::config::{self, Settings, TicketIssuer};
 use mag_portal::game_admin::GameAdmin;
 use mag_portal::oidc::{self, OidcClient, ProviderConfig};
 use mag_portal::report_store::StoreArgs;
-use mag_portal::{admin, db, reports, web};
+use mag_portal::{admin, db, reports, status, web};
 
 #[derive(Parser)]
 #[command(
@@ -96,6 +96,10 @@ struct ServeArgs {
     /// File holding the game admin API's shared secret (at least 32 bytes).
     #[arg(long, env = "PORTAL_GAME_ADMIN_SECRET_FILE")]
     game_admin_secret_file: Option<PathBuf>,
+    /// Seconds between the status page's polls of each game server.
+    #[arg(long, env = "PORTAL_STATUS_REFRESH_SECONDS", default_value_t = mag_portal::status::DEFAULT_REFRESH_SECONDS,
+          value_parser = clap::value_parser!(u64).range(5..=300))]
+    status_refresh_seconds: u64,
     #[arg(long, env = "PORTAL_OPERATOR_CONTACT")]
     operator_contact: Option<String>,
     #[arg(long, env = "PORTAL_GOOGLE_CLIENT_ID")]
@@ -160,6 +164,22 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         Some(api) => tracing::info!(url = api.base_url(), "game server admin API configured"),
         None => tracing::info!("game server admin API not configured"),
     }
+    // PORTAL_STATUS_SERVERS and each server's PORTAL_STATUS_<ID>_* settings (docs/portal-status.md).
+    let status_servers = status::servers_from_env(settings.game_admin.as_ref(), |name| {
+        std::env::var(name).ok()
+    })?;
+    for server in &status_servers {
+        tracing::info!(
+            server = %server.id,
+            url = server.admin.base_url(),
+            staff_only = server.staff_only,
+            "status page server configured"
+        );
+    }
+    let status_service = Arc::new(status::StatusService::new(
+        status_servers,
+        Duration::from_secs(args.status_refresh_seconds),
+    ));
     let tickets = TicketIssuer::new(
         config::load_signing_key(&args.ticket_key_file)?,
         args.ticket_key_id,
@@ -231,6 +251,8 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     if let Some(service) = &report_service {
         reports::spawn_purge(pool.clone(), service.clone());
     }
+    // Polls the game servers and reloads the banner now and every refresh interval.
+    status_service.spawn(pool.clone());
     let state = Arc::new(web::AppState {
         pool,
         oidc,
@@ -238,6 +260,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         settings,
         limits: web::Limits::default(),
         reports: report_service,
+        status: status_service,
     });
     let listener = tokio::net::TcpListener::bind(&args.listen)
         .await

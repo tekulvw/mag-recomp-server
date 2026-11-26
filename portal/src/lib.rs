@@ -17,6 +17,7 @@ pub mod reports;
 pub mod social;
 pub mod social_web;
 pub mod staff;
+pub mod status;
 pub mod ticket;
 pub mod tokens;
 pub mod web;
