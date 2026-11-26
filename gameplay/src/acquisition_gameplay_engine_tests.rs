@@ -1998,3 +1998,26 @@ fn registered_bot_source_capture_start_and_cancellation_are_record_first() {
 pub(crate) fn ground_manual_repair_sources() -> Engine<Vec<u8>> {
     capture_fixture_with_reinforcements(None, None, true)
 }
+
+/// An arrival has no interaction of its own. The bot planner places it at the
+/// arrival trigger its captured vehicle must reach, on the side that owns the
+/// capture before it, so both sides keep a destination after the capture.
+#[test]
+fn bot_planner_places_an_arrival_at_its_trigger_for_the_capture_owner() {
+    let e = capture_fixture();
+    for chain in 0..4_u16 {
+        let capture = FIRST_CAPTURE + chain * 2;
+        let x = 1000. + f32::from(chain) * 30.;
+        assert_eq!(
+            e.bot_objective_center(capture + 1),
+            Some(([x, 3., 1040.], 1)),
+            "chain {chain}"
+        );
+        assert_eq!(
+            e.bot_objective_center(capture).map(|(_, owner)| owner),
+            Some(1)
+        );
+    }
+    // An object outside every chain is still unplaceable.
+    assert_eq!(e.bot_objective_center(120), None);
+}

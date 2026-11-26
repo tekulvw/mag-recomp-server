@@ -137,6 +137,20 @@ Smoke grenades are not part of this configuration. Pass the worker's
 `--smoke-grenade-rules` flag instead (see [smoke grenades](smoke-grenades.md)).
 A configuration that still sets `smoke_grenades` is refused at startup.
 
+### Bots after a capture
+
+The objective catalog has no interaction for an arrival objective, so the bot
+planner takes its place from this configuration: the centre of the arrival
+trigger the captured vehicle must reach. The side that owned the capture
+defends it, holding guard places around the trigger; the other side heads
+there on its attack places. Bots do not drive the captured vehicle.
+
+A bot whose objective still has no place (no interaction, demolition or
+arrival trigger) backs off for the planner's stall interval and reports
+`bot_objective_waiting` with reason `bot_objective_unplaceable` once per task.
+It does not count towards the spawn-wave backlog, so it can neither hold the
+shared planning budget nor keep the raised wave budget on.
+
 Authenticated firearm reports and grenade detonations use source equipment and
 vehicle armor. Fractional HP persists across hits. Critical vehicles decay using
 the configured rate. Destruction applies ordinary occupant damage, then the

@@ -340,6 +340,10 @@ fn objectives(can_deactivate: bool) -> ObjectiveCatalog {
 
 /// A 120 m generated floor and navmesh with `slots` as (team, squad, x, z).
 fn engine(slots: &[(u8, u16, f32, f32)], can_deactivate: bool) -> Engine<Vec<u8>> {
+    engine_with(slots, objectives(can_deactivate))
+}
+
+fn engine_with(slots: &[(u8, u16, f32, f32)], catalog: ObjectiveCatalog) -> Engine<Vec<u8>> {
     let items = crate::bot_registry::identity_tests::bootstrap_items();
     let names = crate::bot_names::Catalog::from_json(
         &serde_json::to_vec(&json!({"entries":(0..64).map(|i| json!({"name":format!("Synthetic {i}")})).collect::<Vec<_>>()}))
@@ -389,7 +393,7 @@ fn engine(slots: &[(u8, u16, f32, f32)], can_deactivate: bool) -> Engine<Vec<u8>
     .unwrap()
     .with_bot_names(names);
     let mut engine = Engine::from_resources(Vec::new(), 1_000_000, resources)
-        .with_objective_catalog(objectives(can_deactivate))
+        .with_objective_catalog(catalog)
         .unwrap();
     engine.maximum_players = 64;
     let floor = [
@@ -969,4 +973,66 @@ fn sixty_four_bots_retask_inside_the_shared_planner_budget() {
         let r = (f64::from(g.x) - center[0]).hypot(f64::from(g.z) - center[2]);
         assert!(r <= duty.duty.ring(&p)[1] + 0.5, "{duty:?} {r}");
     }
+}
+
+/// Team 0's lane is an objective with nothing to place a destination around
+/// (no interaction, no demolition and no arrival trigger), as an Acquisition
+/// arrival is to a planner without the mode runtime. Its bots must back off
+/// and report it once instead of taking every candidate check of every tick:
+/// team 1's bots, behind them in the queue, still get planned.
+#[test]
+fn an_unplaceable_lane_cannot_starve_the_shared_planner() {
+    const UNPLACED: u16 = 13;
+    let catalog = ObjectiveCatalog::from_json(
+        &json!({"schema_version":1,"format":"mag_retail_objective_catalog","application_id":20231,
+        "protocol":protocol::ProtocolInfo::RETAIL_PROTOCOL,"game_type":0,"map_name":"synthetic_arena",
+        "entity_family":12,"network_type":12,
+        "source":{"authored_catalog_sha256":"0".repeat(64),"binding_capture_sha256":"1".repeat(64),
+            "startup_proof_sha256":"2".repeat(64),"source_image_sha256":"3".repeat(64),
+            "capture_qualification":"bounded_concurrent_token_slot_capture"},
+        "objects":[demolition(LANE, LANE_AT, 30_000),
+            json!({"token":format!("0x{UNPLACED:08x}"),"object_index":UNPLACED,"initial_state":1})],
+        "squads":(0..2u16).flat_map(|team| (0..4u16).map(move |slot| json!({
+            "team":team,"squad_index":team*16+slot,
+            "initial_objective_index":if team == 0 {UNPLACED} else {LANE},
+            "authored_objectives":[{"object_index":if team == 0 {UNPLACED} else {LANE},"order":1}]
+        }))).collect::<Vec<_>>()})
+        .to_string(),
+    )
+    .unwrap();
+    // Team 0 holds the low object indices, so a cursor walk meets it first.
+    let slots: Vec<_> = (0..64u16)
+        .map(|i| {
+            let team = u8::from(i >= 32);
+            let squad = u16::from(team) * 16 + (i % 32) / 8;
+            (
+                team,
+                squad,
+                10. + f32::from(i % 8) * 12.,
+                10. + f32::from(i / 8) * 12.,
+            )
+        })
+        .collect();
+    let mut e = engine_with(&slots, catalog);
+    for tick in 0..120 {
+        plan_tick(&mut e, 100 + tick * 50);
+    }
+    let team = |id: &u16| e.bot_registry.bots[id].target.squad.team();
+    let tasked: std::collections::BTreeSet<u16> = records(&e, "bot_objective_task")
+        .iter()
+        .map(|r| r["object_index"].as_u64().unwrap() as u16)
+        .collect();
+    assert!(tasked.iter().all(|id| team(id) == 1), "{tasked:?}");
+    assert_eq!(tasked.len(), 32, "every team-1 bot is planned");
+    let unplaceable = records(&e, "bot_objective_waiting")
+        .into_iter()
+        .filter(|r| r["reason"] == "bot_objective_unplaceable")
+        .map(|r| r["object_index"].as_u64().unwrap() as u16)
+        .collect::<Vec<_>>();
+    assert_eq!(unplaceable.len(), 32, "each team-0 bot reports once");
+    assert!(unplaceable.iter().all(|id| team(id) == 0));
+    // Backing-off bots are not a wave waiting for routes: the raised
+    // planning budget is released once the placeable side is routed.
+    let slices = records(&e, "bot_planning_slice");
+    assert_eq!(slices.last().unwrap()["wave"], false, "{:?}", slices.last());
 }
