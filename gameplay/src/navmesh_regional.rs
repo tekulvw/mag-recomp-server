@@ -55,6 +55,24 @@ pub struct RegionalArtifact {
     coverage_sha256: String,
     mesh: Artifact,
 }
+impl DetourPayload for RegionalArtifact {
+    fn detour(&self) -> &Artifact {
+        &self.mesh
+    }
+}
+impl RegionalArtifact {
+    /// Read the artifact at `path` once per attempt, checking its Detour
+    /// digest over those bytes and reading again when it does not verify
+    /// (see `VerifiedArtifact::read`).
+    pub fn read(path: &std::path::Path) -> std::io::Result<Self> {
+        Ok(crate::verified_read::read(
+            path,
+            MAX_ARTIFACT_JSON_BYTES,
+            "navmesh_artifact",
+            decode_artifact::<Self>,
+        )?)
+    }
+}
 
 impl Coverage {
     pub fn from_bytes(raw: &[u8]) -> Result<Self, Error> {

@@ -24,6 +24,9 @@ mod reference;
 pub mod regional;
 pub use movement_profile::MovementProfile;
 #[cfg(test)]
+#[path = "navmesh_artifact_read_tests.rs"]
+mod artifact_read_tests;
+#[cfg(test)]
 #[path = "navmesh_goal_tests.rs"]
 mod goal_tests;
 #[cfg(test)]
@@ -140,6 +143,67 @@ pub struct Artifact {
     /// that body (`NavMesh::load_with_body`); absent means the box.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_shape: Option<BodyShape>,
+}
+/// An artifact read from a file whose Detour digest matched the bytes that
+/// one read produced (`NavMesh::load_verified` takes it).
+pub struct VerifiedArtifact(Artifact);
+impl VerifiedArtifact {
+    /// Read the artifact at `path` into memory once, parse it and hash its
+    /// Detour data from those bytes. A read that does not verify is logged
+    /// and read again (`verified_read`); when none does, the error names
+    /// the file and both digests (`navmesh_binary_hash_mismatch: ...`).
+    pub fn read(path: &std::path::Path) -> std::io::Result<Self> {
+        Ok(Self(crate::verified_read::read(
+            path,
+            MAX_ARTIFACT_JSON_BYTES,
+            "navmesh_artifact",
+            decode_artifact::<Artifact>,
+        )?))
+    }
+    #[cfg(test)]
+    pub(crate) fn read_with(
+        path: &std::path::Path,
+        load: impl FnMut() -> std::io::Result<Vec<u8>>,
+    ) -> std::io::Result<Self> {
+        Ok(Self(crate::verified_read::read_with(
+            path,
+            "navmesh_artifact",
+            load,
+            std::time::Duration::ZERO,
+            decode_artifact::<Artifact>,
+        )?))
+    }
+    pub fn artifact(&self) -> &Artifact {
+        &self.0
+    }
+}
+/// A document carrying one Detour binary and the digest recorded for it.
+pub(crate) trait DetourPayload: serde::de::DeserializeOwned {
+    fn detour(&self) -> &Artifact;
+}
+impl DetourPayload for Artifact {
+    fn detour(&self) -> &Artifact {
+        self
+    }
+}
+/// Parse `bytes` and compare the recorded Detour digest with the Detour
+/// data parsed from those same bytes.
+pub(crate) fn decode_artifact<T: DetourPayload>(
+    bytes: &[u8],
+) -> Result<T, crate::verified_read::Rejection<std::convert::Infallible>> {
+    use crate::verified_read::Rejection;
+    let value: T = serde_json::from_slice(bytes).map_err(|e| Rejection::Decode(e.to_string()))?;
+    let artifact = value.detour();
+    let actual = sha256(&artifact.detour_data);
+    if actual != artifact.detour_sha256 {
+        return Err(Rejection::Digest {
+            code: "navmesh_binary_hash_mismatch",
+            expected: artifact.detour_sha256.clone(),
+            actual,
+            bytes: artifact.detour_data.len(),
+        });
+    }
+    Ok(value)
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -631,6 +695,28 @@ impl NavMesh {
             BodyShape::Box,
         )
     }
+    /// Load an artifact read by `VerifiedArtifact::read`, for the runtime
+    /// `body` shape as `load_with_body` does. Its Detour digest was checked
+    /// over the bytes that were read, so it is not hashed a second time.
+    pub fn load_verified(
+        artifact: VerifiedArtifact,
+        world_sha256: &str,
+        map_name: &str,
+        rules: Option<&MovementProfile>,
+        body: BodyShape,
+    ) -> Result<Self, Error> {
+        Self::load_artifact_checked(
+            artifact.0,
+            world_sha256,
+            map_name,
+            false,
+            QUERY_NODE_LIMIT,
+            rules,
+            false,
+            body,
+            true,
+        )
+    }
     #[allow(clippy::too_many_arguments)]
     fn load_artifact_with_body(
         artifact: Artifact,
@@ -641,6 +727,32 @@ impl NavMesh {
         rules: Option<&MovementProfile>,
         regional: bool,
         body: BodyShape,
+    ) -> Result<Self, Error> {
+        Self::load_artifact_checked(
+            artifact,
+            world_sha256,
+            map_name,
+            reference,
+            node_limit,
+            rules,
+            regional,
+            body,
+            false,
+        )
+    }
+    /// `digest_checked`: the caller already compared the Detour digest with
+    /// these exact bytes (`VerifiedArtifact`); the size checks still apply.
+    #[allow(clippy::too_many_arguments)]
+    fn load_artifact_checked(
+        artifact: Artifact,
+        world_sha256: &str,
+        map_name: &str,
+        reference: bool,
+        node_limit: c_int,
+        rules: Option<&MovementProfile>,
+        regional: bool,
+        body: BodyShape,
+        digest_checked: bool,
     ) -> Result<Self, Error> {
         let wide = !reference
             && !regional
@@ -695,7 +807,7 @@ impl NavMesh {
         }
         if artifact.detour_data.len() < 100
             || artifact.detour_data.len() as u64 > byte_limit(reference, wide)
-            || artifact.detour_sha256 != sha256(&artifact.detour_data)
+            || (!digest_checked && artifact.detour_sha256 != sha256(&artifact.detour_data))
         {
             return err("navmesh_binary_hash_mismatch");
         }

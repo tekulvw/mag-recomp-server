@@ -53,6 +53,17 @@ pub struct SelectedMatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admission_epoch: Option<u64>,
 }
+/// What a loaded mesh depends on: profiles agreeing on all of it can share
+/// one `NavMesh` (its structure gates are keyed by a process-wide revision,
+/// so one world's gates are never taken for another's).
+#[derive(PartialEq)]
+struct NavmeshKey {
+    path: PathBuf,
+    world_sha256: String,
+    map_name: String,
+    movement_profile_sha256: Option<String>,
+    body: navmesh::BodyShape,
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Manifest {
@@ -312,6 +323,9 @@ impl Registry {
         }
         let mut profiles = BTreeMap::new();
         let mut collision_cache: BTreeMap<PathBuf, collision::CollisionWorld> = BTreeMap::new();
+        // Profiles that name the same mesh file for the same world, movement
+        // profile and body share one loaded mesh (two sides of a map do).
+        let mut navmesh_cache: Vec<(NavmeshKey, Arc<navmesh::NavMesh>)> = Vec::new();
         for mut source in manifest.profiles {
             if !identifier(&source.profile_id, 1) || profiles.contains_key(&source.profile_id) {
                 return Err(io::Error::other("invalid_or_duplicate_match_profile_id"));
@@ -427,6 +441,46 @@ impl Registry {
                         .map_err(io::Error::other)
                 })
                 .transpose()?;
+            if source.movement_profile.is_some() && source.navmesh_world.is_none() {
+                return Err(io::Error::other(
+                    "match_profile_movement_profile_requires_navmesh",
+                ));
+            }
+            if source.bot_body_profile.is_some() && source.navmesh_world.is_none() {
+                return Err(io::Error::other(
+                    "match_profile_bot_body_profile_requires_navmesh",
+                ));
+            }
+            let rules = source
+                .movement_profile
+                .as_ref()
+                .map(navmesh::MovementProfile::load)
+                .transpose()?;
+            let body = source
+                .bot_body_profile
+                .as_ref()
+                .map(navmesh::BodyShape::load_profile)
+                .transpose()?
+                .unwrap_or_default();
+            // A mesh records the SHA-256 of the collision file it was baked
+            // from, so read it first: the world is then read against that
+            // digest (`CollisionWorld::load_expecting`). A mesh file another
+            // profile already loaded records the same digest.
+            let mut pending_mesh = None;
+            let expected_world = match (&source.navmesh_world, &source.collision_world) {
+                (Some(path), Some(_)) => Some(
+                    match navmesh_cache.iter().find(|(key, _)| key.path == *path) {
+                        Some((_, mesh)) => mesh.artifact().world_sha256.clone(),
+                        None => {
+                            let artifact = navmesh::VerifiedArtifact::read(path)?;
+                            let world = artifact.artifact().world_sha256.clone();
+                            pending_mesh = Some(artifact);
+                            world
+                        }
+                    },
+                ),
+                _ => None,
+            };
             let collision = source
                 .collision_world
                 .as_ref()
@@ -434,13 +488,38 @@ impl Registry {
                     if let Some(world) = collision_cache.get(p) {
                         return Ok(world.clone());
                     }
-                    let world =
-                        collision::CollisionWorld::load(p, collision::CollisionLimits::default())
-                            .map_err(io::Error::other)?;
+                    let limits = collision::CollisionLimits::default();
+                    let world = match &expected_world {
+                        Some(expected) => {
+                            collision::CollisionWorld::load_expecting(p, limits, expected)
+                        }
+                        None => collision::CollisionWorld::load(p, limits),
+                    }
+                    .map_err(io::Error::other)?;
                     collision_cache.insert(p.clone(), world.clone());
                     Ok::<_, io::Error>(world)
                 })
                 .transpose()?;
+            // A world another profile loaded was checked against its own mesh.
+            if let (Some(world), Some(expected)) = (&collision, &expected_world)
+                && world.source_sha256() != expected
+            {
+                return Err(io::Error::other(format!(
+                    "match_profile_navmesh_world_mismatch: {} records collision sha256 \
+                     {expected}; {} has sha256 {}",
+                    source
+                        .navmesh_world
+                        .as_deref()
+                        .unwrap_or(Path::new(""))
+                        .display(),
+                    source
+                        .collision_world
+                        .as_deref()
+                        .unwrap_or(Path::new(""))
+                        .display(),
+                    world.source_sha256()
+                )));
+            }
             if collision
                 .as_ref()
                 .is_some_and(|w| w.metadata().map_name != spawns.map_name())
@@ -475,16 +554,6 @@ impl Registry {
                 ),
                 (None, world) => world,
             };
-            if source.movement_profile.is_some() && source.navmesh_world.is_none() {
-                return Err(io::Error::other(
-                    "match_profile_movement_profile_requires_navmesh",
-                ));
-            }
-            if source.bot_body_profile.is_some() && source.navmesh_world.is_none() {
-                return Err(io::Error::other(
-                    "match_profile_bot_body_profile_requires_navmesh",
-                ));
-            }
             let navmesh = source
                 .navmesh_world
                 .as_ref()
@@ -492,35 +561,38 @@ impl Registry {
                     let world = collision.as_ref().ok_or_else(|| {
                         io::Error::other("match_profile_navmesh_requires_collision")
                     })?;
-                    let mut bytes = Vec::new();
-                    std::fs::File::open(path)?
-                        .take(navmesh::MAX_ARTIFACT_JSON_BYTES + 1)
-                        .read_to_end(&mut bytes)?;
-                    if bytes.len() as u64 > navmesh::MAX_ARTIFACT_JSON_BYTES {
-                        return Err(io::Error::other("navmesh artifact size limit"));
-                    }
-                    let artifact = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-                    let rules = source
-                        .movement_profile
-                        .as_ref()
-                        .map(navmesh::MovementProfile::load)
-                        .transpose()?;
-                    let body = source
-                        .bot_body_profile
-                        .as_ref()
-                        .map(navmesh::BodyShape::load_profile)
-                        .transpose()?
-                        .unwrap_or_default();
-                    let mesh = navmesh::NavMesh::load_with_body(
-                        artifact,
-                        world.source_sha256(),
-                        spawns.map_name(),
-                        rules.as_ref(),
+                    let key = NavmeshKey {
+                        path: path.clone(),
+                        world_sha256: world.source_sha256().to_string(),
+                        map_name: spawns.map_name().to_string(),
+                        movement_profile_sha256: rules
+                            .as_ref()
+                            .map(|r| r.source_sha256().to_string()),
                         body,
-                    )
-                    .map_err(io::Error::other)?;
+                    };
+                    let mesh = match navmesh_cache.iter().find(|(k, _)| *k == key) {
+                        Some((_, mesh)) => Arc::clone(mesh),
+                        None => {
+                            let artifact = match pending_mesh.take() {
+                                Some(artifact) => artifact,
+                                None => navmesh::VerifiedArtifact::read(path)?,
+                            };
+                            let mesh = Arc::new(
+                                navmesh::NavMesh::load_verified(
+                                    artifact,
+                                    &key.world_sha256,
+                                    &key.map_name,
+                                    rules.as_ref(),
+                                    body,
+                                )
+                                .map_err(io::Error::other)?,
+                            );
+                            navmesh_cache.push((key, Arc::clone(&mesh)));
+                            mesh
+                        }
+                    };
                     mesh.validate_coverage(world).map_err(io::Error::other)?;
-                    Ok::<_, io::Error>(Arc::new(mesh))
+                    Ok::<_, io::Error>(mesh)
                 })
                 .transpose()?;
             // Bots move against the same collision layers the mesh was baked from.
@@ -4259,7 +4331,7 @@ mod tests {
         );
         let mut covered = row;
         covered["collision_coverage"] = json!(coverage);
-        let registry = load("covered.json", covered).unwrap();
+        let registry = load("covered.json", covered.clone()).unwrap();
         let world = registry.profiles["covered"].collision.as_ref().unwrap();
         assert_eq!(world.source_sha256(), world_sha256);
         assert!(world.metadata().physics_regions.is_empty());
@@ -4268,6 +4340,41 @@ mod tests {
             world_sha256
         );
         assert!(registry.profiles["covered"].navmesh.is_some());
+
+        // Two sides of one map name the same mesh, world and body: one load.
+        let mut twin = covered.clone();
+        twin["profile_id"] = json!("covered-twin");
+        let shared = Registry::load(files.write(
+            "shared.json",
+            json!({"format":"mag_match_profiles_v1","profiles":[covered, twin]}),
+        ))
+        .unwrap();
+        assert!(Arc::ptr_eq(
+            shared.profiles["covered"].navmesh.as_ref().unwrap(),
+            shared.profiles["covered-twin"].navmesh.as_ref().unwrap()
+        ));
+
+        // A mesh baked from another world: the world is read against the
+        // digest the mesh records, and the error names the file and both.
+        let mut stranger = artifact.clone();
+        stranger.world_sha256 = "e".repeat(64);
+        let stranger = files.write("stranger.json", serde_json::to_value(&stranger).unwrap());
+        let error = load(
+            "stranger-profiles.json",
+            json!({"profile_id":"covered","spawn_catalog":spawn,
+                "collision_world":collision,"navmesh_world":stranger}),
+        )
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(
+            error.starts_with(&format!(
+                "collision_world_hash_mismatch: {}: expected sha256 {}, read sha256 {world_sha256}",
+                collision.display(),
+                "e".repeat(64)
+            )),
+            "{error}"
+        );
     }
 
     #[test]
