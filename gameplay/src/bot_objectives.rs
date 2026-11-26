@@ -81,6 +81,9 @@ fn default_drop_crossing_share() -> f64 {
 fn default_drop_convoy_limit() -> usize {
     drop_policy_default("drop_convoy_limit").as_u64().unwrap() as usize
 }
+fn default_drop_crowd_grant_ms() -> u64 {
+    drop_policy_default("drop_crowd_grant_ms").as_u64().unwrap()
+}
 fn default_drop_convoy_landing_gap_m() -> f64 {
     drop_policy_default("drop_convoy_landing_gap_m")
         .as_f64()
@@ -155,6 +158,10 @@ pub struct ObjectivePolicy {
     pub(super) drop_convoy_limit: usize,
     #[serde(default = "default_drop_convoy_landing_gap_m")]
     pub(super) drop_convoy_landing_gap_m: f64,
+    /// A passage with waiters but no owner and no staged waiter for this long
+    /// grants the waiter nearest its launch whose approach is clear (`0`: never).
+    #[serde(default = "default_drop_crowd_grant_ms")]
+    pub(super) drop_crowd_grant_ms: u64,
     #[serde(default = "default_drop_holding_scan")]
     pub(super) drop_holding_scan: usize,
     #[serde(default = "default_wave_backlog")]
@@ -217,6 +224,7 @@ impl ObjectivePolicy {
             || !(0. ..=1.).contains(&self.drop_crossing_share)
             || self.drop_convoy_limit > 8
             || !(0.75..=4.).contains(&self.drop_convoy_landing_gap_m)
+            || self.drop_crowd_grant_ms > 60_000
             || !(1..=64).contains(&self.drop_holding_scan)
             || !(1..=256).contains(&self.wave_backlog)
             || !(1..=16).contains(&self.wave_route_queries_per_tick)
