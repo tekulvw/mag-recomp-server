@@ -2,6 +2,13 @@
 //! Entries are boxes, or capsules when inserted as a capsule body; a capsule
 //! mover meets a capsule entry exactly (`sweep_vertical_capsules`) and any
 //! other pairing through the two bodies' boxes.
+//!
+//! A capsule bot's entry is a trail: the capsule at every pose of the path it
+//! reserved, its current pose last, so a capsule mover meets a moving capsule
+//! bot round (contact normals run axis to axis) rather than through the box
+//! around that path. A capsule mover that already overlaps a bot's capsule
+//! (crowded spawns) may make any move that does not deepen the overlap, and
+//! `separation` says how far it must move to leave it; boxes are unchanged.
 use crate::bot_physics::{Body, Point};
 use crate::capsule_sweep::{VerticalCapsule, sweep_vertical_capsules};
 use std::collections::{BTreeMap, BTreeSet};
@@ -40,12 +47,40 @@ pub(crate) struct Hit {
     pub fraction: f64,
     pub normal: Point,
 }
-#[derive(Clone, Copy)]
+/// Space a bot reserved by moving: the box its sweep covered and the feet it
+/// moved from and to. A capsule body's entry follows the path between them;
+/// a box body's uses only the box.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Reservation {
+    pub bounds: Bounds,
+    pub path: [Point; 2],
+}
+/// Most capsule poses one trail entry keeps; a longer path is sampled more
+/// sparsely (its box still covers all of it for the broad phase).
+const MAX_TRAIL: usize = 24;
+#[derive(Clone)]
 struct Entry {
     bounds: Bounds,
     allow_overlap_escape: bool,
-    /// The capsule centre and dimensions of a capsule body entry.
-    capsule: Option<(Point, VerticalCapsule)>,
+    /// A capsule body entry: its dimensions and the centres of every pose it
+    /// occupies or reserved, the current pose last.
+    capsule: Option<Trail>,
+}
+#[derive(Clone)]
+struct Trail {
+    capsule: VerticalCapsule,
+    centres: Vec<Point>,
+}
+impl Trail {
+    fn at(pose: Option<(Point, VerticalCapsule)>) -> Option<Self> {
+        pose.map(|(centre, capsule)| Self {
+            capsule,
+            centres: vec![centre],
+        })
+    }
+    fn current(&self) -> Point {
+        self.centres[self.centres.len() - 1]
+    }
 }
 #[derive(Default)]
 pub(crate) struct ActorGrid {
@@ -80,7 +115,8 @@ impl ActorGrid {
     /// As `insert`, for a human standing at `feet` with `body`. A box body
     /// is exactly `insert(id, Bounds::body(feet, body))`.
     pub fn insert_body(&mut self, id: u16, feet: Point, body: Body) -> Result<(), &'static str> {
-        self.insert_entry(id, Bounds::body(feet, body), true, capsule_at(feet, body))
+        let trail = Trail::at(capsule_at(feet, body));
+        self.insert_entry(id, Bounds::body(feet, body), true, trail)
     }
     /// As `insert_reserved`, for a bot's actual pose rather than an envelope.
     pub fn insert_reserved_body(
@@ -89,14 +125,63 @@ impl ActorGrid {
         feet: Point,
         body: Body,
     ) -> Result<(), &'static str> {
-        self.insert_entry(id, Bounds::body(feet, body), false, capsule_at(feet, body))
+        let trail = Trail::at(capsule_at(feet, body));
+        self.insert_entry(id, Bounds::body(feet, body), false, trail)
+    }
+    /// As `insert_reserved`, for a bot whose `body` moved through the feet
+    /// poses `path` (straight between consecutive ones), its current pose
+    /// last, and whose sweep covered `swept`. A capsule body becomes a trail
+    /// of capsules along the path, spaced at most half its radius apart while
+    /// the path is short; a box body is `insert_reserved` of the box covering
+    /// `swept` and every pose.
+    pub fn insert_reserved_path(
+        &mut self,
+        id: u16,
+        path: &[Point],
+        body: Body,
+        swept: Bounds,
+    ) -> Result<(), &'static str> {
+        let (&first, rest) = path.split_first().ok_or("actor_collision_empty_path")?;
+        let mut feet = vec![first];
+        let spacing = 0.5 * body.radius;
+        let mut from = first;
+        for &to in rest {
+            let length = (0..3)
+                .map(|i| (to[i] - from[i]).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            if !length.is_finite() {
+                return Err("actor_collision_invalid_bounds");
+            }
+            let pieces = ((length / spacing).ceil() as usize).clamp(1, MAX_TRAIL);
+            for k in 1..=pieces {
+                let f = k as f64 / pieces as f64;
+                feet.push(std::array::from_fn(|i| from[i] + (to[i] - from[i]) * f));
+            }
+            from = to;
+        }
+        if feet.len() > MAX_TRAIL {
+            // Keep the start and the current pose, and evenly spaced ones between.
+            let last = feet.len() - 1;
+            feet = (0..MAX_TRAIL)
+                .map(|k| feet[k * last / (MAX_TRAIL - 1)])
+                .collect();
+        }
+        let bounds = feet
+            .iter()
+            .fold(swept, |b, &p| b.union(Bounds::body(p, body)));
+        let trail = body.shape.capsule().map(|(capsule, centre)| Trail {
+            capsule,
+            centres: feet.iter().map(|p| [p[0], p[1] + centre, p[2]]).collect(),
+        });
+        self.insert_entry(id, bounds, false, trail)
     }
     fn insert_entry(
         &mut self,
         id: u16,
         bounds: Bounds,
         allow_overlap_escape: bool,
-        capsule: Option<(Point, VerticalCapsule)>,
+        capsule: Option<Trail>,
     ) -> Result<(), &'static str> {
         if !self.bodies.contains_key(&id) && self.bodies.len() >= MAX_BODIES {
             return Err("actor_collision_body_limit");
@@ -154,16 +239,26 @@ impl ActorGrid {
                 return Err("actor_collision_query_limit");
             }
             *budget -= 1;
-            let entry = self.bodies[&id];
-            let contact = match (capsule_at(from, b), entry.capsule) {
-                (Some((centre, mover)), Some((other_centre, other))) => sweep_capsules(
-                    centre,
-                    capsule_at(to, b).map_or(centre, |(c, _)| c),
-                    mover,
-                    other_centre,
-                    other,
-                    entry.allow_overlap_escape,
-                ),
+            let entry = &self.bodies[&id];
+            let contact = match (capsule_at(from, b), &entry.capsule) {
+                (Some((centre, mover)), Some(trail)) => {
+                    let end = capsule_at(to, b).map_or(centre, |(c, _)| c);
+                    let mut first: Option<(f64, Point)> = None;
+                    for &other_centre in &trail.centres {
+                        if let Some(hit) = sweep_capsules(
+                            centre,
+                            end,
+                            mover,
+                            other_centre,
+                            trail.capsule,
+                            entry.allow_overlap_escape,
+                        ) && first.is_none_or(|f| hit.0 < f.0)
+                        {
+                            first = Some(hit);
+                        }
+                    }
+                    first
+                }
                 _ => sweep_box(from, to, b, entry.bounds, entry.allow_overlap_escape),
             };
             if let Some((fraction, normal)) = contact
@@ -178,8 +273,72 @@ impl ActorGrid {
         }
         Ok(nearest)
     }
+    /// Whether `id` is a reserved (bot or vehicle) entry rather than an
+    /// authoritative human.
+    pub(crate) fn reserved(&self, id: u16) -> bool {
+        self.bodies
+            .get(&id)
+            .is_some_and(|entry| !entry.allow_overlap_escape)
+    }
     pub fn occupied(&self, actor: u16, p: Point, b: Body) -> Result<bool, &'static str> {
         Ok(self.sweep(actor, p, p, b, &mut 256)?.is_some())
+    }
+    /// For a capsule `body` with its feet at `feet`: the horizontal
+    /// displacement that would take it out of every capsule body it overlaps
+    /// (each one's current pose), summed over them; None when it overlaps
+    /// none or is a box. Each overlap contributes its depth along the
+    /// horizontal direction from the other body's axis to this one's; bodies
+    /// whose axes coincide part along a direction fixed by their ids.
+    pub fn separation(
+        &self,
+        actor: u16,
+        feet: Point,
+        body: Body,
+        budget: &mut usize,
+    ) -> Result<Option<Point>, &'static str> {
+        let Some((centre, mover)) = capsule_at(feet, body) else {
+            return Ok(None);
+        };
+        let mut candidates = BTreeSet::new();
+        for cell in cells(Bounds::body(feet, body))? {
+            if let Some(ids) = self.cells.get(&cell) {
+                candidates.extend(ids.iter().copied());
+            }
+        }
+        let mut push = [0.; 3];
+        let mut any = false;
+        for id in candidates {
+            let Some(trail) = self.bodies[&id].capsule.as_ref().filter(|_| id != actor) else {
+                continue;
+            };
+            if *budget == 0 {
+                return Err("actor_collision_query_limit");
+            }
+            *budget -= 1;
+            let other = trail.current();
+            let reach = mover.radius + trail.capsule.radius;
+            let gap =
+                ((centre[1] - other[1]).abs() - mover.half_height - trail.capsule.half_height)
+                    .max(0.);
+            let (dx, dz) = (centre[0] - other[0], centre[2] - other[2]);
+            let across = dx.hypot(dz);
+            let depth = reach - across.hypot(gap);
+            if depth <= 1e-9 {
+                continue;
+            }
+            let away = if across > 1e-6 {
+                [dx / across, 0., dz / across]
+            } else if actor < id {
+                [1., 0., 0.]
+            } else {
+                [-1., 0., 0.]
+            };
+            for i in [0, 2] {
+                push[i] += away[i] * depth;
+            }
+            any = true;
+        }
+        Ok(any.then_some(push))
     }
 }
 fn cells(bounds: Bounds) -> Result<Vec<(i32, i32)>, &'static str> {
@@ -212,9 +371,13 @@ fn capsule_at(feet: Point, body: Body) -> Option<(Point, VerticalCapsule)> {
         .capsule()
         .map(|(capsule, centre)| ([feet[0], feet[1] + centre, feet[2]], capsule))
 }
-/// A capsule mover against a capsule entry. A genuine human overlap may only
-/// escape: a start inside it is clear when it moves away along the contact
-/// normal, as `sweep_box` lets it move out along its nearest exit.
+/// A capsule mover against one capsule of an entry. A genuine human overlap
+/// may only escape: a start inside it is clear when it moves away along the
+/// contact normal, as `sweep_box` lets it move out along its nearest exit. A
+/// start inside a bot's capsule is clear for any move that does not approach
+/// its axis (the contact normal is the gradient of the distance between the
+/// axes, and that distance is convex along a straight move, so the overlap
+/// never deepens); a stationary query still reports the overlap.
 fn sweep_capsules(
     from: Point,
     to: Point,
@@ -224,11 +387,27 @@ fn sweep_capsules(
     allow_overlap_escape: bool,
 ) -> Option<(f64, Point)> {
     let (fraction, normal) = sweep_vertical_capsules(from, to, mover, other_centre, other)?;
-    let away: f64 = (0..3).map(|i| (to[i] - from[i]) * normal[i]).sum();
+    let delta: Point = std::array::from_fn(|i| to[i] - from[i]);
+    let away: f64 = (0..3).map(|i| delta[i] * normal[i]).sum();
     if fraction == 0. && allow_overlap_escape && away > 1e-9 {
         return None;
     }
+    let length = delta.iter().map(|d| d * d).sum::<f64>().sqrt();
+    if fraction == 0.
+        && !allow_overlap_escape
+        && length > 1e-9
+        && away >= -1e-9 * length
+        && overlaps(from, mover, other_centre, other)
+    {
+        return None;
+    }
     Some((fraction, normal))
+}
+/// Whether capsules centred at `a` and `b` overlap (deeper than tangency).
+fn overlaps(a: Point, first: VerticalCapsule, b: Point, second: VerticalCapsule) -> bool {
+    let gap = ((a[1] - b[1]).abs() - first.half_height - second.half_height).max(0.);
+    let reach = first.radius + second.radius - crate::capsule_sweep::CONTACT_TOLERANCE;
+    (a[0] - b[0]).hypot(a[2] - b[2]).hypot(gap) < reach
 }
 fn sweep_box(
     from: Point,
@@ -499,13 +678,21 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
-        // A reserved bot body allows no escape.
+        // A reserved bot body lets a capsule mover part from it too (any
+        // move that does not approach its axis), but never deeper in, and a
+        // stationary query still finds the overlap.
         grid.insert_reserved_body(2, [2., 0., 2.], body).unwrap();
         assert!(
             grid.sweep(1, from, [3., 0., 2.], body, &mut 8)
                 .unwrap()
+                .is_none()
+        );
+        assert!(
+            grid.sweep(1, from, [2., 0., 2.], body, &mut 8)
+                .unwrap()
                 .is_some()
         );
+        assert!(grid.occupied(1, from, body).unwrap());
         // A box mover meets the capsule entry through its box, and a capsule
         // mover meets a reserved box envelope through its own box.
         assert!(
@@ -584,5 +771,131 @@ mod tests {
                 .is_some(),
             "crossing published swept paths must reserve space"
         );
+    }
+
+    #[test]
+    fn a_capsule_bot_overlap_permits_parting_tangential_and_vertical_moves_only() {
+        let body = capsule_body();
+        let mut grid = ActorGrid::default();
+        grid.insert_reserved_body(2, [0., 0., 0.], body).unwrap();
+        let from = [0.5, 0., 0.];
+        for (to, clear) in [
+            ([0.9, 0., 0.], true),    // straight out
+            ([0.5, 0., 0.3], true),   // tangential: the axes only part
+            ([0.5, -0.1, 0.], true),  // settling onto the ground beneath
+            ([0.5, 0.3, 0.], true),   // a step lift
+            ([0.3, 0., 0.], false),   // deeper in
+            ([0.45, 0., 0.3], false), // round but approaching first
+        ] {
+            assert_eq!(
+                grid.sweep(1, from, to, body, &mut 8).unwrap().is_none(),
+                clear,
+                "{to:?}"
+            );
+        }
+        // A capsule standing on top may not be pushed down into it.
+        assert!(
+            grid.sweep(1, [0., 1.7, 0.], [0., 1.6, 0.], body, &mut 8)
+                .unwrap()
+                .is_some()
+        );
+        // A box mover keeps the box rule: no way out of a reserved body.
+        assert!(
+            grid.sweep(1, from, [0.9, 0., 0.], Body::default(), &mut 8)
+                .unwrap()
+                .is_some()
+        );
+    }
+    #[test]
+    fn a_capsule_trail_reserves_its_path_round_and_meets_movers_axis_to_axis() {
+        let body = capsule_body();
+        let mut grid = ActorGrid::default();
+        let swept = Bounds::body([0., 0., 0.], Body::default())
+            .union(Bounds::body([4., 0., 0.], Body::default()));
+        grid.insert_reserved_path(2, &[[0., 0., 0.], [4., 0., 0.]], body, swept)
+            .unwrap();
+        // Crossing the reserved path is refused, as for the box envelope.
+        let h = grid
+            .sweep(1, [2., 0., -3.], [2., 0., 3.], body, &mut 8)
+            .unwrap()
+            .expect("the path is reserved");
+        assert!((h.normal[2] + 1.).abs() < 1e-6, "{h:?}");
+        // Off the round end of the trail (where its box would still reach)
+        // a body is clear, and a mover glancing the end is turned round it.
+        assert!(!grid.occupied(1, [4.6, 0., -0.6], body).unwrap());
+        assert!(
+            grid.occupied(1, [4.6, 0., -0.6], Body::default()).unwrap(),
+            "a box meets the trail's box"
+        );
+        let h = grid
+            .sweep(1, [4.5, 0., -3.], [4.5, 0., 3.], body, &mut 8)
+            .unwrap()
+            .unwrap();
+        assert!(h.normal[0] > 0.3 && h.normal[2] < 0., "{h:?}");
+        // The current pose is the last one.
+        let mut budget = 8;
+        let push = grid
+            .separation(1, [4.5, 0., 0.], body, &mut budget)
+            .unwrap()
+            .unwrap();
+        assert!((push[0] - 0.3).abs() < 1e-9 && push[2] == 0., "{push:?}");
+        assert!(
+            grid.separation(1, [0.5, 0., 0.], body, &mut budget)
+                .unwrap()
+                .is_none(),
+            "only the current pose is parted from"
+        );
+    }
+    #[test]
+    fn separation_is_the_overlap_depth_away_from_each_axis() {
+        let body = capsule_body();
+        let mut grid = ActorGrid::default();
+        grid.insert_reserved_body(2, [0., 0., 0.], body).unwrap();
+        grid.insert_reserved_body(3, [1., 0., 0.], body).unwrap();
+        let mut budget = 8;
+        // Between the two: pushed from both, mostly out of the nearer one.
+        let push = grid
+            .separation(1, [0.6, 0., 0.3], body, &mut budget)
+            .unwrap()
+            .unwrap();
+        let d2 = 0.6f64.hypot(0.3);
+        let d3 = 0.4f64.hypot(0.3);
+        let expected = [
+            0.6 / d2 * (0.8 - d2) - 0.4 / d3 * (0.8 - d3),
+            0.3 / d2 * (0.8 - d2) + 0.3 / d3 * (0.8 - d3),
+        ];
+        assert!((push[0] - expected[0]).abs() < 1e-9, "{push:?}");
+        assert!((push[2] - expected[1]).abs() < 1e-9, "{push:?}");
+        // Touching is not overlapping; a box body is never parted.
+        assert!(
+            grid.separation(1, [-0.8, 0., 0.], body, &mut budget)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            grid.separation(1, [0.3, 0., 0.], Body::default(), &mut budget)
+                .unwrap()
+                .is_none()
+        );
+        // Coincident axes part in opposite directions fixed by the ids.
+        let mut grid = ActorGrid::default();
+        grid.insert_reserved_body(1, [0., 0., 0.], body).unwrap();
+        grid.insert_reserved_body(2, [0., 0., 0.], body).unwrap();
+        let a = grid.separation(1, [0.; 3], body, &mut 8).unwrap().unwrap();
+        let b = grid.separation(2, [0.; 3], body, &mut 8).unwrap().unwrap();
+        assert!(a[0] > 0. && (a[0] + b[0]).abs() < 1e-12, "{a:?} {b:?}");
+    }
+    #[test]
+    fn a_box_body_path_is_exactly_its_swept_box() {
+        let body = Body::default();
+        let swept = Bounds::body([0., 0., 0.], body).union(Bounds::body([2., 0., 1.], body));
+        let mut a = ActorGrid::default();
+        let mut b = ActorGrid::default();
+        a.insert_reserved(2, swept).unwrap();
+        b.insert_reserved_path(2, &[[0., 0., 0.], [2., 0., 1.]], body, swept)
+            .unwrap();
+        assert_eq!(a.bodies[&2].bounds.min, b.bodies[&2].bounds.min);
+        assert_eq!(a.bodies[&2].bounds.max, b.bodies[&2].bounds.max);
+        assert!(b.bodies[&2].capsule.is_none() && !b.bodies[&2].allow_overlap_escape);
     }
 }

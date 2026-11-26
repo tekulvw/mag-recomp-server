@@ -13,6 +13,10 @@ pub type Point = [f64; 3];
 const WORK_LIMIT: usize = 16_384;
 const SUBSTEP: f64 = 0.05;
 const GRAVITY: f64 = 9.81;
+/// Fastest a capsule body is moved out of another capsule body it overlaps.
+/// Each of a crowded pair moves away on its own update, so they part over a
+/// few updates instead of being thrown apart.
+const DEPENETRATION_MPS: f64 = 1.5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PhysicsError {
@@ -225,6 +229,7 @@ pub struct WorldTerrain<'a> {
     world: &'a CollisionWorld,
     actors: Option<crate::actor_collision::Query<'a>>,
     actor_contact: std::cell::Cell<Option<u16>>,
+    actor_touched: std::cell::Cell<Option<u16>>,
 }
 impl<'a> WorldTerrain<'a> {
     pub fn new(world: Option<&'a CollisionWorld>, map_name: &str) -> Result<Self, PhysicsError> {
@@ -239,6 +244,7 @@ impl<'a> WorldTerrain<'a> {
             world,
             actors: None,
             actor_contact: std::cell::Cell::new(None),
+            actor_touched: std::cell::Cell::new(None),
         })
     }
     pub(crate) fn with_actors(mut self, query: crate::actor_collision::Query<'a>) -> Self {
@@ -247,6 +253,51 @@ impl<'a> WorldTerrain<'a> {
     }
     pub(crate) fn actor_contact(&self) -> Option<u16> {
         self.actor_contact.get()
+    }
+    /// The last body the latest `advance` touched, even when a later contact
+    /// in the same call was static geometry (`actor_contact` is then None).
+    pub(crate) fn actor_touched(&self) -> Option<u16> {
+        self.actor_touched.get()
+    }
+    fn note_contact(&self, hit: &RayHit) {
+        let id = hit
+            .instance_id
+            .strip_prefix("dynamic-character:")
+            .and_then(|id| id.parse().ok());
+        self.actor_contact.set(id);
+        if id.is_some() {
+            self.actor_touched.set(id);
+        }
+    }
+    /// Move a capsule body that overlaps other capsule bodies part of the way
+    /// out, at most `DEPENETRATION_MPS` for `h` seconds, sliding along static
+    /// geometry and other bodies (never into them). The box, a body overlapping
+    /// nothing, and a move the world cannot cover are left alone; contacts
+    /// made while parting are not reported.
+    fn depenetrate(&self, position: Point, h: f64, b: Body, budget: &mut usize) -> Point {
+        let Some(query) = self.actors.filter(|_| b.is_capsule()) else {
+            return position;
+        };
+        let Ok(Some(push)) = query.grid.separation(query.actor, position, b, budget) else {
+            return position;
+        };
+        let depth = push[0].hypot(push[2]);
+        if depth <= 1e-9 {
+            return position;
+        }
+        let step = (depth + b.skin).min(DEPENETRATION_MPS * h);
+        let delta = [push[0] / depth * step, 0.0, push[2] / depth * step];
+        if self
+            .require_horizontal_coverage(position, add(position, delta), b)
+            .is_err()
+        {
+            return position;
+        }
+        let (contact, touched) = (self.actor_contact.get(), self.actor_touched.get());
+        let parted = self.slide(position, delta, b, budget);
+        self.actor_contact.set(contact);
+        self.actor_touched.set(touched);
+        parted.map_or(position, |(p, _)| p)
     }
     /// Requires explicit source-verified coverage, including the complete body
     /// corridor and vertical step/snap margin. Triangle presence/bounds and global
@@ -697,11 +748,13 @@ impl<'a> WorldTerrain<'a> {
             self.require_horizontal_coverage(m.position, add(m.position, scale(velocity, dt)), b)?;
         }
         self.actor_contact.set(None);
+        self.actor_touched.set(None);
         let count = (dt / SUBSTEP).ceil() as usize;
         let h = dt / count as f64;
         let mut budget = WORK_LIMIT;
         m.blocked = false;
         for _ in 0..count {
+            m.position = self.depenetrate(m.position, h, b, &mut budget);
             // Establish support only from supplied ground. Airborne starts do not
             // climb or snap upward into a plane; a vertical sweep lands them.
             let mut support = None;
@@ -972,11 +1025,7 @@ impl<'a> WorldTerrain<'a> {
             let Some(hit) = self.sweep(p, end, b, budget)? else {
                 return Ok((end, v, false, blocked));
             };
-            self.actor_contact.set(
-                hit.instance_id
-                    .strip_prefix("dynamic-character:")
-                    .and_then(|id| id.parse().ok()),
-            );
+            self.note_contact(&hit);
             p = stop_before(p, end, hit.fraction, b.skin);
             let n = hit.normal;
             if delta[1] <= 0.0 && self.stands_on(p, &hit, b, budget)? {
@@ -1020,11 +1069,7 @@ impl<'a> WorldTerrain<'a> {
                 break;
             };
             blocked = true;
-            self.actor_contact.set(
-                hit.instance_id
-                    .strip_prefix("dynamic-character:")
-                    .and_then(|id| id.parse().ok()),
-            );
+            self.note_contact(&hit);
             p = stop_before(p, end, hit.fraction, b.skin);
             let mut normal = [hit.normal[0], 0.0, hit.normal[2]];
             let len = length(normal);

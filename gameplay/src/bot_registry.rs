@@ -121,7 +121,7 @@ pub(crate) struct BotRegistry {
     generations: BTreeMap<u16, u32>,
     known: BTreeMap<String, BTreeSet<u16>>,
     pub(super) stats_publication: crate::bot_stat_publication::State,
-    reservations: BTreeMap<u16, (crate::actor_collision::Bounds, Duration)>,
+    reservations: BTreeMap<u16, (crate::actor_collision::Reservation, Duration)>,
     last_wait_receipt: Option<Duration>,
     collision_evidence: Option<String>,
     regional_unavailable: Option<&'static str>,
@@ -715,6 +715,42 @@ fn regional_slot_source_active(catalog: &spawn_catalog::SpawnCatalog, slot: &Bot
         })
 }
 
+/// The body a bot occupies in the actor grid: the default box, or the
+/// runtime capsule (only its dimensions matter there).
+fn grid_body(body: bot_physics::Body) -> bot_physics::Body {
+    bot_physics::Body::default().with_shape(body.shape)
+}
+/// Reserve a bot's current pose: its capsule for a capsule body, the default
+/// box (as before capsule bodies) otherwise.
+fn reserve_pose(
+    actors: &mut crate::actor_collision::ActorGrid,
+    id: u16,
+    feet: [f64; 3],
+    body: bot_physics::Body,
+) -> Result<(), &'static str> {
+    if body.shape.capsule().is_some() {
+        actors.insert_reserved_body(id, feet, grid_body(body))
+    } else {
+        actors.insert_reserved(
+            id,
+            crate::actor_collision::Bounds::body(feet, bot_physics::Body::default()),
+        )
+    }
+}
+/// Reserve the space a bot's move covered: the capsule trail along its path
+/// for a capsule body, the swept box otherwise.
+fn reserve_path(
+    actors: &mut crate::actor_collision::ActorGrid,
+    id: u16,
+    reservation: crate::actor_collision::Reservation,
+    body: bot_physics::Body,
+) -> Result<(), &'static str> {
+    if body.shape.capsule().is_some() {
+        actors.insert_reserved_path(id, &reservation.path, grid_body(body), reservation.bounds)
+    } else {
+        actors.insert_reserved(id, reservation.bounds)
+    }
+}
 pub(crate) fn human_in_actor_grid(a: &Active, now: Duration) -> bool {
     a.ready_for_updates
         && a.entered_game
@@ -996,10 +1032,21 @@ impl<W: Write> Engine<W> {
             if let Some((reserved, until)) = self.bot_registry.reservations.get(&bot.object_index)
                 && *until > now
             {
-                grid.insert_reserved(
-                    bot.object_index,
-                    Bounds::body(physical, body).union(*reserved),
-                )?;
+                if body.shape.capsule().is_some() {
+                    // A capsule bot reserves the path its capsule followed.
+                    let [from, to] = reserved.path;
+                    grid.insert_reserved_path(
+                        bot.object_index,
+                        &[from, to, physical],
+                        body,
+                        reserved.bounds,
+                    )?;
+                } else {
+                    grid.insert_reserved(
+                        bot.object_index,
+                        Bounds::body(physical, body).union(reserved.bounds),
+                    )?;
+                }
             } else {
                 grid.insert_reserved_body(bot.object_index, physical, body)?;
             }
@@ -1494,12 +1541,11 @@ impl<W: Write> Engine<W> {
                 bot.omitted_healthy_steps = 0;
                 bot.last_move_since = None;
                 bot.last_navigation_status = None;
-                actors.insert_reserved(
+                reserve_pose(
+                    &mut actors,
                     id,
-                    crate::actor_collision::Bounds::body(
-                        bot.target.runtime.unwrap().physical_position(),
-                        bot_physics::Body::default(),
-                    ),
+                    bot.target.runtime.unwrap().physical_position(),
+                    body,
                 )?;
                 packets.push(dummy::respawn_for(
                     id,
@@ -1557,6 +1603,7 @@ impl<W: Write> Engine<W> {
             } else if bot.resupply.is_none()
                 && matches!(bot.target.runtime.unwrap().phase, BotPhase::Relocating)
             {
+                let start = bot.target.runtime.unwrap().physical_position();
                 let movement = bot.target.movement_step_with_drop_admission(
                     1,
                     now,
@@ -1626,10 +1673,14 @@ impl<W: Write> Engine<W> {
                                 bot_physics::Body::default(),
                             )
                         });
+                        let reservation = crate::actor_collision::Reservation {
+                            bounds,
+                            path: [start, step.runtime.physical_position()],
+                        };
                         self.bot_registry
                             .reservations
-                            .insert(id, (bounds, now + Duration::from_millis(250)));
-                        actors.insert_reserved(id, bounds)?;
+                            .insert(id, (reservation, now + Duration::from_millis(250)));
+                        reserve_path(&mut actors, id, reservation, body)?;
                     } else {
                         actors.remove(id);
                         self.bot_registry.reservations.remove(&id);
@@ -1747,13 +1798,7 @@ impl<W: Write> Engine<W> {
                     bot.damage.health_quarter_points = hp;
                 }
                 if bot.health > 0 {
-                    actors.insert_reserved(
-                        id,
-                        crate::actor_collision::Bounds::body(
-                            step.runtime.physical_position(),
-                            bot_physics::Body::default(),
-                        ),
-                    )?;
+                    reserve_pose(&mut actors, id, step.runtime.physical_position(), body)?;
                 } else {
                     bot.target.pending_move = None;
                     actors.remove(id);
@@ -2672,6 +2717,7 @@ impl<W: Write> Engine<W> {
             {
                 continue;
             }
+            let start = target.runtime.map(BotRuntime::physical_position);
             if let Some(step) = target.script_step_with_actors(
                 2,
                 now,
@@ -2700,10 +2746,16 @@ impl<W: Write> Engine<W> {
                             bot_physics::Body::default(),
                         )
                     });
-                    actors.insert_reserved(target.object_index, bounds)?;
-                    self.bot_registry
-                        .reservations
-                        .insert(target.object_index, (bounds, now + Duration::from_secs(1)));
+                    let end = step.runtime.physical_position();
+                    let reservation = crate::actor_collision::Reservation {
+                        bounds,
+                        path: [start.unwrap_or(end), end],
+                    };
+                    reserve_path(&mut actors, target.object_index, reservation, body)?;
+                    self.bot_registry.reservations.insert(
+                        target.object_index,
+                        (reservation, now + Duration::from_secs(1)),
+                    );
                 } else {
                     actors.remove(target.object_index);
                 }
@@ -3230,13 +3282,7 @@ impl<W: Write> Engine<W> {
                     task: Default::default(),
                 },
             );
-            actors.insert_reserved(
-                index,
-                crate::actor_collision::Bounds::body(
-                    runtime.physical_position(),
-                    bot_physics::Body::default(),
-                ),
-            )?;
+            reserve_pose(actors, index, runtime.physical_position(), body)?;
         }
         Ok(())
     }
@@ -3754,7 +3800,7 @@ pub(crate) mod healing_reward_relationship_tests;
 /// Isolated snapshot of precisely the registry fields ordinary damage mutates.
 pub(crate) struct CharacterDamageCandidate {
     bots: BTreeMap<u16, WorldBot>,
-    reservations: BTreeMap<u16, (crate::actor_collision::Bounds, Duration)>,
+    reservations: BTreeMap<u16, (crate::actor_collision::Reservation, Duration)>,
 }
 impl BotRegistry {
     pub(crate) fn character_damage_candidate(&self) -> CharacterDamageCandidate {
@@ -3847,7 +3893,10 @@ impl BotRegistry {
         self.reservations.insert(
             id,
             (
-                actor_collision::Bounds::body(point, bot_physics::Body::default()),
+                actor_collision::Reservation {
+                    bounds: actor_collision::Bounds::body(point, bot_physics::Body::default()),
+                    path: [point; 2],
+                },
                 until,
             ),
         );

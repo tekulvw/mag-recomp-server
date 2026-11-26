@@ -1693,6 +1693,13 @@ const NAVIGATION_GRACE_MS: u32 = 5000;
 // A geometry work budget belongs to each physical call. Keep late owner
 // updates from putting twenty dense-world substeps into that single budget.
 const NAVIGATION_SOLVER_SLICE_SECONDS: f64 = 0.25;
+/// Longest a capsule bot keeps its course against a higher-index bot before it
+/// steers round that bot too.
+const CAPSULE_HOLD_SECONDS: f64 = 2.0;
+/// How long a capsule bot that backed off keeps giving way, and how far ahead
+/// (in seconds of its own motion) it looks for the bot it gives way to.
+const CAPSULE_YIELD_SECONDS: f64 = 1.0;
+const CAPSULE_YIELD_LOOKAHEAD_SECONDS: f64 = 1.0;
 const AIRBORNE_SETTLE_MAX_SECONDS: f64 = 0.5;
 const AIRBORNE_SETTLE_SLICE_SECONDS: f64 = 0.05;
 const NAVIGATION_LIMITS: bot_navigation::Limits = bot_navigation::Limits {
@@ -1713,6 +1720,13 @@ pub(super) struct NavmeshRuntime {
     pub perception_wait: Duration,
     pub navigation_aborted: bool,
     airborne_settle_seconds: f64,
+    /// Time a capsule bot has waited on traffic without closing on its
+    /// waypoint (see `CAPSULE_HOLD_SECONDS`).
+    capsule_held_seconds: f64,
+    /// Time a capsule bot that backed off for traffic keeps looking
+    /// `CAPSULE_YIELD_LOOKAHEAD_SECONDS` ahead, so it does not walk straight
+    /// back into the bot it made way for.
+    capsule_yield_seconds: f64,
 }
 impl NavmeshRuntime {
     /// Held time excluded from a move's deadline.
@@ -3039,9 +3053,17 @@ impl NavigationMove {
             } else {
                 false
             };
+            // A capsule body looks ahead with its own round shape, which other
+            // capsule bodies meet axis to axis; the box keeps its box.
+            let capsule = context.body.shape.capsule().is_some();
+            let probe = if capsule {
+                bot_physics::Body::default().with_shape(context.body.shape)
+            } else {
+                bot_physics::Body::default()
+            };
             if drop_link.is_none()
                 && motion.grounded
-                && distance > 1.0
+                && distance > if capsule { 0.25 } else { 1.0 }
                 && !(goal_occupied
                     && (route.projected_goal[0] - motion.position[0])
                         .hypot(route.projected_goal[2] - motion.position[2])
@@ -3049,37 +3071,75 @@ impl NavigationMove {
                 && let Some(query) = context.actors
             {
                 let horizon = slice.max(0.25);
-                let end = std::array::from_fn(|i| motion.position[i] + velocity[i] * horizon);
-                if let Some(blocker) = query.grid.sweep(
-                    query.actor,
-                    motion.position,
-                    end,
-                    bot_physics::Body::default(),
-                    &mut 256,
-                )? {
-                    let side = if context.state.avoid_left { -1. } else { 1. };
-                    for side in [side, -side] {
+                let look = if capsule && context.state.capsule_yield_seconds > 0. {
+                    horizon.max(CAPSULE_YIELD_LOOKAHEAD_SECONDS)
+                } else {
+                    horizon
+                };
+                let end = std::array::from_fn(|i| motion.position[i] + velocity[i] * look);
+                if let Some(blocker) =
+                    query
+                        .grid
+                        .sweep(query.actor, motion.position, end, probe, &mut 256)?
+                {
+                    let side = if context.state.avoid_left && !capsule {
+                        -1.
+                    } else {
+                        1.
+                    };
+                    // Turn 60 degrees to either side. Capsule traffic gives
+                    // way by object index: of a bot pair the lower index
+                    // keeps its course (sliding round the other body), while
+                    // the higher one turns 60 degrees, steps square to the
+                    // side or backs off at an angle or straight back,
+                    // preferring the same hand each time. A head-on pair then
+                    // never mirrors itself, and in a passage too narrow to
+                    // pass in the higher index retreats until the other is
+                    // through. A lower index held up longer than
+                    // `CAPSULE_HOLD_SECONDS` turns as well (the other may be
+                    // standing still), as it does for a human.
+                    const SIXTY: (f64, f64) = (0.5, 0.8660254037844386);
+                    let holds = capsule
+                        && query.actor < blocker.id
+                        && query.grid.reserved(blocker.id)
+                        && context.state.capsule_held_seconds < CAPSULE_HOLD_SECONDS;
+                    let mut turns = vec![(SIXTY, side), (SIXTY, -side)];
+                    if capsule {
+                        let back = (-SIXTY.0, SIXTY.1);
+                        turns.extend([
+                            ((0., 1.), side),
+                            ((0., 1.), -side),
+                            (back, side),
+                            (back, -side),
+                        ]);
+                        if query.actor > blocker.id {
+                            // Straight back along the way it came, which its
+                            // corridor always holds.
+                            turns.push(((-1., 0.), side));
+                        }
+                    }
+                    if holds {
+                        turns.clear();
+                    }
+                    for ((forward, across), side) in turns {
                         let v = [
-                            velocity[0] * 0.5 - velocity[2] * 0.8660254037844386 * side,
+                            velocity[0] * forward - velocity[2] * across * side,
                             0.,
-                            velocity[2] * 0.5 + velocity[0] * 0.8660254037844386 * side,
+                            velocity[2] * forward + velocity[0] * across * side,
                         ];
                         let end = std::array::from_fn(|i| motion.position[i] + v[i] * horizon);
                         if mesh.contains(end, route)
                             && query
                                 .grid
-                                .sweep(
-                                    query.actor,
-                                    motion.position,
-                                    end,
-                                    bot_physics::Body::default(),
-                                    &mut 256,
-                                )?
+                                .sweep(query.actor, motion.position, end, probe, &mut 256)?
                                 .is_none()
                         {
                             velocity = v;
                             context.avoiding = true;
                             avoided_actor = Some(blocker.id);
+                            if capsule && forward < 0. {
+                                context.state.capsule_yield_seconds = CAPSULE_YIELD_SECONDS;
+                            }
                             break;
                         }
                     }
@@ -3182,15 +3242,25 @@ impl NavigationMove {
                     stopped: Some("bot_navmesh_fall_lethal"),
                 });
             }
+            // A capsule body that touched another body during the slice and
+            // then stopped against static geometry was still held up by
+            // traffic (it slid round the body into the wall): it waits
+            // rather than abandoning the route.
             if motion.blocked
-                && let Some(id) = terrain.actor_contact().or(avoided_actor)
+                && let Some(id) = terrain
+                    .actor_contact()
+                    .or(avoided_actor)
+                    .or_else(|| terrain.actor_touched().filter(|_| capsule))
             {
                 let remaining_distance =
                     (target[0] - motion.position[0]).hypot(target[2] - motion.position[2]);
                 if !motion.grounded || distance - remaining_distance <= 0.001 {
                     context.waiting_on = Some(id);
-                    if avoided_actor.is_some() {
+                    if avoided_actor.is_some() && !capsule {
                         context.state.avoid_left = !context.state.avoid_left;
+                    }
+                    if capsule {
+                        context.state.capsule_held_seconds += slice + seconds;
                     }
                     let (motion, complete) = context.idle_physics(
                         terrain,
@@ -3231,6 +3301,15 @@ impl NavigationMove {
                 }
                 context.recovered_contacts += 1;
             }
+            if capsule {
+                if (target[0] - motion.position[0]).hypot(target[2] - motion.position[2])
+                    < distance - 0.001
+                {
+                    context.state.capsule_held_seconds = 0.;
+                }
+                context.state.capsule_yield_seconds =
+                    (context.state.capsule_yield_seconds - slice).max(0.);
+            }
         }
         Ok(NavigationStep {
             motion,
@@ -3256,6 +3335,9 @@ fn character_position(p: bot_physics::Point) -> replication::CharacterPosition {
     }
 }
 
+#[cfg(test)]
+#[path = "bot_capsule_traffic_tests.rs"]
+mod capsule_traffic_tests;
 #[cfg(test)]
 #[path = "bot_corridor_settlement_tests.rs"]
 mod settlement_tests;
