@@ -1316,7 +1316,7 @@ fn runtime_ground_delta_contains_only_requested_existing_object_fields() {
     assert!(ground_vehicles::encode(2, 100, &[dead]).is_err());
 }
 
-fn escort_driver_engine() -> Engine<Vec<u8>> {
+pub(crate) fn escort_driver_engine() -> Engine<Vec<u8>> {
     let mut engine = acquisition_entry::acquisition()
         .with_match_limits(1, 64)
         .unwrap();
@@ -1415,7 +1415,7 @@ fn escort_driver_relay(
     ground_driver_relay(profile, 4, sequence, position_x)
 }
 
-fn ground_driver_relay(
+pub(crate) fn ground_driver_relay(
     profile: wire_profile::WireProfile,
     index: u16,
     sequence: u32,

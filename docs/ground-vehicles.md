@@ -83,3 +83,30 @@ The generated limits are conservative replacement policy:8m manual mount distanc
 An opted-in Domination catalog requires exactly eight source-type3 driver rows, each at physical seat0 with passenger slots2–9 and cap8. Legacy no-driver catalogs retain their previous behavior. Admitted operator visibility is part of the same complete seat inventory required by periodic Structural area effects.
 
 Driving changes dismount qualification for every occupant of that APC. The runtime rechecks the candidate exit against the current rotated vehicle pose, loaded map-matched static scene and current dynamic bodies. Failed clearance retains the seat and driver grant. Reproduce and test all initial poses and moved/rotated exits using the intended collision resources; a stationary source-exit receipt alone does not establish current-pose clearance. Keep each gameplay configuration's collision world and active-ability sidecar digests synchronized when staging data.
+
+## Changing seats in place
+
+The client's change-seat action sends an ordinary mount request for another
+seat on the vehicle it already occupies. The client picks that seat itself. It
+steps through the seats in index order, skips occupied seats and wraps around.
+From the driver or gunner seat it can stop on a passenger seat. From a
+passenger seat it skips the other passenger seats. On a vehicle with driver
+seat0, gunner seat1 and passenger seats2–9, changing seats from the gunner seat
+therefore lands in seat2 first, and changing again from there reaches the
+driver seat. The server honours the requested seat and never substitutes
+another one.
+
+An in-place change is handled like a fresh mount of the new seat, without the
+on-foot distance and freshness checks. The old seat is released in the same
+update. Taking seat0 grants owner field1 to the new driver and starts a fresh
+motion budget, exactly as a fresh driver mount does. Leaving seat0 revokes
+field1 to server owner `0x105`, so nobody can drive a vehicle that has no driver.
+Taking seat1 grants turret owner field6. Leaving seat1 sets field6 to `0xFFFF`
+and clears the turret grant. A request for a seat that another occupant holds
+is refused, and no seat or grant changes. Other clients learn who sits where
+only from that character's state14 vehicle and seat user data; the vehicle has
+no separate occupancy field. Late joiners receive the current field1 and
+field6 owners in the creation row.
+`in_place_seat_changes_grant_driving_exactly_like_a_fresh_driver_mount` and
+`in_place_seat_change_into_a_held_driver_seat_is_refused` cover the Domination
+APC and the Acquisition Escort.
