@@ -387,6 +387,33 @@ impl Runtime {
         self.setup.category_zero_indices()
     }
 
+    /// What completing each structural objective changes, for bot planning.
+    pub(crate) fn structure_hints(&self) -> BTreeMap<u16, crate::bot_demolition::Hint> {
+        use crate::domination_fsp::{FspType, SquadRouting};
+        let mut hints: BTreeMap<u16, crate::bot_demolition::Hint> = BTreeMap::new();
+        for (index, point, team, fsp_type, routing) in self.setup.fsp.linked_spawns() {
+            let hint = hints.entry(index).or_default();
+            match (fsp_type, routing) {
+                (FspType::ActiveWhenIncomplete, SquadRouting::Enabled) => {
+                    hint.closes_spawn_of = Some(team as u8);
+                    hint.spawn_point = Some(point);
+                }
+                (FspType::ActiveWhenIncomplete, SquadRouting::Disabled) => {
+                    hint.closes_vehicle_spawn_of = Some(team as u8)
+                }
+                (FspType::ActiveWhenComplete, _) => hint.opens_spawn_of = Some(team as u8),
+            }
+        }
+        for (&index, &token) in &self.setup.tokens_by_index {
+            if self.setup.classes_by_index.get(&index) == Some(&NativeClass::Structural)
+                && self.setup.map.toggles_abilities(token, Event::Completed)
+            {
+                hints.entry(index).or_default().toggles_abilities = true;
+            }
+        }
+        hints
+    }
+
     pub(crate) fn is_started(&self) -> bool {
         self.started
     }

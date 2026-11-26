@@ -315,6 +315,7 @@ pub(super) struct Director {
     /// launch floor (kept apart from retreat/egress support sampling).
     staging_cache: BTreeMap<(u32, [u32; 3]), Result<replication::CharacterPosition, &'static str>>,
     pub(super) armed: crate::bot_armed_objectives::Book,
+    pub(super) demolition: crate::bot_demolition::Book,
 }
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct CandidateKey {
@@ -454,8 +455,8 @@ pub(super) fn operator_action<'a>(
 )> {
     use protocol::ObjectiveInteractionKind::{Activate, Deactivate};
     use replication::ObjectiveState::{
-        Activated, Activating, CancelRetaken, Completed, Deactivated, Deactivating, Retaken,
-        Retaking,
+        Activated, Activating, CancelRetaken, Completed, Deactivated, Deactivating, Repaired,
+        Retaken, Retaking,
     };
     // A native secure-and-hold point (Domination): the attacking side secures
     // an open or retaken point, the owning side retakes a secured one. The
@@ -473,7 +474,8 @@ pub(super) fn operator_action<'a>(
         return Some((kind, r.range()));
     }
     if let Some(r) = &object.demolition {
-        let kind = if team != r.owner_team && matches!(state, Deactivated | Activating) {
+        // A repaired structure may be armed again.
+        let kind = if team != r.owner_team && matches!(state, Deactivated | Activating | Repaired) {
             Activate
         } else if team == r.owner_team && r.can_defuse && matches!(state, Activated | Deactivating)
         {
@@ -2488,12 +2490,37 @@ impl<W: Write> Engine<W> {
         // An engineer sent to repair a destroyed objective of its side goes
         // there instead of its squad's lane.
         let repairs = self.plan_repair_duties();
-        // An armed-objective duty replaces the squad's lane for that bot.
+        // A demolition team takes bots without another duty that do not hold
+        // an action elsewhere (bot_demolition).
+        let demolitions = {
+            let mut busy: std::collections::BTreeSet<u16> =
+                duties.keys().chain(repairs.keys()).copied().collect();
+            if let Some((catalog, world)) = self
+                .objective_catalog
+                .as_ref()
+                .zip(self.objective_world.as_ref())
+            {
+                busy.extend(
+                    catalog
+                        .objects
+                        .iter()
+                        .filter(|o| o.demolition.is_none())
+                        .filter_map(|o| world.interaction_owner(o.object_index))
+                        .map(|(id, _, _)| id),
+                );
+            }
+            self.plan_demolition_duties(now, &busy, &mut receipts)
+        };
+        // An armed-objective duty replaces the squad's lane for that bot, then
+        // a repair duty, then a demolition duty.
         let target_of = |id: u16, squad: u16| {
-            duties
-                .get(&id)
-                .map(|d| d.objective)
-                .or_else(|| repairs.get(&id).copied().map_or(assigned[&squad], Some))
+            duties.get(&id).map(|d| d.objective).or_else(|| {
+                repairs
+                    .get(&id)
+                    .or_else(|| demolitions.get(&id))
+                    .copied()
+                    .map_or(assigned[&squad], Some)
+            })
         };
         let mut operators = BTreeMap::new();
         if policy.interactions_enabled
@@ -2961,24 +2988,29 @@ impl<W: Write> Engine<W> {
             };
             let defending = bot.target.squad.team() == owner;
             let operator = bot.task.operator;
-            let operator_rule = operator.then(|| {
-                let object = self
-                    .objective_catalog
-                    .as_ref()
-                    .unwrap()
-                    .objects
-                    .iter()
-                    .find(|o| o.object_index == objective)
-                    .unwrap();
-                let world = self.objective_world.as_ref().unwrap();
-                operator_action(
-                    object,
-                    world.state(objective).unwrap(),
-                    bot.target.squad.team(),
-                    world,
-                )
-                .unwrap()
-            });
+            // An engineer sent to repair operates the objective through its
+            // repair range rather than an interaction.
+            let operator_rule = operator
+                .then(|| {
+                    let object = self
+                        .objective_catalog
+                        .as_ref()
+                        .unwrap()
+                        .objects
+                        .iter()
+                        .find(|o| o.object_index == objective)
+                        .unwrap();
+                    let world = self.objective_world.as_ref().unwrap();
+                    let team = bot.target.squad.team();
+                    operator_action(object, world.state(objective).unwrap(), team, world)
+                        .map(|(_, range)| range)
+                        .or_else(|| {
+                            (bot.task.repair == Some(objective))
+                                .then(|| crate::bot_repair::repair_range(object, world, team))
+                                .flatten()
+                        })
+                })
+                .flatten();
             let operator_role = DestinationRole {
                 name: "operator".into(),
                 back_m: 0.,
@@ -3021,7 +3053,7 @@ impl<W: Write> Engine<W> {
             };
             let mut offset = policy.candidate_offsets_m[index];
             offset[1] += sector;
-            let mut raw = if let Some((_, range)) = operator_rule {
+            let mut raw = if let Some(range) = operator_rule {
                 // Grounding and the range itself are checked again before the route is accepted.
                 position(range.approach(candidate_attempt))
             } else if let Some(duty) = armed {
@@ -3086,7 +3118,7 @@ impl<W: Write> Engine<W> {
                 self.bot_registry
                     .director
                     .candidate_support(key, policy.cache_limit, || {
-                        if !recovering && let Some((_, range)) = operator_rule {
+                        if !recovering && let Some(range) = operator_rule {
                             supported_operator(
                                 self.collision_world.as_ref(),
                                 &map,
@@ -3136,7 +3168,7 @@ impl<W: Write> Engine<W> {
             let result = (|| {
                 let goal = static_goal?;
                 if !recovering
-                    && let Some((_, range)) = operator_rule
+                    && let Some(range) = operator_rule
                     && !range.contains_planned(point(goal))
                 {
                     return Err("bot_operator_approach_out_of_range");

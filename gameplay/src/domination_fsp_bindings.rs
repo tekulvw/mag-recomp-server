@@ -200,6 +200,23 @@ impl Bindings {
             objectives,
         })
     }
+    /// Each objective linked to a forward spawn, by catalog index: the
+    /// spawn point index, the point's team, whether the point is open while the objective is not
+    /// completed, and whether squads route their lives to it (an infantry
+    /// spawn rather than a vehicle source).
+    pub(crate) fn linked_spawns(
+        &self,
+    ) -> impl Iterator<Item = (u16, u16, Team, FspType, SquadRouting)> + '_ {
+        self.links.iter().filter_map(|(token, (link, spawn))| {
+            Some((
+                *self.objectives.get(token)?,
+                spawn.identity.native_id as u16,
+                spawn.team,
+                link.fsp_type,
+                spawn.squad_routing,
+            ))
+        })
+    }
     pub(crate) fn category_zero_indices(&self) -> Result<[u16; 32], &'static str> {
         let mut result = [0; 32];
         for (index, squad) in self.squads.iter().enumerate() {
