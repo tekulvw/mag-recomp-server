@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.1](https://github.com/tekulvw/mag-recomp-server/compare/chart-v0.13.0...chart-v0.13.1) (2026-11-26)
+
+
+### Bug Fixes
+
+* **chart:** give gameplay Pods a drain and a matching grace period ([#359](https://github.com/tekulvw/mag-recomp-server/issues/359)) ([b5f4716](https://github.com/tekulvw/mag-recomp-server/commit/b5f4716e33d99190189d79a041dd1b1c1ac53722))
+
 ## [0.13.0](https://github.com/tekulvw/mag-recomp-server/compare/chart-v0.12.1...chart-v0.13.0) (2026-11-26)
 
 

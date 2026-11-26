@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.12.0](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.11.0...medius-v0.12.0) (2026-11-26)
+
+
+### Features
+
+* **medius:** make character-store import idempotent, with a dry run, counts and digests ([#365](https://github.com/tekulvw/mag-recomp-server/issues/365)) ([42ae55f](https://github.com/tekulvw/mag-recomp-server/commit/42ae55f37e9d2e3d22be32d1890c1fe39929c031))
+* **medius:** report read-only server status on the admin API ([#361](https://github.com/tekulvw/mag-recomp-server/issues/361)) ([df62be3](https://github.com/tekulvw/mag-recomp-server/commit/df62be352eaf93bf2f3edfdad6fcbf2eac20eca8))
+* **voice:** add lab diagnostic receipts for the voice capture ([#342](https://github.com/tekulvw/mag-recomp-server/issues/342)) ([e45091c](https://github.com/tekulvw/mag-recomp-server/commit/e45091c93c7566ab1fd1d226221bcbb34c150a8e))
+* **voice:** publish voice group memberships and add the DME relay decision ([#345](https://github.com/tekulvw/mag-recomp-server/issues/345)) ([e120806](https://github.com/tekulvw/mag-recomp-server/commit/e1208068010b98746992c6582683d5baea7b4cf7))
+
+
+### Bug Fixes
+
+* **medius:** reconnect cleanly to a worker that outlived Medius ([#358](https://github.com/tekulvw/mag-recomp-server/issues/358)) ([dc9e94e](https://github.com/tekulvw/mag-recomp-server/commit/dc9e94e634e8ac3a6b48f3952800806cfd002268))
+* **medius:** stop probing GSSAPI on character database connections ([#367](https://github.com/tekulvw/mag-recomp-server/issues/367)) ([0f4bdae](https://github.com/tekulvw/mag-recomp-server/commit/0f4bdaebf02271b2e7490a96eb1ccb8a52959972))
+
 ## [0.11.0](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.10.2...medius-v0.11.0) (2026-11-26)
 
 

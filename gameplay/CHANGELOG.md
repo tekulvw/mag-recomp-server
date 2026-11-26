@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.16.0](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.15.0...gameplay-v0.16.0) (2026-11-26)
+
+
+### Features
+
+* **gameplay:** give bots varied kits, apparel, faces and voices ([#346](https://github.com/tekulvw/mag-recomp-server/issues/346)) ([81f52b3](https://github.com/tekulvw/mag-recomp-server/commit/81f52b3326fc83a15791641094dd3eb10ccef7e3))
+* **voice:** add lab diagnostic receipts for the voice capture ([#342](https://github.com/tekulvw/mag-recomp-server/issues/342)) ([e45091c](https://github.com/tekulvw/mag-recomp-server/commit/e45091c93c7566ab1fd1d226221bcbb34c150a8e))
+* **voice:** publish voice group memberships and add the DME relay decision ([#345](https://github.com/tekulvw/mag-recomp-server/issues/345)) ([e120806](https://github.com/tekulvw/mag-recomp-server/commit/e1208068010b98746992c6582683d5baea7b4cf7))
+
+
+### Bug Fixes
+
+* **gameplay:** fit capsule bots' placement checks, goal tolerance and recovery reach ([#344](https://github.com/tekulvw/mag-recomp-server/issues/344)) ([3c8f605](https://github.com/tekulvw/mag-recomp-server/commit/3c8f605240639e25b0657c123b8cbcdf87984df4))
+* **gameplay:** keep late joiners in full 256-bot worlds from being evicted ([#351](https://github.com/tekulvw/mag-recomp-server/issues/351)) ([e8fbc68](https://github.com/tekulvw/mag-recomp-server/commit/e8fbc68c4c3db9904cd1f55cabfa65c42a5511fa))
+* **gameplay:** let a downed player bleed out and requeue at once ([#366](https://github.com/tekulvw/mag-recomp-server/issues/366)) ([0b0f555](https://github.com/tekulvw/mag-recomp-server/commit/0b0f5557b7d679be48bbede0320f38149a2e9a44))
+* **gameplay:** let routes reach an objective a planted charge walls off ([#364](https://github.com/tekulvw/mag-recomp-server/issues/364)) ([def3359](https://github.com/tekulvw/mag-recomp-server/commit/def3359d1e32e4e07199e7d7515bdfa501cfdb71))
+* **gameplay:** reach walled-off goals beside them only for spawn lane checks ([#368](https://github.com/tekulvw/mag-recomp-server/issues/368)) ([2284ef6](https://github.com/tekulvw/mag-recomp-server/commit/2284ef6439e0d52fb2cb739578731890e24c8cef))
+* **gameplay:** release a dead Medius's players and drain on SIGTERM ([#357](https://github.com/tekulvw/mag-recomp-server/issues/357)) ([be9b1ee](https://github.com/tekulvw/mag-recomp-server/commit/be9b1eed37fb3b2a1c1c6f561a5fd4203b1395cb))
+* **gameplay:** requeue dead players for the next wave on the world tick ([#363](https://github.com/tekulvw/mag-recomp-server/issues/363)) ([e27a7b0](https://github.com/tekulvw/mag-recomp-server/commit/e27a7b06c6044f5a6baf845a5c81bb5abd906d3b))
+* **gameplay:** retry startup reads that fail their digest and share meshes between profiles ([#349](https://github.com/tekulvw/mag-recomp-server/issues/349)) ([3c75914](https://github.com/tekulvw/mag-recomp-server/commit/3c7591430765f74fbc728a66b95caf836c96401d))
+* **gameplay:** send bots to their squad's FRAGO and keep bot-led squads tagged ([#356](https://github.com/tekulvw/mag-recomp-server/issues/356)) ([63f8802](https://github.com/tekulvw/mag-recomp-server/commit/63f88023b43e4abbcb07909d37f8c271e16b58cc))
+* **gameplay:** send defending bots to their forward spawns and objectives in time ([#355](https://github.com/tekulvw/mag-recomp-server/issues/355)) ([195f8b6](https://github.com/tekulvw/mag-recomp-server/commit/195f8b66dd1499afebbd7b619c28c74c857f3867))
+* **gameplay:** send objective changes to players on the deploy screen ([#350](https://github.com/tekulvw/mag-recomp-server/issues/350)) ([7542d0d](https://github.com/tekulvw/mag-recomp-server/commit/7542d0dd9da3114275cd9843596b2fa0a77ee62f))
+* **gameplay:** step capsule bots clear of approach lanes when holding for a drop ([#348](https://github.com/tekulvw/mag-recomp-server/issues/348)) ([cccb620](https://github.com/tekulvw/mag-recomp-server/commit/cccb6200677851c4e768bcfd9c403b9cfe0ddbe1))
+
+
+### Performance Improvements
+
+* **gameplay:** let engaged bots shoot before searching bots spend the ray budget ([#352](https://github.com/tekulvw/mag-recomp-server/issues/352)) ([4c13619](https://github.com/tekulvw/mag-recomp-server/commit/4c13619df909f9b5b33eb3833922386947d20b1f))
+
 ## [0.15.0](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.14.5...gameplay-v0.15.0) (2026-11-26)
 
 
