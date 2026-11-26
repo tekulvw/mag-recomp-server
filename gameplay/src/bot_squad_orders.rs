@@ -359,7 +359,7 @@ impl<W: Write> Engine<W> {
     /// the nearest objective of its team, as chosen at the last bot tick.
     /// Before a squad's first bot tick, or for a squad without bots, its lane.
     /// Bot spawn ranking reads it (its change lands separately).
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) fn bot_squad_current_objective(&self, squad: u16) -> Option<u16> {
         match self.bot_registry.director.squad_orders.current.get(&squad) {
             Some(&current) => current,
