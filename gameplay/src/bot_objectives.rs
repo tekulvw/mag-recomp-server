@@ -2478,13 +2478,17 @@ impl<W: Write> Engine<W> {
             .into_iter()
             .map(|squad| (squad, self.bot_squad_lane(squad)))
             .collect();
-        let duties = self.plan_armed_duties(&policy.armed, now, &mut receipts);
+        let mut duties = self.plan_armed_duties(&policy.armed, now, &mut receipts);
+        // Attackers inside an armed charge's blast leave it (bot_blast).
+        let zones = self.armed_blast_zones();
+        self.plan_blast_evacuations(&zones, &mut duties, now, &mut receipts);
         let centers: BTreeMap<u16, [f64; 3]> = if duties.is_empty() {
             BTreeMap::new()
         } else {
             self.armed_objectives()
                 .into_iter()
                 .map(|a| (a.index, a.center))
+                .chain(zones.values().map(|z| (z.objective, z.center)))
                 .collect()
         };
         // An engineer sent to repair a destroyed objective of its side goes
@@ -2655,11 +2659,16 @@ impl<W: Write> Engine<W> {
                 t.unavailable_reported = false;
                 // A new duty taken by a bot already covering the objective
                 // keeps its spot: it stops here instead of walking to a ring place.
+                // A guard inside its objective's blast zone walks out instead.
                 if let Some(duty) = armed.filter(|_| !operator && settled)
                     && let Some(center) = centers.get(&duty.objective)
                     && (f64::from(r.position.x) - center[0])
                         .hypot(f64::from(r.position.z) - center[2])
                         <= duty.duty.ring(&policy.armed)[1]
+                    && !zones.get(&duty.objective).is_some_and(|zone| {
+                        zone.attackers == bot.target.squad.team()
+                            && zone.contains([r.position.x.into(), 0., r.position.z.into()])
+                    })
                 {
                     t.goal = Some(r.position);
                     t.role_goal = Some(r.position);
@@ -3061,7 +3070,7 @@ impl<W: Write> Engine<W> {
                     center.map(f64::from),
                     objective,
                     duty,
-                    &policy.armed,
+                    &Self::armed_policy_outside_blast(&zones, objective, &policy.armed),
                     candidate_attempt,
                 ))
             } else {
@@ -3267,6 +3276,21 @@ impl<W: Write> Engine<W> {
                 };
                 query_us = query_started.elapsed().as_micros() as u64;
                 result?;
+                // An attacker does not walk into a charge's blast it is not
+                // already in (bot_blast).
+                let team = bot.target.squad.team();
+                if let Some(points) = bot.target.registry_route_points() {
+                    let mut walk = vec![point(bot.target.runtime.unwrap().position)];
+                    walk.extend_from_slice(points);
+                    if zones
+                        .values()
+                        .any(|zone| zone.attackers == team && zone.entered_by(&walk))
+                    {
+                        bot.target.pending_move = None;
+                        bot.target.runtime.as_mut().unwrap().phase = BotPhase::Complete;
+                        return Err("bot_route_blast_zone");
+                    }
+                }
                 let segment_goal = bot.target.registry_move_destination().unwrap_or(goal);
                 let t = &mut bot.task;
                 t.goal = Some(segment_goal);

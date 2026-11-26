@@ -297,6 +297,12 @@ impl Runtime {
             arrival_requests: BTreeMap::new(),
         }
     }
+    pub(crate) fn structural_blast_properties(
+        &self,
+        index: u16,
+    ) -> Option<crate::domination_structural_effects::BlastProperties> {
+        self.structural.as_ref()?.blast_properties(index)
+    }
     pub(crate) fn bot_regional_structural_bounds(
         &self,
         clv_sha256: &str,
