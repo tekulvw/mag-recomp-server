@@ -346,3 +346,34 @@ fn the_planter_leaves_the_blast_once_its_charge_is_armed() {
     );
     assert_eq!(evacuations(&engine)[&bot].objective, 0);
 }
+
+#[test]
+fn an_attacking_squad_breaks_the_bunker_before_its_point_and_teams_leave_it() {
+    let (mut engine, _) = demolition_fixture();
+    let config = engine.bot_registry.config.as_mut().unwrap();
+    config.breach.domination_reach_m = 2048.;
+    let origin = engine
+        .spawn_catalog
+        .as_ref()
+        .and_then(|c| c.point(c.default_for_squad(0)?))
+        .map(|p| [p.position.x, p.position.z]);
+    let (point, _) = engine.bot_objective_center(1).unwrap();
+    let (bunker, _) = engine.bot_objective_center(0).unwrap();
+    let flat = |a: [f32; 2], b: [f32; 3]| (a[0] - b[0]).hypot(a[1] - b[2]);
+    let origin = origin.unwrap();
+    // The synthetic bunker stands on the attackers' side of their point.
+    assert!(flat(origin, bunker) < flat(origin, point));
+    engine.refresh_breach(test_time(1000), 1).unwrap();
+    assert_eq!(engine.bot_mode_lane(0), Some(1));
+    assert_eq!(engine.bot_squad_lane(0), Some(0), "the bunker comes first");
+    let breach = rows(&engine, "bot_breach_plan");
+    assert_eq!(breach[0]["lanes"][0]["defences"], json!([[0, "bunker"]]));
+    // Whole squads break it, so no demolition team is sent there as well.
+    let (duties, _) = plan(&mut engine, 1000);
+    assert!(duties.is_empty());
+    // Switched off, the squad goes straight for its point again.
+    let config = engine.bot_registry.config.as_mut().unwrap();
+    config.breach.enabled = false;
+    engine.refresh_breach(test_time(1050), 1).unwrap();
+    assert_eq!(engine.bot_squad_lane(0), Some(1));
+}

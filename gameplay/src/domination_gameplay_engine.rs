@@ -408,7 +408,9 @@ impl Runtime {
             if self.setup.classes_by_index.get(&index) == Some(&NativeClass::Structural)
                 && self.setup.map.toggles_abilities(token, Event::Completed)
             {
-                hints.entry(index).or_default().toggles_abilities = true;
+                let hint = hints.entry(index).or_default();
+                hint.toggles_abilities = true;
+                hint.enables_abilities = self.setup.map.enables_abilities(token, Event::Completed);
             }
         }
         hints

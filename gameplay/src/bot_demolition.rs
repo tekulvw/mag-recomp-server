@@ -149,6 +149,8 @@ pub(crate) struct Hint {
     pub closes_vehicle_spawn_of: Option<u8>,
     pub opens_spawn_of: Option<u8>,
     pub toggles_abilities: bool,
+    /// Some of those switches turn an ability on (anti-air).
+    pub enables_abilities: bool,
 }
 impl Hint {
     /// The best value class that applies when `attacker` destroys a

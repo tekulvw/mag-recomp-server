@@ -30,7 +30,7 @@ The structures still decide how a lane plays:
   drop zones and switches on its air strikes. A repair closes them again
   ([acquisition-gameplay.md](acquisition-gameplay.md#parachute-drops)).
 
-Mortars, sensors, other command-ability structures and motor pools sit
+Mortars, sensors and motor pools sit
 beside or behind the captures. They help, but they are not in the way.
 
 ## A lane and its defences
@@ -49,11 +49,12 @@ a capture. Of those, only these count:
 | Kind | Read from | Lane |
 | --- | --- | --- |
 | bunker | the structure is the forward spawn of an on-foot squad point of the owners | the lane of the owner squad that spawns there |
-| anti-air | its destruction opens spawn points of the other side (Acquisition: its authored anti-air hook and the drop zones it opens) | the lane of the attacking squads whose drop zones it opens, else the nearest |
+| anti-air | its destruction opens spawn points of the other side or switches command abilities on (Acquisition: its authored anti-air hook and the drop zones it opens; Domination: a completion hook that enables abilities) | the lane of the attacking squads whose drop zones it opens, else the nearest |
 | obstacle | no authored links: only its own geometry (gates, barricades) | the lane with the nearest capture |
 
-Structures with any other link (mortar, sensor, command abilities, motor
-pools and vehicle sources) are support, and are never lane defences. A
+Structures with any other link (mortars and sensors, which only switch the
+defenders' abilities off, motor pools and vehicle sources) are support, and
+are never lane defences. A
 structure the attackers own is never a defence. Defences are worked in order
 of their distance from the lane's origin, outermost first.
 

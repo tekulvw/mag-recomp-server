@@ -359,6 +359,19 @@ impl Map {
             .any(|command| matches!(command, Command::Ability { .. }))
     }
 
+    /// Whether the event's hook switches some command ability on (anti-air
+    /// opening the other side's air support), not only off.
+    pub(crate) fn enables_abilities(&self, objective_token: u32, event: Event) -> bool {
+        self.hooks
+            .get(&(objective_token, event))
+            .and_then(|hook| self.bindings.get(&hook.binding_token))
+            .into_iter()
+            .flatten()
+            .flat_map(|entry| &entry.rules)
+            .flat_map(|rule| &rule.commands)
+            .any(|command| matches!(command, Command::Ability { enabled: true, .. }))
+    }
+
     pub fn unresolved_hook(&self, objective_token: u32, event: Event) -> Option<u32> {
         self.hooks
             .get(&(objective_token, event))
@@ -489,6 +502,18 @@ mod tests {
                 ]
             }]
         })
+    }
+
+    #[test]
+    fn ability_hooks_report_whether_they_switch_an_ability_on() {
+        let catalog = Catalog::from_json(&synthetic_catalog().to_string().into_bytes()).unwrap();
+        let map = catalog.map("synthetic").unwrap();
+        // Objective 6's repair hook switches the sensor on in one branch.
+        assert!(map.toggles_abilities(6, Event::Repaired));
+        assert!(map.enables_abilities(6, Event::Repaired));
+        assert!(!map.toggles_abilities(1, Event::Completed));
+        assert!(!map.enables_abilities(1, Event::Completed));
+        assert!(!map.enables_abilities(6, Event::Completed));
     }
 
     #[test]

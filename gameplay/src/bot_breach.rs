@@ -16,9 +16,10 @@
 //!   `reach_m` of its capture and nearer the attackers' side than it:
 //!   obstacles (gates, barricades) nearest the lane's captures, bunkers whose
 //!   forward spawn belongs to a defender squad of the lane, and anti-air
-//!   whose destruction opens drop zones of the lane's attacking squads.
-//!   Mortars, sensors, other command-ability structures and motor pools are
-//!   support and not part of it.
+//!   whose destruction opens drop zones of the lane's attacking squads or
+//!   switches command abilities on. Mortars and sensors (which only switch
+//!   the defenders' abilities off) and motor pools are support and not part
+//!   of it.
 //! - Defences are worked outermost first. While some stand and the capture is
 //!   open to the attackers, the n-th attacking squad of the lane (by squad
 //!   index, among squads with bots, after `attacker_reserve_squads` that stay
@@ -510,7 +511,8 @@ impl<W: Write> Engine<W> {
                 let hint = hints.get(&o.object_index).copied().unwrap_or_default();
                 let role = if hint.closes_spawn_of == Some(owner) {
                     hint.spawn_point.map_or(Role::Obstacle, Role::OwnerSpawn)
-                } else if hint.opens_spawn_of.is_some_and(|t| t != owner) {
+                } else if hint.opens_spawn_of.is_some_and(|t| t != owner) || hint.enables_abilities
+                {
                     Role::AntiAir(Vec::new())
                 } else if hint.toggles_abilities || hint.closes_vehicle_spawn_of.is_some() {
                     Role::Support
