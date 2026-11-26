@@ -289,6 +289,7 @@ impl<W: Write> Engine<W> {
             statistics_cursor: 0,
             prefer_statistics: false,
             pending_firearm_assist_rows: Default::default(),
+            talk_channel: None,
             hospital_bootstrap: 0..0,
             smoke_bootstrap: 0..0,
             ordered_health_pending: false,

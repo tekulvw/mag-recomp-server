@@ -271,6 +271,7 @@ namespace Server.Medius
             _supportsAssistRewards = hello.Capabilities.Contains("assist_rewards_v1", StringComparer.Ordinal);
             _supportsWorldStreamResume = hello.SupportsWorldStreamResume;
             _supportsEventReplay = hello.SupportsEventReplay;
+            _supportsVoiceGroups = hello.SupportsVoiceGroups;
             WorkerContract = MagWorkerContract.From(hello);
         }
         public static void RequireLoadoutSelectionCapability(GameplayBridgeResponse hello)
@@ -697,17 +698,18 @@ namespace Server.Medius
                     continue;
                 }
                 using var subscription = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-                bool positions; GameplayWorldStreamPosition resumeAfter;
+                bool positions; GameplayWorldStreamPosition resumeAfter; bool voiceGroups;
                 lock (_gate)
                 {
                     _worldSubscription = subscription;
                     positions = _supportsWorldStreamResume && !InRegistry;
                     resumeAfter = positions && _worldStreamResuming ? _worldStreamPosition : null;
+                    voiceGroups = WantsVoiceGroups;
                 }
                 bool acknowledged = false;
                 try
                 {
-                    await _bridge.SubscribeWorldAsync((uint)World.WorldId, Id(), positions, resumeAfter, async reply =>
+                    await _bridge.SubscribeWorldAsync((uint)World.WorldId, Id(), positions, resumeAfter, voiceGroups, async reply =>
                     {
                         lock (_gate)
                         {
@@ -719,6 +721,7 @@ namespace Server.Medius
                             bool first = !acknowledged; acknowledged = true;
                             AdvanceWorldStream(reply, first, resumeAfter);
                             if (!Route(reply)) throw new InvalidDataException("World stream recipient mismatch.");
+                            ApplyVoiceGroups(reply);
                             _lastWorldFrameTimestamp = _timeProvider.GetTimestamp();
                             _worldStreamHealthy = true;
                             if (_worldStreamResuming)
@@ -752,6 +755,8 @@ namespace Server.Medius
                             // (for example after a rollback); stop asking for them.
                             _supportsWorldStreamResume = false;
                         }
+                        // Likewise a worker rolled back below voice_groups_v1 refuses the request.
+                        if (voiceGroups && !acknowledged && error is InvalidDataException) _supportsVoiceGroups = false;
                         retained = RetainThroughWorldStreamGap(error);
                         count = _reservations.Count;
                     }

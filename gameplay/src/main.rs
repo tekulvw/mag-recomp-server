@@ -182,6 +182,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
     let mut development_grenade_radius = false;
     let mut coalesce_character_replication = false;
     let mut per_recipient_reply_budget = false;
+    let mut voice_routing = false;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -603,6 +604,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             "--development-grenade-radius" => development_grenade_radius = true,
             "--coalesce-character-replication" => coalesce_character_replication = true,
             "--per-recipient-reply-budget" => per_recipient_reply_budget = true,
+            "--voice-routing" => voice_routing = true,
             "--worker-id" => {
                 let id = args
                     .next()
@@ -643,7 +645,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             }
             _ => {
                 return Err(io::Error::other(
-                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--match-profiles /absolute/MATCH_PROFILES.json] [--party-reservations] [--active-abilities /absolute/ACTIVE_ABILITIES.json] [--squad-orders /absolute/ORDERS.json] [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--dynamic-bodies /absolute/BODIES.json] [--static-partition /absolute/PARTITION.json] [--acquisition-gameplay /absolute/GAMEPLAY.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--firearm-assist-rules /absolute/ASSISTS.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--smoke-grenade-rules /absolute/SMOKE.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--worker-id ID] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json [--collision-coverage COVERAGE.json]] [--navmesh-world MESH.mag-nav] [--regional-walk-coverage /absolute/COVERAGE.json] [--movement-profile /absolute/MOVEMENT.json] [--bot-body-profile /absolute/BODY.json] [--bot-fill-total N --bot-population POPULATION.json] [--bot-perception on|off] [--bot-cover on|crouch|off] [--bot-names /absolute/NAMES.json] [--bot-resupply-catalog /absolute/SUPPLY.json] [--bot-resupply-approach-policy /absolute/APPROACH.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS] [--coalesce-character-replication] [--per-recipient-reply-budget] [--log-segment-bytes BYTES [--log-retention-s SECONDS]]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
+                    "usage: mag-gameplay [--application-id 20230|20231] [--validate-catalogs] --item-catalog ITEMS.json --spawn-catalog SPAWNS.json --log NEW_FILE [--match-profiles /absolute/MATCH_PROFILES.json] [--party-reservations] [--active-abilities /absolute/ACTIVE_ABILITIES.json] [--squad-orders /absolute/ORDERS.json] [--wire-profiles PROFILES.json] [--objective-catalog OBJECTIVES.json] [--ground-vehicles /absolute/VEHICLES.json] [--dynamic-bodies /absolute/BODIES.json] [--static-partition /absolute/PARTITION.json] [--acquisition-gameplay /absolute/GAMEPLAY.json] [--character-blast-rules /absolute/BLAST.json] [--retail-combat-metadata /absolute/RETAIL.json] [--bootstrap-loadouts /absolute/BOOTSTRAP.json] [--fall-damage-rules /absolute/FALL.json] [--incapacitation-rules /absolute/INCAPACITATION.json] [--character-damage-rules /absolute/DAMAGE.json] [--firearm-assist-rules /absolute/ASSISTS.json] [--skill-catalog /absolute/SKILLS.json] [--retail-armory-catalog /absolute/ARMORY.json] [--smoke-grenade-rules /absolute/SMOKE.json] [--leadership-passives /absolute/PASSIVES.json --leadership-role-policy /absolute/ROLES.json] [--bind IP:PORT] [--worker-id ID] [--development-control] [--development-grenade-radius] [--development-dummy] [--development-dummy-position x,y,z] [--collision-world WORLD.json [--collision-coverage COVERAGE.json]] [--navmesh-world MESH.mag-nav] [--regional-walk-coverage /absolute/COVERAGE.json] [--movement-profile /absolute/MOVEMENT.json] [--bot-body-profile /absolute/BODY.json] [--bot-fill-total N --bot-population POPULATION.json] [--bot-perception on|off] [--bot-cover on|crouch|off] [--bot-names /absolute/NAMES.json] [--bot-resupply-catalog /absolute/SUPPLY.json] [--bot-resupply-approach-policy /absolute/APPROACH.json] [--tick-telemetry NEW_FILE] [--tick-budget-ms MS] [--coalesce-character-replication] [--per-recipient-reply-budget] [--voice-routing] [--log-segment-bytes BYTES [--log-retention-s SECONDS]]; query only: mag-gameplay --collision-world WORLD.json --collision-query x,y,z x,y,z",
                 ));
             }
         }
@@ -2159,6 +2161,9 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         if per_recipient_reply_budget {
             engine = engine.with_per_recipient_reply_budget();
         }
+        if voice_routing {
+            engine = engine.with_voice_routing();
+        }
         if coalesce_character_replication {
             engine = engine.with_character_replication_coalescing();
         }
@@ -2523,6 +2528,8 @@ struct WorldSubscriber {
     sender: SyncSender<Response>,
     /// The subscriber asked for frame positions (world_stream_resume_v1).
     positions: bool,
+    /// The subscriber asked for relay tables (voice_groups_v1).
+    voice_groups: bool,
 }
 type SharedSubscriber = Arc<Mutex<Option<WorldSubscriber>>>;
 
@@ -2537,6 +2544,9 @@ struct SubscribeWorld {
     positions: bool,
     #[serde(default)]
     resume: Option<ResumeFrom>,
+    /// Ask for `voice_groups` frames. A worker without `--voice-routing` sends none.
+    #[serde(default)]
+    voice_groups: bool,
 }
 fn write_response(
     stream: &mut TcpStream,
@@ -2603,6 +2613,7 @@ fn serve_subscription(
                 worker_identity,
             );
         }
+        let voice_groups = request.voice_groups;
         let receiver = match register_subscriber(&mut guard, journal, request, generation) {
             Ok(receiver) => receiver,
             Err((request_id, code)) => {
@@ -2616,6 +2627,8 @@ fn serve_subscription(
             }
         };
         engine.enable_world_ticks();
+        // A full relay table follows on the next world frame, after a resume too.
+        engine.subscribe_voice_groups(voice_groups);
         receiver
     };
     // Persistent subscriptions have their own single slot, separate from request workers.
@@ -2666,6 +2679,9 @@ fn register_subscriber(
     sender.send(acknowledgement).unwrap();
     for mut frame in replay {
         frame.request_id = request.request_id.clone();
+        if !request.voice_groups {
+            frame.voice_groups = None;
+        }
         sender.send(frame).unwrap();
     }
     *slot = Some(WorldSubscriber {
@@ -2674,6 +2690,7 @@ fn register_subscriber(
         request_id: request.request_id,
         sender,
         positions,
+        voice_groups: request.voice_groups,
     });
     Ok(receiver)
 }
@@ -2869,6 +2886,7 @@ fn spawn_world_scheduler(
             if response.messages.is_empty()
                 && response.rewards.is_empty()
                 && response.match_terminal.is_none()
+                && response.voice_groups.is_none()
                 && !due
             {
                 continue;
@@ -2896,6 +2914,9 @@ fn publish_frame(subscriber: &SharedSubscriber, journal: &Mutex<Journal>, frame:
     frame.request_id = current.request_id.clone();
     if !current.positions {
         frame.world_stream = None;
+    }
+    if !current.voice_groups {
+        frame.voice_groups = None;
     }
     if let Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) =
         current.sender.try_send(frame)
@@ -2939,6 +2960,7 @@ mod subscription_tests {
             request_id: "synthetic-world-stream".into(),
             sender: sender.clone(),
             positions: false,
+            voice_groups: false,
         });
         (sender, receiver)
     }
@@ -3023,6 +3045,20 @@ mod subscription_tests {
         resume: Option<ResumeFrom>,
         generation: u64,
     ) -> Result<mpsc::Receiver<Response>, (String, &'static str)> {
+        subscribe_with_voice(
+            shared, journal, request_id, positions, resume, generation, false,
+        )
+    }
+
+    fn subscribe_with_voice(
+        shared: &SharedSubscriber,
+        journal: &Mutex<Journal>,
+        request_id: &str,
+        positions: bool,
+        resume: Option<ResumeFrom>,
+        generation: u64,
+        voice_groups: bool,
+    ) -> Result<mpsc::Receiver<Response>, (String, &'static str)> {
         let mut guard = vacant_subscriber_slot(shared)
             .ok()
             .flatten()
@@ -3034,6 +3070,7 @@ mod subscription_tests {
             world_id: 1,
             positions,
             resume,
+            voice_groups,
         };
         register_subscriber(&mut guard, journal, request, generation)
     }
@@ -3131,6 +3168,65 @@ mod subscription_tests {
             ["03", "04", "05", "06"]
         );
         assert!(resumed.iter().all(|f| f.request_id == "synthetic-second"));
+    }
+
+    #[test]
+    fn voice_groups_reach_only_subscribers_that_asked_for_them() {
+        let shared: SharedSubscriber = Arc::new(Mutex::new(None));
+        let journal = Mutex::new(Journal::new("synthetic-epoch".into()));
+        let voice_frame = |revision| {
+            let mut frame = frame("01");
+            frame.voice_groups = Some(mag_gameplay::voice_routing::VoiceGroups {
+                revision,
+                members: Vec::new(),
+            });
+            frame
+        };
+        let legacy = subscribe(&shared, &journal, "synthetic-legacy", true, None, 1).unwrap();
+        legacy.recv().unwrap();
+        publish_frame(&shared, &journal, voice_frame(1));
+        let delivered = legacy.recv().unwrap();
+        assert!(delivered.voice_groups.is_none());
+        let encoded = serde_json::to_value(&delivered).unwrap();
+        assert!(encoded.get("voice_groups").is_none());
+
+        // Journaled frames replayed to a resuming subscriber follow its request too.
+        drop(legacy);
+        publish_frame(&shared, &journal, voice_frame(2));
+        let resume = || {
+            Some(ResumeFrom {
+                epoch: "synthetic-epoch".into(),
+                after: 0,
+            })
+        };
+        let voice = subscribe_with_voice(
+            &shared,
+            &journal,
+            "synthetic-voice",
+            true,
+            resume(),
+            2,
+            true,
+        )
+        .unwrap();
+        voice.recv().unwrap();
+        let replayed: Vec<_> = (0..2).map(|_| voice.recv().unwrap()).collect();
+        assert_eq!(
+            replayed
+                .iter()
+                .map(|f| f.voice_groups.as_ref().unwrap().revision)
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+        publish_frame(&shared, &journal, voice_frame(3));
+        assert_eq!(voice.recv().unwrap().voice_groups.unwrap().revision, 3);
+
+        drop(voice);
+        publish_frame(&shared, &journal, frame("02"));
+        let plain = subscribe(&shared, &journal, "synthetic-plain", true, resume(), 3).unwrap();
+        plain.recv().unwrap();
+        let replayed: Vec<_> = (0..4).map(|_| plain.recv().unwrap()).collect();
+        assert!(replayed.iter().all(|f| f.voice_groups.is_none()));
     }
 
     #[test]

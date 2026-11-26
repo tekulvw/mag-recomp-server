@@ -39,6 +39,10 @@ if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(RealRegistryWo
 }
 Test("registry DME host world and lease isolation", RegistryDmeHostChecks.Run);
 Test("voice diagnostics are off by default, sample bounded and find lab voice blocks", VoiceDiagnosticsChecks.Run);
+Test("voice relay is off by default and tiers the first rollout to squad groups", VoiceRelayChecks.Options);
+Test("voice_groups frames parse strictly into a relay table", VoiceRelayChecks.Codec);
+Test("voice relay decisions by role, tier, side, binding and budget", VoiceRelayChecks.Decisions);
+Test("voice_groups are requested on the world stream only when asked", VoiceRelayChecks.Subscription);
 Test("DME port capacity configuration and leases", DmePortCapacityChecks.Budget);
 Test("DME port capacity bounds placement and keeps parties whole", DmePortCapacityChecks.Placement);
 Test("DME port capacity refuses standalone admission and frees ports on release", DmePortCapacityChecks.Admission);

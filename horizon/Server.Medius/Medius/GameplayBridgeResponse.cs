@@ -93,6 +93,9 @@ namespace Server.Medius {
   public bool SupportsWorldCapacity => Capabilities.Contains(MagWorldCapacity.Capability,StringComparer.Ordinal);
   public bool SupportsPerRecipientReplyBudget => Capabilities.Contains(GameplayReplyLimits.PerRecipientCapability,StringComparer.Ordinal);
   public GameplayWorldStreamPosition WorldStream {get; internal set;}
+  /// <summary>A world frame's relay table (voice_groups_v1), sent only to a subscriber that asked.</summary>
+  public Server.Dme.VoiceGroupsFrame VoiceGroups {get; internal set;}
+  public bool SupportsVoiceGroups => Capabilities.Contains(Server.Dme.VoiceRelayOptions.Capability,StringComparer.Ordinal);
   internal GameplayBridgeResponse(bool ok,string error,IReadOnlyList<GameplayBridgeMessage> messages,GameplayBridgeFailure failure=GameplayBridgeFailure.None,IReadOnlyList<GameplayReward> rewards=null,GameplayMatchTerminal matchTerminal=null,IReadOnlyList<GameplayLoadoutSelection> loadoutSelections=null,IReadOnlyList<string> capabilities=null,IReadOnlyList<MagMatchProfile> matchProfiles=null,GameplaySelectedMatch selectedMatch=null,GameplayWorkerIdentity workerIdentity=null,GameplayPartyReservation partyReservation=null){PartyReservation=partyReservation;MatchProfiles=matchProfiles??Array.Empty<MagMatchProfile>();SelectedMatch=selectedMatch;WorkerIdentity=workerIdentity;LoadoutSelections=loadoutSelections??Array.Empty<GameplayLoadoutSelection>();Capabilities=capabilities??Array.Empty<string>();Ok=ok;Error=error;Messages=messages;Failure=failure;Rewards=rewards??Array.Empty<GameplayReward>();MatchTerminal=matchTerminal;}
   internal static GameplayBridgeResponse Failed(GameplayBridgeFailure failure,long elapsed)=>new GameplayBridgeResponse(false,null,Array.Empty<GameplayBridgeMessage>(),failure){ElapsedMilliseconds=elapsed};
  }
@@ -143,7 +146,8 @@ namespace Server.Medius {
     bool hasWorkerIdentity=root.TryGetProperty("worker_identity",out var workerIdentity);
     bool hasParty=root.TryGetProperty("party_reservation",out var party);
     bool hasWorldStream=root.TryGetProperty("world_stream",out var worldStream);
-    var fields=new List<string>{"v","request_id","ok","error","messages"};if(hasParty)fields.Add("party_reservation");if(hasProfiles)fields.Add("match_profiles");if(hasSelectedMatch)fields.Add("selected_match");if(hasSelections)fields.Add("loadout_selections");if(hasCapabilities)fields.Add("capabilities");if(hasRewards)fields.Add("rewards");if(hasTerminal)fields.Add("match_terminal");if(hasWorkerIdentity)fields.Add("worker_identity");if(hasWorldStream)fields.Add("world_stream");
+    bool hasVoiceGroups=root.TryGetProperty("voice_groups",out var voiceGroups);
+    var fields=new List<string>{"v","request_id","ok","error","messages"};if(hasParty)fields.Add("party_reservation");if(hasProfiles)fields.Add("match_profiles");if(hasSelectedMatch)fields.Add("selected_match");if(hasSelections)fields.Add("loadout_selections");if(hasCapabilities)fields.Add("capabilities");if(hasRewards)fields.Add("rewards");if(hasTerminal)fields.Add("match_terminal");if(hasWorkerIdentity)fields.Add("worker_identity");if(hasWorldStream)fields.Add("world_stream");if(hasVoiceGroups)fields.Add("voice_groups");
     if(!ExactFields(root,fields.ToArray())||!root.GetProperty("v").TryGetInt32(out var version)||version!=2||
      root.GetProperty("request_id").ValueKind!=JsonValueKind.String||root.GetProperty("request_id").GetString()!=requestId)return false;
     GameplayWorkerIdentity parsedIdentity=null;
@@ -268,7 +272,9 @@ namespace Server.Medius {
      if(epoch.Length<16||epoch.Length>64||!epoch.All(c=>char.IsAsciiLetterOrDigit(c)||c=='-'||c=='_'))return false;
      parsedPosition=new GameplayWorldStreamPosition(epoch,sequence);
     }
-    response=new GameplayBridgeResponse(success,error.ValueKind==JsonValueKind.String?error.GetString():null,parsed.AsReadOnly(),rewards:parsedRewards.AsReadOnly(),matchTerminal:parsedTerminal,loadoutSelections:parsedSelections.AsReadOnly(),capabilities:parsedCapabilities.AsReadOnly(),matchProfiles:parsedProfiles,selectedMatch:parsedMatch,workerIdentity:parsedIdentity,partyReservation:parsedParty){WorldStream=parsedPosition};return true;
+    Server.Dme.VoiceGroupsFrame parsedVoiceGroups=null;
+    if(hasVoiceGroups&&(!success||!GameplayVoiceGroupsCodec.TryParse(voiceGroups,out parsedVoiceGroups)))return false;
+    response=new GameplayBridgeResponse(success,error.ValueKind==JsonValueKind.String?error.GetString():null,parsed.AsReadOnly(),rewards:parsedRewards.AsReadOnly(),matchTerminal:parsedTerminal,loadoutSelections:parsedSelections.AsReadOnly(),capabilities:parsedCapabilities.AsReadOnly(),matchProfiles:parsedProfiles,selectedMatch:parsedMatch,workerIdentity:parsedIdentity,partyReservation:parsedParty){WorldStream=parsedPosition,VoiceGroups=parsedVoiceGroups};return true;
    }catch(Exception e)when(e is JsonException||e is InvalidOperationException||e is FormatException||e is ArgumentException||e is KeyNotFoundException){return false;}
   }
  }
