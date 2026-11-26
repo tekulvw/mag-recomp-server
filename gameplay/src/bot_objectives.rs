@@ -580,6 +580,35 @@ fn supported(
         body,
     )
 }
+/// How far above a nearby body's floor a spot beside it first looks for
+/// ground: about one step, so a roof, canopy or floor overhead is not taken
+/// for the floor the body stands on.
+const LOCAL_FLOOR_UP_M: f64 = 1.;
+/// Ground for a spot a short way beside a body (a recovery step, a traffic
+/// pad, a staging spot by a launch), where `raw` is half a metre above that
+/// body's floor. The plain search takes the highest surface within
+/// `ground_search_m` above and below, which under a roof is the roof: a
+/// different, usually unreachable navmesh floor, so every such spot fails to
+/// route and the body never steps aside. Search from one step above the floor
+/// downwards first, and only when that finds nothing fall back to the plain
+/// search.
+fn supported_local(
+    world: Option<&collision::CollisionWorld>,
+    map: &str,
+    raw: replication::CharacterPosition,
+    policy: &ObjectivePolicy,
+    body: bot_physics::Body,
+) -> Result<replication::CharacterPosition, &'static str> {
+    supported_interval(
+        world,
+        map,
+        raw,
+        LOCAL_FLOOR_UP_M.min(policy.ground_search_m),
+        policy.ground_search_m,
+        body,
+    )
+    .or_else(|_| supported(world, map, raw, policy, body))
+}
 /// A role route's goal must project onto the navmesh within this distance.
 const ROLE_GOAL_TOLERANCE_M: f64 = 0.3;
 /// The vertical column searched for a navmesh floor under or over a role spot.
@@ -1505,7 +1534,7 @@ impl<W: Write> Engine<W> {
             self.bot_registry
                 .director
                 .candidate_support(key, policy.cache_limit, || {
-                    supported(self.collision_world.as_ref(), &map, raw, policy, body)
+                    supported_local(self.collision_world.as_ref(), &map, raw, policy, body)
                 })
                 .0
         };
@@ -1538,6 +1567,24 @@ impl<W: Write> Engine<W> {
                     })
                 {
                     return Err("traffic_yield_no_displacement");
+                }
+                // A pad on another navmesh floor needs a drop or is out of
+                // reach, and a pad route may not take a drop: refuse it
+                // before spending a route query.
+                if let Some(mesh) = self.navmesh_world.as_ref()
+                    && let (Ok(from), Ok(to)) = (
+                        mesh.component_id(
+                            self.bot_registry.bots[&id]
+                                .target
+                                .runtime
+                                .unwrap()
+                                .physical_position(),
+                        ),
+                        mesh.component_id(point(goal)),
+                    )
+                    && from != to
+                {
+                    return Err("traffic_yield_other_floor");
                 }
                 // A temporary pad must clear the requester's continuation,
                 // not merely sit beyond its short protected prefix. Use the
@@ -1829,7 +1876,7 @@ impl<W: Write> Engine<W> {
                 let support = match self.bot_registry.director.holding_cache.get(&key) {
                     Some(g) => *g,
                     None => {
-                        let g = supported(
+                        let g = supported_local(
                             self.collision_world.as_ref(),
                             map,
                             raw,
@@ -1940,15 +1987,15 @@ impl<W: Write> Engine<W> {
             let support = if let Some(g) = self.bot_registry.director.staging_cache.get(&key) {
                 *g
             } else {
-                // The same ground search as every other spot: a spawn floor
-                // below the launch is a valid staging area. Other floors are
-                // excluded by the navmesh component check, not by height.
-                let g = supported_interval(
+                // The same ground search as every other spot beside a body:
+                // a spawn floor below the launch is a valid staging area, and
+                // a roof over the launch is not taken for its floor. Other
+                // floors are excluded by the navmesh component check.
+                let g = supported_local(
                     self.collision_world.as_ref(),
                     map,
                     raw,
-                    policy.ground_search_m,
-                    policy.ground_search_m,
+                    policy,
                     self.bot_movement_body(),
                 );
                 if self.bot_registry.director.staging_cache.len() >= policy.cache_limit {
@@ -2177,7 +2224,15 @@ impl<W: Write> Engine<W> {
             if let Some(g) = self.bot_registry.director.holding_cache.get(&key) {
                 *g
             } else {
-                let g = supported(
+                // A staging spot by the launch or a rejoin step stays on its
+                // own floor; an exit or retreat from an aborted drop keeps
+                // the plain search, which may climb back to the launch floor.
+                let search = if physical_exit {
+                    supported
+                } else {
+                    supported_local
+                };
+                let g = search(
                     self.collision_world.as_ref(),
                     &map,
                     raw,
@@ -3287,7 +3342,7 @@ impl<W: Write> Engine<W> {
                                 body,
                             )
                         } else if recovering {
-                            supported(self.collision_world.as_ref(), &map, raw, &policy, body)
+                            supported_local(self.collision_world.as_ref(), &map, raw, &policy, body)
                         } else {
                             supported_role(
                                 self.collision_world.as_ref(),
@@ -3600,6 +3655,9 @@ fn nearest_floor_mesh_point(
 #[cfg(test)]
 #[path = "bot_drop_holding_tests.rs"]
 mod drop_holding_tests;
+#[cfg(test)]
+#[path = "bot_local_floor_tests.rs"]
+mod local_floor_tests;
 #[cfg(test)]
 #[path = "bot_offmesh_stop_tests.rs"]
 mod offmesh_stop_tests;
