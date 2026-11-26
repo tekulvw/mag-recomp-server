@@ -278,6 +278,47 @@ Findings:
   tick. The 320 simulated reply drains per second cost 0.21-0.24 ms per 50 ms in
   total. Tick cost with 32 observers matches 1 observer.
 
+### Authored-capacity baseline on main (2026-11-25)
+
+These runs used main at 12cc216, with Phases 0 and 1 (#265, #263, #264, #273) and the squad-8 projector (#277) merged. The inputs were private sim roots derived from the live Acquisition bundle (the bunker-insertion candidate on 950b7681) and the live Domination bundle (70947eae). Their spawn catalogs carry exactly the projector's `--capacity authored` change: team 64 or 128, squad 8. The populations already had 128 and 256 slots at 8 per squad, and `bot_fill_total` was set to 128 or 256.
+
+Every run simulated 900 s, with statistics after 120 s. Runs went one at a time on an Apple M4 Pro under `nice -n 15`. With one observer, the observer sent 10 events per second.
+
+| World | Bots alive | Tick mean / p99 / max (ms) | Objectives phase (ms) | Bots phase (ms) | Planner backlog mean / max | Peak RSS |
+|---|---|---|---|---|---|---|
+| Acq 64 Panama | 61 | 1.27 / 6.86 / 42.2 | 0.21 | 0.95 | 8 / 57 | 2.2 GB |
+| Acq 128 Panama | 122 | 1.95 / 6.80 / 34.3 | 0.56 | 1.10 | 25 / 70 | 2.2 GB |
+| Acq 128 VOZ | 120 | 1.87 / 5.26 / 16.3 | 0.55 | 0.95 | 1 / 61 | 2.2 GB |
+| Acq 128 Alaska | 119 | 2.16 / 6.24 / 16.8 | 0.57 | 1.19 | 3 / 20 | 2.2 GB |
+| Dom 64 Baku | 59 | 1.12 / 2.30 / 10.1 | 0.47 | 0.46 | 5 / 15 | 2.5 GB |
+| Dom 256 Baku | 252 | 6.23 / 9.13 / 22.7 | 2.93 | 2.70 | 52 / 100 | 2.5 GB |
+
+Findings:
+
+- **The Domination 256 objective phase was an O(n²) scan.** Each tick, the active-ability target list looked up each bot's squad by scanning all 32 squads' members, and each squad's members by scanning every bot. Indexing that lookup, together with the detection-identity lookups (#322), cut the phase from 2.9 to 1.0 ms at 256 and from 0.56 to 0.24 ms at Acquisition 128, and cut the Domination 256 tick mean from 6.2 to 4.8 ms.
+- **Bot budgets dilute at 256.** Planner backlog averages 52 and peaks at 100. Drop holds reach about 124k per run, against 1-28k in Acquisition 128. Phase 3 is still needed.
+- **Peak RSS is 2.2-2.5 GB.** The live gameplay worker's limit is 3 GiB.
+
+### Bridge throughput at 32 observers
+
+Two opt-in flags change how replies are framed, as Phase 2 planned:
+
+- `--coalesce-character-replication` (#317) joins one tick's single-Character deltas into one update per recipient at drain time.
+- `--per-recipient-reply-budget` (#318) gives each recipient 16 messages and 6,144 bytes of shared frames per reply, behind `reply_budget_per_recipient_v1`.
+
+These runs used 32 observers. "World frames only" means no client events, so world frames alone drain the queues; this is the worst case.
+
+| World | Flags | Events | Evicted | Deepest queue | msg/s per recipient | KB/s per recipient |
+|---|---|---|---|---|---|---|
+| Acq 128 | neither | 10 Hz | none | 0 | 270 | 8.3 |
+| Acq 128 | coalescing | 10 Hz | none | 0 | 25 | 3.5 |
+| Dom 256 | neither | 10 Hz | none | 3 | 498 | 15.1 |
+| Dom 256 | coalescing | 10 Hz | none | 0 | 30 | 6.4 |
+| Acq 128 | neither, or either flag alone | none | all 32 at 2-97 s | bound | - | - |
+| Acq 128 | both | none | none | 18 | 24 | 3.3 |
+| Dom 256 | neither, or either flag alone | none | all 32 at about 2 s | bound | - | - |
+| Dom 256 | both | none | none | 53 | 31 | 6.5 |
+
 ## Network
 
 Per human, worst case at Domination 256 (255 other characters):
@@ -401,6 +442,7 @@ Each phase is one or more focused PRs from current main. Every PR keeps existing
 ### Phase 2: replication scaling (3 PRs; required before any 128 world takes more than a few humans)
 
 5. `perf(gameplay): coalesce bot character updates into multi-object replication packets`
+   - **Done as #317**, with a change. Deltas are joined per recipient when the queue drains, not when they are published, behind `--coalesce-character-replication`. This keeps every recipient's FIFO order and owner corrections, and it also joins other single-Character deltas of the same tick.
    - Within one tick, append each recipient's due bot deltas into one 0x0007
      update of at most 1397 bytes, and split when full.
    - Each object keeps its own per-field presence bits. There is one sequence
@@ -413,6 +455,7 @@ Each phase is one or more focused PRs from current main. Every PR keeps existing
      about half the bytes.
    - Synthetic codec round-trip tests, plus an A/B with Phase 0 tooling.
 6. `perf(medius): carry shared replication frames once with per-recipient sequences`
+   - **Replaced by #318:** a per-recipient reply budget behind `reply_budget_per_recipient_v1`. Joined frames differ by recipient, so sending each frame once no longer applies. With coalescing, the JSON volume is small (about 1 KB per recipient per world frame), so a larger per-recipient budget is enough.
    - A new bridge message shape for shared frames: `{payload, recipients:
      [{reservation_id, player_id, sequence}]}`.
    - Horizon patches the 32-bit sequence. It sits byte-aligned at bytes 2-5 of
@@ -468,7 +511,7 @@ Order and dependencies:
    ├─> 5 ──> 6 ──> 7
    └─> 8 ──> 9
 10 (independent) ──> private bundles
-Acquisition 128 on test: needs 2, 3, 5, 6, 10, plus private bundle
+Acquisition 128 on test: needs 2, 3, 5, 6, 10, plus private bundle (built 2026-11-25: fbe0ec3e, Domination 256 fe8eb054)
 Domination 256 on test: needs all of the above, plus 8, and the Character-pool checks below
 ```
 
