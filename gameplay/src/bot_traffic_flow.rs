@@ -258,6 +258,7 @@ pub(super) fn synthetic_link(id: u32, launch: [f64; 3], landing: [f64; 3]) -> na
         trajectory,
         trajectory_sha256: String::new(),
         body_slope_degrees: None,
+        body_shape: None,
     }
 }
 

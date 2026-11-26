@@ -946,6 +946,7 @@ fn bot_resupply_drop_route_requires_one_contiguous_matching_certificate_pair() {
         trajectory: Vec::new(),
         trajectory_sha256: String::new(),
         body_slope_degrees: None,
+        body_shape: None,
     };
     let accepts = |route: &navmesh::Route, id| {
         development_bot_movement::matches_supply_route_passage(

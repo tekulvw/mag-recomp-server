@@ -952,7 +952,9 @@ impl<W: Write> Engine<W> {
     ) -> Result<crate::actor_collision::ActorGrid, &'static str> {
         use crate::actor_collision::{ActorGrid, Bounds};
         let mut grid = ActorGrid::default();
-        let body = bot_physics::Body::default();
+        // Bodies take the runtime body's shape (a box unless a body profile
+        // selects a capsule); only its dimensions matter here.
+        let body = bot_physics::Body::default().with_shape(self.bot_movement_body().shape);
         for a in self
             .active
             .iter()
@@ -960,10 +962,7 @@ impl<W: Write> Engine<W> {
             .filter(|a| human_in_actor_grid(a, now))
         {
             if let Some(sample) = a.tracking.sample {
-                grid.insert(
-                    a.reservation.player,
-                    Bounds::body(point(sample.position), body),
-                )?;
+                grid.insert_body(a.reservation.player, point(sample.position), body)?;
             }
         }
         for bot in self
@@ -985,13 +984,16 @@ impl<W: Write> Engine<W> {
                         .and_then(|t| t.runtime)
                 })
                 .map_or_else(|| point(bot.position), BotRuntime::physical_position);
-            let mut bounds = Bounds::body(physical, body);
             if let Some((reserved, until)) = self.bot_registry.reservations.get(&bot.object_index)
                 && *until > now
             {
-                bounds = bounds.union(*reserved);
+                grid.insert_reserved(
+                    bot.object_index,
+                    Bounds::body(physical, body).union(*reserved),
+                )?;
+            } else {
+                grid.insert_reserved_body(bot.object_index, physical, body)?;
             }
-            grid.insert_reserved(bot.object_index, bounds)?;
         }
         Ok(grid)
     }

@@ -36,6 +36,7 @@ impl Profile {
             max_slope_degrees: self.max_slope_degrees,
             ground_snap: self.ground_snap,
             skin: self.skin,
+            shape: Default::default(),
         };
         body.validate().map_err(|e| e.code().to_owned())?;
         if !self.bake_radius.is_finite()

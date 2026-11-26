@@ -1,6 +1,6 @@
 mod navmesh_spawn_exit_cli;
 use mag_gameplay::navmesh::{
-    self, Artifact, BakeInput, Layout, MovementProfile, NavMesh, ReferenceManifest,
+    self, Artifact, BakeInput, BodyShape, Layout, MovementProfile, NavMesh, ReferenceManifest,
     ReferenceNavMesh,
 };
 use serde_json::json;
@@ -105,6 +105,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .get("--movement-profile")
             .map(MovementProfile::load)
             .transpose()
+    };
+    // The bot body shape a mesh is baked for and its drops are traced with;
+    // the default box without `--body-profile`.
+    let body_shape = || {
+        flags
+            .get("--body-profile")
+            .map(BodyShape::load_profile)
+            .transpose()
+            .map(Option::unwrap_or_default)
     };
     match command.as_str() {
         "bake-regional-walk" => {
@@ -224,10 +233,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         "bake" => {
             if flags.keys().any(|k| {
-                !["--input", "--output", "--movement-profile", "--layout"].contains(&k.as_str())
+                ![
+                    "--input",
+                    "--output",
+                    "--movement-profile",
+                    "--layout",
+                    "--body-profile",
+                ]
+                .contains(&k.as_str())
             }) {
                 return Err("unknown bake flag".into());
             }
+            let shape = body_shape()?;
             let layout = match flags.get("--layout").map(String::as_str) {
                 None | Some("auto") => Layout::Auto,
                 Some("wide") => Layout::Wide,
@@ -253,6 +270,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut artifact =
                 navmesh::bake_with_layout(input, movement_profile()?.as_ref(), layout)?;
             artifact.character_movement_layers = layers;
+            artifact.body_shape = shape.stamp();
             write(Some(&get("--output")?.to_string()), &artifact)?;
             eprintln!(
                 "{}",
@@ -270,6 +288,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "--fall-damage-rules",
                     "--health",
                     "--movement-profile",
+                    "--body-profile",
                 ]
                 .contains(&k.as_str())
             }) {
@@ -284,6 +303,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 get("--fall-damage-rules")?,
                 get("--health")?.parse()?,
                 movement_profile()?.as_ref(),
+                body_shape()?,
             )?;
         }
         "replay-drop" => {
@@ -295,6 +315,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "--fixture",
                     "--output",
                     "--movement-profile",
+                    "--body-profile",
                 ]
                 .contains(&k.as_str())
             }) {
@@ -307,6 +328,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 get("--fixture")?,
                 get("--output")?,
                 movement_profile()?.as_ref(),
+                body_shape()?,
             )?;
         }
         "add-drop" => {
@@ -321,11 +343,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "--id",
                     "--output",
                     "--movement-profile",
+                    "--body-profile",
                 ]
                 .contains(&k.as_str())
             }) {
                 return Err("unknown add-drop flag".into());
             }
+            let shape = body_shape()?;
             let mut artifact: Artifact =
                 serde_json::from_slice(&read(get("--mesh")?, navmesh::MAX_ARTIFACT_JSON_BYTES)?)?;
             let world_path = get("--collision-world")?;
@@ -333,8 +357,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let world = navmesh_spawn_exit_cli::load_world(world_path, coverage)?;
             let rules = movement_profile()?;
             let map = world.metadata().map_name.clone();
-            let mesh =
-                navmesh_spawn_exit_cli::load_mesh(artifact.clone(), &hash, &map, rules.as_ref())?;
+            let mesh = navmesh_spawn_exit_cli::load_mesh(
+                artifact.clone(),
+                &hash,
+                &map,
+                rules.as_ref(),
+                shape,
+            )?;
             let world =
                 world.with_character_movement_layers(mesh.artifact().character_movement_layers);
             mesh.validate_coverage(&world)?;
@@ -348,9 +377,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 mesh.body(),
             )?;
             artifact.drop_links.push(link);
-            let _ =
-                navmesh_spawn_exit_cli::load_mesh(artifact.clone(), &hash, &map, rules.as_ref())?;
+            let _ = navmesh_spawn_exit_cli::load_mesh(
+                artifact.clone(),
+                &hash,
+                &map,
+                rules.as_ref(),
+                shape,
+            )?;
             write(Some(&get("--output")?.to_string()), &artifact)?;
+        }
+        "rebind-body" => {
+            // Re-target a mesh at another body shape. Its drop certificates
+            // were traced with the old body and are removed: certify them
+            // again for the new one with add-drop and search-spawn-exits.
+            if flags.keys().any(|k| {
+                !["--mesh", "--output", "--movement-profile", "--body-profile"]
+                    .contains(&k.as_str())
+            }) {
+                return Err("unknown rebind-body flag".into());
+            }
+            let mut artifact: Artifact =
+                serde_json::from_slice(&read(get("--mesh")?, navmesh::MAX_ARTIFACT_JSON_BYTES)?)?;
+            let rules = movement_profile()?;
+            let shape = body_shape()?;
+            let (world, map) = (artifact.world_sha256.clone(), artifact.map_name.clone());
+            let current = BodyShape::from_stamp(artifact.body_shape);
+            if current == shape {
+                return Err("mesh already records this body shape".into());
+            }
+            // The input must be a mesh that loads for the body it records.
+            NavMesh::load_with_body(artifact.clone(), &world, &map, rules.as_ref(), current)?;
+            let removed = artifact.drop_links.len();
+            artifact.drop_links.clear();
+            artifact.body_shape = shape.stamp();
+            NavMesh::load_with_body(artifact.clone(), &world, &map, rules.as_ref(), shape)?;
+            write(Some(&get("--output")?.to_string()), &artifact)?;
+            eprintln!(
+                "{}",
+                json!({"op":"rebind_body_complete","body_shape":shape,"removed_drop_links":removed})
+            );
         }
         "goals" => {
             if flags.keys().any(|key| {
@@ -362,6 +427,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "--goal-radius",
                     "--output",
                     "--movement-profile",
+                    "--body-profile",
                 ]
                 .contains(&key.as_str())
             }) {
@@ -370,15 +436,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let artifact: Artifact =
                 serde_json::from_slice(&read(get("--mesh")?, navmesh::MAX_ARTIFACT_JSON_BYTES)?)?;
             let world = navmesh_spawn_exit_cli::load_world(get("--collision-world")?, coverage)?;
-            let mesh = match movement_profile()?.as_ref() {
-                Some(rules) => NavMesh::load_with_movement_profile(
-                    artifact,
-                    world.source_sha256(),
-                    &world.metadata().map_name,
-                    rules,
-                ),
-                None => NavMesh::load(artifact, world.source_sha256(), &world.metadata().map_name),
-            }?;
+            let mesh = NavMesh::load_with_body(
+                artifact,
+                world.source_sha256(),
+                &world.metadata().map_name,
+                movement_profile()?.as_ref(),
+                body_shape()?,
+            )?;
             mesh.validate_coverage(&world)?;
             let mut goals =
                 mesh.goal_candidates(point(get("--goal")?)?, get("--goal-radius")?.parse()?)?;
@@ -413,6 +477,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "--fall-damage-rules",
                     "--health",
                     "--movement-profile",
+                    "--body-profile",
                 ]
                 .contains(&k.as_str())
             }) {
@@ -423,10 +488,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 serde_json::from_slice(&read(get("--mesh")?, navmesh::MAX_ARTIFACT_JSON_BYTES)?)?;
             let world = artifact.world_sha256.clone();
             let map = artifact.map_name.clone();
-            let mesh = match movement_profile()?.as_ref() {
-                Some(rules) => NavMesh::load_with_movement_profile(artifact, &world, &map, rules),
-                None => NavMesh::load(artifact, &world, &map),
-            }?;
+            let mesh = NavMesh::load_with_body(
+                artifact,
+                &world,
+                &map,
+                movement_profile()?.as_ref(),
+                body_shape()?,
+            )?;
             let load_us = load_began.elapsed().as_micros();
             if command == "component" {
                 let start = point(get("--start")?)?;

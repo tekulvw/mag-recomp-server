@@ -1,6 +1,6 @@
 //! Bounded private-geometry discovery; all map coordinates supplied externally.
 use mag_gameplay::{
-    bot_physics::{Body, WorldTerrain},
+    bot_physics::{Body, BodyShape, WorldTerrain},
     collision::{CollisionLimits, CollisionWorld},
     navmesh::{self, Artifact, MovementProfile, NavMesh, Status},
 };
@@ -8,18 +8,17 @@ use serde::Deserialize;
 use serde_json::json;
 use std::{collections::BTreeMap, fs, io::Write};
 
-/// Load a mesh with the movement profile it was baked with, if any. The
-/// mesh's body (`NavMesh::body`) is then the one every trace here uses.
+/// Load a mesh with the movement profile it was baked with, if any, for the
+/// selected body shape. The mesh's body (`NavMesh::body`) is then the one
+/// every trace here uses, and every certificate records its shape.
 pub fn load_mesh(
     artifact: Artifact,
     world_sha256: &str,
     map_name: &str,
     rules: Option<&MovementProfile>,
+    shape: BodyShape,
 ) -> Result<NavMesh, navmesh::Error> {
-    match rules {
-        Some(rules) => NavMesh::load_with_movement_profile(artifact, world_sha256, map_name, rules),
-        None => NavMesh::load(artifact, world_sha256, map_name),
-    }
+    NavMesh::load_with_body(artifact, world_sha256, map_name, rules, shape)
 }
 
 /// Load a collision world and, when given, its hash-bound coverage sidecar.
@@ -115,27 +114,26 @@ fn supported(t: &WorldTerrain<'_>, probe: Point, b: Body) -> Result<Point, Strin
 fn xz(a: Point, b: Point) -> f64 {
     (a[0] - b[0]).hypot(a[2] - b[2])
 }
-fn protected_bounds(l: &navmesh::DropLink) -> (Point, Point) {
+fn protected_bounds(l: &navmesh::DropLink, body: Body) -> (Point, Point) {
+    let (r, h) = (body.radius, body.height);
     let mut lo = [f64::INFINITY; 3];
     let mut hi = [f64::NEG_INFINITY; 3];
     for m in &l.trajectory {
         for k in 0..3 {
-            lo[k] = lo[k].min(m.position[k] - [0.35, 0.0, 0.35][k]);
-            hi[k] = hi[k].max(m.position[k] + [0.35, 1.8, 0.35][k]);
+            lo[k] = lo[k].min(m.position[k] - [r, 0.0, r][k]);
+            hi[k] = hi[k].max(m.position[k] + [r, h, r][k]);
         }
     }
     for k in 0..3 {
         lo[k] = lo[k].min(l.launch[k] - [1.5, 0.0, 1.5][k]);
-        hi[k] = hi[k].max(l.launch[k] + [1.5, 1.8, 1.5][k]);
+        hi[k] = hi[k].max(l.launch[k] + [1.5, h, 1.5][k]);
     }
     (lo, hi)
 }
-fn swept_overlaps(a: Point, b: Point, l: &navmesh::DropLink) -> bool {
-    let (lo, hi) = protected_bounds(l);
-    (0..3).all(|k| {
-        a[k].min(b[k]) - [0.35, 0.0, 0.35][k] < hi[k]
-            && a[k].max(b[k]) + [0.35, 1.8, 0.35][k] > lo[k]
-    })
+fn swept_overlaps(a: Point, b: Point, l: &navmesh::DropLink, body: Body) -> bool {
+    let (r, h) = (body.radius, body.height);
+    let (lo, hi) = protected_bounds(l, body);
+    (0..3).all(|k| a[k].min(b[k]) - [r, 0.0, r][k] < hi[k] && a[k].max(b[k]) + [r, h, r][k] > lo[k])
 }
 fn replay(
     t: &WorldTerrain,
@@ -176,7 +174,7 @@ fn replay(
         m = t
             .advance(m, [dx / d * speed, 0., dz / d * speed], 0.05, body)
             .map_err(|e| e.code().to_owned())?;
-        if avoid.is_some_and(|l| swept_overlaps(old, m.position, l)) {
+        if avoid.is_some_and(|l| swept_overlaps(old, m.position, l, body)) {
             return Err("incoming_crosses_protected_tube".into());
         }
         if m.blocked {
@@ -311,6 +309,7 @@ pub fn run(
     fall_rules: &str,
     health: u16,
     movement_profile: Option<&MovementProfile>,
+    shape: BodyShape,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let rules = mag_gameplay::fall_damage::Rules::load(fall_rules)?;
     if health == 0 {
@@ -372,12 +371,21 @@ pub fn run(
     let hash = navmesh::sha256(&fs::read(world_path)?);
     let mut art: Artifact = serde_json::from_slice(&fs::read(mesh_path)?)?;
     let old = art.drop_links.clone();
+    // The search extends these links and the result must load for the same
+    // body: recertify seeds traced with another body shape first.
+    if old
+        .iter()
+        .any(|l| BodyShape::from_stamp(l.body_shape) != shape)
+    {
+        return Err(navmesh::Error("navmesh_drop_body_shape_mismatch").into());
+    }
     art.drop_links.clear();
     let mesh = load_mesh(
         art.clone(),
         &hash,
         &world.metadata().map_name,
         movement_profile,
+        shape,
     )?;
     let world = world.with_character_movement_layers(mesh.artifact().character_movement_layers);
     mesh.validate_coverage(&world)?;
@@ -513,8 +521,8 @@ pub fn run(
                                         other, &link, 1.5,
                                     );
                                 }
-                                let (a, b) = protected_bounds(other);
-                                let (c, d) = protected_bounds(&link);
+                                let (a, b) = protected_bounds(other, body);
+                                let (c, d) = protected_bounds(&link, body);
                                 (0..3).all(|k| a[k] < d[k] && b[k] > c[k])
                             }) {
                                 *failures
@@ -635,6 +643,7 @@ pub fn replay_case(
     fixture_path: &str,
     output: &str,
     movement_profile: Option<&MovementProfile>,
+    shape: BodyShape,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let f: ReplayCase = serde_json::from_slice(&fs::read(fixture_path)?)?;
     if f.slices.is_empty()
@@ -648,7 +657,13 @@ pub fn replay_case(
     let world = load_world(world_path, coverage_path)?;
     let hash = navmesh::sha256(&fs::read(world_path)?);
     let art: Artifact = serde_json::from_slice(&fs::read(mesh_path)?)?;
-    let mesh = load_mesh(art, &hash, &world.metadata().map_name, movement_profile)?;
+    let mesh = load_mesh(
+        art,
+        &hash,
+        &world.metadata().map_name,
+        movement_profile,
+        shape,
+    )?;
     let world = world.with_character_movement_layers(mesh.artifact().character_movement_layers);
     let l = mesh
         .artifact()
