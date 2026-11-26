@@ -151,6 +151,15 @@ internal static class VoiceDiagnosticsChecks
         Check(late.Any(l => l.StartsWith("voice_diag counts") && l.Contains("lead=other recent=101 ")), "late signature counted as lead=other");
         Check(lines.Any(l => l.Contains("client=0 voice_group=83 recent=101 ")) && !lines.Any(l => l.Contains("unrecorded_signatures")),
               "late voice stream and nothing unrecorded: " + string.Join(" | ", lines.Where(l => l.StartsWith("voice_diag counts"))));
+        // Idle signatures leave the table after a quiet interval, so new kinds get their own signature again.
+        full.Observe(0, "udp", 53, null, VoicePacket(83, 102, 37), 2 * VoiceDiagnostics.CountIntervalMs + 2);
+        lines.Clear();
+        full.Observe(0, "udp", 53, null, VoicePacket(84, 1, 37), 2 * VoiceDiagnostics.CountIntervalMs + 3);
+        Check(lines.Any(l => l.StartsWith("voice_diag sample") && l.Contains("lead=0x8154")), "a new kind after eviction is sampled");
+        full.Observe(0, "udp", 53, null, VoicePacket(84, 2, 37), 3 * VoiceDiagnostics.CountIntervalMs + 3);
+        Check(lines.Any(l => l.StartsWith("voice_diag counts") && l.Contains("lead=0x8154 recent=2 ")) &&
+              !lines.Any(l => l.Contains("rt=45")), "evicted idle signatures, own signature for the new kind: " +
+              string.Join(" | ", lines.Where(l => l.StartsWith("voice_diag counts"))));
         var mismatch = VoicePacket(36, 1, 37); mismatch[6] = 37;
         Check(!VoicePacketHeader.TryParse(mismatch, out _), "the two group bytes must agree");
         Check(!VoicePacketHeader.TryParse(VoicePacket(36, 1, 37)[..13], out _), "a short header is not voice");

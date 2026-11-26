@@ -15,7 +15,9 @@ namespace Server.Dme
     /// signature (client, transport message, plugin, first two body bytes), logs the first samples of
     /// each signature with their leading bytes and where a lab voice block starts, then one sample in
     /// every <see cref="SampleEvery"/> for as long as the signature lasts, and logs the counts every
-    /// ten seconds. Messages that parse as voice packets (<see cref="VoicePacketHeader"/>) also feed
+    /// ten seconds. A signature idle for a whole interval is dropped from the table, and once the
+    /// table is full a new signature is kept as "lead=other" under its message type, so a long-lived
+    /// process never stops seeing new traffic. Messages that parse as voice packets (<see cref="VoicePacketHeader"/>) also feed
     /// a stream per client and group, whose counts line carries the data bytes, the data length
     /// range, packets holding more than one lab block, and sequence gaps and steps back. It only
     /// observes: traffic is never changed, delayed or dropped.
@@ -200,6 +202,14 @@ namespace Server.Dme
                                      $"length_mismatch={s.Value.RecentMismatch} length_mismatch_total={s.Value.TotalMismatch} " +
                                      $"mismatch_body_max={s.Value.RecentMismatchBodyMax}"));
                     if (_streamOverflow > 0) counts.Add($"voice_diag counts ms={nowMs} unrecorded_voice_streams={_streamOverflow}");
+                    // A signature with no message for a whole interval leaves the table (its total with
+                    // it), so one-off messages never fill it in a long lab session. A later message of
+                    // that kind starts a fresh signature with fresh samples.
+                    foreach (var idle in _signatures.Where(s => s.Value.SinceLast == 0).Select(s => s.Key).ToList())
+                    {
+                        _signatures.Remove(idle);
+                        if (idle.lead == OtherLead) _otherSignatures--;
+                    }
                     foreach (var s in _signatures.Values) s.SinceLast = 0;
                     foreach (var s in _streams.Values) s.Reset();
                 }

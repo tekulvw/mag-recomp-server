@@ -188,7 +188,9 @@ with the packets, data bytes, smallest and largest data length, packets holding 
 block, sequence gaps (packets the DME never saw), sequence steps back (repeats or a restarted
 client) and messages with the voice kind whose length does not match one packet. A message kind that
 first appears after 512 kinds are in use (messages with random leading bytes fill the table in a
-long-lived process) is still counted and sampled, as "lead=other" under its message type; in gameplay, each `0x0259` with its body bytes, the player and their squad, platoon and
+long-lived process) is still counted and sampled, as "lead=other" under its message type, and a kind
+with no message for a whole ten-second interval leaves the table, so a long lab session never goes
+blind; in gameplay, each `0x0259` with its body bytes, the player and their squad, platoon and
 role at that moment. The receipts are runtime captures: they stay in the private evidence stores, never
 in Git, and the switch is never set on live. With pattern payloads from the client's lab mode the
 receipts contain no speech.
