@@ -4,6 +4,8 @@ use serde_json::json;
 
 #[path = "domination_bot_capture_tests.rs"]
 mod bot_capture;
+#[path = "domination_bot_demolition_tests.rs"]
+mod bot_demolition;
 #[path = "domination_bot_repair_tests.rs"]
 mod bot_repair;
 #[path = "domination_structural_repair_tests.rs"]
