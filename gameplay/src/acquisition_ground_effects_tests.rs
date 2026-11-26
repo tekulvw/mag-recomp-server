@@ -161,6 +161,13 @@ fn acquisition_ground_effects_critical_death_kills_occupant_and_recapture_restor
     let occupant = &engine.peers["synthetic-reservation-0000"];
     assert!(!occupant.life.is_alive());
     assert!(occupant.ground_seat.is_none());
+    // The vehicle's death publishes the occupant leaving its seat.
+    let terminal = crate::seated_death::tests::terminal_for(
+        occupant.pending_shared.iter().map(Vec::as_slice),
+        occupant.reservation.player,
+        engine.wire_profile,
+    );
+    crate::seated_death::tests::assert_seated_exit(&terminal);
     assert_eq!(occupant.last_damage.last_attacker, 0x0380_0001);
     let world = engine.objective_world.as_ref().unwrap();
     assert_eq!(

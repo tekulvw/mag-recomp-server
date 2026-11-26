@@ -25,37 +25,17 @@ fn notices(actor: &Active) -> Vec<String> {
         .collect()
 }
 
-fn terminal_packet(frames: &[OutboundMessage], profile: wire_profile::WireProfile) {
-    let wire = frames
-        .iter()
-        .map(|f| protocol::decode_hex(&f.payload_hex))
-        .find(|wire| {
-            ObjectUpdate::decode_with_profile(wire, profile)
-                .is_ok_and(|u| u.header.object_type_mask == 1 << 3)
-        })
-        .expect("terminal Character update");
-    let mut bits = BitReader::with_profile(&wire, profile);
-    bits.position = profile.header_bits();
-    assert_eq!(bits.read(1), Ok(1));
-    assert_eq!(bits.read(16), Ok(0));
-    for field in 0..22 {
-        assert_eq!(
-            bits.read(1),
-            Ok(u32::from(field == 4 || field == 8)),
-            "field {field}"
-        );
-        if field == 4 {
-            assert_eq!(bits.read(8), Ok(7));
-            assert_eq!(bits.read(24), Ok(0));
-        } else if field == 8 {
-            assert_eq!(bits.read(8), Ok(0x10));
-            assert_eq!(bits.read(16), Ok(0));
-            assert_eq!(bits.read(32), Ok(0x0380_0000));
-            assert_eq!(bits.read(32), Ok(u32::MAX));
-            assert_eq!(bits.read(32), Ok(0));
-        }
-    }
-    assert_eq!(bits.read(1), Ok(0));
+/// The terminal update leaves the Ground seat: state 7, exit pose, HP0, and
+/// for a driver the driving authority returned to the server in the same packet.
+fn terminal_packet(
+    frames: &[OutboundMessage],
+    profile: wire_profile::WireProfile,
+) -> crate::seated_death::tests::Terminal {
+    use crate::seated_death::tests::{assert_seated_exit, frame_wires, terminal_for};
+    let terminal = terminal_for(frame_wires(frames).iter().map(Vec::as_slice), 0, profile);
+    assert_seated_exit(&terminal);
+    assert_eq!(terminal.bunker, None);
+    terminal
 }
 
 #[test]
@@ -75,7 +55,9 @@ fn ground_passenger_redeploy_clears_seat_publishes_terminal_state_and_allows_reu
     assert_eq!(actor.last_damage.health_quarter_points, 0);
     // self0/self0, Unknown0, signed-1, associated vehicle flag0x40.
     assert_eq!(notices(actor), ["01ff0000000000ffffffff40"]);
-    terminal_packet(&frames, engine.wire_profile);
+    let terminal = terminal_packet(&frames, engine.wire_profile);
+    // A passenger hands no driving authority back.
+    assert_eq!(terminal.ground_owner, None);
     assert_eq!(
         engine.current_ground_vehicle(0).unwrap().position,
         vehicle_before.position
@@ -87,6 +69,10 @@ fn ground_passenger_redeploy_clears_seat_publishes_terminal_state_and_allows_reu
             .health_quarter_points,
         vehicle_before.health_quarter_points
     );
+    // The dead passenger's dismount retry is answered with the exit, not refused.
+    let replay = ground_seat_event(&mut engine, false, 0x0100_0000, 9, 0, 202);
+    terminal_packet(&replay, engine.wire_profile);
+    assert!(!String::from_utf8_lossy(&engine.writer).contains("ground_passenger_seat_not_owned"));
     redeploy(&mut engine, 0, 201).unwrap();
     assert_eq!(notices(engine.active.as_ref().unwrap()).len(), 1);
     assert!(engine.pending_reward_batch().is_empty());
@@ -100,7 +86,12 @@ fn ground_driver_redeploy_revokes_ownership_and_new_driver_can_mount() {
     ready_on_foot(&mut engine, 0, 10);
     ground_seat_event(&mut engine, true, 0x0100_0000, 0, 0, 20);
     assert_eq!(engine.ground_driver_owner(0), Some(0));
-    redeploy(&mut engine, 0, 30).unwrap();
+    let frames = redeploy(&mut engine, 0, 30).unwrap();
+    let terminal = terminal_packet(&frames, engine.wire_profile);
+    assert_eq!(
+        terminal.ground_owner,
+        Some((0, ground_vehicles::SERVER_OWNER))
+    );
     assert!(matches!(
         engine.active.as_ref().unwrap().life,
         CharacterLife::AwaitingRespawn { .. }
@@ -134,7 +125,11 @@ fn ground_gunner_redeploy_revokes_grant_and_frees_the_seat() {
         engine.ground_gunner_kind(engine.active.as_ref().unwrap()),
         Some(crate::ground_turrets::PolicyKind::Apc)
     );
-    redeploy(&mut engine, 0, 200).unwrap();
+    let frames = redeploy(&mut engine, 0, 200).unwrap();
+    assert_eq!(
+        terminal_packet(&frames, engine.wire_profile).ground_owner,
+        None
+    );
     assert!(matches!(
         engine.active.as_ref().unwrap().life,
         CharacterLife::AwaitingRespawn { .. }

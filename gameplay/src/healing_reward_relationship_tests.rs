@@ -332,6 +332,7 @@ fn human_medkit_native_request_heals_living_registry_bot_with_ai_healing_off() {
     assert_eq!(queue.len(), before_frames + 2);
     assert_eq!(queue[before_frames], creation);
     let expected = replication::CharacterDamageUpdate {
+        seated_exit: None,
         sequence: 2,
         timestamp_ms: 1100,
         object_index: bot,

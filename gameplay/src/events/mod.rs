@@ -969,11 +969,8 @@ impl<W: Write> Engine<W> {
                 peer.life = life;
                 if !life.is_alive() {
                     peer.flash_yaw = None;
-                    peer.ground_seat = None;
-                    peer.helo_seat = None;
+                    peer.release_seat_on_death();
                     peer.helo_creation_sent = false;
-                    peer.mounted_seat = None;
-                    peer.mounted_bunker = None;
                 }
             }
         }
@@ -1161,11 +1158,10 @@ impl<W: Write> Engine<W> {
         if let Some(life) = plan.combat.new_life {
             active.life = life;
             if !life.is_alive() {
-                active.ground_seat = None;
-                active.helo_seat = None;
+                active.release_seat_on_death();
                 active.helo_creation_sent = false;
-                active.mounted_seat = None;
-                active.mounted_bunker = None;
+            } else {
+                active.terminal_seat = None;
             }
             if !life.is_alive() || plan.replication.spawn_delta.is_some() {
                 active.revive_state_pending = false;

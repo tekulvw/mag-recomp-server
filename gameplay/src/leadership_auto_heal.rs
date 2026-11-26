@@ -140,6 +140,7 @@ impl<W: Write> Engine<W> {
                             (((old_hp + amount).min(max_hp) * 4.).trunc() as u16) & 0xfff;
                         damage.last_location_and_type = 0x60 | (old.last_location_and_type & 0xf);
                         let packet = replication::CharacterDamageUpdate {
+                            seated_exit: None,
                             sequence: 2,
                             timestamp_ms: now.as_millis() as u32,
                             object_index: actor.reservation.player,

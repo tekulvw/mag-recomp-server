@@ -1,7 +1,7 @@
 //! Owned redeploy through the native KillSelf event with synthetic Helo occupants.
 
 use crate::domination_helo::{Carrier, PassengerSeat};
-use crate::replication::{BitReader, CharacterPosition, ObjectUpdate, VehicleState};
+use crate::replication::{CharacterPosition, VehicleState};
 use crate::spawn_progression::dispatch;
 use crate::*;
 
@@ -101,25 +101,16 @@ fn helo_redeploy_immediately_releases_the_owned_seat_and_publishes_state_seven()
     let notice = protocol::decode_hex("01ff0000000000ffffffff40");
     assert_eq!(notices(actor), [notice.as_slice()]);
 
-    let profile = engine.wire_profile;
-    let wire = frames
-        .iter()
-        .map(|frame| protocol::decode_hex(&frame.payload_hex))
-        .find(|wire| {
-            ObjectUpdate::decode_with_profile(wire, profile)
-                .is_ok_and(|update| update.header.object_type_mask == 1 << 3)
-        })
-        .expect("terminal Character update");
-    let mut bits = BitReader::with_profile(&wire, profile);
-    bits.position = profile.header_bits();
-    assert_eq!(bits.read(1), Ok(1));
-    assert_eq!(bits.read(16), Ok(0));
-    for _ in 0..4 {
-        assert_eq!(bits.read(1), Ok(0));
-    }
-    assert_eq!(bits.read(1), Ok(1));
-    assert_eq!(bits.read(8), Ok(7));
-    assert_eq!(bits.read(24), Ok(0));
+    // With no current carrier pose the body leaves at its last tracked pose.
+    let terminal = crate::seated_death::tests::terminal_for(
+        crate::seated_death::tests::frame_wires(&frames)
+            .iter()
+            .map(Vec::as_slice),
+        0,
+        engine.wire_profile,
+    );
+    crate::seated_death::tests::assert_seated_exit(&terminal);
+    assert_eq!((terminal.bunker, terminal.ground_owner), (None, None));
 
     assert_eq!(engine.peers[PEER].helo_seat, Some(peer_seat));
     assert!(engine.peers[PEER].life.is_alive());
@@ -127,6 +118,53 @@ fn helo_redeploy_immediately_releases_the_owned_seat_and_publishes_state_seven()
     assert!(helo.motion.passengers().eq([(peer_seat.seat, 1)]));
     assert_eq!(helo.damage.wire.health_quarter_points, 1);
     assert_eq!(board(helo, 2), seat);
+}
+
+#[test]
+fn helo_redeploy_leaves_the_carrier_at_its_current_pose() {
+    let (mut engine, _, _) = fixture();
+    let pose = CharacterPosition {
+        x: 40.,
+        y: 12.,
+        z: 30.,
+    };
+    let helo = carrier(&mut engine, 0);
+    helo.current_pose = Some(crate::domination_helo::FlightPose {
+        position: pose,
+        forward: [0., 0., 1.],
+    });
+    let frames = redeploy(&mut engine, 0).unwrap();
+    let terminal = crate::seated_death::tests::terminal_for(
+        crate::seated_death::tests::frame_wires(&frames)
+            .iter()
+            .map(Vec::as_slice),
+        0,
+        engine.wire_profile,
+    );
+    crate::seated_death::tests::assert_seated_exit(&terminal);
+    assert_eq!(terminal.position, Some(pose));
+    assert_eq!(engine.active.as_ref().unwrap().helo_seat, None);
+}
+
+#[test]
+fn a_downed_rider_update_leaves_the_carrier_whatever_killed_it() {
+    // Carrier destruction and every other cause share this update builder.
+    let (mut engine, _, _) = fixture();
+    let pose = CharacterPosition {
+        x: 20.,
+        y: 9.,
+        z: 25.,
+    };
+    carrier(&mut engine, 0).current_pose = Some(crate::domination_helo::FlightPose {
+        position: pose,
+        forward: [0., 0., 1.],
+    });
+    let player = engine.peers[PEER].reservation.player;
+    let damage = engine.peers[PEER].last_damage;
+    let update = engine.character_damage_update(9, 1, player, damage, true);
+    let exit = update.seated_exit.expect("rider exit");
+    assert_eq!(exit.position, pose);
+    assert_eq!((exit.bunker_ownership, exit.ground_owner), (None, None));
 }
 
 #[test]

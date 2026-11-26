@@ -206,18 +206,16 @@ pub(super) fn plan_pending_damage<W: Write>(
                 1,
             ));
         }
-        let packet = replication::CharacterDamageUpdate {
-            sequence: next_sequence,
-            timestamp_ms: now.as_millis() as u32,
-            object_index: pending.target_character_id as u16,
-            damage: resolved,
-            forced_state: lethal.then_some(replication::CharacterState {
-                state: 7,
-                stance: 0,
-                user_data: [0; 3],
-            }),
-        }
-        .encode_with_profile(ctx.engine.wire_profile)?;
+        let packet = ctx
+            .engine
+            .character_damage_update(
+                next_sequence,
+                now.as_millis() as u32,
+                pending.target_character_id as u16,
+                resolved,
+                lethal,
+            )
+            .encode_with_profile(ctx.engine.wire_profile)?;
         if pending.target_character_id == (0x03800000 | u32::from(active.reservation.player)) {
             plan.combat.new_damage_model = Some(resolved);
             plan.combat.new_life = Some(human_life.unwrap_or(if lethal {
@@ -332,6 +330,7 @@ pub(super) fn plan_healing_tick<W: Write>(
             effect.effect.advance_with_receipts(now, active.last_damage)
     {
         let packet = replication::CharacterDamageUpdate {
+            seated_exit: None,
             sequence: next_sequence,
             timestamp_ms: now.as_millis() as u32,
             object_index: active.reservation.player,

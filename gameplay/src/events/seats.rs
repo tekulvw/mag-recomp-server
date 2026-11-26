@@ -87,6 +87,13 @@ pub(super) fn dismount_seat<W: Write>(
     plan: &mut EventPlan,
     request: protocol::DismountSeat,
 ) -> Result<Value, &'static str> {
+    if let Some(seat) = ctx
+        .active
+        .terminal_seat
+        .filter(|seat| !ctx.active.life.is_alive() && seat.matches(&request))
+    {
+        return replay_terminal_exit(ctx, plan, request, seat);
+    }
     if request.vehicle_id >> 24 == 2 {
         return helo_dismount(ctx, plan, request);
     }
@@ -466,5 +473,44 @@ fn ground_dismount<W: Write>(
     }
     Ok(
         json!({"type":"dismount_seat","vehicle_id":request.vehicle_id,"seat_id":request.seat_id,"transition_sent":plan.replication.seat_transition.is_some()}),
+    )
+}
+
+/// A dead occupant still asking to leave the seat its death released gets
+/// the terminal exit again, freshly sequenced; see docs/seated-death-dismount.md.
+fn replay_terminal_exit<W: Write>(
+    ctx: &PlanningContext<'_, W>,
+    plan: &mut EventPlan,
+    request: protocol::DismountSeat,
+    seat: crate::seated_death::SeatIdentity,
+) -> Result<Value, &'static str> {
+    let active = ctx.active;
+    let exit = ctx.engine.seat_exit(active, seat);
+    if request.character_id != (0x0380_0000 | u32::from(active.reservation.player)) {
+        plan.gameplay_denial = Some("invalid_terminal_exit_target");
+    } else if exit.is_none() {
+        plan.gameplay_denial = Some("terminal_exit_pose_unavailable");
+    } else if !ctx.history_available {
+        plan.gameplay_denial = Some("replication_history_limit");
+    } else {
+        let update = replication::CharacterDamageUpdate {
+            sequence: ctx.next_sequence,
+            timestamp_ms: ctx.now.as_millis() as u32,
+            object_index: active.reservation.player,
+            damage: active.last_damage,
+            forced_state: Some(replication::CharacterState {
+                state: 7,
+                stance: 0,
+                user_data: [0; 3],
+            }),
+            seated_exit: exit,
+        }
+        .encode_with_profile(ctx.engine.wire_profile)?;
+        plan.outgoing = Some(update.clone());
+        plan.replication.damage_delta = Some(update);
+    }
+    Ok(
+        json!({"type":"dismount_seat","vehicle_id":request.vehicle_id,
+        "seat_id":request.seat_id,"terminal_exit_replayed":plan.replication.damage_delta.is_some()}),
     )
 }

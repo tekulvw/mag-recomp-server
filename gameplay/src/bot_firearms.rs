@@ -1144,20 +1144,15 @@ impl<W: Write> Engine<W> {
                         receipts[shot_receipt]["bot_firearm_kd"] = json!(plan.audit());
                         bot_kd = Some(plan);
                     }
-                    let packet = replication::CharacterDamageUpdate {
-                        sequence: 2,
-                        timestamp_ms: now.as_millis() as u32,
-                        object_index: target.life.id,
-                        damage,
-                        forced_state: (damage.health_quarter_points == 0).then_some(
-                            replication::CharacterState {
-                                state: 7,
-                                stance: 0,
-                                user_data: [0; 3],
-                            },
-                        ),
-                    }
-                    .encode_with_profile(self.wire_profile)?;
+                    let packet = self
+                        .character_damage_update(
+                            2,
+                            now.as_millis() as u32,
+                            target.life.id,
+                            damage,
+                            damage.health_quarter_points == 0,
+                        )
+                        .encode_with_profile(self.wire_profile)?;
                     pending_damage = Some((target, damage, human_life, packet));
                 }
             }

@@ -67,6 +67,7 @@ pub(super) fn plan<W: Write>(
         ..patient.last_damage
     };
     let packet = replication::CharacterDamageUpdate {
+        seated_exit: None,
         sequence: ctx.next_sequence,
         timestamp_ms: ctx.now.as_millis() as u32,
         object_index: patient.reservation.player,

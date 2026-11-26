@@ -2,7 +2,10 @@
 
 Owned human redeploy supports current Helo passengers and indexed Hospital
 passengers and gunners, alongside the existing Ground routes. The native
-KillSelf owner check and terminal state7 apply to each supported family. Legacy
+KillSelf owner check and terminal state7 apply to each supported family. The
+terminal update also carries the seat exit pose (and, for a Hospital, the new
+ownership) so the client leaves the seat; see
+[seated-death-dismount.md](seated-death-dismount.md). Legacy
 Alpha and other unqualified mounts retain their separate support boundary.
 
 ## Helo occupancy

@@ -235,6 +235,7 @@ mod retail_firearm_coverage_tests;
 pub mod retail_melee;
 pub mod rotating_log;
 mod score_clock;
+mod seated_death;
 pub mod skill_catalog;
 #[cfg(test)]
 mod smoke_admission_tests;
@@ -1317,6 +1318,8 @@ struct Active {
     helo_seat: Option<domination_helo::PassengerSeat>,
     helo_creation_sent: bool,
     seat_transitions: Vec<Vec<u8>>,
+    /// The seat the current dead life left; see seated_death.rs.
+    terminal_seat: Option<seated_death::SeatIdentity>,
     last_exit: Option<protocol::DismountSeat>,
     match_clock_started: Option<Duration>,
     last_clock_points: i16,
