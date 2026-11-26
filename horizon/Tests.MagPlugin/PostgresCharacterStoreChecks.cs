@@ -363,6 +363,16 @@ internal static partial class LeadershipProgressionChecks
             "echo").Result == MagNetResult.Success && pg.ReadForAccount("echo").Single().Id == 3, "Character IDs do not continue after a replace");
     }));
 
+    public static void PostgresSecretDirectoryConnection() => WithDirectory(directory =>
+    {
+        foreach (var (name, value) in new[] { ("host", "db-rw"), ("port", "5432\n"), ("dbname", "mag"), ("user", "mag"), ("password", "invented") })
+            File.WriteAllText(Path.Combine(directory, name), value);
+        var builder = new NpgsqlConnectionStringBuilder(PostgresCharacterDatabase.ConnectionStringFromSecretDirectory(directory, null));
+        Check(builder.Host == "db-rw" && builder.Port == 5432 && builder.Database == "mag" && builder.SslMode == SslMode.Require,
+            "Secret directory connection settings");
+        Check(builder.GssEncryptionMode == GssEncryptionMode.Disable, "GSSAPI encryption is attempted (libgssapi_krb5 load errors)");
+    });
+
     public static void PostgresImportCommandLine() => WithDirectory(directory => WithPostgres("postgres import command line", (database, connection) =>
     {
         var catalogs = ParityCatalogsIn(directory);

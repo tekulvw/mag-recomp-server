@@ -77,7 +77,10 @@ namespace Server.Medius
             {
                 Host = Read("host"), Port = port, Database = Read("dbname"), Username = Read("user"), Password = Read("password"),
                 ApplicationName = "mag-medius", Timeout = 2, CommandTimeout = 3, MaxPoolSize = 8,
-                SslMode = SslMode.Require
+                SslMode = SslMode.Require,
+                // TLS protects the connection. Npgsql's default (Prefer) first tries GSSAPI encryption,
+                // which the image has no library for: every process logged a libgssapi_krb5 load error.
+                GssEncryptionMode = GssEncryptionMode.Disable
             };
             if (!string.IsNullOrWhiteSpace(caFile))
             {
