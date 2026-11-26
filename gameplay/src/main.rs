@@ -782,10 +782,23 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             "configure collision coverage inside each match profile",
         ));
     }
+    // A mesh records the SHA-256 of the collision file it was baked from:
+    // read it first, then read the world against that digest.
+    let mut pending_mesh = match (&navmesh_path, &collision_path, &regional_walk_path) {
+        (Some(path), Some(_), None) => Some(mag_gameplay::navmesh::VerifiedArtifact::read(path)?),
+        _ => None,
+    };
     let collision_world = collision_path
         .as_ref()
         .map(|path| {
-            CollisionWorld::load(path, CollisionLimits::default()).map_err(io::Error::other)
+            let limits = CollisionLimits::default();
+            match &pending_mesh {
+                Some(mesh) => {
+                    CollisionWorld::load_expecting(path, limits, &mesh.artifact().world_sha256)
+                }
+                None => CollisionWorld::load(path, limits),
+            }
+            .map_err(io::Error::other)
         })
         .transpose()?;
     // A coverage sidecar must name this exact world; the world bytes stay unchanged.
@@ -820,13 +833,10 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
         let world = collision_world
             .as_ref()
             .ok_or_else(|| io::Error::other("--navmesh-world requires --collision-world"))?;
-        if std::fs::metadata(&path)?.len() > mag_gameplay::navmesh::MAX_ARTIFACT_JSON_BYTES {
-            return Err(io::Error::other("navmesh artifact size limit"));
-        }
         use mag_gameplay::navmesh::{self, BodyShape, MovementProfile, NavMesh};
-        let raw = std::fs::read(path)?;
-        let mesh = if let Some(path) = regional_walk_path.as_ref() {
-            let artifact = serde_json::from_slice(&raw).map_err(io::Error::other)?;
+        let mesh = if let Some(regional) = regional_walk_path.as_ref() {
+            let artifact = navmesh::regional::RegionalArtifact::read(&path)?;
+            let path = regional;
             let coverage = navmesh::regional::Coverage::load(path)?;
             let mesh =
                 navmesh::regional::load(artifact, world, coverage).map_err(io::Error::other)?;
@@ -845,7 +855,10 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                 .map_err(io::Error::other)?;
             mesh
         } else {
-            let artifact = serde_json::from_slice(&raw).map_err(io::Error::other)?;
+            let artifact = match pending_mesh.take() {
+                Some(artifact) => artifact,
+                None => navmesh::VerifiedArtifact::read(&path)?,
+            };
             let hash = world.source_sha256();
             let map = &world.metadata().map_name;
             let rules = movement_profile_path
@@ -859,7 +872,7 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
                 .map(BodyShape::load_profile)
                 .transpose()?
                 .unwrap_or_default();
-            NavMesh::load_with_body(artifact, hash, map, rules.as_ref(), body)
+            NavMesh::load_verified(artifact, hash, map, rules.as_ref(), body)
                 .map_err(io::Error::other)?
         };
         mesh.validate_coverage(world).map_err(io::Error::other)?;

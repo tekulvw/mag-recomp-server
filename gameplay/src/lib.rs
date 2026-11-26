@@ -155,6 +155,7 @@ mod objective_counters;
 mod objective_rewards;
 mod repair_rewards;
 mod resources;
+mod verified_read;
 mod world_tick;
 pub use resources::EngineResources;
 /// Whether two certified drops can never be served at the same time (their
