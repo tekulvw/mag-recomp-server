@@ -36,6 +36,8 @@ const MAX_REGIONS: usize = 64;
 
 /// Identities of the structures a polygon's gate was computed from.
 pub(crate) type GateSources = Vec<(String, String, [u64; 12])>;
+/// Gated polygons with their sources, and how many were reused.
+type Gates = (Vec<(GateSources, PolyGate)>, usize);
 
 /// Compute and install the gates of `snapshot` on `mesh` now, unless they
 /// are current. A polygon whose structures are unchanged since the previous
@@ -74,10 +76,7 @@ pub(crate) fn install_now(
 
 /// Every gated polygon of `snapshot`, with the structures it was computed
 /// from, and how many were reused from the installed gates.
-fn gates(
-    mesh: &NavMesh,
-    snapshot: &StructureObstacles,
-) -> Result<(Vec<(GateSources, PolyGate)>, usize), &'static str> {
+fn gates(mesh: &NavMesh, snapshot: &StructureObstacles) -> Result<Gates, &'static str> {
     let body = mesh.body();
     let reach = body.radius + 2.0 * CELL_M;
     let mut polys = BTreeSet::new();
