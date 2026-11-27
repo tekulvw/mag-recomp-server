@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.1](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.14.0...medius-v0.14.1) (2026-11-27)
+
+
+### Bug Fixes
+
+* **medius:** make the character export a verified rollback copy ([#399](https://github.com/tekulvw/mag-recomp-server/issues/399)) ([f778af7](https://github.com/tekulvw/mag-recomp-server/commit/f778af7b354aee19cea34e89827f728747a6035f))
+
 ## [0.14.0](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.13.1...medius-v0.14.0) (2026-11-27)
 
 
