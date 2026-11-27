@@ -90,49 +90,44 @@ internal static class VoiceForwardingChecks
 
     public static void ListenerForms()
     {
-        var off = VoiceRelayOptions.FromEnvironment(_ => null);
-        Check(off.Form == VoiceRelayForm.App, "the default listener form is app");
-        foreach (var (value, form) in new[] { ("app", VoiceRelayForm.App), ("app53", VoiceRelayForm.App53), ("from_b2", VoiceRelayForm.FromB2),
-            ("whole", VoiceRelayForm.Whole), ("from_b6", VoiceRelayForm.FromB6) })
+        // The form switch is gone: a value left set (any of the former lab forms, or garbage) is
+        // reported and ignored, never fatal, and never changes the options.
+        foreach (var value in new[] { "app", "app53", "from_b2", "whole", "from_b6", "raw", " App" })
         {
-            var parsed = VoiceRelayOptions.FromEnvironment(name => name == VoiceRelayOptions.FormVariable ? value : null);
-            Check(parsed.Form == form && VoiceRelayOptions.Name(form) == value && !parsed.Enabled, $"form {value}");
+            var warnings = new List<string>();
+            var parsed = VoiceRelayOptions.FromEnvironment(name =>
+                name == VoiceRelayOptions.Variable ? "1" : name == VoiceRelayOptions.RemovedFormVariable ? value : null, warnings.Add);
+            Check(parsed.Enabled && parsed.Tier == VoiceRelayTier.All, $"form '{value}' changed the options");
+            Check(warnings.Count == 1 && warnings[0].Contains(VoiceRelayOptions.RemovedFormVariable) && warnings[0].Contains("ignored"),
+                $"form '{value}' was not reported: [{string.Join("; ", warnings)}]");
         }
-        foreach (var value in new[] { "App", "b2", "raw", " app" })
-        {
-            bool threw = false;
-            try { VoiceRelayOptions.FromEnvironment(name => name == VoiceRelayOptions.FormVariable ? value : null); }
-            catch (ArgumentException) { threw = true; }
-            Check(threw, $"form '{value}' accepted");
-        }
+        var quiet = new List<string>();
+        VoiceRelayOptions.FromEnvironment(name => name == VoiceRelayOptions.RemovedFormVariable ? "" : null, quiet.Add);
+        VoiceRelayOptions.FromEnvironment(_ => null, quiet.Add);
+        Check(quiet.Count == 0, "an unset or empty form switch was reported");
+        Check(VoiceRelayOptions.FromEnvironment(name => name == VoiceRelayOptions.RemovedFormVariable ? "whole" : null) != null,
+            "a removed form value without a warning sink");
 
         foreach (var uplink in new[] { Uplink(36, 7, 37), Uplink(0, 8, 74), Uplink(300, 9, 222) })
         {
             Check(VoiceGroupSend.TryParse(uplink, out var send), "synthetic uplink parses");
             foreach (int talker in new[] { 0, 5, 200, 511 })
             {
-                // app: a client app single from the talker, carrying the library message unchanged.
-                var app = VoiceListenerMessage.Build(VoiceRelayForm.App, talker, uplink, send);
+                // A client app single from the talker, carrying the library message unchanged.
+                var app = VoiceListenerMessage.Build(talker, uplink, send);
                 Check(app is RT_MSG_CLIENT_APP_SINGLE single && single.TargetOrSource == talker && app.Id == RT_MSG_TYPE.RT_MSG_CLIENT_APP_SINGLE,
-                    "app form is a client app single");
+                    "the listener form is a client app single");
                 var (source, data) = Listen(app);
                 Check(source == talker && data.SequenceEqual(uplink[send.AppOffset..]) && data[0] == 0 && data[1] == 0x2F &&
                     data[2] == (byte)send.Group && data.Length == VoiceGroupSend.VoiceHeaderLength + send.DataLength,
-                    $"app form: source {source}, {data.Length} bytes");
-
-                var app53 = VoiceListenerMessage.Build(VoiceRelayForm.App53, talker, uplink, send);
-                Check((byte)app53.Id == 53 && Body(app53).SequenceEqual(Body(app)), "app53 carries the app form's bytes as message 53");
-
-                Check(Listen(VoiceListenerMessage.Build(VoiceRelayForm.FromB2, talker, uplink, send)).app.SequenceEqual(uplink[2..]), "from_b2");
-                Check(Listen(VoiceListenerMessage.Build(VoiceRelayForm.Whole, talker, uplink, send)).app.SequenceEqual(uplink), "whole");
-                Check(Listen(VoiceListenerMessage.Build(VoiceRelayForm.FromB6, talker, uplink, send)).app.SequenceEqual(uplink[6..]), "from_b6");
+                    $"listener form: source {source}, {data.Length} bytes");
             }
         }
         // The uplink buffer is never shared with or changed by the listener message.
         var original = Uplink(20, 1, 37);
         VoiceGroupSend.TryParse(original, out var once);
         var copy = (byte[])original.Clone();
-        var built = (RT_MSG_CLIENT_APP_SINGLE)VoiceListenerMessage.Build(VoiceRelayForm.Whole, 1, original, once);
+        var built = (RT_MSG_CLIENT_APP_SINGLE)VoiceListenerMessage.Build(1, original, once);
         built.Payload[0] = 0xFF;
         Check(original.SequenceEqual(copy), "the listener payload aliases the uplink");
     }
@@ -163,7 +158,7 @@ internal static class VoiceForwardingChecks
         if (!VoiceGroupSend.TryParse(uplink, out var send)) return delivered;
         decision = VoiceRelay.Decide(options, table, talker, send.Group, send.DataLength, true, muted, _ => true, budget, now);
         if (!decision.Relayed) return delivered;
-        var message = VoiceListenerMessage.Build(options.Form, talker, uplink, send);
+        var message = VoiceListenerMessage.Build(talker, uplink, send);
         foreach (int recipient in decision.Recipients) delivered.Add(recipient, Listen(message));
         return delivered;
     }
