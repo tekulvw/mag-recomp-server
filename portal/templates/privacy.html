@@ -16,9 +16,11 @@
 <p>The MAG launcher sends a report when the game crashes, fails to start, stops, runs slowly or has audio trouble. A report holds the launcher and game version, your operating system and hardware details, frame-time and audio timing figures, and the launcher's and game's logs. It is tied to your account so staff can follow up, but we do not keep your IP address with it. Reports are kept for {{ report_days }} days, are visible only to site staff, and are used only to fix problems. Turn them off in MAG Settings.</p>
 <h2>Friends and status</h2>
 <p>Your friends list, the friend requests you send and receive, and the players you block are kept with your account. Only you and staff see your requests and blocks; a player you block is not told. While you play, the game sends the portal a short status (what the game's friends list shows, such as whether you are in a match). The portal keeps only the latest one, shows it only to your mutual friends, and forgets it {{ presence_seconds }} seconds after the game stops sending it or as soon as you leave. Friends on the other factions see it too.</p>
+<h2>Player reports</h2>
+<p>When you report a player, we keep the player's name, the reason, what you wrote, the time you gave and your account. Only site staff see reports. The reported player is never told who reported them or what was written, and you see only whether your report is still open or has been reviewed. If you delete your account, your reports stay for the moderators without your account; reports about you stay with your player name.</p>
 <h2>The game server</h2>
 <p>When you play, the game server learns your account number and player name and keeps your characters and match records.</p>
 <h2>Deleting your account</h2>
-<p>Delete your account from your account page at any time (a banned account is deleted by the operator on request). That removes everything above, including your reports, friends, requests and blocks, except your player name, which stays reserved so nobody else can take over its characters.</p>
+<p>Delete your account from your account page at any time (a banned account is deleted by the operator on request). That removes everything above, including your performance and error reports, friends, requests and blocks, except your player name, which stays reserved so nobody else can take over its characters, and the player reports described above.</p>
 {% if let Some(c) = contact %}<h2>Contact</h2><p>{{ c }}</p>{% endif %}
 {% endblock %}

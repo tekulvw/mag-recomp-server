@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Your reports{% endblock %}
+{% block content %}
+<h1>Your reports</h1>
+{% if filed %}<p class="ok">Thanks. Your report was sent to the moderators.</p>{% endif %}
+<p>Reports you filed about other players. A moderator reviews each one; what they decide stays between them and the player. <a class="button" href="/reports/new">Report a player</a></p>
+{% if rows.is_empty() %}<p class="quiet">You have not reported anyone.</p>{% else %}
+<table>
+  <thead><tr><th>Player</th><th>Reason</th><th>Filed</th><th>Status</th></tr></thead>
+  <tbody>
+  {% for r in rows %}<tr><td>{{ r.target }}</td><td>{{ r.reason }}</td><td>{{ r.filed }}</td><td>{{ r.status }}</td></tr>{% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

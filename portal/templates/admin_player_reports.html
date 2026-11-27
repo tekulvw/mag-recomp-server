@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Player reports{% endblock %}
+{% block content %}
+{% include "admin_nav.html" %}
+<h1>Player reports</h1>
+<p>Reports players filed about other players. {{ open_total }} open. Open a report to review it; act on the player from their character or user page, then mark the report actioned or dismissed with a note. Reporters see only whether a report is open or reviewed, and reported players are never told who reported them.</p>
+<form method="get" action="/admin/player-reports" class="row">
+  <select name="status" aria-label="Status">
+    {% for s in statuses %}<option value="{{ s }}"{% if status == **s %} selected{% endif %}>{{ s }}</option>{% endfor %}
+  </select>
+  <select name="reason" aria-label="Reason">
+    <option value="">Any reason</option>
+    {% for (value, label) in reasons %}<option value="{{ value }}"{% if reason == **value %} selected{% endif %}>{{ label }}</option>{% endfor %}
+  </select>
+  <button>Filter</button>
+</form>
+{% if rows.is_empty() %}<p class="quiet">No reports match.</p>{% else %}
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Filed</th><th>Player</th><th>Reason</th><th>Status</th><th>Other reports</th><th>Reporter</th><th>Description</th><th></th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+  <tr><td>{{ r.filed }}</td><td>{{ r.target }}</td><td>{{ r.reason }}</td><td>{{ r.status }}</td><td>{{ r.others }}{% if r.others_open > 0 %} ({{ r.others_open }} open){% endif %}</td><td>{% if let Some(rid) = r.reporter_id %}<a href="/admin/users/{{ rid }}">{{ r.reporter }}</a>{% else %}<span class="quiet">{{ r.reporter }}</span>{% endif %}</td><td>{{ r.preview }}</td><td><a href="/admin/player-reports/{{ r.id }}">Review</a></td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="quiet">Newest first; at most 200.</p>
+{% endif %}
+{% endblock %}

@@ -33,6 +33,8 @@ pub struct Settings {
     /// The game server's admin API (`PORTAL_GAME_ADMIN_URL` and
     /// `PORTAL_GAME_ADMIN_SECRET_FILE`); `None` leaves the Game server admin section off.
     pub game_admin: Option<GameAdmin>,
+    /// Player reports one account may file in 24 hours (`PORTAL_PLAYER_REPORTS_PER_DAY`).
+    pub player_reports_per_day: i64,
 }
 
 impl Settings {
@@ -54,6 +56,7 @@ impl Settings {
             font_dir: None,
             owner_emails: Vec::new(),
             game_admin: None,
+            player_reports_per_day: crate::player_reports::DEFAULT_PER_DAY,
         })
     }
 }

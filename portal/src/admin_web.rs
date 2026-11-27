@@ -1,6 +1,6 @@
 //! The staff admin panel under `/admin`: users, reserved names, staff roles, an audit log and
-//! the game server's characters (`game`), service accounts (`service`), launcher reports
-//! (`reports`) and the server status with its maintenance banner (`status`).
+//! the game server's characters (`game`), service accounts (`service`), player reports
+//! (`player_reports`), launcher reports (`reports`) and the server status with its maintenance banner (`status`).
 //!
 //! Everyone else gets 404 for every admin path. Staff act only on accounts and roles ranked
 //! below their own (see `staff::outranks`); every change is written to the audit log.
@@ -33,6 +33,7 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .merge(service::routes())
         .merge(reports::routes())
+        .merge(player_reports::routes())
         .route("/admin", get(dashboard))
         .route("/admin/users", get(users))
         .route("/admin/users/{id}", get(user_page))
@@ -226,6 +227,7 @@ struct DashboardPage {
     banned: i64,
     devices: i64,
     reserved: i64,
+    open_player_reports: i64,
     log: Vec<LogView>,
 }
 
@@ -260,6 +262,7 @@ async fn dashboard(State(state): Shared, headers: HeaderMap) -> PageResult {
             banned: stats.banned,
             devices: stats.devices,
             reserved: stats.reserved,
+            open_player_reports: crate::player_reports::open_count(&state.pool).await?,
             log,
         },
     ))
@@ -842,6 +845,7 @@ async fn staff_remove(
     Ok(Redirect::to("/admin/staff").into_response())
 }
 
-// Service accounts and launcher reports; after `guard!`, which they use.
+// Service accounts, player reports and launcher reports; after `guard!`, which they use.
+mod player_reports;
 mod reports;
 mod service;

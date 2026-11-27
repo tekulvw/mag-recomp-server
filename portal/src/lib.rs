@@ -11,6 +11,8 @@ pub mod db;
 pub mod game_admin;
 pub mod names;
 pub mod oidc;
+pub mod player_reports;
+pub mod player_reports_web;
 pub mod ratelimit;
 pub mod report_store;
 pub mod reports;
