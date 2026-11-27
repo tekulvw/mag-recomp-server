@@ -1977,6 +1977,12 @@ struct MediusState {
     voice_calls: Vec<(String, String, Value)>,
     /// Answer voice requests with 404, as a game server without voice moderation does.
     no_voice: bool,
+    /// Make each applied change, then answer only after this long (live, 2026-11-27: the mute was
+    /// saved but the answer came after the portal had given up).
+    slow_apply: Option<std::time::Duration>,
+    /// Make each applied change, then answer 503 `outcome_unknown`, as Medius does when its
+    /// database stops answering during the commit.
+    unknown_apply: bool,
 }
 
 struct FakeMedius {
@@ -1988,9 +1994,41 @@ fn lower_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// [`fake_medius_answer`], late or with an unknown outcome for applied changes when asked.
+async fn fake_medius(
+    State(m): State<Arc<FakeMedius>>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let applies = method == axum::http::Method::POST
+        && serde_json::from_slice::<Value>(&body).is_ok_and(|v| v["apply"] == json!(true));
+    let (delay, unknown) = {
+        let st = m.state.lock().unwrap();
+        (st.slow_apply, st.unknown_apply)
+    };
+    let response = fake_medius_answer(State(m), method, uri, headers, body).await;
+    if !applies || response.status() != StatusCode::OK {
+        return response;
+    }
+    if let Some(delay) = delay {
+        tokio::time::sleep(delay).await;
+    }
+    if unknown {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "outcome_unknown", "message": "synthetic"})),
+        )
+            .into_response();
+    }
+    response
+}
+
 /// Checks the request's signature independently of the portal's code, then answers like the
 /// Medius admin API contract.
-async fn fake_medius(
+async fn fake_medius_answer(
     State(m): State<Arc<FakeMedius>>,
     method: axum::http::Method,
     uri: axum::http::Uri,
@@ -4103,6 +4141,127 @@ async fn maintenance_banner(_: PgPoolOptions, connect: PgConnectOptions) {
     );
     let (_, dashboard) = body(h.get("/admin", Some(&o)).await).await;
     assert!(dashboard.contains("clear status banner"));
+    test_db.close().await;
+}
+
+/// A change the game server applies but does not confirm in time is shown as possibly applied,
+/// never as "could not reach … nothing was changed", and the page reads the state back.
+#[sqlx::test]
+async fn game_server_unconfirmed_changes(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
+    let (medius, url) = fake_medius_server().await;
+    // Short synthetic timeouts: reads 1 s, writes 2 s; the game server answers writes after 3 s.
+    let api = GameAdmin::new(&url, GAME_SECRET.to_vec())
+        .unwrap()
+        .with_timeouts(
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(2),
+        );
+    let h = harness_with(pool, Some(api)).await;
+    medius.state.lock().unwrap().slow_apply = Some(std::time::Duration::from_secs(3));
+    let o = h.sign_in("owner").await;
+    let csrf_o = h.csrf(&o).await;
+
+    // A dry run is not slowed and still works.
+    let fields = [
+        ("csrf", csrf_o.as_str()),
+        ("action", "mute"),
+        ("duration", "60"),
+        ("reason", "synthetic spam"),
+    ];
+    let (status, page) = body(
+        h.post_form("/admin/game/characters/alpha/voice", &o, &fields)
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+
+    // The applied mute times out: the page says it may have been applied and shows it active.
+    let started = std::time::Instant::now();
+    let (status, page) = body(
+        h.post_form("/admin/game/characters/alpha/voice/confirm", &o, &fields)
+            .await,
+    )
+    .await;
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{page}");
+    assert!(
+        page.contains("The request timed out; it may have been applied")
+            && page.contains("no answer within 2 seconds")
+            && page.contains("Refresh to check"),
+        "{page}"
+    );
+    assert!(!page.contains("Could not reach") && !page.contains("Nothing was changed"));
+    assert!(
+        page.contains("Now on the game server") && page.contains("synthetic spam"),
+        "the mute read back: {page}"
+    );
+    assert_eq!(medius.state.lock().unwrap().voice.len(), 1);
+    let log = h.get("/admin", Some(&o)).await.text().await.unwrap();
+    assert!(
+        log.contains("voice mute") && log.contains("unconfirmed"),
+        "{log}"
+    );
+
+    // A level change the same way.
+    let (status, page) = body(
+        h.post_form(
+            "/admin/game/characters/alpha/level/confirm",
+            &o,
+            &[("csrf", &csrf_o), ("level", "20")],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{page}");
+    assert!(page.contains("it may have been applied") && !page.contains("Nothing was changed"));
+    assert!(page.contains("now reports level 20"), "{page}");
+
+    // The game server's own "outcome unknown" answer is shown the same way.
+    {
+        let mut st = medius.state.lock().unwrap();
+        st.slow_apply = None;
+        st.unknown_apply = true;
+    }
+    let (status, page) = body(
+        h.post_form(
+            "/admin/game/characters/alpha/voice/confirm",
+            &o,
+            &[("csrf", &csrf_o), ("action", "unmute")],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{page}");
+    assert!(
+        page.contains("it may have been applied")
+            && page.contains("database stopped answering")
+            && page.contains("has no active voice mute or ban"),
+        "{page}"
+    );
+
+    // Nothing listening: a write that never left is still "could not reach … nothing was changed".
+    let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let closed_url = format!("http://{}", closed.local_addr().unwrap());
+    drop(closed);
+    let h = harness_with(
+        h.pool.clone(),
+        Some(GameAdmin::new(&closed_url, GAME_SECRET.to_vec()).unwrap()),
+    )
+    .await;
+    let o = h.sign_in("owner").await;
+    let csrf_o = h.csrf(&o).await;
+    let (status, page) = body(
+        h.post_form(
+            "/admin/game/characters/alpha/voice/confirm",
+            &o,
+            &[("csrf", &csrf_o), ("action", "unmute")],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(page.contains("Could not reach") && page.contains("Nothing was changed"));
     test_db.close().await;
 }
 

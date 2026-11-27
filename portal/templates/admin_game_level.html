@@ -8,6 +8,14 @@
   <p><strong>The game server refused the change</strong> ({{ r.code }}): {{ r.message }}</p>
   <p>{{ r.advice }}</p>
 </div>
+{% else if let Some(u) = uncertain %}
+<p class="alert">{{ u }}</p>
+{% if let Some(e) = now_error %}
+<p class="alert">The current level could not be read back: {{ e }}</p>
+{% else if let Some(l) = now_level %}
+<p>The game server now reports level {{ l }} (asked for {{ level }}).</p>
+{% endif %}
+<p><a href="/admin/game/characters/{{ account|urlencode_strict }}">Refresh to check</a> before trying again.</p>
 {% else if let Some(e) = error %}
 <p class="alert">{{ e }} Nothing was changed.</p>
 {% else if let Some(c) = change %}
