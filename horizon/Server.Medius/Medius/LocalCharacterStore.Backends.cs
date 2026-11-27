@@ -21,9 +21,10 @@ namespace Server.Medius
     public sealed partial class LocalCharacterStore
     {
         /// <summary>What one operation touches: an account's character (and, for creation, any character
-        /// already holding the requested name), plus a reward receipt and match row for rewards.</summary>
+        /// already holding the requested name), plus a reward receipt and match row for rewards, or the
+        /// account's voice sanctions for moderation.</summary>
         private sealed record StoreScope(string Account, uint CharacterId = 0, string RewardId = null, string MatchKey = null,
-            string Name = null, bool CreateDirectory = true);
+            string Name = null, bool CreateDirectory = true, bool VoiceSanctions = false);
 
         private interface ICharacterBackend
         {
@@ -48,6 +49,10 @@ namespace Server.Medius
             public abstract void Commit(string touchedProgress = null);
             /// <summary>Records the state before an operator change and returns where it was recorded.</summary>
             public abstract string Backup(string backupDirectory, string operation, string account, byte level);
+            /// <summary>Durably saves <paramref name="account"/>'s voice sanctions (the session's scope) and
+            /// journals the change: PostgreSQL in mag.admin_changes in the same transaction, the JSON store as a
+            /// copy of the file before it in <paramref name="backupDirectory"/>. Returns where it was journalled.</summary>
+            public abstract string CommitVoiceSanctions(string account, string operation, string before, string after, string backupDirectory);
             public abstract void Dispose();
         }
 
@@ -99,6 +104,23 @@ namespace Server.Medius
                 using (var backup = new FileStream(backupPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
                 { backup.Write(current); backup.Flush(true); }
                 return backupPath;
+            }
+            public override string CommitVoiceSanctions(string account, string operation, string before, string after, string backupDirectory)
+            {
+                string journal = null;
+                if (File.Exists(_path))
+                {
+                    byte[] current = File.ReadAllBytes(_path);
+                    string digest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(current)).ToLowerInvariant();
+                    Directory.CreateDirectory(backupDirectory);
+                    journal = System.IO.Path.Combine(backupDirectory, $"characters.before-admin-{operation}-{account}-{digest.Substring(0, 12)}.json");
+                    // The same contents were already kept under this name by an earlier change.
+                    if (!File.Exists(journal))
+                        using (var backup = new FileStream(journal, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                        { backup.Write(current); backup.Flush(true); }
+                }
+                Commit();
+                return journal;
             }
             public override void Dispose() => _lease.Dispose();
         }

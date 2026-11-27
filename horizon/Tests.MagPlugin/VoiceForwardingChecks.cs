@@ -317,6 +317,44 @@ internal static partial class LeadershipProgressionChecks
                 foreach (var expected in new[] { "unbound=1", "not_allowed_group=1", "proximity_off=1", "malformed=1" })
                     Check(counters.Contains(expected), $"counters missing {expected}: {counters}");
 
+                // Account sanctions: the relay reads the cache's snapshot, never the store, so a change
+                // written to the store takes effect at the next refresh. A mute or a ban drops both copies of
+                // every frame as muted; an expired sanction stops dropping at once, without a refresh.
+                var previousCache = VoiceSanctionCache.Current;
+                var clock = new DateTimeOffset(2026, 11, 27, 12, 0, 0, TimeSpan.Zero);
+                store.Clock = () => clock;
+                var cache = new VoiceSanctionCache(store, () => clock);
+                VoiceSanctionCache.Current = cache;
+                try
+                {
+                    string backups = Path.Combine(directory, "voice-backups");
+                    Check(cache.Refresh() && cache.Count == 0, "an empty sanction snapshot");
+                    Check(store.ChangeVoiceSanction("alpha", VoiceSanctionKind.Mute, false, "synthetic", "staff", TimeSpan.FromMinutes(10), true, backups).Applied,
+                        "synthetic mute");
+                    Hears(alpha.client, VoiceForwardingChecks.Uplink(20, 9, 37), "a mute waits for the next refresh", bravo.client);
+                    Check(cache.Refresh() && cache.Count == 1, "the refresh loads the mute");
+                    long mutedBefore = Muted();
+                    Hears(alpha.client, VoiceForwardingChecks.Uplink(20, 10, 37), "a muted talker's channel copy");
+                    Hears(alpha.client, VoiceForwardingChecks.Uplink(83 + alpha.client.DmeId, 11, 37), "a muted talker's proximity copy");
+                    Hears(alpha.client, VoiceForwardingChecks.Uplink(4, 12, 37), "a muted talker's platoon chat");
+                    Check(Muted() == mutedBefore + 3, "a mute counts every dropped copy as muted: " + host.VoiceCounters);
+                    Hears(bravo.client, VoiceForwardingChecks.Uplink(20, 13, 37), "a muted listener still hears", alpha.client);
+                    clock = clock.AddMinutes(10);
+                    Hears(alpha.client, VoiceForwardingChecks.Uplink(20, 14, 37), "an expired mute lifts without a refresh", bravo.client);
+                    Check(store.ChangeVoiceSanction("alpha", VoiceSanctionKind.Ban, false, null, "staff", null, true, backups).Applied, "synthetic ban");
+                    cache.Refresh();
+                    Hears(alpha.client, VoiceForwardingChecks.Uplink(20, 15, 37), "a banned talker");
+                    Check(store.ChangeVoiceSanction("alpha", VoiceSanctionKind.Ban, true, "appeal", "staff", null, true, backups).Applied, "synthetic unban");
+                    cache.Refresh();
+                    Hears(alpha.client, VoiceForwardingChecks.Uplink(20, 16, 37), "an unbanned talker", bravo.client);
+                }
+                finally { VoiceSanctionCache.Current = previousCache; }
+                long Muted()
+                {
+                    var match = System.Text.RegularExpressions.Regex.Match(host.VoiceCounters, @"\bmuted=(\d+)");
+                    return match.Success ? long.Parse(match.Groups[1].Value) : -1;
+                }
+
                 // The talker's budget: a burst of packed packets passes up to one second at twice the nominal rate.
                 int heard = 0;
                 for (int i = 0; i < 20; i++)

@@ -12,7 +12,7 @@ same numbers as the client document.
 - Retail channels exactly: Squad, Platoon and Company chat, Platoon broadcast and Team broadcast, with
   the retail role gating.
 - No proximity yet, but the routing keeps room for it; when it comes, enemies can hear proximity speech.
-- No recording. Moderation is server-side voice mutes and bans per account.
+- No recording. Moderation is server-side voice mutes and bans per account ("Moderation").
 - In-match only. There is still no party voice world (see `docs/configured-world-registry.md`).
 - Off by default behind an explicit switch; mag-test first, then live, where the player's own client
   setting keeps it opt-in.
@@ -206,13 +206,39 @@ handles messages, in both the prototype and the retail build; the two agree.
 
 ## Moderation
 
-- **Voice mute** (an account's voice is not relayed for a time) and **voice ban** (until lifted), stored
-  per account with the other account flags. The relay drops that account's packets silently; the
-  player still hears others.
-- Managed with `mag-admin` (new `voice mute <account> <minutes>`, `voice ban <account>`,
-  `voice unban <account>`, dry run by default like its other writes). Changes apply to connected players
-  within a few seconds.
-- The game's own per-player mute stays a client feature and needs nothing from the server.
+Server-side voice moderation is per account: a **voice mute** or a **voice ban**. Neither retail nor
+this design gives listeners anything to see or do about it. Retail's own mutes are client-side (the
+self-mute and the per-channel listen mute, "Lab findings"), and nothing on the listener side tells a
+mute from a ban. So the relay treats the two alike; the kind records the operator's intent: a mute is a
+cool-off, a ban a standing refusal.
+
+- **Effect.** While a sanction is active the relay drops every voice packet the account sends, its
+  channel copy and its proximity copy, and counts each as `muted`. The player still hears everyone
+  else and is not told. A ban refuses the account's voice for its whole duration in the same way.
+- **Duration.** Either kind may end at a time (`--for 30m`, `12h`, `7d`, `2w`; from one minute to ten
+  years) or last until lifted. Imposing a kind again replaces that kind's sanction; a mute and a ban
+  can stand together, and the relay reports the ban.
+- **Storage.** In the character store beside the characters: PostgreSQL table `mag.voice_sanctions`
+  (migration 0002; account, kind, reason, operator, created and expiry times, at most one row per
+  account and kind, deleted with its character) and the JSON store's `voiceSanctions` list. A lifted
+  sanction leaves the table; an expired one stays until replaced or lifted, and is ignored. Import,
+  export, verify and the contents digest carry sanctions like any other record.
+- **Journal.** Every applied change (`voice-mute`, `voice-ban`, `voice-unmute`, `voice-unban`) is
+  journalled with the sanction before it, the sanction after it, the operator and the reason: in
+  `mag.admin_changes` in the same transaction, or, for the JSON store, as a copy of the file before the
+  change in `.maintenance-backups/`.
+- **Caching.** Main Medius (with the local DME and `MAG_VOICE_RELAY=1`) loads the active sanctions into
+  memory at start, reloads them every 5 seconds and at once after the admin API applies a change. The
+  relay checks the talker's account against that snapshot for each packet: one lookup, never a
+  database query. Expiry is checked at each lookup, so a sanction ends on time without a reload. If a
+  reload fails, the last snapshot stays and Medius logs it once; with no snapshot at all, nobody is
+  silenced. The log line names counts only, never accounts or reasons.
+- **Tools.** `mag-admin voice list`, `voice mute|ban <account> [--for DURATION] [--reason TEXT]
+  [--operator NAME] [--apply]` and `voice unmute|unban <account> [--reason TEXT] [--operator NAME]
+  [--apply]`, dry runs without `--apply`; and the admin API's `GET /admin/v1/voice` and
+  `POST /admin/v1/voice/{account}/{mute|ban|unmute|unban}` under its signed authentication, the actor
+  being the operator. See [admin-cli.md](../../admin-cli.md#voice-moderation). A sanction needs an account
+  with a character, and works whether or not the account is online.
 
 ## Switches
 
@@ -257,7 +283,8 @@ receipts contain no speech.
 2. Diagnostic receipts (`MAG_VOICE_DIAG`), off by default, for the lab capture on mag-test.
 3. Squad only: the channel record, memberships, `voice_groups` and the DME relay for squad groups.
    Opt-in on mag-test.
-4. Platoon and Company chat, both broadcasts, the transmit checks for every tier, moderation commands.
+4. Platoon and Company chat, both broadcasts, the transmit checks for every tier, moderation commands
+   (account voice mutes and bans, "Moderation").
 5. mag-test soak, then live with the relay on and clients opt-in.
 
 ## Synthetic tests

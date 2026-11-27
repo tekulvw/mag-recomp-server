@@ -205,7 +205,8 @@ namespace Server.Dme
         /// default) that copy is dropped as proximity_off. Once listed, it goes to every other bound
         /// client whose listen set has it, enemies included, and has its own byte budget.</summary>
         /// <param name="talkerBound">The talker is a bound, admitted client of this world.</param>
-        /// <param name="talkerMuted">Placeholder for the account voice mute or ban (stage 4).</param>
+        /// <param name="talkerMuted">The talker's account holds an active voice mute or ban; both
+        /// copies of every frame (channel and proximity) are then dropped as muted.</param>
         /// <param name="recipientBound">Whether a DME client index is a bound, admitted client
         /// whose reservation matches its table entry.</param>
         public static VoiceRelayDecision Decide(VoiceRelayOptions options, VoiceRelayTable table, int talker, int group, int bytes,

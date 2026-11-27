@@ -26,6 +26,16 @@ namespace Server.Medius
         [--apply]                            Needs the running server's admin API (MAG_ADMIN_API_LISTEN and
                                              MAG_ADMIN_API_SECRET_FILE). Without --apply this is a dry run.
 
+  voice list                                 Active voice mutes and bans: account, kind, end, operator, reason.
+  voice mute <account>                       Stop relaying the account's in-match voice (both the channel and
+  voice ban <account>                        the proximity copy). A mute and a ban act alike; the kind records
+        [--for DURATION] [--reason TEXT]     intent. --for takes 30m, 12h, 7d or 2w; without it the sanction
+        [--operator NAME] [--apply]          lasts until lifted. Imposing again replaces it. The running server
+                                             applies it within 5 s, or at once through the admin API.
+  voice unmute <account>                     Lift an active mute or ban.
+  voice unban <account>
+        [--reason TEXT] [--operator NAME] [--apply]
+
   character-store status                     The configured backend (MAG_CHARACTER_STORE), its schema, row counts,
                                              contents digest and last import.
   character-store migrate                    Apply pending PostgreSQL schema migrations.
@@ -42,7 +52,9 @@ namespace Server.Medius
 
 --config defaults to /config/main (the medius config directory). A write is refused while the
 account has a live login (session markers in $MAG_ACTIVE_ACCOUNTS_DIR, default /tmp), and lowering
-a level is refused. Applied changes first copy the store to .maintenance-backups/ beside it.";
+a level is refused. Applied changes first copy the store to .maintenance-backups/ beside it (the
+PostgreSQL store journals them in mag.admin_changes instead). Voice commands work while the account
+is online, and without --apply they are dry runs too.";
 
         /// <summary>
         /// Command line for <c>Server.Medius.dll admin …</c>; loads configuration like the server.
@@ -98,15 +110,15 @@ a level is refused. Applied changes first copy the store to .maintenance-backups
             DateTime now, TextWriter output, TextWriter error, MagAdminApiClient api = null)
         {
             bool apply = args.Contains("--apply");
-            string reason = null, operatorName = null;
+            string reason = null, operatorName = null, duration = null;
             var words = new List<string>();
             for (int i = 0; i < args.Length; i++)
             {
                 if (args[i] == "--apply") continue;
-                if (args[i] == "--reason" || args[i] == "--operator")
+                if (args[i] == "--reason" || args[i] == "--operator" || args[i] == "--for")
                 {
                     if (i + 1 >= args.Length) { error.WriteLine(Usage); return 2; }
-                    if (args[i] == "--reason") reason = args[++i]; else operatorName = args[++i];
+                    if (args[i] == "--reason") reason = args[++i]; else if (args[i] == "--operator") operatorName = args[++i]; else duration = args[++i];
                     continue;
                 }
                 words.Add(args[i]);
@@ -116,6 +128,11 @@ a level is refused. Applied changes first copy the store to .maintenance-backups
             {
                 switch (words.ToArray())
                 {
+                    case ["voice", var action, var account] when action is "mute" or "ban" or "unmute" or "unban":
+                        return Voice(store, action, account, apply, reason, operatorName, duration, backupDirectory, output, error, now);
+                    case var _ when duration != null:
+                        error.WriteLine(Usage);
+                        return 2;
                     case ["character", "kill", var account]:
                         return Kill(api, account, apply, reason, operatorName, now, output, error);
                     case var _ when killOptions:
@@ -123,6 +140,8 @@ a level is refused. Applied changes first copy the store to .maintenance-backups
                         return 2;
                     case ["accounts", "list"]:
                         return List(store, markerDirectory, now, output);
+                    case ["voice", "list"]:
+                        return VoiceList(store, now, output);
                     case ["character", "show", var account]:
                         return Show(store, account, markerDirectory, now, output, error);
                     case ["character", "set-level", var account, var levelText]:
@@ -328,6 +347,53 @@ a level is refused. Applied changes first copy the store to .maintenance-backups
                     return 1;
             }
         }
+
+        static string Time(DateTimeOffset? at) => at?.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ") ?? "until lifted";
+
+        private static int VoiceList(LocalCharacterStore store, DateTime now, TextWriter output)
+        {
+            var active = MagVoiceModeration.Active(store, new DateTimeOffset(DateTime.SpecifyKind(now, DateTimeKind.Utc)));
+            output.WriteLine($"{"ACCOUNT",-16} {"KIND",-4} {"ENDS",-20} {"SINCE",-20} {"OPERATOR",-24} REASON");
+            foreach (var s in active)
+                output.WriteLine($"{s.Account,-16} {VoiceSanction.Name(s.Kind),-4} {Time(s.ExpiresAt),-20} {Time(s.CreatedAt),-20} {s.Operator,-24} {s.Reason}");
+            if (active.Count == 0) output.WriteLine("(no active voice mutes or bans)");
+            return 0;
+        }
+
+        private static int Voice(LocalCharacterStore store, string action, string account, bool apply, string reason, string operatorName,
+            string durationText, string backupDirectory, TextWriter output, TextWriter error, DateTime now)
+        {
+            bool lift = action.StartsWith("un", StringComparison.Ordinal);
+            var kind = action.EndsWith("ban", StringComparison.Ordinal) ? VoiceSanctionKind.Ban : VoiceSanctionKind.Mute;
+            TimeSpan? duration = null;
+            if (durationText != null)
+            {
+                if (lift) { error.WriteLine($"mag-admin: voice {action} takes no --for"); return 2; }
+                if (!MagVoiceModeration.TryParseDuration(durationText, out var parsed))
+                {
+                    error.WriteLine($"mag-admin: --for must be a whole number of minutes, hours, days or weeks (30m, 12h, 7d, 2w), " +
+                        $"at most {LocalCharacterStore.MaximumVoiceSanctionDuration.TotalDays:0} days");
+                    return 2;
+                }
+                duration = parsed;
+            }
+            var result = MagVoiceModeration.Change(store, account, kind, lift, reason, operatorName ?? DefaultOperator(), duration, apply, backupDirectory);
+            if (result.Refusal == MagVoiceRefusal.InvalidRequest) { error.WriteLine("mag-admin: " + result.Message); return 2; }
+            if (result.Refusal != MagVoiceRefusal.None) { error.WriteLine($"mag-admin: refused ({result.Code}): {result.Message}"); return 1; }
+            var change = result.Change;
+            string kindName = VoiceSanction.Name(kind);
+            output.WriteLine((change.Applied ? "applied" : "dry run (add --apply to write)") + $": voice {action} {account}");
+            output.WriteLine("  before  " + (change.Before == null ? $"no active {kindName}" : Describe(change.Before)));
+            output.WriteLine("  after   " + (change.After == null ? $"no {kindName}" : Describe(change.After)));
+            if (change.Journal != null) output.WriteLine($"  journal {change.Journal}");
+            if (change.Applied && !lift)
+                output.WriteLine("  the running server drops this account's voice within 5 s (both copies of every frame)");
+            return 0;
+        }
+
+        static string Describe(VoiceSanction s) =>
+            $"{VoiceSanction.Name(s.Kind)} {(s.ExpiresAt == null ? "until lifted" : "until " + Time(s.ExpiresAt))}, by {s.Operator}" +
+            (s.Reason == null ? "" : $": {s.Reason}");
 
         private static int SetLevel(LocalCharacterStore store, string account, byte level, bool apply, string backupDirectory,
             string markerDirectory, DateTime now, TextWriter output, TextWriter error)

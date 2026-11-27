@@ -14,6 +14,9 @@ kubectl exec -n <namespace> $M -c medius -- mag-admin character set-level <accou
 kubectl exec -n <namespace> $M -c medius -- mag-admin character set-level <account> 3 --apply
 kubectl exec -n <namespace> $M -c medius -- mag-admin character kill <account> --reason "stuck in a parachute"           # dry run
 kubectl exec -n <namespace> $M -c medius -- mag-admin character kill <account> --reason "stuck in a parachute" --apply
+kubectl exec -n <namespace> $M -c medius -- mag-admin voice mute <account> --for 30m --reason "spam" --operator <you>          # dry run
+kubectl exec -n <namespace> $M -c medius -- mag-admin voice mute <account> --for 30m --reason "spam" --operator <you> --apply
+kubectl exec -n <namespace> $M -c medius -- mag-admin voice list
 ```
 
 ## Commands
@@ -24,9 +27,12 @@ kubectl exec -n <namespace> $M -c medius -- mag-admin character kill <account> -
 | `character show <account>` | One character in detail, including the XP needed for the next level. |
 | `character set-level <account> <level> [--apply]` | Raises the character to `<level>` the way earned progression would. XP becomes that level's catalog threshold, and each gained level's `SkillPointsGained` is added. Without `--apply` it only prints the planned change. |
 | `character kill <account> [--reason TEXT] [--operator NAME] [--apply]` | Kills the account's player in its running match, exactly as if it had pressed Kill Self (see [Operator kill](#operator-kill)). Without `--apply` it only names the player, world and worker. It works through the running server's [admin API](#admin-api), so it needs `adminApi.enabled`. |
+| `voice list` | Active voice mutes and bans: account, kind, end (or `until lifted`), when and by whom, and the reason. |
+| `voice mute <account>`, `voice ban <account>` `[--for DURATION] [--reason TEXT] [--operator NAME] [--apply]` | Stops relaying the account's in-match voice (see [Voice moderation](#voice-moderation)). `--for` takes a whole number of minutes, hours, days or weeks (`30m`, `12h`, `7d`, `2w`, up to 3650 days); without it the sanction lasts until lifted. Without `--apply` it only prints the planned sanction. |
+| `voice unmute <account>`, `voice unban <account>` `[--reason TEXT] [--operator NAME] [--apply]` | Lifts an active mute or ban. Without `--apply` it only prints the plan. |
 
 Exit codes: `0` success or dry run, `1` refused or failed, `2` usage or
-configuration error. `--config DIR` selects a medius config directory other than
+configuration error (for the voice commands also a bad `--for`, `--reason` or `--operator`). `--config DIR` selects a medius config directory other than
 `/config/main`.
 
 ## Safety rules
@@ -102,6 +108,44 @@ Refusals print `refused (<code>)` and exit 1:
 | `kill_refused` | The worker applied the request but denied the Kill Self itself (for example `mounted_death_not_supported`); `worker_reason` names the denial |
 | `worker_refused` | The worker refused the request with another code, named in `worker_reason` |
 
+## Voice moderation
+
+The voice relay ([voice relay design](superpowers/specs/2026-11-25-voice-relay-design.md#moderation))
+drops every voice packet an account with an active **voice mute** or **voice ban** sends: both the
+copy for its talk channel and the proximity copy, counted as `muted` in the `Voice relay:` line. The
+player still hears everyone and is not told. Retail and the client have no listener-side difference
+between the two, so they act alike; the kind records intent (a mute is a cool-off, a ban a standing
+refusal). Either ends at its `--for` time or lasts until lifted.
+
+To mute someone:
+
+1. Find the account (`accounts list`, or the portal's game admin page).
+2. Dry run: `mag-admin voice mute <account> --for 30m --reason "spam" --operator <you>`. It prints
+   the sanction before and after.
+3. Apply: add `--apply`. The running server picks it up within 5 seconds (at once when changed
+   through the admin API or the portal); a player in a match goes silent mid-sentence.
+4. Check with `voice list`; lift it early with `voice unmute <account> --apply`.
+
+Rules:
+
+- **Per account and kind.** An account has at most one mute and one ban. Imposing a kind again
+  replaces it (new end, reason and operator). Lifting needs an active sanction of that kind
+  (`not_sanctioned` otherwise); an expired one needs no lifting.
+- **Any session state.** Unlike `set-level`, sanctions apply while the account is online. The account
+  must have a character (`not_found` otherwise).
+- **Journalled.** `--operator` names the staff member (default `mag-admin:$USER`, or `mag-admin`).
+  With the PostgreSQL store each applied change is a `mag.admin_changes` row (operation `voice-mute`,
+  `voice-ban`, `voice-unmute` or `voice-unban`) with the sanction before and after, the operator and
+  the reason, in the same transaction. With the JSON store the file before the change is kept in
+  `.maintenance-backups/characters.before-admin-voice-<operation>-<account>-<sha12>.json`.
+- **Cached, never per packet.** Main Medius loads active sanctions only when it runs the relay
+  (`MAG_LOCAL_DME=1` and `MAG_VOICE_RELAY=1`), reloads them every 5 s and after each API change, and
+  checks expiry at each lookup. A failed reload keeps the previous set and logs
+  `Voice sanctions: reload failed` once.
+
+Refusals print `refused (<code>)` and exit 1: `not_found` (no character has that account) and
+`not_sanctioned` (nothing to lift).
+
 ## PostgreSQL character store
 
 With `MAG_CHARACTER_STORE=postgres` (chart `characterStore.backend: postgres`), the
@@ -166,7 +210,7 @@ before the rollback, which the export already carried into the JSON store.
 
 ## Admin API
 
-The same list, show, set-level and kill operations are also available over an internal HTTP
+The same list, show, set-level, kill and voice operations are also available over an internal HTTP
 API, so the accounts portal can offer them to staff. It runs inside the main medius
 process (never MAPS) and calls the same code as `mag-admin`: the same rules,
 session check, lock, backup and commit.
@@ -207,6 +251,9 @@ Anything else is `401 {"error":"unauthorized"}`; the log records only the reason
 | `GET /admin/v1/characters/{account}` | `200 {"account","level","experience","skill_points","next_level_experience","session"}`; `next_level_experience` is null at the maximum level |
 | `POST /admin/v1/characters/{account}/level` with `{"level":N,"apply":bool}` | `200 {"applied","account","from_level","to_level","experience_before","experience_after","skill_points_before","skill_points_after","backup"}`; `backup` is the backup file name, or null for a dry run |
 | `POST /admin/v1/characters/{account}/kill` with `{"apply":bool,"reason":text}` | `200 {"applied","account","worker_id","world_id","player_id","result","reason"}`: the [operator kill](#operator-kill). `result` is `killed` or `gave_up` (a downed player), null for a dry run. `reason` is optional, printable ASCII, at most 256 characters; the actor header is the operator |
+| `GET /admin/v1/voice` | `200 {"sanctions":[{"account","kind","reason","operator","created_at","expires_at"}]}`: the active [voice sanctions](#voice-moderation), by account, a ban before a mute. Times are UTC `YYYY-MM-DDTHH:MM:SSZ`; `expires_at` and `reason` are null when absent |
+| `POST /admin/v1/voice/{account}/mute` or `/ban` with `{"apply":bool,"reason":text,"duration_minutes":N}` | `200 {"applied","account","action","kind","before","after"}`; `before` is the active sanction of that kind it replaces, `after` the new one, each null or a sanction as above. `reason` and `duration_minutes` (1 to 5256000) are optional; without a duration it lasts until lifted. The actor header is the operator |
+| `POST /admin/v1/voice/{account}/unmute` or `/unban` with `{"apply":bool,"reason":text}` | `200`, as above with `after` null. `409 {"error":"not_sanctioned","message"}` when there is no active sanction of that kind |
 | `GET /admin/v1/dme-ports` | `200 {"capacity","in_use","available","first_port","last_port","source","udp_ports_bound"}`: humans holding a DME UDP port across all worlds against the [cap](configured-world-registry.md#dme-port-capacity). `capacity`, `available` and `last_port` are null when unbounded; `source` is `port_range`, `override` or `unbounded`; `udp_ports_bound` counts sockets actually bound |
 | `GET /admin/v1/status` | `200`: the read-only server status below, for the portal's public status page |
 
@@ -268,6 +315,11 @@ Kill refusals use the codes in [Operator kill](#operator-kill), as
 location fields are null until the player is found): `404 {"error":"not_found"}` for an unknown
 account, `503` for `worker_unavailable` and `worker_unanswered`, and `409` for the others. A
 kill body with fields other than `apply` and `reason` is `400`.
+
+Voice requests answer `404 {"error":"not_found"}` for an account without a character and `400
+{"error":"invalid_request"}` for a body with other fields, a bad `reason` or duration, or a
+duration on a lift. Each applied or refused voice change is logged with the actor, account, end
+and reason, and an applied one refreshes the relay's sanctions at once.
 
 A dry run while the account is online still answers `200` with `applied: false`. A bad
 body is `400 {"error":"invalid_request"}`, an unknown account or path `404

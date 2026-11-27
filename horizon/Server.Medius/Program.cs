@@ -358,6 +358,17 @@ namespace Server.Medius
             WorldRegistry?.AdminGameplayHosts() ??
             (LocalDme != null ? new[] { new MagAdminGameplayHost("gameplay", LocalDme) } : Array.Empty<MagAdminGameplayHost>());
 
+        /// <summary>The in-memory voice mutes and bans the DME relay checks per talker; only main Medius
+        /// with the local DME and MAG_VOICE_RELAY=1 loads them.</summary>
+        static void StartVoiceSanctions()
+        {
+            if (Settings.EnableMagPluginAdapter || Environment.GetEnvironmentVariable("MAG_LOCAL_DME") != "1" ||
+                !Server.Dme.VoiceRelayOptions.Current.Enabled) return;
+            var cache = new VoiceSanctionCache(CreateCharacterStore(), log: message => Logger.Info(message));
+            cache.Start();
+            VoiceSanctionCache.Current = cache;
+        }
+
         static void StartAdminApi()
         {
             var settings = MagAdminApiSettings.FromEnvironment();
@@ -368,7 +379,7 @@ namespace Server.Medius
             AdminApi = new MagAdminApi(settings.Listen, settings.Secret, CreateCharacterStore(),
                 MagAdminOperations.BackupDirectory(storePath), markers, () => DateTime.UtcNow, message => Logger.Info(message),
                 DmePortBudget, now => MagServerStatus.Capture(WorldRegistry, LocalDme, DmePortBudget, markers, now),
-                AdminGameplayHosts);
+                AdminGameplayHosts, () => VoiceSanctionCache.Current?.Refresh(force: true));
             AdminApi.Start();
             Logger.Info($"Admin API listening on {AdminApi.LocalEndPoint}.");
         }
@@ -391,6 +402,7 @@ namespace Server.Medius
                 Logger.Info($"Portal tickets required: audience={PortalTickets.Settings.Audience} keys={string.Join(",", PortalTickets.Settings.Keys.Keys.OrderBy(id => id))}");
             PublishActiveAccounts();
             DmePortBudget = MagDmePortBudget.FromEnvironment();
+            StartVoiceSanctions();
             StartAdminApi();
 
             string registryPath=Environment.GetEnvironmentVariable("MAG_WORLD_REGISTRY");

@@ -258,6 +258,10 @@ namespace Server.Medius
             public Dictionary<string, RewardReceipt> RewardReceipts { get; set; }
             [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
             public Dictionary<string, MatchRewardProgress> MatchRewardProgress { get; set; }
+            /// <summary>Server-side voice mutes and bans, at most one of each per account; absent when none
+            /// (LocalCharacterStore.VoiceSanctions.cs). An older build keeps the field as extension data.</summary>
+            [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+            public List<StoredVoiceSanction> VoiceSanctions { get; set; }
         }
         private static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions
         { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, WriteIndented = true };
@@ -342,6 +346,7 @@ namespace Server.Medius
                 throw new InvalidDataException("Character-store schema or local account policy invalid.");
             if (document.SchemaVersion == 1) foreach (var c in document.Characters) c.Account = "player";
             ValidateRewardLedger(document);
+            ValidateVoiceSanctions(document);
             foreach (var character in document.Characters) PrepareCharacter(character);
             return document;
         }

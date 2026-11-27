@@ -12,9 +12,10 @@ using NpgsqlTypes;
 namespace Server.Medius
 {
     /// <summary>Counts and a digest of one store's canonical contents; never player data.</summary>
-    public sealed record CharacterStoreSummary(int Characters, int Receipts, int MatchRows, string Digest)
+    public sealed record CharacterStoreSummary(int Characters, int Receipts, int MatchRows, string Digest, int VoiceSanctions = 0)
     {
-        public string Describe() => $"{Characters} characters, {Receipts} reward receipts, {MatchRows} match rows, digest {Digest}";
+        public string Describe() => $"{Characters} characters, {Receipts} reward receipts, {MatchRows} match rows, " +
+            (VoiceSanctions > 0 ? $"{VoiceSanctions} voice sanctions, " : "") + $"digest {Digest}";
     }
 
     /// <summary>How <c>character-store import</c> treats a database that is not empty.</summary>
@@ -144,8 +145,11 @@ namespace Server.Medius
                         foreach (var row in ReadProgress(match, id => owner.Account))
                             progress[MatchProgressKey(row.Account, row.CharacterId, row.MatchKey)] = row;
                     }
+                    // Only moderation reads (and locks) the account's sanctions; other operations leave them alone.
+                    var sanctions = scope.VoiceSanctions && list.Any(c => c.Account == scope.Account)
+                        ? LoadVoiceSanctionRows(_connection, _transaction, scope.Account) : null;
                     Document = new Document { SchemaVersion = 3, Account = "player", DisplayName = "Player", Characters = list,
-                        RewardReceipts = receipts, MatchRewardProgress = progress };
+                        RewardReceipts = receipts, MatchRewardProgress = progress, VoiceSanctions = sanctions };
                 }
                 catch (Exception e)
                 {
@@ -210,6 +214,20 @@ namespace Server.Medius
                     }
                     _transaction.Commit();
                     _committed = true;
+                }
+                catch (Exception e) { throw _backend.Database.Translate(e); }
+            }
+
+            public override string CommitVoiceSanctions(string account, string operation, string before, string after, string backupDirectory)
+            {
+                if (_committed) throw new InvalidOperationException("Character-store session already committed.");
+                try
+                {
+                    WriteVoiceSanctions(_connection, _transaction, account, Document.VoiceSanctions ?? new List<StoredVoiceSanction>(),
+                        operation, before, after);
+                    _transaction.Commit();
+                    _committed = true;
+                    return "mag.admin_changes";
                 }
                 catch (Exception e) { throw _backend.Database.Translate(e); }
             }
@@ -450,8 +468,9 @@ namespace Server.Medius
                 { CommandTimeout = PostgresCharacterDatabase.MaintenanceCommandTimeoutSeconds };
             var receiptMap = new Dictionary<string, RewardReceipt>(StringComparer.Ordinal);
             foreach (var (id, receipt) in ReadReceipts(receipts)) receiptMap[id] = receipt;
+            var sanctions = LoadVoiceSanctionRows(connection, transaction, null);
             return new Document { SchemaVersion = 3, Account = "player", DisplayName = "Player", Characters = list,
-                RewardReceipts = receiptMap, MatchRewardProgress = progress };
+                RewardReceipts = receiptMap, MatchRewardProgress = progress, VoiceSanctions = sanctions.Count == 0 ? null : sanctions };
         }
 
         private Document LoadWholeDocument() => _backend is PostgresBackend pg ? LoadPostgresDocument(pg) : ReadDocument();
@@ -463,7 +482,8 @@ namespace Server.Medius
                 : document.Characters.Any(c => Has(c.ExtensionData)) ? "character"
                 : document.Characters.Any(c => c.Loadouts?.Any(l => Has(l.ExtensionData)) == true) ? "loadout"
                 : document.RewardReceipts?.Values.Any(r => Has(r.ExtensionData) || Has(r.Snapshot.ExtensionData)) == true ? "reward receipt"
-                : document.MatchRewardProgress?.Values.Any(r => Has(r.ExtensionData)) == true ? "match row" : null;
+                : document.MatchRewardProgress?.Values.Any(r => Has(r.ExtensionData)) == true ? "match row"
+                : document.VoiceSanctions?.Any(s => Has(s.ExtensionData)) == true ? "voice sanction" : null;
             if (field != null)
                 throw new InvalidDataException($"The JSON store has fields this build does not know (in a {field}); import refuses to drop them.");
         }
@@ -555,6 +575,8 @@ namespace Server.Medius
                 foreach (var (id, receipt) in receipts)
                     if (!InsertReceipt(connection, transaction, id, receipt, now))
                         throw new InvalidDataException("Duplicate reward receipt in the JSON store.");
+                foreach (var sanction in document.VoiceSanctions ?? new List<StoredVoiceSanction>())
+                    InsertVoiceSanction(connection, transaction, sanction);
                 using (var sequence = new NpgsqlCommand(document.Characters.Count > 0
                     ? "SELECT setval('mag.character_ids', @max)" : "SELECT setval('mag.character_ids', 1, false)", connection, transaction))
                 {
@@ -663,7 +685,8 @@ namespace Server.Medius
             using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
             foreach (var (key, value) in canonical) hash.AppendData(Encoding.UTF8.GetBytes(key + "\t" + value.ToJsonString() + "\n"));
             return new CharacterStoreSummary(document.Characters.Count, document.RewardReceipts?.Count ?? 0,
-                document.MatchRewardProgress?.Count ?? 0, Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant()[..16]);
+                document.MatchRewardProgress?.Count ?? 0, Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant()[..16],
+                document.VoiceSanctions?.Count ?? 0);
         }
 
         /// <summary>
@@ -707,6 +730,8 @@ namespace Server.Medius
                 node.Remove("lastRewardAt");
                 result["match " + key] = node;
             }
+            foreach (var sanction in document.VoiceSanctions ?? new List<StoredVoiceSanction>())
+                result["voice " + sanction.Account + " " + sanction.Kind] = JsonSerializer.SerializeToNode(sanction, JsonOptions).AsObject();
             return result;
         }
     }

@@ -11,7 +11,8 @@ namespace Server.Medius
     // world stream. While the switch is on, the DME hands each group-addressed client send to Voice:
     // it is parsed (VoiceGroupSend), decided (DecideVoiceRelay) and delivered in the listener form
     // (VoiceListenerMessage) to each recipient, over its UDP channel when it has one and TCP
-    // otherwise. With the switch off the DME never calls Voice and group sends keep today's path.
+    // otherwise. A talker whose account holds an active voice mute or ban (VoiceSanctionCache) is
+    // dropped as muted. With the switch off the DME never calls Voice and group sends keep today's path.
     public sealed partial class LocalDmeHost
     {
         readonly VoiceRelayOptions _voiceRelayOptions = VoiceRelayOptions.Current;
@@ -54,8 +55,11 @@ namespace Server.Medius
                 var entry = talker == null ? null : _voiceTable?.Find(talker.DmeId);
                 bool bound = BoundForVoice(reservation, talker) && entry != null &&
                     string.Equals(entry.ReservationId, reservation.Id, StringComparison.Ordinal);
+                // An account voice mute or ban (VoiceSanctionCache) drops both copies of every frame. The
+                // lookup reads the in-memory snapshot; the store is never asked per packet.
+                bool silenced = bound && VoiceSanctionCache.Current?.Silencing(reservation.Account) != null;
                 var decision = VoiceRelay.Decide(_voiceRelayOptions, _voiceTable, talker?.DmeId ?? -1, group, bytes, bound,
-                    talkerMuted: false, // Account voice mutes and bans arrive with the moderation commands.
+                    silenced,
                     member => _reservations.TryGetValue(member.ReservationId, out var r) && r.Client != null &&
                         r.Client.DmeId == member.PlayerId && r.Client.DmeWorld == talker.DmeWorld && BoundForVoice(r, r.Client),
                     _voiceBudget, Environment.TickCount64);
