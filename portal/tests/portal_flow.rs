@@ -2568,6 +2568,319 @@ async fn game_server_errors_are_shown(_: PgPoolOptions, connect: PgConnectOption
     test_db.close().await;
 }
 
+// ---- Game server section with several characters per account ----
+
+/// One character of a fake Medius that keeps character slots.
+#[derive(Clone)]
+struct SlotCharacter {
+    account: &'static str,
+    character_id: u32,
+    name: &'static str,
+    slot: u8,
+    faction: u8,
+    level: u32,
+    deleted_at: Option<&'static str>,
+}
+
+impl SlotCharacter {
+    fn json(&self) -> Value {
+        json!({"character_id": self.character_id, "name": self.name, "slot": self.slot,
+               "faction": self.faction, "level": self.level,
+               "experience": i64::from(self.level) * 1000, "skill_points": 10,
+               "deleted": self.deleted_at.is_some(), "deleted_at": self.deleted_at})
+    }
+}
+
+#[derive(Default)]
+struct SlotMediusState {
+    characters: Vec<SlotCharacter>,
+    /// The path and query of each request, and its body.
+    requests: Vec<(String, String)>,
+}
+
+/// Answers like the Medius admin API with character slots: one account entry per character,
+/// `?slot=` on the character read and `slot` in the level body (signatures are checked by the
+/// other fake; this one looks at what the portal asks for).
+async fn fake_slot_medius(
+    State(m): State<Arc<Mutex<SlotMediusState>>>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let reply = |status: StatusCode, value: Value| (status, Json(value)).into_response();
+    let mut st = m.lock().unwrap();
+    let text = String::from_utf8_lossy(&body).into_owned();
+    st.requests
+        .push((uri.path_and_query().unwrap().to_string(), text.clone()));
+    let query_slot = uri
+        .query()
+        .and_then(|q| q.strip_prefix("slot="))
+        .map(|n| n.parse::<u8>().unwrap());
+    let segments: Vec<&str> = uri.path().trim_start_matches('/').split('/').collect();
+    let live = |st: &SlotMediusState, account: &str| -> Vec<SlotCharacter> {
+        let mut v: Vec<SlotCharacter> = st
+            .characters
+            .iter()
+            .filter(|c| c.account == account && c.deleted_at.is_none())
+            .cloned()
+            .collect();
+        v.sort_by_key(|c| c.slot);
+        v
+    };
+    match (method.as_str(), segments.as_slice()) {
+        ("GET", ["admin", "v1", "accounts"]) => {
+            let accounts: Vec<Value> = st
+                .characters
+                .iter()
+                .map(|c| {
+                    let mut v = c.json();
+                    v["account"] = c.account.into();
+                    v["session"] = "offline".into();
+                    v
+                })
+                .collect();
+            reply(StatusCode::OK, json!({ "accounts": accounts }))
+        }
+        ("GET", ["admin", "v1", "characters", account]) => {
+            let live = live(&st, account);
+            let chosen = match query_slot {
+                Some(n) => live.iter().find(|c| c.slot == n),
+                None => live.first(),
+            };
+            let Some(c) = chosen else {
+                return reply(StatusCode::NOT_FOUND, json!({"error": "not_found"}));
+            };
+            let all: Vec<Value> = st
+                .characters
+                .iter()
+                .filter(|x| x.account == *account)
+                .map(SlotCharacter::json)
+                .collect();
+            let mut v = c.json();
+            v["account"] = (*account).into();
+            v["session"] = "offline".into();
+            v["next_level_experience"] = (i64::from(c.level + 1) * 1000).into();
+            v["characters"] = all.into();
+            reply(StatusCode::OK, v)
+        }
+        ("POST", ["admin", "v1", "characters", account, "level"]) => {
+            let account = account.to_string();
+            let request: Value = serde_json::from_str(&text).unwrap();
+            let (level, apply) = (
+                request["level"].as_u64().unwrap() as u32,
+                request["apply"].as_bool().unwrap(),
+            );
+            let live = live(&st, &account);
+            let chosen = match request.get("slot").and_then(Value::as_u64) {
+                Some(n) => live.iter().find(|c| u64::from(c.slot) == n),
+                None if live.len() > 1 => {
+                    return reply(
+                        StatusCode::CONFLICT,
+                        json!({"error": "ambiguous_character",
+                               "message": format!("{account} has {} live characters; name a slot", live.len())}),
+                    );
+                }
+                None => live.first(),
+            };
+            let Some(c) = chosen.cloned() else {
+                return reply(StatusCode::NOT_FOUND, json!({"error": "not_found"}));
+            };
+            if apply {
+                let id = c.character_id;
+                st.characters
+                    .iter_mut()
+                    .find(|x| x.character_id == id)
+                    .unwrap()
+                    .level = level;
+            }
+            reply(
+                StatusCode::OK,
+                json!({"applied": apply, "account": account, "from_level": c.level,
+                       "to_level": level, "experience_before": i64::from(c.level) * 1000,
+                       "experience_after": i64::from(level) * 1000, "skill_points_before": 10,
+                       "skill_points_after": 20,
+                       "backup": apply.then(|| format!("{account}-backup-1.json")),
+                       "character_id": c.character_id, "name": c.name, "slot": c.slot}),
+            )
+        }
+        _ => reply(StatusCode::NOT_FOUND, json!({"error": "not_found"})),
+    }
+}
+
+#[sqlx::test]
+async fn game_server_character_slots(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
+    let medius = Arc::new(Mutex::new(SlotMediusState {
+        characters: vec![
+            SlotCharacter {
+                account: "alpha",
+                character_id: 11,
+                name: "Alpha",
+                slot: 0,
+                faction: 1,
+                level: 5,
+                deleted_at: None,
+            },
+            SlotCharacter {
+                account: "alpha",
+                character_id: 12,
+                name: "AlphaTwo",
+                slot: 2,
+                faction: 2,
+                level: 30,
+                deleted_at: None,
+            },
+            SlotCharacter {
+                account: "alpha",
+                character_id: 9,
+                name: "AlphaOld",
+                slot: 1,
+                faction: 0,
+                level: 2,
+                deleted_at: Some("2026-11-20T08:30:00Z"),
+            },
+            SlotCharacter {
+                account: "bravo",
+                character_id: 20,
+                name: "Bravo",
+                slot: 0,
+                faction: 0,
+                level: 7,
+                deleted_at: None,
+            },
+        ],
+        requests: Vec::new(),
+    }));
+    let addr = serve(
+        Router::new()
+            .fallback(fake_slot_medius)
+            .with_state(medius.clone()),
+    )
+    .await;
+    let h = harness_with(
+        pool,
+        Some(GameAdmin::new(&format!("http://{addr}"), GAME_SECRET.to_vec()).unwrap()),
+    )
+    .await;
+    let last_request = || medius.lock().unwrap().requests.last().cloned().unwrap();
+    let o = h.sign_in("owner").await;
+    let csrf_o = h.csrf(&o).await;
+
+    // The list has a row per character, the deleted one marked and not linked to a slot.
+    let (status, page) = body(h.get("/admin/game", Some(&o)).await).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert!(page.contains("<th>Slot</th>"));
+    assert!(page.contains("href=\"/admin/game/characters/alpha?slot=0\">Alpha</a>"));
+    assert!(page.contains("href=\"/admin/game/characters/alpha?slot=2\">AlphaTwo</a>"));
+    assert!(page.contains("AlphaOld <span class=\"pill\">deleted</span>"));
+    assert!(page.contains("href=\"/admin/game/characters/bravo?slot=0\">Bravo</a>"));
+    assert!(!page.contains("?slot=1"));
+
+    // Without a slot the page shows the lowest live slot, and lists every character.
+    let (status, page) = body(h.get("/admin/game/characters/alpha", Some(&o)).await).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(last_request().0, "/admin/v1/characters/alpha");
+    assert!(page.contains("<h2>Slot 0 · Alpha</h2>"));
+    assert!(page.contains("href=\"/admin/game/characters/alpha?slot=2\">AlphaTwo</a>"));
+    assert!(page.contains("<span class=\"pill\">deleted</span> 2026-11-20T08:30:00Z"));
+    assert!(page.contains("<input type=\"hidden\" name=\"slot\" value=\"0\">"));
+
+    let (status, page) = body(h.get("/admin/game/characters/alpha?slot=2", Some(&o)).await).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(last_request().0, "/admin/v1/characters/alpha?slot=2");
+    assert!(page.contains("<h2>Slot 2 · AlphaTwo</h2>") && page.contains("<dd>SVER</dd>"));
+    assert!(page.contains("<input type=\"hidden\" name=\"slot\" value=\"2\">"));
+
+    // A free slot (the deleted character's) and a slot that cannot exist.
+    let (status, page) = body(h.get("/admin/game/characters/alpha?slot=1", Some(&o)).await).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(page.contains("no live character in slot 1 of alpha"));
+    let requests = medius.lock().unwrap().requests.len();
+    let (status, _) = body(h.get("/admin/game/characters/alpha?slot=7", Some(&o)).await).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(medius.lock().unwrap().requests.len(), requests);
+
+    // Raising a level names the slot, through the preview and the confirmation.
+    let (status, page) = body(
+        h.post_form(
+            "/admin/game/characters/alpha/level",
+            &o,
+            &[("csrf", &csrf_o), ("level", "40"), ("slot", "2")],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(last_request().1, r#"{"level":40,"apply":false,"slot":2}"#);
+    assert!(
+        page.contains("Character in slot 2: AlphaTwo.") && page.contains("<td>30</td><td>40</td>")
+    );
+    assert!(page.contains("<input type=\"hidden\" name=\"slot\" value=\"2\">"));
+    let (status, page) = body(
+        h.post_form(
+            "/admin/game/characters/alpha/level/confirm",
+            &o,
+            &[("csrf", &csrf_o), ("level", "40"), ("slot", "2")],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(last_request().1, r#"{"level":40,"apply":true,"slot":2}"#);
+    assert!(page.contains("Level set."));
+    assert!(page.contains("href=\"/admin/game/characters/alpha?slot=2\">Back to alpha"));
+    let log = h.get("/admin", Some(&o)).await.text().await.unwrap();
+    assert!(
+        log.contains("slot 2 (AlphaTwo): 30→40, backup alpha-backup-1.json"),
+        "{log}"
+    );
+    {
+        let st = medius.lock().unwrap();
+        let levels: Vec<u32> = st.characters.iter().map(|c| c.level).collect();
+        assert_eq!(levels, [5, 40, 2, 7]);
+    }
+
+    // No slot on an account with two live characters: refused, with what to do.
+    let (status, page) = body(
+        h.post_form(
+            "/admin/game/characters/alpha/level",
+            &o,
+            &[("csrf", &csrf_o), ("level", "10")],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(last_request().1, r#"{"level":10,"apply":false}"#);
+    assert!(page.contains("ambiguous_character") && page.contains("choose the character"));
+    let (status, _) = body(
+        h.post_form(
+            "/admin/game/characters/alpha/level",
+            &o,
+            &[("csrf", &csrf_o), ("level", "10"), ("slot", "5")],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // One live character and no slot: the game server picks it, and the confirmation keeps to it.
+    let (status, page) = body(
+        h.post_form(
+            "/admin/game/characters/bravo/level",
+            &o,
+            &[("csrf", &csrf_o), ("level", "10")],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert!(page.contains("Character in slot 0: Bravo."));
+    assert!(page.contains("<input type=\"hidden\" name=\"slot\" value=\"0\">"));
+    test_db.close().await;
+}
+
 // ---- Launcher reports ----
 
 mod report_support {

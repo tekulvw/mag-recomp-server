@@ -9,7 +9,28 @@
 {% else if let Some(e) = error %}
 <p class="alert">{{ e }}</p>
 {% else if let Some(c) = character %}
+{% if !characters.is_empty() %}
+<h2>Characters</h2>
+<p>The account's characters, one per slot. Open one to see it{% if is_admin %} or set its level{% endif %}. A deleted character keeps its name reserved; operators restore or purge it with <code>mag-admin</code>.</p>
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Slot</th><th>Character</th><th>Faction</th><th>Level</th><th>XP</th><th>Skill points</th><th>Deleted</th></tr></thead>
+  <tbody>
+  {% for x in characters %}
+  <tr>
+    <td>{{ x.slot }}</td>
+    <td>{% if x.selected %}<strong>{{ x.name }}</strong> <span class="quiet">(shown below)</span>{% else if x.deleted_at.is_some() %}{{ x.name }}{% else %}<a href="/admin/game/characters/{{ account|urlencode_strict }}?slot={{ x.slot }}">{{ x.name }}</a>{% endif %}</td>
+    <td>{{ x.faction }}</td><td>{{ x.level }}</td><td>{{ x.experience }}</td><td>{{ x.skill_points }}</td>
+    <td>{% if let Some(at) = x.deleted_at %}<span class="pill">deleted</span>{% if !at.is_empty() %} {{ at }}{% endif %}{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% if let Some(n) = c.slot %}<h2>Slot {{ n }}{% if !c.name.is_empty() %} · {{ c.name }}{% endif %}</h2>{% endif %}
 <dl>
+  {% if !c.faction.is_empty() %}<dt>Faction</dt><dd>{{ c.faction }}</dd>{% endif %}
   <dt>Level</dt><dd>{{ c.level }}</dd>
   <dt>XP</dt><dd>{{ c.experience }}</dd>
   <dt>Next level at</dt><dd>{{ c.next_level }}</dd>
@@ -51,9 +72,10 @@
 {% endif %}
 {% if is_admin %}
 <h2>Set level</h2>
-<p>Raises the character to a level, with the XP and skill points the game gives for it. The next step shows the change before anything is saved. The player must be signed out of the game.</p>
+<p>Raises the character{% if let Some(n) = c.slot %} in slot {{ n }}{% if !c.name.is_empty() %} ({{ c.name }}){% endif %}{% endif %} to a level, with the XP and skill points the game gives for it. The next step shows the change before anything is saved. The player must be signed out of the game.</p>
 <form method="post" action="/admin/game/characters/{{ account|urlencode_strict }}/level" class="stack">
   <input type="hidden" name="csrf" value="{{ csrf }}">
+  {% if let Some(n) = c.slot %}<input type="hidden" name="slot" value="{{ n }}">{% endif %}
   <label>New level<input name="level" type="number" min="1" step="1" required></label>
   <button>Preview change</button>
 </form>

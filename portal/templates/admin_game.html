@@ -8,14 +8,22 @@
 {% else if let Some(e) = error %}
 <p class="alert">{{ e }}</p>
 {% else %}
-<p>Characters on the game server. Open one to see its details{% if is_admin %} or set its level{% endif %}.</p>
+<p>Characters on the game server. Open one to see its details{% if is_admin %} or set its level{% endif %}.{% if slots %} An account holds up to three characters; a character the player deleted is kept, marked deleted, until an operator restores or purges it.{% endif %}</p>
 {% if rows.is_empty() %}<p class="quiet">The game server has no characters.</p>{% else %}
+<div class="table-scroll">
 <table>
-  <thead><tr><th>Character</th><th>Level</th><th>XP</th><th>Skill points</th><th>Session</th><th>Portal account</th></tr></thead>
+  <thead><tr>{% if slots %}<th>Account</th><th>Slot</th><th>Character</th><th>Faction</th>{% else %}<th>Character</th>{% endif %}<th>Level</th><th>XP</th><th>Skill points</th><th>Session</th><th>Portal account</th></tr></thead>
   <tbody>
   {% for r in rows %}
   <tr>
+    {% if slots %}
     <td><a href="/admin/game/characters/{{ r.account|urlencode_strict }}">{{ r.account }}</a></td>
+    <td>{% if let Some(n) = r.slot %}{{ n }}{% endif %}</td>
+    <td>{% if let Some(at) = r.deleted_at %}{{ r.name }} <span class="pill">deleted</span>{% if !at.is_empty() %} <span class="quiet">{{ at }}</span>{% endif %}{% else %}<a href="/admin/game/characters/{{ r.account|urlencode_strict }}{% if let Some(n) = r.link_slot %}?slot={{ n }}{% endif %}">{{ r.name }}</a>{% endif %}</td>
+    <td>{{ r.faction }}</td>
+    {% else %}
+    <td><a href="/admin/game/characters/{{ r.account|urlencode_strict }}{% if let Some(n) = r.link_slot %}?slot={{ n }}{% endif %}">{{ r.account }}</a></td>
+    {% endif %}
     <td>{{ r.level }}</td><td>{{ r.experience }}</td><td>{{ r.skill_points }}</td>
     <td>{% if r.session == "online" %}<strong>online</strong>{% else %}{{ r.session }}{% endif %}</td>
     <td>{% if let Some(id) = r.portal_id %}<a href="/admin/users/{{ id }}">account {{ id }}</a>{% else %}<span class="quiet">none</span>{% endif %}</td>
@@ -23,6 +31,7 @@
   {% endfor %}
   </tbody>
 </table>
+</div>
 {% endif %}
 <h2>Voice mutes and bans</h2>
 {% if let Some(e) = voice_error %}<p class="alert">{{ e }}</p>
