@@ -163,7 +163,13 @@ superior or themselves. Every change goes to an audit log shown on the admin ove
 The **Game server** section (`/admin/game`) lists the game server's characters with their level,
 XP, skill points and session, through the game server's internal admin API. Setting a level is
 two steps: a preview (a dry run on the game server) shows the change, and a separate confirmation
-applies it and writes the audit log. The game server refuses while the player is signed in. Each
+applies it and writes the audit log. The game server refuses while the player is signed in.
+Moderators and above can also **mute or ban an account's in-match voice** from its character page
+(30 minutes to 30 days, or until lifted, with an optional reason) and lift it there; the section's
+front page lists every active voice mute and ban. These work while the player is signed in, follow
+the same preview-then-confirm steps, take effect in the running match at once and are written to the
+audit log; the game server journals them too (docs/admin-cli.md, "Voice moderation"). A game server
+without voice moderation shows a note instead of the form. Each
 request is signed with HMAC-SHA256 over `METHOD\nPATH_AND_QUERY\nTIMESTAMP\nNONCE\nhex(SHA-256(body))`
 and names the staff member in `X-Mag-Admin-Actor`; `src/game_admin.rs` documents the scheme and
 holds a test vector.
