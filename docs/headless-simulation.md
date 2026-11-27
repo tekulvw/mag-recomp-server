@@ -38,6 +38,10 @@ How it works:
 - Bot cover spot builds ([bot-cover.md](bot-cover.md)) run on a worker thread
   live; the simulation waits for them instead, so virtual time does not run
   ahead without cover.
+- Spawn-route checks ([bot-active-spawns.md](bot-active-spawns.md#route-checks-run-off-the-world-tick))
+  are queued to a worker thread as live; before each tick the simulation
+  waits for the answers (outside the timed phases), so a check asked for in
+  one tick is always answered on the next.
 - `MAG_SIM_SNAPSHOTS=1` records `sim_bot_snapshot` every 500 ms: each live
   bot's position, drop state and goal. In Acquisition and Domination,
   `in_structure` is true when the bot's standing body penetrates a placed

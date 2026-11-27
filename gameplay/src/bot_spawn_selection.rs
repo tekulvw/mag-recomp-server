@@ -119,6 +119,276 @@ fn point(p: replication::CharacterPosition) -> [f64; 3] {
     [f64::from(p.x), f64::from(p.y), f64::from(p.z)]
 }
 
+/// A queued spawn route is not answered yet. The point is skipped for this
+/// life and neither cached nor reported.
+pub(crate) const SPAWN_ROUTE_PENDING: &str = "bot_spawn_route_pending";
+const SPAWN_ROUTE_PREFETCH_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Which cache a spawn-route job fills: a defender lane spawn (point, lane
+/// objective, population slot) or a point qualification (point, source spawn).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum SpawnRouteKey {
+    Lane(u16, u16, bool),
+    Point(u16, u16),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SpawnRouteKind {
+    /// From a placement to the lane objective.
+    Lane { goal: [f64; 3], slot: bool },
+    /// From the bot's population slot to a placement.
+    Point { home: [f64; 3] },
+}
+
+/// Everything a qualification needs that is not the world itself: navmesh
+/// routes only, so it can run on another thread.
+pub(crate) struct SpawnRouteJob {
+    mesh: std::sync::Arc<navmesh::NavMesh>,
+    rules: Option<fall_damage::Rules>,
+    candidates: Vec<replication::CharacterPosition>,
+    arrival: Arrival,
+    kind: SpawnRouteKind,
+    #[cfg(test)]
+    delay: Option<Duration>,
+}
+
+pub(crate) enum SpawnRouteResult {
+    Lane(Result<LaneSpawn, &'static str>),
+    Point(Result<QualifiedPoint, &'static str>),
+}
+
+struct SpawnRouteAnswer {
+    key: SpawnRouteKey,
+    mesh: std::sync::Arc<navmesh::NavMesh>,
+    gates: Option<(u64, u32)>,
+    result: SpawnRouteResult,
+}
+
+impl SpawnRouteJob {
+    /// One complete route proves the point: for a lane, from a placement to
+    /// near the objective (a planted charge's console may wall off the
+    /// objective's own point); for a point, from the population slot to a
+    /// placement (spawns are often left through one-way drops, so the reverse
+    /// direction is not required). At most `ROUTE_ATTEMPTS` placements on the
+    /// navmesh are tried.
+    fn run(self) -> SpawnRouteResult {
+        #[cfg(test)]
+        if let Some(delay) = self.delay {
+            std::thread::sleep(delay);
+        }
+        let mesh = &*self.mesh;
+        let mut routed = None;
+        let mut attempts = 0;
+        let mut last = "bot_spawn_navmesh_uncovered";
+        for &candidate in &self.candidates {
+            let Ok(component) = mesh.component_id(point(candidate)) else {
+                continue;
+            };
+            if attempts == ROUTE_ATTEMPTS {
+                break;
+            }
+            attempts += 1;
+            let (route, incomplete) = match self.kind {
+                SpawnRouteKind::Lane { goal, .. } => (
+                    spawn_route(
+                        mesh,
+                        self.rules.as_ref(),
+                        point(candidate),
+                        goal,
+                        LANE_GOAL_RADIUS_M,
+                        true,
+                    ),
+                    "bot_lane_route_incomplete",
+                ),
+                SpawnRouteKind::Point { home } => (
+                    spawn_route(
+                        mesh,
+                        self.rules.as_ref(),
+                        home,
+                        point(candidate),
+                        0.5,
+                        false,
+                    ),
+                    "bot_spawn_navmesh_disconnected",
+                ),
+            };
+            match route {
+                Ok(route) if route.status == navmesh::Status::Complete => {
+                    routed = Some((component, route.length_m));
+                    break;
+                }
+                Ok(_) => last = incomplete,
+                Err(reason) => last = reason,
+            }
+        }
+        let routed = routed.ok_or(last);
+        match self.kind {
+            SpawnRouteKind::Lane { slot, .. } => {
+                SpawnRouteResult::Lane(routed.map(|(component, route_m)| {
+                    let positions = if slot {
+                        Vec::new()
+                    } else {
+                        separated(mesh, self.candidates, component)
+                    };
+                    LaneSpawn {
+                        qualified: QualifiedPoint {
+                            positions,
+                            arrival: self.arrival,
+                        },
+                        route_m,
+                    }
+                }))
+            }
+            SpawnRouteKind::Point { .. } => {
+                SpawnRouteResult::Point(routed.map(|(component, _)| QualifiedPoint {
+                    positions: separated(mesh, self.candidates, component),
+                    arrival: self.arrival,
+                }))
+            }
+        }
+    }
+}
+
+fn spawn_route(
+    mesh: &navmesh::NavMesh,
+    rules: Option<&fall_damage::Rules>,
+    from: [f64; 3],
+    to: [f64; 3],
+    radius: f64,
+    beside: bool,
+) -> Result<navmesh::Route, &'static str> {
+    if let Some(rules) = rules {
+        if beside {
+            mesh.route_with_drops_beside(from, to, radius, rules, 400)
+        } else {
+            mesh.route_with_drops(from, to, radius, rules, 400)
+        }
+        .map_err(|e| e.0)
+    } else if mesh.artifact().drop_links.is_empty() {
+        mesh.route_to(from, to, radius, beside).map_err(|e| e.0)
+    } else {
+        Err("bot_navmesh_fall_rules_required")
+    }
+}
+
+/// Spawn-route qualification off the world tick. A qualification that fails
+/// can search the whole navmesh once per placement (a lane wall-off on a
+/// large map costs tens of milliseconds per attempt), and a side's first wave
+/// asks for dozens at once; inline, that held the world for seconds. Jobs run
+/// one at a time on a worker thread and answer on a later tick.
+/// A queued job with the structure gates its caller's caches hold.
+type QueuedSpawnRoute = (SpawnRouteKey, Option<(u64, u32)>, SpawnRouteJob);
+
+pub(crate) struct SpawnRoutes {
+    /// Run jobs on the calling thread (unit tests, unchanged expectations).
+    pub(crate) inline: bool,
+    /// Headless simulation: queue as live, but wait for the answers before
+    /// the next tick so runs stay deterministic.
+    pub(crate) blocking: bool,
+    pub(super) pending: std::collections::BTreeSet<SpawnRouteKey>,
+    pub(super) last_prefetch: Option<Duration>,
+    jobs: Option<std::sync::mpsc::Sender<QueuedSpawnRoute>>,
+    answers: Option<std::sync::mpsc::Receiver<SpawnRouteAnswer>>,
+    held: Vec<SpawnRouteAnswer>,
+    #[cfg(test)]
+    pub(crate) test_delay: Option<Duration>,
+}
+// Not derived: unit tests route inline by default (`cfg!(test)`).
+#[allow(clippy::derivable_impls)]
+impl Default for SpawnRoutes {
+    fn default() -> Self {
+        Self {
+            inline: cfg!(test),
+            blocking: false,
+            pending: Default::default(),
+            last_prefetch: None,
+            jobs: None,
+            answers: None,
+            held: Vec::new(),
+            #[cfg(test)]
+            test_delay: None,
+        }
+    }
+}
+impl SpawnRoutes {
+    /// Queue a job; give it back when no worker thread can take it.
+    fn queue(
+        &mut self,
+        key: SpawnRouteKey,
+        gates: Option<(u64, u32)>,
+        job: SpawnRouteJob,
+    ) -> Result<(), Box<SpawnRouteJob>> {
+        if self.jobs.is_none() {
+            let (jobs, inbox) = std::sync::mpsc::channel::<QueuedSpawnRoute>();
+            let (outbox, answers) = std::sync::mpsc::channel();
+            let worker = std::thread::Builder::new()
+                .name("bot-spawn-routes".into())
+                .spawn(move || {
+                    for (key, gates, job) in inbox {
+                        let mesh = job.mesh.clone();
+                        let result = job.run();
+                        if outbox
+                            .send(SpawnRouteAnswer {
+                                key,
+                                mesh,
+                                gates,
+                                result,
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+            if worker.is_err() {
+                return Err(Box::new(job));
+            }
+            self.jobs = Some(jobs);
+            self.answers = Some(answers);
+        }
+        let sender = self.jobs.as_ref().expect("started");
+        match sender.send((key, gates, job)) {
+            Ok(()) => {
+                self.pending.insert(key);
+                Ok(())
+            }
+            Err(std::sync::mpsc::SendError((_, _, job))) => {
+                self.jobs = None;
+                self.answers = None;
+                Err(Box::new(job))
+            }
+        }
+    }
+    fn answered(&mut self) -> Vec<SpawnRouteAnswer> {
+        let mut answers = std::mem::take(&mut self.held);
+        if let Some(receiver) = &self.answers {
+            answers.extend(receiver.try_iter());
+        }
+        answers
+    }
+    fn wait_for_pending(&mut self) {
+        let Some(receiver) = &self.answers else {
+            return;
+        };
+        while self
+            .pending
+            .iter()
+            .any(|key| !self.held.iter().any(|answer| answer.key == *key))
+        {
+            match receiver.recv() {
+                Ok(answer) => self.held.push(answer),
+                Err(_) => break,
+            }
+        }
+    }
+    /// Drop every queued key; answers still in flight are discarded.
+    pub(crate) fn forget(&mut self) {
+        self.pending.clear();
+        self.held.clear();
+        self.last_prefetch = None;
+    }
+}
+
 fn ring(radius_steps: i32) -> impl Iterator<Item = [f64; 2]> {
     (1..=radius_steps).flat_map(|radius| {
         (-radius..=radius).flat_map(move |x| {
@@ -264,6 +534,7 @@ impl<W: Write> Engine<W> {
             return slot_choice(actors);
         };
         self.refresh_spawn_route_caches();
+        self.collect_bot_spawn_routes(receipts);
         if self.navmesh_world.is_some()
             && let Some(lane) = self.bot_defended_lane(squad)
         {
@@ -341,6 +612,7 @@ impl<W: Write> Engine<W> {
             self.bot_registry.spawn_qualification.clear();
             self.bot_registry.lane_spawns.clear();
             self.bot_registry.spawn_route_gates = gates;
+            self.bot_spawn_routes.forget();
         }
     }
 
@@ -373,27 +645,7 @@ impl<W: Write> Engine<W> {
         lane: (u16, [f64; 3]),
         receipts: &mut Vec<Value>,
     ) -> Vec<(u16, Vec<replication::CharacterPosition>, Arrival)> {
-        let mut points = self.bot_spawn_order(squad, home);
-        if let Some(available) = self
-            .spawn_catalog
-            .as_ref()
-            .and_then(|c| c.available_for_squad(squad))
-            .map(<[u16]>::to_vec)
-        {
-            for index in available {
-                if !points.contains(&index) && self.bot_hospital_point(squad, index) {
-                    points.push(index);
-                }
-            }
-        }
-        if let Some(index) = self
-            .spawn_catalog
-            .as_ref()
-            .and_then(|c| c.native_unselectable_default(squad))
-            && !points.contains(&index)
-        {
-            points.push(index);
-        }
+        let points = self.bot_defender_points(squad, home);
         let mut ranked = Vec::new();
         for index in points {
             if let Ok(spawn) = self.lane_spawn(index, home, home_position, lane, receipts) {
@@ -425,8 +677,101 @@ impl<W: Write> Engine<W> {
         order
     }
 
+    /// Every point a defending squad may use now: its ordinary order, then an
+    /// operational hospital of its side and a natively routed field hospital.
+    fn bot_defender_points(&self, squad: u16, home: u16) -> Vec<u16> {
+        let mut points = self.bot_spawn_order(squad, home);
+        if let Some(available) = self
+            .spawn_catalog
+            .as_ref()
+            .and_then(|c| c.available_for_squad(squad))
+            .map(<[u16]>::to_vec)
+        {
+            for index in available {
+                if !points.contains(&index) && self.bot_hospital_point(squad, index) {
+                    points.push(index);
+                }
+            }
+        }
+        if let Some(index) = self
+            .spawn_catalog
+            .as_ref()
+            .and_then(|c| c.native_unselectable_default(squad))
+            && !points.contains(&index)
+        {
+            points.push(index);
+        }
+        points
+    }
+
+    /// Queue the defender lane routes the population will ask for, while
+    /// humans wait for the first wave, so the first defender lives can already
+    /// use their forward points. At most once a second; never routes inline.
+    pub(crate) fn prefetch_bot_spawn_routes(
+        &mut self,
+        now: Duration,
+        wall: u64,
+    ) -> Result<(), &'static str> {
+        if self.bot_spawn_routes.inline
+            || self
+                .bot_spawn_routes
+                .last_prefetch
+                .is_some_and(|last| now < last + SPAWN_ROUTE_PREFETCH_INTERVAL)
+            || self.navmesh_world.is_none()
+        {
+            return Ok(());
+        }
+        self.bot_spawn_routes.last_prefetch = Some(now);
+        // Squad fill ranking reads this before the first bots are placed.
+        self.cache_squad_routes(wall)?;
+        if !self.bot_population_follows_active_spawns() {
+            return Ok(());
+        }
+        self.refresh_spawn_route_caches();
+        let slots: Vec<_> = self
+            .bot_registry
+            .config
+            .as_ref()
+            .map(|c| {
+                c.slots
+                    .iter()
+                    .filter_map(|s| Some((s.squad?, s.source_spawn?, s.position)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut seen = std::collections::BTreeSet::new();
+        for (squad, home, position) in slots {
+            let Some(lane) = self.bot_defended_lane(squad) else {
+                continue;
+            };
+            for index in self.bot_defender_points(squad, home) {
+                let slot = index == home;
+                let key = (index, lane.0, slot);
+                let route_key = SpawnRouteKey::Lane(index, lane.0, slot);
+                if !seen.insert(key)
+                    || self.bot_registry.lane_spawns.contains_key(&key)
+                    || self.bot_spawn_routes.pending.contains(&route_key)
+                {
+                    continue;
+                }
+                // Points without placements are cached (and reported) when a
+                // bot asks; only routes are queued here. Receipts are written
+                // when a bot's spawn choice collects the answer.
+                if let Ok(job) = self.lane_route_job(index, slot.then_some(position), lane.1) {
+                    let gates = self.bot_registry.spawn_route_gates;
+                    if self.bot_spawn_routes.queue(route_key, gates, job).is_err() {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Cached per (point, lane objective, population slot) until the
-    /// structure gates change.
+    /// structure gates change. An uncached key is routed on the spawn-route
+    /// worker; until it answers the point is `bot_spawn_route_pending`, which
+    /// is neither cached nor reported, so the bot uses its next point.
     fn lane_spawn(
         &mut self,
         index: u16,
@@ -437,10 +782,32 @@ impl<W: Write> Engine<W> {
     ) -> Result<LaneSpawn, &'static str> {
         let slot = index == home;
         let key = (index, objective, slot);
+        self.collect_bot_spawn_routes(receipts);
         if let Some(cached) = self.bot_registry.lane_spawns.get(&key) {
             return cached.clone();
         }
-        let result = self.lane_spawn_uncached(index, slot.then_some(home_position), goal);
+        let route_key = SpawnRouteKey::Lane(index, objective, slot);
+        if self.bot_spawn_routes.pending.contains(&route_key) {
+            return Err(SPAWN_ROUTE_PENDING);
+        }
+        let result = match self.lane_route_job(index, slot.then_some(home_position), goal) {
+            Ok(job) => match self.run_or_queue_spawn_route(route_key, job) {
+                Some(SpawnRouteResult::Lane(result)) => result,
+                Some(SpawnRouteResult::Point(_)) => unreachable!("lane job"),
+                None => return Err(SPAWN_ROUTE_PENDING),
+            },
+            Err(reason) => Err(reason),
+        };
+        self.store_lane_spawn(key, result.clone(), receipts);
+        result
+    }
+
+    fn store_lane_spawn(
+        &mut self,
+        (index, objective, slot): (u16, u16, bool),
+        result: Result<LaneSpawn, &'static str>,
+        receipts: &mut Vec<Value>,
+    ) {
         match &result {
             Ok(spawn) => receipts.push(json!({"op":"bot_lane_spawn_qualified",
                 "spawn_point_index":index,"objective":objective,"population_slot":slot,
@@ -450,16 +817,20 @@ impl<W: Write> Engine<W> {
                 "spawn_point_index":index,"objective":objective,"population_slot":slot,
                 "reason":reason})),
         }
-        self.bot_registry.lane_spawns.insert(key, result.clone());
-        result
+        self.bot_registry
+            .lane_spawns
+            .insert((index, objective, slot), result);
     }
 
-    fn lane_spawn_uncached(
+    /// The world-side half of a lane qualification: the placements to try
+    /// (cheap ground probes against the collision world). The routes run in
+    /// `SpawnRouteJob::run`.
+    fn lane_route_job(
         &self,
         index: u16,
         slot: Option<replication::CharacterPosition>,
         goal: [f64; 3],
-    ) -> Result<LaneSpawn, &'static str> {
+    ) -> Result<SpawnRouteJob, &'static str> {
         let mesh = self
             .navmesh_world
             .clone()
@@ -468,61 +839,74 @@ impl<W: Write> Engine<W> {
             Some(position) => (vec![position], Arrival::PopulationSlot),
             None => self.bot_spawn_candidates(index)?,
         };
-        // A complete route from a placement to the objective proves bots can
-        // leave the point and reach their lane from it.
-        let mut routed = None;
-        let mut attempts = 0;
-        let mut last = "bot_spawn_navmesh_uncovered";
-        for &candidate in &candidates {
-            let Ok(component) = mesh.component_id(point(candidate)) else {
-                continue;
-            };
-            if attempts == ROUTE_ATTEMPTS {
-                break;
-            }
-            attempts += 1;
-            // Near the objective is enough: a planted charge's console may
-            // wall off the objective's own point.
-            match self.bot_route(&mesh, point(candidate), goal, LANE_GOAL_RADIUS_M, true) {
-                Ok(route) if route.status == navmesh::Status::Complete => {
-                    routed = Some((component, route.length_m));
-                    break;
-                }
-                Ok(_) => last = "bot_lane_route_incomplete",
-                Err(reason) => last = reason,
-            }
-        }
-        let (component, route_m) = routed.ok_or(last)?;
-        let positions = if slot.is_some() {
-            Vec::new()
-        } else {
-            separated(&mesh, candidates, component)
-        };
-        Ok(LaneSpawn {
-            qualified: QualifiedPoint { positions, arrival },
-            route_m,
+        Ok(SpawnRouteJob {
+            mesh,
+            rules: self.fall_damage_rules.clone(),
+            candidates,
+            arrival,
+            kind: SpawnRouteKind::Lane {
+                goal,
+                slot: slot.is_some(),
+            },
+            #[cfg(test)]
+            delay: self.bot_spawn_routes.test_delay,
         })
     }
 
-    fn bot_route(
-        &self,
-        mesh: &navmesh::NavMesh,
-        from: [f64; 3],
-        to: [f64; 3],
-        radius: f64,
-        beside: bool,
-    ) -> Result<navmesh::Route, &'static str> {
-        if let Some(rules) = &self.fall_damage_rules {
-            if beside {
-                mesh.route_with_drops_beside(from, to, radius, rules, 400)
-            } else {
-                mesh.route_with_drops(from, to, radius, rules, 400)
+    /// Run a job now (tests, or no worker thread), or queue it. `None` means
+    /// queued: the answer arrives through `collect_bot_spawn_routes`.
+    fn run_or_queue_spawn_route(
+        &mut self,
+        key: SpawnRouteKey,
+        job: SpawnRouteJob,
+    ) -> Option<SpawnRouteResult> {
+        if self.bot_spawn_routes.inline {
+            return Some(job.run());
+        }
+        let gates = self.bot_registry.spawn_route_gates;
+        match self.bot_spawn_routes.queue(key, gates, job) {
+            Ok(()) => None,
+            Err(job) => Some(job.run()),
+        }
+    }
+
+    /// Store every answered spawn-route job that is still current: same
+    /// navmesh and the structure gates its caches were routed through.
+    pub(crate) fn collect_bot_spawn_routes(&mut self, receipts: &mut Vec<Value>) {
+        let gates = self.bot_registry.spawn_route_gates;
+        for answer in self.bot_spawn_routes.answered() {
+            if !self.bot_spawn_routes.pending.remove(&answer.key)
+                || !self
+                    .navmesh_world
+                    .as_ref()
+                    .is_some_and(|mesh| std::sync::Arc::ptr_eq(mesh, &answer.mesh))
+                || answer.gates != gates
+            {
+                continue;
             }
-            .map_err(|e| e.0)
-        } else if mesh.artifact().drop_links.is_empty() {
-            mesh.route_to(from, to, radius, beside).map_err(|e| e.0)
-        } else {
-            Err("bot_navmesh_fall_rules_required")
+            match (answer.key, answer.result) {
+                (SpawnRouteKey::Lane(index, objective, slot), SpawnRouteResult::Lane(result)) => {
+                    self.store_lane_spawn((index, objective, slot), result, receipts)
+                }
+                (SpawnRouteKey::Point(index, home), SpawnRouteResult::Point(result)) => {
+                    self.store_spawn_qualification((index, home), result, receipts)
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Headless simulation: wait (outside the timed phases) for queued spawn
+    /// routes, so each is stored on the tick after it was asked for whatever
+    /// the host's speed.
+    pub(crate) fn wait_bot_spawn_routes(&mut self, wall: u64) -> Result<(), &'static str> {
+        if !self.bot_spawn_routes.blocking {
+            return Ok(());
+        }
+        self.bot_spawn_routes.wait_for_pending();
+        match self.wait_bot_squad_routes() {
+            Some(routes) => self.apply_squad_routes(routes, wall),
+            None => Ok(()),
         }
     }
 
@@ -534,10 +918,32 @@ impl<W: Write> Engine<W> {
         home_position: replication::CharacterPosition,
         receipts: &mut Vec<Value>,
     ) -> Result<QualifiedPoint, &'static str> {
+        self.collect_bot_spawn_routes(receipts);
         if let Some(cached) = self.bot_registry.spawn_qualification.get(&(index, home)) {
             return cached.clone();
         }
-        let result = self.qualify_bot_spawn_uncached(index, home_position);
+        let route_key = SpawnRouteKey::Point(index, home);
+        if self.bot_spawn_routes.pending.contains(&route_key) {
+            return Err(SPAWN_ROUTE_PENDING);
+        }
+        let result = match self.point_route_job(index, home_position) {
+            Ok(job) => match self.run_or_queue_spawn_route(route_key, job) {
+                Some(SpawnRouteResult::Point(result)) => result,
+                Some(SpawnRouteResult::Lane(_)) => unreachable!("point job"),
+                None => return Err(SPAWN_ROUTE_PENDING),
+            },
+            Err(reason) => Err(reason),
+        };
+        self.store_spawn_qualification((index, home), result.clone(), receipts);
+        result
+    }
+
+    fn store_spawn_qualification(
+        &mut self,
+        (index, home): (u16, u16),
+        result: Result<QualifiedPoint, &'static str>,
+        receipts: &mut Vec<Value>,
+    ) {
         match &result {
             Ok(qualified) => receipts.push(json!({"op":"bot_spawn_point_qualified",
                 "spawn_point_index":index,"source_spawn":home,
@@ -547,8 +953,7 @@ impl<W: Write> Engine<W> {
         }
         self.bot_registry
             .spawn_qualification
-            .insert((index, home), result.clone());
-        result
+            .insert((index, home), result);
     }
 
     /// Grounded, collision-covered placements for a point before routing:
@@ -671,44 +1076,26 @@ impl<W: Write> Engine<W> {
         ))
     }
 
-    fn qualify_bot_spawn_uncached(
+    fn point_route_job(
         &self,
         index: u16,
         home_position: replication::CharacterPosition,
-    ) -> Result<QualifiedPoint, &'static str> {
+    ) -> Result<SpawnRouteJob, &'static str> {
         let mesh = self
             .navmesh_world
             .clone()
             .ok_or("bot_navmesh_unavailable")?;
         let (candidates, arrival) = self.bot_spawn_candidates(index)?;
-        // One complete route from the population slot proves the landing
-        // area belongs to the walking network bots reach from their spawn.
-        // (Spawns are often left through one-way drops, so the reverse
-        // direction is not required.)
-        let mut routed = None;
-        let mut attempts = 0;
-        let mut last = "bot_spawn_navmesh_uncovered";
-        for &candidate in &candidates {
-            let Ok(component) = mesh.component_id(point(candidate)) else {
-                continue;
-            };
-            if attempts == ROUTE_ATTEMPTS {
-                break;
-            }
-            attempts += 1;
-            match self.bot_route(&mesh, point(home_position), point(candidate), 0.5, false) {
-                Ok(route) if route.status == navmesh::Status::Complete => {
-                    routed = Some(component);
-                    break;
-                }
-                Ok(_) => last = "bot_spawn_navmesh_disconnected",
-                Err(reason) => last = reason,
-            }
-        }
-        let component = routed.ok_or(last)?;
-        Ok(QualifiedPoint {
-            positions: separated(&mesh, candidates, component),
+        Ok(SpawnRouteJob {
+            mesh,
+            rules: self.fall_damage_rules.clone(),
+            candidates,
             arrival,
+            kind: SpawnRouteKind::Point {
+                home: point(home_position),
+            },
+            #[cfg(test)]
+            delay: self.bot_spawn_routes.test_delay,
         })
     }
 }
