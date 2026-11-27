@@ -97,6 +97,7 @@ fn upstream_status(e: &GameAdminError) -> StatusCode {
         GameAdminError::NotFound => StatusCode::NOT_FOUND,
         GameAdminError::Refused(_) => StatusCode::CONFLICT,
         GameAdminError::BadRequest(_) => StatusCode::BAD_REQUEST,
+        GameAdminError::Uncertain { .. } => StatusCode::GATEWAY_TIMEOUT,
         _ => StatusCode::BAD_GATEWAY,
     }
 }
@@ -329,6 +330,11 @@ struct LevelPage {
     change: Option<ChangeView>,
     refusal: Option<RefusalView>,
     error: Option<String>,
+    /// An applied change the game server did not confirm; it may have been made.
+    uncertain: Option<String>,
+    /// The level read back after an unconfirmed change, or why it could not be read.
+    now_level: Option<u32>,
+    now_error: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -398,6 +404,9 @@ async fn set_level(
         change: None,
         refusal: None,
         error: None,
+        uncertain: None,
+        now_level: None,
+        now_error: None,
     };
     let change = match result {
         Ok(change) => change,
@@ -405,6 +414,24 @@ async fn set_level(
         Err(GameAdminError::Refused(r)) => {
             view.refusal = Some(r.into());
             return Ok(page(StatusCode::CONFLICT, view));
+        }
+        Err(e @ GameAdminError::Uncertain { .. }) => {
+            // Read back what the game server holds now, and keep the attempt in the audit log.
+            match api.character(&actor_label(&actor), &view.account).await {
+                Ok(Some(c)) => view.now_level = Some(c.level),
+                Ok(None) => view.now_error = Some("the game server has no character for it".into()),
+                Err(read) => view.now_error = Some(read.to_string()),
+            }
+            staff::log(
+                &state.pool,
+                actor.account(),
+                "set level",
+                &view.account,
+                &format!("to {level}, unconfirmed: the game server did not confirm it"),
+            )
+            .await?;
+            view.uncertain = Some(e.to_string());
+            return Ok(page(upstream_status(&e), view));
         }
         Err(e) => {
             let status = upstream_status(&e);
@@ -460,6 +487,11 @@ struct VoicePage {
     after: Option<SanctionRow>,
     refusal: Option<RefusalView>,
     error: Option<String>,
+    /// An applied change the game server did not confirm; it may have been made.
+    uncertain: Option<String>,
+    /// The account's sanctions read back after an unconfirmed change, or why they could not be read.
+    now: Vec<SanctionRow>,
+    now_error: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -568,6 +600,9 @@ async fn change_voice(
         after: None,
         refusal: None,
         error: None,
+        uncertain: None,
+        now: Vec::new(),
+        now_error: None,
     };
     let change = match result {
         Ok(change) => change,
@@ -575,6 +610,25 @@ async fn change_voice(
         Err(GameAdminError::Refused(r)) => {
             view.refusal = Some(r.into());
             return Ok(page(StatusCode::CONFLICT, view));
+        }
+        Err(e @ GameAdminError::Uncertain { .. }) => {
+            // Read back what the game server holds now, and keep the attempt in the audit log.
+            let (all, read_error) = sanctions(api, &actor_label(&actor)).await;
+            view.now = all
+                .into_iter()
+                .filter(|s| s.account == view.account)
+                .collect();
+            view.now_error = read_error;
+            staff::log(
+                &state.pool,
+                actor.account(),
+                &format!("voice {}", action.as_str()),
+                &view.account,
+                "unconfirmed: the game server did not confirm it",
+            )
+            .await?;
+            view.uncertain = Some(e.to_string());
+            return Ok(page(upstream_status(&e), view));
         }
         Err(e) => {
             let status = upstream_status(&e);

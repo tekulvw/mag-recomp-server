@@ -8,6 +8,22 @@
   <p><strong>The game server refused the change</strong> ({{ r.code }}): {{ r.message }}</p>
   <p>{{ r.advice }}</p>
 </div>
+{% else if let Some(u) = uncertain %}
+<p class="alert">{{ u }}</p>
+<h2>Now on the game server</h2>
+{% if let Some(e) = now_error %}
+<p class="alert">The current state could not be read back: {{ e }}</p>
+{% else if now.is_empty() %}
+<p class="quiet">{{ account }} has no active voice mute or ban.</p>
+{% else %}
+<table>
+  <thead><tr><th>Kind</th><th>Ends</th><th>Since</th><th>By</th><th>Reason</th></tr></thead>
+  <tbody>
+  {% for s in now %}<tr><td>{{ s.kind }}</td><td>{{ s.ends }}</td><td>{{ s.since }}</td><td>{{ s.operator }}</td><td>{{ s.reason }}</td></tr>
+  {% endfor %}</tbody>
+</table>
+{% endif %}
+<p><a href="/admin/game/characters/{{ account|urlencode_strict }}">Refresh to check</a> before trying again.</p>
 {% else if let Some(e) = error %}
 <p class="alert">{{ e }} Nothing was changed.</p>
 {% else %}

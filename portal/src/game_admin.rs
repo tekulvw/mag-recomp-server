@@ -33,7 +33,12 @@ pub const SIGNATURE_HEADER: &str = "x-mag-admin-signature";
 
 /// Shortest accepted shared secret, in bytes.
 pub const MIN_SECRET_LEN: usize = 32;
-const TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a read, or a dry run that saves nothing, may take.
+pub const READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a change that is applied may take. The game server can be slow to confirm a save that
+/// it has made (a database waiting on its standby), so writes get longer than reads, and a write
+/// that runs out of time is reported as unconfirmed, never as "nothing changed".
+pub const WRITE_TIMEOUT: Duration = Duration::from_secs(15);
 /// Largest response body read; the character list is the biggest answer.
 const MAX_RESPONSE_BYTES: usize = 4 << 20;
 /// How long [`GameAdmin::character_keys`] reuses a character list it fetched.
@@ -330,7 +335,13 @@ pub enum GameAdminError {
     )]
     Unauthorized,
     #[error("Could not reach the game server's admin API at {url}: {reason}.")]
-    Unreachable { url: String, reason: &'static str },
+    Unreachable { url: String, reason: String },
+    /// A change was sent but not confirmed: it may or may not have been applied.
+    #[error(
+        "The request timed out; it may have been applied. The game server at {url} did not \
+         confirm the change ({reason}). Refresh to check before trying again."
+    )]
+    Uncertain { url: String, reason: String },
     #[error("The game server's admin API gave an unexpected answer: {0}.")]
     Unexpected(String),
     #[error("The game server has no character for that account.")]
@@ -349,6 +360,8 @@ pub struct GameAdmin {
     http: reqwest::Client,
     /// The character keys, shared by every clone, for player name lookups.
     keys: Arc<Mutex<Option<CachedKeys>>>,
+    read_timeout: Duration,
+    write_timeout: Duration,
 }
 
 impl fmt::Debug for GameAdmin {
@@ -379,9 +392,9 @@ impl GameAdmin {
         if secret.len() < MIN_SECRET_LEN {
             bail!("the game admin secret must be at least {MIN_SECRET_LEN} bytes");
         }
+        // Each request sets its own overall timeout (reads and writes differ).
         let http = reqwest::Client::builder()
-            .timeout(TIMEOUT)
-            .connect_timeout(TIMEOUT)
+            .connect_timeout(READ_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
         Ok(Self {
@@ -389,7 +402,16 @@ impl GameAdmin {
             secret,
             http,
             keys: Arc::new(Mutex::new(None)),
+            read_timeout: READ_TIMEOUT,
+            write_timeout: WRITE_TIMEOUT,
         })
+    }
+
+    /// Other timeouts than [`READ_TIMEOUT`] and [`WRITE_TIMEOUT`] (synthetic tests).
+    pub fn with_timeouts(mut self, read: Duration, write: Duration) -> Self {
+        self.read_timeout = read;
+        self.write_timeout = write;
+        self
     }
 
     /// From the two settings, which must be given together. Empty values count as unset.
@@ -473,7 +495,14 @@ impl GameAdmin {
 
     async fn status_logged(&self, actor: &str, warn: bool) -> Result<ServerStatus, GameAdminError> {
         let (status, body) = self
-            .send_logged(Method::GET, "/admin/v1/status", Vec::new(), actor, warn)
+            .send_logged(
+                Method::GET,
+                "/admin/v1/status",
+                Vec::new(),
+                actor,
+                warn,
+                false,
+            )
             .await?;
         match status {
             StatusCode::OK => parse(&body, "the server status"),
@@ -519,7 +548,9 @@ impl GameAdmin {
         }
         let path = format!("/admin/v1/characters/{}/level", path_segment(account)?);
         let body = serde_json::to_vec(&Body { level, apply }).expect("plain JSON");
-        let (status, body) = self.send(Method::POST, &path, body, actor).await?;
+        let (status, body) = self
+            .send_logged(Method::POST, &path, body, actor, true, apply)
+            .await?;
         match status {
             StatusCode::OK => {
                 let change: LevelChange = parse(&body, "the level change")?;
@@ -581,7 +612,9 @@ impl GameAdmin {
             duration_minutes,
         })
         .expect("plain JSON");
-        let (status, body) = self.send(Method::POST, &path, body, actor).await?;
+        let (status, body) = self
+            .send_logged(Method::POST, &path, body, actor, true, apply)
+            .await?;
         match status {
             StatusCode::OK => {
                 let change: VoiceChange = parse(&body, "the voice change")?;
@@ -606,9 +639,13 @@ impl GameAdmin {
         body: Vec<u8>,
         actor: &str,
     ) -> Result<(StatusCode, Vec<u8>), GameAdminError> {
-        self.send_logged(method, path, body, actor, true).await
+        self.send_logged(method, path, body, actor, true, false)
+            .await
     }
 
+    /// `applies` marks a request that changes something: it gets [`WRITE_TIMEOUT`], and once it
+    /// may have reached the game server, a timeout or a dropped answer is
+    /// [`GameAdminError::Uncertain`] rather than [`GameAdminError::Unreachable`].
     async fn send_logged(
         &self,
         method: Method,
@@ -616,11 +653,17 @@ impl GameAdmin {
         body: Vec<u8>,
         actor: &str,
         warn: bool,
+        applies: bool,
     ) -> Result<(StatusCode, Vec<u8>), GameAdminError> {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
+        let timeout = if applies {
+            self.write_timeout
+        } else {
+            self.read_timeout
+        };
         let nonce = tokens::b64url(&tokens::random_bytes::<18>());
         let signature = signature(
             &self.secret,
@@ -636,7 +679,8 @@ impl GameAdmin {
             .header(TIMESTAMP_HEADER, timestamp.to_string())
             .header(NONCE_HEADER, nonce)
             .header(ACTOR_HEADER, actor)
-            .header(SIGNATURE_HEADER, signature);
+            .header(SIGNATURE_HEADER, signature)
+            .timeout(timeout);
         if !body.is_empty() {
             request = request
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -644,12 +688,22 @@ impl GameAdmin {
         }
         let unreachable = |e: reqwest::Error| {
             let reason = if e.is_timeout() {
-                "no answer within 5 seconds"
+                format!("no answer within {}", seconds(timeout))
             } else if e.is_connect() {
-                "the connection failed"
+                "the connection failed".to_owned()
             } else {
-                "the request failed"
+                "the request failed".to_owned()
             };
+            // A change that may have reached the game server is not "unreachable": it may be saved.
+            if applies && !e.is_connect() {
+                if warn {
+                    tracing::warn!(url = %self.base_url, reason, "game admin API did not confirm a change");
+                }
+                return GameAdminError::Uncertain {
+                    url: self.base_url.clone(),
+                    reason,
+                };
+            }
             if warn {
                 tracing::warn!(url = %self.base_url, reason, "game admin API unreachable");
             }
@@ -680,8 +734,32 @@ impl GameAdmin {
             }
             return Err(GameAdminError::Unauthorized);
         }
+        // The game server's own "the database stopped answering while saving" (HTTP 503).
+        if applies && status == StatusCode::SERVICE_UNAVAILABLE && outcome_unknown(&bytes) {
+            if warn {
+                tracing::warn!(url = %self.base_url, "game admin API could not confirm a change");
+            }
+            return Err(GameAdminError::Uncertain {
+                url: self.base_url.clone(),
+                reason: "its database stopped answering while saving".into(),
+            });
+        }
         Ok((status, bytes.to_vec()))
     }
+}
+
+/// "5 seconds", "1 second" or "500 ms".
+fn seconds(d: Duration) -> String {
+    match d.as_secs() {
+        0 => format!("{} ms", d.as_millis()),
+        1 => "1 second".into(),
+        n => format!("{n} seconds"),
+    }
+}
+
+/// The game server's 503 body for a save whose outcome it does not know.
+fn outcome_unknown(body: &[u8]) -> bool {
+    serde_json::from_slice::<ErrorBody>(body).is_ok_and(|e| e.error == "outcome_unknown")
 }
 
 /// The account as a URL path segment: lowercase letters, digits, `-` and `_` need no escaping.
@@ -847,12 +925,35 @@ mod tests {
             GameAdminError::Unauthorized,
             GameAdminError::Unreachable {
                 url: "http://host".into(),
-                reason: "the connection failed",
+                reason: "the connection failed".into(),
+            },
+            GameAdminError::Uncertain {
+                url: "http://host".into(),
+                reason: "no answer within 15 seconds".into(),
             },
             refusal,
         ] {
             assert!(!e.to_string().contains("0123456789abcdef"));
         }
+    }
+
+    #[test]
+    fn write_outcomes() {
+        assert_eq!(seconds(Duration::from_secs(5)), "5 seconds");
+        assert_eq!(seconds(Duration::from_secs(1)), "1 second");
+        assert_eq!(seconds(Duration::from_millis(300)), "300 ms");
+        assert!(outcome_unknown(
+            br#"{"error":"outcome_unknown","message":"x"}"#
+        ));
+        assert!(!outcome_unknown(br#"{"error":"internal_error"}"#));
+        assert!(!outcome_unknown(b"not json"));
+        let text = GameAdminError::Uncertain {
+            url: "http://host".into(),
+            reason: "no answer within 15 seconds".into(),
+        }
+        .to_string();
+        assert!(text.contains("timed out; it may have been applied") && text.contains("Refresh"));
+        assert!(!text.contains("Could not reach"));
     }
 
     #[test]

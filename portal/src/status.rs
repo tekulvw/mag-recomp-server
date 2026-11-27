@@ -1178,7 +1178,7 @@ mod tests {
             1,
             Err(GameAdminError::Unreachable {
                 url: "http://medius.example.test:10490".into(),
-                reason: "the connection failed",
+                reason: "the connection failed".into(),
             }),
             at(0),
         );

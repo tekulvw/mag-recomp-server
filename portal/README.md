@@ -172,7 +172,10 @@ Moderators and above can also **mute or ban an account's in-match voice** from i
 front page lists every active voice mute and ban. These work while the player is signed in, follow
 the same preview-then-confirm steps, take effect in the running match at once and are written to the
 audit log; the game server journals them too (docs/admin-cli.md, "Voice moderation"). A game server
-without voice moderation shows a note instead of the form. Each
+without voice moderation shows a note instead of the form. Reads and previews wait 5 seconds for
+the game server; an applied change waits 15. A change the game server does not confirm in time (or
+answers `outcome_unknown`) may still have been made: the page says so, reads the state back, shows
+it, and writes the attempt to the audit log as unconfirmed, instead of "nothing was changed". Each
 request is signed with HMAC-SHA256 over `METHOD\nPATH_AND_QUERY\nTIMESTAMP\nNONCE\nhex(SHA-256(body))`
 and names the staff member in `X-Mag-Admin-Actor`; `src/game_admin.rs` documents the scheme and
 holds a test vector.
