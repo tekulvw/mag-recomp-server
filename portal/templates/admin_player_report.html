@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Player report{% endblock %}
+{% block content %}
+{% include "admin_nav.html" %}
+<h1>Player report {{ id }}</h1>
+<dl>
+  <dt>Player</dt><dd><strong>{{ target_name }}</strong>{% if let Some(href) = game_href %} · <a href="{{ href }}">character</a> (voice mute and ban, level){% endif %}{% if let Some(aid) = target_account %} · <a href="/admin/users/{{ aid }}">user</a> (account ban){% else %} · <span class="quiet">no portal account holds this name</span>{% endif %}</dd>
+  <dt>Reason</dt><dd>{{ reason }}</dd>
+  <dt>Filed</dt><dd>{{ filed }}</dd>
+  <dt>Happened</dt><dd>{% if let Some(o) = occurred %}about {{ o }}{% else %}<span class="quiet">not given</span>{% endif %}</dd>
+  <dt>Reporter</dt><dd>{% if let Some(rid) = reporter_id %}<a href="/admin/users/{{ rid }}">{{ reporter }}</a>{% else %}<span class="quiet">{{ reporter }}</span>{% endif %} <span class="quiet">(staff only; never shown to the player)</span></dd>
+  <dt>Status</dt><dd>{{ status }}{% if let Some(r) = reviewed %} · {{ r }}{% endif %}</dd>
+</dl>
+<h2>What happened</h2>
+<p class="comment">{{ description }}</p>
+{% if let Some(n) = note %}<h2>Moderator note</h2><p class="comment">{{ n }}</p>{% endif %}
+
+<h2>Review</h2>
+{% if let Some(why) = blocked %}<p class="alert">{{ why }}</p>{% else %}
+{% if open %}
+<form method="post" action="/admin/player-reports/{{ id }}/review" class="stack">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>Note (staff only)
+    <textarea name="note" rows="3" maxlength="{{ max_note }}" required></textarea></label>
+  <div class="row">
+    <button name="action" value="actioned">Mark actioned</button>
+    <button name="action" value="dismissed" class="secondary">Dismiss</button>
+  </div>
+</form>
+{% else %}
+<form method="post" action="/admin/player-reports/{{ id }}/review" class="stack">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>Note (optional, staff only)
+    <textarea name="note" rows="2" maxlength="{{ max_note }}"></textarea></label>
+  <button name="action" value="open" class="secondary">Reopen</button>
+</form>
+{% endif %}
+{% endif %}
+
+<h2>Other reports about {{ target_name }}</h2>
+{% if others.is_empty() %}<p class="quiet">None.</p>{% else %}
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Filed</th><th>Reason</th><th>Status</th><th>Reporter</th><th>Description</th><th></th></tr></thead>
+  <tbody>
+  {% for r in others %}
+  <tr><td>{{ r.filed }}</td><td>{{ r.reason }}</td><td>{{ r.status }}</td><td>{% if let Some(rid) = r.reporter_id %}<a href="/admin/users/{{ rid }}">{{ r.reporter }}</a>{% else %}<span class="quiet">{{ r.reporter }}</span>{% endif %}</td><td>{{ r.preview }}</td><td><a href="/admin/player-reports/{{ r.id }}">Review</a></td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+<p><a href="/admin/player-reports">All player reports</a></p>
+{% endblock %}

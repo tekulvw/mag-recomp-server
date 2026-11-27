@@ -8,10 +8,12 @@ and the [ticket format](../docs/portal-ticket.md). Launchers also send performan
 reports with their logs: see [launcher reports](../docs/portal-reports.md). The home page shows each game server's status
 (counts only, cached and polled in the background; see [server status](../docs/portal-status.md)). Players keep a
 friends list (requests, blocks) at `/friends`, and game clients relay presence through the
-portal: see [friends and presence](../docs/portal-social.md).
+portal: see [friends and presence](../docs/portal-social.md). Players report other players'
+conduct at `/reports/new` for moderators to review: see [player reports](../docs/portal-player-reports.md).
 
 The site is server-rendered HTML. Its only JavaScript, `static/status.js`, keeps the home and
-status pages' server status current without a reload; every page works without it. It stores accounts in PostgreSQL and
+status pages' server status current without a reload, and `static/report.js` suggests names in
+the report form; every page works without them. It stores accounts in PostgreSQL and
 never passes Google tokens on to the game or the game server.
 
 ## Build and test
@@ -83,6 +85,7 @@ holds ticket test vectors for other verifiers; regenerate them with
 | `PORTAL_REPORT_S3_ACCESS_KEY_FILE`, `PORTAL_REPORT_S3_SECRET_KEY_FILE` | for `s3` | Files holding the bucket's access key ID and secret key. Never logged. |
 | `PORTAL_REPORT_DIR` | for `dir` | Existing, writable folder for report logs. |
 | `PORTAL_REPORT_RETENTION_DAYS` | no | Days reports (rows and logs) are kept (default 30); purged hourly. |
+| `PORTAL_PLAYER_REPORTS_PER_DAY` | no | Player reports one account may file in 24 hours, 1 to 1000 (default 5). See [player reports](../docs/portal-player-reports.md). |
 | `PORTAL_LISTEN` | no | Listen address (default `0.0.0.0:8080`). Serve it behind a TLS-terminating proxy. |
 | `PORTAL_DB_ACQUIRE_TIMEOUT_SECONDS` | no | Seconds a request waits for a database connection, 1 to 60 (default 3). After it, API requests answer `503 busy` and pages a "Busy" page, both with `Retry-After`. |
 | `RUST_LOG` | no | Log filter (default `info`). |
@@ -155,7 +158,7 @@ email someone signs in with, so a role can be granted before the first sign-in.
 | --- | --- |
 | Owner (`PORTAL_OWNER_EMAILS`) | Everything below, and grant or remove admins. |
 | Admin | Grant or remove moderators; reserve, release and assign names; delete accounts; set game character levels; download launcher report logs; everything a moderator can. |
-| Moderator | Search and view accounts; ban and unban; unlink launchers; view game server characters; view launcher reports and their metrics. |
+| Moderator | Search and view accounts; ban and unban; unlink launchers; view game server characters; view launcher reports and their metrics; review player reports. |
 
 Staff act only on accounts and roles ranked below their own: nobody can change a peer, a
 superior or themselves. Every change goes to an audit log shown on the admin overview.

@@ -59,6 +59,8 @@ pub struct Limits {
     pub social_reads: RateLimiter<i32>,
     /// `GET /api/v1/social/lookup`, per account.
     pub lookup: RateLimiter<i32>,
+    /// Player name suggestions for the report form (`/reports/players`), per account.
+    pub player_search: RateLimiter<i32>,
 }
 
 impl Default for Limits {
@@ -72,6 +74,7 @@ impl Default for Limits {
             social_changes: RateLimiter::new(30, minute),
             social_reads: RateLimiter::new(120, minute),
             lookup: RateLimiter::new(30, minute),
+            player_search: RateLimiter::new(120, minute),
         }
     }
 }
@@ -136,6 +139,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .merge(crate::admin_web::routes())
         .merge(crate::social_web::routes())
+        .merge(crate::player_reports_web::routes())
         .merge(crate::status::routes())
         .layer(axum::middleware::from_fn(failed_requests))
         .layer(axum::middleware::map_response(security_headers))

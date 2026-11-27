@@ -137,8 +137,9 @@ pub async fn stored_role(pool: &PgPool, email: &str) -> sqlx::Result<Option<Role
 
 // ---- Audit log ----
 
-pub async fn log(
-    pool: &PgPool,
+/// Writes one audit log entry, on the pool or inside a caller's transaction.
+pub async fn log<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
     actor: &Account,
     action: &str,
     target: &str,
@@ -153,7 +154,7 @@ pub async fn log(
     .bind(action)
     .bind(target)
     .bind(detail)
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(())
 }
@@ -214,7 +215,7 @@ pub struct AccountSummary {
 }
 
 /// `\`, `%` and `_` taken literally inside a LIKE pattern.
-fn like_literal(text: &str) -> String {
+pub(crate) fn like_literal(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
         if matches!(c, '\\' | '%' | '_') {

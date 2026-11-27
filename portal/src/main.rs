@@ -127,6 +127,10 @@ struct ServeArgs {
     report_retention_days: i64,
     #[command(flatten)]
     report_store: StoreArgs,
+    /// Player reports one account may file in 24 hours (docs/portal-player-reports.md).
+    #[arg(long, env = "PORTAL_PLAYER_REPORTS_PER_DAY", default_value_t = mag_portal::player_reports::DEFAULT_PER_DAY,
+          value_parser = clap::value_parser!(i64).range(1..=1000))]
+    player_reports_per_day: i64,
     /// Skip migrations at start (run `mag-portal migrate` separately).
     #[arg(long, env = "PORTAL_SKIP_MIGRATIONS")]
     skip_migrations: bool,
@@ -152,6 +156,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     settings.operator_contact = args.operator_contact.filter(|c| !c.trim().is_empty());
     settings.owner_emails = mag_portal::staff::parse_owner_emails(&args.owner_emails);
     settings.font_dir = args.font_dir;
+    settings.player_reports_per_day = args.player_reports_per_day;
     settings.client_ip_header = args
         .client_ip_header
         .map(|h| h.trim().to_ascii_lowercase())

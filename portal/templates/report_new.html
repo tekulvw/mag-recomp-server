@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Report a player{% endblock %}
+{% block head %}<script src="/report.js?v={{ script_version }}" defer></script>{% endblock %}
+{% block content %}
+<h1>Report a player</h1>
+<p>Tell the moderators about cheating, harassment, griefing or an offensive name. They read every report and decide what to do; nothing happens to the player automatically, and they are never told who reported them. You can file {{ per_day }} reports a day. <a href="/reports">Your reports</a></p>
+{% if let Some(e) = error %}<p class="alert">{{ e }}</p>{% endif %}
+
+<h2>Find the player</h2>
+<form method="get" action="/reports/new" class="row">
+  <label>Part of their name<input name="q" value="{{ query }}" maxlength="32" autocomplete="off"></label>
+  <button class="secondary">Search</button>
+</form>
+{% if searched %}
+{% if results.is_empty() %}<p class="quiet">No player names contain that. Type at least 2 letters of the name.</p>{% else %}
+<ul>
+  {% for n in results %}<li><a href="/reports/new?name={{ n }}">{{ n }}</a></li>{% endfor %}
+</ul>
+{% endif %}
+{% endif %}
+
+<h2>Your report</h2>
+<form method="post" action="/reports/new" class="stack" id="report-form" data-players="/reports/players">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="tz" id="report-tz" value="">
+  <label>Player name
+    <input name="name" id="report-name" value="{{ name }}" maxlength="32" list="report-names" autocomplete="off" required></label>
+  <datalist id="report-names"></datalist>
+  <label>Reason
+    <select name="reason" required>
+      <option value="">Choose one</option>
+      {% for (value, label) in reasons %}<option value="{{ value }}"{% if reason == **value %} selected{% endif %}>{{ label }}</option>{% endfor %}
+    </select></label>
+  <label>What happened
+    <textarea name="description" rows="6" maxlength="{{ max_description }}" required>{{ description }}</textarea></label>
+  <p class="quiet">At most {{ max_description }} characters. Say which match or map, and what you saw or heard.</p>
+  <label>About when (optional, your local time)
+    <input type="datetime-local" name="when" id="report-when" value="{{ when }}"></label>
+  <button>Send report</button>
+</form>
+{% endblock %}

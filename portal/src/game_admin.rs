@@ -14,7 +14,8 @@
 
 use std::fmt;
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, bail};
 use hmac::{Hmac, KeyInit, Mac};
@@ -35,6 +36,15 @@ pub const MIN_SECRET_LEN: usize = 32;
 const TIMEOUT: Duration = Duration::from_secs(5);
 /// Largest response body read; the character list is the biggest answer.
 const MAX_RESPONSE_BYTES: usize = 4 << 20;
+/// How long [`GameAdmin::character_keys`] reuses a character list it fetched.
+pub const CHARACTER_LIST_TTL: Duration = Duration::from_secs(60);
+/// How long it waits after a failed fetch before asking the game server again.
+const CHARACTER_LIST_RETRY: Duration = Duration::from_secs(15);
+/// The actor the game server records for the player report form's name lookups.
+pub const PLAYER_LOOKUP_ACTOR: &str = "portal player reports (lookup)";
+
+/// The last character list fetch: when, and the keys or the error.
+type CachedKeys = (Instant, Result<Arc<Vec<String>>, String>);
 
 /// Lowercase hex.
 pub fn hex(bytes: &[u8]) -> String {
@@ -337,6 +347,8 @@ pub struct GameAdmin {
     base_url: String,
     secret: Vec<u8>,
     http: reqwest::Client,
+    /// The character keys, shared by every clone, for player name lookups.
+    keys: Arc<Mutex<Option<CachedKeys>>>,
 }
 
 impl fmt::Debug for GameAdmin {
@@ -376,6 +388,7 @@ impl GameAdmin {
             base_url: url.as_str().trim_end_matches('/').to_owned(),
             secret,
             http,
+            keys: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -413,6 +426,38 @@ impl GameAdmin {
             StatusCode::OK => Ok(parse::<AccountList>(&body, "the character list")?.accounts),
             other => Err(failure(other, &body)),
         }
+    }
+
+    /// Every character's key (lowercase name), sorted, from a list at most
+    /// [`CHARACTER_LIST_TTL`] old. Player name lookups use it, so typing in the report form
+    /// does not fetch the whole list on every key press. A failure is reused for a few seconds
+    /// too, so an unreachable game server is not asked again at once.
+    pub async fn character_keys(&self) -> Result<Arc<Vec<String>>, GameAdminError> {
+        let now = Instant::now();
+        let cached = self.keys.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some((at, result)) = cached {
+            let age = now.duration_since(at);
+            match result {
+                Ok(keys) if age < CHARACTER_LIST_TTL => return Ok(keys),
+                Err(reason) if age < CHARACTER_LIST_RETRY => {
+                    return Err(GameAdminError::Unexpected(reason));
+                }
+                _ => {}
+            }
+        }
+        let fetched = self.accounts(PLAYER_LOOKUP_ACTOR).await.map(|list| {
+            let mut keys: Vec<String> = list
+                .into_iter()
+                .map(|c| c.account.to_ascii_lowercase())
+                .filter(|k| valid_account(k))
+                .collect();
+            keys.sort();
+            keys.dedup();
+            Arc::new(keys)
+        });
+        let stored = fetched.as_ref().map(Arc::clone).map_err(|e| e.to_string());
+        *self.keys.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), stored));
+        fetched
     }
 
     /// The game server's status. `NotFound` means it is too old to report one.
