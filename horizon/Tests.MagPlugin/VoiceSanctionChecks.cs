@@ -96,7 +96,8 @@ internal static partial class LeadershipProgressionChecks
 
         // A store with an invalid sanction is refused, like any other invalid record.
         foreach (var (name, sanction) in new[] {
-            ("unknown account", """{"account":"nobody","kind":"mute","operator":"staff","createdAt":1}"""),
+            // A sanction may outlive its account's characters (character slots), but never names an invalid account.
+            ("invalid account", """{"account":"No Body","kind":"mute","operator":"staff","createdAt":1}"""),
             ("unknown kind", """{"account":"alpha","kind":"gag","operator":"staff","createdAt":1}"""),
             ("no operator", """{"account":"alpha","kind":"mute","operator":"","createdAt":1}"""),
             ("ends before it starts", """{"account":"alpha","kind":"mute","operator":"staff","createdAt":10,"expiresAt":10}"""),
@@ -314,7 +315,7 @@ internal static partial class LeadershipProgressionChecks
         Check(Scalar(connection, "SELECT count(*) FROM mag.voice_sanctions WHERE account = 'alpha' AND expires_at IS NOT NULL") == 2, "Rows");
         // The schema refuses what the store would refuse.
         foreach (var sql in new[] {
-            "INSERT INTO mag.voice_sanctions VALUES ('nobody', 'mute', NULL, 'staff', now(), NULL)",
+            "INSERT INTO mag.voice_sanctions VALUES ('No Body', 'mute', NULL, 'staff', now(), NULL)",
             "INSERT INTO mag.voice_sanctions VALUES ('bravo', 'gag', NULL, 'staff', now(), NULL)",
             "INSERT INTO mag.voice_sanctions VALUES ('bravo', 'mute', NULL, '', now(), NULL)",
             "INSERT INTO mag.voice_sanctions VALUES ('bravo', 'mute', NULL, 'staff', now(), now() - interval '1 minute')",
@@ -330,14 +331,17 @@ internal static partial class LeadershipProgressionChecks
         pg.ExportTo(new LocalCharacterStore(exported, new PlainCommitter()) { ProgressionCatalog = catalog }, false);
         var roundTrip = new LocalCharacterStore(exported, new PlainCommitter()) { ProgressionCatalog = catalog };
         Check(roundTrip.ReadVoiceSanctions().Count == 2 && pg.CompareWith(roundTrip).Count == 0, "Export carries the sanctions");
-        Sql(connection, "DELETE FROM mag.characters");
+        // Sanctions are per account since character slots (0003): an empty database has neither.
+        Sql(connection, "DELETE FROM mag.characters; DELETE FROM mag.voice_sanctions");
         var imported = pg.ImportFrom(json);
         Check(imported.After.VoiceSanctions == 2 && pg.CompareWith(json).Count == 0, "Import carries the sanctions");
 
         // Upgrading a schema-1 database keeps its characters and adds the table.
-        Sql(connection, "DROP TABLE mag.voice_sanctions; DELETE FROM mag.schema_migrations WHERE version = 2");
-        Check(database.SchemaVersion() == 1, "Downgraded synthetic schema");
-        Check(database.Migrate() == 1 && database.SchemaVersion() == 2, "Migration 0002 applies to a schema-1 database");
+        Sql(connection, "DROP SCHEMA mag CASCADE");
+        Check(database.Migrate(1) == 1 && database.SchemaVersion() == 1, "Synthetic schema-1 database");
+        Sql(connection, SchemaOneCharacters);
+        Check(database.Migrate() == database.LatestSchemaVersion - 1 && database.SchemaVersion() == database.LatestSchemaVersion,
+            "Migration 0002 and later apply to a schema-1 database");
         Check(pg.ReadAll().Count == 2 && pg.ReadVoiceSanctions().Count == 0, "The upgrade kept the characters");
         Check(pg.ChangeVoiceSanction("alpha", VoiceSanctionKind.Mute, false, null, "staff", null, true, null).Applied, "A sanction after the upgrade");
     }));

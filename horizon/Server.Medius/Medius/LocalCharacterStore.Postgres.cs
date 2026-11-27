@@ -78,7 +78,7 @@ namespace Server.Medius
 
         private const string CharacterColumns = "id, account, name, faction, head_id, voice_id, flags, universe_id, np_id, experience, level, " +
             "skill_points, owned_skills, unlocked_items, last_used_loadout, loadout_layout_revision, leadership_level, nominations, " +
-            "matches_since_last_command, leadership_points, leadership_level_floor";
+            "matches_since_last_command, leadership_points, leadership_level_floor, slot, deleted_at, original_name";
 
         private sealed class PostgresBackend : ICharacterBackend
         {
@@ -87,8 +87,9 @@ namespace Server.Medius
             public PostgresBackend(LocalCharacterStore store, PostgresCharacterDatabase database) { Store = store; Database = database; }
 
             public IReadOnlyList<StoredCharacter> ReadAll() => Read("SELECT " + CharacterColumns + " FROM mag.characters ORDER BY id", null);
-            public IReadOnlyList<StoredCharacter> ReadForAccount(string account) =>
-                Read("SELECT " + CharacterColumns + " FROM mag.characters WHERE account = @account ORDER BY id", account);
+            public IReadOnlyList<StoredCharacter> ReadForAccount(string account, bool includeDeleted) =>
+                Read("SELECT " + CharacterColumns + " FROM mag.characters WHERE account = @account" +
+                    (includeDeleted ? "" : " AND deleted_at IS NULL") + " ORDER BY deleted_at IS NOT NULL, slot, id", account);
 
             private IReadOnlyList<StoredCharacter> Read(string sql, string account)
             {
@@ -123,7 +124,7 @@ namespace Server.Medius
             private readonly NpgsqlTransaction _transaction;
             private readonly HashSet<uint> _loadedCharacters = new();
             private readonly HashSet<string> _loadedReceipts = new(StringComparer.Ordinal);
-            private (string Operation, string Account, string Before)? _audit;
+            private (string Operation, string Account, uint CharacterId, string Before)? _audit;
             private bool _committed;
 
             public PostgresSession(PostgresBackend backend, StoreScope scope)
@@ -134,6 +135,15 @@ namespace Server.Medius
                 try
                 {
                     _transaction = _connection.BeginTransaction();
+                    // Creation, deletion and restore change which slots and names an account holds, which no
+                    // existing row lock covers; they serialize per account, and the read below sees the winner.
+                    if (scope.Name != null && scope.Account != null)
+                    {
+                        using var account = new NpgsqlCommand("SELECT pg_advisory_xact_lock(hashtext('mag-account:' || @account))",
+                            _connection, _transaction);
+                        account.Parameters.Add(Text("account", scope.Account));
+                        account.ExecuteNonQuery();
+                    }
                     using var characters = new NpgsqlCommand("SELECT " + CharacterColumns + " FROM mag.characters " +
                         "WHERE account = @account OR (@name::text IS NOT NULL AND lower(name) = lower(@name::text)) ORDER BY id FOR UPDATE",
                         _connection, _transaction);
@@ -163,8 +173,7 @@ namespace Server.Medius
                             progress[MatchProgressKey(row.Account, row.CharacterId, row.MatchKey)] = row;
                     }
                     // Only moderation reads (and locks) the account's sanctions; other operations leave them alone.
-                    var sanctions = scope.VoiceSanctions && list.Any(c => c.Account == scope.Account)
-                        ? LoadVoiceSanctionRows(_connection, _transaction, scope.Account) : null;
+                    var sanctions = scope.VoiceSanctions ? LoadVoiceSanctionRows(_connection, _transaction, scope.Account) : null;
                     Document = new Document { SchemaVersion = 3, Account = "player", DisplayName = "Player", Characters = list,
                         RewardReceipts = receipts, MatchRewardProgress = progress, VoiceSanctions = sanctions };
                 }
@@ -188,11 +197,16 @@ namespace Server.Medius
                 catch (Exception e) { throw _backend.Database.Translate(e); }
             }
 
-            public override string Backup(string backupDirectory, string operation, string account, byte level)
+            public override string Backup(string backupDirectory, string operation, string account, uint characterId, string label)
             {
-                var before = Document.Characters.Single(c => c.Account == account);
-                _audit = (operation, account, JsonSerializer.Serialize(before, JsonOptions));
+                Journal(operation, account, characterId);
                 return "mag.admin_changes";
+            }
+
+            public override void Journal(string operation, string account, uint characterId)
+            {
+                var before = Document.Characters.Single(c => c.Account == account && c.Id == characterId);
+                _audit = (operation, account, characterId, JsonSerializer.Serialize(before, JsonOptions));
             }
 
             public override void Commit(string touchedProgress = null)
@@ -201,6 +215,13 @@ namespace Server.Medius
                 var store = _backend.Store;
                 try
                 {
+                    // A purged character: its kits, match rows, receipts and history cascade.
+                    foreach (uint removed in _loadedCharacters.Where(id => Document.Characters.All(c => c.Id != id)))
+                    {
+                        using var purge = new NpgsqlCommand("DELETE FROM mag.characters WHERE id = @id", _connection, _transaction);
+                        purge.Parameters.Add(Typed("id", NpgsqlDbType.Bigint, (long)removed));
+                        if (purge.ExecuteNonQuery() != 1) throw new CharacterStoreConflictException("Character row changed concurrently.");
+                    }
                     foreach (var character in Document.Characters)
                     {
                         if (store.ProgressionCatalog != null) { character.Experience ??= 0; character.Level ??= 1; }
@@ -219,14 +240,16 @@ namespace Server.Medius
                             throw new CharacterStoreConflictException("Reward receipt committed concurrently.");
                     if (_audit is { } change)
                     {
-                        var (operation, account, before) = change;
-                        using var audit = new NpgsqlCommand("INSERT INTO mag.admin_changes (operation, account, before, after) " +
-                            "VALUES (@operation, @account, @before, @after)", _connection, _transaction);
+                        var (operation, account, characterId, before) = change;
+                        var after = Document.Characters.SingleOrDefault(c => c.Id == characterId);
+                        using var audit = new NpgsqlCommand("INSERT INTO mag.admin_changes (operation, account, character_id, before, after) " +
+                            "VALUES (@operation, @account, @character, @before, @after)", _connection, _transaction);
                         audit.Parameters.Add(Text("operation", operation));
                         audit.Parameters.Add(Text("account", account));
+                        audit.Parameters.Add(Typed("character", NpgsqlDbType.Bigint, (long)characterId));
                         audit.Parameters.Add(new NpgsqlParameter("before", NpgsqlDbType.Jsonb) { Value = before });
                         audit.Parameters.Add(new NpgsqlParameter("after", NpgsqlDbType.Jsonb)
-                            { Value = JsonSerializer.Serialize(Document.Characters.Single(c => c.Account == account), JsonOptions) });
+                            { Value = after == null ? "{}" : JsonSerializer.Serialize(after, JsonOptions) });
                         audit.ExecuteNonQuery();
                     }
                 }
@@ -301,7 +324,9 @@ namespace Server.Medius
                     UniverseId = checked((uint)r.GetInt64(7)), NpId = r.GetFieldValue<byte[]>(8),
                     Experience = r.IsDBNull(9) ? null : r.GetInt32(9), Level = Small(10), SkillPoints = Small(11),
                     OwnedSkills = Mask(12), UnlockedItems = Mask(13), LastUsedLoadout = Small(14).Value,
-                    LoadoutLayoutRevision = decimal.ToUInt64(r.GetDecimal(15)),
+                    LoadoutLayoutRevision = decimal.ToUInt64(r.GetDecimal(15)), Slot = Small(21).Value,
+                    DeletedAt = r.IsDBNull(22) ? null : new DateTimeOffset(DateTime.SpecifyKind(r.GetDateTime(22), DateTimeKind.Utc)).ToUnixTimeSeconds(),
+                    OriginalName = r.IsDBNull(23) ? null : r.GetString(23),
                     Leadership = r.IsDBNull(16) ? null : new StoredLeadershipRecord
                     {
                         LeadershipLevel = Small(16).Value, Nominations = Small(17).Value, MatchesSinceLastCommand = Small(18).Value,
@@ -339,12 +364,13 @@ namespace Server.Medius
             string sql = insert
                 ? "INSERT INTO mag.characters (" + CharacterColumns + ") VALUES (@id, @account, @name, @faction, @head, @voice, @flags, @universe, " +
                   "@np, @experience, @level, @skill_points, @owned_skills, @unlocked_items, @last_used, @layout, @leadership_level, @nominations, " +
-                  "@recency, @leadership_points, @leadership_floor)"
+                  "@recency, @leadership_points, @leadership_floor, @slot, @deleted_at, @original_name)"
                 : "UPDATE mag.characters SET account = @account, name = @name, faction = @faction, head_id = @head, voice_id = @voice, " +
                   "flags = @flags, universe_id = @universe, np_id = @np, experience = @experience, level = @level, skill_points = @skill_points, " +
                   "owned_skills = @owned_skills, unlocked_items = @unlocked_items, last_used_loadout = @last_used, loadout_layout_revision = @layout, " +
                   "leadership_level = @leadership_level, nominations = @nominations, matches_since_last_command = @recency, " +
-                  "leadership_points = @leadership_points, leadership_level_floor = @leadership_floor, revision = revision + 1, updated_at = now() " +
+                  "leadership_points = @leadership_points, leadership_level_floor = @leadership_floor, slot = @slot, deleted_at = @deleted_at, original_name = @original_name, " +
+                  "revision = revision + 1, updated_at = now() " +
                   "WHERE id = @id";
             using (var command = new NpgsqlCommand(sql, connection, transaction))
             {
@@ -371,6 +397,10 @@ namespace Server.Medius
                 p.Add(Typed("recency", NpgsqlDbType.Smallint, lead == null ? null : (short)lead.MatchesSinceLastCommand));
                 p.Add(Typed("leadership_points", NpgsqlDbType.Bigint, lead?.LeadershipPoints is uint lp ? (long)lp : null));
                 p.Add(Typed("leadership_floor", NpgsqlDbType.Smallint, lead?.LeadershipLevelFloor is byte floor ? (short)floor : null));
+                p.Add(Typed("slot", NpgsqlDbType.Smallint, (short)c.Slot));
+                p.Add(Typed("deleted_at", NpgsqlDbType.TimestampTz,
+                    c.DeletedAt is long deleted ? DateTimeOffset.FromUnixTimeSeconds(deleted).UtcDateTime : null));
+                p.Add(Text("original_name", c.OriginalName));
                 if (command.ExecuteNonQuery() != 1) throw new CharacterStoreConflictException("Character row changed concurrently.");
             }
             if (c.Loadouts == null)
@@ -593,6 +623,8 @@ namespace Server.Medius
                         using (var clear = new NpgsqlCommand("DELETE FROM mag.characters", connection, transaction)
                             { CommandTimeout = PostgresCharacterDatabase.MaintenanceCommandTimeoutSeconds })
                             clear.ExecuteNonQuery(); // loadouts, match rows, receipts and history cascade
+                        using (var sanctions = new NpgsqlCommand("DELETE FROM mag.voice_sanctions", connection, transaction))
+                            sanctions.ExecuteNonQuery(); // per account, so no longer cascaded from a character
                         break;
                 }
                 foreach (var character in document.Characters)
@@ -655,7 +687,8 @@ namespace Server.Medius
                 using var reader = marker.ExecuteReader();
                 if (reader.Read()) { importId = reader.GetInt64(0); importedAt = DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc); }
             }
-            if (Count("SELECT count(*) FROM mag.characters") == 0)
+            // Since slots, a sanction can outlive its account's characters, so empty means neither.
+            if (Count("SELECT (SELECT count(*) FROM mag.characters) + (SELECT count(*) FROM mag.voice_sanctions)") == 0)
                 return new CharacterImportPlan(sourceSummary, null, CharacterImportAction.Import, importedAt, false, 0, null);
             // The target's own rows, read in this transaction: after the lock taken by an import, nothing can change them.
             var target = LoadPostgresDocument(pg, connection, transaction);
@@ -807,7 +840,10 @@ namespace Server.Medius
                 var node = JsonSerializer.SerializeToNode(character, JsonOptions).AsObject();
                 node["experience"] ??= 0;
                 node["level"] ??= 1;
-                result["character " + character.Account] = node;
+                // A live slot-0 character keeps the key it had when accounts had one character, so a
+                // store's digest does not change with the slot migration.
+                result["character " + character.Account + (character.Slot == 0 && !character.Deleted ? "" :
+                    " #" + character.Id.ToString(System.Globalization.CultureInfo.InvariantCulture))] = node;
             }
             foreach (var (id, receipt) in document.RewardReceipts ?? new Dictionary<string, RewardReceipt>())
                 result["receipt " + id] = JsonSerializer.SerializeToNode(receipt, JsonOptions).AsObject();

@@ -16,15 +16,27 @@ namespace Server.Medius
         public const string Usage =
 @"usage: mag-admin [--config DIR] <command>
 
-  accounts list                              Every account's character, level, XP and skill points.
-  character show <account>                   One character in detail, with the next level threshold.
-  character set-level <account> <level>      Raise a character to <level> as earned progression would:
-        [--apply]                            XP becomes the level threshold and each gained level's skill
+  accounts list                              Every character: account, slot, name, level, XP, skill points,
+                                             session, and whether the player deleted it.
+  character show <character> [--slot N]      One character in detail, with the next level threshold, and
+                                             every character of its account.
+  character set-level <character> <level>    Raise a character to <level> as earned progression would:
+        [--slot N] [--apply]                 XP becomes the level threshold and each gained level's skill
                                              points are added. Without --apply this is a dry run.
-  character kill <account>                   Kill the account's player in its running match, as if it had
+  character kill <character> [--slot N]      Kill the character's player in its running match, as if it had
         [--reason TEXT] [--operator NAME]    pressed Kill Self (for a player stuck in a parachute or a seat).
         [--apply]                            Needs the running server's admin API (MAG_ADMIN_API_LISTEN and
                                              MAG_ADMIN_API_SECRET_FILE). Without --apply this is a dry run.
+  character restore <account> <name>         Bring back a character the player deleted, into the account's
+        [--apply]                            lowest free slot, with everything it had, and its old name if
+                                             that is still free.
+  character purge <account> <name>           Remove a deleted character for good (its progression, history
+        [--apply]                            and kits). Live characters are refused.
+
+  A <character> is an account with one character, an account with --slot N (0 to 2), or a character
+  name. Accounts have up to three character slots. A character the player deletes in game keeps its
+  row (shown as deleted, its name moved aside as <name>~<id>) until it is restored or purged; restore
+  and purge take either name.
 
   voice list                                 Active voice mutes and bans: account, kind, end, operator, reason.
   voice mute <account>                       Stop relaying the account's in-match voice (both the channel and
@@ -113,6 +125,7 @@ is online, and without --apply they are dry runs too.";
         {
             bool apply = args.Contains("--apply");
             string reason = null, operatorName = null, duration = null;
+            int? slot = null;
             var words = new List<string>();
             for (int i = 0; i < args.Length; i++)
             {
@@ -123,8 +136,17 @@ is online, and without --apply they are dry runs too.";
                     if (args[i] == "--reason") reason = args[++i]; else if (args[i] == "--operator") operatorName = args[++i]; else duration = args[++i];
                     continue;
                 }
+                if (args[i] == "--slot")
+                {
+                    if (i + 1 >= args.Length || !byte.TryParse(args[++i], out byte parsed) || parsed >= LocalCharacterStore.CharacterSlots)
+                    { error.WriteLine($"mag-admin: --slot must be a number from 0 to {LocalCharacterStore.CharacterSlots - 1}"); return 2; }
+                    slot = parsed;
+                    continue;
+                }
                 words.Add(args[i]);
             }
+            bool slotCommand = words.Count >= 3 && words[0] == "character" && words[1] is "show" or "set-level" or "kill";
+            if (slot != null && !slotCommand) { error.WriteLine(Usage); return 2; }
             bool killOptions = reason != null || operatorName != null;
             try
             {
@@ -135,8 +157,8 @@ is online, and without --apply they are dry runs too.";
                     case var _ when duration != null:
                         error.WriteLine(Usage);
                         return 2;
-                    case ["character", "kill", var account]:
-                        return Kill(api, account, apply, reason, operatorName, now, output, error);
+                    case ["character", "kill", var target]:
+                        return Kill(api, store, target, slot, apply, reason, operatorName, now, output, error);
                     case var _ when killOptions:
                         error.WriteLine(Usage);
                         return 2;
@@ -144,11 +166,13 @@ is online, and without --apply they are dry runs too.";
                         return List(store, markerDirectory, now, output);
                     case ["voice", "list"]:
                         return VoiceList(store, now, output);
-                    case ["character", "show", var account]:
-                        return Show(store, account, markerDirectory, now, output, error);
-                    case ["character", "set-level", var account, var levelText]:
+                    case ["character", "show", var target]:
+                        return Show(store, target, slot, markerDirectory, now, output, error);
+                    case ["character", "set-level", var target, var levelText]:
                         if (!byte.TryParse(levelText, out byte level)) { error.WriteLine("mag-admin: level must be a number from 1 to 255"); return 2; }
-                        return SetLevel(store, account, level, apply, backupDirectory, markerDirectory, now, output, error);
+                        return SetLevel(store, target, slot, level, apply, backupDirectory, markerDirectory, now, output, error);
+                    case ["character", var action, var account, var name] when action is "restore" or "purge":
+                        return RestoreOrPurge(store, action, account, name, apply, backupDirectory, output, error);
                     default:
                         error.WriteLine(Usage);
                         return 2;
@@ -296,18 +320,30 @@ is online, and without --apply they are dry runs too.";
 
         private static int List(LocalCharacterStore store, string markerDirectory, DateTime now, TextWriter output)
         {
-            output.WriteLine($"{"ACCOUNT",-20} {"ID",4} {"NAME",-20} {"FACTION",7} {"LEVEL",5} {"XP",7} {"SKILLPTS",8}  SESSION");
+            output.WriteLine($"{"ACCOUNT",-20} {"SLOT",4} {"ID",4} {"NAME",-20} {"FACTION",7} {"LEVEL",5} {"XP",7} {"SKILLPTS",8}  SESSION");
             foreach (var c in MagAdminOperations.ListAccounts(store, markerDirectory, now))
-                output.WriteLine($"{c.Account,-20} {c.CharacterId,4} {c.Name,-20} {c.Faction,7} {c.Level,5} {c.Experience,7} {c.SkillPoints,8}  {c.Session}");
+                output.WriteLine($"{c.Account,-20} {c.Slot,4} {c.CharacterId,4} {c.Name,-20} {c.Faction,7} {c.Level,5} {c.Experience,7} {c.SkillPoints,8}  " +
+                    (c.Deleted ? $"deleted {Time(c.DeletedAt)}" : c.Session));
             return 0;
         }
 
-        private static int Show(LocalCharacterStore store, string account, string markerDirectory, DateTime now, TextWriter output, TextWriter error)
+        private static int Show(LocalCharacterStore store, string target, int? slot, string markerDirectory, DateTime now, TextWriter output, TextWriter error)
         {
-            var c = MagAdminOperations.Show(store, account, markerDirectory, now);
-            if (c == null) { error.WriteLine($"mag-admin: account {account} has no character"); return 1; }
+            var resolved = MagAdminOperations.Resolve(store, target, slot);
+            if (resolved.Refusal == MagAdminRefusal.Ambiguous) { error.WriteLine("mag-admin: " + resolved.Message); return 1; }
+            var c = resolved.Character == null ? null :
+                MagAdminOperations.Show(store, resolved.Character.Account, markerDirectory, now, resolved.Character.Slot);
+            if (c == null)
+            {
+                // An account whose characters are all deleted still lists them.
+                var deleted = MagAdminOperations.Characters(store, target, markerDirectory, now);
+                if (deleted.Count == 0) { error.WriteLine($"mag-admin: account {target} has no character" + (slot is int n ? $" in slot {n}" : "")); return 1; }
+                output.WriteLine($"account:      {target} (no live character)");
+                Characters(deleted, output);
+                return 1;
+            }
             output.WriteLine($"account:      {c.Account}");
-            output.WriteLine($"character:    {c.CharacterId} {c.Name} (faction {c.Faction})");
+            output.WriteLine($"character:    {c.CharacterId} {c.Name} (faction {c.Faction}, slot {c.Slot})");
             output.WriteLine($"level:        {c.Level}");
             output.WriteLine($"experience:   {c.Experience}");
             output.WriteLine($"skill points: {c.SkillPoints}");
@@ -316,6 +352,37 @@ is online, and without --apply they are dry runs too.";
                     ? $"next level:   {c.NextLevel} at {c.NextLevelExperience} XP"
                     : "next level:   maximum level reached");
             output.WriteLine($"session:      {c.Session}");
+            Characters(MagAdminOperations.Characters(store, c.Account, markerDirectory, now), output);
+            return 0;
+        }
+
+        static void Characters(IReadOnlyList<MagAdminAccount> characters, TextWriter output)
+        {
+            output.WriteLine("characters:");
+            foreach (var x in characters)
+                output.WriteLine($"  slot {x.Slot}  {x.CharacterId,4} {x.Name,-20} faction {x.Faction}  level {x.Level,3}" +
+                    (x.Deleted ? $"  deleted {Time(x.DeletedAt)}" : ""));
+        }
+
+        private static int RestoreOrPurge(LocalCharacterStore store, string action, string account, string name, bool apply, string backupDirectory,
+            TextWriter output, TextWriter error)
+        {
+            var result = action == "restore"
+                ? MagAdminOperations.Restore(store, account, name, apply, backupDirectory)
+                : MagAdminOperations.Purge(store, account, name, apply, backupDirectory);
+            if (result.Refusal != MagAdminRefusal.None) { error.WriteLine($"mag-admin: refused ({result.Code}): {result.Message}"); return 1; }
+            var change = result.Change;
+            output.WriteLine((change.Applied ? "applied" : "dry run (add --apply to write)") +
+                $": character {action} {change.Account} ({change.CharacterId} {change.Name}, level {change.Level})");
+            output.WriteLine("  deleted " + Time(change.DeletedAt is long at ? DateTimeOffset.FromUnixTimeSeconds(at) : null));
+            output.WriteLine(action == "restore"
+                ? $"  restored into slot {change.Slot}"
+                : "  removed for good with its progression, kits and match history");
+            if (action == "restore")
+                output.WriteLine(change.Name == change.PreviousName
+                    ? $"  name    {change.Name} (its old name is taken, so it keeps its deleted name)"
+                    : $"  name    {change.PreviousName} -> {change.Name}");
+            if (change.BackupPath != null) output.WriteLine($"  backup  {change.BackupPath}");
             return 0;
         }
 
@@ -326,8 +393,8 @@ is online, and without --apply they are dry runs too.";
             return string.IsNullOrWhiteSpace(user) ? "mag-admin" : "mag-admin:" + user.Trim();
         }
 
-        private static int Kill(MagAdminApiClient api, string account, bool apply, string reason, string operatorName, DateTime now,
-            TextWriter output, TextWriter error)
+        private static int Kill(MagAdminApiClient api, LocalCharacterStore store, string target, int? slot, bool apply, string reason,
+            string operatorName, DateTime now, TextWriter output, TextWriter error)
         {
             if (api == null)
             {
@@ -335,13 +402,23 @@ is online, and without --apply they are dry runs too.";
                     $"and {MagAdminApiSettings.SecretFileVariable} (chart adminApi.enabled) and run it in the main medius container");
                 return 2;
             }
+            string account = target;
+            // A character name or a slot is resolved here; a bare account goes to the server as it is.
+            if (slot != null || !MagDevelopmentAccountPolicy.ValidAccount(target))
+            {
+                var resolved = store == null ? null : MagAdminOperations.Resolve(store, target, slot);
+                if (resolved?.Character == null) { error.WriteLine("mag-admin: " + (resolved?.Message ?? $"account {target} has no character")); return 1; }
+                account = resolved.Character.Account; slot = resolved.Character.Slot;
+            }
             if (!MagDevelopmentAccountPolicy.ValidAccount(account)) { error.WriteLine($"mag-admin: account {account} has no character"); return 1; }
             if (!MagAdminKill.ValidReason(reason))
             { error.WriteLine($"mag-admin: --reason must be printable ASCII of at most {MagAdminKill.MaximumReasonLength} characters"); return 2; }
             string actor = operatorName ?? DefaultOperator();
             if (actor.Length == 0 || actor.Length > MagAdminKill.MaximumOperatorLength || actor.Any(c => c < 0x20 || c > 0x7e))
             { error.WriteLine($"mag-admin: --operator must be 1 to {MagAdminKill.MaximumOperatorLength} printable ASCII characters"); return 2; }
-            var body = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new { apply, reason });
+            var body = slot is int named
+                ? System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new { apply, reason, slot = named })
+                : System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new { apply, reason });
             (int status, System.Text.Json.JsonElement? json) reply;
             try { reply = api.Send("POST", $"/admin/v1/characters/{account}/kill", body, actor, now); }
             catch (Exception e) when (e is System.Net.Sockets.SocketException || e is IOException || e is OperationCanceledException || e is InvalidDataException)
@@ -420,20 +497,20 @@ is online, and without --apply they are dry runs too.";
             $"{VoiceSanction.Name(s.Kind)} {(s.ExpiresAt == null ? "until lifted" : "until " + Time(s.ExpiresAt))}, by {s.Operator}" +
             (s.Reason == null ? "" : $": {s.Reason}");
 
-        private static int SetLevel(LocalCharacterStore store, string account, byte level, bool apply, string backupDirectory,
+        private static int SetLevel(LocalCharacterStore store, string target, int? slot, byte level, bool apply, string backupDirectory,
             string markerDirectory, DateTime now, TextWriter output, TextWriter error)
         {
-            var result = MagAdminOperations.SetLevel(store, account, level, apply, backupDirectory, markerDirectory, now);
+            var result = MagAdminOperations.SetLevel(store, target, level, apply, backupDirectory, markerDirectory, now, slot);
             // The CLI keeps reporting an unchanged level as a successful no-op.
             if (result.Refusal != MagAdminRefusal.None && result.Refusal != MagAdminRefusal.SameLevel)
             {
                 error.WriteLine($"mag-admin: refused: {result.Message}");
                 return 1;
             }
-            if (result.OnlineWarning) output.WriteLine($"warning: {account} is logged in; --apply will be refused until it logs out");
             var change = result.Change;
+            if (result.OnlineWarning) output.WriteLine($"warning: {change.Account} is logged in; --apply will be refused until it logs out");
             string verb = change.Applied ? "applied" : result.Refusal == MagAdminRefusal.SameLevel ? "unchanged" : "dry run (add --apply to write)";
-            output.WriteLine($"{verb}: {change.Account} ({change.CharacterId} {change.Name})");
+            output.WriteLine($"{verb}: {change.Account} ({change.CharacterId} {change.Name}, slot {change.Slot})");
             output.WriteLine($"  level        {change.PreviousLevel} -> {change.Level}");
             output.WriteLine($"  experience   {change.PreviousExperience} -> {change.Experience}");
             output.WriteLine($"  skill points {change.PreviousSkillPoints} -> {change.SkillPoints}");

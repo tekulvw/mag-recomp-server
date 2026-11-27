@@ -71,6 +71,20 @@ namespace Server.Medius
         public byte? Level { get; set; }
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public StoredLeadershipRecord Leadership { get; set; }
+        /// <summary>The character's slot on its account, 0 to <see cref="LocalCharacterStore.CharacterSlots"/> - 1.
+        /// Stores written before slots existed have one character per account, which is slot 0.</summary>
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+        public byte Slot { get; set; }
+        /// <summary>Unix seconds at which the player deleted the character; null while it is live. A deleted
+        /// character keeps its row and progression, but no longer holds its slot or its name (see
+        /// LocalCharacterStore.DeleteCharacterForAccount).</summary>
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public long? DeletedAt { get; set; }
+        /// <summary>A deleted character's name before the deletion moved it aside; null otherwise.</summary>
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string OriginalName { get; set; }
+        [JsonIgnore]
+        public bool Deleted => DeletedAt != null;
         [JsonIgnore]
         internal MagProgressionCatalog RecordProgressionCatalog { get; set; }
         [JsonIgnore]
@@ -183,8 +197,33 @@ namespace Server.Medius
         public int Experience { get; internal set; }
         public byte SkillPoints { get; internal set; }
         public string BackupPath { get; internal set; }
+        public byte Slot { get; internal set; }
         internal static AdminLevelChange Refused(string reason, MagCharacterRecord current = null) => new AdminLevelChange {
             Refusal = true, Reason = reason, PreviousLevel = current?.Level ?? 0, Level = current?.Level ?? 0 };
+    }
+    /// <summary>A planned or applied operator restore or purge of a deleted character; Refused carries a
+    /// reason and no write.</summary>
+    public sealed class AdminCharacterChange
+    {
+        public bool Refusal { get; internal set; }
+        public bool Applied { get; internal set; }
+        /// <summary>A refusal word (<c>account-not-found</c>, <c>character-not-deleted</c>, <c>ambiguous-character</c>,
+        /// <c>character-slots-full</c>, <c>backup-directory-required</c>), or <c>dry-run</c> / <c>applied</c>.</summary>
+        public string Reason { get; internal set; }
+        public string Account { get; internal set; }
+        public uint CharacterId { get; internal set; }
+        /// <summary>The character's name after the change: for a restore, its original name when that is free,
+        /// else its moved-aside name.</summary>
+        public string Name { get; internal set; }
+        /// <summary>The stored name before the change (a deleted character's moved-aside name).</summary>
+        public string PreviousName { get; internal set; }
+        public byte Level { get; internal set; }
+        /// <summary>The slot a restore puts the character in; for a purge, the slot it last held.</summary>
+        public byte Slot { get; internal set; }
+        public long? DeletedAt { get; internal set; }
+        public string BackupPath { get; internal set; }
+        internal static AdminCharacterChange Refused(string reason, string account, string name = null) =>
+            new AdminCharacterChange { Refusal = true, Reason = reason, Account = account, Name = name };
     }
     public interface ICharacterStoreCommitter { void WriteAtomically(string path, byte[] contents); }
 
@@ -320,7 +359,14 @@ namespace Server.Medius
             return Path.GetFullPath(_path);
         }
         // Readers do not create directories or lock files; usable through a read-only mount.
-        public IReadOnlyList<StoredCharacter> ReadAll() => _backend.ReadAll();
+        /// <summary>Every live character. Deleted characters are left out (see <see cref="ReadEveryCharacter"/>).</summary>
+        public IReadOnlyList<StoredCharacter> ReadAll() => _backend.ReadAll().Where(c => !c.Deleted).ToArray();
+        /// <summary>Every character, deleted ones included: for operator tools.</summary>
+        public IReadOnlyList<StoredCharacter> ReadEveryCharacter() => _backend.ReadAll();
+        /// <summary>The account's character with this id, deleted or not; null when it has none. For paths that
+        /// follow a character already playing (reward notifications), which a deletion must not break.</summary>
+        public StoredCharacter ReadCharacter(string account, uint characterId) => MagDevelopmentAccountPolicy.ValidAccount(account)
+            ? _backend.ReadForAccount(account, includeDeleted: true).SingleOrDefault(c => c.Id == characterId) : null;
         private static Document EmptyDocument() => new Document { SchemaVersion = 2, Account = "player", DisplayName = "Player", Characters = new List<StoredCharacter>() };
         private Document ReadDocument()
         {
@@ -342,7 +388,7 @@ namespace Server.Medius
                 document.Characters == null || document.Characters.Count > (document.SchemaVersion == 1 ? 1 : 128) || document.Characters.Any(c => !Valid(c, document.SchemaVersion)) ||
                 document.Characters.Select(c => c.Id).Distinct().Count() != document.Characters.Count ||
                 document.Characters.Select(c => c.Name.ToLowerInvariant()).Distinct().Count() != document.Characters.Count ||
-                (document.SchemaVersion >= 2 && document.Characters.Select(c => c.Account).Distinct().Count() != document.Characters.Count))
+                !SlotsUnique(document.Characters))
                 throw new InvalidDataException("Character-store schema or local account policy invalid.");
             if (document.SchemaVersion == 1) foreach (var c in document.Characters) c.Account = "player";
             ValidateRewardLedger(document);
@@ -360,7 +406,34 @@ namespace Server.Medius
                 throw new InvalidDataException("Persisted XP/level does not match the progression catalog.");
         }
         private static bool ValidName(string name) => !string.IsNullOrWhiteSpace(name) && name.Length <= 32 && name.All(c => c >= 33 && c <= 126);
+        /// <summary>Character slots per account. Retail MAG gave every account one character slot and, from
+        /// August 2010, two more on the character login screen (a paid subscription there; free here). The
+        /// client shows as many slots as the character list's allowed count (0x0237).</summary>
+        public const int CharacterSlots = 3;
+        /// <summary>No two live characters of one account share a slot. Deleted characters hold none.</summary>
+        private static bool SlotsUnique(IEnumerable<StoredCharacter> characters)
+        {
+            var live = characters.Where(c => !c.Deleted).Select(c => (c.Account, c.Slot)).ToList();
+            return live.Distinct().Count() == live.Count;
+        }
+        /// <summary>The lowest slot <paramref name="account"/>'s live characters leave free, or null when all are taken.</summary>
+        private static byte? FreeSlot(IEnumerable<StoredCharacter> characters, string account)
+        {
+            var taken = characters.Where(c => c.Account == account && !c.Deleted).Select(c => c.Slot).ToHashSet();
+            for (byte slot = 0; slot < CharacterSlots; slot++) if (!taken.Contains(slot)) return slot;
+            return null;
+        }
+        private static bool IsFree(IEnumerable<StoredCharacter> characters, string account, byte slot) =>
+            slot < CharacterSlots && !characters.Any(c => c.Account == account && !c.Deleted && c.Slot == slot);
+        /// <summary>The slot a client-chosen name ends with (<c>!0</c> to <c>!2</c>), or null.</summary>
+        internal static byte? NamedSlot(string name) =>
+            name != null && name.Length >= 3 && name[^2] == '!' && name[^1] >= '0' && name[^1] < '0' + CharacterSlots ? (byte)(name[^1] - '0') : null;
+        /// <summary>The account's live character with this id, or null (another account's, deleted or absent).</summary>
+        private static StoredCharacter Owned(IEnumerable<StoredCharacter> characters, string account, uint characterId) =>
+            characters.SingleOrDefault(c => c.Account == account && c.Id == characterId && !c.Deleted);
         private static bool Valid(StoredCharacter c, int schema) => c != null && c.Id > 0 && ValidName(c.Name) && c.Faction <= 2 &&
+            c.Slot < CharacterSlots && (c.DeletedAt == null || c.DeletedAt >= 0) &&
+            (c.OriginalName == null || c.DeletedAt != null && ValidName(c.OriginalName)) &&
             (c.Experience == null || c.Experience >= 0) && (c.Level == null || c.Level >= 1) &&
             (c.Leadership?.LeadershipLevelFloor == null || c.Leadership.LeadershipPoints.HasValue && c.Leadership.LeadershipLevelFloor == c.Leadership.LeadershipLevel) &&
             (c.OwnedSkills == null || c.OwnedSkills.Length == 5) && (c.UnlockedItems == null || c.UnlockedItems.Length == 24) &&
@@ -368,8 +441,9 @@ namespace Server.Medius
             c.UniverseId == 26 && MagDevelopmentAccountPolicy.ValidNpId(c.NpId, schema == 1 ? null : c.Account) &&
             (schema == 1 ? c.Id == 1 && c.Name == "Player" : MagDevelopmentAccountPolicy.ValidAccount(c.Account));
         private static bool ValidLoadout(StoredLoadout row) => row?.Items != null && row.Items.Length == 22 && row.Items.All(id => id >= -1 && id < 4096);
+        /// <summary>The account's live characters in slot order.</summary>
         public IReadOnlyList<StoredCharacter> ReadForAccount(string account) => MagDevelopmentAccountPolicy.ValidAccount(account)
-            ? _backend.ReadForAccount(account) : Array.Empty<StoredCharacter>();
+            ? _backend.ReadForAccount(account, includeDeleted: false) : Array.Empty<StoredCharacter>();
         // Compatibility entry point for older local lab tools; live sessions use the account-bound API.
         public CharacterCreationOutcome Create(MagCreateCharacterRequest request) => request?.AccountName == "Player"
             ? CreateForAccount(request, "player") : Outcome(MagNetResult.NameInvalid, "invalid-legacy-name");
@@ -386,20 +460,27 @@ namespace Server.Medius
                 return Outcome(MagNetResult.Error, "np-id-account-mismatch");
             using var session = _backend.Open(new StoreScope(account, Name: request.AccountName));
             var all = session.Document.Characters;
-            var existing = all.SingleOrDefault(c => c.Account == account);
+            // Names are unique across the whole store. A deleted character's name was moved aside, so the
+            // client can create a new character under the same "<online ID>!<slot>" name at once.
+            var existing = all.SingleOrDefault(c => string.Equals(c.Name, request.AccountName, StringComparison.OrdinalIgnoreCase));
             if (existing != null)
             {
-                bool same = existing.Name == request.AccountName && existing.Faction == request.Faction && existing.HeadId == request.HeadId &&
-                    existing.VoiceId == request.VoiceId && existing.UniverseId == request.UniverseId && existing.NpId.SequenceEqual(request.NpId);
-                if (!same) return Outcome(MagNetResult.NameTaken, "local-account-slot-occupied");
+                // Only an exact retry of this account's own creation succeeds again (a lost acknowledgement).
+                bool same = existing.Account == account && !existing.Deleted && existing.Name == request.AccountName &&
+                    existing.Faction == request.Faction && existing.HeadId == request.HeadId && existing.VoiceId == request.VoiceId &&
+                    existing.UniverseId == request.UniverseId && existing.NpId.SequenceEqual(request.NpId);
+                if (!same) return Outcome(MagNetResult.NameTaken, "character-name-taken");
             }
             else
             {
-                if (all.Any(c => string.Equals(c.Name, request.AccountName, StringComparison.OrdinalIgnoreCase)))
-                    return Outcome(MagNetResult.NameTaken, "character-name-taken");
+                // Retail has no result for a full account; the client's generic error is the closest.
+                if (FreeSlot(all, account) is not byte slot) return Outcome(MagNetResult.Error, "character-slots-full");
+                // The request has no slot field, but the client names a character after the slot the player picked
+                // ("<online ID>!<slot>"); that slot is used when it is free, so the list keeps the player's layout.
+                if (NamedSlot(request.AccountName) is byte named && IsFree(all, account, named)) slot = named;
                 if (session.CharacterLimit is int limit && all.Count >= limit) return Outcome(MagNetResult.Error, "local-store-full");
                 uint next = session.NextCharacterId();
-                var created = new StoredCharacter { Account = account, Id = next, Name = request.AccountName, Faction = request.Faction,
+                var created = new StoredCharacter { Account = account, Id = next, Slot = slot, Name = request.AccountName, Faction = request.Faction,
                     HeadId = request.HeadId, VoiceId = request.VoiceId, UniverseId = request.UniverseId, NpId = (byte[])request.NpId.Clone() };
                 if (ProgressionCatalog != null)
                 {
@@ -431,7 +512,7 @@ namespace Server.Medius
             if (!catalog.Valid(replacement.ToLoadout())) return Outcome(MagNetResult.Error, "invalid-authored-loadout");
             using var session = _backend.Open(new StoreScope(account, characterId));
             var all = session.Document.Characters;
-            var character = all.SingleOrDefault(c => c.Account == account && c.Id == characterId);
+            var character = Owned(all, account, characterId);
             if (character == null) return Outcome(MagNetResult.Error, "character-not-owned");
             if (!catalog.ValidForFaction(replacement.ToLoadout(), character.Faction))
                 return Outcome(MagNetResult.Error, "invalid-faction-loadout");
@@ -463,7 +544,7 @@ namespace Server.Medius
             if (catalog?.ApplicationId != 20231) return Outcome(MagNetResult.Error, "retail-loadout-catalog-unavailable");
             using var session = _backend.Open(new StoreScope(account, characterId));
             var all = session.Document.Characters;
-            var character = all.SingleOrDefault(c => c.Account == account && c.Id == characterId);
+            var character = Owned(all, account, characterId);
             if (character == null) return Outcome(MagNetResult.Error, "character-not-owned");
             if (character.LoadoutLayoutRevision == ulong.MaxValue) return Outcome(MagNetResult.Error, "loadout-layout-revision-exhausted");
             var rows = character.Loadouts;
@@ -497,7 +578,7 @@ namespace Server.Medius
             if (catalog == null || (catalog.ApplicationId == 20230 && LoadoutCatalog == null)) return Outcome(MagNetResult.Error, "skill-catalog-unavailable");
             using var session = _backend.Open(new StoreScope(account, characterId));
             var all = session.Document.Characters;
-            var character = all.SingleOrDefault(c => c.Account == account && c.Id == characterId);
+            var character = Owned(all, account, characterId);
             if (character == null) return Outcome(MagNetResult.Error, "character-not-owned");
             var record = character.ToRecord();
             if (!catalog.TryPurchase(character.Faction, skillId, record.SkillPoints, record.Skills, out byte cost, out var equipment, out string reason))
@@ -521,7 +602,7 @@ namespace Server.Medius
                 return Outcome(MagNetResult.Error, "unsupported-nomination-bits");
             using var session = _backend.Open(new StoreScope(account, characterId));
             var all = session.Document.Characters;
-            var character = all.SingleOrDefault(c => c.Account == account && c.Id == characterId);
+            var character = Owned(all, account, characterId);
             if (character == null) return Outcome(MagNetResult.Error, "character-not-owned");
             if (character.Leadership?.Nominations == nominations) return Outcome(MagNetResult.Success, "nominations-unchanged");
             character.Leadership ??= new StoredLeadershipRecord { LeadershipLevel = 1 };
@@ -535,7 +616,7 @@ namespace Server.Medius
                 return Outcome(MagNetResult.Error, "invalid-last-used-loadout");
             using var session = _backend.Open(new StoreScope(account, characterId));
             var all = session.Document.Characters;
-            var character = all.SingleOrDefault(c => c.Account == account && c.Id == characterId);
+            var character = Owned(all, account, characterId);
             if (character == null) return Outcome(MagNetResult.Error, "character-not-owned");
             if (expectedLayoutRevision != character.LoadoutLayoutRevision) return Outcome(MagNetResult.Error, "stale-loadout-layout");
             var catalog = LoadoutCatalog;
@@ -648,6 +729,8 @@ namespace Server.Medius
             if (catalog == null) return Deny("progression-catalog-unavailable");
             using var session = _backend.Open(new StoreScope(account, characterId, RewardId: rewardId, MatchKey: matchKey));
             var document = session.Document;
+            // A deleted character still takes its rewards: they were earned before the player deleted it from the
+            // character list, gameplay keeps resending a refused one, and a restore brings the progression back whole.
             var character = document.Characters.SingleOrDefault(c => c.Account == account && c.Id == characterId);
             if (character == null) return Deny("character-not-owned");
             document.RewardReceipts = document.RewardReceipts ?? new Dictionary<string, RewardReceipt>(StringComparer.Ordinal);
@@ -736,7 +819,7 @@ namespace Server.Medius
             if (rules == null) return Deny("training-catalog-unavailable");
             using var session = _backend.Open(new StoreScope(account, characterId));
             var document = session.Document;
-            var character = document.Characters.SingleOrDefault(c => c.Account == account && c.Id == characterId);
+            var character = Owned(document.Characters, account, characterId);
             if (character == null) return Deny("character-not-owned");
             if ((character.Flags & rules.CompletedFlagMask) != 0)
             {
@@ -767,25 +850,33 @@ namespace Server.Medius
             return new TrainingCompletionOutcome { Result = MagNetResult.Success, Reason = "training-completed", NewlyCompleted = true, Record = character.ToRecord() };
         }
         /// <summary>
-        /// Operator maintenance: raise one account's character to a level exactly as earned progression
-        /// would, setting XP to the level threshold and granting the skill points of each level gained.
+        /// Operator maintenance: raise one character to a level exactly as earned progression would,
+        /// setting XP to the level threshold and granting the skill points of each level gained.
         /// Runs under the store lock; with <paramref name="apply"/> it first copies the current store
         /// into <paramref name="backupDirectory"/>. Lowering is refused because spent points cannot be
-        /// reconciled.
+        /// reconciled. This overload names the account's only live character; an account with several
+        /// is refused (<c>ambiguous-character</c>) and needs the character id.
         /// </summary>
         public AdminLevelChange RaiseLevelForAdmin(string account, byte level, bool apply, string backupDirectory)
+        {
+            var live = ReadForAccount(account);
+            if (live.Count > 1) return AdminLevelChange.Refused("ambiguous-character");
+            return RaiseLevelForAdmin(account, live.Count == 1 ? live[0].Id : 0, level, apply, backupDirectory);
+        }
+        /// <summary>As <see cref="RaiseLevelForAdmin(string, byte, bool, string)"/>, for the account's live character <paramref name="characterId"/>.</summary>
+        public AdminLevelChange RaiseLevelForAdmin(string account, uint characterId, byte level, bool apply, string backupDirectory)
         {
             var catalog = ProgressionCatalog;
             if (catalog == null) return AdminLevelChange.Refused("progression-catalog-unavailable");
             if (!MagDevelopmentAccountPolicy.ValidAccount(account)) return AdminLevelChange.Refused("invalid-account");
             if (level < 1 || level > catalog.MaximumLevel) return AdminLevelChange.Refused("level-out-of-range");
-            using var session = _backend.Open(new StoreScope(account, CreateDirectory: false));
+            using var session = _backend.Open(new StoreScope(account, characterId, CreateDirectory: false));
             var document = session.Document;
-            var character = document.Characters.SingleOrDefault(c => c.Account == account);
+            var character = Owned(document.Characters, account, characterId);
             if (character == null) return AdminLevelChange.Refused("account-not-found");
             var before = character.ToRecord();
             if (level < before.Level) return AdminLevelChange.Refused("lowering-unsupported", before);
-            var change = new AdminLevelChange { Account = account, CharacterId = character.Id, Name = character.Name,
+            var change = new AdminLevelChange { Account = account, CharacterId = character.Id, Name = character.Name, Slot = character.Slot,
                 PreviousLevel = before.Level, PreviousExperience = (int)before.Experience, PreviousSkillPoints = before.SkillPoints,
                 Level = level, Experience = level == before.Level ? (int)before.Experience : catalog.ThresholdForLevel(level),
                 SkillPoints = catalog.PointsAfterGain(before.SkillPoints, before.Level, level) };
@@ -793,9 +884,133 @@ namespace Server.Medius
             if (!apply) { change.Reason = "dry-run"; return change; }
             if (string.IsNullOrWhiteSpace(backupDirectory) || !Path.IsPathFullyQualified(backupDirectory))
                 return AdminLevelChange.Refused("backup-directory-required", before);
-            change.BackupPath = session.Backup(backupDirectory, "set-level", account, level);
+            change.BackupPath = session.Backup(backupDirectory, "set-level", account, character.Id,
+                level.ToString(System.Globalization.CultureInfo.InvariantCulture));
             character.Experience = change.Experience; character.Level = change.Level; character.SkillPoints = change.SkillPoints;
             UpdateLeadership(character, catalog, change.Level);
+            session.Commit();
+            change.Applied = true; change.Reason = "applied";
+            return change;
+        }
+        /// <summary>
+        /// The player deletes one of its characters from the character list (0x023C). Retail deletes it; this
+        /// server keeps it instead, deliberately: the character leaves the list and frees its slot, but its
+        /// row, kits, progression and reward history stay, marked with the time, so a misclick or a stolen
+        /// account cannot destroy a character for good. Its name is moved aside (<c>alpha!0</c> becomes
+        /// <c>alpha!0~7</c> for character 7, the original kept in <see cref="StoredCharacter.OriginalName"/>):
+        /// the client names characters after their slot, so a new character in the same slot needs the name
+        /// at once. Operators bring a deleted character back with <see cref="RestoreCharacterForAdmin"/> or
+        /// remove it with <see cref="PurgeCharacterForAdmin"/>. The request names the character by id and
+        /// name, which must both match a live character of the authenticated account.
+        /// </summary>
+        public CharacterCreationOutcome DeleteCharacterForAccount(string account, uint characterId, string name)
+        {
+            if (!MagDevelopmentAccountPolicy.ValidAccount(account) || characterId == 0 || !ValidName(name))
+                return Outcome(MagNetResult.Error, "invalid-character-delete");
+            using var session = _backend.Open(new StoreScope(account, characterId, Name: AsideName(name, characterId)));
+            var all = session.Document.Characters;
+            var character = Owned(all, account, characterId);
+            if (character == null || character.Name != name) return Outcome(MagNetResult.Error, "character-not-owned");
+            string aside = AsideName(name, characterId);
+            if (all.Any(c => c != character && string.Equals(c.Name, aside, StringComparison.OrdinalIgnoreCase)))
+                return Outcome(MagNetResult.Error, "character-aside-name-taken");
+            session.Journal("character-delete", account, character.Id);
+            character.DeletedAt = Clock().ToUnixTimeSeconds();
+            character.OriginalName = character.Name; character.Name = aside;
+            session.Commit(); // The deletion is durable before the session acknowledges it.
+            return Outcome(MagNetResult.Success, "character-deleted");
+        }
+        /// <summary>A deleted character's stored name: its name and <c>~id</c>, the name shortened to fit 32 characters.</summary>
+        internal static string AsideName(string name, uint characterId)
+        {
+            string suffix = "~" + characterId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            return name[..Math.Min(name.Length, 32 - suffix.Length)] + suffix;
+        }
+        /// <summary>The account's deleted character named <paramref name="name"/> (any case): by its moved-aside
+        /// name, else by the name it had. A name several deleted characters had is ambiguous.</summary>
+        private static (StoredCharacter Character, string Refusal) DeletedCharacter(Document document, string account, string name)
+        {
+            bool Is(string value) => string.Equals(value, name, StringComparison.OrdinalIgnoreCase);
+            var mine = document.Characters.Where(c => c.Account == account).ToList();
+            var exact = mine.SingleOrDefault(c => Is(c.Name)); // names are unique in the store
+            if (exact?.Deleted == true) return (exact, null);
+            // A live character may hold the name again (a new one in the same slot); the deleted one had it.
+            var had = mine.Where(c => c.Deleted && Is(c.OriginalName)).ToList();
+            return had.Count switch
+            {
+                1 => (had[0], null),
+                > 1 => (null, "ambiguous-character"),
+                _ => (null, exact != null ? "character-not-deleted" : "account-not-found")
+            };
+        }
+        /// <summary>The original name of the deleted character <paramref name="name"/> names, read ahead of the
+        /// session so that the session also loads (and locks) whoever holds that name now.</summary>
+        private string OriginalNameOf(string account, string name)
+        {
+            var exact = _backend.ReadForAccount(account, includeDeleted: true)
+                .FirstOrDefault(c => c.Deleted && string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase));
+            return exact != null ? exact.OriginalName : name;
+        }
+        /// <summary>
+        /// Operator maintenance: bring a deleted character back into the lowest free slot of its account,
+        /// with everything it had, and its original name when no other character holds it now (else it keeps
+        /// its moved-aside name, which the client logs in with just as well). Refused when the account's
+        /// slots are all taken. Dry run unless
+        /// <paramref name="apply"/>; an applied restore is journalled (mag.admin_changes, or a copy of the
+        /// JSON store in <paramref name="backupDirectory"/>).
+        /// </summary>
+        public AdminCharacterChange RestoreCharacterForAdmin(string account, string name, bool apply, string backupDirectory)
+        {
+            if (!MagDevelopmentAccountPolicy.ValidAccount(account) || !ValidName(name)) return AdminCharacterChange.Refused("account-not-found", account, name);
+            // The scope also loads whoever holds the original name now, wherever it is.
+            using var session = _backend.Open(new StoreScope(account, CreateDirectory: false, Name: OriginalNameOf(account, name) ?? name));
+            var document = session.Document;
+            var (character, refusal) = DeletedCharacter(document, account, name);
+            if (refusal != null) return AdminCharacterChange.Refused(refusal, account, name);
+            if (FreeSlot(document.Characters, account) is not byte slot) return AdminCharacterChange.Refused("character-slots-full", account, character.Name);
+            string restored = character.OriginalName != null && !document.Characters.Any(c => c != character &&
+                string.Equals(c.Name, character.OriginalName, StringComparison.OrdinalIgnoreCase)) ? character.OriginalName : character.Name;
+            var change = new AdminCharacterChange { Account = account, CharacterId = character.Id, Name = restored, PreviousName = character.Name,
+                Level = character.ToRecord().Level, Slot = slot, DeletedAt = character.DeletedAt, Reason = "dry-run" };
+            if (!apply) return change;
+            if (_backend is JsonBackend && (string.IsNullOrWhiteSpace(backupDirectory) || !Path.IsPathFullyQualified(backupDirectory)))
+                return AdminCharacterChange.Refused("backup-directory-required", account, character.Name);
+            change.BackupPath = session.Backup(backupDirectory, "character-restore", account, character.Id, character.Id.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            character.DeletedAt = null; character.Slot = slot; character.Name = restored; character.OriginalName = null;
+            session.Commit();
+            change.Applied = true; change.Reason = "applied";
+            return change;
+        }
+        /// <summary>
+        /// Operator maintenance: remove a deleted character for good, with its kits, match rows, reward
+        /// receipts and match history. <paramref name="name"/> is its moved-aside name or the one it had. Only a deleted character can be purged. Dry
+        /// run unless <paramref name="apply"/>; an applied purge keeps the character's last state in its
+        /// journal (mag.admin_changes, or the copy of the JSON store in <paramref name="backupDirectory"/>).
+        /// The account's voice sanctions stay: they belong to the account, not to a character.
+        /// </summary>
+        public AdminCharacterChange PurgeCharacterForAdmin(string account, string name, bool apply, string backupDirectory)
+        {
+            if (!MagDevelopmentAccountPolicy.ValidAccount(account) || !ValidName(name)) return AdminCharacterChange.Refused("account-not-found", account, name);
+            using var session = _backend.Open(new StoreScope(account, CreateDirectory: false));
+            var document = session.Document;
+            var (character, refusal) = DeletedCharacter(document, account, name);
+            if (refusal != null) return AdminCharacterChange.Refused(refusal, account, name);
+            var change = new AdminCharacterChange { Account = account, CharacterId = character.Id, Name = character.OriginalName ?? character.Name,
+                PreviousName = character.Name, Level = character.ToRecord().Level, Slot = character.Slot, DeletedAt = character.DeletedAt, Reason = "dry-run" };
+            if (!apply) return change;
+            if (_backend is JsonBackend && (string.IsNullOrWhiteSpace(backupDirectory) || !Path.IsPathFullyQualified(backupDirectory)))
+                return AdminCharacterChange.Refused("backup-directory-required", account, character.Name);
+            change.BackupPath = session.Backup(backupDirectory, "character-purge", account, character.Id, character.Id.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            document.Characters.Remove(character);
+            // The JSON store holds the whole ledger; PostgreSQL's rows go with the character (ON DELETE CASCADE).
+            if (document.MatchRewardProgress != null)
+                foreach (var key in document.MatchRewardProgress.Where(e => e.Value.Account == account && e.Value.CharacterId == character.Id)
+                    .Select(e => e.Key).ToList())
+                    document.MatchRewardProgress.Remove(key);
+            if (document.RewardReceipts != null)
+                foreach (var key in document.RewardReceipts.Where(e => e.Value.Account == account && e.Value.CharacterId == character.Id)
+                    .Select(e => e.Key).ToList())
+                    document.RewardReceipts.Remove(key);
             session.Commit();
             change.Applied = true; change.Reason = "applied";
             return change;

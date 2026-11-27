@@ -11,7 +11,9 @@ M=deploy/<release>-mag-recomp-server-medius
 kubectl exec -n <namespace> $M -c medius -- mag-admin accounts list
 kubectl exec -n <namespace> $M -c medius -- mag-admin character show <account>
 kubectl exec -n <namespace> $M -c medius -- mag-admin character set-level <account> 3           # dry run
-kubectl exec -n <namespace> $M -c medius -- mag-admin character set-level <account> 3 --apply
+kubectl exec -n <namespace> $M -c medius -- mag-admin character set-level <account> 3 --slot 1 --apply
+kubectl exec -n <namespace> $M -c medius -- mag-admin character restore <account> <name>        # dry run
+kubectl exec -n <namespace> $M -c medius -- mag-admin character restore <account> <name> --apply
 kubectl exec -n <namespace> $M -c medius -- mag-admin character kill <account> --reason "stuck in a parachute"           # dry run
 kubectl exec -n <namespace> $M -c medius -- mag-admin character kill <account> --reason "stuck in a parachute" --apply
 kubectl exec -n <namespace> $M -c medius -- mag-admin voice mute <account> --for 30m --reason "spam" --operator <you>          # dry run
@@ -23,10 +25,21 @@ kubectl exec -n <namespace> $M -c medius -- mag-admin voice list
 
 | Command | Effect |
 | --- | --- |
-| `accounts list` | Every account's character with level, XP, skill points and session state (`online`, `offline`, or `unknown` when no session marker exists). |
-| `character show <account>` | One character in detail, including the XP needed for the next level. |
-| `character set-level <account> <level> [--apply]` | Raises the character to `<level>` the way earned progression would. XP becomes that level's catalog threshold, and each gained level's `SkillPointsGained` is added. Without `--apply` it only prints the planned change. |
-| `character kill <account> [--reason TEXT] [--operator NAME] [--apply]` | Kills the account's player in its running match, exactly as if it had pressed Kill Self (see [Operator kill](#operator-kill)). Without `--apply` it only names the player, world and worker. It works through the running server's [admin API](#admin-api), so it needs `adminApi.enabled`. |
+| `accounts list` | Every character, one line each: account, slot, id, name, faction, level, XP, skill points and session state (`online`, `offline`, or `unknown` when no session marker exists), or `deleted <time>` for a character the player deleted. |
+| `character show <character> [--slot N]` | One character in detail, including the XP needed for the next level, then every character of its account with its slot. |
+| `character set-level <character> <level> [--slot N] [--apply]` | Raises the character to `<level>` the way earned progression would. XP becomes that level's catalog threshold, and each gained level's `SkillPointsGained` is added. Without `--apply` it only prints the planned change. |
+| `character kill <character> [--slot N] [--reason TEXT] [--operator NAME] [--apply]` | Kills the character's player in its running match, exactly as if it had pressed Kill Self (see [Operator kill](#operator-kill)). Without `--apply` it only names the player, world and worker. It works through the running server's [admin API](#admin-api), so it needs `adminApi.enabled`. |
+| `character restore <account> <name> [--apply]` | Brings back a character the player [deleted](character-slots.md#deletion): into the account's lowest free slot, with its progression, kits and history, and with its old name when that is still free. `<name>` is its old name or its moved-aside name (`<name>~<id>`). Refused (`slots_full`) while every slot holds a live character. |
+| `character purge <account> <name> [--apply]` | Removes a deleted character for good, with its kits, match rows, receipts and match history. Live characters are refused (`not_deleted`); the account's voice sanctions stay. |
+
+A `<character>` is one of:
+
+- an account with exactly one live character (the form every command took before slots);
+- an account with `--slot N` (0 to 2);
+- a character name, in any case.
+
+An account with several live characters and no `--slot` is refused (`ambiguous-character`) with
+its slots listed. Accounts hold up to three characters; see [Character slots](character-slots.md).
 | `voice list` | Active voice mutes and bans: account, kind, end (or `until lifted`), when and by whom, and the reason. |
 | `voice mute <account>`, `voice ban <account>` `[--for DURATION] [--reason TEXT] [--operator NAME] [--apply]` | Stops relaying the account's in-match voice (see [Voice moderation](#voice-moderation)). `--for` takes a whole number of minutes, hours, days or weeks (`30m`, `12h`, `7d`, `2w`, up to 3650 days); without it the sanction lasts until lifted. Without `--apply` it only prints the planned sanction. |
 | `voice unmute <account>`, `voice unban <account>` `[--reason TEXT] [--operator NAME] [--apply]` | Lifts an active mute or ban. Without `--apply` it only prints the plan. |
@@ -50,10 +63,13 @@ configuration error (for the voice commands also a bad `--for`, `--reason` or `-
   and print a warning.
 - **Backed up.** Before writing, the current store is copied to
   `.maintenance-backups/characters.before-admin-set-level-<account>-<level>-<sha12>.json`
-  next to the store. To revert, copy that file back over the store while the
+  next to the store (`characters.before-admin-character-restore-<account>-<id>-<sha12>.json`
+  and `...-character-purge-...` for restore and purge). To revert, copy that file back over the store while the
   account is logged out.
   With the PostgreSQL store, the character row before and after the change is
-  recorded in `mag.admin_changes` in the same transaction instead.
+  recorded in `mag.admin_changes` (with its `character_id`) in the same transaction
+  instead. A player's own deletion is journalled there too (`character-delete`); a
+  purge records `{}` as the row after.
 - **Serialized with the server.** Changes happen under the store's own lock, so a
   concurrent reward or loadout save is applied before or after, never lost.
 
@@ -226,7 +242,7 @@ before the rollback, which the export already carried into the JSON store.
 
 ## Admin API
 
-The same list, show, set-level, kill and voice operations are also available over an internal HTTP
+The same list, show, set-level, kill, restore, purge and voice operations are also available over an internal HTTP
 API, so the accounts portal can offer them to staff. It runs inside the main medius
 process (never MAPS) and calls the same code as `mag-admin`: the same rules,
 session check, lock, backup and commit.
@@ -259,14 +275,16 @@ at most 16 KB (larger is `413`, chunked is `400`). Responses are `application/js
 
 Anything else is `401 {"error":"unauthorized"}`; the log records only the reason class.
 
-**Endpoints.** `account` is the store key (the lowercase player name).
+**Endpoints.** `account` is the store key (the lowercase player name). Every field the
+one-character-per-account API answered is still answered; the slot fields are additions.
 
 | Request | Success |
 | --- | --- |
-| `GET /admin/v1/accounts` | `200 {"accounts":[{"account","level","experience","skill_points","session"}]}` |
-| `GET /admin/v1/characters/{account}` | `200 {"account","level","experience","skill_points","next_level_experience","session"}`; `next_level_experience` is null at the maximum level |
-| `POST /admin/v1/characters/{account}/level` with `{"level":N,"apply":bool}` | `200 {"applied","account","from_level","to_level","experience_before","experience_after","skill_points_before","skill_points_after","backup"}`; `backup` is the backup file name, or null for a dry run |
-| `POST /admin/v1/characters/{account}/kill` with `{"apply":bool,"reason":text}` | `200 {"applied","account","worker_id","world_id","player_id","result","reason"}`: the [operator kill](#operator-kill). `result` is `killed` or `gave_up` (a downed player), null for a dry run. `reason` is optional, printable ASCII, at most 256 characters; the actor header is the operator |
+| `GET /admin/v1/accounts` | `200 {"accounts":[{"account","level","experience","skill_points","session","character_id","name","slot","faction","deleted","deleted_at"}]}`: one entry per character, deleted ones included, by account, live before deleted, then by slot. `deleted_at` is null for a live character |
+| `GET /admin/v1/characters/{account}[?slot=N]` | `200 {"account","level","experience","skill_points","next_level_experience","session","character_id","name","slot","faction","characters"}` for the account's live character in slot N, or without `slot` its lowest live slot; `next_level_experience` is null at the maximum level. `characters` lists every character of the account as `{"character_id","name","slot","faction","level","experience","skill_points","deleted","deleted_at"}`. `404` when there is no such live character |
+| `POST /admin/v1/characters/{account}/level` with `{"level":N,"apply":bool,"slot":N}` | `200 {"applied","account","character_id","name","slot","from_level","to_level","experience_before","experience_after","skill_points_before","skill_points_after","backup"}`; `backup` is the backup file name, or null for a dry run. `slot` is optional for an account with one live character; with several it is required, else `409 {"error":"ambiguous_character","message"}` |
+| `POST /admin/v1/characters/{account}/kill` with `{"apply":bool,"reason":text,"slot":N}` | `200 {"applied","account","worker_id","world_id","player_id","result","reason"}`: the [operator kill](#operator-kill). `result` is `killed` or `gave_up` (a downed player), null for a dry run. `reason` is optional, printable ASCII, at most 256 characters; the actor header is the operator. `slot` as for `level`; with a slot the kill applies only while the account plays that character |
+| `POST /admin/v1/characters/{account}/restore` or `/purge` with `{"name":text,"apply":bool}` | `200 {"applied","account","character_id","name","previous_name","slot","level","deleted_at"}`: restore or purge a deleted character, as `mag-admin character restore` and `purge`. `name` in the answer is the character's name after a restore (its old one when free); `slot` the slot it was restored into, or for a purge the slot it last held. `404` when the account has no deleted character of that name; `409` `slots_full`, `not_deleted` or `ambiguous_character` |
 | `GET /admin/v1/voice` | `200 {"sanctions":[{"account","kind","reason","operator","created_at","expires_at"}]}`: the active [voice sanctions](#voice-moderation), by account, a ban before a mute. Times are UTC `YYYY-MM-DDTHH:MM:SSZ`; `expires_at` and `reason` are null when absent |
 | `POST /admin/v1/voice/{account}/mute` or `/ban` with `{"apply":bool,"reason":text,"duration_minutes":N}` | `200 {"applied","account","action","kind","before","after"}`; `before` is the active sanction of that kind it replaces, `after` the new one, each null or a sanction as above. `reason` and `duration_minutes` (1 to 5256000) are optional; without a duration it lasts until lifted. The actor header is the operator |
 | `POST /admin/v1/voice/{account}/unmute` or `/unban` with `{"apply":bool,"reason":text}` | `200`, as above with `after` null. `409 {"error":"not_sanctioned","message"}` when there is no active sanction of that kind |

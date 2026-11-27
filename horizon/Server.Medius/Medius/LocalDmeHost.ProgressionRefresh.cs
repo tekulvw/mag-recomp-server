@@ -67,7 +67,7 @@ namespace Server.Medius
                 bool retry = false;
                 try
                 {
-                    var row = _store.ReadForAccount(owner.Account).SingleOrDefault(character => character.Id == owner.CharacterId);
+                    var row = _store.ReadCharacter(owner.Account, owner.CharacterId);
                     if (row == null) throw new InvalidDataException("Durable progression owner is missing.");
                     var record = row.ToRecord();
                     var request = new

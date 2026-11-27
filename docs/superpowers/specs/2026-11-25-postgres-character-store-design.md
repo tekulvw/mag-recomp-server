@@ -90,7 +90,7 @@ example, a `null` skill-point balance means "the catalog's initial points").
 ```sql
 CREATE TABLE mag.characters (
   id                        bigint PRIMARY KEY CHECK (id BETWEEN 1 AND 4294967295),
-  account                   text NOT NULL UNIQUE,        -- portal account name; one character per account
+  account                   text NOT NULL UNIQUE,        -- portal account name; one character per account until migration 0003 (docs/character-slots.md)
   name                      text NOT NULL CHECK (name ~ '^[!-~]{1,32}$'),
   faction                   smallint NOT NULL CHECK (faction BETWEEN 0 AND 2),
   head_id                   smallint NOT NULL CHECK (head_id BETWEEN 0 AND 255),

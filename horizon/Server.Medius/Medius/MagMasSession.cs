@@ -158,6 +158,24 @@ namespace Server.Medius
                     { StorageStatus = "storage-error-no-success"; }
                     ObserveActivity(now);
                     return Reply(applicationId, new MagCreateCharacterResponse { TransactionId = request.TransactionId, Result = result });
+                case MagDeleteCharacterRequest request when AccountAuthEnabled && CharacterStorageEnabled &&
+                    (State == SessionState.LocalDevelopmentAuthenticated || State == SessionState.CharacterCreated) &&
+                    MagDevelopmentAccountPolicy.HasZeroRsa(request):
+                    {
+                        // The client connects to MAS for this request alone, as for creation. The store keeps the
+                        // character (soft deletion); the client sees it leave the list either way.
+                        bool deleted = false;
+                        try
+                        {
+                            if (CharacterStore == null) throw new IOException("Character store unavailable.");
+                            var outcome = CharacterStore.DeleteCharacterForAccount(AuthenticatedAccount, request.CharacterId, request.CharacterName);
+                            deleted = outcome.Result == MagNetResult.Success; StorageStatus = outcome.Reason;
+                        }
+                        catch (Exception e) when (e is IOException || e is InvalidDataException || e is UnauthorizedAccessException)
+                        { StorageStatus = "storage-error-no-success"; }
+                        ObserveActivity(now);
+                        return Reply(applicationId, new MagDeleteCharacterResponse { TransactionId = request.TransactionId, Success = deleted });
+                    }
             }
             // Every unimplemented request remains observable only.
             ObserveActivity(now);

@@ -130,8 +130,9 @@ namespace Server.Medius
                         try
                         {
                             if (CharacterStore == null) throw new IOException("Character store unavailable.");
-                            response.Characters = CharacterStore.ReadForAccount(AuthenticatedAccount).Select(c => applicationId == 20231
-                                ? MagRetailCharacterSummary.FromSummary(c.ToSummary()) : c.ToSummary()).ToList();
+                            response.AllowedCharacters = LocalCharacterStore.CharacterSlots;
+                            response.Characters = SlotList(CharacterStore.ReadForAccount(AuthenticatedAccount)).Select(c => applicationId == 20231
+                                ? MagRetailCharacterSummary.FromSummary(c) : c).ToList();
                             response.CharacterCount = (byte)response.Characters.Count; StorageStatus = "local-profile-list-read";
                         }
                         catch (Exception e) when (e is IOException || e is InvalidDataException || e is UnauthorizedAccessException)
@@ -142,6 +143,25 @@ namespace Server.Medius
             ObserveActivity(now);
             return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();
         }
+
+        /// <summary>
+        /// The account's characters as list positions: position N is slot N. The client shows the allowed
+        /// number of slots and treats a summary with id 0 as an empty one (its own offline emulator lists one
+        /// character and two cleared summaries). A slot freed below an occupied one is sent as a cleared
+        /// summary so the characters above it keep their places; trailing empty slots are left out, so an
+        /// account with characters in its first slots gets exactly the list it always had.
+        /// </summary>
+        internal static List<MagCharacterSummary> SlotList(IReadOnlyList<StoredCharacter> characters)
+        {
+            var list = new List<MagCharacterSummary>();
+            if (characters.Count == 0) return list;
+            int highest = characters.Max(c => c.Slot);
+            for (int slot = 0; slot <= highest; slot++)
+                list.Add(characters.FirstOrDefault(c => c.Slot == slot)?.ToSummary() ?? ClearedSummary());
+            return list;
+        }
+        /// <summary>An empty slot as the client clears one: no id or name, faction -1, a level-1 commando, an empty kit.</summary>
+        internal static MagCharacterSummary ClearedSummary() => new MagCharacterSummary { Faction = 0xff };
 
         private bool PortalAuthenticate(MagNpAuthenticateRequest request, DateTime now, out MagNpAuthenticateResponse refusal)
         {

@@ -40,13 +40,16 @@ namespace Server.Medius
                 new TaskCompletionSource<GameplayBridgeResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
         }
 
-        /// <summary>The account's placed player in this host's running match, if any.</summary>
-        public (LocalDmeAdminKillStatus Status, LocalDmeAdminKillTarget Target) FindAdminKillTarget(string account)
+        /// <summary>The account's placed player in this host's running match, if any; with
+        /// <paramref name="characterId"/>, only while it plays that character.</summary>
+        public (LocalDmeAdminKillStatus Status, LocalDmeAdminKillTarget Target) FindAdminKillTarget(string account, uint? characterId = null)
         {
             lock (_gate)
             {
-                var rows = _reservations.Values.Where(r => string.Equals(r.Account, account, StringComparison.Ordinal)).ToArray();
-                if (rows.Length == 0 && !_pendingReleases.Values.Any(r => string.Equals(r.Reservation.Account, account, StringComparison.Ordinal)))
+                bool Named(string rowAccount, uint rowCharacter) =>
+                    string.Equals(rowAccount, account, StringComparison.Ordinal) && (characterId == null || rowCharacter == characterId);
+                var rows = _reservations.Values.Where(r => Named(r.Account, r.CharacterId)).ToArray();
+                if (rows.Length == 0 && !_pendingReleases.Values.Any(r => Named(r.Reservation.Account, r.Reservation.CharacterId)))
                     return (LocalDmeAdminKillStatus.NotHere, null);
                 var now = DateTime.UtcNow;
                 var live = rows.FirstOrDefault(r => IsLiveCohort(r) && r.Accepted && r.Claimed && !r.Invalidated &&

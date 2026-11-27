@@ -121,6 +121,21 @@ namespace RT.Models.MAG
         public override ushort MessageType => 0x023b;
         public MagNetResult Result { get; set; }
     }
+    /// <summary>The player deletes a character from the character list: the summary's name and id
+    /// (0x023C, common header, uint16-length name, uint32 id). Sent over MAS after authentication,
+    /// like creation, in the prototype and retail v1.0 clients alike.</summary>
+    public sealed class MagDeleteCharacterRequest : MagPluginClientMessage
+    {
+        public override ushort MessageType => 0x023c;
+        public string CharacterName { get; set; } = string.Empty;
+        public uint CharacterId { get; set; }
+    }
+    /// <summary>0x023D: common header and one success bit.</summary>
+    public sealed class MagDeleteCharacterResponse : MagPluginClientMessage
+    {
+        public override ushort MessageType => 0x023d;
+        public bool Success { get; set; }
+    }
     public sealed class MagLoadout
     {
         public byte UpdateId { get; set; } = 1;

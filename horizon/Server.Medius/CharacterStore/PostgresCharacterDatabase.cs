@@ -197,8 +197,9 @@ namespace Server.Medius
             }
         }
 
-        /// <summary>Applies every pending migration under an advisory lock; returns how many were applied.</summary>
-        public int Migrate()
+        /// <summary>Applies every pending migration under an advisory lock (with <paramref name="upTo"/>, only
+        /// those up to that version, for synthetic upgrade checks); returns how many were applied.</summary>
+        public int Migrate(int? upTo = null)
         {
             try
             {
@@ -219,7 +220,7 @@ namespace Server.Medius
                     var applied = ReadApplied(connection);
                     CheckApplied(applied);
                     int count = 0;
-                    foreach (var migration in KnownMigrations.Where(m => !applied.ContainsKey(m.Version)))
+                    foreach (var migration in KnownMigrations.Where(m => !applied.ContainsKey(m.Version) && (upTo == null || m.Version <= upTo)))
                     {
                         using var transaction = connection.BeginTransaction();
                         using (var apply = new NpgsqlCommand(migration.Sql, connection, transaction) { CommandTimeout = MaintenanceCommandTimeoutSeconds })

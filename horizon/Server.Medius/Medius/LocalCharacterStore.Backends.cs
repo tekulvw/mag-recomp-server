@@ -38,8 +38,10 @@ namespace Server.Medius
 
         private interface ICharacterBackend
         {
+            /// <summary>Every character, deleted ones included.</summary>
             IReadOnlyList<StoredCharacter> ReadAll();
-            IReadOnlyList<StoredCharacter> ReadForAccount(string account);
+            /// <summary>The account's characters in slot order, live ones first; deleted ones only when asked.</summary>
+            IReadOnlyList<StoredCharacter> ReadForAccount(string account, bool includeDeleted);
             /// <summary>Opens an exclusive unit of work. Disposing it without <see cref="StoreSession.Commit"/>
             /// discards every change.</summary>
             StoreSession Open(StoreScope scope);
@@ -57,8 +59,13 @@ namespace Server.Medius
             public abstract uint NextCharacterId();
             /// <summary>Durably saves the document; <paramref name="touchedProgress"/> names the match row a reward changed.</summary>
             public abstract void Commit(string touchedProgress = null);
-            /// <summary>Records the state before an operator change and returns where it was recorded.</summary>
-            public abstract string Backup(string backupDirectory, string operation, string account, byte level);
+            /// <summary>Records the state before an operator change to character <paramref name="characterId"/> and
+            /// returns where it was recorded: a copy of the JSON store named with <paramref name="label"/>, or
+            /// mag.admin_changes.</summary>
+            public abstract string Backup(string backupDirectory, string operation, string account, uint characterId, string label);
+            /// <summary>Journals a player's own change to character <paramref name="characterId"/> where the backend keeps a
+            /// journal (mag.admin_changes); the JSON store keeps none for it.</summary>
+            public abstract void Journal(string operation, string account, uint characterId);
             /// <summary>Durably saves <paramref name="account"/>'s voice sanctions (the session's scope) and
             /// journals the change: PostgreSQL in mag.admin_changes in the same transaction, the JSON store as a
             /// copy of the file before it in <paramref name="backupDirectory"/>. Returns where it was journalled.</summary>
@@ -80,7 +87,8 @@ namespace Server.Medius
             private readonly LocalCharacterStore _store;
             public JsonBackend(LocalCharacterStore store) => _store = store;
             public IReadOnlyList<StoredCharacter> ReadAll() => _store.ReadDocument().Characters;
-            public IReadOnlyList<StoredCharacter> ReadForAccount(string account) => ReadAll().Where(c => c.Account == account).ToArray();
+            public IReadOnlyList<StoredCharacter> ReadForAccount(string account, bool includeDeleted) => ReadAll()
+                .Where(c => c.Account == account && (includeDeleted || !c.Deleted)).OrderBy(c => c.Deleted).ThenBy(c => c.Slot).ThenBy(c => c.Id).ToArray();
             public StoreSession Open(StoreScope scope) => new JsonSession(_store, scope.CreateDirectory);
         }
 
@@ -104,13 +112,14 @@ namespace Server.Medius
                 Document.Characters.Count == 0 ? 1u : checked(Document.Characters.Max(c => c.Id) + 1u);
             public override void Commit(string touchedProgress = null) =>
                 _store.Commit(_path, Document.Characters, Document, touchedProgress);
-            public override string Backup(string backupDirectory, string operation, string account, byte level)
+            public override void Journal(string operation, string account, uint characterId) { }
+            public override string Backup(string backupDirectory, string operation, string account, uint characterId, string label)
             {
                 byte[] current = File.ReadAllBytes(_path);
                 string digest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(current)).ToLowerInvariant();
                 Directory.CreateDirectory(backupDirectory);
                 string backupPath = System.IO.Path.Combine(backupDirectory,
-                    $"characters.before-admin-{operation}-{account}-{level}-{digest.Substring(0, 12)}.json");
+                    $"characters.before-admin-{operation}-{account}-{label}-{digest.Substring(0, 12)}.json");
                 using (var backup = new FileStream(backupPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
                 { backup.Write(current); backup.Flush(true); }
                 return backupPath;

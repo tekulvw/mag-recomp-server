@@ -147,7 +147,8 @@ namespace Server.Medius
                 var response = new MagCharacterDataResponse { TransactionId = lookup.TransactionId, RequestId = lookup.RequestId };
                 try
                 {
-                    var character = CharacterStore == null ? null : FindCharacter(CharacterStore.ReadAll(), lookup);
+                    var character = CharacterStore == null ? null :
+                        FindCharacter(CharacterStore.ReadAll(), lookup, id => id == CharacterId || _registry?.IsAccountOnline(id, now) == true);
                     if (character != null)
                     {
                         response.Record = character.ToRecord(); response.Success = true;
@@ -252,14 +253,18 @@ namespace Server.Medius
         // Kind 2 names the character id (the id players see in a match); kind 1 names a character.
         // A name is the stored name first, else the one character whose display name it is, since
         // the in-match name of a linked character is its display name.
-        private static StoredCharacter FindCharacter(IReadOnlyList<StoredCharacter> characters, MagCharacterDataRequest lookup)
+        /// <summary>A player card's character: by id, by stored name, else by the name other players see. Every
+        /// character of an account shows the same online ID, so a display name that only one account holds
+        /// names the character it is playing (<paramref name="online"/>), else its lowest slot.</summary>
+        public static StoredCharacter FindCharacter(IReadOnlyList<StoredCharacter> characters, MagCharacterDataRequest lookup, Func<uint, bool> online)
         {
             if (lookup.QueryKind == 2) return lookup.AccountId == 0 ? null : characters.FirstOrDefault(row => row.Id == lookup.AccountId);
             if (lookup.QueryKind != 1 || string.IsNullOrEmpty(lookup.AccountName)) return null;
             var stored = characters.FirstOrDefault(row => row.Name == lookup.AccountName);
             if (stored != null) return stored;
-            var shown = characters.Where(row => row.DisplayName() == lookup.AccountName).Take(2).ToArray();
-            return shown.Length == 1 ? shown[0] : null;
+            var shown = characters.Where(row => row.DisplayName() == lookup.AccountName).ToArray();
+            if (shown.Length == 0 || shown.Select(row => row.Account).Distinct().Count() != 1) return null;
+            return shown.FirstOrDefault(row => online(row.Id)) ?? shown.OrderBy(row => row.Slot).First();
         }
     }
 }
