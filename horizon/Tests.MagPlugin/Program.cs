@@ -164,9 +164,14 @@ Test("postgres character store export keeps history to the JSON bound and verifi
 Test("postgres character store connections from a secret directory use TLS without GSSAPI", LeadershipProgressionChecks.PostgresSecretDirectoryConnection);
 Test("postgres character store import is idempotent with a dry run, counts and digests", LeadershipProgressionChecks.PostgresImportCommandLine);
 Test("postgres voice sanctions match the JSON store, journal, import, export and migrate", LeadershipProgressionChecks.PostgresVoiceSanctions);
+Test("postgres character slots match the JSON store, refuse what it refuses and serialize creations", LeadershipProgressionChecks.PostgresCharacterSlots);
+Test("postgres character slots upgrade a schema-2 database in place", LeadershipProgressionChecks.PostgresCharacterSlotUpgrade);
 Test("postgres voice writes answer at once while the synchronous standby stalls; a cut-off commit is an unknown outcome", LeadershipProgressionChecks.PostgresVoiceWritesIgnoreStalledStandby);
 Test("retail saved loadout delete commits and compacts the owned layout", LoadoutPreferenceStoreChecks.DeleteThroughMls);
 Test("retail skill purchase owns its equipment for loadout saves", LoadoutPreferenceStoreChecks.RetailSkillPurchaseOwnsItsEquipment);
+Test("character slots: three per account, soft deletion with the name moved aside, restore and purge", LeadershipProgressionChecks.CharacterSlotStore);
+Test("character slots through MAPS and MAS: three allowed, slot positions, delete requests and login", LeadershipProgressionChecks.CharacterSlotSessions);
+Test("character slots through mag-admin and the admin API: per-character targets, restore and purge", LeadershipProgressionChecks.CharacterSlotAdmin);
 Test("account-bound NP identity creation and persistence", NpIdentityChecks.Run);
 Test("MLS answers lobby player-card character data for any character", LeadershipProgressionChecks.PlayerCardLookup);
 Test("retail player online and game-info wire", LeadershipProgressionChecks.PlayerStatusWire);

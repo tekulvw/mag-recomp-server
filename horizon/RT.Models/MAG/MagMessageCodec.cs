@@ -25,7 +25,7 @@ namespace RT.Models.MAG
             if (TryParseForApplication(payload, applicationId, out message) && (message is MagRetailPartyInvite || message is MagRetailPartyInviteResponse ||
                 message is MagRetailPartyLeave || message is MagRetailPartyOpenInvite || message is MagRetailPartyRejoinRequest || message is MagRetailCancelJoinRequest || message is MagTrainingCompletedRequest || message is MagKeepAlive || message is MagJoinGameRequest || message is MagServerStatusRequest || message is MagHello || message is MagProtocolInfo || message is MagAccountLoginRequest || message is MagCharacterDataRequest ||
                 message is MagNpAuthenticateRequest || message is MagUniverseListRequest || message is MagRetailPatchRequest || message is MagRetailAccountLogoutRequest ||
-                message is MagNewsEulaRequest || message is MagCharacterListRequest || message is MagCreateCharacterRequest || message is MagLoadoutUpdateRequest || message is MagRetailLoadoutDeleteRequest || message is MagPurchaseSkillRequest || message is MagRetailNominationsUpdate ||
+                message is MagNewsEulaRequest || message is MagCharacterListRequest || message is MagCreateCharacterRequest || message is MagDeleteCharacterRequest || message is MagLoadoutUpdateRequest || message is MagRetailLoadoutDeleteRequest || message is MagPurchaseSkillRequest || message is MagRetailNominationsUpdate ||
                 message is MagRetailPlayerOnlineRequest || message is MagRetailPlayerGameInfoRequest)) return true;
             message = null;
             return false;
@@ -111,6 +111,8 @@ namespace RT.Models.MAG
                     0x024f => new MagCharacterRecordNotification(),
                     0x023a => new MagCreateCharacterRequest(),
                     0x023b => new MagCreateCharacterResponse(),
+                    0x023c => new MagDeleteCharacterRequest(),
+                    0x023d => new MagDeleteCharacterResponse(),
                     0x023e => new MagNewsEulaRequest(),
                     0x023f => new MagNewsEulaResponse(),
                     _ => null
@@ -299,6 +301,12 @@ namespace RT.Models.MAG
                         break;
                     case MagCreateCharacterResponse created:
                         created.Result = (MagNetResult)unchecked((int)reader.ReadUInt32());
+                        break;
+                    case MagDeleteCharacterRequest delete:
+                        delete.CharacterName = reader.ReadString(); delete.CharacterId = reader.ReadUInt32();
+                        break;
+                    case MagDeleteCharacterResponse deleted:
+                        deleted.Success = reader.ReadBoolean();
                         break;
                     case MagCharacterListResponse characters:
                         characters.Success = reader.ReadBoolean(); characters.AllowedCharacters = reader.ReadByte(); characters.CharacterCount = reader.ReadByte();
@@ -545,6 +553,12 @@ namespace RT.Models.MAG
                     break;
                 case MagCreateCharacterResponse created:
                     writer.WriteUInt32(unchecked((uint)(int)created.Result));
+                    break;
+                case MagDeleteCharacterRequest delete:
+                    writer.WriteString(delete.CharacterName ?? string.Empty); writer.WriteUInt32(delete.CharacterId);
+                    break;
+                case MagDeleteCharacterResponse deleted:
+                    writer.WriteBoolean(deleted.Success);
                     break;
                 case MagCharacterListResponse characters:
                     if (characters.Characters == null || characters.CharacterCount != characters.Characters.Count) throw new ArgumentException("MAG character count mismatch.", nameof(message));

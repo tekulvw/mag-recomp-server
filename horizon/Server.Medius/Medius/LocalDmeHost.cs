@@ -1115,11 +1115,9 @@ namespace Server.Medius
                                 if (callback != null && _notifiedRewards.Add(reward.RewardId)) notify = callback;
                             }
                         }
-                        if (notify != null)
-                        {
-                            var current = _store.ReadForAccount(owner.Account).Single(c => c.Id == owner.CharacterId).ToRecord();
-                            notify(current);
-                        }
+                        // A character purged meanwhile has no record left to publish.
+                        if (notify != null && _store.ReadCharacter(owner.Account, owner.CharacterId) is { } current)
+                            notify(current.ToRecord());
                         var request = new Dictionary<string, object> {
                             ["v"] = 2, ["request_id"] = Id(), ["op"] = "progression_committed", ["reservation_id"] = owner.Id,
                             ["world_id"] = reward.WorldId, ["player_id"] = reward.PlayerId, ["reward_id"] = reward.RewardId,

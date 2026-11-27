@@ -330,7 +330,9 @@ namespace Server.Medius
                     case ["", "admin", "v1", "accounts"]:
                         return request.Method != "GET" ? MethodNotAllowed("GET") : Accounts(now);
                     case ["", "admin", "v1", "characters", var account] when account.Length > 0:
-                        return request.Method != "GET" ? MethodNotAllowed("GET") : Character(account, now);
+                        return request.Method != "GET" ? MethodNotAllowed("GET") : Character(account, QuerySlot(request.PathAndQuery), now);
+                    case ["", "admin", "v1", "characters", var account, var action] when account.Length > 0 && action is "restore" or "purge":
+                        return request.Method != "POST" ? MethodNotAllowed("POST") : RestoreOrPurge(account, action, request.Body, actor);
                     case ["", "admin", "v1", "characters", var account, "level"] when account.Length > 0:
                         return request.Method != "POST" ? MethodNotAllowed("POST") : SetLevel(account, request.Body, actor, now);
                     case ["", "admin", "v1", "characters", var account, "kill"] when account.Length > 0:
@@ -376,11 +378,42 @@ namespace Server.Medius
         private static MagAdminApiResponse MethodNotAllowed(string allow) =>
             MagAdminApiResponse.Json(405, new { error = "method_not_allowed" }, allow);
 
+        /// <summary>One entry per character, deleted ones included (docs/admin-cli.md). The first five fields
+        /// are those of the one-character-per-account API.</summary>
         private MagAdminApiResponse Accounts(DateTime now) => MagAdminApiResponse.Json(200, new
         {
             accounts = MagAdminOperations.ListAccounts(_store, _markerDirectory, now).Select(c => new
-            { account = c.Account, level = c.Level, experience = c.Experience, skill_points = c.SkillPoints, session = c.Session })
+            {
+                account = c.Account, level = c.Level, experience = c.Experience, skill_points = c.SkillPoints, session = c.Session,
+                character_id = c.CharacterId, name = c.Name, slot = c.Slot, faction = c.Faction, deleted = c.Deleted, deleted_at = Time(c.DeletedAt)
+            })
         });
+
+        static string Time(DateTimeOffset? at) => at?.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ");
+
+        /// <summary><c>?slot=N</c> (0 to 255) from a request target, or null when absent. A malformed value
+        /// is -1, which names no slot.</summary>
+        static int? QuerySlot(string pathAndQuery)
+        {
+            int query = pathAndQuery.IndexOf('?');
+            if (query < 0) return null;
+            foreach (var pair in pathAndQuery[(query + 1)..].Split('&'))
+                if (pair.StartsWith("slot=", StringComparison.Ordinal))
+                    return byte.TryParse(pair[5..], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out byte slot)
+                        ? slot : -1;
+            return null;
+        }
+
+        /// <summary>An optional <c>"slot"</c> body field: absent or null is null; true when present and valid.</summary>
+        static bool TrySlot(JsonElement root, out int? slot)
+        {
+            slot = null;
+            if (!root.TryGetProperty("slot", out var value) || value.ValueKind == JsonValueKind.Null) return true;
+            if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt32(out int number) || number < 0 || number >= LocalCharacterStore.CharacterSlots)
+                return false;
+            slot = number;
+            return true;
+        }
 
         private MagAdminApiResponse DmePorts()
         {
@@ -394,26 +427,79 @@ namespace Server.Medius
             });
         }
 
-        private MagAdminApiResponse Character(string account, DateTime now)
+        /// <summary>The account's character in <paramref name="slot"/> (else its lowest live slot), and every
+        /// character of the account under <c>characters</c>.</summary>
+        private MagAdminApiResponse Character(string account, int? slot, DateTime now)
         {
-            var c = MagDevelopmentAccountPolicy.ValidAccount(account) ? MagAdminOperations.Show(_store, account, _markerDirectory, now) : null;
+            var c = MagDevelopmentAccountPolicy.ValidAccount(account) ? MagAdminOperations.Show(_store, account, _markerDirectory, now, slot) : null;
             if (c == null) return MagAdminApiResponse.Error(404, "not_found");
             return MagAdminApiResponse.Json(200, new
             {
                 account = c.Account, level = c.Level, experience = c.Experience, skill_points = c.SkillPoints,
-                next_level_experience = c.NextLevelExperience, session = c.Session
+                next_level_experience = c.NextLevelExperience, session = c.Session,
+                character_id = c.CharacterId, name = c.Name, slot = c.Slot, faction = c.Faction,
+                characters = MagAdminOperations.Characters(_store, account, _markerDirectory, now).Select(x => new
+                {
+                    character_id = x.CharacterId, name = x.Name, slot = x.Slot, faction = x.Faction, level = x.Level,
+                    experience = x.Experience, skill_points = x.SkillPoints, deleted = x.Deleted, deleted_at = Time(x.DeletedAt)
+                })
+            });
+        }
+
+        /// <summary>Restore or purge a deleted character (docs/admin-cli.md); body <c>{"name", "apply"}</c>.</summary>
+        private MagAdminApiResponse RestoreOrPurge(string account, string action, byte[] body, string actor)
+        {
+            bool apply; string name;
+            try
+            {
+                using var document = JsonDocument.Parse(body);
+                var root = document.RootElement;
+                if (root.ValueKind != JsonValueKind.Object || root.EnumerateObject().Any(p => p.Name != "apply" && p.Name != "name") ||
+                    !root.TryGetProperty("apply", out var applyValue) || (applyValue.ValueKind != JsonValueKind.True && applyValue.ValueKind != JsonValueKind.False) ||
+                    !root.TryGetProperty("name", out var nameValue) || nameValue.ValueKind != JsonValueKind.String)
+                    return MagAdminApiResponse.Error(400, "invalid_request");
+                apply = applyValue.GetBoolean();
+                name = nameValue.GetString();
+            }
+            catch (JsonException) { return MagAdminApiResponse.Error(400, "invalid_request"); }
+            var result = action == "restore"
+                ? MagAdminOperations.Restore(_store, account, name, apply, _backupDirectory)
+                : MagAdminOperations.Purge(_store, account, name, apply, _backupDirectory);
+            string who = JsonSerializer.Serialize(actor), what = JsonSerializer.Serialize(name);
+            switch (result.Refusal)
+            {
+                case MagAdminRefusal.None:
+                    break;
+                case MagAdminRefusal.NotFound:
+                    return MagAdminApiResponse.Error(404, "not_found");
+                case MagAdminRefusal.Failed:
+                    _log($"admin api: {action} failed actor={who} account={account} name={what}: {result.Message}");
+                    return MagAdminApiResponse.Error(500, "internal_error");
+                default:
+                    _log($"admin api: {action} refused ({result.Code}) actor={who} account={account} name={what} apply={apply}");
+                    return MagAdminApiResponse.Json(409, new { error = result.Code, message = result.Message });
+            }
+            var change = result.Change;
+            _log(change.Applied
+                ? $"admin api: applied {action} actor={who} account={account} character={change.CharacterId} name={what} slot={change.Slot}"
+                : $"admin api: dry-run {action} actor={who} account={account} character={change.CharacterId} name={what} slot={change.Slot}");
+            return MagAdminApiResponse.Json(200, new
+            {
+                applied = change.Applied, account = change.Account, character_id = change.CharacterId, name = change.Name,
+                previous_name = change.PreviousName, slot = change.Slot, level = change.Level, deleted_at = Time(change.DeletedAt is long at ? DateTimeOffset.FromUnixTimeSeconds(at) : null)
             });
         }
 
         private MagAdminApiResponse Kill(string account, byte[] body, string actor, DateTime now)
         {
-            bool apply; string reason = null;
+            bool apply; string reason = null; int? slot = null;
             try
             {
                 using var document = JsonDocument.Parse(body);
                 var root = document.RootElement;
-                if (root.ValueKind != JsonValueKind.Object || root.EnumerateObject().Any(p => p.Name != "apply" && p.Name != "reason") ||
-                    !root.TryGetProperty("apply", out var applyValue) || (applyValue.ValueKind != JsonValueKind.True && applyValue.ValueKind != JsonValueKind.False))
+                if (root.ValueKind != JsonValueKind.Object || root.EnumerateObject().Any(p => p.Name != "apply" && p.Name != "reason" && p.Name != "slot") ||
+                    !root.TryGetProperty("apply", out var applyValue) || (applyValue.ValueKind != JsonValueKind.True && applyValue.ValueKind != JsonValueKind.False) ||
+                    !TrySlot(root, out slot))
                     return MagAdminApiResponse.Error(400, "invalid_request");
                 apply = applyValue.GetBoolean();
                 if (root.TryGetProperty("reason", out var reasonValue) && reasonValue.ValueKind != JsonValueKind.Null)
@@ -424,7 +510,17 @@ namespace Server.Medius
             }
             catch (JsonException) { return MagAdminApiResponse.Error(400, "invalid_request"); }
             if (!MagAdminKill.ValidReason(reason)) return MagAdminApiResponse.Error(400, "invalid_request");
-            var result = MagAdminKill.KillAsync(_store, _gameplayHosts(), account, apply, reason, actor, _markerDirectory, now)
+            // With several live characters the request names one by slot; the kill applies only while it plays.
+            uint? characterId = null;
+            if (MagDevelopmentAccountPolicy.ValidAccount(account) && (slot != null || _store.ReadForAccount(account).Count > 1))
+            {
+                var resolved = MagAdminOperations.Resolve(_store, account, slot);
+                if (resolved.Refusal == MagAdminRefusal.NotFound) return MagAdminApiResponse.Error(404, "not_found");
+                if (resolved.Refusal != MagAdminRefusal.None)
+                    return MagAdminApiResponse.Json(409, new { error = MagAdminSetLevelResult.CodeOf(resolved.Refusal), message = resolved.Message });
+                characterId = resolved.Character.Id;
+            }
+            var result = MagAdminKill.KillAsync(_store, _gameplayHosts(), account, apply, reason, actor, _markerDirectory, now, characterId)
                 .GetAwaiter().GetResult();
             string who = JsonSerializer.Serialize(actor), why = JsonSerializer.Serialize(reason);
             string where = $"worker={result.WorkerId ?? "none"} world={result.WorldId?.ToString() ?? "none"} player={result.PlayerId?.ToString() ?? "none"}";
@@ -522,20 +618,24 @@ namespace Server.Medius
 
         private MagAdminApiResponse SetLevel(string account, byte[] body, string actor, DateTime now)
         {
-            long level; bool apply;
+            long level; bool apply; int? slot;
             try
             {
                 using var document = JsonDocument.Parse(body);
                 var root = document.RootElement;
                 if (root.ValueKind != JsonValueKind.Object ||
                     !root.TryGetProperty("level", out var levelValue) || levelValue.ValueKind != JsonValueKind.Number || !levelValue.TryGetInt64(out level) ||
-                    !root.TryGetProperty("apply", out var applyValue) || (applyValue.ValueKind != JsonValueKind.True && applyValue.ValueKind != JsonValueKind.False))
+                    !root.TryGetProperty("apply", out var applyValue) || (applyValue.ValueKind != JsonValueKind.True && applyValue.ValueKind != JsonValueKind.False) ||
+                    !TrySlot(root, out slot))
                     return MagAdminApiResponse.Error(400, "invalid_request");
                 apply = applyValue.GetBoolean();
             }
             catch (JsonException) { return MagAdminApiResponse.Error(400, "invalid_request"); }
             int requested = level < int.MinValue ? int.MinValue : level > int.MaxValue ? int.MaxValue : (int)level;
-            var result = MagAdminOperations.SetLevel(_store, account, requested, apply, _backupDirectory, _markerDirectory, now);
+            // The path names an account: a character name there is not looked up.
+            if (!MagDevelopmentAccountPolicy.ValidAccount(account) || _store.ReadForAccount(account).Count == 0)
+                return MagAdminApiResponse.Error(404, "not_found");
+            var result = MagAdminOperations.SetLevel(_store, account, requested, apply, _backupDirectory, _markerDirectory, now, slot);
             string who = JsonSerializer.Serialize(actor);
             switch (result.Refusal)
             {
@@ -557,7 +657,8 @@ namespace Server.Medius
                 : $"admin api: dry-run set-level actor={who} account={change.Account} from={change.PreviousLevel} to={change.Level}");
             return MagAdminApiResponse.Json(200, new
             {
-                applied = change.Applied, account = change.Account, from_level = change.PreviousLevel, to_level = change.Level,
+                applied = change.Applied, account = change.Account, character_id = change.CharacterId, name = change.Name, slot = change.Slot,
+                from_level = change.PreviousLevel, to_level = change.Level,
                 experience_before = change.PreviousExperience, experience_after = change.Experience,
                 skill_points_before = change.PreviousSkillPoints, skill_points_after = change.SkillPoints, backup
             });

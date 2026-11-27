@@ -64,10 +64,12 @@ namespace Server.Medius
             reason == null || (reason.Length <= MaximumReasonLength && reason.All(c => c >= 0x20 && c <= 0x7e));
 
         public static async Task<MagAdminKillResult> KillAsync(LocalCharacterStore store, IReadOnlyList<MagAdminGameplayHost> hosts,
-            string account, bool apply, string reason, string operatorName, string markerDirectory, DateTime now)
+            string account, bool apply, string reason, string operatorName, string markerDirectory, DateTime now, uint? characterId = null)
         {
-            if (!MagDevelopmentAccountPolicy.ValidAccount(account) || !store.ReadAll().Any(c => c.Account == account))
-                return Refuse(MagAdminKillRefusal.NotFound, account, $"account {account} has no character");
+            // An account plays one character at a time; a named character must be the one in the match.
+            if (!MagDevelopmentAccountPolicy.ValidAccount(account) ||
+                !store.ReadForAccount(account).Any(c => characterId == null || c.Id == characterId))
+                return Refuse(MagAdminKillRefusal.NotFound, account, $"account {account} has no {(characterId == null ? "" : "such ")}character");
             if (!ValidReason(reason))
                 return Refuse(MagAdminKillRefusal.InvalidReason, account, $"the reason must be printable ASCII of at most {MaximumReasonLength} characters");
             if (string.IsNullOrEmpty(reason)) reason = null;
@@ -78,7 +80,7 @@ namespace Server.Medius
             (MagAdminGameplayHost Host, LocalDmeAdminKillStatus Status, LocalDmeAdminKillTarget Target) found = default;
             foreach (var host in hosts ?? Array.Empty<MagAdminGameplayHost>())
             {
-                var (status, candidate) = host.Host.FindAdminKillTarget(account);
+                var (status, candidate) = host.Host.FindAdminKillTarget(account, characterId);
                 if (status == LocalDmeAdminKillStatus.NotHere) continue;
                 if (found.Host == null || Rank(status) > Rank(found.Status)) found = (host, status, candidate);
             }

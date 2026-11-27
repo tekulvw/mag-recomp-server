@@ -88,10 +88,10 @@ namespace Server.Medius
         private static void ValidateVoiceSanctions(Document document)
         {
             if (document.VoiceSanctions == null) return;
-            var accounts = document.Characters.Select(c => c.Account).ToHashSet(StringComparer.Ordinal);
+            // A sanction belongs to the account: it outlives a purged character, even the account's last one.
             var seen = new HashSet<string>(StringComparer.Ordinal);
             foreach (var s in document.VoiceSanctions)
-                if (s == null || s.Account == null || !accounts.Contains(s.Account) || !VoiceSanction.TryParseKind(s.Kind, out _) ||
+                if (s == null || !MagDevelopmentAccountPolicy.ValidAccount(s.Account) || !VoiceSanction.TryParseKind(s.Kind, out _) ||
                     !ValidVoiceSanctionReason(s.Reason) || !ValidVoiceSanctionOperator(s.Operator) || s.CreatedAt < 0 ||
                     (s.ExpiresAt is long end && end <= s.CreatedAt) || !seen.Add(s.Account + "\n" + s.Kind))
                     throw new InvalidDataException("Character-store voice sanctions invalid.");
@@ -147,7 +147,9 @@ namespace Server.Medius
                 return Refused("invalid-duration");
             using var session = _backend.Open(new StoreScope(account, CreateDirectory: false, VoiceSanctions: true));
             var document = session.Document;
-            if (!document.Characters.Any(c => c.Account == account)) return Refused("account-not-found");
+            // An account is known while it has a character (deleted ones too) or a sanction to lift.
+            if (!document.Characters.Any(c => c.Account == account) && document.VoiceSanctions?.Any(s => s.Account == account) != true)
+                return Refused("account-not-found");
             string kindName = VoiceSanction.Name(kind);
             var all = document.VoiceSanctions ?? new List<StoredVoiceSanction>();
             var existing = all.SingleOrDefault(s => s.Account == account && s.Kind == kindName);

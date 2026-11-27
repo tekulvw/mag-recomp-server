@@ -100,7 +100,7 @@ internal static partial class LeadershipProgressionChecks
         Created("bravo", "Bravo");
         Created("charlie", "ALPHA");          // name taken, case-insensitively
         Created("alpha", "Alpha");            // exact retry
-        Created("alpha", "Other");            // account slot occupied
+        Created("alpha", "Other");            // a second slot
         Reward("alpha", 1, "r1", "world-1-m1", "enemy_killed");
         Reward("alpha", 1, "r1", "world-1-m1", "enemy_killed");    // replay
         Reward("alpha", 1, "r1", "world-1-m1", "teammate_healed"); // receipt mismatch
@@ -132,12 +132,17 @@ internal static partial class LeadershipProgressionChecks
         log.Add($"set-level: {applied.Reason} {applied.Applied} {applied.Level} {applied.Experience} {applied.SkillPoints}");
         foreach (var account in new[] { "alpha", "bravo", "charlie" })
         {
-            var row = store.ReadForAccount(account).SingleOrDefault();
-            var r = row?.ToRecord();
-            log.Add(row == null ? $"read {account}: none" : $"read {account}: id={r.AccountId} xp={r.Experience} lvl={r.Level} sp={r.SkillPoints} " +
-                $"lead={r.LeadershipLevel}/{r.LeadershipPoints}/{r.LeadershipNominations} last={r.LastUsedLoadout} " +
-                $"kits={string.Join("|", r.Loadouts.Select(l => l.UpdateId + ":" + string.Join(",", l.Items)))} " +
-                $"items={string.Join(",", r.AvailableItems)} skills={string.Join(",", r.Skills)}");
+            // An account holds up to three characters (alpha has two here); log every one, in slot order.
+            var rows = store.ReadForAccount(account);
+            if (rows.Count == 0) log.Add($"read {account}: none");
+            foreach (var row in rows)
+            {
+                var r = row.ToRecord();
+                log.Add($"read {account} slot {row.Slot}: id={r.AccountId} name={row.Name} xp={r.Experience} lvl={r.Level} sp={r.SkillPoints} " +
+                    $"lead={r.LeadershipLevel}/{r.LeadershipPoints}/{r.LeadershipNominations} last={r.LastUsedLoadout} " +
+                    $"kits={string.Join("|", r.Loadouts.Select(l => l.UpdateId + ":" + string.Join(",", l.Items)))} " +
+                    $"items={string.Join(",", r.AvailableItems)} skills={string.Join(",", r.Skills)}");
+            }
         }
         log.Add("all: " + string.Join(",", store.ReadAll().Select(c => c.Account + "=" + c.Id)));
         return log;
@@ -285,7 +290,7 @@ internal static partial class LeadershipProgressionChecks
         var catalogs = ParityCatalogsIn(directory);
         string jsonPath = Path.Combine(directory, "characters.json");
         var json = Configure(new LocalCharacterStore(jsonPath), catalogs);
-        RunParityScript(json, Path.Combine(directory, "backups"));
+        RunParityScript(json, Path.Combine(directory, "backups"));   // three characters: alpha (slots 0 and 1) and bravo
         var pg = Configure(LocalCharacterStore.ForPostgres(database), catalogs);
 
         // Unknown fields are refused, and nothing is written.
@@ -306,7 +311,7 @@ internal static partial class LeadershipProgressionChecks
 
         var first = pg.ImportFrom(json);
         var imported = first.After;
-        Check(first.Plan.Action == CharacterImportAction.Import && imported == json.Summarize() && imported.Characters == 2 &&
+        Check(first.Plan.Action == CharacterImportAction.Import && imported == json.Summarize() && imported.Characters == 3 &&
             imported.Receipts == 6 && imported.MatchRows == 3, "Import summary differs from the JSON store: " + imported.Describe());
         Check(pg.CompareWith(json).Count == 0, "Import does not verify");
         const string imports = "SELECT count(*) FROM mag.admin_changes WHERE operation = 'character-store-import'";
@@ -333,7 +338,7 @@ internal static partial class LeadershipProgressionChecks
         var replay = pg.ApplyRewardForAccount("alpha", 1, "r2", "world-1-m1", "enemy_killed", 1);
         Check(replay.Result == MagNetResult.Success && replay.Duplicate, "An imported receipt does not replay");
         Check(pg.CreateForAccount(new MagCreateCharacterRequest { AccountName = "Delta", Faction = 1, UniverseId = 26, NpId = new byte[36] },
-            "delta").Result == MagNetResult.Success && pg.ReadForAccount("delta").Single().Id == 3, "Character IDs do not continue after import");
+            "delta").Result == MagNetResult.Success && pg.ReadForAccount("delta").Single().Id == 4, "Character IDs do not continue after import");
         Check(Scalar(connection, "SELECT count(*) FROM mag.match_progress WHERE result_kind = 'match_major_victory' AND finalized") == 1,
             "The match result kind was not recorded");
 
@@ -357,13 +362,13 @@ internal static partial class LeadershipProgressionChecks
             "Replace over server writes was not refused: " + used);
         try { pg.ImportFrom(json, new CharacterImportOptions(Replace: true)); throw new Exception("Replace discarded server writes"); }
         catch (InvalidDataException) { }
-        Check(Scalar(connection, "SELECT count(*) FROM mag.characters") == 3, "A refused replace changed rows");
+        Check(Scalar(connection, "SELECT count(*) FROM mag.characters") == 4, "A refused replace changed rows");
         var discarded = pg.ImportFrom(json, new CharacterImportOptions(Replace: true, DiscardPostgresChanges: true));
         Check(discarded.Plan.Action == CharacterImportAction.Replace && pg.CompareWith(json).Count == 0 &&
-            Scalar(connection, "SELECT count(*) FROM mag.characters") == 2 && Scalar(connection, imports) == 3,
+            Scalar(connection, "SELECT count(*) FROM mag.characters") == 3 && Scalar(connection, imports) == 3,
             "Replace with --discard-postgres-changes failed: " + discarded.Plan);
         Check(pg.CreateForAccount(new MagCreateCharacterRequest { AccountName = "Echo", Faction = 1, UniverseId = 26, NpId = new byte[36] },
-            "echo").Result == MagNetResult.Success && pg.ReadForAccount("echo").Single().Id == 3, "Character IDs do not continue after a replace");
+            "echo").Result == MagNetResult.Success && pg.ReadForAccount("echo").Single().Id == 4, "Character IDs do not continue after a replace");
     }));
 
     public static void PostgresSecretDirectoryConnection() => WithDirectory(directory =>
@@ -400,15 +405,15 @@ internal static partial class LeadershipProgressionChecks
             dry.Output.Contains(digest), "import --dry-run: " + dry);
         Check(Scalar(connection, "SELECT count(*) FROM mag.characters") == 0, "import --dry-run wrote rows");
         var import = Run("import", "--from", jsonPath);
-        Check(import.Code == 0 && import.Output.Contains("imported: 2 characters, 6 reward receipts, 3 match rows, digest " + digest) &&
+        Check(import.Code == 0 && import.Output.Contains("imported: 3 characters, 6 reward receipts, 3 match rows, digest " + digest) &&
             import.Output.Contains("verified"), "import: " + import);
         var repeat = Run("import", "--from", jsonPath);
         Check(repeat.Code == 0 && repeat.Output.Contains("unchanged: "), "repeated import: " + repeat);
         var verify = Run("verify", "--json", jsonPath);
-        Check(verify.Code == 0 && verify.Output.Contains("json:     2 characters") && verify.Output.Contains("postgres: 2 characters") &&
+        Check(verify.Code == 0 && verify.Output.Contains("json:     3 characters") && verify.Output.Contains("postgres: 3 characters") &&
             verify.Output.Contains(digest), "verify: " + verify);
         var status = Run("status");
-        Check(status.Code == 0 && status.Output.Contains("characters 2, character_loadouts 5") && status.Output.Contains("reward_receipts 6") &&
+        Check(status.Code == 0 && status.Output.Contains("characters 3, character_loadouts 5") && status.Output.Contains("reward_receipts 6") &&
             status.Output.Contains("digest " + digest) && !status.Output.Contains("last import: never"), "status: " + status);
         Check(Run("import", "--from", jsonPath, "--discard-postgres-changes").Code == 2, "--discard-postgres-changes without --replace was accepted");
 
