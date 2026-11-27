@@ -24,5 +24,22 @@
   </tbody>
 </table>
 {% endif %}
+<h2>Voice mutes and bans</h2>
+{% if let Some(e) = voice_error %}<p class="alert">{{ e }}</p>
+{% else if sanctions.is_empty() %}<p class="quiet">No account is voice muted or banned.</p>
+{% else %}
+<p>These accounts' in-match voice is not relayed. Open a character to lift a sanction.</p>
+<table>
+  <thead><tr><th>Character</th><th>Kind</th><th>Ends</th><th>Since</th><th>By</th><th>Reason</th></tr></thead>
+  <tbody>
+  {% for s in sanctions %}
+  <tr>
+    <td><a href="/admin/game/characters/{{ s.account|urlencode_strict }}">{{ s.account }}</a></td>
+    <td>{{ s.kind }}</td><td>{{ s.ends }}</td><td>{{ s.since }}</td><td>{{ s.operator }}</td><td>{{ s.reason }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
 {% endif %}
 {% endblock %}

@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Voice {{ action }} · {{ account }}{% endblock %}
+{% block content %}
+{% include "admin_nav.html" %}
+<h1>Voice {{ action }} · {{ account }}</h1>
+{% if let Some(r) = refusal %}
+<div class="alert">
+  <p><strong>The game server refused the change</strong> ({{ r.code }}): {{ r.message }}</p>
+  <p>{{ r.advice }}</p>
+</div>
+{% else if let Some(e) = error %}
+<p class="alert">{{ e }} Nothing was changed.</p>
+{% else %}
+{% if applied %}
+<p><strong>{% if lift %}Voice sanction lifted.{% else %}Voice {{ action }} applied.{% endif %}</strong> The game server applies it to a player in a match at once.</p>
+{% else %}
+<p>The game server would make this change. Nothing has been saved yet.</p>
+{% endif %}
+<table>
+  <thead><tr><th></th><th>Kind</th><th>Ends</th><th>By</th><th>Reason</th></tr></thead>
+  <tbody>
+  <tr><td>Before</td>{% if let Some(b) = before %}<td>{{ b.kind }}</td><td>{{ b.ends }}</td><td>{{ b.operator }}</td><td>{{ b.reason }}</td>{% else %}<td colspan="4" class="quiet">none active</td>{% endif %}</tr>
+  <tr><td>After</td>{% if let Some(a) = after %}<td>{{ a.kind }}</td><td>{{ a.ends }}</td><td>{{ a.operator }}</td><td>{{ a.reason }}</td>{% else %}<td colspan="4" class="quiet">none</td>{% endif %}</tr>
+  </tbody>
+</table>
+{% if !applied %}
+<p>A mute or ban stops the game server relaying any of this account's in-match voice. The player still hears everyone and is not told.</p>
+<form method="post" action="/admin/game/characters/{{ account|urlencode_strict }}/voice/confirm" class="row">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="action" value="{{ action }}">
+  <input type="hidden" name="duration" value="{{ duration }}">
+  <input type="hidden" name="reason" value="{{ reason }}">
+  <button class="danger">Apply voice {{ action }}</button>
+  <a href="/admin/game/characters/{{ account|urlencode_strict }}">Cancel</a>
+</form>
+{% endif %}
+{% endif %}
+<p><a href="/admin/game/characters/{{ account|urlencode_strict }}">Back to {{ account }}</a></p>
+{% endblock %}

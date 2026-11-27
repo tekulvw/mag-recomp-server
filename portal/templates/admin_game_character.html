@@ -16,6 +16,39 @@
   <dt>Skill points</dt><dd>{{ c.skill_points }}</dd>
   <dt>Session</dt><dd>{% if c.session == "online" %}<strong>online</strong>{% else %}{{ c.session }}{% endif %}</dd>
 </dl>
+<h2>Voice</h2>
+{% if let Some(e) = voice_error %}<p class="alert">{{ e }}</p>
+{% else %}
+{% if sanctions.is_empty() %}<p class="quiet">Not voice muted or banned.</p>
+{% else %}
+<table>
+  <thead><tr><th>Kind</th><th>Ends</th><th>Since</th><th>By</th><th>Reason</th><th></th></tr></thead>
+  <tbody>
+  {% for s in sanctions %}
+  <tr>
+    <td>{{ s.kind }}</td><td>{{ s.ends }}</td><td>{{ s.since }}</td><td>{{ s.operator }}</td><td>{{ s.reason }}</td>
+    <td><form method="post" action="/admin/game/characters/{{ account|urlencode_strict }}/voice">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="action" value="un{{ s.kind }}">
+      <button>Lift {{ s.kind }}</button>
+    </form></td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+<p>A mute or ban stops the game server relaying this account's in-match voice, both its channel and its proximity voice. The player still hears everyone and is not told. Both act the same; choose ban for a standing refusal. The next step shows the change before anything is saved.</p>
+<form method="post" action="/admin/game/characters/{{ account|urlencode_strict }}/voice" class="stack">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>Action<select name="action"><option value="mute">Mute</option><option value="ban">Ban</option></select></label>
+  <label>Lasts<select name="duration">
+    <option value="30">30 minutes</option><option value="60">1 hour</option><option value="1440">1 day</option>
+    <option value="10080">7 days</option><option value="43200">30 days</option><option value="">Until lifted</option>
+  </select></label>
+  <label>Reason<input name="reason" maxlength="256"></label>
+  <button>Preview voice change</button>
+</form>
+{% endif %}
 {% if is_admin %}
 <h2>Set level</h2>
 <p>Raises the character to a level, with the XP and skill points the game gives for it. The next step shows the change before anything is saved. The player must be signed out of the game.</p>

@@ -147,6 +147,10 @@ impl Refusal {
             "lower_level" => "Levels can only be raised. Choose a level above the current one.",
             "same_level" => "The character is already at that level. Nothing was changed.",
             "level_out_of_range" => "Choose a level the game supports.",
+            "not_sanctioned" => {
+                "The account has no active voice mute or ban of that kind, so there is nothing \
+                 to lift. Nothing was changed."
+            }
             "no_progression_catalog" => {
                 "The game server has no progression catalog loaded, so it cannot work out \
                  experience for a level. Fix the server's data files first."
@@ -154,6 +158,76 @@ impl Refusal {
             _ => "Nothing was changed.",
         }
     }
+}
+
+/// One active voice sanction from `GET /admin/v1/voice`, or the `before`/`after` of a change.
+/// Times are UTC `YYYY-MM-DDTHH:MM:SSZ`.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct VoiceSanction {
+    pub account: String,
+    /// `mute` or `ban`.
+    pub kind: String,
+    pub reason: Option<String>,
+    pub operator: String,
+    pub created_at: String,
+    /// `None` lasts until lifted.
+    pub expires_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct VoiceList {
+    sanctions: Vec<VoiceSanction>,
+}
+
+/// What a voice moderation request does to an account's in-match voice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VoiceAction {
+    Mute,
+    Ban,
+    Unmute,
+    Unban,
+}
+
+impl VoiceAction {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "mute" => Some(Self::Mute),
+            "ban" => Some(Self::Ban),
+            "unmute" => Some(Self::Unmute),
+            "unban" => Some(Self::Unban),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Mute => "mute",
+            Self::Ban => "ban",
+            Self::Unmute => "unmute",
+            Self::Unban => "unban",
+        }
+    }
+
+    /// Unmute and unban lift a sanction; they take no duration.
+    pub fn is_lift(self) -> bool {
+        matches!(self, Self::Unmute | Self::Unban)
+    }
+}
+
+/// Longest voice sanction with an end, in minutes (3650 days); longer ones are until lifted.
+pub const MAX_VOICE_MINUTES: u32 = 3650 * 24 * 60;
+
+/// A voice mute, ban or lift, planned (`applied: false`) or made.
+#[derive(Debug, Clone, Deserialize)]
+pub struct VoiceChange {
+    pub applied: bool,
+    pub account: String,
+    pub action: String,
+    pub kind: String,
+    /// The active sanction of this kind before the change.
+    pub before: Option<VoiceSanction>,
+    /// The sanction after it; `None` for a lift.
+    pub after: Option<VoiceSanction>,
 }
 
 /// `GET /admin/v1/status`: the game server's read-only status, counts only (no account names).
@@ -405,6 +479,70 @@ impl GameAdmin {
             StatusCode::OK => {
                 let change: LevelChange = parse(&body, "the level change")?;
                 if change.account != account || change.to_level != level || change.applied != apply
+                {
+                    return Err(GameAdminError::Unexpected(
+                        "it described a different change than the one asked for".into(),
+                    ));
+                }
+                Ok(change)
+            }
+            other => Err(failure(other, &body)),
+        }
+    }
+
+    /// The active voice mutes and bans. `NotFound` means the game server is too old to have them.
+    pub async fn voice_sanctions(&self, actor: &str) -> Result<Vec<VoiceSanction>, GameAdminError> {
+        let (status, body) = self
+            .send(Method::GET, "/admin/v1/voice", Vec::new(), actor)
+            .await?;
+        match status {
+            StatusCode::OK => Ok(parse::<VoiceList>(&body, "the voice sanctions")?.sanctions),
+            other => Err(failure(other, &body)),
+        }
+    }
+
+    /// Plans (`apply: false`) or makes a voice mute, ban or lift. `duration_minutes` is only
+    /// for a mute or ban; `None` lasts until lifted.
+    pub async fn change_voice(
+        &self,
+        actor: &str,
+        account: &str,
+        action: VoiceAction,
+        apply: bool,
+        reason: Option<&str>,
+        duration_minutes: Option<u32>,
+    ) -> Result<VoiceChange, GameAdminError> {
+        #[derive(serde::Serialize)]
+        struct Body<'a> {
+            apply: bool,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            reason: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            duration_minutes: Option<u32>,
+        }
+        if action.is_lift() && duration_minutes.is_some() {
+            return Err(GameAdminError::BadRequest(
+                "a lift takes no duration".into(),
+            ));
+        }
+        let path = format!(
+            "/admin/v1/voice/{}/{}",
+            path_segment(account)?,
+            action.as_str()
+        );
+        let body = serde_json::to_vec(&Body {
+            apply,
+            reason,
+            duration_minutes,
+        })
+        .expect("plain JSON");
+        let (status, body) = self.send(Method::POST, &path, body, actor).await?;
+        match status {
+            StatusCode::OK => {
+                let change: VoiceChange = parse(&body, "the voice change")?;
+                if change.account != account
+                    || change.action != action.as_str()
+                    || change.applied != apply
                 {
                     return Err(GameAdminError::Unexpected(
                         "it described a different change than the one asked for".into(),

@@ -1971,6 +1971,12 @@ struct MediusState {
     status_calls: u32,
     /// (account, level, apply) for each signed level request.
     level_calls: Vec<(String, u32, bool)>,
+    /// Active voice sanctions, as `GET /admin/v1/voice` lists them.
+    voice: Vec<Value>,
+    /// (account, action, request body) for each signed voice request.
+    voice_calls: Vec<(String, String, Value)>,
+    /// Answer voice requests with 404, as a game server without voice moderation does.
+    no_voice: bool,
 }
 
 struct FakeMedius {
@@ -2049,6 +2055,57 @@ async fn fake_medius(
                 })
                 .collect();
             reply(StatusCode::OK, json!({ "accounts": accounts }))
+        }
+        ("GET", ["admin", "v1", "voice"]) if !st.no_voice => {
+            reply(StatusCode::OK, json!({ "sanctions": st.voice }))
+        }
+        ("POST", ["admin", "v1", "voice", account, action]) if !st.no_voice => {
+            let (account, action) = (account.to_string(), action.to_string());
+            let Ok(request) = serde_json::from_slice::<Value>(&body) else {
+                return reply(StatusCode::BAD_REQUEST, json!({"error": "invalid_request"}));
+            };
+            st.voice_calls
+                .push((account.clone(), action.clone(), request.clone()));
+            let Some(apply) = request["apply"].as_bool() else {
+                return reply(StatusCode::BAD_REQUEST, json!({"error": "invalid_request"}));
+            };
+            if !st.characters.contains_key(&account) {
+                return reply(StatusCode::NOT_FOUND, json!({"error": "not_found"}));
+            }
+            let kind = action.trim_start_matches("un").to_owned();
+            let lift = action.starts_with("un");
+            let actor = st.actors.last().cloned().unwrap_or_default();
+            let position = st
+                .voice
+                .iter()
+                .position(|s| s["account"] == account.as_str() && s["kind"] == kind.as_str());
+            let before = position.map(|i| st.voice[i].clone());
+            if lift && before.is_none() {
+                return reply(
+                    StatusCode::CONFLICT,
+                    json!({"error": "not_sanctioned",
+                           "message": format!("not-sanctioned: {account} has no active voice {kind}")}),
+                );
+            }
+            let after = (!lift).then(|| {
+                json!({"account": account, "kind": kind, "reason": request["reason"],
+                       "operator": actor, "created_at": "2026-11-27T12:00:00Z",
+                       "expires_at": request["duration_minutes"].as_u64()
+                           .map(|m| format!("2026-11-27T12:00:00Z+{m}m"))})
+            });
+            if apply {
+                if let Some(i) = position {
+                    st.voice.remove(i);
+                }
+                if let Some(a) = &after {
+                    st.voice.push(a.clone());
+                }
+            }
+            reply(
+                StatusCode::OK,
+                json!({"applied": apply, "account": account, "action": action, "kind": kind,
+                       "before": before, "after": after}),
+            )
         }
         ("GET", ["admin", "v1", "characters", "broken"]) => {
             reply(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": "boom"}))
@@ -4046,5 +4103,196 @@ async fn maintenance_banner(_: PgPoolOptions, connect: PgConnectOptions) {
     );
     let (_, dashboard) = body(h.get("/admin", Some(&o)).await).await;
     assert!(dashboard.contains("clear status banner"));
+    test_db.close().await;
+}
+
+#[sqlx::test]
+async fn game_server_voice_moderation(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
+    let (medius, url) = fake_medius_server().await;
+    let h = harness_with(
+        pool,
+        Some(GameAdmin::new(&url, GAME_SECRET.to_vec()).unwrap()),
+    )
+    .await;
+    let calls = || medius.state.lock().unwrap().voice_calls.clone();
+    let active = || medius.state.lock().unwrap().voice.clone();
+
+    // Players cannot reach it at all.
+    let u = h.sign_in("player").await;
+    let csrf_u = h.csrf(&u).await;
+    let r = h
+        .post_form(
+            "/admin/game/characters/alpha/voice/confirm",
+            &u,
+            &[("csrf", &csrf_u), ("action", "mute"), ("duration", "30")],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+
+    // Moderators may moderate voice (they cannot set levels).
+    let o = h.sign_in("owner").await;
+    let csrf_o = h.csrf(&o).await;
+    let r = h
+        .post_form(
+            "/admin/staff/set",
+            &o,
+            &[
+                ("csrf", &csrf_o),
+                ("email", "mod@example.test"),
+                ("role", "moderator"),
+            ],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+    let m = h.sign_in("mod").await;
+    let csrf_m = h.csrf(&m).await;
+    let (status, page) = body(h.get("/admin/game/characters/alpha", Some(&m)).await).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert!(page.contains("Not voice muted or banned") && page.contains("Preview voice change"));
+    assert!(page.contains("action=\"/admin/game/characters/alpha/voice\""));
+    let (_, page) = body(h.get("/admin/game", Some(&m)).await).await;
+    assert!(page.contains("No account is voice muted or banned"));
+
+    // The CSRF token is required; bad input is refused before the game server is asked.
+    let r = h
+        .post_form(
+            "/admin/game/characters/alpha/voice",
+            &m,
+            &[("csrf", "bad"), ("action", "mute"), ("duration", "30")],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    for form in [
+        [("action", "silence"), ("duration", "30"), ("reason", "")],
+        [("action", "mute"), ("duration", "soon"), ("reason", "")],
+        [("action", "mute"), ("duration", "0"), ("reason", "")],
+        [("action", "mute"), ("duration", "5256001"), ("reason", "")],
+        [
+            ("action", "mute"),
+            ("duration", "30"),
+            ("reason", "caf\u{e9}"),
+        ],
+    ] {
+        let mut fields = vec![("csrf", csrf_m.as_str())];
+        fields.extend(form);
+        let r = h
+            .post_form("/admin/game/characters/alpha/voice", &m, &fields)
+            .await;
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST, "{form:?}");
+    }
+    assert!(calls().is_empty());
+
+    // A dry run shows the plan and changes nothing.
+    let (status, page) = body(
+        h.post_form(
+            "/admin/game/characters/alpha/voice",
+            &m,
+            &[
+                ("csrf", &csrf_m),
+                ("action", "mute"),
+                ("duration", "30"),
+                ("reason", "synthetic spam"),
+            ],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert!(page.contains("Nothing has been saved yet") && page.contains("Apply voice mute"));
+    assert!(page.contains("action=\"/admin/game/characters/alpha/voice/confirm\""));
+    assert!(page.contains("name=\"duration\" value=\"30\"") && page.contains("synthetic spam"));
+    assert!(active().is_empty());
+    assert_eq!(
+        calls()[0].2,
+        json!({"apply": false, "reason": "synthetic spam", "duration_minutes": 30})
+    );
+
+    // Confirming applies it, under the moderator's name, and writes the audit log.
+    let (status, page) = body(
+        h.post_form(
+            "/admin/game/characters/alpha/voice/confirm",
+            &m,
+            &[
+                ("csrf", &csrf_m),
+                ("action", "mute"),
+                ("duration", "30"),
+                ("reason", "synthetic spam"),
+            ],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert!(page.contains("Voice mute applied."));
+    assert_eq!(active().len(), 1);
+    assert_eq!(active()[0]["operator"], "mod@example.test");
+    // Until lifted: no duration is sent.
+    let r = h
+        .post_form(
+            "/admin/game/characters/charlie/voice/confirm",
+            &m,
+            &[("csrf", &csrf_m), ("action", "ban"), ("duration", "")],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(calls().last().unwrap().2, json!({"apply": true}));
+    let log = h.get("/admin", Some(&o)).await.text().await.unwrap();
+    assert!(log.contains("voice mute") && log.contains("reason: synthetic spam"));
+    assert!(log.contains("voice ban") && log.contains("ends until lifted"));
+
+    // The list and the character page show the sanctions, with a lift button.
+    let (_, page) = body(h.get("/admin/game", Some(&m)).await).await;
+    assert!(page.contains("Voice mutes and bans") && page.contains("synthetic spam"));
+    assert!(page.contains("until lifted"));
+    let (_, page) = body(h.get("/admin/game/characters/alpha", Some(&m)).await).await;
+    assert!(page.contains("Lift mute") && page.contains("value=\"unmute\""));
+    assert!(!page.contains("Lift ban"));
+
+    // Lifting: a refusal is explained and logs nothing; a lift is logged.
+    let (status, page) = body(
+        h.post_form(
+            "/admin/game/characters/alpha/voice",
+            &m,
+            &[("csrf", &csrf_m), ("action", "unban")],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(page.contains("not_sanctioned") && page.contains("nothing to lift"));
+    let r = h
+        .post_form(
+            "/admin/game/characters/alpha/voice/confirm",
+            &m,
+            &[("csrf", &csrf_m), ("action", "unmute"), ("duration", "30")],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(calls().last().unwrap().2, json!({"apply": true}));
+    assert_eq!(active().len(), 1);
+    let log = h.get("/admin", Some(&o)).await.text().await.unwrap();
+    assert!(log.contains("voice unmute") && log.contains("lifted mute"));
+    assert_eq!(log.matches("voice unban").count(), 0);
+
+    // Unknown characters, and a game server without voice moderation.
+    let r = h
+        .post_form(
+            "/admin/game/characters/nobody/voice",
+            &m,
+            &[("csrf", &csrf_m), ("action", "mute"), ("duration", "30")],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    medius.state.lock().unwrap().no_voice = true;
+    let (status, page) = body(h.get("/admin/game/characters/alpha", Some(&m)).await).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        page.contains("does not support voice moderation")
+            && !page.contains("Preview voice change")
+    );
+    let (status, page) = body(h.get("/admin/game", Some(&m)).await).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(page.contains("does not support voice moderation"));
     test_db.close().await;
 }

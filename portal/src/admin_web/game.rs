@@ -1,8 +1,9 @@
 //! The admin panel's Game server section under `/admin/game`: characters on the game server
 //! and level changes, through the game server's internal admin API (`crate::game_admin`).
 //!
-//! Moderators and above can view. Admins and above can set levels: a dry run first shows
-//! the plan, and a separate confirmation applies it. Applied changes go to the audit log.
+//! Moderators and above can view, and can mute or ban an account's in-match voice (or lift
+//! it). Admins and above can set levels. Every change is a dry run first that shows the plan,
+//! and a separate confirmation applies it. Applied changes go to the audit log.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,7 +17,10 @@ use serde::Deserialize;
 
 use super::{Nav, Staff, require_staff, require_staff_form};
 use crate::db;
-use crate::game_admin::{GameAdmin, GameAdminError, Refusal, valid_account};
+use crate::game_admin::{
+    GameAdmin, GameAdminError, MAX_VOICE_MINUTES, Refusal, VoiceAction, VoiceSanction,
+    valid_account,
+};
 use crate::staff::{self, Role};
 use crate::web::{AppState, PageResult, Shared, message, page};
 
@@ -29,6 +33,46 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
             "/admin/game/characters/{account}/level/confirm",
             post(level_apply),
         )
+        .route("/admin/game/characters/{account}/voice", post(voice_plan))
+        .route(
+            "/admin/game/characters/{account}/voice/confirm",
+            post(voice_apply),
+        )
+}
+
+/// One voice sanction as the pages show it.
+struct SanctionRow {
+    account: String,
+    kind: String,
+    ends: String,
+    since: String,
+    operator: String,
+    reason: String,
+}
+
+impl From<VoiceSanction> for SanctionRow {
+    fn from(s: VoiceSanction) -> Self {
+        Self {
+            account: s.account,
+            kind: s.kind,
+            ends: s.expires_at.unwrap_or_else(|| "until lifted".into()),
+            since: s.created_at,
+            operator: s.operator,
+            reason: s.reason.unwrap_or_default(),
+        }
+    }
+}
+
+/// The active sanctions, or why they cannot be shown (an older game server answers 404).
+async fn sanctions(api: &GameAdmin, actor: &str) -> (Vec<SanctionRow>, Option<String>) {
+    match api.voice_sanctions(actor).await {
+        Ok(list) => (list.into_iter().map(SanctionRow::from).collect(), None),
+        Err(GameAdminError::NotFound) => (
+            Vec::new(),
+            Some("This game server does not support voice moderation yet.".into()),
+        ),
+        Err(e) => (Vec::new(), Some(e.to_string())),
+    }
 }
 
 /// Who the game server records as acting: the staff member's email, else their account.
@@ -95,6 +139,8 @@ struct ListPage {
     configured: bool,
     error: Option<String>,
     rows: Vec<CharacterRow>,
+    sanctions: Vec<SanctionRow>,
+    voice_error: Option<String>,
 }
 
 async fn list(State(state): Shared, headers: HeaderMap) -> PageResult {
@@ -112,6 +158,8 @@ async fn list(State(state): Shared, headers: HeaderMap) -> PageResult {
         configured: false,
         error: None,
         rows: Vec::new(),
+        sanctions: Vec::new(),
+        voice_error: None,
     };
     let Some(api) = state.settings.game_admin.as_ref() else {
         return Ok(page(StatusCode::OK, view));
@@ -126,6 +174,7 @@ async fn list(State(state): Shared, headers: HeaderMap) -> PageResult {
         }
     };
     characters.sort_by(|a, b| a.account.cmp(&b.account));
+    (view.sanctions, view.voice_error) = sanctions(api, &actor_label(&actor)).await;
     let keys: Vec<String> = characters
         .iter()
         .map(|c| c.account.to_ascii_lowercase())
@@ -170,6 +219,8 @@ struct CharacterPage {
     portal_id: Option<i32>,
     character: Option<CharacterView>,
     error: Option<String>,
+    sanctions: Vec<SanctionRow>,
+    voice_error: Option<String>,
 }
 
 async fn character_page(
@@ -201,6 +252,8 @@ async fn character_page(
         portal_id,
         character: None,
         error: None,
+        sanctions: Vec::new(),
+        voice_error: None,
     };
     let Some(api) = state.settings.game_admin.as_ref() else {
         return Ok(page(StatusCode::OK, view));
@@ -218,6 +271,12 @@ async fn character_page(
                     .unwrap_or_else(|| "top level".into()),
                 session: c.session.as_str(),
             });
+            let (all, voice_error) = sanctions(api, &actor_label(&actor)).await;
+            view.sanctions = all
+                .into_iter()
+                .filter(|s| s.account == view.account)
+                .collect();
+            view.voice_error = voice_error;
             Ok(page(StatusCode::OK, view))
         }
         Ok(None) => Ok(no_character(&view.account)),
@@ -378,6 +437,177 @@ async fn set_level(
         skill_points_after: change.skill_points_after,
         backup: change.backup,
     });
+    Ok(page(StatusCode::OK, view))
+}
+
+// ---- Voice mutes and bans ----
+
+#[derive(Template)]
+#[template(path = "admin_game_voice.html")]
+struct VoicePage {
+    nav_csrf: Option<String>,
+    csrf: String,
+    role: &'static str,
+    is_admin: bool,
+    account: String,
+    action: &'static str,
+    lift: bool,
+    /// The form's duration in minutes, empty for "until lifted"; echoed into the confirmation.
+    duration: String,
+    reason: String,
+    applied: bool,
+    before: Option<SanctionRow>,
+    after: Option<SanctionRow>,
+    refusal: Option<RefusalView>,
+    error: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct VoiceForm {
+    csrf: String,
+    action: String,
+    #[serde(default)]
+    duration: String,
+    #[serde(default)]
+    reason: String,
+}
+
+async fn voice_plan(
+    State(state): Shared,
+    headers: HeaderMap,
+    Path(raw): Path<String>,
+    Form(form): Form<VoiceForm>,
+) -> PageResult {
+    change_voice(&state, &headers, &raw, &form, false).await
+}
+
+async fn voice_apply(
+    State(state): Shared,
+    headers: HeaderMap,
+    Path(raw): Path<String>,
+    Form(form): Form<VoiceForm>,
+) -> PageResult {
+    change_voice(&state, &headers, &raw, &form, true).await
+}
+
+async fn change_voice(
+    state: &AppState,
+    headers: &HeaderMap,
+    raw: &str,
+    form: &VoiceForm,
+    apply: bool,
+) -> PageResult {
+    let actor = guard!(require_staff_form(state, headers, Role::Moderator, &form.csrf).await);
+    let Some(account) = account_key(raw) else {
+        return Ok(no_character(&raw.chars().take(32).collect::<String>()));
+    };
+    let back = format!("/admin/game/characters/{account}");
+    let Some(api) = state.settings.game_admin.as_ref() else {
+        return Ok(not_configured_message());
+    };
+    let bad = |title: &str, text: &str| {
+        Ok(message(
+            StatusCode::BAD_REQUEST,
+            title,
+            &format!("{text} Nothing was changed."),
+            Some((&back, "Back")),
+        ))
+    };
+    let Some(action) = VoiceAction::parse(form.action.trim()) else {
+        return bad("Choose an action", "Choose mute, ban, unmute or unban.");
+    };
+    let duration_text = form.duration.trim();
+    let duration = if duration_text.is_empty() || action.is_lift() {
+        None
+    } else {
+        match duration_text.parse::<u32>() {
+            Ok(m) if (1..=MAX_VOICE_MINUTES).contains(&m) => Some(m),
+            _ => {
+                return bad(
+                    "Duration needed",
+                    "Choose how long the sanction lasts, or until lifted.",
+                );
+            }
+        }
+    };
+    let reason = form.reason.trim();
+    if reason.len() > 256 || !reason.bytes().all(|b| (0x20..=0x7e).contains(&b)) {
+        return bad(
+            "Reason too long",
+            "Keep the reason to 256 plain characters (letters, digits and punctuation).",
+        );
+    }
+    let result = api
+        .change_voice(
+            &actor_label(&actor),
+            &account,
+            action,
+            apply,
+            (!reason.is_empty()).then_some(reason),
+            duration,
+        )
+        .await;
+    let Nav {
+        nav_csrf,
+        csrf,
+        role,
+        is_admin,
+    } = actor.nav();
+    let mut view = VoicePage {
+        nav_csrf,
+        csrf,
+        role,
+        is_admin,
+        account,
+        action: action.as_str(),
+        lift: action.is_lift(),
+        duration: duration.map(|m| m.to_string()).unwrap_or_default(),
+        reason: reason.to_owned(),
+        applied: false,
+        before: None,
+        after: None,
+        refusal: None,
+        error: None,
+    };
+    let change = match result {
+        Ok(change) => change,
+        Err(GameAdminError::NotFound) => return Ok(no_character(&view.account)),
+        Err(GameAdminError::Refused(r)) => {
+            view.refusal = Some(r.into());
+            return Ok(page(StatusCode::CONFLICT, view));
+        }
+        Err(e) => {
+            let status = upstream_status(&e);
+            view.error = Some(e.to_string());
+            return Ok(page(status, view));
+        }
+    };
+    if change.applied {
+        let ends = change
+            .after
+            .as_ref()
+            .map(|s| s.expires_at.as_deref().unwrap_or("until lifted").to_owned());
+        let detail = match ends {
+            Some(ends) => format!("ends {ends}"),
+            None => format!("lifted {}", change.kind),
+        };
+        let detail = if reason.is_empty() {
+            detail
+        } else {
+            format!("{detail}; reason: {reason}")
+        };
+        staff::log(
+            &state.pool,
+            actor.account(),
+            &format!("voice {}", action.as_str()),
+            &view.account,
+            &detail,
+        )
+        .await?;
+    }
+    view.applied = change.applied;
+    view.before = change.before.map(SanctionRow::from);
+    view.after = change.after.map(SanctionRow::from);
     Ok(page(StatusCode::OK, view))
 }
 
