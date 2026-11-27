@@ -32,14 +32,19 @@ internal static class VoiceRelayChecks
     public static void Options()
     {
         var off = VoiceRelayOptions.FromEnvironment(_ => null);
-        Check(!off.Enabled && off.Tier == VoiceRelayTier.Squad, "voice relay is off and squad-only by default");
+        Check(!off.Enabled && off.Tier == VoiceRelayTier.All, "voice relay is off and serves every static tier by default");
+        Check(VoiceRelayOptions.Off.Tier == VoiceRelayTier.All, "the off options keep the retail tier");
         foreach (var value in new[] { "", "0", "true", " 1", "yes" })
             Check(!VoiceRelayOptions.FromEnvironment(name => name == VoiceRelayOptions.Variable ? value : null).Enabled, $"enabled by '{value}'");
-        var on = VoiceRelayOptions.FromEnvironment(name => name == VoiceRelayOptions.Variable ? "1" : null);
-        Check(on.Enabled && on.Tier == VoiceRelayTier.Squad, "MAG_VOICE_RELAY=1 relays squad groups first");
-        var all = VoiceRelayOptions.FromEnvironment(name =>
+        var all = VoiceRelayOptions.FromEnvironment(name => name == VoiceRelayOptions.Variable ? "1" : null);
+        Check(all.Enabled && all.Tier == VoiceRelayTier.All, "MAG_VOICE_RELAY=1 relays every static tier (retail)");
+        var explicitAll = VoiceRelayOptions.FromEnvironment(name =>
             name == VoiceRelayOptions.Variable ? "1" : name == VoiceRelayOptions.TierVariable ? "all" : null);
-        Check(all.Enabled && all.Tier == VoiceRelayTier.All, "MAG_VOICE_RELAY_TIER=all");
+        Check(explicitAll.Enabled && explicitAll.Tier == VoiceRelayTier.All, "MAG_VOICE_RELAY_TIER=all");
+        var on = VoiceRelayOptions.FromEnvironment(name =>
+            name == VoiceRelayOptions.Variable ? "1" : name == VoiceRelayOptions.TierVariable ? "squad" : null);
+        Check(on.Enabled && on.Tier == VoiceRelayTier.Squad, "MAG_VOICE_RELAY_TIER=squad");
+        Check(VoiceRelayOptions.Name(VoiceRelayTier.All) == "all" && VoiceRelayOptions.Name(VoiceRelayTier.Squad) == "squad", "tier names");
         foreach (var bad in new[] { "ALL", "platoon", " squad", "proximity" })
         {
             bool threw = false;

@@ -91,7 +91,7 @@ namespace Server.Medius
                 var decision = DecideVoiceRelay(talker, send.Group, send.DataLength);
                 if (decision.Relayed && decision.Recipients.Count > 0)
                 {
-                    var message = VoiceListenerMessage.Build(_voiceRelayOptions.Form, talker.DmeId, body, send);
+                    var message = VoiceListenerMessage.Build(talker.DmeId, body, send);
                     foreach (int id in decision.Recipients)
                     {
                         var member = _voiceTable.Find(id);
@@ -112,7 +112,7 @@ namespace Server.Medius
                 (_voiceCountersLoggedMs != long.MinValue && now - _voiceCountersLoggedMs < VoiceCountersIntervalMs)) return;
             _voiceCountersLoggedMs = now;
             _voiceCountersLoggedPackets = _voiceCounters.ReceivedPackets;
-            Logger.Info($"Voice relay: {StreamScope} form={VoiceRelayOptions.Name(_voiceRelayOptions.Form)} {_voiceCounters}");
+            Logger.Info($"Voice relay: {StreamScope} tier={VoiceRelayOptions.Name(_voiceRelayOptions.Tier)} {_voiceCounters}");
         }
 
         /// <summary>A bound, admitted client of this world's live match. Called with _gate held.</summary>

@@ -193,10 +193,10 @@ handles messages, in both the prototype and the retail build; the two agree.
   arrived (the message from type 47 on: group, media type, length, sequence and data unchanged). The
   default form is a client app single with the talker as its source, which is how the DME forwards
   other peer traffic. The talker's index is the only stamp; the sequence is never renumbered.
-- **Lab switch.** `MAG_VOICE_RELAY_FORM` chooses the listener form for a hearing test: `app` (the
-  default, above), `app53` (the same bytes as message 53), and three slices of the uplink body behind
-  the same index that the reading above rules out but a hearing session can confirm: `from_b2`,
-  `whole` and `from_b6`. An unknown value fails at start-up.
+- **Confirmed by hearing.** On mag-test, with the relay on and `MAG_VOICE_RELAY_TIER=all`,
+  a listener heard a talker in this form. It is now the only form: the lab switch
+  `MAG_VOICE_RELAY_FORM` and its alternatives (`app53`, `from_b2`, `whole`, `from_b6`) are removed. A
+  value still set is ignored, with a warning in the Medius log, so an old deployment keeps starting.
 - **Checking it from a listener.** On the receiving client (voice on, `MAG_VOICE_TRACE` set), a form the
   game accepts shows `connect` events beyond the three at start-up (a talker slot's voice port joined to
   its PCM port) and `write` events on that talker's voice port, then a summary with `received_blocks`
@@ -219,12 +219,14 @@ handles messages, in both the prototype and the retail build; the two agree.
 | Switch | Where | Default | Effect |
 | --- | --- | --- | --- |
 | `MAG_VOICE_RELAY` | medius (DME) environment | off | relay voice; with it off the DME never parses group sends and they keep today's path (logged as unhandled) |
-| `MAG_VOICE_RELAY_TIER` | medius (DME) environment | `squad` | `squad` relays squad groups only; `all` relays every static tier |
-| `MAG_VOICE_RELAY_FORM` | medius (DME) environment, lab only | `app` | listener form (see "Listener form") |
+| `MAG_VOICE_RELAY_TIER` | medius (DME) environment | `all` | `all` relays every static tier, the retail channels; `squad` relays squad groups only, for a staged rollout. Any other value stops Medius at start-up |
 | `voice_routing` | gameplay configuration | off | decode `0x0259` into the channel record and publish `voice_groups` |
 | `MAG_VOICE_DIAG` | medius and gameplay environment, lab only | off | per-packet receipts (below) |
 
 With every switch off the server behaves as today, except that `0x0259` stays logged as unknown.
+The default tier was `squad` until the hearing test passed; it is now `all`, since retail serves every
+static tier and the binding decision is retail-exact channels. The counters line names the tier
+(`tier=all`).
 
 ## Diagnostics for the lab capture
 

@@ -1,4 +1,5 @@
 using System;
+using DotNetty.Common.Internal.Logging;
 using System.Collections.Generic;
 using System.Linq;
 using RT.Common;
@@ -34,22 +35,21 @@ namespace Server.Dme
         public static bool IsRelayGroup(int group) => (group >= 0 && group <= LastSquad) || IsProximity(group);
     }
 
-    /// <summary>Which groups the relay serves. The first rollout relays squad chat only.</summary>
+    /// <summary>Which groups the relay serves. <see cref="All"/> (every static tier) is retail's
+    /// rule and the default; <see cref="Squad"/> keeps a rollout to squad chat only.</summary>
     public enum VoiceRelayTier { Squad, All }
 
-    /// <summary>How the relay hands a voice packet to a listener. <see cref="App"/> is the form the
-    /// game's network library reads (see <see cref="VoiceListenerMessage"/>); the others exist only
-    /// so a lab hearing test can rule them out without a rebuild.</summary>
-    public enum VoiceRelayForm { App, App53, FromB2, Whole, FromB6 }
-
     /// <summary>MAG_VOICE_RELAY=1 turns the relay on (off by default); MAG_VOICE_RELAY_TIER is
-    /// "squad" (default) or "all" (every static tier); MAG_VOICE_RELAY_FORM is the listener form,
-    /// "app" (default), or one of the lab alternatives "app53", "from_b2", "whole", "from_b6".</summary>
+    /// "all" (default, every static tier, as retail) or "squad" (squad groups only). The relay always
+    /// delivers the one listener form the game reads (<see cref="VoiceListenerMessage"/>); the
+    /// MAG_VOICE_RELAY_FORM lab switch that chose another is gone, and a value left set is ignored
+    /// with a warning.</summary>
     public sealed class VoiceRelayOptions
     {
         public const string Variable = "MAG_VOICE_RELAY";
         public const string TierVariable = "MAG_VOICE_RELAY_TIER";
-        public const string FormVariable = "MAG_VOICE_RELAY_FORM";
+        /// <summary>The removed lab switch for the listener form. Read only to warn that it is ignored.</summary>
+        public const string RemovedFormVariable = "MAG_VOICE_RELAY_FORM";
         /// <summary>Gameplay hello capability; a worker with it sends voice_groups on request.</summary>
         public const string Capability = "voice_groups_v1";
         /// <summary>Nominal voice byte rate: one 37-byte block every 40 ms (the game's 7300 bps port rate).</summary>
@@ -57,45 +57,33 @@ namespace Server.Dme
         /// <summary>Per-talker budget: twice the nominal rate.</summary>
         public const int BudgetBytesPerSecond = 2 * NominalBytesPerSecond;
 
-        public static readonly VoiceRelayOptions Off = new VoiceRelayOptions(false, VoiceRelayTier.Squad);
-        public static VoiceRelayOptions Current { get; set; } = FromEnvironment(Environment.GetEnvironmentVariable);
+        static readonly IInternalLogger Logger = InternalLoggerFactory.GetInstance<VoiceRelayOptions>();
+
+        public static readonly VoiceRelayOptions Off = new VoiceRelayOptions(false, VoiceRelayTier.All);
+        public static VoiceRelayOptions Current { get; set; } = FromEnvironment(Environment.GetEnvironmentVariable, message => Logger.Warn(message));
 
         public bool Enabled { get; }
         public VoiceRelayTier Tier { get; }
-        public VoiceRelayForm Form { get; }
 
-        public VoiceRelayOptions(bool enabled, VoiceRelayTier tier, VoiceRelayForm form = VoiceRelayForm.App)
-        { Enabled = enabled; Tier = tier; Form = form; }
+        public VoiceRelayOptions(bool enabled, VoiceRelayTier tier) { Enabled = enabled; Tier = tier; }
 
-        /// <summary>Unknown tier or form values fail clearly instead of widening or guessing.</summary>
-        public static VoiceRelayOptions FromEnvironment(Func<string, string> environment)
+        /// <summary>An unknown tier fails clearly instead of widening or guessing. A value left in
+        /// the removed MAG_VOICE_RELAY_FORM is reported to <paramref name="warn"/> and ignored.</summary>
+        public static VoiceRelayOptions FromEnvironment(Func<string, string> environment, Action<string> warn = null)
         {
             bool enabled = environment?.Invoke(Variable) == "1";
             string tier = environment?.Invoke(TierVariable);
             VoiceRelayTier parsed;
-            if (string.IsNullOrEmpty(tier) || tier == "squad") parsed = VoiceRelayTier.Squad;
-            else if (tier == "all") parsed = VoiceRelayTier.All;
-            else throw new ArgumentException($"{TierVariable} must be squad or all.");
-            VoiceRelayForm form = environment?.Invoke(FormVariable) switch
-            {
-                null or "" or "app" => VoiceRelayForm.App,
-                "app53" => VoiceRelayForm.App53,
-                "from_b2" => VoiceRelayForm.FromB2,
-                "whole" => VoiceRelayForm.Whole,
-                "from_b6" => VoiceRelayForm.FromB6,
-                _ => throw new ArgumentException($"{FormVariable} must be app, app53, from_b2, whole or from_b6."),
-            };
-            return new VoiceRelayOptions(enabled, parsed, form);
+            if (string.IsNullOrEmpty(tier) || tier == "all") parsed = VoiceRelayTier.All;
+            else if (tier == "squad") parsed = VoiceRelayTier.Squad;
+            else throw new ArgumentException($"{TierVariable} must be all or squad.");
+            string form = environment?.Invoke(RemovedFormVariable);
+            if (!string.IsNullOrEmpty(form))
+                warn?.Invoke($"{RemovedFormVariable}={form} is ignored: the switch was removed and the relay always uses the app listener form.");
+            return new VoiceRelayOptions(enabled, parsed);
         }
 
-        public static string Name(VoiceRelayForm form) => form switch
-        {
-            VoiceRelayForm.App53 => "app53",
-            VoiceRelayForm.FromB2 => "from_b2",
-            VoiceRelayForm.Whole => "whole",
-            VoiceRelayForm.FromB6 => "from_b6",
-            _ => "app",
-        };
+        public static string Name(VoiceRelayTier tier) => tier == VoiceRelayTier.Squad ? "squad" : "all";
 
         public bool Serves(int group) =>
             !VoiceGroupNumbers.IsParty(group) &&
@@ -334,30 +322,16 @@ namespace Server.Dme
     /// application data, which it hands on with that index as the sender. The voice handler keys its
     /// reorder buffer and talker slot on that index. So the relay sends the talker's application data
     /// unchanged (the network-library message from type 47 on, keeping group, media type, length,
-    /// sequence and data) behind the talker's DME client index; the index is the only stamp.
-    /// <see cref="VoiceRelayForm.App"/> sends it as a client app single, as the DME forwards other peer
-    /// traffic; <see cref="VoiceRelayForm.App53"/> sends the same bytes as message 53. The remaining
-    /// forms are lab alternatives that put another slice of the uplink body behind the same index.</summary>
+    /// sequence and data) behind the talker's DME client index, as a client app single, the way the
+    /// DME forwards other peer traffic; the index is the only stamp. A mag-test hearing test confirmed
+    /// this form.</summary>
     public static class VoiceListenerMessage
     {
-        public static BaseScertMessage Build(VoiceRelayForm form, int talker, byte[] body, VoiceGroupSend send)
+        public static BaseScertMessage Build(int talker, byte[] body, VoiceGroupSend send)
         {
             if (body == null) throw new ArgumentNullException(nameof(body));
             if (talker < 0 || talker > short.MaxValue) throw new ArgumentOutOfRangeException(nameof(talker));
-            byte[] payload = form switch
-            {
-                VoiceRelayForm.FromB2 => body[2..],
-                VoiceRelayForm.Whole => (byte[])body.Clone(),
-                VoiceRelayForm.FromB6 => body[6..],
-                _ => body[send.AppOffset..],
-            };
-            if (form != VoiceRelayForm.App53)
-                return new RT_MSG_CLIENT_APP_SINGLE { TargetOrSource = (short)talker, Payload = payload };
-            var contents = new byte[2 + payload.Length];
-            contents[0] = (byte)talker;
-            contents[1] = (byte)(talker >> 8);
-            payload.CopyTo(contents, 2);
-            return new RawScertMessage((RT_MSG_TYPE)VoiceGroupSend.Transport) { Contents = contents };
+            return new RT_MSG_CLIENT_APP_SINGLE { TargetOrSource = (short)talker, Payload = body[send.AppOffset..] };
         }
     }
 }
