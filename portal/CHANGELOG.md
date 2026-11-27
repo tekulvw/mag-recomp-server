@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.9.0](https://github.com/tekulvw/mag-recomp-server/compare/portal-v0.8.0...portal-v0.9.0) (2026-11-27)
+
+
+### Features
+
+* **portal:** let players report players to a moderator queue ([#401](https://github.com/tekulvw/mag-recomp-server/issues/401)) ([6f7eb89](https://github.com/tekulvw/mag-recomp-server/commit/6f7eb894cd0809a3ece3bd8b367b1842e3b1f9f8))
+* **portal:** list every character slot of an account in the game admin pages ([#406](https://github.com/tekulvw/mag-recomp-server/issues/406)) ([e7939bf](https://github.com/tekulvw/mag-recomp-server/commit/e7939bf6aa731cd47f6fc32e20a6056ffe69d978))
+
+
+### Bug Fixes
+
+* **portal:** show an unconfirmed admin write as possibly applied ([#404](https://github.com/tekulvw/mag-recomp-server/issues/404)) ([b045858](https://github.com/tekulvw/mag-recomp-server/commit/b045858e00c2d3170ba3c5bff19428981dc85aa6))
+
 ## [0.8.0](https://github.com/tekulvw/mag-recomp-server/compare/portal-v0.7.0...portal-v0.8.0) (2026-11-27)
 
 

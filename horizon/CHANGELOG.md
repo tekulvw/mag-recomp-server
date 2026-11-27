@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.15.0](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.14.1...medius-v0.15.0) (2026-11-27)
+
+
+### Features
+
+* **medius:** give every account three character slots, with soft deletion ([#405](https://github.com/tekulvw/mag-recomp-server/issues/405)) ([2a59ad6](https://github.com/tekulvw/mag-recomp-server/commit/2a59ad61b32ad2ddf1506714a046d16df34da3eb))
+
+
+### Bug Fixes
+
+* **medius:** answer voice moderation at once while the standby lags ([#403](https://github.com/tekulvw/mag-recomp-server/issues/403)) ([14d8901](https://github.com/tekulvw/mag-recomp-server/commit/14d8901a072e1c8138f09ecd942c0530d2779e47))
+
 ## [0.14.1](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.14.0...medius-v0.14.1) (2026-11-27)
 
 
