@@ -229,10 +229,9 @@ namespace Server.Medius
                             { Value = JsonSerializer.Serialize(Document.Characters.Single(c => c.Account == account), JsonOptions) });
                         audit.ExecuteNonQuery();
                     }
-                    _transaction.Commit();
-                    _committed = true;
                 }
                 catch (Exception e) { throw _backend.Database.Translate(e); }
+                CommitTransaction();
             }
 
             public override string CommitVoiceSanctions(string account, string operation, string before, string after, string backupDirectory)
@@ -242,11 +241,35 @@ namespace Server.Medius
                 {
                     WriteVoiceSanctions(_connection, _transaction, account, Document.VoiceSanctions ?? new List<StoredVoiceSanction>(),
                         operation, before, after);
-                    _transaction.Commit();
-                    _committed = true;
-                    return "mag.admin_changes";
+                    // A moderation change is durable once the primary has flushed it; it does not wait for a
+                    // synchronous standby. Live CNPG runs synchronous replication (ANY 1, preferred
+                    // durability): a standby slow to acknowledge held a voice mute's COMMIT past the
+                    // command timeout, so an applied mute was reported as failed and the portal timed out.
+                    // The standby still receives the change by streaming; only a failover in the moment
+                    // before it does could lose the sanction, which the operator sees in the list.
+                    // Character and reward commits keep waiting for the standby.
+                    using var local = new NpgsqlCommand("SET LOCAL synchronous_commit TO local", _connection, _transaction);
+                    local.ExecuteNonQuery();
                 }
                 catch (Exception e) { throw _backend.Database.Translate(e); }
+                CommitTransaction();
+                return "mag.admin_changes";
+            }
+
+            /// <summary>COMMIT. A failure here, unlike one in the statements before it, leaves the outcome
+            /// unknown: the primary may have saved the change and been waiting for its standby.</summary>
+            private void CommitTransaction()
+            {
+                try { _transaction.Commit(); }
+                catch (Exception e)
+                {
+                    var translated = _backend.Database.Translate(e);
+                    if (translated is CharacterStoreUnavailableException)
+                        throw new CharacterStoreCommitUncertainException(
+                            "Character database stopped answering during commit; the change may have been saved.", e);
+                    throw translated;
+                }
+                _committed = true;
             }
 
             public override void Dispose()
