@@ -2642,6 +2642,8 @@ async fn fake_slot_medius(
                 .collect();
             reply(StatusCode::OK, json!({ "accounts": accounts }))
         }
+        // The character page also shows the account's voice sanctions; this server has none.
+        ("GET", ["admin", "v1", "voice"]) => reply(StatusCode::OK, json!({ "sanctions": [] })),
         ("GET", ["admin", "v1", "characters", account]) => {
             let live = live(&st, account);
             let chosen = match query_slot {
@@ -2763,7 +2765,18 @@ async fn game_server_character_slots(_: PgPoolOptions, connect: PgConnectOptions
         Some(GameAdmin::new(&format!("http://{addr}"), GAME_SECRET.to_vec()).unwrap()),
     )
     .await;
-    let last_request = || medius.lock().unwrap().requests.last().cloned().unwrap();
+    // The last request other than the voice sanctions read the character page makes after it.
+    let last_request = || {
+        medius
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .rev()
+            .find(|(path, _)| path != "/admin/v1/voice")
+            .cloned()
+            .unwrap()
+    };
     let o = h.sign_in("owner").await;
     let csrf_o = h.csrf(&o).await;
 
@@ -2781,6 +2794,20 @@ async fn game_server_character_slots(_: PgPoolOptions, connect: PgConnectOptions
     let (status, page) = body(h.get("/admin/game/characters/alpha", Some(&o)).await).await;
     assert_eq!(status, StatusCode::OK, "{page}");
     assert_eq!(last_request().0, "/admin/v1/characters/alpha");
+    let paths: Vec<String> = medius
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .rev()
+        .take(2)
+        .map(|r| r.0.clone())
+        .collect();
+    assert_eq!(
+        paths,
+        ["/admin/v1/voice", "/admin/v1/characters/alpha"],
+        "the page reads the character, then its sanctions"
+    );
     assert!(page.contains("<h2>Slot 0 · Alpha</h2>"));
     assert!(page.contains("href=\"/admin/game/characters/alpha?slot=2\">AlphaTwo</a>"));
     assert!(page.contains("<span class=\"pill\">deleted</span> 2026-11-20T08:30:00Z"));
