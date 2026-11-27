@@ -1834,7 +1834,9 @@ impl<W: Write> Engine<W> {
                 )?);
                 receipts.push(json!({"op":"bot_respawn","object_index":id,
                     "generation":runtime.generation,"spawn_point_index":spawn.spawn_point,
-                    "arrival":spawn.arrival.code(),"position":spawn.position}));
+                    "arrival":spawn.arrival.code(),"position":spawn.position,
+                    "objective":spawn.objective.map(|o| o.0),
+                    "objective_route_m":spawn.objective.map(|o| o.1)}));
             }
             if !bot.has_supply_action()
                 && !self.bot_registry.config.as_ref().unwrap().autonomous
@@ -3562,6 +3564,7 @@ impl<W: Write> Engine<W> {
                         position: slot.position,
                         spawn_point: slot.source_spawn,
                         arrival: crate::bot_spawn_selection::Arrival::PopulationSlot,
+                        objective: None,
                     }
                 }
             };
@@ -3645,7 +3648,7 @@ impl<W: Write> Engine<W> {
             } else {
                 None
             };
-            let mut spawn_receipt = json!({"op":"bot_population_spawn","name":display_name,"name_index":name_index,"object_index":index,"generation":generation,"team":team,"squad_index":squad.squad_index(),"source_spawn":slot.source_spawn,"slot":slot_index,"spawn_point_index":spawn.spawn_point,"arrival":spawn.arrival.code(),"position":spawn.position});
+            let mut spawn_receipt = json!({"op":"bot_population_spawn","name":display_name,"name_index":name_index,"object_index":index,"generation":generation,"team":team,"squad_index":squad.squad_index(),"source_spawn":slot.source_spawn,"slot":slot_index,"spawn_point_index":spawn.spawn_point,"arrival":spawn.arrival.code(),"position":spawn.position,"objective":spawn.objective.map(|o| o.0),"objective_route_m":spawn.objective.map(|o| o.1)});
             if let Some(kit) = &kit {
                 spawn_receipt["kit"] = json!(kit.id);
                 spawn_receipt["kit_role"] = json!(kit.role.code());

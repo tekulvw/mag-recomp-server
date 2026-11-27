@@ -49,8 +49,10 @@ squad stays on its lane.
 Duties still come first for the bots that hold them, in their existing order:
 armed-objective duties and blast evacuation, repair, demolition teams, then
 the squad's objective. Resupply runs pause objective work as before. When a
-duty ends, the bot returns to its squad's objective. Spawn selection and
-demolition team scoring still measure from the lane objective.
+duty ends, the bot returns to its squad's objective. Bot lives of a squad on
+a FRAGO, or defending its objective, start at the points nearest this
+objective by route ([bot-active-spawns.md](bot-active-spawns.md)). Demolition team scoring still
+measures from the lane objective.
 
 ## Automatic orders for bot-led squads
 
@@ -72,12 +74,16 @@ changes hands again.
 The population file's `squad_orders` object. Omitted fields use the defaults:
 
 ```json
-"squad_orders": {"follow_orders": true, "automatic_orders": true}
+"squad_orders": {"follow_orders": true, "automatic_orders": true,
+  "spawn_at_current_objective": true}
 ```
 
 - `"follow_orders": false` restores the previous lane-only selection, without
   the nearest-objective fallback.
 - `"automatic_orders": false` leaves bot-led squads untagged, as before.
+- `"spawn_at_current_objective": false` ranks only defenders' spawns, toward
+  their lane objective, ignoring the FRAGO, as before
+  ([bot-active-spawns.md](bot-active-spawns.md)).
 
 ## Evidence
 
@@ -89,6 +95,13 @@ The population file's `squad_orders` object. Omitted fields use the defaults:
 - `bot_objective_task` and `bot_objective_waiting`: the bot's `objective`, as
   before.
 - `squad_orders_published`: the tag that reached each recipient.
+
+Retail spawn choice does not read the tag. A human squad's shared spawn is
+the leader's choice among the squad's active points, and the mode moves the
+squad default only through objective effects (Sabotage forward links,
+Domination and Acquisition spawn effects)
+([worker-match-profiles.md](worker-match-profiles.md#shared-squad-spawn-selection)).
+Ranking bot spawns toward the FRAGO is this server's own policy.
 
 ## Not implemented
 

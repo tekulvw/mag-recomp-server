@@ -27,14 +27,20 @@
 //! placement is skipped and reported once with its reason. When nothing else
 //! qualifies the population slot is the fallback.
 //!
-//! Defending squads (whose lane objective their own team owns) instead rank
-//! every point they may use now, including an operational hospital of their
-//! side and a natively routed field hospital. Forward spawns (such a
-//! hospital, or a point the squad gained at runtime) come first whenever they
-//! route to the lane objective, then the squad's other points; within each
-//! group the shorter navmesh route goes first. Points that do not route there
-//! are skipped, near-equal points are spread per bot, and the population slot
-//! is the last fallback.
+//! With a navmesh, a squad that defends the objective it works on now
+//! (`bot_squad_current_objective`), or works on one other than its lane
+//! objective (its human leader's FRAGO, or the nearest objective of its team
+//! once its lane is exhausted), instead ranks every point it may use now,
+//! including an operational hospital of its side and a natively routed field
+//! hospital, toward that objective. Forward spawns (such a hospital, a point
+//! the squad gained at runtime, or its runtime default once the mode moved
+//! it) come first whenever they route there, then the squad's other points;
+//! within each group the shorter navmesh route goes first. Points that do not
+//! route there are skipped, near-equal points are spread per bot, and the
+//! population slot is the last fallback. When no point routes to that
+//! objective a defended lane objective is tried, then the order above. With
+//! `squad_orders.spawn_at_current_objective` off only defending squads (whose
+//! lane objective their own team owns) rank, toward their lane objective.
 //!
 //! Routes respect the structures standing now, so every cached qualification
 //! is dropped when the navmesh installs gates for a new structure snapshot.
@@ -52,10 +58,10 @@ const PARACHUTE_GROUND_SEARCH_M: f64 = 400.0;
 const AUTHORED_GROUND_SEARCH_M: f64 = 3.0;
 const ROUTE_ATTEMPTS: usize = 4;
 const MIN_SEPARATION_M: f64 = 0.71;
-/// Defenders spread over points whose route to the lane objective is within
+/// Squads spread over points whose route to their objective is within
 /// this distance of the shortest one.
 const FORWARD_SPREAD_M: f64 = 20.0;
-/// A lane route ends within this distance of the objective centre.
+/// A spawn route ends within this distance of the objective centre.
 const LANE_GOAL_RADIUS_M: f64 = 5.0;
 const HOSPITAL_RING_RADIUS_STEPS: i32 = 1;
 /// Field hospitals have no exit data; bots stand within this many 1 m rings
@@ -91,6 +97,9 @@ pub(crate) struct LifeSpawn {
     /// The point used; `None` for a population slot without a source binding.
     pub spawn_point: Option<u16>,
     pub arrival: Arrival,
+    /// The objective the point was ranked toward and the route length from
+    /// the point to it, when the life was ranked by route.
+    pub objective: Option<(u16, f64)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -106,7 +115,16 @@ pub(crate) struct QualifiedPoint {
     arrival: Arrival,
 }
 
-/// A defender spawn point proven to route to the squad's lane objective.
+/// Points in the order a bot life tries them: placements, arrival and the
+/// route length to the ranked objective (`None` for the unranked fallback).
+type RankedOrder = Vec<(
+    u16,
+    Vec<replication::CharacterPosition>,
+    Arrival,
+    Option<f64>,
+)>;
+
+/// A spawn point proven to route to the objective a squad is ranked toward.
 #[derive(Clone, Debug)]
 pub(crate) struct LaneSpawn {
     /// Placements in the routed navmesh component; empty for the bot's own
@@ -472,6 +490,58 @@ impl<W: Write> Engine<W> {
         (owner == team).then(|| (lane, center.map(f64::from)))
     }
 
+    fn bot_spawn_at_current_objective(&self) -> bool {
+        self.bot_registry
+            .config
+            .as_ref()
+            .is_none_or(|c| c.squad_orders.spawn_at_current_objective)
+    }
+
+    /// The objectives a squad's bot lives are ranked toward, in order, each
+    /// with its centre. The objective the squad works on now (its human
+    /// leader's FRAGO, else its lane, else the nearest objective of its team)
+    /// comes first when the squad defends it or it is not the squad's lane
+    /// objective. Its lane objective (the lane defence it breaks first, see
+    /// bot_breach) and the mode's own lane objective follow when the squad
+    /// defends them, for when no point routes to the ones before. Before lanes
+    /// exist the authored initial assignment stands in. An attacking squad on
+    /// its lane gets none and keeps the active-spawn order. With
+    /// `spawn_at_current_objective` off, only a defended lane is ranked
+    /// toward, as before.
+    pub(crate) fn bot_spawn_goals(&self, squad: u16) -> Vec<(u16, [f64; 3])> {
+        if !self.bot_spawn_at_current_objective() {
+            return self.bot_defended_lane(squad).into_iter().collect();
+        }
+        let Ok(team) = replication::SquadAddress::from_index(squad).map(|s| s.team()) else {
+            return Vec::new();
+        };
+        let lane = self.bot_squad_lane(squad).or_else(|| {
+            self.initial_objective_index(squad)
+                .ok()
+                .filter(|&index| index != u16::MAX)
+        });
+        let current = self.bot_squad_current_objective(squad).or(lane);
+        let mut goals: Vec<(u16, [f64; 3])> = Vec::new();
+        for (objective, off_lane) in [
+            (current, current != lane),
+            (lane, false),
+            (self.bot_mode_lane(squad), false),
+        ] {
+            let Some(objective) = objective else {
+                continue;
+            };
+            if goals.iter().any(|goal| goal.0 == objective) {
+                continue;
+            }
+            if let Some((center, owner)) = self.bot_objective_center(objective)
+                && (off_lane || owner == team)
+            {
+                goals.push((objective, center.map(f64::from)));
+            }
+        }
+        goals
+    }
+
     /// An operational Domination hospital of the squad's own side that the
     /// squad may spawn at now (its point is linked and active).
     fn bot_hospital_point(&self, squad: u16, index: u16) -> bool {
@@ -546,6 +616,7 @@ impl<W: Write> Engine<W> {
                         position: bound.position,
                         spawn_point: bound.source_spawn,
                         arrival: Arrival::PopulationSlot,
+                        objective: None,
                     })
                 },
             )
@@ -558,27 +629,34 @@ impl<W: Write> Engine<W> {
         };
         self.refresh_spawn_route_caches();
         self.collect_bot_spawn_routes(receipts);
-        if self.navmesh_world.is_some()
-            && let Some(lane) = self.bot_defended_lane(squad)
-        {
-            for (index, positions, arrival) in
-                self.bot_defender_spawn_order(actor, squad, home, bound.position, lane, receipts)
-            {
-                if index == home {
-                    if let LifeSpawnChoice::Spawn(spawn) = slot_choice(actors)? {
-                        return Ok(LifeSpawnChoice::Spawn(spawn));
-                    }
+        if self.navmesh_world.is_some() {
+            let current = self.bot_spawn_at_current_objective();
+            for goal in self.bot_spawn_goals(squad) {
+                let (order, routed) =
+                    self.bot_ranked_spawn_order(actor, squad, home, bound.position, goal, receipts);
+                // Nothing routes to this objective: try the next one.
+                if !routed && current {
                     continue;
                 }
-                if let Some(position) = self.free_bot_placement(actor, &positions, actors)? {
-                    return Ok(LifeSpawnChoice::Spawn(LifeSpawn {
-                        position,
-                        spawn_point: Some(index),
-                        arrival,
-                    }));
+                for (index, positions, arrival, route_m) in order {
+                    let objective = route_m.map(|m| (goal.0, m));
+                    if index == home {
+                        if let LifeSpawnChoice::Spawn(spawn) = slot_choice(actors)? {
+                            return Ok(LifeSpawnChoice::Spawn(LifeSpawn { objective, ..spawn }));
+                        }
+                        continue;
+                    }
+                    if let Some(position) = self.free_bot_placement(actor, &positions, actors)? {
+                        return Ok(LifeSpawnChoice::Spawn(LifeSpawn {
+                            position,
+                            spawn_point: Some(index),
+                            arrival,
+                            objective,
+                        }));
+                    }
                 }
+                return slot_choice(actors);
             }
-            return slot_choice(actors);
         }
         for index in self.bot_spawn_order(squad, home) {
             if index == home {
@@ -593,6 +671,7 @@ impl<W: Write> Engine<W> {
                     position,
                     spawn_point: Some(index),
                     arrival: qualified.arrival,
+                    objective: None,
                 }));
             }
         }
@@ -642,36 +721,49 @@ impl<W: Write> Engine<W> {
     /// A defender's forward spawn: an operational hospital of its side, a
     /// natively routed field hospital, or a point the squad gained at runtime
     /// (a forward spawn the match opened for it).
+    ///
+    /// With `spawn_at_current_objective` the squad's runtime default also
+    /// counts once the mode moved it off the authored default (an Acquisition
+    /// LALO drop zone while its platoon's anti-aircraft is down).
     fn bot_forward_spawn(&self, squad: u16, index: u16) -> bool {
         let Some(catalog) = &self.spawn_catalog else {
             return false;
         };
+        let moved_default = || {
+            self.bot_spawn_at_current_objective()
+                && catalog.default_for_squad(squad) == Some(index)
+                && catalog
+                    .selected_squad(squad)
+                    .is_some_and(|binding| binding.default_spawn != index)
+        };
         self.bot_hospital_point(squad, index)
             || catalog.native_unselectable_default(squad) == Some(index)
             || catalog.runtime_added_points(squad).contains(&index)
+            || moved_default()
     }
 
-    /// Defender policy: every point the squad may use now (including an
-    /// operational hospital of its side) that routes to the lane objective.
-    /// Forward spawns go before the squad's other points, so defenders hold
-    /// their forward positions while they stand; within each group the
-    /// shortest route goes first. Points within `FORWARD_SPREAD_M` of the
-    /// group's shortest are rotated per bot so a squad spreads over equally
-    /// forward points. A human member's led squad spawn goes first when it
-    /// routes. The bot's own population slot is always last as the fallback.
-    fn bot_defender_spawn_order(
+    /// Route-ranked policy: every point the squad may use now (including an
+    /// operational hospital of its side) that routes to `goal`. Forward
+    /// spawns go before the squad's other points, so squads hold their
+    /// forward positions while they stand; within each group the shortest
+    /// route goes first. Points within `FORWARD_SPREAD_M` of the group's
+    /// shortest are rotated per bot so a squad spreads over equally forward
+    /// points. A human member's led squad spawn goes first when it routes.
+    /// The bot's own population slot is always last as the fallback. The
+    /// flag says whether any point routed.
+    fn bot_ranked_spawn_order(
         &mut self,
         actor: u16,
         squad: u16,
         home: u16,
         home_position: replication::CharacterPosition,
-        lane: (u16, [f64; 3]),
+        goal: (u16, [f64; 3]),
         receipts: &mut Vec<Value>,
-    ) -> Vec<(u16, Vec<replication::CharacterPosition>, Arrival)> {
+    ) -> (RankedOrder, bool) {
         let points = self.bot_defender_points(squad, home);
         let mut ranked = Vec::new();
         for index in points {
-            if let Ok(spawn) = self.lane_spawn(index, home, home_position, lane, receipts) {
+            if let Ok(spawn) = self.lane_spawn(index, home, home_position, goal, receipts) {
                 let rear = !self.bot_forward_spawn(squad, index);
                 ranked.push((rear, spawn.route_m, index, spawn.qualified));
             }
@@ -690,14 +782,17 @@ impl<W: Write> Engine<W> {
             let led = ranked.remove(at);
             ranked.insert(0, led);
         }
+        let routed = !ranked.is_empty();
         let mut order: Vec<_> = ranked
             .into_iter()
-            .map(|(_, _, index, qualified)| (index, qualified.positions, qualified.arrival))
+            .map(|(_, route_m, index, qualified)| {
+                (index, qualified.positions, qualified.arrival, Some(route_m))
+            })
             .collect();
         if !order.iter().any(|entry| entry.0 == home) {
-            order.push((home, Vec::new(), Arrival::PopulationSlot));
+            order.push((home, Vec::new(), Arrival::PopulationSlot, None));
         }
-        order
+        (order, routed)
     }
 
     /// Every point a defending squad may use now: its ordinary order, then an
@@ -804,7 +899,7 @@ impl<W: Write> Engine<W> {
         Ok(())
     }
 
-    /// Cached per (point, lane objective, population slot) until the
+    /// Cached per (point, ranked objective, population slot) until the
     /// structure gates change. An uncached key is routed on the spawn-route
     /// worker; until it answers the point is `bot_spawn_route_pending`, which
     /// is neither cached nor reported, so the bot uses its next point.
