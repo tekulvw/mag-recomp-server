@@ -164,7 +164,14 @@ Staff act only on accounts and roles ranked below their own: nobody can change a
 superior or themselves. Every change goes to an audit log shown on the admin overview.
 
 The **Game server** section (`/admin/game`) lists the game server's characters with their level,
-XP, skill points and session, through the game server's internal admin API. Setting a level is
+XP, skill points and session, through the game server's internal admin API. An account holds up to
+three characters, in slots 0 to 2: the list has a row per character with its slot, name and
+faction, and marks the ones the player deleted (the game server keeps them, slot freed and name
+reserved, until an operator restores or purges them with `mag-admin`). An account's character page
+lists all its characters and shows one: the slot in its `?slot=N`, else the lowest live slot.
+Setting a level changes the character shown, so the form carries its slot; without one, the game
+server refuses with `ambiguous_character` when the account has more than one live character. A game
+server that predates slots (one character per account) shows as before. Setting a level is
 two steps: a preview (a dry run on the game server) shows the change, and a separate confirmation
 applies it and writes the audit log. The game server refuses while the player is signed in.
 Moderators and above can also **mute or ban an account's in-match voice** from its character page

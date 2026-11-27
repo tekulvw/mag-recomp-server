@@ -3,6 +3,7 @@
 {% block content %}
 {% include "admin_nav.html" %}
 <h1>Set level · {{ account }}</h1>
+{% if let Some(n) = slot %}<p>Character in slot {{ n }}{% if let Some(name) = name %}: {{ name }}{% endif %}.</p>{% else if let Some(name) = name %}<p>Character {{ name }}.</p>{% endif %}
 {% if let Some(r) = refusal %}
 <div class="alert">
   <p><strong>The game server refused the change</strong> ({{ r.code }}): {{ r.message }}</p>
@@ -15,7 +16,7 @@
 {% else if let Some(l) = now_level %}
 <p>The game server now reports level {{ l }} (asked for {{ level }}).</p>
 {% endif %}
-<p><a href="/admin/game/characters/{{ account|urlencode_strict }}">Refresh to check</a> before trying again.</p>
+<p><a href="/admin/game/characters/{{ account|urlencode_strict }}{{ slot_query }}">Refresh to check</a> before trying again.</p>
 {% else if let Some(e) = error %}
 <p class="alert">{{ e }} Nothing was changed.</p>
 {% else if let Some(c) = change %}
@@ -40,10 +41,11 @@
 <form method="post" action="/admin/game/characters/{{ account|urlencode_strict }}/level/confirm" class="row">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <input type="hidden" name="level" value="{{ level }}">
+  {% if let Some(n) = slot %}<input type="hidden" name="slot" value="{{ n }}">{% endif %}
   <button class="danger">Apply level {{ level }}</button>
-  <a href="/admin/game/characters/{{ account|urlencode_strict }}">Cancel</a>
+  <a href="/admin/game/characters/{{ account|urlencode_strict }}{{ slot_query }}">Cancel</a>
 </form>
 {% endif %}
 {% endif %}
-<p><a href="/admin/game/characters/{{ account|urlencode_strict }}">Back to {{ account }}</a></p>
+<p><a href="/admin/game/characters/{{ account|urlencode_strict }}{{ slot_query }}">Back to {{ account }}</a></p>
 {% endblock %}

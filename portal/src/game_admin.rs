@@ -99,7 +99,12 @@ impl SessionState {
     }
 }
 
-/// One entry of `GET /admin/v1/accounts`.
+/// Highest character slot: an account holds up to three characters, in slots 0 to 2.
+pub const MAX_SLOT: u8 = 2;
+
+/// One entry of `GET /admin/v1/accounts`: one per character, deleted ones included. A game
+/// server that predates character slots sends one entry per account without the character
+/// fields, which are then `None` (and `deleted` false).
 #[derive(Debug, Clone, Deserialize)]
 pub struct CharacterSummary {
     pub account: String,
@@ -107,6 +112,20 @@ pub struct CharacterSummary {
     pub experience: i64,
     pub skill_points: i64,
     pub session: SessionState,
+    #[serde(default)]
+    pub character_id: Option<u32>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub slot: Option<u8>,
+    #[serde(default)]
+    pub faction: Option<u8>,
+    /// Deleted by the player: kept by the game server, its slot free and its name reserved.
+    #[serde(default)]
+    pub deleted: bool,
+    /// UTC `YYYY-MM-DDTHH:MM:SSZ`.
+    #[serde(default)]
+    pub deleted_at: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -114,7 +133,9 @@ struct AccountList {
     accounts: Vec<CharacterSummary>,
 }
 
-/// `GET /admin/v1/characters/{account}`.
+/// `GET /admin/v1/characters/{account}[?slot=N]`: the selected character (that slot, else the
+/// account's lowest live slot) and every character of the account. From a game server that
+/// predates character slots the character fields are `None` and `characters` is empty.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Character {
     pub account: String,
@@ -123,6 +144,33 @@ pub struct Character {
     pub skill_points: i64,
     pub next_level_experience: Option<i64>,
     pub session: SessionState,
+    #[serde(default)]
+    pub character_id: Option<u32>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub slot: Option<u8>,
+    #[serde(default)]
+    pub faction: Option<u8>,
+    #[serde(default)]
+    pub characters: Vec<AccountCharacter>,
+}
+
+/// One of an account's characters, live or deleted, in [`Character::characters`].
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct AccountCharacter {
+    pub character_id: u32,
+    pub name: String,
+    pub slot: u8,
+    pub faction: u8,
+    pub level: u32,
+    pub experience: i64,
+    pub skill_points: i64,
+    #[serde(default)]
+    pub deleted: bool,
+    /// UTC `YYYY-MM-DDTHH:MM:SSZ`.
+    #[serde(default)]
+    pub deleted_at: Option<String>,
 }
 
 /// A level change, planned (`applied: false`) or made.
@@ -137,6 +185,13 @@ pub struct LevelChange {
     pub skill_points_before: i64,
     pub skill_points_after: i64,
     pub backup: Option<String>,
+    /// The character changed; `None` from a game server that predates character slots.
+    #[serde(default)]
+    pub character_id: Option<u32>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub slot: Option<u8>,
 }
 
 /// A 409 answer: the game server will not make the change.
@@ -165,6 +220,15 @@ impl Refusal {
             "not_sanctioned" => {
                 "The account has no active voice mute or ban of that kind, so there is nothing \
                  to lift. Nothing was changed."
+            }
+            "ambiguous_character" => {
+                "The account has more than one character, so the game server will not guess \
+                 which one to change. Open the account's character page, choose the character's \
+                 slot and try again."
+            }
+            "slots_full" => {
+                "Every character slot of the account is in use, so the deleted character cannot \
+                 be restored until the player deletes one."
             }
             "no_progression_catalog" => {
                 "The game server has no progression catalog loaded, so it cannot work out \
@@ -510,13 +574,18 @@ impl GameAdmin {
         }
     }
 
-    /// One character, or `None` if the game server has none for `account`.
+    /// One character, or `None` if the game server has no live one for `account` (in `slot`,
+    /// when given; else the account's lowest live slot).
     pub async fn character(
         &self,
         actor: &str,
         account: &str,
+        slot: Option<u8>,
     ) -> Result<Option<Character>, GameAdminError> {
-        let path = format!("/admin/v1/characters/{}", path_segment(account)?);
+        let mut path = format!("/admin/v1/characters/{}", path_segment(account)?);
+        if let Some(slot) = slot {
+            path.push_str(&format!("?slot={}", slot_number(slot)?));
+        }
         let (status, body) = self.send(Method::GET, &path, Vec::new(), actor).await?;
         match status {
             StatusCode::OK => {
@@ -526,6 +595,14 @@ impl GameAdmin {
                         "it described a different account".into(),
                     ));
                 }
+                // A game server that predates slots ignores the query and has only slot 0.
+                if let Some(asked) = slot
+                    && character.slot.unwrap_or(0) != asked
+                {
+                    return Err(GameAdminError::Unexpected(
+                        "it described a different character slot".into(),
+                    ));
+                }
                 Ok(Some(character))
             }
             StatusCode::NOT_FOUND => Ok(None),
@@ -533,28 +610,41 @@ impl GameAdmin {
         }
     }
 
-    /// Plans (`apply: false`) or makes a level change.
+    /// Plans (`apply: false`) or makes a level change, to the character in `slot`. Without a
+    /// slot the game server changes the account's only live character, and refuses with
+    /// `ambiguous_character` when it has more than one.
     pub async fn set_level(
         &self,
         actor: &str,
         account: &str,
         level: u32,
         apply: bool,
+        slot: Option<u8>,
     ) -> Result<LevelChange, GameAdminError> {
         #[derive(serde::Serialize)]
         struct Body {
             level: u32,
             apply: bool,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            slot: Option<u8>,
         }
         let path = format!("/admin/v1/characters/{}/level", path_segment(account)?);
-        let body = serde_json::to_vec(&Body { level, apply }).expect("plain JSON");
+        if let Some(slot) = slot {
+            slot_number(slot)?;
+        }
+        let body = serde_json::to_vec(&Body { level, apply, slot }).expect("plain JSON");
         let (status, body) = self
             .send_logged(Method::POST, &path, body, actor, true, apply)
             .await?;
         match status {
             StatusCode::OK => {
                 let change: LevelChange = parse(&body, "the level change")?;
-                if change.account != account || change.to_level != level || change.applied != apply
+                // An answer without a slot comes from a game server that predates slots.
+                let other_slot = slot.is_some_and(|s| change.slot.is_some_and(|c| c != s));
+                if change.account != account
+                    || change.to_level != level
+                    || change.applied != apply
+                    || other_slot
                 {
                     return Err(GameAdminError::Unexpected(
                         "it described a different change than the one asked for".into(),
@@ -773,6 +863,15 @@ fn path_segment(account: &str) -> Result<&str, GameAdminError> {
     }
 }
 
+/// A character slot the game server can hold, or `BadRequest`.
+fn slot_number(slot: u8) -> Result<u8, GameAdminError> {
+    if slot <= MAX_SLOT {
+        Ok(slot)
+    } else {
+        Err(GameAdminError::BadRequest("not a character slot".into()))
+    }
+}
+
 /// A game server account key: a lowercase player name of 1 to 32 letters, digits, `-` or `_`.
 pub fn valid_account(account: &str) -> bool {
     (1..=32).contains(&account.len())
@@ -977,9 +1076,247 @@ mod tests {
             )
             .is_err()
         );
+        assert!(
+            parse::<AccountList>(
+                br#"{"accounts":[{"account":"alpha","level":5,"experience":100,"skill_points":2,"session":"online","slot":"one"}]}"#,
+                "x"
+            )
+            .is_err()
+        );
         assert!(valid_account("alpha_ranger-7"));
         for bad in ["", "Alpha", "a/b", "a b", "a%2f", &"a".repeat(33)] {
             assert!(!valid_account(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn account_lists_old_and_new() {
+        // A game server that predates character slots: one entry per account.
+        let old: AccountList = serde_json::from_slice(
+            br#"{"accounts":[{"account":"alpha","level":5,"experience":100,"skill_points":2,"session":"offline"}]}"#,
+        )
+        .unwrap();
+        let a = &old.accounts[0];
+        assert_eq!((a.account.as_str(), a.level), ("alpha", 5));
+        assert_eq!((a.character_id, a.slot, a.faction), (None, None, None));
+        assert!(a.name.is_none() && !a.deleted && a.deleted_at.is_none());
+
+        // One entry per character, a deleted one included.
+        let new: AccountList = serde_json::from_slice(
+            br#"{"accounts":[
+              {"account":"alpha","level":5,"experience":100,"skill_points":2,"session":"offline",
+               "character_id":11,"name":"Alpha","slot":0,"faction":1,"deleted":false,"deleted_at":null},
+              {"account":"alpha","level":30,"experience":9000,"skill_points":40,"session":"offline",
+               "character_id":12,"name":"AlphaTwo","slot":2,"faction":0,"deleted":false,"deleted_at":null},
+              {"account":"alpha","level":2,"experience":10,"skill_points":0,"session":"offline",
+               "character_id":9,"name":"AlphaOld","slot":1,"faction":2,"deleted":true,
+               "deleted_at":"2026-11-20T08:30:00Z"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(new.accounts.len(), 3);
+        let second = &new.accounts[1];
+        assert_eq!(second.character_id, Some(12));
+        assert_eq!(second.name.as_deref(), Some("AlphaTwo"));
+        assert_eq!((second.slot, second.faction), (Some(2), Some(0)));
+        let gone = &new.accounts[2];
+        assert!(gone.deleted);
+        assert_eq!(gone.deleted_at.as_deref(), Some("2026-11-20T08:30:00Z"));
+    }
+
+    #[test]
+    fn characters_of_an_account() {
+        let old: Character = serde_json::from_slice(
+            br#"{"account":"alpha","level":5,"experience":1,"skill_points":2,"next_level_experience":null,"session":"offline"}"#,
+        )
+        .unwrap();
+        assert!(old.characters.is_empty() && old.slot.is_none() && old.name.is_none());
+
+        let new: Character = serde_json::from_slice(
+            br#"{"account":"alpha","level":30,"experience":9000,"skill_points":40,
+                 "next_level_experience":9500,"session":"offline","character_id":12,
+                 "name":"AlphaTwo","slot":2,"faction":0,"characters":[
+                   {"character_id":11,"name":"Alpha","slot":0,"faction":1,"level":5,
+                    "experience":100,"skill_points":2,"deleted":false,"deleted_at":null},
+                   {"character_id":12,"name":"AlphaTwo","slot":2,"faction":0,"level":30,
+                    "experience":9000,"skill_points":40,"deleted":false,"deleted_at":null},
+                   {"character_id":9,"name":"AlphaOld","slot":1,"faction":2,"level":2,
+                    "experience":10,"skill_points":0,"deleted":true,
+                    "deleted_at":"2026-11-20T08:30:00Z"}]}"#,
+        )
+        .unwrap();
+        assert_eq!((new.slot, new.name.as_deref()), (Some(2), Some("AlphaTwo")));
+        assert_eq!(new.characters.len(), 3);
+        assert!(new.characters[2].deleted);
+        assert_eq!(new.characters[0].faction, 1);
+    }
+
+    #[test]
+    fn slot_refusals_have_advice() {
+        for (code, words) in [
+            ("ambiguous_character", "choose the character"),
+            ("slots_full", "cannot be restored"),
+        ] {
+            let refusal = failure(
+                StatusCode::CONFLICT,
+                format!(r#"{{"error":"{code}","message":"synthetic"}}"#).as_bytes(),
+            );
+            match refusal {
+                GameAdminError::Refused(r) => {
+                    assert_eq!(r.code, code);
+                    assert!(r.advice().contains(words), "{code}: {}", r.advice());
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    /// The path, query and body of each request, answered with the JSON `answer` gives for the
+    /// path and body.
+    type Seen = Arc<Mutex<Vec<(String, String)>>>;
+
+    async fn capture(
+        answer: fn(&str, &serde_json::Value) -> serde_json::Value,
+    ) -> (Seen, GameAdmin) {
+        use axum::response::IntoResponse;
+        let seen: Seen = Arc::default();
+        let log = seen.clone();
+        let app =
+            axum::Router::new().fallback(move |uri: axum::http::Uri, body: axum::body::Bytes| {
+                let log = log.clone();
+                async move {
+                    let path = uri.path_and_query().unwrap().as_str().to_owned();
+                    let text = String::from_utf8(body.to_vec()).unwrap();
+                    log.lock().unwrap().push((path.clone(), text.clone()));
+                    let request = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+                    axum::Json(answer(&path, &request)).into_response()
+                }
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let api = GameAdmin::new(&format!("http://{addr}"), SECRET.to_vec()).unwrap();
+        (seen, api)
+    }
+
+    fn character_answer(path: &str, _: &serde_json::Value) -> serde_json::Value {
+        let slot: u8 = path
+            .split_once("?slot=")
+            .map_or(0, |(_, n)| n.parse().unwrap());
+        serde_json::json!({"account": "alpha", "level": 5, "experience": 1, "skill_points": 2,
+            "next_level_experience": null, "session": "offline", "character_id": 10 + slot,
+            "name": format!("Alpha{slot}"), "slot": slot, "faction": 0, "characters": []})
+    }
+
+    fn level_answer(_: &str, request: &serde_json::Value) -> serde_json::Value {
+        let mut answer = serde_json::json!({"applied": request["apply"], "account": "alpha",
+            "from_level": 5, "to_level": request["level"], "experience_before": 1,
+            "experience_after": 2, "skill_points_before": 3, "skill_points_after": 4,
+            "backup": null});
+        // Like a game server that predates slots when none was asked for.
+        if let Some(slot) = request.get("slot") {
+            answer["slot"] = slot.clone();
+            answer["name"] = "AlphaTwo".into();
+            answer["character_id"] = 12.into();
+        }
+        answer
+    }
+
+    #[tokio::test]
+    async fn slot_query_and_body() {
+        let (seen, api) = capture(character_answer).await;
+        let c = api
+            .character("staff", "alpha", None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(c.slot, Some(0));
+        let c = api
+            .character("staff", "alpha", Some(2))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((c.slot, c.name.as_deref()), (Some(2), Some("Alpha2")));
+        assert!(matches!(
+            api.character("staff", "alpha", Some(3)).await,
+            Err(GameAdminError::BadRequest(_))
+        ));
+        let paths: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(p, _)| p.clone())
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "/admin/v1/characters/alpha",
+                "/admin/v1/characters/alpha?slot=2"
+            ]
+        );
+
+        let (seen, api) = capture(level_answer).await;
+        let change = api
+            .set_level("staff", "alpha", 20, false, None)
+            .await
+            .unwrap();
+        assert_eq!((change.slot, change.name), (None, None));
+        let change = api
+            .set_level("staff", "alpha", 20, true, Some(2))
+            .await
+            .unwrap();
+        assert_eq!(change.slot, Some(2));
+        assert_eq!(change.name.as_deref(), Some("AlphaTwo"));
+        let bodies: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, b)| b.clone())
+            .collect();
+        assert_eq!(
+            bodies,
+            [
+                r#"{"level":20,"apply":false}"#,
+                r#"{"level":20,"apply":true,"slot":2}"#
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn answers_about_another_slot_are_rejected() {
+        fn wrong_slot(path: &str, request: &serde_json::Value) -> serde_json::Value {
+            let mut answer = if path.ends_with("/level") {
+                level_answer(path, request)
+            } else {
+                character_answer("", request)
+            };
+            answer["slot"] = 1.into();
+            answer
+        }
+        let (_, api) = capture(wrong_slot).await;
+        assert!(matches!(
+            api.character("staff", "alpha", Some(2)).await,
+            Err(GameAdminError::Unexpected(_))
+        ));
+        assert!(matches!(
+            api.set_level("staff", "alpha", 20, false, Some(2)).await,
+            Err(GameAdminError::Unexpected(_))
+        ));
+
+        // A game server that predates slots answers without one: only slot 0 can be it.
+        fn no_slot(_: &str, _: &serde_json::Value) -> serde_json::Value {
+            serde_json::json!({"account": "alpha", "level": 5, "experience": 1,
+                "skill_points": 2, "next_level_experience": null, "session": "offline"})
+        }
+        let (_, api) = capture(no_slot).await;
+        assert!(
+            api.character("staff", "alpha", Some(0))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(matches!(
+            api.character("staff", "alpha", Some(1)).await,
+            Err(GameAdminError::Unexpected(_))
+        ));
     }
 }
