@@ -448,6 +448,39 @@ fn bots_fill_squads_that_can_reach_an_objective_first() {
 }
 
 #[test]
+fn the_squad_route_check_runs_off_the_world_tick_and_applies_on_a_later_one() {
+    // Live, the check can take seconds of navmesh search on a large map. It
+    // must never hold the world: the call returns at once, squads rank as
+    // routable meanwhile, and the answer lands on a later call.
+    let mut engine = build(SABOTAGE, 16, &[4]);
+    engine.bot_spawn_routes.inline = false;
+    engine.cache_squad_routes(1).unwrap();
+    assert!(engine.bot_registry.squad_route_check_running());
+    assert_eq!(engine.bot_registry.squad_route(16), None);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while engine.bot_registry.squad_route_check_running() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "squad route check never answered"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+        engine.cache_squad_routes(1).unwrap();
+    }
+    assert_eq!(engine.bot_registry.squad_route(16), Some(false));
+    assert_eq!(engine.bot_registry.squad_route(17), Some(true));
+    let log = String::from_utf8_lossy(&engine.writer);
+    assert!(
+        log.lines()
+            .any(|line| line.contains("bot_population_unroutable_squads")
+                && line.contains("\"squads\":[16]")),
+        "{log}"
+    );
+    // The answer is applied once: later calls neither restart nor repeat it.
+    engine.cache_squad_routes(1).unwrap();
+    assert!(!engine.bot_registry.squad_route_check_running());
+}
+
+#[test]
 fn bots_fill_squads_that_meet_the_other_side_at_an_objective() {
     // Side 1's squads 16 and 17 (authored to objective 5, like side 0's
     // squads 0 and 1) are stranded, so side 1 fills squad 18 (objective 6).

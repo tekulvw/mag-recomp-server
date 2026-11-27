@@ -1460,6 +1460,8 @@ pub struct Engine<W: Write> {
     bot_registry: bot_registry::BotRegistry,
     bot_perception: bot_perception::World,
     bot_cover: bot_cover::World,
+    /// Spawn-route qualification jobs that run off the world tick.
+    bot_spawn_routes: bot_spawn_selection::SpawnRoutes,
     bot_names: bot_names::Catalog,
     /// Opt-in varied bot kits; bots keep the bootstrap kit when absent.
     bot_kits: Option<std::sync::Arc<bot_kits::Catalog>>,

@@ -73,6 +73,36 @@ qualification (and its receipt) is renewed whenever the navmesh installs gates
 for a new structure snapshot: a destroyed gate opens a way, a repaired one
 closes it.
 
+## Route checks run off the world tick
+
+Proving that a point routes can be expensive. A point that does not route
+searches the navmesh once per placement tried, and on a large map that takes
+tens of milliseconds each. A side's first wave asks for dozens of points at
+once. Run inline, a defender wave on Baku held the world for 7 s on a laptop
+and about 16 s on a cluster node: longer than the 10 s world-stream frame
+deadline, so every client was dropped.
+
+So the server never routes for a spawn choice inside the world tick:
+
+- A point qualification or defender lane qualification that is not cached is
+  queued to a worker thread. The tick only gathers the point's placements
+  (ground probes). Until the answer arrives the point counts as pending: it
+  is skipped for this life, is not cached and has no receipt, and the bot uses
+  its next point or its population slot. The answer and its receipt are
+  stored on a later tick, provided the navmesh and its structure gates are
+  unchanged. Otherwise the point is queued again.
+- While humans wait for their side's first wave, the defender lane points
+  every population slot will ask for are queued ahead (at most once a second),
+  so the first defender lives normally already have their forward points.
+- The check behind squad fill order (whether a squad's population slots
+  reach any objective; see `bot_population_unroutable_squads`) runs once per
+  population on its own worker thread, started at the same time. Until it
+  answers, squads rank as routable, as they do without navigation data.
+
+Synthetic unit tests keep the routes inline so their expectations are
+unchanged. The headless simulation queues as live, then waits for the answers
+outside its timed phases, so a run stays deterministic.
+
 ## First lives
 
 Bots of a side take their first lives at that side's first spawn wave. The

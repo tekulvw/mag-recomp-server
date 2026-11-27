@@ -453,6 +453,7 @@ impl<W: Write> Engine<W> {
         self.enable_world_ticks();
         self.enable_tick_timing();
         self.bot_cover.blocking_builds = true;
+        self.bot_spawn_routes.blocking = true;
         let joined = self.headless_sim_join(options, Duration::ZERO, wall0)?;
         self.headless_sim_measure(options, joined, wall0, ticks)
     }

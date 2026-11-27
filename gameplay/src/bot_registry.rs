@@ -163,6 +163,8 @@ pub(crate) struct BotRegistry {
     /// Per squad: whether its population slots can route to any objective
     /// (see `squad_routable`). Static for the installed population.
     squad_routes: BTreeMap<u16, bool>,
+    /// The off-tick check filling `squad_routes` (see `cache_squad_routes`).
+    squad_route_job: Option<std::sync::mpsc::Receiver<BTreeMap<u16, bool>>>,
 }
 #[derive(Clone)]
 pub(super) struct WorldBot {
@@ -1616,6 +1618,9 @@ impl<W: Write> Engine<W> {
         {
             return Ok(Vec::new());
         }
+        // Route defender spawns off the tick while the side waits for its
+        // first wave (see `prefetch_bot_spawn_routes`).
+        self.prefetch_bot_spawn_routes(now, wall)?;
         // Start the first population once a real human reaches on foot, or
         // once a side's first wave is due (see `bot_team_first_wave`).
         // Thereafter its world-owned lives/routes continue through human death.
@@ -3154,7 +3159,26 @@ impl<W: Write> Engine<W> {
     /// A squad counts as unroutable only when at least one of its slots is
     /// on the navmesh and none of them reaches an objective; missing
     /// navigation data or an off-mesh slot never demotes a squad.
-    fn cache_squad_routes(&mut self, wall: u64) -> Result<(), &'static str> {
+    ///
+    /// The check routes from up to `ROUTE_CHECK_SLOTS` slots per squad to
+    /// every objective until one reaches; on a large map with walled-off
+    /// objectives that is seconds of navmesh search, so outside unit tests it
+    /// runs on a worker thread. Until it answers, squads rank as routable
+    /// (the same as missing navigation data); the answer is applied on a
+    /// later tick, normally while humans wait for the first wave.
+    pub(crate) fn cache_squad_routes(&mut self, wall: u64) -> Result<(), &'static str> {
+        if let Some(job) = &self.bot_registry.squad_route_job {
+            match job.try_recv() {
+                Ok(routes) => {
+                    self.bot_registry.squad_route_job = None;
+                    return self.apply_squad_routes(routes, wall);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => return Ok(()),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.bot_registry.squad_route_job = None;
+                }
+            }
+        }
         let Some(config) = self.bot_registry.config.as_ref() else {
             return Ok(());
         };
@@ -3192,30 +3216,55 @@ impl<W: Write> Engine<W> {
             })
             .map(|p| p.map(f64::from))
             .collect();
-        let mut unroutable = Vec::new();
-        for squad in squads {
-            let mut on_mesh = false;
-            let mut routes = goals.is_empty();
-            for slot in config
-                .slots
-                .iter()
-                .filter(|s| s.squad == Some(squad))
-                .take(Self::ROUTE_CHECK_SLOTS)
-            {
-                let start = point(slot.position);
-                if mesh.component_id(start).is_err() {
-                    continue;
-                }
-                on_mesh = true;
-                if goals.iter().any(|&goal| {
-                    mesh.route_with_drops(start, goal, 5., rules, 400)
-                        .is_ok_and(|r| r.status == navmesh::Status::Complete)
-                }) {
-                    routes = true;
-                    break;
-                }
+        let starts: Vec<(u16, Vec<[f64; 3]>)> = squads
+            .into_iter()
+            .map(|squad| {
+                let slots = config
+                    .slots
+                    .iter()
+                    .filter(|s| s.squad == Some(squad))
+                    .take(Self::ROUTE_CHECK_SLOTS)
+                    .map(|slot| point(slot.position))
+                    .collect();
+                (squad, slots)
+            })
+            .collect();
+        let (mesh, rules) = (mesh.clone(), rules.clone());
+        if !self.bot_spawn_routes.inline {
+            let (answer, job) = std::sync::mpsc::channel();
+            let spawned = std::thread::Builder::new()
+                .name("bot-squad-routes".into())
+                .spawn({
+                    let (mesh, rules, goals, starts) =
+                        (mesh.clone(), rules.clone(), goals.clone(), starts.clone());
+                    move || {
+                        let _ = answer.send(squad_routes(&mesh, &rules, &goals, &starts));
+                    }
+                });
+            if spawned.is_ok() {
+                self.bot_registry.squad_route_job = Some(job);
+                return Ok(());
             }
-            let routable = routes || !on_mesh;
+        }
+        let routes = squad_routes(&mesh, &rules, &goals, &starts);
+        self.apply_squad_routes(routes, wall)
+    }
+    /// Headless simulation: wait for the squad route check outside the timed
+    /// phases, then apply it on this tick.
+    pub(crate) fn wait_bot_squad_routes(&mut self) -> Option<BTreeMap<u16, bool>> {
+        let job = self.bot_registry.squad_route_job.take()?;
+        job.recv().ok()
+    }
+    pub(crate) fn apply_squad_routes(
+        &mut self,
+        routes: BTreeMap<u16, bool>,
+        wall: u64,
+    ) -> Result<(), &'static str> {
+        let mut unroutable = Vec::new();
+        for (squad, routable) in routes {
+            if self.bot_registry.squad_routes.contains_key(&squad) {
+                continue;
+            }
             if !routable {
                 unroutable.push(squad);
             }
@@ -3699,6 +3748,7 @@ impl<W: Write> Engine<W> {
         self.bot_registry.spawn_qualification.clear();
         self.bot_registry.lane_spawns.clear();
         self.bot_registry.spawn_route_gates = None;
+        self.bot_spawn_routes.forget();
         self.bot_registry.sides_started = [false; 2];
     }
 }
@@ -4231,6 +4281,14 @@ pub(crate) struct CharacterDamageCandidate {
 }
 #[cfg(test)]
 impl BotRegistry {
+    /// Whether `squad`'s spawns route to an objective, once checked.
+    pub(crate) fn squad_route(&self, squad: u16) -> Option<bool> {
+        self.squad_routes.get(&squad).copied()
+    }
+    /// Whether the off-tick squad route check is still running.
+    pub(crate) fn squad_route_check_running(&self) -> bool {
+        self.squad_route_job.is_some()
+    }
     /// The bots a recipient holds snapshots of, if it has been snapshotted.
     pub(crate) fn known_bots(&self, reservation_id: &str) -> Option<&BTreeSet<u16>> {
         self.known.get(reservation_id)
@@ -4579,4 +4637,36 @@ mod regional_team_tests {
             );
         }
     }
+}
+
+/// Per squad: whether a population slot on the navmesh reaches any goal,
+/// walking or through certified drops. A squad without a slot on the
+/// navmesh, or a map without goals, counts as routable.
+fn squad_routes(
+    mesh: &navmesh::NavMesh,
+    rules: &crate::fall_damage::Rules,
+    goals: &[[f64; 3]],
+    starts: &[(u16, Vec<[f64; 3]>)],
+) -> BTreeMap<u16, bool> {
+    starts
+        .iter()
+        .map(|(squad, slots)| {
+            let mut on_mesh = false;
+            let mut routes = goals.is_empty();
+            for &start in slots {
+                if mesh.component_id(start).is_err() {
+                    continue;
+                }
+                on_mesh = true;
+                if goals.iter().any(|&goal| {
+                    mesh.route_with_drops(start, goal, 5., rules, 400)
+                        .is_ok_and(|r| r.status == navmesh::Status::Complete)
+                }) {
+                    routes = true;
+                    break;
+                }
+            }
+            (*squad, routes || !on_mesh)
+        })
+        .collect()
 }

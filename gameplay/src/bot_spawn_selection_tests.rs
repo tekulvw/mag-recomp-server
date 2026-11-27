@@ -792,3 +792,90 @@ fn each_side_starts_its_bots_at_its_own_first_wave() {
     reconcile(&mut engine, 35);
     assert!(teams(&engine).contains(&human), "{:?}", teams(&engine));
 }
+
+fn lane_receipts(receipts: &[Value]) -> usize {
+    receipts
+        .iter()
+        .filter(|r| r["op"] == "bot_lane_spawn_qualified" || r["op"] == "bot_lane_spawn_unusable")
+        .count()
+}
+
+#[test]
+fn a_slow_defender_route_never_holds_the_spawn_choice() {
+    // On a large map one failing lane qualification can search the whole
+    // navmesh; a side's first wave asks for dozens and held the world past
+    // the 10 s stream deadline. Queued, the choice returns at once with the
+    // population slot and the forward points arrive on a later life.
+    let mut engine = engine_with_defence();
+    engine.bot_spawn_routes.inline = false;
+    engine.bot_spawn_routes.test_delay = Some(Duration::from_millis(800));
+    let started = std::time::Instant::now();
+    let (spawn, receipts) = choose_defender(&mut engine, 200, &Default::default());
+    assert!(
+        started.elapsed() < Duration::from_millis(400),
+        "the choice waited for a route: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(spawn.arrival, Arrival::PopulationSlot);
+    assert_eq!(spawn.spawn_point, Some(DEFENDER_HOME));
+    assert_eq!(
+        lane_receipts(&receipts),
+        0,
+        "pending points are not reported"
+    );
+    assert!(!engine.bot_spawn_routes.pending.is_empty());
+    // Asking again while the routes run queues nothing new and stays fast.
+    let queued = engine.bot_spawn_routes.pending.len();
+    let started = std::time::Instant::now();
+    let (again, _) = choose_defender(&mut engine, 201, &Default::default());
+    assert!(started.elapsed() < Duration::from_millis(400));
+    assert_eq!(again.arrival, Arrival::PopulationSlot);
+    assert_eq!(engine.bot_spawn_routes.pending.len(), queued);
+    // Once answered, the next life uses the forward points, reported once.
+    engine.bot_spawn_routes.blocking = true;
+    engine.wait_bot_spawn_routes(1).unwrap();
+    let (forward, receipts) = choose_defender(&mut engine, 202, &Default::default());
+    assert!(
+        [Some(NORTH), Some(SOUTH)].contains(&forward.spawn_point),
+        "{forward:?}"
+    );
+    assert!(lane_receipts(&receipts) > 0);
+    assert!(engine.bot_spawn_routes.pending.is_empty());
+    // The same choice as routing inline.
+    let mut inline = engine_with_defence();
+    let (expected, _) = choose_defender(&mut inline, 202, &Default::default());
+    assert_eq!(forward, expected);
+}
+
+#[test]
+fn queued_routes_through_replaced_structure_gates_are_routed_again() {
+    let mut engine = engine_with_defence();
+    engine.bot_spawn_routes.inline = false;
+    engine.bot_spawn_routes.blocking = true;
+    // Slow enough that no answer can arrive within one spawn choice.
+    engine.bot_spawn_routes.test_delay = Some(Duration::from_millis(250));
+    let (first, _) = choose_defender(&mut engine, 200, &Default::default());
+    assert_eq!(first.arrival, Arrival::PopulationSlot);
+    // The gates change while the answers are in flight.
+    let structures = std::sync::Arc::new(crate::bot_structure_collision::StructureObstacles::new(
+        &crate::domination_structural_world::SequenceCollisionState::default(),
+        1,
+    ));
+    let mesh = engine.navmesh_world.clone().unwrap();
+    crate::navmesh_structure_gates::install_now(&mesh, Some(&structures)).unwrap();
+    engine.wait_bot_spawn_routes(1).unwrap();
+    let (stale, receipts) = choose_defender(&mut engine, 200, &Default::default());
+    assert_eq!(
+        stale.arrival,
+        Arrival::PopulationSlot,
+        "answers routed through the old gates are dropped"
+    );
+    assert_eq!(lane_receipts(&receipts), 0, "{receipts:?}");
+    engine.wait_bot_spawn_routes(1).unwrap();
+    let (current, receipts) = choose_defender(&mut engine, 200, &Default::default());
+    assert!(
+        [Some(NORTH), Some(SOUTH)].contains(&current.spawn_point),
+        "{current:?}"
+    );
+    assert!(lane_receipts(&receipts) > 0);
+}
