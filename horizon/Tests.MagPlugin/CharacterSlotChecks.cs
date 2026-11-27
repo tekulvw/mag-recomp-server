@@ -358,9 +358,12 @@ internal static partial class LeadershipProgressionChecks
         Check(expected.SequenceEqual(actual), "Backends disagree: json " + string.Join(" / ", expected) + " postgres " + string.Join(" / ", actual));
         var differences = pg.CompareWith(json);
         Check(differences.Count == 0 && pg.Summarize() == json.Summarize(), "Stores differ: " + string.Join("; ", differences));
-        Check(Scalar(connection, "SELECT count(*) FROM mag.admin_changes WHERE operation = 'character-delete' AND character_id IS NOT NULL") == 5 &&
-            Scalar(connection, "SELECT count(*) FROM mag.admin_changes WHERE operation = 'character-purge' AND after = '{}'::jsonb") == 2 &&
-            Scalar(connection, "SELECT count(*) FROM mag.admin_changes WHERE operation = 'character-restore'") == 2, "Deletes, restores and purges are journalled");
+        // The script deletes four characters (alpha!2, Plain, the replacement alpha!2 and bravo!0), restores two and purges two.
+        long deletes = Scalar(connection, "SELECT count(*) FROM mag.admin_changes WHERE operation = 'character-delete' AND character_id IS NOT NULL");
+        long purges = Scalar(connection, "SELECT count(*) FROM mag.admin_changes WHERE operation = 'character-purge' AND after = '{}'::jsonb");
+        long restores = Scalar(connection, "SELECT count(*) FROM mag.admin_changes WHERE operation = 'character-restore'");
+        Check(deletes == 4 && purges == 2 && restores == 2,
+            $"Deletes, restores and purges are journalled: {deletes} deletes, {restores} restores, {purges} purges");
         Check(Scalar(connection, "SELECT count(*) FROM mag.match_progress p LEFT JOIN mag.characters c ON c.id = p.character_id WHERE c.id IS NULL") == 0,
             "A purge leaves no ledger rows behind");
 
