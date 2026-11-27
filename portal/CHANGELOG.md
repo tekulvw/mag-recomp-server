@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/tekulvw/mag-recomp-server/compare/portal-v0.7.0...portal-v0.8.0) (2026-11-27)
+
+
+### Features
+
+* **portal:** mute or ban an account's in-match voice from the admin panel ([#398](https://github.com/tekulvw/mag-recomp-server/issues/398)) ([49a854b](https://github.com/tekulvw/mag-recomp-server/commit/49a854b0855b7eb23fcfcd329c32491a9b104b00))
+
 ## [0.7.0](https://github.com/tekulvw/mag-recomp-server/compare/portal-v0.6.0...portal-v0.7.0) (2026-11-26)
 
 

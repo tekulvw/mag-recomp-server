@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.14.0](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.13.1...medius-v0.14.0) (2026-11-27)
+
+
+### Features
+
+* **medius:** add mag-admin character kill to unstick live players ([#390](https://github.com/tekulvw/mag-recomp-server/issues/390)) ([554fdb9](https://github.com/tekulvw/mag-recomp-server/commit/554fdb903e0fa9b9f131d4c1e01229fe01ba6220))
+* **voice:** relay every static tier by default and keep only the app listener form ([#396](https://github.com/tekulvw/mag-recomp-server/issues/396)) ([49784f3](https://github.com/tekulvw/mag-recomp-server/commit/49784f34f7558c95bc9e6ec79af37677cc0da4c9))
+* **voice:** relay group-addressed voice sends to listeners behind MAG_VOICE_RELAY ([#395](https://github.com/tekulvw/mag-recomp-server/issues/395)) ([ceb93eb](https://github.com/tekulvw/mag-recomp-server/commit/ceb93eb101376dd583251efffd0229b4dea7dce6))
+* **voice:** server-side voice mutes and bans per account ([#397](https://github.com/tekulvw/mag-recomp-server/issues/397)) ([5cce443](https://github.com/tekulvw/mag-recomp-server/commit/5cce443b4edbf459d5c59abd11e36486476d28d1))
+
 ## [0.13.1](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.13.0...medius-v0.13.1) (2026-11-26)
 
 
