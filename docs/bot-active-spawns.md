@@ -86,14 +86,23 @@ So the server never routes for a spawn choice inside the world tick:
 
 - A point qualification or defender lane qualification that is not cached is
   queued to a worker thread. The tick only gathers the point's placements
-  (ground probes). Until the answer arrives the point counts as pending: it
+  (ground probes), once per point and collision world: placements depend
+  only on static collision, the authored point and a hospital's authored
+  exits, so a structure gate change qualifies the routes again but keeps the
+  placements. Until the answer arrives the point counts as pending: it
   is skipped for this life, is not cached and has no receipt, and the bot uses
   its next point or its population slot. The answer and its receipt are
   stored on a later tick, provided the navmesh and its structure gates are
   unchanged. Otherwise the point is queued again.
-- While humans wait for their side's first wave, the defender lane points
-  every population slot will ask for are queued ahead (at most once a second),
-  so the first defender lives normally already have their forward points.
+- The defender lane points every population slot will ask for are queued
+  ahead, at most once a second: while humans wait for their side's first
+  wave, so the first defender lives normally already have their forward
+  points, and again after structure gate changes. One pass probes the
+  placements of at most two points it has not probed before (a parachute
+  point's drop line searches 400 m down per jumper, a few milliseconds per
+  point); a pass that meets more stops there and continues on the next tick.
+  Before this, a 256-player Domination simulation probed about 45 defender
+  points in one tick (200–360 ms), and again after every gate change.
 - The check behind squad fill order (whether a squad's population slots
   reach any objective; see `bot_population_unroutable_squads`) runs once per
   population on its own worker thread, started at the same time. Until it

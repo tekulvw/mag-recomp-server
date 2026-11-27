@@ -156,6 +156,10 @@ pub(crate) struct BotRegistry {
     /// Placements per (spawn point, population source spawn).
     pub(super) spawn_qualification:
         BTreeMap<(u16, u16), Result<crate::bot_spawn_selection::QualifiedPoint, &'static str>>,
+    /// Grounded placements per spawn point before routing, for the collision
+    /// world they were probed in. Structure gate changes leave them alone:
+    /// they depend only on static collision and authored hospital exits.
+    pub(super) spawn_candidates: crate::bot_spawn_selection::CandidateCache,
     /// Defender placements and route lengths per (spawn point, lane objective,
     /// whether the point is the bot's own population slot).
     pub(super) lane_spawns:
@@ -3748,6 +3752,7 @@ impl<W: Write> Engine<W> {
         self.bot_registry.spawn_qualification.clear();
         self.bot_registry.lane_spawns.clear();
         self.bot_registry.spawn_route_gates = None;
+        self.bot_registry.spawn_candidates = Default::default();
         self.bot_spawn_routes.forget();
         self.bot_registry.sides_started = [false; 2];
     }
