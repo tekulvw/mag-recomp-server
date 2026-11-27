@@ -164,6 +164,7 @@ Test("postgres character store export keeps history to the JSON bound and verifi
 Test("postgres character store connections from a secret directory use TLS without GSSAPI", LeadershipProgressionChecks.PostgresSecretDirectoryConnection);
 Test("postgres character store import is idempotent with a dry run, counts and digests", LeadershipProgressionChecks.PostgresImportCommandLine);
 Test("postgres voice sanctions match the JSON store, journal, import, export and migrate", LeadershipProgressionChecks.PostgresVoiceSanctions);
+Test("postgres voice writes answer at once while the synchronous standby stalls; a cut-off commit is an unknown outcome", LeadershipProgressionChecks.PostgresVoiceWritesIgnoreStalledStandby);
 Test("retail saved loadout delete commits and compacts the owned layout", LoadoutPreferenceStoreChecks.DeleteThroughMls);
 Test("retail skill purchase owns its equipment for loadout saves", LoadoutPreferenceStoreChecks.RetailSkillPurchaseOwnsItsEquipment);
 Test("account-bound NP identity creation and persistence", NpIdentityChecks.Run);

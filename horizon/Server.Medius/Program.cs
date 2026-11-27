@@ -379,7 +379,7 @@ namespace Server.Medius
             AdminApi = new MagAdminApi(settings.Listen, settings.Secret, CreateCharacterStore(),
                 MagAdminOperations.BackupDirectory(storePath), markers, () => DateTime.UtcNow, message => Logger.Info(message),
                 DmePortBudget, now => MagServerStatus.Capture(WorldRegistry, LocalDme, DmePortBudget, markers, now),
-                AdminGameplayHosts, () => VoiceSanctionCache.Current?.Refresh(force: true));
+                AdminGameplayHosts, () => VoiceSanctionCache.Current?.RequestRefresh());
             AdminApi.Start();
             Logger.Info($"Admin API listening on {AdminApi.LocalEndPoint}.");
         }

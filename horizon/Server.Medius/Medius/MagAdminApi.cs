@@ -348,12 +348,30 @@ namespace Server.Medius
                         return MagAdminApiResponse.Error(404, "not_found");
                 }
             }
+            catch (CharacterStoreCommitUncertainException e)
+            {
+                // The change may be saved: say so rather than "failed", so the caller re-reads it.
+                _log($"admin api: {request.Method} {path} outcome unknown: {e.Message} ({e.InnerException?.GetType().Name})");
+                return MagAdminApiResponse.Json(503, new
+                {
+                    error = "outcome_unknown",
+                    message = "The character database stopped answering while saving; the change may have been applied. Read it back before retrying."
+                });
+            }
             catch (Exception e)
             {
                 _log($"admin api: {request.Method} {path} failed: {e.GetType().Name}: {e.Message}");
                 return MagAdminApiResponse.Error(500, "internal_error");
             }
         }
+
+        /// <summary>Tells the relay's sanction cache to reload, off the request: the change is already
+        /// saved, and the response never waits for a reload (its store read, its lock or a slow hook).</summary>
+        private void SanctionsChanged() => _ = Task.Run(() =>
+        {
+            try { _voiceSanctionsChanged(); }
+            catch (Exception e) { _log("admin api: voice sanction reload request failed: " + e.GetType().Name); }
+        });
 
         private static MagAdminApiResponse MethodNotAllowed(string allow) =>
             MagAdminApiResponse.Json(405, new { error = "method_not_allowed" }, allow);
@@ -490,7 +508,7 @@ namespace Server.Medius
                     return MagAdminApiResponse.Json(409, new { error = result.Code, message = result.Message });
             }
             var change = result.Change;
-            if (change.Applied) _voiceSanctionsChanged();
+            if (change.Applied) SanctionsChanged();
             string until = lift ? "" : " until=" + (change.After.ExpiresAt?.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ") ?? "lifted");
             _log(change.Applied
                 ? $"admin api: applied voice {action} actor={who} account={account}{until} reason={why} journal={change.Journal}"

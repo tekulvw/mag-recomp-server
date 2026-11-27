@@ -12,7 +12,8 @@ namespace Server.Medius
     /// (docs/superpowers/specs/2026-11-25-voice-relay-design.md, "Moderation"). The relay asks it once per
     /// voice packet, which costs one dictionary lookup on an immutable snapshot and never touches the store.
     /// The snapshot is reloaded every <see cref="RefreshInterval"/> (an unchanged JSON file is not reread)
-    /// and at once after the admin API applies a change; expiry is checked at each lookup, so an ended
+    /// and, in the background, as soon as the admin API applies a change (<see cref="RequestRefresh"/>);
+    /// expiry is checked at each lookup, so an ended
     /// sanction stops dropping voice on time without a reload. A failed reload keeps the last snapshot.
     /// </summary>
     public sealed class VoiceSanctionCache : IDisposable
@@ -82,6 +83,32 @@ namespace Server.Medius
                     _failing = true;
                     return false;
                 }
+            }
+        }
+
+        int _requested, _running;
+
+        /// <summary>
+        /// Reload (forced) on the thread pool and return at once. Requests that arrive while a reload runs
+        /// are folded into one more reload after it, so a burst of changes costs at most two store reads
+        /// and never queues threads on the refresh lock.
+        /// </summary>
+        public void RequestRefresh()
+        {
+            Interlocked.Exchange(ref _requested, 1);
+            if (Interlocked.CompareExchange(ref _running, 1, 0) == 0) ThreadPool.QueueUserWorkItem(_ => RefreshRequested());
+        }
+
+        void RefreshRequested()
+        {
+            while (true)
+            {
+                Volatile.Write(ref _requested, 0);
+                try { Refresh(force: true); }
+                catch (Exception e) { _log("Voice sanctions: requested reload failed: " + e.GetType().Name); }
+                Interlocked.Exchange(ref _running, 0); // a full fence: the read below cannot move above it
+                // A request that arrived during the reload, unless another worker already took it.
+                if (Volatile.Read(ref _requested) == 0 || Interlocked.CompareExchange(ref _running, 1, 0) != 0) return;
             }
         }
 

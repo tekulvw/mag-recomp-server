@@ -152,7 +152,30 @@ internal static partial class LeadershipProgressionChecks
         Check(cache.Refresh() && log.Any(line => line.Contains("readable again")), "Recovery is logged");
         Check(store.ChangeVoiceSanction("bravo", VoiceSanctionKind.Ban, true, null, "staff", null, true, backups).Applied, "unban");
         Check(cache.Refresh() && cache.Silencing("bravo") == null, "A lift is picked up");
+
+        // A requested reload runs in the background and returns at once, even while a reload holds the lock;
+        // a burst of requests is folded into the reloads already queued.
+        Check(store.ChangeVoiceSanction("bravo", VoiceSanctionKind.Mute, false, null, "staff", TimeSpan.FromMinutes(5), true, backups).Applied, "mute");
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+        for (int i = 0; i < 50; i++) cache.RequestRefresh();
+        Check(timer.Elapsed < TimeSpan.FromMilliseconds(500), $"Requested reloads blocked the caller: {timer.Elapsed.TotalMilliseconds:0} ms");
+        Check(Eventually(() => cache.Silencing("bravo") != null), "A requested reload did not load the mute");
+        Check(store.ChangeVoiceSanction("bravo", VoiceSanctionKind.Mute, true, null, "staff", null, true, backups).Applied, "unmute");
+        cache.RequestRefresh();
+        Check(Eventually(() => cache.Silencing("bravo") == null), "A request after a burst was lost");
     });
+
+    /// <summary>Polls <paramref name="condition"/> for up to ten seconds.</summary>
+    private static bool Eventually(Func<bool> condition)
+    {
+        var wait = System.Diagnostics.Stopwatch.StartNew();
+        while (!condition())
+        {
+            if (wait.Elapsed > TimeSpan.FromSeconds(10)) return false;
+            Thread.Sleep(5);
+        }
+        return true;
+    }
 
     private static readonly byte[] VoiceApiSecret = Encoding.UTF8.GetBytes("synthetic-voice-api-secret-0123456789abcdef");
     private static int _voiceNonce;
@@ -211,27 +234,42 @@ internal static partial class LeadershipProgressionChecks
         Check(Admin("voice", "unmute", "alpha", "--apply").code == 0 && Admin("voice", "unban", "bravo", "--apply").code == 0, "CLI lifts");
 
         // The admin API: the same rules, the actor as operator, and the refresh hook only after an applied change.
+        // The hook runs off the request: here it blocks until released, and every answer still comes at once.
         var log = new List<string>();
+        int hooked = 0;
+        using var release = new ManualResetEventSlim(false);
+        var api = new MagAdminApi(new IPEndPoint(IPAddress.Loopback, 0), VoiceApiSecret, store, backups, directory, () => now,
+            line => { lock (log) log.Add(line); }, voiceSanctionsChanged: () => { Interlocked.Increment(ref hooked); release.Wait(); });
         int refreshed = 0;
-        var api = new MagAdminApi(new IPEndPoint(IPAddress.Loopback, 0), VoiceApiSecret, store, backups, directory, () => now, log.Add,
-            voiceSanctionsChanged: () => refreshed++);
+        void Hooked(int count)
+        {
+            Eventually(() => Volatile.Read(ref hooked) >= count);
+            Thread.Sleep(20); // and no more than asked
+            refreshed = Volatile.Read(ref hooked);
+        }
         JsonElement Body(MagAdminApiResponse response) => JsonDocument.Parse(response.Body).RootElement;
         var dryApi = api.Handle(VoiceRequest("POST", "/admin/v1/voice/alpha/mute", now, """{"apply":false,"reason":"synthetic","duration_minutes":60}"""));
+        Hooked(0);
         Check(dryApi.Status == 200 && !Body(dryApi).GetProperty("applied").GetBoolean() && refreshed == 0 &&
             Body(dryApi).GetProperty("after").GetProperty("expires_at").GetString() == "2026-11-27T13:00:00Z", "API dry run: " + Encoding.UTF8.GetString(dryApi.Body));
+        var timer = System.Diagnostics.Stopwatch.StartNew();
         var mute = api.Handle(VoiceRequest("POST", "/admin/v1/voice/alpha/mute", now, """{"apply":true,"reason":"synthetic","duration_minutes":60}"""));
+        Check(timer.Elapsed < TimeSpan.FromSeconds(1), $"The mute waited for its blocked reload: {timer.Elapsed.TotalMilliseconds:0} ms");
+        Hooked(1);
         Check(mute.Status == 200 && Body(mute).GetProperty("applied").GetBoolean() && refreshed == 1 &&
             Body(mute).GetProperty("after").GetProperty("operator").GetString() == "staff@example.invalid" &&
             Body(mute).GetProperty("before").ValueKind == JsonValueKind.Null, "API mute: " + Encoding.UTF8.GetString(mute.Body));
         Check(log.Any(line => line.StartsWith("admin api: applied voice mute actor=\"staff@example.invalid\" account=alpha until=2026-11-27T13:00:00Z")),
-            "API mute logged: " + string.Join(" | ", log));
+            "API mute logged: " + string.Join(" | ", log.ToArray()));
         var ban = api.Handle(VoiceRequest("POST", "/admin/v1/voice/bravo/ban", now, """{"apply":true}"""));
+        Hooked(2);
         Check(ban.Status == 200 && Body(ban).GetProperty("after").GetProperty("expires_at").ValueKind == JsonValueKind.Null && refreshed == 2, "API ban");
         var list = api.Handle(VoiceRequest("GET", "/admin/v1/voice", now));
         var sanctions = Body(list).GetProperty("sanctions");
         Check(list.Status == 200 && sanctions.GetArrayLength() == 2 && sanctions[0].GetProperty("account").GetString() == "alpha" &&
             sanctions[1].GetProperty("kind").GetString() == "ban", "API list: " + Encoding.UTF8.GetString(list.Body));
         var notSanctioned = api.Handle(VoiceRequest("POST", "/admin/v1/voice/alpha/unban", now, """{"apply":true}"""));
+        Hooked(2);
         Check(notSanctioned.Status == 409 && Body(notSanctioned).GetProperty("error").GetString() == "not_sanctioned" && refreshed == 2, "API 409");
         Check(api.Handle(VoiceRequest("POST", "/admin/v1/voice/nobody/mute", now, """{"apply":true}""")).Status == 404, "API unknown account");
         Check(api.Handle(VoiceRequest("GET", "/admin/v1/voice/alpha/mute", now)).Status == 405, "API wrong method");
@@ -244,8 +282,10 @@ internal static partial class LeadershipProgressionChecks
         Check(api.Handle(VoiceRequest("POST", "/admin/v1/voice/alpha/unmute", now, """{"apply":true,"duration_minutes":5}""")).Status == 400,
             "API lift with a duration");
         var unmute = api.Handle(VoiceRequest("POST", "/admin/v1/voice/alpha/unmute", now, """{"apply":true,"reason":"synthetic appeal"}"""));
+        Hooked(3);
         Check(unmute.Status == 200 && Body(unmute).GetProperty("after").ValueKind == JsonValueKind.Null && refreshed == 3, "API unmute");
         Check(store.ReadVoiceSanctions().Single().Account == "bravo", "API changes reach the store");
+        release.Set();
     });
 
     public static void PostgresVoiceSanctions() => WithDirectory(directory => WithPostgres("postgres voice sanctions", (database, connection) =>
@@ -300,5 +340,91 @@ internal static partial class LeadershipProgressionChecks
         Check(database.Migrate() == 1 && database.SchemaVersion() == 2, "Migration 0002 applies to a schema-1 database");
         Check(pg.ReadAll().Count == 2 && pg.ReadVoiceSanctions().Count == 0, "The upgrade kept the characters");
         Check(pg.ChangeVoiceSanction("alpha", VoiceSanctionKind.Mute, false, null, "staff", null, true, null).Applied, "A sanction after the upgrade");
+    }));
+    /// <summary>
+    /// The live failure of 2026-11-27: CNPG's synchronous standby was slow to acknowledge, so a voice mute's
+    /// COMMIT sat in "waiting for synchronous replication" past the command timeout. The mute was saved on
+    /// the primary yet the admin API answered 500 after five seconds and the portal timed out. Here a
+    /// standby that never answers stands in: moderation must not wait for it, the relay's reload must not
+    /// hold up the answer, and a commit cut off while waiting is reported as an unknown outcome, not a failure.
+    /// </summary>
+    public static void PostgresVoiceWritesIgnoreStalledStandby() => WithDirectory(directory => WithPostgres(
+        "postgres voice writes answer at once while the synchronous standby stalls", (database, connection) =>
+    {
+        var clock = VoiceNow;
+        var pg = LocalCharacterStore.ForPostgres(database);
+        pg.ProgressionCatalog = Load(directory, LegacyCatalog()); pg.Clock = () => clock;
+        Create(pg, "alpha", "Alpha"); Create(pg, "bravo", "Bravo");
+        string name = new NpgsqlConnectionStringBuilder(connection).Database;
+        string Text(string sql)
+        {
+            using var c = new NpgsqlConnection(connection);
+            c.Open();
+            using var command = new NpgsqlCommand(sql, c);
+            return command.ExecuteScalar()?.ToString();
+        }
+        long SyncRepWaiters() => Scalar(connection,
+            $"SELECT count(*) FROM pg_stat_activity WHERE datname = '{name}' AND wait_event = 'SyncRep'");
+        // The check server runs with synchronous_commit=off; only this throwaway database turns it back on,
+        // so only its commits wait for the standby that is never there.
+        Sql(connection, "ALTER SYSTEM SET synchronous_standby_names = 'mag_check_absent_standby'");
+        try
+        {
+            Sql(connection, "SELECT pg_reload_conf()");
+            Sql(connection, $"ALTER DATABASE {name} SET synchronous_commit = on");
+            NpgsqlConnection.ClearAllPools();
+            Check(Eventually(() => Text("SHOW synchronous_standby_names") == "mag_check_absent_standby" && Text("SHOW synchronous_commit") == "on"),
+                "The stalled standby was not configured");
+
+            // Fresh connections, so the database's setting applies (pooled ones keep the session they began with).
+            using var waiting = new PostgresCharacterDatabase(connection) { Clock = () => clock };
+            pg = LocalCharacterStore.ForPostgres(waiting);
+            pg.ProgressionCatalog = Load(directory, LegacyCatalog()); pg.Clock = () => clock;
+            DateTime now = clock.UtcDateTime;
+            var log = new List<string>();
+            void Log(string line) { lock (log) log.Add(line); }
+            var cache = new VoiceSanctionCache(pg, () => clock);
+            Check(cache.Refresh() && cache.Silencing("alpha") == null, "Nothing silenced at first");
+            string markers = Path.Combine(directory, "markers"); Directory.CreateDirectory(markers);
+            MagActiveAccounts.Write(Path.Combine(markers, MagActiveAccounts.FilePrefix + "main.json"), new Dictionary<string, DateTime>(), now);
+            var api = new MagAdminApi(new IPEndPoint(IPAddress.Loopback, 0), VoiceApiSecret, pg, Path.Combine(directory, "backups"), markers, () => now, Log,
+                voiceSanctionsChanged: cache.RequestRefresh);
+
+            // A character write waits for the standby, as every commit did on live.
+            var level = Task.Run(() => api.Handle(VoiceRequest("POST", "/admin/v1/characters/bravo/level", now, """{"level":3,"apply":true}""")));
+            Check(Eventually(() => SyncRepWaiters() == 1 || level.IsCompleted) && !level.IsCompleted, "The level change did not wait for the absent standby: " +
+                (level.IsCompleted ? $"{level.Result.Status} {Encoding.UTF8.GetString(level.Result.Body)} {string.Join(" | ", log.ToArray())}" : "no SyncRep wait"));
+
+            // A mute, a ban and their lifts do not, and the relay's cache picks each up in the background.
+            foreach (var (action, silenced) in new[] { ("mute", true), ("ban", true), ("unmute", true), ("unban", false) })
+            {
+                var timer = System.Diagnostics.Stopwatch.StartNew();
+                var answer = api.Handle(VoiceRequest("POST", $"/admin/v1/voice/alpha/{action}", now,
+                    action.StartsWith("un") ? """{"apply":true}""" : """{"apply":true,"reason":"synthetic","duration_minutes":60}"""));
+                Check(answer.Status == 200 && JsonDocument.Parse(answer.Body).RootElement.GetProperty("applied").GetBoolean(),
+                    $"API {action} under a stalled standby: {answer.Status} {Encoding.UTF8.GetString(answer.Body)}");
+                Check(timer.Elapsed < TimeSpan.FromSeconds(1), $"The voice {action} took {timer.Elapsed.TotalMilliseconds:0} ms");
+                Check(Eventually(() => (cache.Silencing("alpha") != null) == silenced), $"The cache did not follow the {action}");
+            }
+            Check(Scalar(connection, "SELECT count(*) FROM mag.admin_changes WHERE operation LIKE 'voice-%' AND account = 'alpha'") == 4,
+                "Each voice change is journalled");
+            Check(SyncRepWaiters() == 1 && !level.IsCompleted, "The level change stopped waiting by itself");
+
+            // Cut off while waiting (what Npgsql's timeout and cancel did on live): the primary keeps the change,
+            // so the API says the outcome is unknown instead of failed.
+            Sql(connection, $"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{name}' AND wait_event = 'SyncRep'");
+            Check(level.Wait(TimeSpan.FromSeconds(10)), "The level change did not return after its connection ended");
+            var cut = level.Result;
+            Check(cut.Status == 503 && JsonDocument.Parse(cut.Body).RootElement.GetProperty("error").GetString() == "outcome_unknown",
+                $"A commit cut off while waiting: {cut.Status} {Encoding.UTF8.GetString(cut.Body)}");
+            Check(log.ToArray().Any(line => line.Contains("outcome unknown")), "The unknown outcome is logged: " + string.Join(" | ", log.ToArray()));
+            Thread.Sleep(PostgresCharacterDatabase.UnavailableBackoff + TimeSpan.FromMilliseconds(100));
+            Check(pg.ReadForAccount("bravo").Single().ToRecord().Level == 3, "The cut-off level change was not kept by the primary");
+        }
+        finally
+        {
+            Sql(connection, "ALTER SYSTEM RESET synchronous_standby_names");
+            Sql(connection, "SELECT pg_reload_conf()");
+        }
     }));
 }

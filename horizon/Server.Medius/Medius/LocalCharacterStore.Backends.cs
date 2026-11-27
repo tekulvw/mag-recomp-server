@@ -7,9 +7,19 @@ namespace Server.Medius
 {
     /// <summary>The character store's backing database could not be reached or failed; the operation
     /// is uncertain or not applied, exactly as for a failed file commit, and callers defer it.</summary>
-    public sealed class CharacterStoreUnavailableException : IOException
+    public class CharacterStoreUnavailableException : IOException
     {
         public CharacterStoreUnavailableException(string message, Exception inner = null) : base(message, inner) { }
+    }
+
+    /// <summary>The database stopped answering during COMMIT itself, after every statement had run: the
+    /// change may be saved or not. A PostgreSQL primary that has written the commit locally but is still
+    /// waiting for its synchronous standby, when the wait is cancelled or the connection drops, keeps the
+    /// change. Callers that report to a person say the outcome is unknown and re-read it; it is still a
+    /// <see cref="CharacterStoreUnavailableException"/>, so deferring callers need no change.</summary>
+    public sealed class CharacterStoreCommitUncertainException : CharacterStoreUnavailableException
+    {
+        public CharacterStoreCommitUncertainException(string message, Exception inner = null) : base(message, inner) { }
     }
 
     /// <summary>A concurrent writer won a uniqueness race; the operation is rerun from the start.</summary>

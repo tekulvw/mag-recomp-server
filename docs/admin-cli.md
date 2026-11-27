@@ -335,7 +335,17 @@ kill body with fields other than `apply` and `reason` is `400`.
 Voice requests answer `404 {"error":"not_found"}` for an account without a character and `400
 {"error":"invalid_request"}` for a body with other fields, a bad `reason` or duration, or a
 duration on a lift. Each applied or refused voice change is logged with the actor, account, end
-and reason, and an applied one refreshes the relay's sanctions at once.
+and reason, and an applied one asks the relay to reload its sanctions in the background; the answer
+never waits for that reload.
+
+A voice change commits on the PostgreSQL primary without waiting for a synchronous standby
+(`synchronous_commit = local` for that transaction), so it answers in milliseconds even while the
+standby is slow; the standby still receives it by streaming. Character, level and reward commits
+keep waiting for the standby.
+
+If the database stops answering during the commit itself (after every statement ran), the change
+may be saved: any write answers `503 {"error":"outcome_unknown","message":text}` and the log says
+`outcome unknown`. Read the state back (`voice list`, the character) before retrying.
 
 A dry run while the account is online still answers `200` with `applied: false`. A bad
 body is `400 {"error":"invalid_request"}`, an unknown account or path `404
