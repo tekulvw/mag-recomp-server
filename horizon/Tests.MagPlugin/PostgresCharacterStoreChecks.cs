@@ -100,7 +100,7 @@ internal static partial class LeadershipProgressionChecks
         Created("bravo", "Bravo");
         Created("charlie", "ALPHA");          // name taken, case-insensitively
         Created("alpha", "Alpha");            // exact retry
-        Created("alpha", "Other");            // account slot occupied
+        Created("alpha", "Other");            // a second slot
         Reward("alpha", 1, "r1", "world-1-m1", "enemy_killed");
         Reward("alpha", 1, "r1", "world-1-m1", "enemy_killed");    // replay
         Reward("alpha", 1, "r1", "world-1-m1", "teammate_healed"); // receipt mismatch
@@ -132,12 +132,17 @@ internal static partial class LeadershipProgressionChecks
         log.Add($"set-level: {applied.Reason} {applied.Applied} {applied.Level} {applied.Experience} {applied.SkillPoints}");
         foreach (var account in new[] { "alpha", "bravo", "charlie" })
         {
-            var row = store.ReadForAccount(account).SingleOrDefault();
-            var r = row?.ToRecord();
-            log.Add(row == null ? $"read {account}: none" : $"read {account}: id={r.AccountId} xp={r.Experience} lvl={r.Level} sp={r.SkillPoints} " +
-                $"lead={r.LeadershipLevel}/{r.LeadershipPoints}/{r.LeadershipNominations} last={r.LastUsedLoadout} " +
-                $"kits={string.Join("|", r.Loadouts.Select(l => l.UpdateId + ":" + string.Join(",", l.Items)))} " +
-                $"items={string.Join(",", r.AvailableItems)} skills={string.Join(",", r.Skills)}");
+            // An account holds up to three characters (alpha has two here); log every one, in slot order.
+            var rows = store.ReadForAccount(account);
+            if (rows.Count == 0) log.Add($"read {account}: none");
+            foreach (var row in rows)
+            {
+                var r = row.ToRecord();
+                log.Add($"read {account} slot {row.Slot}: id={r.AccountId} name={row.Name} xp={r.Experience} lvl={r.Level} sp={r.SkillPoints} " +
+                    $"lead={r.LeadershipLevel}/{r.LeadershipPoints}/{r.LeadershipNominations} last={r.LastUsedLoadout} " +
+                    $"kits={string.Join("|", r.Loadouts.Select(l => l.UpdateId + ":" + string.Join(",", l.Items)))} " +
+                    $"items={string.Join(",", r.AvailableItems)} skills={string.Join(",", r.Skills)}");
+            }
         }
         log.Add("all: " + string.Join(",", store.ReadAll().Select(c => c.Account + "=" + c.Id)));
         return log;
