@@ -158,8 +158,8 @@ record and field names; never player data or credentials.
 | `character-store status` | The backend and, for PostgreSQL, its host, database and schema version, each table's row count, the contents' counts and digest, and when the last import wrote. |
 | `character-store migrate` | Apply pending schema migrations (main Medius also does this at startup). |
 | `character-store import --from <json> [--dry-run] [--replace [--discard-postgres-changes]]` | Copy a JSON store into PostgreSQL in one transaction, then verify. The JSON file stays locked meanwhile, and a JSON store with fields this build doesn't know is refused. See below. |
-| `character-store verify --json <json>` | Compare a JSON store with PostgreSQL: both stores' counts and digests, then characters (unset XP and level read as 0 and 1), receipts and match rows (without their dates). Differences are listed by record and field name; exit 1 if any. |
-| `character-store export --to <json> [--replace]` | Write PostgreSQL to a JSON store, the rollback path. Settled history is compacted to fit the JSON bound. An existing file is replaced only with `--replace`, which first keeps it as `<json>.before-export-<UTC time>`. |
+| `character-store verify --json <json> [--as-export]` | Compare a JSON store with PostgreSQL: both stores' counts and digests, then characters (unset XP and level read as 0 and 1), receipts and match rows (without their dates). Differences are listed by record and field name; exit 1 if any. With `--as-export`, check a file `export` wrote: settled history beyond the JSON bound may be missing (it is counted as `trimmed`), everything else must match. See below. |
+| `character-store export --to <json> [--replace]` | Write PostgreSQL to a JSON store, the rollback path, then read the file back and verify it against what was read; exit 1 if it is not a complete copy. Settled history beyond the JSON bound is left out. An existing file is replaced only with `--replace`, which first keeps it as `<json>.before-export-<UTC time>`. |
 | `character-store prune` | Run reward-ledger retention now (main Medius runs it hourly). |
 
 `import` is idempotent. It prints both stores' counts and digests, the last import and the
@@ -179,6 +179,22 @@ exits 1 when the import would be refused. Every import that writes records its c
 never player data, in `mag.admin_changes` (operation `character-store-import`).
 While it runs, the import holds an exclusive lock on `mag.characters`, so no character write can
 interleave.
+
+PostgreSQL keeps a week of match rows and receipts (`MAG_REWARD_LEDGER_RETENTION_DAYS`), more
+than the JSON store's bound (1 MiB, and 4096 receipts or match rows). `export` therefore writes
+everything the JSON store must hold: every character with its kits and progression, voice
+sanctions, and every open match row with its receipts. It then adds settled history (finalized
+match rows, and open ones with no reward for the open-row TTL), most recently rewarded first, until
+the next row would pass the bound. It does not compact to the live store's smaller target. If the
+rows the JSON store must hold do not fit, the export fails. Otherwise it reads the file back with
+the JSON store's own validation, as a rollback would, and compares it with the database contents it
+was written from. Those are read in one transaction, so writes by the running server don't count.
+It prints `trimmed: N settled match rows with M reward receipts` for what it left out, then
+`verified`, or the differences and exit 1.
+
+`verify --json <file> --as-export` makes the same comparison against the database as it is now.
+Trimmed history is excused, but nothing else is, so rewards committed since the export show up as
+differences. Plain `verify` stays exact, as an import needs.
 
 Cutover, with no matches running:
 

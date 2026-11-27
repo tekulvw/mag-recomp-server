@@ -800,7 +800,12 @@ namespace Server.Medius
             change.Applied = true; change.Reason = "applied";
             return change;
         }
-        private void Commit(string path, List<StoredCharacter> all, Document document = null, string touchedProgress = null)
+        /// <summary>
+        /// Writes the store. <paramref name="keepHistoryToBound"/> (an export, see ExportTo) keeps all the
+        /// settled history that fits the store's hard bounds instead of compacting it to the target.
+        /// </summary>
+        private void Commit(string path, List<StoredCharacter> all, Document document = null, string touchedProgress = null,
+            bool keepHistoryToBound = false)
         {
             document = document ?? ReadDocument();
             document.Characters = all;
@@ -822,9 +827,12 @@ namespace Server.Medius
             var contents = JsonSerializer.SerializeToUtf8Bytes(document, JsonOptions);
             string compaction = null;
             long expiredBefore = now - (long)OpenMatchRowTtl.TotalSeconds;
-            if (document.SchemaVersion == 3 && contents.Length > LedgerCompactionTriggerBytes)
-                contents = CompactRewardLedger(document, touchedProgress, expiredBefore, contents, out compaction);
-            if (contents.Length > MaximumStoreBytes) throw new InvalidDataException(DescribeOverflow(document, expiredBefore, contents.Length));
+            if (document.SchemaVersion == 3 && (contents.Length > (keepHistoryToBound ? MaximumStoreBytes : LedgerCompactionTriggerBytes) ||
+                LedgerOverCount(document)))
+                contents = CompactRewardLedger(document, touchedProgress, expiredBefore, contents,
+                    keepHistoryToBound ? MaximumStoreBytes : LedgerCompactionTargetBytes, out compaction);
+            if (contents.Length > MaximumStoreBytes || LedgerOverCount(document))
+                throw new InvalidDataException(DescribeOverflow(document, expiredBefore, contents.Length));
             _committer.WriteAtomically(path, contents);
             if (compaction != null) LedgerMaintenance?.Invoke(compaction);
         }
@@ -837,14 +845,20 @@ namespace Server.Medius
         /// </summary>
         private static bool IsCompactable(MatchRewardProgress row, long expiredBefore) =>
             row.Finalized || row.LastRewardAt < expiredBefore;
+        /// <summary>More receipts or match rows than a reader accepts. A live store never gets there (an
+        /// award is refused at the bound); an export of a larger PostgreSQL ledger can.</summary>
+        private static bool LedgerOverCount(Document document) => document.SchemaVersion == 3 &&
+            (document.RewardReceipts.Count > MaximumRewardReceipts || document.MatchRewardProgress.Count > MaximumRewardReceipts);
         /// <summary>
         /// Evicts settled and abandoned history so the store keeps accepting rewards. Compactable rows are
         /// dropped together with their receipts, least recently rewarded first, until the store is at the
         /// compaction target. Active open rows are never evicted, nor is the row this commit touches. The
         /// most recently rewarded compactable rows stay for redelivery after a lost acknowledgement and are
-        /// evicted only when the store would otherwise exceed its hard bound.
+        /// evicted only when the store would otherwise exceed its hard bound. Either way, rows are evicted
+        /// until the receipt and match-row counts are within what a reader accepts.
         /// </summary>
-        private static byte[] CompactRewardLedger(Document document, string touchedProgress, long expiredBefore, byte[] contents, out string summary)
+        private static byte[] CompactRewardLedger(Document document, string touchedProgress, long expiredBefore, byte[] contents,
+            int targetBytes, out string summary)
         {
             int beforeBytes = contents.Length, beforeReceipts = document.RewardReceipts.Count, beforeRows = document.MatchRewardProgress.Count;
             var receiptsByRow = document.RewardReceipts
@@ -864,11 +878,11 @@ namespace Server.Medius
                 document.MatchRewardProgress.Remove(row);
                 return size;
             }
-            foreach (var (limit, goal) in new[] { (retainedFrom, LedgerCompactionTargetBytes), (settled.Count, MaximumStoreBytes) })
-                while (contents.Length > goal && next < limit)
+            foreach (var (limit, goal) in new[] { (retainedFrom, targetBytes), (settled.Count, MaximumStoreBytes) })
+                while ((contents.Length > goal || LedgerOverCount(document)) && next < limit)
                 {
                     long estimate = contents.Length;
-                    while (estimate > goal && next < limit) estimate -= Evict(settled[next++]);
+                    while ((estimate > goal || LedgerOverCount(document)) && next < limit) estimate -= Evict(settled[next++]);
                     // Rebuilt without free slots, so rows added later still serialize last.
                     document.RewardReceipts = document.RewardReceipts.ToDictionary(e => e.Key, e => e.Value, StringComparer.Ordinal);
                     document.MatchRewardProgress = document.MatchRewardProgress.ToDictionary(e => e.Key, e => e.Value, StringComparer.Ordinal);
@@ -882,6 +896,9 @@ namespace Server.Medius
         private static string DescribeOverflow(Document document, long expiredBefore, int bytes)
         {
             if (document.SchemaVersion != 3) return $"Character store exceeds local bound: {bytes} of {MaximumStoreBytes} bytes.";
+            if (bytes <= MaximumStoreBytes)
+                return $"Character store exceeds local bound: {document.RewardReceipts.Count} reward receipts and " +
+                    $"{document.MatchRewardProgress.Count} match rows (at most {MaximumRewardReceipts} each) after evicting settled matches.";
             var open = document.MatchRewardProgress.Where(e => !IsCompactable(e.Value, expiredBefore)).Select(e => e.Key).ToHashSet(StringComparer.Ordinal);
             int openReceipts = document.RewardReceipts.Values.Count(r => open.Contains(MatchProgressKey(r.Account, r.CharacterId, r.MatchKey)));
             return $"Character store exceeds local bound: {bytes} of {MaximumStoreBytes} bytes after evicting settled matches; " +

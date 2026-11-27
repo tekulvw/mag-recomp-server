@@ -45,9 +45,11 @@ namespace Server.Medius
         [--discard-postgres-changes]         unless the server wrote after the last import; adding
                                              --discard-postgres-changes replaces them anyway.
   character-store verify --json <json>       Compare a JSON store with PostgreSQL: counts, digests, and differences
-                                             by record and field name.
-  character-store export --to <json>         Write PostgreSQL to a JSON store (rollback); --replace keeps
-        [--replace]                          a timestamped copy of an existing file and replaces it.
+        [--as-export]                        by record and field name. --as-export checks an export: settled
+                                             history beyond the JSON bound may be missing, all else must match.
+  character-store export --to <json>         Write PostgreSQL to a JSON store (rollback), read it back and verify
+        [--replace]                          it; exit 1 if it is not a complete copy. --replace keeps a
+                                             timestamped copy of an existing file and replaces it.
   character-store prune                      Run PostgreSQL reward-ledger retention now.
 
 --config defaults to /config/main (the medius config directory). A write is refused while the
@@ -223,12 +225,21 @@ is online, and without --apply they are dry runs too.";
                         var target = configured(); var source = json(path);
                         output.WriteLine("json:     " + source.Summarize().Describe());
                         output.WriteLine("postgres: " + target.Summarize().Describe());
+                        if (args.Contains("--as-export")) return ReportExport(target.CompareExport(source), output, error,
+                            "verified: the JSON store is a complete export of PostgreSQL",
+                            "the JSON store is not a complete export of PostgreSQL (or PostgreSQL changed after it)");
                         return Report(target.CompareWith(source), output, error);
                     }
                     case "export" when Option("--to") is string to:
+                    {
                         database.RequireCurrentSchema();
-                        output.WriteLine("exported: " + configured().ExportTo(json(to), args.Contains("--replace")).Describe());
-                        return 0;
+                        var result = configured().ExportTo(json(to), args.Contains("--replace"));
+                        output.WriteLine("postgres: " + result.Source.Describe());
+                        output.WriteLine("exported: " + result.Exported.Describe());
+                        return ReportExport(result.Comparison, output, error,
+                            "verified: read back, the export is a complete copy of what was read from PostgreSQL",
+                            $"the written export {to} is not a complete copy of PostgreSQL; do not roll back with it");
+                    }
                     case "prune":
                         database.RequireCurrentSchema();
                         output.WriteLine(database.PruneLedger(Program.LedgerRetention).Describe());
@@ -259,6 +270,20 @@ is online, and without --apply they are dry runs too.";
                 CharacterImportAction.Replace => "replace the database's rows with the JSON store",
                 _ => "refuse",
             });
+        }
+
+        /// <summary>An export comparison: what the JSON bound left out, then any difference (exit 1).</summary>
+        private static int ReportExport(CharacterExportComparison comparison, TextWriter output, TextWriter error, string verified, string failed)
+        {
+            output.WriteLine("trimmed:  " + comparison.DescribeTrimmed() + " kept only in PostgreSQL, beyond the JSON store's bound");
+            if (comparison.Differences.Count == 0)
+            {
+                output.WriteLine(verified + " (characters, kits, progression, voice sanctions, open match rows and every kept receipt exactly)");
+                return 0;
+            }
+            foreach (var difference in comparison.Differences) error.WriteLine("difference: " + difference);
+            error.WriteLine($"mag-admin: {comparison.Differences.Count} difference(s): {failed}");
+            return 1;
         }
 
         private static int Report(IReadOnlyList<string> differences, TextWriter output, TextWriter error)

@@ -43,6 +43,23 @@ namespace Server.Medius
     /// <summary>An import's plan and the database's contents after it.</summary>
     public sealed record CharacterImportResult(CharacterImportPlan Plan, CharacterStoreSummary After);
 
+    /// <summary>
+    /// How a JSON export compares with the PostgreSQL contents it was written from. Characters (with their
+    /// kits and progression), voice sanctions, and every match row the JSON store still needs with its
+    /// receipts are compared exactly; <see cref="Differences"/> names each record missing or differing,
+    /// so empty means the export is a complete rollback copy. Settled history (finalized or abandoned match
+    /// rows, whole with their receipts) that PostgreSQL keeps beyond the JSON store's bound is counted in
+    /// <see cref="TrimmedMatchRows"/> and <see cref="TrimmedReceipts"/> instead, as the JSON store's own
+    /// compaction would have dropped it.
+    /// </summary>
+    public sealed record CharacterExportComparison(IReadOnlyList<string> Differences, int TrimmedMatchRows, int TrimmedReceipts)
+    {
+        public string DescribeTrimmed() => $"{TrimmedMatchRows} settled match rows with {TrimmedReceipts} reward receipts";
+    }
+
+    /// <summary>An export: PostgreSQL's contents as read, the JSON store as written and read back, and how they compare.</summary>
+    public sealed record CharacterExportResult(CharacterStoreSummary Source, CharacterStoreSummary Exported, CharacterExportComparison Comparison);
+
     public sealed partial class LocalCharacterStore
     {
         /// <summary>A store over PostgreSQL. Rules, catalogs and policy properties behave exactly as for the
@@ -652,18 +669,31 @@ namespace Server.Medius
         }
 
         /// <summary>
-        /// Writes this PostgreSQL store to a JSON store (the rollback path), through the JSON store's own
-        /// commit, so settled history is compacted to fit its bound. An existing file is replaced only with
+        /// Writes this PostgreSQL store to a JSON store (the rollback path) through the JSON store's own
+        /// commit, from one consistent read. PostgreSQL keeps more settled history than the JSON store, so
+        /// the export keeps all of it that fits the JSON store's hard bounds (bytes, receipts and match rows)
+        /// and leaves out only the least recently rewarded settled rows beyond them; it does not compact to
+        /// the live store's smaller target. Rows the JSON store still needs are never left out: if they do not
+        /// fit, the export fails. The written file is then read back with the JSON store's own validation,
+        /// as a rollback would read it, and compared with what was read from PostgreSQL (see
+        /// <see cref="CharacterExportComparison"/>). An existing file is replaced only with
         /// <paramref name="replace"/>, and is first kept beside it with a timestamp.
         /// </summary>
-        public CharacterStoreSummary ExportTo(LocalCharacterStore target, bool replace)
+        public CharacterExportResult ExportTo(LocalCharacterStore target, bool replace)
         {
             if (_backend is not PostgresBackend pg) throw new InvalidOperationException("Export needs a PostgreSQL source store.");
             if (target?._backend is not JsonBackend) throw new InvalidOperationException("Export needs a JSON target store.");
             var document = LoadPostgresDocument(pg);
             if (document.Characters.Count > 128) throw new InvalidDataException("The JSON store holds at most 128 characters.");
+            // The commit compacts the document it writes; keep what was read for the comparison.
+            var read = new Document { SchemaVersion = document.SchemaVersion, Account = document.Account, DisplayName = document.DisplayName,
+                Characters = document.Characters, VoiceSanctions = document.VoiceSanctions,
+                RewardReceipts = new Dictionary<string, RewardReceipt>(document.RewardReceipts, StringComparer.Ordinal),
+                MatchRewardProgress = new Dictionary<string, MatchRewardProgress>(document.MatchRewardProgress, StringComparer.Ordinal) };
+            var source = Summarize(read);
             string path = target.ValidPath();
             Directory.CreateDirectory(Path.GetDirectoryName(path));
+            Document written;
             using (var session = target._backend.Open(new StoreScope(null)))
             {
                 if (File.Exists(path))
@@ -671,9 +701,43 @@ namespace Server.Medius
                     if (!replace) throw new IOException("The JSON store already exists; pass --replace to keep a copy and replace it.");
                     File.Copy(path, path + ".before-export-" + target.Clock().UtcDateTime.ToString("yyyyMMddTHHmmssZ"), false);
                 }
-                target.Commit(path, document.Characters, document);
+                target.Commit(path, document.Characters, document, keepHistoryToBound: true);
+                written = target.ReadDocument();
             }
-            return target.Summarize();
+            return new CharacterExportResult(source, Summarize(written), CompareExport(read, written, target.ExpiredBefore()));
+        }
+
+        /// <summary>
+        /// Compares this PostgreSQL store with a JSON store written by <see cref="ExportTo"/> (<c>verify
+        /// --as-export</c>): exactly, except for settled history beyond the JSON store's bound. Writes made
+        /// to PostgreSQL after the export show up as differences.
+        /// </summary>
+        public CharacterExportComparison CompareExport(LocalCharacterStore exported)
+        {
+            if (_backend is not PostgresBackend) throw new InvalidOperationException("Export verification needs a PostgreSQL store.");
+            if (exported?._backend is not JsonBackend) throw new InvalidOperationException("Export verification needs a JSON store.");
+            var copy = exported.ReadDocument();
+            return CompareExport(LoadWholeDocument(), copy, exported.ExpiredBefore());
+        }
+
+        /// <summary>Rows last rewarded before this Unix time are abandoned (see IsCompactable).</summary>
+        private long ExpiredBefore() => Clock().ToUnixTimeSeconds() - (long)OpenMatchRowTtl.TotalSeconds;
+
+        private static CharacterExportComparison CompareExport(Document source, Document copy, long expiredBefore)
+        {
+            var copyRows = copy.MatchRewardProgress ?? new Dictionary<string, MatchRewardProgress>();
+            var copyReceipts = copy.RewardReceipts ?? new Dictionary<string, RewardReceipt>();
+            // Compaction drops whole settled rows with their receipts; anything else missing is a difference.
+            var trimmedRows = (source.MatchRewardProgress ?? new Dictionary<string, MatchRewardProgress>())
+                .Where(e => !copyRows.ContainsKey(e.Key) && IsCompactable(e.Value, expiredBefore)).Select(e => e.Key)
+                .ToHashSet(StringComparer.Ordinal);
+            var trimmedReceipts = (source.RewardReceipts ?? new Dictionary<string, RewardReceipt>())
+                .Where(e => !copyReceipts.ContainsKey(e.Key) && trimmedRows.Contains(MatchProgressKey(e.Value.Account, e.Value.CharacterId, e.Value.MatchKey)))
+                .Select(e => e.Key).ToList();
+            var expected = Canonical(source);
+            foreach (var row in trimmedRows) expected.Remove("match " + row);
+            foreach (var id in trimmedReceipts) expected.Remove("receipt " + id);
+            return new CharacterExportComparison(CompareCanonical(expected, Canonical(copy), "postgres", "json"), trimmedRows.Count, trimmedReceipts.Count);
         }
 
         /// <summary>Counts and a digest of the canonical contents (see <see cref="CompareWith"/>).</summary>
