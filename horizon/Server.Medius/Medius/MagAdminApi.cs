@@ -167,6 +167,7 @@ namespace Server.Medius
         private readonly MagDmePortBudget _portBudget;
         private readonly Func<DateTime, object> _status;
         private readonly Func<IReadOnlyList<MagAdminGameplayHost>> _gameplayHosts;
+        private readonly Action _voiceSanctionsChanged;
         private readonly SemaphoreSlim _connections = new SemaphoreSlim(MaximumConnections);
         private readonly CancellationTokenSource _stop = new CancellationTokenSource();
         private TcpListener _listener;
@@ -174,8 +175,9 @@ namespace Server.Medius
 
         public MagAdminApi(IPEndPoint listen, byte[] secret, LocalCharacterStore store, string backupDirectory, string markerDirectory,
             Func<DateTime> clock, Action<string> log, MagDmePortBudget portBudget = null, Func<DateTime, object> status = null,
-            Func<IReadOnlyList<MagAdminGameplayHost>> gameplayHosts = null)
+            Func<IReadOnlyList<MagAdminGameplayHost>> gameplayHosts = null, Action voiceSanctionsChanged = null)
         {
+            _voiceSanctionsChanged = voiceSanctionsChanged ?? (() => { });
             _portBudget = portBudget ?? MagDmePortBudget.Unbounded();
             _status = status;
             _gameplayHosts = gameplayHosts ?? (() => Array.Empty<MagAdminGameplayHost>());
@@ -333,6 +335,11 @@ namespace Server.Medius
                         return request.Method != "POST" ? MethodNotAllowed("POST") : SetLevel(account, request.Body, actor, now);
                     case ["", "admin", "v1", "characters", var account, "kill"] when account.Length > 0:
                         return request.Method != "POST" ? MethodNotAllowed("POST") : Kill(account, request.Body, actor, now);
+                    case ["", "admin", "v1", "voice"]:
+                        return request.Method != "GET" ? MethodNotAllowed("GET") : VoiceList(now);
+                    case ["", "admin", "v1", "voice", var account, var action] when account.Length > 0 &&
+                        action is "mute" or "ban" or "unmute" or "unban":
+                        return request.Method != "POST" ? MethodNotAllowed("POST") : Voice(account, action, request.Body, actor, now);
                     case ["", "admin", "v1", "dme-ports"]:
                         return request.Method != "GET" ? MethodNotAllowed("GET") : DmePorts();
                     case ["", "admin", "v1", "status"] when _status != null:
@@ -428,6 +435,70 @@ namespace Server.Medius
             {
                 applied = result.Applied, account = result.Account, worker_id = result.WorkerId, world_id = result.WorldId,
                 player_id = result.PlayerId, result = result.Result, reason
+            });
+        }
+
+        private MagAdminApiResponse VoiceList(DateTime now) => MagAdminApiResponse.Json(200, new
+        {
+            sanctions = MagVoiceModeration.Active(_store, new DateTimeOffset(DateTime.SpecifyKind(now, DateTimeKind.Utc))).Select(MagVoiceModeration.Json)
+        });
+
+        /// <summary>Voice mute, ban, unmute or unban (docs/admin-cli.md). The actor header is the operator.</summary>
+        private MagAdminApiResponse Voice(string account, string action, byte[] body, string actor, DateTime now)
+        {
+            bool lift = action.StartsWith("un", StringComparison.Ordinal);
+            var kind = action.EndsWith("ban", StringComparison.Ordinal) ? VoiceSanctionKind.Ban : VoiceSanctionKind.Mute;
+            bool apply; string reason = null; TimeSpan? duration = null;
+            try
+            {
+                using var document = JsonDocument.Parse(body);
+                var root = document.RootElement;
+                if (root.ValueKind != JsonValueKind.Object ||
+                    root.EnumerateObject().Any(p => p.Name != "apply" && p.Name != "reason" && (lift || p.Name != "duration_minutes")) ||
+                    !root.TryGetProperty("apply", out var applyValue) || (applyValue.ValueKind != JsonValueKind.True && applyValue.ValueKind != JsonValueKind.False))
+                    return MagAdminApiResponse.Error(400, "invalid_request");
+                apply = applyValue.GetBoolean();
+                if (root.TryGetProperty("reason", out var reasonValue) && reasonValue.ValueKind != JsonValueKind.Null)
+                {
+                    if (reasonValue.ValueKind != JsonValueKind.String) return MagAdminApiResponse.Error(400, "invalid_request");
+                    reason = reasonValue.GetString();
+                }
+                if (root.TryGetProperty("duration_minutes", out var minutesValue) && minutesValue.ValueKind != JsonValueKind.Null)
+                {
+                    if (minutesValue.ValueKind != JsonValueKind.Number || !minutesValue.TryGetInt64(out long minutes) || minutes < 1 ||
+                        minutes > (long)LocalCharacterStore.MaximumVoiceSanctionDuration.TotalMinutes)
+                        return MagAdminApiResponse.Error(400, "invalid_request");
+                    duration = TimeSpan.FromMinutes(minutes);
+                }
+            }
+            catch (JsonException) { return MagAdminApiResponse.Error(400, "invalid_request"); }
+            var result = MagVoiceModeration.Change(_store, account, kind, lift, reason, actor, duration, apply, _backupDirectory);
+            string who = JsonSerializer.Serialize(actor), why = JsonSerializer.Serialize(reason);
+            switch (result.Refusal)
+            {
+                case MagVoiceRefusal.None:
+                    break;
+                case MagVoiceRefusal.NotFound:
+                    return MagAdminApiResponse.Error(404, "not_found");
+                case MagVoiceRefusal.InvalidRequest:
+                    return MagAdminApiResponse.Error(400, "invalid_request");
+                case MagVoiceRefusal.Failed:
+                    _log($"admin api: voice {action} failed actor={who} account={account}: {result.Message}");
+                    return MagAdminApiResponse.Error(500, "internal_error");
+                default:
+                    _log($"admin api: voice {action} refused ({result.Code}) actor={who} account={account} apply={apply}");
+                    return MagAdminApiResponse.Json(409, new { error = result.Code, message = result.Message });
+            }
+            var change = result.Change;
+            if (change.Applied) _voiceSanctionsChanged();
+            string until = lift ? "" : " until=" + (change.After.ExpiresAt?.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ") ?? "lifted");
+            _log(change.Applied
+                ? $"admin api: applied voice {action} actor={who} account={account}{until} reason={why} journal={change.Journal}"
+                : $"admin api: dry-run voice {action} actor={who} account={account}{until} reason={why}");
+            return MagAdminApiResponse.Json(200, new
+            {
+                applied = change.Applied, account = change.Account, action, kind = VoiceSanction.Name(kind),
+                before = MagVoiceModeration.Json(change.Before), after = MagVoiceModeration.Json(change.After)
             });
         }
 

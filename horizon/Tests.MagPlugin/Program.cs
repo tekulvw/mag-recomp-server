@@ -48,6 +48,9 @@ Test("voice group sends parse by their address block, any group number", VoiceFo
 Test("voice listener forms carry the talker index and the library message", VoiceForwardingChecks.ListenerForms);
 Test("voice routing end to end by tier, side, proximity, mute and budget", VoiceForwardingChecks.Routing);
 Test("voice relay host delivers group sends to bound listeners only", LeadershipProgressionChecks.VoiceRelayHost);
+Test("voice sanctions are stored per account, expire, journal and refuse what they must", LeadershipProgressionChecks.VoiceSanctionStore);
+Test("voice sanction cache refreshes on change, checks expiry per lookup and survives a bad read", LeadershipProgressionChecks.VoiceSanctionCacheRefresh);
+Test("voice sanctions through mag-admin and the admin API: dry run, apply, list and refusals", LeadershipProgressionChecks.VoiceSanctionAdmin);
 Test("DME port capacity configuration and leases", DmePortCapacityChecks.Budget);
 Test("DME port capacity bounds placement and keeps parties whole", DmePortCapacityChecks.Placement);
 Test("DME port capacity refuses standalone admission and frees ports on release", DmePortCapacityChecks.Admission);
@@ -159,6 +162,7 @@ Test("postgres reward ledger retention prunes rows with their receipts and keeps
 Test("postgres character store imports, verifies and exports a JSON store", LeadershipProgressionChecks.PostgresImportVerifyExport);
 Test("postgres character store connections from a secret directory use TLS without GSSAPI", LeadershipProgressionChecks.PostgresSecretDirectoryConnection);
 Test("postgres character store import is idempotent with a dry run, counts and digests", LeadershipProgressionChecks.PostgresImportCommandLine);
+Test("postgres voice sanctions match the JSON store, journal, import, export and migrate", LeadershipProgressionChecks.PostgresVoiceSanctions);
 Test("retail saved loadout delete commits and compacts the owned layout", LoadoutPreferenceStoreChecks.DeleteThroughMls);
 Test("retail skill purchase owns its equipment for loadout saves", LoadoutPreferenceStoreChecks.RetailSkillPurchaseOwnsItsEquipment);
 Test("account-bound NP identity creation and persistence", NpIdentityChecks.Run);

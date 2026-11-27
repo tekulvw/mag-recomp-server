@@ -271,7 +271,7 @@ namespace Server.Medius
 
         /// <summary>Tables reported by <c>character-store status</c>, in schema order.</summary>
         internal static readonly string[] StatusTables =
-            { "characters", "character_loadouts", "match_progress", "reward_receipts", "match_history", "admin_changes" };
+            { "characters", "character_loadouts", "match_progress", "reward_receipts", "match_history", "admin_changes", "voice_sanctions" };
 
         /// <summary>Row count of each table in <see cref="StatusTables"/>, and when the last import wrote (null if never).</summary>
         public (IReadOnlyList<(string Table, long Rows)> Tables, DateTime? LastImportAt) RowCounts()
