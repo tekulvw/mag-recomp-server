@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.18.0](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.17.1...gameplay-v0.18.0) (2026-11-27)
+
+
+### Features
+
+* **gameplay:** apply an operator kill as the player's own Kill Self ([#389](https://github.com/tekulvw/mag-recomp-server/issues/389)) ([8654cc8](https://github.com/tekulvw/mag-recomp-server/commit/8654cc8f50b2f668cdea4c7fcb278a7aeebeeac1))
+* **gameplay:** start bot lives nearest the squad's current objective, FRAGO first ([#386](https://github.com/tekulvw/mag-recomp-server/issues/386)) ([e669a03](https://github.com/tekulvw/mag-recomp-server/commit/e669a03bf85563232fa8b7fd3697d7560e82004c))
+
+
+### Bug Fixes
+
+* **gameplay:** forget a retired bot's passage permits and exit on a world panic ([#392](https://github.com/tekulvw/mag-recomp-server/issues/392)) ([4d92850](https://github.com/tekulvw/mag-recomp-server/commit/4d92850b303ad5edc0aca625f16a592f685daf14))
+* **gameplay:** give Acquisition defenders their own command abilities ([#384](https://github.com/tekulvw/mag-recomp-server/issues/384)) ([8cd8ad1](https://github.com/tekulvw/mag-recomp-server/commit/8cd8ad1f659eae6b4f3344aef08f27e004370e6d))
+* **gameplay:** route bot spawn checks off the world tick so a first wave cannot stall the world ([#393](https://github.com/tekulvw/mag-recomp-server/issues/393)) ([2886660](https://github.com/tekulvw/mag-recomp-server/commit/28866607b31fbe42768bcc88292138c2c21afa6b))
+* **gameplay:** send attacking bots through their lane's defences before its capture ([#385](https://github.com/tekulvw/mag-recomp-server/issues/385)) ([739599b](https://github.com/tekulvw/mag-recomp-server/commit/739599bbefe6d58e7487c3cc41309f60045ef91a))
+* **gameplay:** wait for the client's respawn screen after a bleed-out ([#391](https://github.com/tekulvw/mag-recomp-server/issues/391)) ([699ac38](https://github.com/tekulvw/mag-recomp-server/commit/699ac382c8fd630a269bd2db80fe9b3d39c2302f))
+
+
+### Performance Improvements
+
+* **gameplay:** probe spawn placements once per point and spread the prefetch across ticks ([#394](https://github.com/tekulvw/mag-recomp-server/issues/394)) ([6dfa640](https://github.com/tekulvw/mag-recomp-server/commit/6dfa6408c15c610be418eccc011230269f1e43f0))
+
 ## [0.17.1](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.17.0...gameplay-v0.17.1) (2026-11-26)
 
 
