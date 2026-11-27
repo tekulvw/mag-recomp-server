@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using RT.Models;
 using Server.Dme;
 using DmeClient = Server.Dme.Models.ClientObject;
 
@@ -6,14 +8,19 @@ namespace Server.Medius
 {
     // In-match voice relay state for this world (docs/superpowers/specs/2026-11-25-voice-relay-design.md).
     // Off unless MAG_VOICE_RELAY=1 and the worker advertises voice_groups_v1. The table follows the
-    // world stream; DecideVoiceRelay is the seam the DME packet path will call once the lab capture
-    // names the transport message that carries voice packets. Until then nothing calls it, and
-    // voice traffic (whatever its carrier) keeps today's path.
+    // world stream. While the switch is on, the DME hands each group-addressed client send to Voice:
+    // it is parsed (VoiceGroupSend), decided (DecideVoiceRelay) and delivered in the listener form
+    // (VoiceListenerMessage) to each recipient, over its UDP channel when it has one and TCP
+    // otherwise. With the switch off the DME never calls Voice and group sends keep today's path.
     public sealed partial class LocalDmeHost
     {
         readonly VoiceRelayOptions _voiceRelayOptions = VoiceRelayOptions.Current;
         readonly VoiceTalkerBudget _voiceBudget = new VoiceTalkerBudget();
         readonly VoiceRelayCounters _voiceCounters = new VoiceRelayCounters();
+        /// <summary>The counters line is logged at most this often, and only after new packets.</summary>
+        const long VoiceCountersIntervalMs = 60_000;
+        long _voiceCountersLoggedMs = long.MinValue;
+        long _voiceCountersLoggedPackets;
         bool _supportsVoiceGroups;
         VoiceRelayTable _voiceTable;
 
@@ -55,6 +62,57 @@ namespace Server.Medius
                 _voiceCounters.Record(decision, Math.Max(0, bytes));
                 return decision;
             }
+        }
+
+        /// <summary>Relay one group-addressed send from <paramref name="talker"/>: a voice packet is
+        /// decided and its listener form queued for each recipient; anything else is dropped and
+        /// counted as malformed. Audio never reaches the gameplay bridge.</summary>
+        public void Voice(DmeClient talker, string transport, byte rtType, byte[] body)
+        {
+            foreach (var (client, message) in PlanVoiceRelay(talker, body))
+            {
+                if (client.Udp != null && client.RemoteUdpEndpoint != null) client.EnqueueUdp(message);
+                else client.EnqueueTcp(message);
+            }
+        }
+
+        /// <summary>The deliveries for one group send, decided and counted under _gate.</summary>
+        IReadOnlyList<(DmeClient client, BaseScertMessage message)> PlanVoiceRelay(DmeClient talker, byte[] body)
+        {
+            lock (_gate)
+            {
+                var deliveries = new List<(DmeClient, BaseScertMessage)>();
+                if (talker == null || body == null || !VoiceGroupSend.TryParse(body, out var send))
+                {
+                    _voiceCounters.Record(VoiceRelayDecision.Dropped(VoiceDropReason.Malformed), 0);
+                    LogVoiceCounters();
+                    return deliveries;
+                }
+                var decision = DecideVoiceRelay(talker, send.Group, send.DataLength);
+                if (decision.Relayed && decision.Recipients.Count > 0)
+                {
+                    var message = VoiceListenerMessage.Build(_voiceRelayOptions.Form, talker.DmeId, body, send);
+                    foreach (int id in decision.Recipients)
+                    {
+                        var member = _voiceTable.Find(id);
+                        if (member != null && _reservations.TryGetValue(member.ReservationId, out var r) && r.Client != null && r.Client != talker)
+                            deliveries.Add((r.Client, message));
+                    }
+                }
+                LogVoiceCounters();
+                return deliveries;
+            }
+        }
+
+        /// <summary>The periodic voice counters line. Called with _gate held.</summary>
+        void LogVoiceCounters()
+        {
+            long now = Environment.TickCount64;
+            if (_voiceCounters.ReceivedPackets == _voiceCountersLoggedPackets ||
+                (_voiceCountersLoggedMs != long.MinValue && now - _voiceCountersLoggedMs < VoiceCountersIntervalMs)) return;
+            _voiceCountersLoggedMs = now;
+            _voiceCountersLoggedPackets = _voiceCounters.ReceivedPackets;
+            Logger.Info($"Voice relay: {StreamScope} form={VoiceRelayOptions.Name(_voiceRelayOptions.Form)} {_voiceCounters}");
         }
 
         /// <summary>A bound, admitted client of this world's live match. Called with _gate held.</summary>

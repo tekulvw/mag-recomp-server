@@ -6,5 +6,7 @@ namespace Server.Dme {
   bool CanUse(ClientObject client);
   void Connected(ClientObject client);
   void Event(ClientObject client,string transport,byte rtType,byte? pluginId,byte[] payload);
+  // A group-addressed send (VoiceGroupSend); the DME calls it only while MAG_VOICE_RELAY=1.
+  void Voice(ClientObject client,string transport,byte rtType,byte[] body);
  }
 }

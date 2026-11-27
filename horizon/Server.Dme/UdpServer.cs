@@ -261,6 +261,16 @@ namespace Server.Dme
                         
                         break;
                     }
+                // Voice relay (docs/superpowers/specs/2026-11-25-voice-relay-design.md). With the
+                // switch off this case never matches and group sends keep the default path.
+                case RawScertMessage groupSend when Program.LocalGameplay != null && VoiceRelayOptions.Current.Enabled &&
+                    VoiceGroupSend.IsTransport((byte)groupSend.Id):
+                    {
+                        if (AuthenticatedEndPoint == null || !AuthenticatedEndPoint.Equals(packet.Source) || ClientObject == null ||
+                            !ClientObject.IsAuthenticated) break;
+                        Program.LocalGameplay.Voice(ClientObject, "udp", (byte)groupSend.Id, groupSend.Contents ?? Array.Empty<byte>());
+                        break;
+                    }
                 default:
                     {
                         Logger.Warn($"UNHANDLED MESSAGE: {message}");

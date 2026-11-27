@@ -1218,6 +1218,7 @@ namespace Server.Medius
                 _loadoutSelections.Forget(r.Id);
                 _loadoutRefreshes.Forget(r.Id);
                 _progressionRefreshes.Remove(r.Id);
+                if (r.Client != null) _voiceBudget.Forget(r.Client.DmeId);
                 if (notifyGameplay)
                 {
                     pending = new PendingRelease { Reservation = r, RequestId = Id() };
