@@ -160,6 +160,7 @@ Test("postgres character store commits concurrent rewards and creations exactly 
 Test("postgres character store outages surface as deferrable IO failures and fail fast", LeadershipProgressionChecks.PostgresOutageDefers);
 Test("postgres reward ledger retention prunes rows with their receipts and keeps history", LeadershipProgressionChecks.PostgresLedgerRetention);
 Test("postgres character store imports, verifies and exports a JSON store", LeadershipProgressionChecks.PostgresImportVerifyExport);
+Test("postgres character store export keeps history to the JSON bound and verifies what it wrote", LeadershipProgressionChecks.PostgresExportBeyondJsonBound);
 Test("postgres character store connections from a secret directory use TLS without GSSAPI", LeadershipProgressionChecks.PostgresSecretDirectoryConnection);
 Test("postgres character store import is idempotent with a dry run, counts and digests", LeadershipProgressionChecks.PostgresImportCommandLine);
 Test("postgres voice sanctions match the JSON store, journal, import, export and migrate", LeadershipProgressionChecks.PostgresVoiceSanctions);

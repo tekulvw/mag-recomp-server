@@ -337,11 +337,14 @@ internal static partial class LeadershipProgressionChecks
         Check(Scalar(connection, "SELECT count(*) FROM mag.match_progress WHERE result_kind = 'match_major_victory' AND finalized") == 1,
             "The match result kind was not recorded");
 
-        // Export (the rollback path) writes a JSON store that verifies against PostgreSQL.
+        // Export (the rollback path) writes a JSON store that verifies against PostgreSQL. Everything fits the
+        // JSON bound, so nothing is trimmed and the copy is exact.
         string exportPath = Path.Combine(directory, "exported.json");
         var exported = Configure(new LocalCharacterStore(exportPath), catalogs);
-        var summary = pg.ExportTo(exported, false);
-        Check(summary == pg.Summarize() && exported.CompareWith(pg).Count == 0, "Export does not verify");
+        var export = pg.ExportTo(exported, false);
+        Check(export.Source == pg.Summarize() && export.Exported == export.Source && export.Comparison.Differences.Count == 0 &&
+            export.Comparison.TrimmedMatchRows == 0 && export.Comparison.TrimmedReceipts == 0 && exported.CompareWith(pg).Count == 0 &&
+            pg.CompareExport(exported).Differences.Count == 0, "Export does not verify");
         try { pg.ExportTo(exported, false); throw new Exception("Export replaced a store without --replace"); }
         catch (IOException) { }
         pg.ExportTo(exported, true);
@@ -420,5 +423,131 @@ internal static partial class LeadershipProgressionChecks
         var replace = Run("import", "--from", jsonPath, "--replace", "--dry-run");
         Check(replace.Code == 0 && replace.Output.Contains("action:   replace"), "import --replace --dry-run: " + replace);
         Check(Run("import", "--from", jsonPath, "--replace").Code == 0 && Run("verify", "--json", jsonPath).Code == 0, "import --replace");
+    }));
+    /// <summary>
+    /// PostgreSQL keeps more settled history than the JSON store's bound (a week of match rows against
+    /// 1 MiB and 4096 receipts or rows). The export keeps all it can, leaves out only the least recently
+    /// rewarded settled rows, fails rather than leave out a row the JSON store still needs, and verifies
+    /// what it wrote; verify --as-export excuses exactly that trimmed history and nothing else.
+    /// </summary>
+    public static void PostgresExportBeyondJsonBound() => WithDirectory(directory => WithPostgres("postgres export beyond the JSON bound", (database, connection) =>
+    {
+        var catalog = Load(directory, Catalog());
+        DateTimeOffset now = PostgresNow;
+        var pg = LocalCharacterStore.ForPostgres(database);
+        pg.ProgressionCatalog = catalog;
+        LocalCharacterStore Json(string path) => new LocalCharacterStore(path) { ProgressionCatalog = catalog, Clock = () => now };
+        Create(pg, "alpha", "Alpha");
+        Create(pg, "bravo", "Bravo");
+        void Reward(string account, uint id, string reward, string match, string kind, TimeSpan ago)
+        {
+            pg.Clock = () => now - ago;
+            Check(pg.ApplyRewardForAccount(account, id, reward, match, kind, 1).Result == MagNetResult.Success, "Synthetic reward " + reward);
+        }
+        // Abandoned (open, no reward for longer than the 24 h TTL), settled, and an open match still running.
+        Reward("bravo", 2, "abandoned-1", "abandoned-open", "enemy_killed", TimeSpan.FromDays(3));
+        Reward("bravo", 2, "abandoned-2", "abandoned-open", "enemy_killed", TimeSpan.FromDays(3));
+        Reward("alpha", 1, "template-1", "template-final", "enemy_killed", TimeSpan.FromHours(1));
+        Reward("alpha", 1, "template-2", "template-final", "enemy_killed", TimeSpan.FromHours(1));
+        Reward("alpha", 1, "template-3", "template-final", "match_minor_defeat", TimeSpan.FromHours(1));
+        Reward("alpha", 1, "active-1", "active-open", "enemy_killed", TimeSpan.FromMinutes(10));
+        Reward("bravo", 2, "active-2", "active-open", "enemy_killed", TimeSpan.FromMinutes(10));
+        pg.Clock = () => now;
+        // 1200 more settled rows like template-final, each older than it (settled-0001 the oldest), with its
+        // three receipts: about three times what the JSON store holds.
+        const int clones = 1200;
+        Sql(connection, $@"
+INSERT INTO mag.match_progress (character_id, match_key, experience, fraction, frago_points, finalized, result_kind, first_reward_at, last_reward_at)
+SELECT p.character_id, 'settled-' || lpad(g::text, 4, '0'), p.experience, p.fraction, p.frago_points, true, p.result_kind,
+       p.first_reward_at - make_interval(mins => {clones + 1} - g), p.last_reward_at - make_interval(mins => {clones + 1} - g)
+  FROM mag.match_progress p, generate_series(1, {clones}) g WHERE p.match_key = 'template-final';
+INSERT INTO mag.reward_receipts (reward_id, character_id, match_key, kind, units, leadership, frago, outcome, committed_at)
+SELECT 'settled-' || lpad(g::text, 4, '0') || '-' || r.reward_id, r.character_id, 'settled-' || lpad(g::text, 4, '0'), r.kind, r.units,
+       r.leadership, r.frago, r.outcome, r.committed_at
+  FROM mag.reward_receipts r, generate_series(1, {clones}) g WHERE r.match_key = 'template-final';");
+        var full = pg.Summarize();
+        Check(full.MatchRows == clones + 4 && full.Receipts == 3 * clones + 7, "Synthetic history: " + full.Describe());
+
+        (int Code, string Output, string Error) Run(params string[] args)
+        {
+            var output = new StringWriter(); var error = new StringWriter();
+            int code = MagAdminCli.RunCharacterStore(args, database, () => pg, Json, output, error);
+            return (code, output.ToString(), error.ToString());
+        }
+
+        // The export keeps history up to the hard bound, not the live store's compaction target.
+        string exportPath = Path.Combine(directory, "exported.json");
+        var exported = Json(exportPath);
+        var export = pg.ExportTo(exported, false);
+        long size = new FileInfo(exportPath).Length;
+        Check(export.Comparison.Differences.Count == 0, "A trimmed export does not verify: " + string.Join("; ", export.Comparison.Differences));
+        Check(size <= LocalCharacterStore.MaximumStoreBytes && size > LocalCharacterStore.LedgerCompactionTriggerBytes,
+            $"The export is {size} bytes: compacted to the live target, or over the hard bound");
+        var copy = Json(exportPath);
+        var kept = copy.Summarize();
+        Check(export.Source == full && export.Exported == kept && kept.Characters == 2 &&
+            export.Comparison.TrimmedMatchRows == full.MatchRows - kept.MatchRows && export.Comparison.TrimmedReceipts == full.Receipts - kept.Receipts &&
+            export.Comparison.TrimmedMatchRows > 1, "Trimmed counts: " + export.Comparison.DescribeTrimmed() + "; kept " + kept.Describe());
+        var rows = JsonNode.Parse(File.ReadAllText(exportPath))!["matchRewardProgress"]!.AsObject()
+            .Select(e => e.Value!["matchKey"]!.GetValue<string>()).ToHashSet();
+        int oldestKept = Enumerable.Range(1, clones).First(g => rows.Contains($"settled-{g:D4}"));
+        Check(rows.Contains("active-open") && rows.Contains("template-final") && !rows.Contains("abandoned-open") &&
+            Enumerable.Range(oldestKept, clones - oldestKept + 1).All(g => rows.Contains($"settled-{g:D4}")) && oldestKept > 1,
+            "The export did not leave out only the least recently rewarded settled rows");
+        // Exactly the trimmed rows differ; every character, kit, open row and kept receipt matches.
+        var exact = copy.CompareWith(pg);
+        Check(exact.Count == export.Comparison.TrimmedMatchRows + export.Comparison.TrimmedReceipts &&
+            exact.All(d => d.EndsWith(": only in the postgres store", StringComparison.Ordinal) &&
+                (d.StartsWith("match ", StringComparison.Ordinal) || d.StartsWith("receipt ", StringComparison.Ordinal))),
+            "The exact comparison found more than trimmed history");
+        Check(Json(exportPath).ReadForAccount("alpha").Single().Experience == pg.ReadForAccount("alpha").Single().Experience,
+            "The rollback copy lost progression");
+
+        // From the command line: export verifies, plain verify is exact and fails, verify --as-export passes.
+        string cliPath = Path.Combine(directory, "cli.json");
+        var cli = Run("export", "--to", cliPath);
+        Check(cli.Code == 0 && cli.Output.Contains("exported: 2 characters") && cli.Output.Contains("trimmed:  " + export.Comparison.DescribeTrimmed()) &&
+            cli.Output.Contains("verified: read back"), "export: " + cli);
+        var strict = Run("verify", "--json", cliPath);
+        Check(strict.Code == 1 && strict.Error.Contains("difference(s) between the stores"), "Plain verify excused trimmed history: " + strict.Code);
+        var asExport = Run("verify", "--json", cliPath, "--as-export");
+        Check(asExport.Code == 0 && asExport.Output.Contains("trimmed:  " + export.Comparison.DescribeTrimmed()) &&
+            asExport.Output.Contains("verified: the JSON store is a complete export"), "verify --as-export: " + asExport);
+
+        // An open row missing from the JSON store is never excused.
+        var edited = JsonNode.Parse(File.ReadAllText(cliPath))!.AsObject();
+        edited["matchRewardProgress"]!.AsObject().Remove("bravo:2:active-open");
+        edited["rewardReceipts"]!.AsObject().Remove("active-2");
+        string editedPath = Path.Combine(directory, "edited.json");
+        File.WriteAllText(editedPath, edited.ToJsonString());
+        var missing = Run("verify", "--json", editedPath, "--as-export");
+        Check(missing.Code == 1 && missing.Error.Contains("match bravo:2:active-open: only in the postgres store") &&
+            missing.Error.Contains("receipt active-2: only in the postgres store") && missing.Error.Contains("not a complete export"),
+            "verify --as-export excused a missing open row: " + missing);
+        // Nor is a write to PostgreSQL after the export.
+        Reward("alpha", 1, "active-3", "active-open", "enemy_killed", TimeSpan.Zero);
+        var later = Run("verify", "--json", cliPath, "--as-export");
+        Check(later.Code == 1 && later.Error.Contains("character alpha: ") && later.Error.Contains("receipt active-3: only in the postgres store"),
+            "verify --as-export missed a later write: " + later);
+
+        // Open rows that do not fit fail the export, and no file is written.
+        Sql(connection, "UPDATE mag.match_progress SET finalized = false, last_reward_at = '2026-11-25T11:59:00Z' WHERE match_key LIKE 'settled-%'");
+        string openPath = Path.Combine(directory, "open.json");
+        var open = Run("export", "--to", openPath);
+        Check(open.Code == 1 && open.Error.Contains("exceeds local bound") && !File.Exists(openPath), "An export left out open rows: " + open);
+
+        // The receipt and row counts bound the export too: 4096 rows without receipts fit well under 1 MiB.
+        Sql(connection, $@"
+DELETE FROM mag.match_progress WHERE match_key LIKE 'settled-%';
+INSERT INTO mag.match_progress (character_id, match_key, experience, fraction, frago_points, finalized, result_kind, first_reward_at, last_reward_at)
+SELECT p.character_id, 'n' || lpad(g::text, 4, '0'), p.experience, p.fraction, p.frago_points, true, p.result_kind,
+       p.first_reward_at - make_interval(mins => 5000 - g), p.last_reward_at - make_interval(mins => 5000 - g)
+  FROM mag.match_progress p, generate_series(1, 4200) g WHERE p.match_key = 'template-final';");
+        string countedPath = Path.Combine(directory, "counted.json");
+        var counted = pg.ExportTo(Json(countedPath), false);
+        var countedKept = Json(countedPath).Summarize();
+        Check(counted.Comparison.Differences.Count == 0 && countedKept.MatchRows == LocalCharacterStore.MaximumRewardReceipts &&
+            counted.Comparison.TrimmedMatchRows == counted.Source.MatchRows - LocalCharacterStore.MaximumRewardReceipts &&
+            new FileInfo(countedPath).Length < LocalCharacterStore.MaximumStoreBytes, "The row count bound: " + countedKept.Describe());
     }));
 }
