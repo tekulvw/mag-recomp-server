@@ -123,6 +123,24 @@ fn point(p: replication::CharacterPosition) -> [f64; 3] {
 /// life and neither cached nor reported.
 pub(crate) const SPAWN_ROUTE_PENDING: &str = "bot_spawn_route_pending";
 const SPAWN_ROUTE_PREFETCH_INTERVAL: Duration = Duration::from_secs(1);
+/// Spawn points whose placements one prefetch pass may probe. Probing a point
+/// costs a few milliseconds (a parachute point's drop line searches 400 m
+/// down per jumper), so a pass that meets more uncached points stops there and
+/// resumes on the next tick instead of building every point's placements in
+/// one tick. A work count rather than a clock keeps simulations deterministic.
+pub(crate) const SPAWN_PREFETCH_PROBES_PER_TICK: usize = 2;
+
+type Candidates = (Vec<replication::CharacterPosition>, Arrival);
+
+/// Placements per spawn point for one collision world (see
+/// `bot_spawn_candidates`).
+#[derive(Default)]
+pub(crate) struct CandidateCache {
+    world: Option<String>,
+    points: std::collections::BTreeMap<u16, Result<Candidates, &'static str>>,
+    /// Points probed (cache misses) since the counter was last read.
+    pub(crate) probes: usize,
+}
 
 /// Which cache a spawn-route job fills: a defender lane spawn (point, lane
 /// objective, population slot) or a point qualification (point, source spawn).
@@ -287,6 +305,9 @@ pub(crate) struct SpawnRoutes {
     pub(crate) blocking: bool,
     pub(super) pending: std::collections::BTreeSet<SpawnRouteKey>,
     pub(super) last_prefetch: Option<Duration>,
+    /// The last prefetch pass stopped at its probe budget; the next tick
+    /// continues it without waiting for the interval.
+    pub(super) prefetch_resume: bool,
     jobs: Option<std::sync::mpsc::Sender<QueuedSpawnRoute>>,
     answers: Option<std::sync::mpsc::Receiver<SpawnRouteAnswer>>,
     held: Vec<SpawnRouteAnswer>,
@@ -302,6 +323,7 @@ impl Default for SpawnRoutes {
             blocking: false,
             pending: Default::default(),
             last_prefetch: None,
+            prefetch_resume: false,
             jobs: None,
             answers: None,
             held: Vec::new(),
@@ -386,6 +408,7 @@ impl SpawnRoutes {
         self.pending.clear();
         self.held.clear();
         self.last_prefetch = None;
+        self.prefetch_resume = false;
     }
 }
 
@@ -713,15 +736,18 @@ impl<W: Write> Engine<W> {
         wall: u64,
     ) -> Result<(), &'static str> {
         if self.bot_spawn_routes.inline
-            || self
-                .bot_spawn_routes
-                .last_prefetch
-                .is_some_and(|last| now < last + SPAWN_ROUTE_PREFETCH_INTERVAL)
+            || (!self.bot_spawn_routes.prefetch_resume
+                && self
+                    .bot_spawn_routes
+                    .last_prefetch
+                    .is_some_and(|last| now < last + SPAWN_ROUTE_PREFETCH_INTERVAL))
             || self.navmesh_world.is_none()
         {
             return Ok(());
         }
         self.bot_spawn_routes.last_prefetch = Some(now);
+        self.bot_spawn_routes.prefetch_resume = false;
+        let probes_before = self.bot_registry.spawn_candidates.probes;
         // Squad fill ranking reads this before the first bots are placed.
         self.cache_squad_routes(wall)?;
         if !self.bot_population_follows_active_spawns() {
@@ -753,6 +779,16 @@ impl<W: Write> Engine<W> {
                     || self.bot_spawn_routes.pending.contains(&route_key)
                 {
                     continue;
+                }
+                // Probe at most a few uncached points per tick; the rest wait
+                // for the next pass.
+                if !slot
+                    && !self.bot_spawn_candidates_cached(index)
+                    && self.bot_registry.spawn_candidates.probes - probes_before
+                        >= SPAWN_PREFETCH_PROBES_PER_TICK
+                {
+                    self.bot_spawn_routes.prefetch_resume = true;
+                    return Ok(());
                 }
                 // Points without placements are cached (and reported) when a
                 // bot asks; only routes are queued here. Receipts are written
@@ -826,7 +862,7 @@ impl<W: Write> Engine<W> {
     /// (cheap ground probes against the collision world). The routes run in
     /// `SpawnRouteJob::run`.
     fn lane_route_job(
-        &self,
+        &mut self,
         index: u16,
         slot: Option<replication::CharacterPosition>,
         goal: [f64; 3],
@@ -960,10 +996,42 @@ impl<W: Write> Engine<W> {
     /// the authored position and a ring around it, a parachute point's
     /// landings, or a hospital's authored exits and the ring cells further
     /// from the hospital than each exit.
-    fn bot_spawn_candidates(
-        &self,
-        index: u16,
-    ) -> Result<(Vec<replication::CharacterPosition>, Arrival), &'static str> {
+    fn bot_spawn_candidates_cached(&self, index: u16) -> bool {
+        let world = self.collision_world.as_ref().map(|w| w.source_sha256());
+        let cache = &self.bot_registry.spawn_candidates;
+        cache.world.as_deref() == world && cache.points.contains_key(&index)
+    }
+
+    /// `bot_spawn_candidates_uncached`, probed once per point and collision
+    /// world. The placements depend only on static collision, the authored
+    /// point and a hospital's authored exits, so structure gate changes keep
+    /// them; only the routes from them are qualified again. A hospital point
+    /// whose hospital is not bound yet is probed again when asked.
+    fn bot_spawn_candidates(&mut self, index: u16) -> Result<Candidates, &'static str> {
+        let world = self
+            .collision_world
+            .as_ref()
+            .map(|w| w.source_sha256().to_owned());
+        let cache = &mut self.bot_registry.spawn_candidates;
+        if cache.world != world {
+            cache.points.clear();
+            cache.world = world;
+        }
+        if let Some(cached) = cache.points.get(&index) {
+            return cached.clone();
+        }
+        cache.probes += 1;
+        let result = self.bot_spawn_candidates_uncached(index);
+        if !matches!(result, Err("bot_spawn_hospital_unbound")) {
+            self.bot_registry
+                .spawn_candidates
+                .points
+                .insert(index, result.clone());
+        }
+        result
+    }
+
+    fn bot_spawn_candidates_uncached(&self, index: u16) -> Result<Candidates, &'static str> {
         let location = *self
             .spawn_catalog
             .as_ref()
@@ -1077,7 +1145,7 @@ impl<W: Write> Engine<W> {
     }
 
     fn point_route_job(
-        &self,
+        &mut self,
         index: u16,
         home_position: replication::CharacterPosition,
     ) -> Result<SpawnRouteJob, &'static str> {

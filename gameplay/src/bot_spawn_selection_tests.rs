@@ -879,3 +879,76 @@ fn queued_routes_through_replaced_structure_gates_are_routed_again() {
     );
     assert!(lane_receipts(&receipts) > 0);
 }
+
+#[test]
+fn a_prefetch_pass_probes_at_most_its_budget_and_resumes_next_tick() {
+    // Defenders' points 7, 8 and 9 need placements probed; the budget is two
+    // per pass, so the third waits for the next tick instead of the interval.
+    let mut engine = engine_with_defence();
+    engine.bot_spawn_routes.inline = false;
+    engine.bot_spawn_routes.blocking = true;
+    let probes = |engine: &Engine<Vec<u8>>| engine.bot_registry.spawn_candidates.probes;
+    engine.prefetch_bot_spawn_routes(Duration::ZERO, 1).unwrap();
+    assert_eq!(probes(&engine), SPAWN_PREFETCH_PROBES_PER_TICK);
+    assert!(engine.bot_spawn_routes.prefetch_resume);
+    engine
+        .prefetch_bot_spawn_routes(Duration::from_millis(50), 1)
+        .unwrap();
+    assert_eq!(probes(&engine), 3);
+    assert!(!engine.bot_spawn_routes.prefetch_resume);
+    // A finished pass waits for the interval.
+    let queued = engine.bot_spawn_routes.pending.len();
+    engine
+        .prefetch_bot_spawn_routes(Duration::from_millis(100), 1)
+        .unwrap();
+    assert_eq!(engine.bot_spawn_routes.pending.len(), queued);
+    engine.wait_bot_spawn_routes(1).unwrap();
+    let (spawn, _) = choose_defender(&mut engine, 200, &Default::default());
+    assert!(
+        [Some(NORTH), Some(SOUTH)].contains(&spawn.spawn_point),
+        "{spawn:?}"
+    );
+    assert_eq!(
+        probes(&engine),
+        3,
+        "the choice reused the probed placements"
+    );
+}
+
+#[test]
+fn structure_gate_changes_route_again_without_probing_placements_again() {
+    let mut engine = engine_with_defence();
+    engine.bot_spawn_routes.inline = false;
+    engine.bot_spawn_routes.blocking = true;
+    for t in [0, 50] {
+        engine
+            .prefetch_bot_spawn_routes(Duration::from_millis(t), 1)
+            .unwrap();
+    }
+    engine.wait_bot_spawn_routes(1).unwrap();
+    choose_defender(&mut engine, 200, &Default::default());
+    let probed = engine.bot_registry.spawn_candidates.probes;
+    let structures = std::sync::Arc::new(crate::bot_structure_collision::StructureObstacles::new(
+        &crate::domination_structural_world::SequenceCollisionState::default(),
+        1,
+    ));
+    let mesh = engine.navmesh_world.clone().unwrap();
+    crate::navmesh_structure_gates::install_now(&mesh, Some(&structures)).unwrap();
+    engine
+        .prefetch_bot_spawn_routes(Duration::from_secs(2), 1)
+        .unwrap();
+    assert!(
+        !engine.bot_spawn_routes.pending.is_empty(),
+        "routes are qualified again"
+    );
+    assert!(!engine.bot_spawn_routes.prefetch_resume);
+    assert_eq!(engine.bot_registry.spawn_candidates.probes, probed);
+    engine.wait_bot_spawn_routes(1).unwrap();
+    let (spawn, receipts) = choose_defender(&mut engine, 200, &Default::default());
+    assert!(
+        [Some(NORTH), Some(SOUTH)].contains(&spawn.spawn_point),
+        "{spawn:?}"
+    );
+    assert!(lane_receipts(&receipts) > 0);
+    assert_eq!(engine.bot_registry.spawn_candidates.probes, probed);
+}
