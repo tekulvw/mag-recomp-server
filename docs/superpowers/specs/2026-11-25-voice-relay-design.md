@@ -24,8 +24,8 @@ same numbers as the client document.
   group (one byte), a media type (one byte), the data size (two bytes), a sequence number (two bytes)
   that counts per talker and group, and at most 248 data bytes; "Lab findings" below gives the observed
   layout. The server delivers it to every other client that listens to that group, marked with the
-  sender's DME client index (U10, the server-to-client form, is still open). The game server never
-  reads or changes the audio bytes, and the receiver tracks sequence per sender.
+  sender's DME client index ("Listener form" below settles U10). The game server never reads or
+  changes the audio bytes, and the receiver tracks sequence per sender.
 - **Every frame is sent twice:** once to the group of the talker's selected channel and once to the
   talker's own proximity group (83 + its DME client index), whether or not proximity chat is on. With
   no selected channel (channel 0) only the proximity copy is sent.
@@ -113,13 +113,16 @@ check the transmit set, which only refuses what the menu never offers.
   there on a healthy server. Once listed, it is relayed to the listeners gameplay put in that group,
   enemies included, with its own byte budget beside the channel copy's.
 - **Fan-out.** Deliver to every other bound client whose listen set contains the group, in the
-  server-to-client form the game expects (U1), stamped with the talker's index (U10), over the
-  recipient's UDP channel when it has one and TCP otherwise. Never to the talker, never across sides
-  except on a proximity group, never to party groups.
+  listener form below, stamped with the talker's index, over the recipient's UDP channel when it has
+  one and TCP otherwise. Never to the talker, never across sides except on a proximity group, never
+  to party groups. One message is built per packet and queued once per recipient.
+- **Malformed sends.** While the relay is on, a group send that is not one well-formed voice packet
+  (one addressed group, message type 47, a length that matches) is dropped and counted as `malformed`.
 - **State.** The relay table is the latest `voice_groups` revision. Until a world has received one,
   nothing is relayed. A client that disconnects leaves every set at once; its next revision confirms it.
-- **Counters.** Per world: packets and bytes received, relayed and dropped by reason. They appear in the
-  existing periodic world log line; no per-packet logging outside the diagnostic switch.
+- **Counters.** Per world: packets and bytes received, relayed and dropped by reason. A `Voice relay:`
+  line logs them at most once a minute, and only after new packets; no per-packet logging outside the
+  diagnostic switch.
 
 ## Lab findings (2026-11-26)
 
@@ -168,6 +171,39 @@ evidence store; these are the conclusions.
   the block rate it packs the waiting blocks into one packet. The packet count understates the voice;
   the byte count is exact. The relay forwards such packets as they are.
 
+## Listener form (2026-11-26, static reading of the client's transport library)
+
+No listener capture exists yet, so this comes from reading how the game's own transport library
+handles messages, in both the prototype and the retail build; the two agree.
+
+- **The uplink address block.** A group send (transport message 53, or 54 for the same send with
+  the sender's other delivery flag) opens with an address block, not with the voice packet. Its first
+  byte counts the group-mask bytes in its low seven bits; its top bit says a two-byte little-endian
+  base group follows. Then come the mask bytes, where bit b of mask byte i names group base + 8i + b,
+  and after them the application data. The lab's `81 GG 00 01` is one mask byte with a base, the base
+  group `GG 00` and the mask `01`. A send to group 0 has no base: `01 01`. So the "14-byte header"
+  is a 4-byte address block plus a 10-byte voice header that opens with the message type 47, and
+  groups above 255 fit in the address block (U11) even though the voice header keeps one byte.
+- **What a client reads.** For every app-family message from the server (client app single,
+  broadcast, list, their QoS variants and the group sends 53 and 54) the library reads a two-byte
+  little-endian source client index and hands the rest to the network layer as application data
+  from that client. Messages the server itself originates carry no index and read as "no client",
+  which the voice handler refuses (it needs an index below 512).
+- **So the relay sends** the talker's DME client index, then the application data exactly as it
+  arrived (the message from type 47 on: group, media type, length, sequence and data unchanged). The
+  default form is a client app single with the talker as its source, which is how the DME forwards
+  other peer traffic. The talker's index is the only stamp; the sequence is never renumbered.
+- **Lab switch.** `MAG_VOICE_RELAY_FORM` chooses the listener form for a hearing test: `app` (the
+  default, above), `app53` (the same bytes as message 53), and three slices of the uplink body behind
+  the same index that the reading above rules out but a hearing session can confirm: `from_b2`,
+  `whole` and `from_b6`. An unknown value fails at start-up.
+- **Checking it from a listener.** On the receiving client (voice on, `MAG_VOICE_TRACE` set), a form the
+  game accepts shows `connect` events beyond the three at start-up (a talker slot's voice port joined to
+  its PCM port) and `write` events on that talker's voice port, then a summary with `received_blocks`
+  rising and `frames_decoded` and `samples_played` (tone mode) or `pattern_ok` (pattern mode), with
+  `sequence_gaps` and `skipped_bytes` near zero. A form it ignores shows only the start-up `connect`s
+  and no `write`. The DME's own `Voice relay:` counters line confirms the packets left the server.
+
 ## Moderation
 
 - **Voice mute** (an account's voice is not relayed for a time) and **voice ban** (until lifted), stored
@@ -182,7 +218,9 @@ evidence store; these are the conclusions.
 
 | Switch | Where | Default | Effect |
 | --- | --- | --- | --- |
-| `MAG_VOICE_RELAY` | medius (DME) environment, chart value | off | relay voice; with it off voice packets are dropped and counted as `relay_off` |
+| `MAG_VOICE_RELAY` | medius (DME) environment | off | relay voice; with it off the DME never parses group sends and they keep today's path (logged as unhandled) |
+| `MAG_VOICE_RELAY_TIER` | medius (DME) environment | `squad` | `squad` relays squad groups only; `all` relays every static tier |
+| `MAG_VOICE_RELAY_FORM` | medius (DME) environment, lab only | `app` | listener form (see "Listener form") |
 | `voice_routing` | gameplay configuration | off | decode `0x0259` into the channel record and publish `voice_groups` |
 | `MAG_VOICE_DIAG` | medius and gameplay environment, lab only | off | per-packet receipts (below) |
 

@@ -586,6 +586,14 @@ namespace Server.Dme
                         _ = clientChannel.CloseAsync();
                         break;
                     }
+                // Voice relay; with the switch off this case never matches.
+                case RawScertMessage groupSend when Program.LocalGameplay != null && VoiceRelayOptions.Current.Enabled &&
+                    VoiceGroupSend.IsTransport((byte)groupSend.Id):
+                    {
+                        if (data.LocalStage != 4 || data.ClientObject == null || !data.ClientObject.IsAuthenticated) break;
+                        Program.LocalGameplay.Voice(data.ClientObject, "tcp", (byte)groupSend.Id, groupSend.Contents ?? Array.Empty<byte>());
+                        break;
+                    }
                 default:
                     {
                         Logger.Warn($"UNHANDLED MESSAGE: {message}");

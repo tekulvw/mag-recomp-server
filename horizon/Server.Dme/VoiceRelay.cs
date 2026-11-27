@@ -1,13 +1,16 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using RT.Common;
+using RT.Models;
 
 namespace Server.Dme
 {
     // In-match voice relay (docs/superpowers/specs/2026-11-25-voice-relay-design.md). Gameplay
     // publishes each world's relay table on the world stream as a voice_groups frame; the DME
-    // decides from it who receives a talker's voice packet. Nothing here touches traffic yet: no
-    // packet path calls VoiceRelay.Decide. See LocalDmeHost.DecideVoiceRelay for the seam.
+    // decides from it who receives a talker's voice packet. With MAG_VOICE_RELAY=1 the DME hands
+    // each group-addressed client send (VoiceGroupSend) to LocalDmeHost.RelayVoice, which decides
+    // it here and delivers the listener form (VoiceListenerMessage) to each recipient.
 
     /// <summary>Relay group numbers, as the client computes them from its side and world squad
     /// index: team = side (0, 1), company = 2 + side, platoon = 4 + platoon, platoon broadcast =
@@ -34,12 +37,19 @@ namespace Server.Dme
     /// <summary>Which groups the relay serves. The first rollout relays squad chat only.</summary>
     public enum VoiceRelayTier { Squad, All }
 
+    /// <summary>How the relay hands a voice packet to a listener. <see cref="App"/> is the form the
+    /// game's network library reads (see <see cref="VoiceListenerMessage"/>); the others exist only
+    /// so a lab hearing test can rule them out without a rebuild.</summary>
+    public enum VoiceRelayForm { App, App53, FromB2, Whole, FromB6 }
+
     /// <summary>MAG_VOICE_RELAY=1 turns the relay on (off by default); MAG_VOICE_RELAY_TIER is
-    /// "squad" (default) or "all" (every static tier).</summary>
+    /// "squad" (default) or "all" (every static tier); MAG_VOICE_RELAY_FORM is the listener form,
+    /// "app" (default), or one of the lab alternatives "app53", "from_b2", "whole", "from_b6".</summary>
     public sealed class VoiceRelayOptions
     {
         public const string Variable = "MAG_VOICE_RELAY";
         public const string TierVariable = "MAG_VOICE_RELAY_TIER";
+        public const string FormVariable = "MAG_VOICE_RELAY_FORM";
         /// <summary>Gameplay hello capability; a worker with it sends voice_groups on request.</summary>
         public const string Capability = "voice_groups_v1";
         /// <summary>Nominal voice byte rate: one 37-byte block every 40 ms (the game's 7300 bps port rate).</summary>
@@ -52,10 +62,12 @@ namespace Server.Dme
 
         public bool Enabled { get; }
         public VoiceRelayTier Tier { get; }
+        public VoiceRelayForm Form { get; }
 
-        public VoiceRelayOptions(bool enabled, VoiceRelayTier tier) { Enabled = enabled; Tier = tier; }
+        public VoiceRelayOptions(bool enabled, VoiceRelayTier tier, VoiceRelayForm form = VoiceRelayForm.App)
+        { Enabled = enabled; Tier = tier; Form = form; }
 
-        /// <summary>Unknown tier values fail clearly instead of widening the relay.</summary>
+        /// <summary>Unknown tier or form values fail clearly instead of widening or guessing.</summary>
         public static VoiceRelayOptions FromEnvironment(Func<string, string> environment)
         {
             bool enabled = environment?.Invoke(Variable) == "1";
@@ -64,8 +76,26 @@ namespace Server.Dme
             if (string.IsNullOrEmpty(tier) || tier == "squad") parsed = VoiceRelayTier.Squad;
             else if (tier == "all") parsed = VoiceRelayTier.All;
             else throw new ArgumentException($"{TierVariable} must be squad or all.");
-            return new VoiceRelayOptions(enabled, parsed);
+            VoiceRelayForm form = environment?.Invoke(FormVariable) switch
+            {
+                null or "" or "app" => VoiceRelayForm.App,
+                "app53" => VoiceRelayForm.App53,
+                "from_b2" => VoiceRelayForm.FromB2,
+                "whole" => VoiceRelayForm.Whole,
+                "from_b6" => VoiceRelayForm.FromB6,
+                _ => throw new ArgumentException($"{FormVariable} must be app, app53, from_b2, whole or from_b6."),
+            };
+            return new VoiceRelayOptions(enabled, parsed, form);
         }
+
+        public static string Name(VoiceRelayForm form) => form switch
+        {
+            VoiceRelayForm.App53 => "app53",
+            VoiceRelayForm.FromB2 => "from_b2",
+            VoiceRelayForm.Whole => "whole",
+            VoiceRelayForm.FromB6 => "from_b6",
+            _ => "app",
+        };
 
         public bool Serves(int group) =>
             !VoiceGroupNumbers.IsParty(group) &&
@@ -98,7 +128,7 @@ namespace Server.Dme
         public VoiceGroupsMember Find(int playerId) => _members.TryGetValue(playerId, out var member) ? member : null;
     }
 
-    public enum VoiceDropReason { None, RelayOff, Unbound, Muted, NotAllowedGroup, OverBudget, ProximityOff }
+    public enum VoiceDropReason { None, RelayOff, Unbound, Muted, NotAllowedGroup, OverBudget, ProximityOff, Malformed }
 
     public sealed class VoiceRelayDecision
     {
@@ -117,6 +147,7 @@ namespace Server.Dme
             VoiceDropReason.NotAllowedGroup => "not_allowed_group",
             VoiceDropReason.OverBudget => "over_budget",
             VoiceDropReason.ProximityOff => "proximity_off",
+            VoiceDropReason.Malformed => "malformed",
             _ => "relayed",
         };
     }
@@ -169,7 +200,7 @@ namespace Server.Dme
 
         public override string ToString() =>
             $"voice received={ReceivedPackets}/{ReceivedBytes}B relayed={RelayedPackets}/{RelayedBytes}B " +
-            string.Join(" ", new[] { VoiceDropReason.RelayOff, VoiceDropReason.Unbound, VoiceDropReason.Muted, VoiceDropReason.NotAllowedGroup, VoiceDropReason.OverBudget, VoiceDropReason.ProximityOff }
+            string.Join(" ", new[] { VoiceDropReason.RelayOff, VoiceDropReason.Unbound, VoiceDropReason.Muted, VoiceDropReason.NotAllowedGroup, VoiceDropReason.OverBudget, VoiceDropReason.ProximityOff, VoiceDropReason.Malformed }
                 .Select(reason => $"{VoiceRelayDecision.Name(reason)}={Dropped(reason)}"));
     }
 
@@ -224,8 +255,9 @@ namespace Server.Dme
     /// lab: a 14-byte header, then the voice data. Byte 1 and byte 6 both carry the relay group
     /// (one byte), bytes 4-5 the voice message kind (0x00 then 0x2F), byte 7 the media type, bytes
     /// 8-9 the data length and bytes 10-11 a sequence number that counts per talker and group
-    /// (both little-endian). Bytes 0, 2-3 and 12-13 are not interpreted. How a group above 255 (a
-    /// proximity group for a client index above 172) is carried has not been observed.</summary>
+    /// (both little-endian). Bytes 0, 2-3 and 12-13 are not interpreted. This is the lab diagnostic's
+    /// view of a send to one nonzero group below 256; the relay reads the full address block with
+    /// <see cref="VoiceGroupSend"/>.</summary>
     public readonly record struct VoicePacketHeader(int Group, byte MediaType, int DataLength, ushort Sequence)
     {
         public const int Length = 14;
@@ -243,6 +275,89 @@ namespace Server.Dme
             if (Length + length != body.Length) return false;
             header = new VoicePacketHeader(body[6], body[7], length, (ushort)(body[10] | (body[11] << 8)));
             return true;
+        }
+    }
+    /// <summary>A client's group-addressed send as the DME receives it: transport message 53, or 54
+    /// for the same send with the sender's other delivery flag. The body opens with an address block.
+    /// Its first byte counts the group-mask bytes in its low seven bits; its top bit says a two-byte
+    /// little-endian base group follows. Then comes the mask, where bit b of mask byte i names group
+    /// base + 8i + b, and after it the application data. For voice that data is one network-library
+    /// message: its two-byte big-endian type 47, a ten-byte voice header (the group's low byte, the
+    /// media type, the data length and the sequence, both little-endian, and two reserved bytes) and
+    /// the data. A voice packet addresses exactly one group. The address block carries the whole
+    /// group number, so proximity groups above 255 fit even though the voice header keeps one byte.
+    /// The lab's 14-byte header is this block for one nonzero group (4 bytes) plus the voice header.</summary>
+    public readonly record struct VoiceGroupSend(int Group, int AppOffset, byte MediaType, int DataLength, ushort Sequence)
+    {
+        public const byte Transport = 53, TransportAlternate = 54;
+        public const ushort VoiceType = 47;
+        /// <summary>Message type, group, media type, length, sequence and the two reserved bytes.</summary>
+        public const int VoiceHeaderLength = 10;
+        public const int MaxData = 248;
+
+        public static bool IsTransport(byte rtType) => rtType == Transport || rtType == TransportAlternate;
+
+        public static bool TryParse(ReadOnlySpan<byte> body, out VoiceGroupSend send)
+        {
+            send = default;
+            if (body.Length < 1) return false;
+            int maskBytes = body[0] & 0x7F, position = 1, baseGroup = 0;
+            if ((body[0] & 0x80) != 0)
+            {
+                if (body.Length < 3) return false;
+                baseGroup = body[1] | (body[2] << 8);
+                position = 3;
+            }
+            if (maskBytes == 0 || body.Length < position + maskBytes) return false;
+            int group = -1;
+            for (int i = 0; i < maskBytes; i++)
+                for (int bit = 0; bit < 8; bit++)
+                    if ((body[position + i] & (1 << bit)) != 0)
+                    {
+                        if (group >= 0) return false;
+                        group = baseGroup + 8 * i + bit;
+                    }
+            if (group < 0) return false;
+            position += maskBytes;
+            var app = body.Slice(position);
+            if (app.Length < VoiceHeaderLength || ((app[0] << 8) | app[1]) != VoiceType || app[2] != (byte)group) return false;
+            int length = app[4] | (app[5] << 8);
+            if (length > MaxData || app.Length != VoiceHeaderLength + length) return false;
+            send = new VoiceGroupSend(group, position, app[3], length, (ushort)(app[6] | (app[7] << 8)));
+            return true;
+        }
+    }
+
+    /// <summary>What a listener receives. The game's network library reads every app-family message
+    /// a client gets from the DME (client app single, broadcast and list, their QoS variants and the
+    /// group sends 53 and 54) the same way: a two-byte little-endian source client index, then the
+    /// application data, which it hands on with that index as the sender. The voice handler keys its
+    /// reorder buffer and talker slot on that index. So the relay sends the talker's application data
+    /// unchanged (the network-library message from type 47 on, keeping group, media type, length,
+    /// sequence and data) behind the talker's DME client index; the index is the only stamp.
+    /// <see cref="VoiceRelayForm.App"/> sends it as a client app single, as the DME forwards other peer
+    /// traffic; <see cref="VoiceRelayForm.App53"/> sends the same bytes as message 53. The remaining
+    /// forms are lab alternatives that put another slice of the uplink body behind the same index.</summary>
+    public static class VoiceListenerMessage
+    {
+        public static BaseScertMessage Build(VoiceRelayForm form, int talker, byte[] body, VoiceGroupSend send)
+        {
+            if (body == null) throw new ArgumentNullException(nameof(body));
+            if (talker < 0 || talker > short.MaxValue) throw new ArgumentOutOfRangeException(nameof(talker));
+            byte[] payload = form switch
+            {
+                VoiceRelayForm.FromB2 => body[2..],
+                VoiceRelayForm.Whole => (byte[])body.Clone(),
+                VoiceRelayForm.FromB6 => body[6..],
+                _ => body[send.AppOffset..],
+            };
+            if (form != VoiceRelayForm.App53)
+                return new RT_MSG_CLIENT_APP_SINGLE { TargetOrSource = (short)talker, Payload = payload };
+            var contents = new byte[2 + payload.Length];
+            contents[0] = (byte)talker;
+            contents[1] = (byte)(talker >> 8);
+            payload.CopyTo(contents, 2);
+            return new RawScertMessage((RT_MSG_TYPE)VoiceGroupSend.Transport) { Contents = contents };
         }
     }
 }

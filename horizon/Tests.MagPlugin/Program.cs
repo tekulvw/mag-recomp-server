@@ -44,6 +44,10 @@ Test("voice relay is off by default and tiers the first rollout to squad groups"
 Test("voice_groups frames parse strictly into a relay table", VoiceRelayChecks.Codec);
 Test("voice relay decisions by role, tier, side, binding, budget and proximity", VoiceRelayChecks.Decisions);
 Test("voice_groups are requested on the world stream only when asked", VoiceRelayChecks.Subscription);
+Test("voice group sends parse by their address block, any group number", VoiceForwardingChecks.Parsing);
+Test("voice listener forms carry the talker index and the library message", VoiceForwardingChecks.ListenerForms);
+Test("voice routing end to end by tier, side, proximity, mute and budget", VoiceForwardingChecks.Routing);
+Test("voice relay host delivers group sends to bound listeners only", LeadershipProgressionChecks.VoiceRelayHost);
 Test("DME port capacity configuration and leases", DmePortCapacityChecks.Budget);
 Test("DME port capacity bounds placement and keeps parties whole", DmePortCapacityChecks.Placement);
 Test("DME port capacity refuses standalone admission and frees ports on release", DmePortCapacityChecks.Admission);

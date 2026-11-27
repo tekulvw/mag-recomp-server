@@ -193,6 +193,8 @@ namespace Server.Medius
         public void Connected(DmeClient client) => Owner(client)?.Host.Connected(client);
         public void Event(DmeClient client, string transport, byte rtType, byte? pluginId, byte[] payload) =>
             Owner(client)?.Host.Event(client, transport, rtType, pluginId, payload);
+        public void Voice(DmeClient client, string transport, byte rtType, byte[] body) =>
+            Owner(client)?.Host.Voice(client, transport, rtType, body);
         public void ArmoryLoadoutCommitted(string account, uint character)
         { foreach (var slot in _slots) slot.Host.ArmoryLoadoutCommitted(account, character); }
 
