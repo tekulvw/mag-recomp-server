@@ -1079,14 +1079,15 @@ fn a_bled_out_patient_rejoins_the_next_wave_at_the_point_chosen_while_downed() {
 }
 
 #[test]
-fn a_bleed_out_just_before_a_wave_spawns_on_that_wave() {
+fn a_bleed_out_expiry_just_before_a_wave_waits_for_the_following_wave() {
     use crate::replication::{ObjectUpdate, UpdateHeader};
     let mut engine = two_actors(0.4);
     engine.enable_world_ticks();
     engine.match_started = true;
     down_patient(&mut engine, Duration::ZERO);
     // The patient lives on a running team clock whose wave falls 100 ms
-    // after the 7 s bleed-out, well inside a dead client's update interval.
+    // after the 7 s bleed-out. Its client is still playing the death then,
+    // so the world tick queues it for the following wave instead.
     let team = usize::from(patient(&engine).team());
     engine.team_waves[team] = Some(TeamWaveClock {
         first_deadline: Duration::from_millis(7100),
@@ -1101,7 +1102,7 @@ fn a_bleed_out_just_before_a_wave_spawns_on_that_wave() {
     ));
     assert_eq!(
         queued.pending_spawn_deadline,
-        Some(Duration::from_millis(7100))
+        Some(Duration::from_millis(27_100))
     );
     let healer = engine.active.take().unwrap();
     engine.active = engine.peers.remove("synthetic-reservation-0000");
@@ -1117,6 +1118,21 @@ fn a_bleed_out_just_before_a_wave_spawns_on_that_wave() {
         .encode_empty_with_profile(engine.wire_profile)
         .unwrap();
     dispatch(&mut engine, &bytes, 7800).unwrap();
+    assert!(matches!(
+        engine.active.as_ref().unwrap().life,
+        CharacterLife::AwaitingRespawn { generation: 4 }
+    ));
+    let header = UpdateHeader {
+        sequence: engine.active.as_ref().unwrap().latest_owner_sequence + 1,
+        nak_sequence: 0,
+        client_index: 0,
+        object_type_mask: 0,
+        timestamp_ms: 27_150,
+    };
+    let bytes = ObjectUpdate { header, wire: &[] }
+        .encode_empty_with_profile(engine.wire_profile)
+        .unwrap();
+    dispatch(&mut engine, &bytes, 27_150).unwrap();
     assert!(matches!(
         engine.active.as_ref().unwrap().life,
         CharacterLife::Alive { generation: 5, .. }
@@ -1214,18 +1230,17 @@ fn assert_gave_up(actor: &Active) {
 #[test]
 fn a_bleed_out_report_gives_up_at_once_and_spawns_on_the_next_wave() {
     let mut engine = downed_owner_with_waves();
-    // Reported 2.6 s before the wave: the client's respawn screen opens at
-    // 2.9 s, before the wave at 3 s.
     downed_state_report(&mut engine, 3, 400);
     assert_gave_up(engine.active.as_ref().unwrap());
-    // The world tick queues the dead character for the wave at 3 s.
+    // The world tick queues the dead character for the first wave more
+    // than the cutoff away: 2.55 s to the wave at 3 s is too close.
     let response = engine.tick_world(Duration::from_millis(450), 1, "tick".into());
     assert!(response.ok, "{:?}", response.error);
     assert_eq!(
         engine.active.as_ref().unwrap().pending_spawn_deadline,
-        Some(Duration::from_secs(3))
+        Some(Duration::from_secs(23))
     );
-    empty_update(&mut engine, 3100);
+    empty_update(&mut engine, 23_100);
     assert!(matches!(
         engine.active.as_ref().unwrap().life,
         CharacterLife::Alive { generation: 5, .. }
@@ -1241,16 +1256,12 @@ fn a_bleed_out_right_before_a_wave_waits_for_the_clients_respawn_screen() {
     let mut engine = downed_owner_with_waves();
     downed_state_report(&mut engine, 3, 2750);
     assert_gave_up(engine.active.as_ref().unwrap());
-    assert_eq!(
-        engine.active.as_ref().unwrap().respawn_screen_ready_at,
-        Some(Duration::from_millis(5250))
-    );
     let response = engine.tick_world(Duration::from_millis(2800), 1, "tick".into());
     assert!(response.ok, "{:?}", response.error);
     assert_eq!(
         engine.active.as_ref().unwrap().pending_spawn_deadline,
         Some(Duration::from_secs(23)),
-        "the wave at 3 s falls before the respawn screen opens at 5.25 s"
+        "the wave at 3 s falls inside the cutoff: the respawn screen opens at 5.25 s"
     );
     empty_update(&mut engine, 3000);
     assert!(matches!(
@@ -1263,7 +1274,6 @@ fn a_bleed_out_right_before_a_wave_waits_for_the_clients_respawn_screen() {
         actor.life,
         CharacterLife::Alive { generation: 5, .. }
     ));
-    assert!(actor.respawn_screen_ready_at.is_none());
 }
 
 #[test]
@@ -1287,7 +1297,6 @@ fn a_confirmation_after_a_bleed_out_report_joins_the_next_wave() {
     dispatch(&mut engine, &0x0211u16.to_be_bytes(), 2800).unwrap();
     let actor = engine.active.as_ref().unwrap();
     assert_eq!(actor.pending_spawn_deadline, Some(Duration::from_secs(3)));
-    assert!(actor.respawn_screen_ready_at.is_none());
     empty_update(&mut engine, 3100);
     assert!(matches!(
         engine.active.as_ref().unwrap().life,

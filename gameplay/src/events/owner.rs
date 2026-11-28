@@ -84,18 +84,13 @@ pub(super) fn object_update<W: Write>(
     plan_update_reply(ctx, plan, h, body_supported, grenade_queue)?;
     // Retail SimCharacter::UpdateState: a downed owner that reports its
     // bleeding-out substate has given up; the incapacitated condition clears
-    // at once. The world tick then queues it for the next wave.
-    // The client itself opens its respawn screen only after its own short
-    // countdown; the requeue waits for that (see `respawn_queue_floor`).
+    // at once. The world tick then queues it for the first wave past the
+    // respawn queue's cutoff, as after any death (see `respawn_queue`).
     let downed_give_up = if bleed_out_reported && body_supported && plan.rejection.is_none() {
         combat::plan_downed_give_up(ctx, plan)?
     } else {
         None
     };
-    if downed_give_up.is_some() {
-        plan.session.respawn_screen_ready_at =
-            Some(now + super::respawn_queue::BLEED_OUT_RESPAWN_SCREEN_DELAY);
-    }
     // Owner planning selects one direct reply; shared delivery is separate.
     // Replication/replay takes priority; leave clock state untouched
     // so the next valid update catches up to absolute elapsed time.
@@ -1548,8 +1543,10 @@ fn plan_update_reply<W: Write>(
             None => None,
         };
         if let Some(clock) = clock {
+            // Rejoining by itself, a dead character waits for the first wave
+            // past the cutoff; a confirmation would take the next wave.
             let deadline = if rejoin_queue {
-                clock.next_after(active.respawn_queue_floor(now))?
+                clock.wave_after_death(now)?
             } else {
                 clock.next_after(now)?
             };
