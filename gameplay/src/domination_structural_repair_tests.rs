@@ -448,3 +448,43 @@ fn tool_packet_after_the_structure_is_repaired_is_an_audited_denial() {
     assert_eq!(e.active.as_ref().unwrap().repair_credit, credit);
     assert_eq!(e.pending_reward_batch(), rewards);
 }
+
+#[test]
+fn packets_in_flight_across_a_match_restart_keep_the_session() {
+    let mut engine = repair_fixture();
+    engine.domination_gameplay.as_mut().unwrap().runtime.reset();
+    assert!(repair(&mut engine, 200).unwrap().is_empty());
+    assert_eq!(
+        last_record(&engine)["gameplay_denial"],
+        "domination_gameplay_not_started"
+    );
+    let actor = engine.active.as_ref().unwrap();
+    let wire = protocol::ObjectiveInteraction {
+        target_object_id: 0x0c80_0000,
+        kind: protocol::ObjectiveInteractionKind::Activate,
+        actor_index: actor.reservation.player,
+        trigger_index: 0,
+    }
+    .encode();
+    let event = crate::events::EventInput {
+        reservation_id: actor.reservation.id.clone(),
+        world_id: actor.reservation.world,
+        player_id: actor.reservation.player,
+        transport: Transport::Udp,
+        direction: Direction::ClientToServer,
+        rt_type: 0x3d,
+        plugin_id: Some(1),
+        payload_hex: protocol::encode_hex(&wire),
+    };
+    let decoded = DecodedEvent::with_profile(&wire, event.player_id, engine.wire_profile, false);
+    let messages = engine
+        .handle_event(event, &decoded, test_time(201), 1)
+        .unwrap();
+    let reply =
+        protocol::ObjectiveInteraction::decode(&protocol::decode_hex(&messages[0].payload_hex))
+            .unwrap();
+    assert_eq!(reply.kind, protocol::ObjectiveInteractionKind::Nak);
+    let record = last_record(&engine);
+    assert_eq!(record["op"], "objective_interaction");
+    assert_eq!(record["gameplay_denial"], "domination_gameplay_not_started");
+}

@@ -1078,3 +1078,24 @@ fn tool_packet_after_the_structure_is_repaired_keeps_the_session() {
     tick(&mut engine, 1200);
     assert_eq!(row(&engine).state_actor.state, ObjectiveState::Repaired);
 }
+
+#[test]
+fn packets_in_flight_across_a_match_restart_keep_the_session() {
+    let mut engine = destroyed_with_defender();
+    // A restart resets the mode runtime; it starts its mission again on the
+    // next world tick, after packets the clients already sent.
+    engine.acquisition_gameplay.as_mut().unwrap().reset();
+    assert!(repair(&mut engine, 141, Transport::Tcp).unwrap().is_empty());
+    assert_eq!(
+        last_record(&engine)["gameplay_denial"],
+        "acquisition_gameplay_not_started"
+    );
+    let messages = interact(&mut engine, Kind::Activate, 1, 142).unwrap();
+    assert_eq!(ack(&messages), Kind::Nak);
+    let record = last_record(&engine);
+    assert_eq!(record["op"], "objective_interaction");
+    assert_eq!(
+        record["gameplay_denial"],
+        "acquisition_gameplay_not_started"
+    );
+}

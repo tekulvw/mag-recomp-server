@@ -447,6 +447,45 @@ fn plan_message<W: Write>(
 }
 
 impl<W: Write> Engine<W> {
+    /// Answer an objective interaction the mode runtime cannot take yet with
+    /// a Nak and an audited denial, keeping the session.
+    fn deny_objective_interaction(
+        &mut self,
+        event: &EventInput,
+        request: protocol::ObjectiveInteraction,
+        code: &'static str,
+        now: Duration,
+        wall: u64,
+    ) -> Result<Vec<OutboundMessage>, &'static str> {
+        let reply = protocol::ObjectiveInteraction {
+            target_object_id: request.target_object_id,
+            kind: protocol::ObjectiveInteractionKind::Nak,
+            actor_index: event.player_id,
+            trigger_index: u8::MAX,
+        };
+        self.record(
+            json!({
+                "op": "objective_interaction", "timestamp_ms": now.as_millis() as u64,
+                "reservation_id": event.reservation_id, "world_id": event.world_id,
+                "player_id": event.player_id, "target_object_id": request.target_object_id,
+                "action": request.kind as u8, "transport": event.transport,
+                "direction": event.direction, "rt_type": event.rt_type,
+                "plugin_id": event.plugin_id,
+                "payload_hex": event.payload_hex.to_ascii_lowercase(),
+                "reply_kind": reply.kind as u8, "gameplay_denial": code,
+            }),
+            wall,
+        )?;
+        self.last_gameplay_denial = Some(code);
+        Ok(vec![OutboundMessage {
+            reservation_id: event.reservation_id.clone(),
+            world_id: event.world_id,
+            player_id: event.player_id,
+            plugin_id: 1,
+            payload_hex: protocol::encode_hex(&reply.encode()),
+        }])
+    }
+
     pub(super) fn handle_event(
         &mut self,
         event: EventInput,
@@ -494,6 +533,20 @@ impl<W: Write> Engine<W> {
             })
         {
             use crate::structural_repair_authority::StructuralRepairAdmission;
+            if !self
+                .acquisition_gameplay
+                .as_ref()
+                .is_some_and(|runtime| runtime.started())
+            {
+                return self.record_structural_repair_denial(
+                    "acquisition_structural_repair",
+                    &event,
+                    request.target_object_id,
+                    "acquisition_gameplay_not_started",
+                    now,
+                    wall_secs,
+                );
+            }
             let (authority, leadership) = match self.admit_structural_repair(
                 request.target_object_id,
                 self.acquisition_structural_repair_tool(),
@@ -601,6 +654,27 @@ impl<W: Write> Engine<W> {
                     })))
             && let Some(actor) = objectives::actor(active)
         {
+            // A match restart resets the mode runtime, which starts its
+            // mission again on the next world tick. An interaction already in
+            // flight across that boundary is refused like any other.
+            let (started, not_started) = match &self.acquisition_gameplay {
+                Some(runtime) => (runtime.started(), "acquisition_gameplay_not_started"),
+                None => (
+                    self.domination_gameplay
+                        .as_ref()
+                        .is_some_and(|world| world.runtime.is_started()),
+                    "domination_gameplay_not_started",
+                ),
+            };
+            if !started {
+                return self.deny_objective_interaction(
+                    &event,
+                    *request,
+                    not_started,
+                    now,
+                    wall_secs,
+                );
+            }
             let timings = objectives::action_timing(active, &plan.leadership);
             if self.acquisition_gameplay.is_some() {
                 return self.event_acquisition_structural(

@@ -2181,6 +2181,20 @@ impl<W: Write> Engine<W> {
             .as_ref()
             .map(BunkerWorld::repair_tool_profile);
         use crate::structural_repair_authority::StructuralRepairAdmission;
+        if !self
+            .domination_gameplay
+            .as_ref()
+            .is_some_and(|world| world.runtime.is_started())
+        {
+            return self.record_structural_repair_denial(
+                "domination_structural_repair",
+                event,
+                request.target_object_id,
+                "domination_gameplay_not_started",
+                now,
+                wall,
+            );
+        }
         let (authority, leadership) =
             match self.admit_structural_repair(request.target_object_id, tool, now)? {
                 StructuralRepairAdmission::Admitted(authority, leadership) => {
