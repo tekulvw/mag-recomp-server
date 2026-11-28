@@ -8,6 +8,14 @@
 {{- $files := $pod.files }}
 {{- $worker := $pod.worker }}
 {{- $medius := eq $component "medius" }}
+{{- $portal := $root.Values.portalTickets | default dict }}
+{{- $portalMode := $portal.mode | default "off" }}
+{{- $dual := eq $portalMode "dual" }}
+{{- if and $medius $dual }}
+{{- if or (empty $portal.sonyKeys) (empty $portal.sonyServices) (not $portal.identityDatabaseSecret) (not $portal.identityDatabaseSecretKey) }}
+{{- fail "portalTickets.mode=dual needs portalTickets.sonyKeys, portalTickets.sonyServices, portalTickets.identityDatabaseSecret and portalTickets.identityDatabaseSecretKey" }}
+{{- end }}
+{{- end }}
 {{- $registry := and $medius (not (empty $root.Values.gameplayWorkers)) }}
 {{- $shutdown := $root.Values.gameplayShutdown | default dict }}
 {{- $graceful := and (not $medius) (or (not (kindIs "invalid" $shutdown.drainSeconds)) (not (kindIs "invalid" $shutdown.receiptFlushSeconds))) }}
@@ -209,18 +217,26 @@ spec:
             - {name: MAG_REWARD_LEDGER_RETENTION_DAYS, value: {{ . | int | toString | quote }}}
             {{- end }}
             {{- end }}
-            {{- $portal := $root.Values.portalTickets | default dict }}
-            {{- if eq ($portal.mode | default "off") "required" }}
+            {{- if or (eq $portalMode "required") $dual }}
             {{- $keys := list }}
             {{- range $id, $spki := $portal.keys }}
             {{- $keys = append $keys (printf "%s:%s" $id $spki) }}
             {{- end }}
             {{- if or (not $portal.audience) (empty $keys) }}
-            {{- fail "portalTickets.mode=required needs portalTickets.audience and at least one portalTickets.keys entry" }}
+            {{- fail (printf "portalTickets.mode=%s needs portalTickets.audience and at least one portalTickets.keys entry" $portalMode) }}
             {{- end }}
-            - {name: MAG_PORTAL_TICKETS, value: required}
+            - {name: MAG_PORTAL_TICKETS, value: {{ $portalMode | quote }}}
             - {name: MAG_PORTAL_TICKET_AUDIENCE, value: {{ $portal.audience | quote }}}
             - {name: MAG_PORTAL_TICKET_KEYS, value: {{ join "," $keys | quote }}}
+            {{- if $dual }}
+            {{- $sonyKeys := list }}
+            {{- range $id, $spki := $portal.sonyKeys }}
+            {{- $sonyKeys = append $sonyKeys (printf "%s:%s" $id $spki) }}
+            {{- end }}
+            - {name: MAG_PSN_TICKET_KEYS, value: {{ join "," $sonyKeys | quote }}}
+            - {name: MAG_PSN_SERVICE_IDS, value: {{ join "," $portal.sonyServices | quote }}}
+            - {name: MAG_IDENTITY_DB_CONNECTION_FILE, value: /identity-db/connection-string}
+            {{- end }}
             {{- end }}
             {{- if and $main $root.Values.adminApi.enabled }}
             - {name: MAG_ADMIN_API_LISTEN, value: {{ printf "0.0.0.0:%d" (int $root.Values.adminApi.port) | quote }}}
@@ -261,6 +277,9 @@ spec:
             - {name: runtime-secrets, mountPath: /runtime-secrets, readOnly: true}
             - {name: logs, mountPath: /logs}
             - {name: tmp, mountPath: /tmp}
+            {{- if $dual }}
+            - {name: identity-db, mountPath: /identity-db, readOnly: true}
+            {{- end }}
             {{- if and $main $root.Values.adminApi.enabled }}
             - {name: admin-api-secret, mountPath: /admin-api, readOnly: true}
             {{- end }}
@@ -347,6 +366,14 @@ spec:
           emptyDir: {sizeLimit: {{ .emptyDirSizeLimit }}}
         {{- end }}
         {{- if $medius }}
+        {{- if $dual }}
+        - name: identity-db
+          secret:
+            secretName: {{ $portal.identityDatabaseSecret | quote }}
+            items:
+              - {key: {{ $portal.identityDatabaseSecretKey | quote }}, path: connection-string}
+            defaultMode: 0440
+        {{- end }}
         - name: news
           emptyDir: {sizeLimit: 2Mi}
         - name: accounts

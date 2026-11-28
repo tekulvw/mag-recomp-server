@@ -53,6 +53,7 @@ namespace Server.Medius
         protected internal class ChannelData
         {
             public int ApplicationId { get; set; } = 0;
+            public MagAuthenticationChannelBinding MagDualBinding { get; } = new MagAuthenticationChannelBinding();
             public MagMapsSession MagMapsSession { get; } = new MagMapsSession();
             public MagMasSession MagMasSession { get; } = new MagMasSession();
             public MagMlsSession MagMlsSession { get; } = new MagMlsSession();

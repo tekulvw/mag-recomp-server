@@ -162,3 +162,7 @@ Rolling out:
 4. To rotate, publish the new key on the portal, add it next to the old one here, restart, let
    the portal sign with it, then remove the old key after the last old tickets have expired
    (at most the portal's ticket lifetime, 12 hours on live).
+
+## Optional Sony console authentication
+
+`MAG_PORTAL_TICKETS=dual` retains MAGT verification and adds explicitly configured Sony NP verification and account linking. Existing `off` and `required` behavior is unchanged. See [dual authentication](dual-authentication.md) for trust configuration, portal database migration, browser linking and the unchecked real-console acceptance gates.

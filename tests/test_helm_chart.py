@@ -14,13 +14,16 @@ HELM = shutil.which('helm') or '/opt/homebrew/bin/helm'
 BASE = {'network': {'advertisedIPv4': '203.0.113.10', 'authDns': 'auth.example.invalid'}, 'runtime': {'existingSecret': 'runtime-keys'}}
 
 
-def render(extra=None, ok=True):
+def render(extra=None, ok=True, skip_schema=False):
     values = dict(BASE)
     for key, value in (extra or {}).items():
         values[key] = {**values.get(key, {}), **value} if isinstance(value, dict) else value
     with tempfile.NamedTemporaryFile(mode='w', suffix='.json') as f:
         json.dump(values, f); f.flush()
-        result = subprocess.run([HELM, 'template', 'test', str(CHART), '-f', f.name], capture_output=True, text=True)
+        command = [HELM, 'template', 'test', str(CHART), '-f', f.name]
+        if skip_schema:
+            command.append('--skip-schema-validation')
+        result = subprocess.run(command, capture_output=True, text=True)
     if ok:
         if result.returncode: raise AssertionError(result.stderr)
         return list(yaml.safe_load_all(result.stdout))
@@ -139,6 +142,81 @@ class ChartTests(unittest.TestCase):
                         {'mode': 'required', 'audience': 'play.example.test', 'keys': {'1': 'not base64!'}},
                         {'mode': 'required', 'audience': 'play.example.test', 'keys': {'1': key}, 'extra': True}):
             render({'portalTickets': invalid}, ok=False)
+
+    def test_dual_authentication_trust_and_database_are_scoped_to_medius(self):
+        portal = {'mode': 'dual', 'audience': 'play.example.test', 'keys': {'1': 'QUJD'},
+                  'sonyKeys': {'fedcba98': 'REVG', '01234567': 'QUJD'},
+                  'sonyServices': ['SYNTHETIC_SERVICE', 'another-1'],
+                  'identityDatabaseSecret': 'portal-identity-db'}
+        for secret_key in (None, 'medius.connection'):
+            configured = dict(portal)
+            if secret_key:
+                configured['identityDatabaseSecretKey'] = secret_key
+            overrides = {'portalTickets': configured}
+            docs = render(self.worker_values(**overrides) if secret_key else overrides)
+            medius = self.medius_pod(docs)['spec']
+            for container in medius['containers']:
+                env = {entry['name']: entry.get('value') for entry in container['env']}
+                self.assertEqual(env['MAG_PORTAL_TICKETS'], 'dual')
+                self.assertEqual(env['MAG_PORTAL_TICKET_AUDIENCE'], 'play.example.test')
+                self.assertEqual(env['MAG_PORTAL_TICKET_KEYS'], '1:QUJD')
+                self.assertEqual(env['MAG_PSN_TICKET_KEYS'], '01234567:QUJD,fedcba98:REVG')
+                self.assertEqual(env['MAG_PSN_SERVICE_IDS'], 'SYNTHETIC_SERVICE,another-1')
+                self.assertEqual(env['MAG_IDENTITY_DB_CONNECTION_FILE'], '/identity-db/connection-string')
+                mount = next(m for m in container['volumeMounts'] if m['name'] == 'identity-db')
+                self.assertEqual(mount, {'name': 'identity-db', 'mountPath': '/identity-db', 'readOnly': True})
+            volume = next(v for v in medius['volumes'] if v['name'] == 'identity-db')
+            self.assertEqual(volume['secret'], {
+                'secretName': 'portal-identity-db', 'defaultMode': 0o440,
+                'items': [{'key': secret_key or 'connectionString', 'path': 'connection-string'}]})
+            for deployment in (d for d in docs if d['kind'] == 'Deployment'
+                               and not d['metadata']['name'].endswith('-medius')):
+                pod = deployment['spec']['template']['spec']
+                self.assertFalse(any(v['name'] == 'identity-db' for v in pod['volumes']))
+                for container in pod['containers'] + pod.get('initContainers', []):
+                    self.assertFalse(any(m['name'] == 'identity-db' for m in container.get('volumeMounts', [])))
+                    self.assertFalse(any(e['name'].startswith(('MAG_PORTAL_', 'MAG_PSN_', 'MAG_IDENTITY_DB_'))
+                                         for e in container.get('env', [])))
+            for container in medius.get('initContainers', []):
+                self.assertFalse(any(m['name'] == 'identity-db' for m in container.get('volumeMounts', [])))
+
+    def test_dual_authentication_is_disabled_in_existing_modes(self):
+        for mode in ('off', 'required'):
+            docs = render({'portalTickets': {'mode': mode, 'audience': 'play.example.test', 'keys': {'1': 'QUJD'},
+                           'sonyKeys': {'01234567': 'QUJD'}, 'sonyServices': ['SYNTHETIC_SERVICE'],
+                           'identityDatabaseSecret': 'portal-identity-db'}})
+            for deployment in (d for d in docs if d['kind'] == 'Deployment'):
+                pod = deployment['spec']['template']['spec']
+                self.assertFalse(any(v['name'] == 'identity-db' for v in pod['volumes']))
+                for container in pod['containers']:
+                    self.assertFalse(any(e['name'].startswith(('MAG_PSN_', 'MAG_IDENTITY_DB_'))
+                                         for e in container.get('env', [])))
+                    self.assertFalse(any(m['name'] == 'identity-db' for m in container.get('volumeMounts', [])))
+
+    def test_dual_authentication_requires_complete_configuration_without_schema(self):
+        complete = {'mode': 'dual', 'audience': 'play.example.test', 'keys': {'1': 'QUJD'},
+                    'sonyKeys': {'01234567': 'QUJD'}, 'sonyServices': ['SYNTHETIC_SERVICE'],
+                    'identityDatabaseSecret': 'portal-identity-db', 'identityDatabaseSecretKey': 'connectionString'}
+        for field, empty in (('audience', ''), ('keys', {}), ('sonyKeys', {}), ('sonyServices', []),
+                             ('identityDatabaseSecret', ''), ('identityDatabaseSecretKey', '')):
+            for skip_schema in (False, True):
+                with self.subTest(field=field, skip_schema=skip_schema):
+                    self.assertIn(field, render({'portalTickets': {**complete, field: empty}},
+                                                ok=False, skip_schema=skip_schema))
+
+    def test_dual_authentication_rejects_invalid_sony_trust_values(self):
+        complete = {'mode': 'dual', 'audience': 'play.example.test', 'keys': {'1': 'QUJD'},
+                    'sonyKeys': {'01234567': 'QUJD'}, 'sonyServices': ['SYNTHETIC_SERVICE'],
+                    'identityDatabaseSecret': 'portal-identity-db'}
+        for field, invalid in (
+                ('sonyKeys', {'0123456': 'QUJD'}), ('sonyKeys', {'0123456G': 'QUJD'}),
+                ('sonyKeys', {'ABCDEF12': 'QUJD'}), ('sonyKeys', {'01234567': 'not base64!'}),
+                ('sonyKeys', {'01234567': ''}), ('sonyServices', ['']),
+                ('sonyServices', ['A' * 25]), ('sonyServices', ['service,name']),
+                ('sonyServices', ['service name']), ('sonyServices', ['servicé']),
+                ('identityDatabaseSecret', 'Invalid Secret'), ('identityDatabaseSecretKey', '../password')):
+            with self.subTest(field=field, invalid=invalid):
+                render({'portalTickets': {**complete, field: invalid}}, ok=False)
 
     @staticmethod
     def policy_allows(policy, port, protocol, namespace):

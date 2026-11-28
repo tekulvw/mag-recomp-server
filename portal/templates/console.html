@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Console identity{% endblock %}
+{% block content %}
+<h1>Console identity</h1>
+<p><a href="/account">Your account</a></p>
+<p>Link your verified Sony identity to use this portal account and its player name from your console. Online names do not determine account ownership.</p>
+{% if let Some(text) = notice %}<p class="alert">{{ text }}</p>{% endif %}
+{% if identities.is_empty() %}
+<p>No console identity is linked.</p>
+{% else %}
+{% for identity in identities %}
+<p>Linked Sony online ID: <strong>{{ identity.online_id }}</strong></p>
+<form method="post" action="/account/console/unlink">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <button class="danger">Unlink Sony identity</button>
+</form>
+{% endfor %}
+<p>Unlinking prevents new console sign-ins. An existing game session continues until its normal lease ends.</p>
+{% endif %}
+{% if can_link && identities.is_empty() %}
+<h2>Enter your console code</h2>
+<p>After a verified console sign-in, enter the 32-character code delivered to that console. Codes expire after five minutes and work once. Only enter a code from your own console.</p>
+<form method="post" action="/account/console" class="stack">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>Console code <input name="code" minlength="32" maxlength="64" autocomplete="off" autocapitalize="none" spellcheck="false" required></label>
+  <button>Link Sony identity</button>
+</form>
+{% else if !can_link %}
+<p>You need an active account and a <a href="/claim">claimed player name</a> to link a console.</p>
+{% endif %}
+{% endblock %}

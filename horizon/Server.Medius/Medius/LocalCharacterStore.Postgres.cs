@@ -78,7 +78,7 @@ namespace Server.Medius
 
         private const string CharacterColumns = "id, account, name, faction, head_id, voice_id, flags, universe_id, np_id, experience, level, " +
             "skill_points, owned_skills, unlocked_items, last_used_loadout, loadout_layout_revision, leadership_level, nominations, " +
-            "matches_since_last_command, leadership_points, leadership_level_floor, slot, deleted_at, original_name, respec_count, respec_points";
+            "matches_since_last_command, leadership_points, leadership_level_floor, slot, deleted_at, original_name, respec_count, respec_points, console_requested_name";
 
         private sealed class PostgresBackend : ICharacterBackend
         {
@@ -123,6 +123,7 @@ namespace Server.Medius
             private readonly NpgsqlConnection _connection;
             private readonly NpgsqlTransaction _transaction;
             private readonly HashSet<uint> _loadedCharacters = new();
+            private readonly string _account;
             private readonly HashSet<string> _loadedReceipts = new(StringComparer.Ordinal);
             private (string Operation, string Account, uint CharacterId, string Before)? _audit;
             private bool _committed;
@@ -130,6 +131,7 @@ namespace Server.Medius
             public PostgresSession(PostgresBackend backend, StoreScope scope)
             {
                 _backend = backend;
+                _account = scope.Account;
                 var database = backend.Database;
                 _connection = database.OpenConnection();
                 try
@@ -145,10 +147,12 @@ namespace Server.Medius
                         account.ExecuteNonQuery();
                     }
                     using var characters = new NpgsqlCommand("SELECT " + CharacterColumns + " FROM mag.characters " +
-                        "WHERE account = @account OR (@name::text IS NOT NULL AND lower(name) = lower(@name::text)) ORDER BY id FOR UPDATE",
+                        "WHERE account = @account OR (@name::text IS NOT NULL AND lower(name) = lower(@name::text)) OR lower(name) = ANY(@additional_names) ORDER BY id FOR UPDATE",
                         _connection, _transaction);
                     characters.Parameters.Add(Text("account", scope.Account ?? ""));
                     characters.Parameters.Add(Text("name", scope.Name));
+                    characters.Parameters.Add(new NpgsqlParameter("additional_names", NpgsqlDbType.Array | NpgsqlDbType.Text)
+                        { Value = (scope.AdditionalNames ?? Array.Empty<string>()).Select(n => n.ToLowerInvariant()).ToArray() });
                     var list = ReadCharacters(characters);
                     LoadLoadouts(_connection, _transaction, list);
                     foreach (var character in list) { backend.Store.PrepareLoaded(character); _loadedCharacters.Add(character.Id); }
@@ -224,6 +228,8 @@ namespace Server.Medius
                     }
                     foreach (var character in Document.Characters)
                     {
+                        // Foreign rows are locked only to inspect names; never rewrite their data or revision.
+                        if (_account != null && character.Account != _account) continue;
                         if (store.ProgressionCatalog != null) { character.Experience ??= 0; character.Level ??= 1; }
                         WriteCharacter(_connection, _transaction, character, insert: !_loadedCharacters.Contains(character.Id));
                     }
@@ -328,6 +334,7 @@ namespace Server.Medius
                     DeletedAt = r.IsDBNull(22) ? null : new DateTimeOffset(DateTime.SpecifyKind(r.GetDateTime(22), DateTimeKind.Utc)).ToUnixTimeSeconds(),
                     OriginalName = r.IsDBNull(23) ? null : r.GetString(23),
                     RespecCount = Small(24), RespecPoints = r.IsDBNull(25) ? null : checked((uint)r.GetInt64(25)),
+                    ConsoleRequestedName = r.IsDBNull(26) ? null : r.GetString(26),
                     Leadership = r.IsDBNull(16) ? null : new StoredLeadershipRecord
                     {
                         LeadershipLevel = Small(16).Value, Nominations = Small(17).Value, MatchesSinceLastCommand = Small(18).Value,
@@ -365,13 +372,13 @@ namespace Server.Medius
             string sql = insert
                 ? "INSERT INTO mag.characters (" + CharacterColumns + ") VALUES (@id, @account, @name, @faction, @head, @voice, @flags, @universe, " +
                   "@np, @experience, @level, @skill_points, @owned_skills, @unlocked_items, @last_used, @layout, @leadership_level, @nominations, " +
-                  "@recency, @leadership_points, @leadership_floor, @slot, @deleted_at, @original_name, @respec_count, @respec_points)"
+                  "@recency, @leadership_points, @leadership_floor, @slot, @deleted_at, @original_name, @respec_count, @respec_points, @console_requested_name)"
                 : "UPDATE mag.characters SET account = @account, name = @name, faction = @faction, head_id = @head, voice_id = @voice, " +
                   "flags = @flags, universe_id = @universe, np_id = @np, experience = @experience, level = @level, skill_points = @skill_points, " +
                   "owned_skills = @owned_skills, unlocked_items = @unlocked_items, last_used_loadout = @last_used, loadout_layout_revision = @layout, " +
                   "leadership_level = @leadership_level, nominations = @nominations, matches_since_last_command = @recency, " +
                   "leadership_points = @leadership_points, leadership_level_floor = @leadership_floor, slot = @slot, deleted_at = @deleted_at, original_name = @original_name, " +
-                  "respec_count = @respec_count, respec_points = @respec_points, " +
+                  "respec_count = @respec_count, respec_points = @respec_points, console_requested_name = @console_requested_name, " +
                   "revision = revision + 1, updated_at = now() " +
                   "WHERE id = @id";
             using (var command = new NpgsqlCommand(sql, connection, transaction))
@@ -403,6 +410,7 @@ namespace Server.Medius
                 p.Add(Typed("deleted_at", NpgsqlDbType.TimestampTz,
                     c.DeletedAt is long deleted ? DateTimeOffset.FromUnixTimeSeconds(deleted).UtcDateTime : null));
                 p.Add(Text("original_name", c.OriginalName));
+                p.Add(Text("console_requested_name", c.ConsoleRequestedName));
                 p.Add(Typed("respec_count", NpgsqlDbType.Smallint, c.RespecCount is byte respecs ? (short)respecs : null));
                 p.Add(Typed("respec_points", NpgsqlDbType.Bigint, c.RespecPoints is uint balance ? (long)balance : null));
                 if (command.ExecuteNonQuery() != 1) throw new CharacterStoreConflictException("Character row changed concurrently.");

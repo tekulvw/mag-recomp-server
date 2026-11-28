@@ -419,7 +419,7 @@ namespace Server.Medius
             }
             PortalTickets = MagPortalTicketPolicy.FromSettings(MagPortalTicketSettings.FromEnvironment());
             if (PortalTickets != null)
-                Logger.Info($"Portal tickets required: audience={PortalTickets.Settings.Audience} keys={string.Join(",", PortalTickets.Settings.Keys.Keys.OrderBy(id => id))}");
+                Logger.Info($"Ticket authentication {PortalTickets.Settings.Mode}: audience={PortalTickets.Settings.Audience} keys={string.Join(",", PortalTickets.Settings.Keys.Keys.OrderBy(id => id))}");
             PublishActiveAccounts();
             DmePortBudget = MagDmePortBudget.FromEnvironment();
             StartVoiceSanctions();

@@ -34,7 +34,7 @@ namespace Server.Medius
         /// already holding the requested name), plus a reward receipt and match row for rewards, or the
         /// account's voice sanctions for moderation.</summary>
         private sealed record StoreScope(string Account, uint CharacterId = 0, string RewardId = null, string MatchKey = null,
-            string Name = null, bool CreateDirectory = true, bool VoiceSanctions = false);
+            string Name = null, bool CreateDirectory = true, bool VoiceSanctions = false, string[] AdditionalNames = null);
 
         private interface ICharacterBackend
         {

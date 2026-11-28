@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
+using Npgsql;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
@@ -11,13 +13,13 @@ namespace Server.Medius
     // Verifies portal game tickets (docs/portal-ticket.md) carried in the NP authenticate message.
     // Off by default: with MAG_PORTAL_TICKETS unset or "off", nothing here is constructed.
 
-    public enum MagPortalTicketMode { Off, Required }
+    public enum MagPortalTicketMode { Off, Required, Dual }
 
     /// <summary>Why a ticket exchange stopped. Only these classes are logged; never ticket bytes.</summary>
     public enum MagPortalTicketReason
     {
         Accepted, Pending, Malformed, UnknownKey, BadSignature, BadLifetime, NotYetValid, Expired,
-        WrongAudience, BadIdentity, Replayed, ReplayCacheFull, BadChunk, BadHeader, TooManyAttempts, AccountSignedIn
+        WrongAudience, BadIdentity, LinkRequired, AccountUnavailable, Replayed, ReplayCacheFull, BadChunk, BadHeader, TooManyAttempts, AccountSignedIn
     }
 
     public static class MagPortalTicketReasons
@@ -35,6 +37,8 @@ namespace Server.Medius
             MagPortalTicketReason.Expired => "expired",
             MagPortalTicketReason.WrongAudience => "wrong_audience",
             MagPortalTicketReason.BadIdentity => "bad_identity",
+            MagPortalTicketReason.LinkRequired => "link_required",
+            MagPortalTicketReason.AccountUnavailable => "account_unavailable",
             MagPortalTicketReason.Replayed => "replayed",
             MagPortalTicketReason.ReplayCacheFull => "replay_cache_full",
             MagPortalTicketReason.BadChunk => "bad_chunk",
@@ -51,6 +55,12 @@ namespace Server.Medius
         public const string ModeVariable = "MAG_PORTAL_TICKETS";
         public const string KeysVariable = "MAG_PORTAL_TICKET_KEYS";
         public const string AudienceVariable = "MAG_PORTAL_TICKET_AUDIENCE";
+        public const string PsnKeysVariable = "MAG_PSN_TICKET_KEYS";
+        public const string PsnServicesVariable = "MAG_PSN_SERVICE_IDS";
+        public const string IdentityDatabaseVariable = "MAG_IDENTITY_DB_CONNECTION_FILE";
+        public IReadOnlyDictionary<string, byte[]> PsnKeys { get; private set; }
+        public IReadOnlyCollection<string> PsnServices { get; private set; }
+        internal string IdentityConnectionString { get; private set; }
         private const string P256Oid = "1.2.840.10045.3.1.7";
 
         public MagPortalTicketMode Mode { get; private set; }
@@ -68,13 +78,47 @@ namespace Server.Medius
         {
             string mode = read(ModeVariable);
             if (string.IsNullOrEmpty(mode) || mode == "off") return new MagPortalTicketSettings { Mode = MagPortalTicketMode.Off };
-            if (mode != "required") throw new ArgumentException(ModeVariable + " must be \"off\" or \"required\".");
-            return new MagPortalTicketSettings
+            if (mode != "required" && mode != "dual") throw new ArgumentException(ModeVariable + " must be off, required or dual.");
+            var settings = new MagPortalTicketSettings
             {
-                Mode = MagPortalTicketMode.Required,
+                Mode = mode == "dual" ? MagPortalTicketMode.Dual : MagPortalTicketMode.Required,
                 Keys = ParseKeys(read(KeysVariable)),
                 Audience = ParseAudience(read(AudienceVariable))
             };
+            if (settings.Mode == MagPortalTicketMode.Dual)
+            {
+                string encoded = read(PsnKeysVariable);
+                if (string.IsNullOrWhiteSpace(encoded)) throw new ArgumentException(PsnKeysVariable + " is required in dual mode.");
+                var keys = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+                foreach (string entry in encoded.Split(','))
+                {
+                    int colon = entry.IndexOf(':');
+                    string id = colon < 0 ? "" : entry[..colon].Trim();
+                    if (id.Length != 8 || id.Any(c => !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f')) || keys.ContainsKey(id))
+                        throw new ArgumentException(PsnKeysVariable + " needs unique eight-lowercase-hex key IDs and base64 SPKI keys.");
+                    try { keys.Add(id, Convert.FromBase64String(entry[(colon + 1)..].Trim())); }
+                    catch (FormatException) { throw new ArgumentException(PsnKeysVariable + " contains invalid base64."); }
+                }
+                string services = read(PsnServicesVariable);
+                if (string.IsNullOrWhiteSpace(services)) throw new ArgumentException(PsnServicesVariable + " is required in dual mode.");
+                settings.PsnKeys = keys;
+                settings.PsnServices = services.Split(',').Select(value => value.Trim()).ToArray();
+                // The independent verifier validates key curves and service field bounds at startup.
+                _ = new MagPsnTicketVerifier(settings.PsnKeys, settings.PsnServices);
+                string path = read(IdentityDatabaseVariable);
+                if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path))
+                    throw new ArgumentException(IdentityDatabaseVariable + " must name an absolute connection-string secret file.");
+                try
+                {
+                    if (new FileInfo(path).Length > 65536) throw new IOException();
+                    settings.IdentityConnectionString = File.ReadAllText(path).Trim();
+                    _ = new NpgsqlConnectionStringBuilder(settings.IdentityConnectionString);
+                    if (settings.IdentityConnectionString.Length == 0) throw new IOException();
+                }
+                catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is ArgumentException)
+                { throw new ArgumentException(IdentityDatabaseVariable + " is unreadable or invalid."); }
+            }
+            return settings;
         }
 
         public static bool ValidAudience(string value) => value != null && value.Length >= 1 && value.Length <= 63 &&
@@ -415,6 +459,10 @@ namespace Server.Medius
         /// <summary>Lowercase player name: the key of existing local characters.</summary>
         public string Account { get; internal set; }
         public uint AccountId { get; internal set; }
+        public string OnlineId { get; internal set; }
+        public string Provider { get; internal set; }
+        // Sent only to the authenticated connection; never included in RefusalLog.
+        public string LinkCode { get; internal set; }
         /// <summary>
         /// For a refused ticket whose signature verified: its signed fields, for staff logs. Null when
         /// the ticket was accepted, or refused before its signature could be trusted.
@@ -454,26 +502,42 @@ namespace Server.Medius
         public const int MaximumFailuresPerSession = 3;
         private readonly MagPortalTicketVerifier _verifier;
         private readonly Func<DateTime> _clock;
+        private readonly MagPsnTicketVerifier _psnVerifier;
+        private readonly IMagExternalIdentityStore _identities;
+        private readonly MagPortalNonceCache _psnNonces = new MagPortalNonceCache();
 
         public MagPortalTicketSettings Settings { get; }
         public MagPortalNonceCache Nonces { get; }
         public MagPortalLiveSessions Sessions { get; } = new MagPortalLiveSessions();
 
-        public MagPortalTicketPolicy(MagPortalTicketSettings settings, Func<DateTime> clock = null, MagPortalNonceCache nonces = null)
+        public MagPortalTicketPolicy(MagPortalTicketSettings settings, Func<DateTime> clock = null, MagPortalNonceCache nonces = null, IMagExternalIdentityStore identities = null)
         {
-            if (settings == null || settings.Mode != MagPortalTicketMode.Required) throw new ArgumentException("Portal ticket policy needs required mode.", nameof(settings));
+            if (settings == null || settings.Mode == MagPortalTicketMode.Off) throw new ArgumentException("Portal ticket policy needs required mode.", nameof(settings));
             Settings = settings;
             _verifier = new MagPortalTicketVerifier(settings.Keys, settings.Audience);
             _clock = clock ?? (() => DateTime.UtcNow);
             Nonces = nonces ?? new MagPortalNonceCache();
+            if (settings.Mode == MagPortalTicketMode.Dual)
+            {
+                _identities = identities ?? throw new ArgumentException("Dual mode requires an identity store.");
+                _psnVerifier = new MagPsnTicketVerifier(settings.PsnKeys, settings.PsnServices);
+            }
         }
 
         /// <summary>Null when tickets are off, so sessions keep their unchanged development path.</summary>
-        public static MagPortalTicketPolicy FromSettings(MagPortalTicketSettings settings) =>
-            settings.Mode == MagPortalTicketMode.Required ? new MagPortalTicketPolicy(settings) : null;
+        public static MagPortalTicketPolicy FromSettings(MagPortalTicketSettings settings)
+        {
+            if (settings.Mode == MagPortalTicketMode.Off) return null;
+            if (settings.Mode == MagPortalTicketMode.Required) return new MagPortalTicketPolicy(settings);
+            var store = new PostgresMagExternalIdentityStore(settings.IdentityConnectionString);
+            try { store.CheckSchema(); return new MagPortalTicketPolicy(settings, identities: store); }
+            catch { store.Dispose(); throw new ArgumentException("Dual authentication identity database/schema unavailable."); }
+        }
 
         /// <summary>The application's NP authenticate message ID; used to keep its payload out of logs.</summary>
         public static bool IsTicketMessage(int applicationId, int messageId) => messageId == (applicationId == 20231 ? 0x0034 : 0x0031);
+        // Diagnostics must also redact a wrong-profile auth packet before parsing rejects it.
+        public static bool IsSensitiveTicketMessage(int messageId) => messageId == 0x0034 || messageId == 0x0031;
 
         /// <summary>
         /// Verifies a chunk. On a complete valid ticket, <paramref name="owner"/> (when given) claims the
@@ -490,9 +554,25 @@ namespace Server.Medius
             if (reason == MagPortalTicketReason.Pending) return new MagPortalAuthentication { Reason = reason };
             if (reason != MagPortalTicketReason.Accepted) return Fail(assembly, reason, true);
             long now = UnixSeconds(_clock());
+            // Format routing is final: a failed MAGT proof never tries another issuer or development auth.
+            bool portal = bytes.Length >= 4 && bytes.AsSpan(0, 4).SequenceEqual("MAGT"u8);
+            if (_psnVerifier != null && !portal) return AuthenticatePsn(assembly, bytes, now, owner, sessionNow);
             reason = _verifier.Verify(bytes, now, out var ticket, out var signed);
             if (reason != MagPortalTicketReason.Accepted) return Fail(assembly, reason, true, signed, now);
             string account = ticket.PlayerName.ToLowerInvariant();
+            if (_identities != null)
+            {
+                try
+                {
+                    var resolved = _identities.ResolvePortal(ticket.AccountId, ticket.PlayerName);
+                    if (resolved == null) return Fail(assembly, MagPortalTicketReason.AccountUnavailable, true);
+                    account = resolved.Owner;
+                    now = UnixSeconds(_clock());
+                    if (ticket.ExpiresAt <= now) return Fail(assembly, MagPortalTicketReason.Expired, true);
+                }
+                catch (Exception e) when (e is NpgsqlException || e is IOException || e is TimeoutException)
+                { return Fail(assembly, MagPortalTicketReason.AccountUnavailable, true); }
+            }
             // Claim first so a refused second session spends none of the ticket's uses.
             if (owner != null && !Sessions.TryClaim(account, owner, sessionNow)) return Fail(assembly, MagPortalTicketReason.AccountSignedIn, true, ticket, now);
             reason = Nonces.TryUse(ticket.Nonce, ticket.AccountId, ticket.ExpiresAt, now);
@@ -501,7 +581,39 @@ namespace Server.Medius
                 if (owner != null) Sessions.Release(owner);
                 return Fail(assembly, reason, true, ticket, now);
             }
-            return new MagPortalAuthentication { Reason = reason, Account = account, AccountId = ticket.AccountId, CheckedAt = now };
+            return new MagPortalAuthentication { Reason = reason, Account = account, AccountId = ticket.AccountId, OnlineId = ticket.PlayerName, Provider = "portal", CheckedAt = now };
+        }
+
+        private MagPortalAuthentication AuthenticatePsn(MagPortalTicketAssembly assembly, byte[] bytes, long now,
+            IMagPortalSession owner, DateTime sessionNow)
+        {
+            var reason = _psnVerifier.VerifyAtMilliseconds(bytes, UnixMilliseconds(_clock()), out var ticket);
+            if (reason != MagPortalTicketReason.Accepted) return Fail(assembly, reason, true);
+            try
+            {
+                var account = _identities.ResolvePsn(ticket.Subject);
+                now = UnixSeconds(_clock());
+                if (ticket.ExpiresAtMilliseconds <= UnixMilliseconds(_clock())) return Fail(assembly, MagPortalTicketReason.Expired, true);
+                if (account == null)
+                {
+                    string code = _identities.IssueProof(ticket.Subject, ticket.OnlineId, UnixMilliseconds(_clock()), ticket.ExpiresAtMilliseconds);
+                    var refused = Fail(assembly, code == null ? MagPortalTicketReason.AccountUnavailable : MagPortalTicketReason.LinkRequired, true);
+                    refused.LinkCode = code;
+                    return refused;
+                }
+                if (owner != null && !Sessions.TryClaim(account.Owner, owner, sessionNow))
+                    return Fail(assembly, MagPortalTicketReason.AccountSignedIn, true);
+                reason = _psnNonces.TryUse(ticket.ReplayNonce, account.AccountId, ticket.ExpiresAt, now);
+                if (reason != MagPortalTicketReason.Accepted)
+                {
+                    if (owner != null) Sessions.Release(owner);
+                    return Fail(assembly, reason, true);
+                }
+                return new MagPortalAuthentication { Reason = reason, Account = account.Owner, AccountId = account.AccountId,
+                    OnlineId = ticket.OnlineId, Provider = "psn", CheckedAt = now };
+            }
+            catch (Exception e) when (e is NpgsqlException || e is IOException || e is TimeoutException)
+            { return Fail(assembly, MagPortalTicketReason.AccountUnavailable, true); }
         }
 
         /// <summary>
@@ -527,6 +639,9 @@ namespace Server.Medius
             if (count) assembly.Failures++;
             return new MagPortalAuthentication { Reason = reason, RefusedTicket = signed, CheckedAt = checkedAt };
         }
+
+        internal static long UnixMilliseconds(DateTime time) => new DateTimeOffset(
+            time.Kind == DateTimeKind.Local ? time.ToUniversalTime() : DateTime.SpecifyKind(time, DateTimeKind.Utc)).ToUnixTimeMilliseconds();
 
         internal static long UnixSeconds(DateTime time)
         {

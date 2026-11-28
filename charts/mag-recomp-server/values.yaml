@@ -184,7 +184,8 @@ resources:
     limits: {memory: 1Gi}
 # Optional portal game-ticket sign-in for Medius (docs/portal-ticket.md). "off" keeps the
 # development name sign-in and sets no environment. "required" accepts only valid portal
-# tickets and needs the audience and at least one key.
+# tickets and needs the audience and at least one key. "dual" additionally accepts trusted
+# Sony NP tickets linked to portal accounts (docs/dual-authentication.md).
 portalTickets:
   mode: "off"
   # This server's host name, exactly as the portal writes it into tickets.
@@ -192,6 +193,14 @@ portalTickets:
   # Key ID (0-255) to base64 DER SubjectPublicKeyInfo, as served by the portal's
   # GET /api/v1/ticket-keys. Public keys, not secrets. Keep the old key while rotating.
   keys: {}
+  # Dual mode only: trusted Sony key ID (eight lowercase hex digits) to base64 DER SPKI.
+  # No Sony key or NP service ID is assumed. Configure trust after console qualification.
+  sonyKeys: {}
+  sonyServices: []
+  # Existing Secret containing the portal database's Npgsql connection string.
+  # Mounted read-only only in MAPS/main Medius; the chart never creates this Secret.
+  identityDatabaseSecret: ""
+  identityDatabaseSecretKey: connectionString
 # Optional internal admin API for character maintenance (docs/admin-cli.md, "Admin API"),
 # served by the main medius container only. It is cluster-internal: a ClusterIP Service and a
 # NetworkPolicy admit only pods in allowedNamespaceSelector namespaces. Never route it through a

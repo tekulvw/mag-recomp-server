@@ -11,13 +11,17 @@ namespace Server.Medius
     public sealed class MagMapsSession : IMagPortalSession
     {
         public enum SessionState { AwaitingHello, HelloSent, WaitingForAuthentication, LocalDevelopmentAuthenticated, ContentSent, CharacterListSent, WaitingForUniverse }
-        public SessionState State { get; private set; } = SessionState.AwaitingHello;
+        private volatile SessionState _state = SessionState.AwaitingHello;
+        public SessionState State { get => _state; private set => _state = value; }
         public bool IsEstablished => State != SessionState.AwaitingHello;
         public bool DevelopmentAuthEnabled { get; set; } = false;
         public bool CharacterStorageEnabled { get; set; }
         public LocalCharacterStore CharacterStore { get; set; }
         public string StorageStatus { get; private set; } = "inactive";
         public string AuthenticatedAccount { get; private set; }
+        public string AuthenticatedOnlineId { get; private set; }
+        /// <summary>Only the connection handler may deliver this proof; do not log it.</summary>
+        public string ConsoleLinkCode { get; private set; }
         /// <summary>Portal tickets in required mode; null keeps the development identity policy.</summary>
         public MagPortalTicketPolicy PortalTickets { get; set; }
         /// <summary>Portal account ID of a ticket-authenticated session; 0 otherwise.</summary>
@@ -28,7 +32,7 @@ namespace Server.Medius
         private readonly MagPortalTicketAssembly _portalTicket = new MagPortalTicketAssembly();
         /// <summary>Idle limit for portal account liveness; MAS.cs sets the application's client timeout.</summary>
         public int PortalLiveTimeoutSeconds { get; set; } = 30;
-        private bool _portalSessionEnded;
+        private volatile bool _portalSessionEnded;
         public bool IsPortalSessionLive(DateTime now) =>
             !_portalSessionEnded && !IsExpired(now, PortalLiveTimeoutSeconds);
         /// <summary>The connection closed: free its portal account for the next sign-in.</summary>
@@ -40,22 +44,23 @@ namespace Server.Medius
         // Portal tickets replace the development identity check, not the local account stack behind it.
         private bool AccountAuthEnabled => DevelopmentAuthEnabled || PortalTickets != null;
         private uint _selectedCharacterId;
-        private DateTime _lastActivityUtc;
+        private readonly MagSessionActivity _activity = new MagSessionActivity();
         private readonly MagServerNews _news;
 
         public MagMapsSession(MagServerNews news = null) => _news = news;
 
         public void ObserveActivity(DateTime now)
         {
-            if (IsEstablished) _lastActivityUtc = now;
+            _activity.Observe(now);
         }
         public bool IsExpired(DateTime now, int timeoutSeconds) =>
-            IsEstablished && (now - _lastActivityUtc).TotalSeconds > timeoutSeconds;
+            IsEstablished && _activity.IsExpired(now, timeoutSeconds);
 
         public IReadOnlyList<RT_MSG_SERVER_PLUGIN_TO_APP> HandleMany(bool enabled, int applicationId,
             RT_MSG_CLIENT_APP_TO_PLUGIN envelope, DateTime now)
         {
             PortalTicketRefusal = null;
+            ConsoleLinkCode = null;
             if (!enabled || !MagPluginRouting.IsSelectedApplication(applicationId) || !envelope.IsValid || envelope.PluginId != 0)
                 return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();
             if (!MagMessageCodec.TryParseClientForApplication(envelope.Payload, applicationId, out var message))
@@ -69,6 +74,8 @@ namespace Server.Medius
                     ObserveActivity(now);
                     return Reply(applicationId, new MagKeepAlive());
                 case MagHello _ when State == SessionState.AwaitingHello:
+                    // Publish initial activity before volatile established state becomes visible to the tick.
+                    ObserveActivity(now);
                     State = SessionState.HelloSent;
                     ObserveActivity(now);
                     // Empty/zero auxiliary values are explicit local policy awaiting retail runtime validation.
@@ -168,10 +175,11 @@ namespace Server.Medius
             var outcome = PortalTickets.Authenticate(_portalTicket, request, this, now);
             PortalTicketStatus = outcome.Reason.Code();
             PortalTicketRefusal = outcome.RefusalLog();
+            ConsoleLinkCode = outcome.LinkCode;
             refusal = MagPortalTicketPolicy.RefusalReply(request, outcome);
             ObserveActivity(now);
             if (!outcome.Accepted) return false;
-            AuthenticatedAccount = outcome.Account; PortalAccountId = outcome.AccountId;
+            AuthenticatedAccount = outcome.Account; PortalAccountId = outcome.AccountId; AuthenticatedOnlineId = outcome.OnlineId;
             return true;
         }
 

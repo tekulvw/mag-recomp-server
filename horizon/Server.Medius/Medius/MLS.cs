@@ -296,7 +296,7 @@ namespace Server.Medius
                         }
                         if (data.MagMlsSession.LastRefusal != null)
                             Logger.Warn($"MAG MLS unhandled plugin type={plugin.ApplicationMessageType:X4} plugin={plugin.PluginId} bytes={plugin.Payload?.Length ?? 0} " +
-                                $"reason={data.MagMlsSession.LastRefusal} head={MagMlsSession.PayloadHead(plugin.Payload)}");
+                                $"reason={data.MagMlsSession.LastRefusal} head={(MagPortalTicketPolicy.IsSensitiveTicketMessage(plugin.ApplicationMessageType) ? "redacted" : MagMlsSession.PayloadHead(plugin.Payload))}");
                         Logger.Info($"MAG MLS plugin type={plugin.ApplicationMessageType:X4} bytes={plugin.Payload?.Length ?? 0} state={data.MagMlsSession.State}/{data.MagMlsSession.StorageStatus} refresh={data.MagMlsSession.LoadoutRefreshStatus} replies={replies.Count}");
                         Queue(replies, clientChannel);
                         break;

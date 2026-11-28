@@ -52,6 +52,28 @@ The tests run a fake OpenID provider and never contact Google. `tests/ticket-vec
 holds ticket test vectors for other verifiers; regenerate them with
 `PORTAL_WRITE_VECTORS=1 cargo test --test ticket_vectors` after a deliberate format change.
 
+## Console account linking
+
+Signed-in people manage Sony identity links at `/account/console`, also linked from their
+account page. The portal never accepts a Sony ticket or issues a code: the explicitly
+configured dual-auth Medius service verifies a Sony ticket and writes a five-minute,
+128-bit proof to the same PostgreSQL database. Console delivery and stock MAG compatibility
+remain unverified hardware gates; see the [dual-auth design](../docs/superpowers/specs/2026-11-28-dual-auth-design.md).
+
+The browser redeems only the code delivered to the user's own console, with their existing
+portal session and CSRF token. The hash is SHA-256 of the lowercase 32-character ASCII hex
+string, after trimming outer whitespace, not of decoded random bytes. Redemption locks and
+rechecks the current account, consumes the proof and inserts the unique provider-qualified
+identity atomically. Conflicts leave the proof intact. Display names never establish ownership.
+Unlinking and bans prevent new admissions; existing game-session leases remain unchanged.
+Account deletion cascades to identity links, and expired proofs are removed by normal cleanup.
+Google sign-in, launcher linking and portal ticket bytes are unchanged.
+
+Migration `0009_external_identities.sql` owns the shared schema (`0008_player_reports.sql`
+already existed). The Medius connection must target this same database, with credentials
+provided through its configured secret file. Never enable request-body logging for console
+codes or NP tickets. Synthetic database and HTTP coverage is in `tests/portal_console.rs`.
+
 ## Setting up
 
 1. **Google OAuth client.** In Google Cloud console, create an OAuth client of type *Web

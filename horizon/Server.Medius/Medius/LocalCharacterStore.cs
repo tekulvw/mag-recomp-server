@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
@@ -83,6 +84,9 @@ namespace Server.Medius
         /// <summary>A deleted character's name before the deletion moved it aside; null otherwise.</summary>
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public string OriginalName { get; set; }
+        /// <summary>Original console creation key, scoped to this owner and active only while live.</summary>
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string ConsoleRequestedName { get; set; }
         /// <summary>Skill respecs the character has taken (retail RespecCount); null for none. It selects the next fee.</summary>
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public byte? RespecCount { get; set; }
@@ -447,7 +451,9 @@ namespace Server.Medius
         private static bool SlotsUnique(IEnumerable<StoredCharacter> characters)
         {
             var live = characters.Where(c => !c.Deleted).Select(c => (c.Account, c.Slot)).ToList();
-            return live.Distinct().Count() == live.Count;
+            var aliases = characters.Where(c => !c.Deleted && c.ConsoleRequestedName != null)
+                .Select(c => (c.Account, Name: c.ConsoleRequestedName.ToLowerInvariant())).ToList();
+            return live.Distinct().Count() == live.Count && aliases.Distinct().Count() == aliases.Count;
         }
         /// <summary>The lowest slot <paramref name="account"/>'s live characters leave free, or null when all are taken.</summary>
         private static byte? FreeSlot(IEnumerable<StoredCharacter> characters, string account)
@@ -466,6 +472,7 @@ namespace Server.Medius
             characters.SingleOrDefault(c => c.Account == account && c.Id == characterId && !c.Deleted);
         private static bool Valid(StoredCharacter c, int schema) => c != null && c.Id > 0 && ValidName(c.Name) && c.Faction <= 2 &&
             c.Slot < CharacterSlots && (c.DeletedAt == null || c.DeletedAt >= 0) &&
+            (c.ConsoleRequestedName == null || ValidName(c.ConsoleRequestedName)) &&
             (c.OriginalName == null || c.DeletedAt != null && ValidName(c.OriginalName)) &&
             (c.Experience == null || c.Experience >= 0) && (c.Level == null || c.Level >= 1) &&
             (c.Leadership?.LeadershipLevelFloor == null || c.Leadership.LeadershipPoints.HasValue && c.Leadership.LeadershipLevelFloor == c.Leadership.LeadershipLevel) &&
@@ -482,26 +489,75 @@ namespace Server.Medius
             ? CreateForAccount(request, "player") : Outcome(MagNetResult.NameInvalid, "invalid-legacy-name");
         // A concurrent create in PostgreSQL can lose a unique-index race; the retry then sees the winner.
         public CharacterCreationOutcome CreateForAccount(MagCreateCharacterRequest request, string account) =>
-            Retrying(() => CreateForAccountOnce(request, account));
-        private CharacterCreationOutcome CreateForAccountOnce(MagCreateCharacterRequest request, string account)
+            CreateForAccount(request, account, null);
+        /// <summary>Identity consistency uses the verified online ID; character ownership stays canonical.</summary>
+        public CharacterCreationOutcome CreateForAccount(MagCreateCharacterRequest request, string account, string verifiedOnlineId) =>
+            CreateForAccount(request, account, verifiedOnlineId, false);
+        /// <summary>Only callers with verified Sony provider provenance enable console name assignment.</summary>
+        public CharacterCreationOutcome CreateForAccount(MagCreateCharacterRequest request, string account, string verifiedOnlineId, bool assignConsoleConflictName)
         {
             if (request == null || !MagDevelopmentAccountPolicy.HasZeroRsa(request) || !ValidName(request.AccountName) || !MagDevelopmentAccountPolicy.ValidAccount(account))
                 return Outcome(MagNetResult.NameInvalid, "invalid-local-name-or-header");
             if (request.Faction > 2 || request.UniverseId != 26)
                 return Outcome(MagNetResult.Error, "unsupported-local-profile-fields");
-            if (!MagDevelopmentAccountPolicy.ValidNpId(request.NpId, account))
+            string onlineId = verifiedOnlineId?.ToLowerInvariant() ?? account;
+            if (!MagDevelopmentAccountPolicy.ValidNpId(request.NpId, onlineId))
                 return Outcome(MagNetResult.Error, "np-id-account-mismatch");
-            using var session = _backend.Open(new StoreScope(account, Name: request.AccountName));
+            // Existing records are canonical-owner NP IDs. Preserve that storage contract while
+            // checking the caller's provider identity above; never mutate the received request.
+            byte[] storedNpId = (byte[])request.NpId.Clone();
+            if (onlineId != account && storedNpId.Any(value => value != 0))
+            {
+                storedNpId = new byte[36];
+                Encoding.ASCII.GetBytes(account).CopyTo(storedNpId, 0);
+            }
+            string[] candidates = assignConsoleConflictName ? ConsoleNames(request.AccountName) : Array.Empty<string>();
+            // One bounded random pool per validated logical request, reused by every transaction retry.
+            return Retrying(() => CreateForAccountOnce(request, account, storedNpId, assignConsoleConflictName, candidates));
+        }
+        private const int ConsoleNameAttempts = 16;
+        private static string[] ConsoleNames(string requested)
+        {
+            string suffix = NamedSlot(requested).HasValue ? requested[^2..] : "";
+            string prefix = suffix.Length == 0 ? requested : requested[..^2];
+            return Enumerable.Range(0, ConsoleNameAttempts).Select(attempt => {
+                // Persisted aliases give retries stability; unpredictable candidates resist preclaiming.
+                string discriminator = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(12)).ToLowerInvariant();
+                string ending = "~" + discriminator + suffix;
+                // Full character records use a 31-byte CString even though the store accepts 32.
+                return prefix[..Math.Min(prefix.Length, 31 - ending.Length)] + ending;
+            }).ToArray();
+        }
+        /// <summary>Exact owner-bound selection; aliases never enable a global name lookup.</summary>
+        internal static bool MatchesSelection(StoredCharacter character, string requested, bool consoleAliases) =>
+            !character.Deleted && (character.Name == requested || consoleAliases && character.ConsoleRequestedName == requested);
+        private CharacterCreationOutcome CreateForAccountOnce(MagCreateCharacterRequest request, string account, byte[] storedNpId, bool assignConsoleConflictName, string[] candidates)
+        {
+            using var session = _backend.Open(new StoreScope(account, Name: request.AccountName, AdditionalNames: candidates));
             var all = session.Document.Characters;
             // Names are unique across the whole store. A deleted character's name was moved aside, so the
             // client can create a new character under the same "<online ID>!<slot>" name at once.
-            var existing = all.SingleOrDefault(c => string.Equals(c.Name, request.AccountName, StringComparison.OrdinalIgnoreCase));
+            var alias = all.SingleOrDefault(c => c.Account == account && !c.Deleted &&
+                string.Equals(c.ConsoleRequestedName, request.AccountName, StringComparison.OrdinalIgnoreCase));
+            var existing = alias ?? all.SingleOrDefault(c => string.Equals(c.Name, request.AccountName, StringComparison.OrdinalIgnoreCase));
+            string assignedName = request.AccountName;
+            bool assigned = false;
+            // Sony callers also need assignment when a free store-valid name exceeds full-record capacity.
+            if (assignConsoleConflictName && (existing != null && existing.Account != account || existing == null && request.AccountName.Length > 31))
+            {
+                assignedName = candidates.FirstOrDefault(name => !all.Any(c =>
+                    string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase) || c.Account == account && !c.Deleted &&
+                    string.Equals(c.ConsoleRequestedName, name, StringComparison.OrdinalIgnoreCase)));
+                if (assignedName == null) return Outcome(MagNetResult.NameTaken, "console-character-names-exhausted");
+                existing = null; assigned = true;
+            }
             if (existing != null)
             {
                 // Only an exact retry of this account's own creation succeeds again (a lost acknowledgement).
-                bool same = existing.Account == account && !existing.Deleted && existing.Name == request.AccountName &&
+                bool same = existing.Account == account && !existing.Deleted &&
+                    (existing.Name == request.AccountName || assignConsoleConflictName && existing.ConsoleRequestedName == request.AccountName) &&
                     existing.Faction == request.Faction && existing.HeadId == request.HeadId && existing.VoiceId == request.VoiceId &&
-                    existing.UniverseId == request.UniverseId && existing.NpId.SequenceEqual(request.NpId);
+                    existing.UniverseId == request.UniverseId && existing.NpId.SequenceEqual(storedNpId);
                 if (!same) return Outcome(MagNetResult.NameTaken, "character-name-taken");
             }
             else
@@ -513,8 +569,8 @@ namespace Server.Medius
                 if (NamedSlot(request.AccountName) is byte named && IsFree(all, account, named)) slot = named;
                 if (session.CharacterLimit is int limit && all.Count >= limit) return Outcome(MagNetResult.Error, "local-store-full");
                 uint next = session.NextCharacterId();
-                var created = new StoredCharacter { Account = account, Id = next, Slot = slot, Name = request.AccountName, Faction = request.Faction,
-                    HeadId = request.HeadId, VoiceId = request.VoiceId, UniverseId = request.UniverseId, NpId = (byte[])request.NpId.Clone() };
+                var created = new StoredCharacter { Account = account, Id = next, Slot = slot, Name = assignedName, ConsoleRequestedName = assigned ? request.AccountName : null, Faction = request.Faction,
+                    HeadId = request.HeadId, VoiceId = request.VoiceId, UniverseId = request.UniverseId, NpId = storedNpId };
                 if (ProgressionCatalog != null)
                 {
                     var catalog = ProgressionCatalog;
@@ -1002,13 +1058,25 @@ namespace Server.Medius
             if (refusal != null) return AdminCharacterChange.Refused(refusal, account, name);
             if (FreeSlot(document.Characters, account) is not byte slot) return AdminCharacterChange.Refused("character-slots-full", account, character.Name);
             string restored = character.OriginalName != null && !document.Characters.Any(c => c != character &&
-                string.Equals(c.Name, character.OriginalName, StringComparison.OrdinalIgnoreCase)) ? character.OriginalName : character.Name;
+                (string.Equals(c.Name, character.OriginalName, StringComparison.OrdinalIgnoreCase) || c.Account == account && !c.Deleted &&
+                string.Equals(c.ConsoleRequestedName, character.OriginalName, StringComparison.OrdinalIgnoreCase))) ? character.OriginalName : character.Name;
+            // Validate the final choice too: the moved-aside name may now be another live owned alias.
+            if (document.Characters.Any(c => c != character && c.Account == account && !c.Deleted &&
+                string.Equals(c.ConsoleRequestedName, restored, StringComparison.OrdinalIgnoreCase)))
+                return AdminCharacterChange.Refused("character-name-alias-taken", account, character.Name);
+            // Deleted names may use all 32 store bytes; restored live records must fit the wire CString.
+            if (restored.Length > 31)
+                return AdminCharacterChange.Refused("character-name-unserializable", account, character.Name);
             var change = new AdminCharacterChange { Account = account, CharacterId = character.Id, Name = restored, PreviousName = character.Name,
                 Level = character.ToRecord().Level, Slot = slot, DeletedAt = character.DeletedAt, Reason = "dry-run" };
             if (!apply) return change;
             if (_backend is JsonBackend && (string.IsNullOrWhiteSpace(backupDirectory) || !Path.IsPathFullyQualified(backupDirectory)))
                 return AdminCharacterChange.Refused("backup-directory-required", account, character.Name);
             change.BackupPath = session.Backup(backupDirectory, "character-restore", account, character.Id, character.Id.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            if (character.ConsoleRequestedName != null && document.Characters.Any(c => c.Id != character.Id && c.Account == account && !c.Deleted &&
+                (string.Equals(c.ConsoleRequestedName, character.ConsoleRequestedName, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(c.Name, character.ConsoleRequestedName, StringComparison.OrdinalIgnoreCase))))
+                character.ConsoleRequestedName = null;
             character.DeletedAt = null; character.Slot = slot; character.Name = restored; character.OriginalName = null;
             session.Commit();
             change.Applied = true; change.Reason = "applied";

@@ -33,6 +33,57 @@ namespace Server.Medius
 
         }
 
+        private readonly MagAuthenticationWorkQueue _magAuthenticationWork = new MagAuthenticationWorkQueue();
+
+        private void ProcessMagPlugin(RT_MSG_CLIENT_APP_TO_PLUGIN plugin, IChannel clientChannel, ChannelData data, MagPluginService pluginService, int application)
+        {
+            int appMessageId = plugin.Payload.Length >= 2 ? (plugin.Payload[0] << 8) | plugin.Payload[1] : -1;
+            IReadOnlyList<RT_MSG_SERVER_PLUGIN_TO_APP> replies;
+            string sessionState, refusal, consoleLinkCode;
+            if (pluginService == MagPluginService.Mas)
+            {
+                data.MagMasSession.DevelopmentAuthEnabled = Program.Settings.EnableMagDevelopmentAuth;
+                data.MagMasSession.CharacterStorageEnabled = Program.Settings.EnableMagCharacterStorage;
+                data.MagMasSession.AccountLoginEnabled = Program.Settings.EnableMagAccountLogin;
+                data.MagMasSession.CharacterDataEnabled = Program.Settings.EnableMagCharacterData;
+                data.MagMasSession.LoginRegistry = Program.MagLoginTickets;
+                data.MagMasSession.CharacterStore = Program.CreateCharacterStore();
+                data.MagMasSession.PortalTickets = Program.PortalTickets;
+                data.MagMasSession.PortalLiveTimeoutSeconds = Program.GetAppSettingsOrDefault(data.ApplicationId).ClientTimeoutSeconds;
+                replies = data.MagMasSession.HandleMany(true, data.ApplicationId, plugin, Utils.GetHighPrecisionUtcTime());
+                sessionState = data.MagMasSession.State + "/" + data.MagMasSession.StorageStatus;
+                if (Program.PortalTickets != null) sessionState += "/ticket=" + data.MagMasSession.PortalTicketStatus;
+                refusal = data.MagMasSession.PortalTicketRefusal;
+                consoleLinkCode = data.MagMasSession.ConsoleLinkCode;
+            }
+            else
+            {
+                data.MagMapsSession.DevelopmentAuthEnabled = Program.Settings.EnableMagDevelopmentAuth;
+                data.MagMapsSession.CharacterStorageEnabled = Program.Settings.EnableMagCharacterStorage;
+                data.MagMapsSession.CharacterStore = Program.CreateCharacterStore();
+                data.MagMapsSession.PortalTickets = Program.PortalTickets;
+                data.MagMapsSession.PortalLiveTimeoutSeconds = Program.GetAppSettingsOrDefault(data.ApplicationId).ClientTimeoutSeconds;
+                replies = data.MagMapsSession.HandleMany(true, data.ApplicationId, plugin, Utils.GetHighPrecisionUtcTime());
+                sessionState = data.MagMapsSession.State + "/" + data.MagMapsSession.StorageStatus;
+                if (Program.PortalTickets != null) sessionState += "/ticket=" + data.MagMapsSession.PortalTicketStatus;
+                refusal = data.MagMapsSession.PortalTicketRefusal;
+                consoleLinkCode = data.MagMapsSession.ConsoleLinkCode;
+            }
+            if (!clientChannel.Active || data.ApplicationId != application ||
+                (Program.PortalTickets?.Settings.Mode == MagPortalTicketMode.Dual && !data.MagDualBinding.Matches(application)))
+            {
+                data.MagMasSession.EndPortalSession(); data.MagMapsSession.EndPortalSession();
+                return;
+            }
+            if (consoleLinkCode != null) Queue(MagConsoleLinkMessages.Create(consoleLinkCode), clientChannel);
+            if (refusal != null) Logger.Warn($"MAG {pluginService} app={data.ApplicationId} {refusal}");
+            // Portal tickets are bearer credentials until they expire: never log their bytes.
+            if (data.ApplicationId == 20231 && replies.Count == 0)
+                Logger.Info($"RETAIL MAG no-reply app=20231 plugin={plugin.PluginId} length={plugin.Payload.Length} payload={(MagPortalTicketPolicy.IsSensitiveTicketMessage(appMessageId) ? "redacted" : BitConverter.ToString(plugin.Payload).Replace("-", "").ToLowerInvariant())}");
+            Logger.Info($"MAG {pluginService} app={data.ApplicationId} plugin={plugin.PluginId} appMessage=0x{appMessageId:X4} length={plugin.Payload.Length} state={sessionState} replies={replies.Count}");
+            foreach (var reply in replies) Queue(reply, clientChannel);
+        }
+
         protected override async Task ProcessMessage(BaseScertMessage message, IChannel clientChannel, ChannelData data)
         {
             // Get ScertClient data
@@ -80,6 +131,12 @@ namespace Server.Medius
                             return;
                         }
 
+                        if (Program.PortalTickets?.Settings.Mode == MagPortalTicketMode.Dual && !data.MagDualBinding.TryBind(clientConnectTcp.AppId))
+                        {
+                            Logger.Warn("MAG dual authentication refuses transport rebinding.");
+                            await clientChannel.CloseAsync();
+                            return;
+                        }
                         data.ApplicationId = clientConnectTcp.AppId;
                         if (scertClient.IsPS3Client)
                         {
@@ -149,42 +206,26 @@ namespace Server.Medius
                             await clientChannel.CloseAsync();
                             break;
                         }
-                        int appMessageId = plugin.Payload.Length >= 2 ? (plugin.Payload[0] << 8) | plugin.Payload[1] : -1;
-                        IReadOnlyList<RT_MSG_SERVER_PLUGIN_TO_APP> replies;
-                        string sessionState, refusal;
-                        if (pluginService == MagPluginService.Mas)
+                        if (Program.PortalTickets?.Settings.Mode == MagPortalTicketMode.Dual)
                         {
-                            data.MagMasSession.DevelopmentAuthEnabled = Program.Settings.EnableMagDevelopmentAuth;
-                            data.MagMasSession.CharacterStorageEnabled = Program.Settings.EnableMagCharacterStorage;
-                            data.MagMasSession.AccountLoginEnabled = Program.Settings.EnableMagAccountLogin;
-                            data.MagMasSession.CharacterDataEnabled = Program.Settings.EnableMagCharacterData;
-                            data.MagMasSession.LoginRegistry = Program.MagLoginTickets;
-                            data.MagMasSession.CharacterStore = Program.CreateCharacterStore();
-                            data.MagMasSession.PortalTickets = Program.PortalTickets;
-                            data.MagMasSession.PortalLiveTimeoutSeconds = Program.GetAppSettingsOrDefault(data.ApplicationId).ClientTimeoutSeconds;
-                            replies = data.MagMasSession.HandleMany(true, data.ApplicationId, plugin, Utils.GetHighPrecisionUtcTime());
-                            sessionState = data.MagMasSession.State + "/" + data.MagMasSession.StorageStatus;
-                            if (Program.PortalTickets != null) sessionState += "/ticket=" + data.MagMasSession.PortalTicketStatus;
-                            refusal = data.MagMasSession.PortalTicketRefusal;
+                            int application = data.ApplicationId;
+                            // All plugin work for this dual-auth channel is serialized off the shared
+                            // service/world tick, including chunks and messages following sign-in.
+                            if (!_magAuthenticationWork.TryEnqueue(clientChannel.Id.AsLongText(),
+                                () => clientChannel.Active && data.ApplicationId == application && data.MagDualBinding.Matches(application),
+                                () => ProcessMagPlugin(plugin, clientChannel, data, pluginService, application),
+                                error =>
+                                {
+                                    Logger.Warn($"MAG authentication work failed: {error.GetType().Name}");
+                                    data.MagMasSession.EndPortalSession(); data.MagMapsSession.EndPortalSession();
+                                    _ = clientChannel.CloseAsync();
+                                }))
+                            {
+                                Logger.Warn("MAG authentication work capacity exhausted; refusing connection.");
+                                await clientChannel.CloseAsync();
+                            }
                         }
-                        else
-                        {
-                            data.MagMapsSession.DevelopmentAuthEnabled = Program.Settings.EnableMagDevelopmentAuth;
-                            data.MagMapsSession.CharacterStorageEnabled = Program.Settings.EnableMagCharacterStorage;
-                            data.MagMapsSession.CharacterStore = Program.CreateCharacterStore();
-                            data.MagMapsSession.PortalTickets = Program.PortalTickets;
-                            data.MagMapsSession.PortalLiveTimeoutSeconds = Program.GetAppSettingsOrDefault(data.ApplicationId).ClientTimeoutSeconds;
-                            replies = data.MagMapsSession.HandleMany(true, data.ApplicationId, plugin, Utils.GetHighPrecisionUtcTime());
-                            sessionState = data.MagMapsSession.State + "/" + data.MagMapsSession.StorageStatus;
-                            if (Program.PortalTickets != null) sessionState += "/ticket=" + data.MagMapsSession.PortalTicketStatus;
-                            refusal = data.MagMapsSession.PortalTicketRefusal;
-                        }
-                        if (refusal != null) Logger.Warn($"MAG {pluginService} app={data.ApplicationId} {refusal}");
-                        // Portal tickets are bearer credentials until they expire: never log their bytes.
-                        if (data.ApplicationId == 20231 && replies.Count == 0)
-                            Logger.Info($"RETAIL MAG no-reply app=20231 plugin={plugin.PluginId} length={plugin.Payload.Length} payload={(Program.PortalTickets != null && MagPortalTicketPolicy.IsTicketMessage(data.ApplicationId, appMessageId) ? "redacted" : BitConverter.ToString(plugin.Payload).Replace("-", "").ToLowerInvariant())}");
-                        Logger.Info($"MAG {pluginService} app={data.ApplicationId} plugin={plugin.PluginId} appMessage=0x{appMessageId:X4} length={plugin.Payload.Length} state={sessionState} replies={replies.Count}");
-                        foreach (var reply in replies) Queue(reply, clientChannel);
+                        else ProcessMagPlugin(plugin, clientChannel, data, pluginService, data.ApplicationId);
                         break;
                     }
                 case RT_MSG_CLIENT_APP_TOSERVER clientAppToServer:

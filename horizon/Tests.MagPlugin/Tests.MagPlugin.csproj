@@ -7,4 +7,5 @@
   <ItemGroup><ProjectReference Include="../Server.Medius/Server.Medius.csproj" /></ItemGroup>
   <!-- Copy of portal/tests/ticket-vectors.json; tests/test_portal_ticket_vectors.py keeps them identical. -->
   <ItemGroup><None Include="portal-ticket-vectors.json" CopyToOutputDirectory="PreserveNewest" /></ItemGroup>
+  <ItemGroup><None Include="console-link-schema.sql" CopyToOutputDirectory="PreserveNewest" /></ItemGroup>
 </Project>
