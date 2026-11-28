@@ -1531,6 +1531,9 @@ pub struct Engine<W: Write> {
     projectile_contacts: Option<std::sync::Arc<domination_projectile_collision::ContactBindings>>,
     acquisition_gameplay: Option<acquisition_gameplay_engine::Runtime>,
     squad_orders: Option<squad_order_engine::Runtime>,
+    /// (side, objective) of objectives a side completed since the last squad
+    /// order publication; their tags are cleared there (squad_order_engine).
+    completed_squad_tags: Vec<(u8, u16)>,
     acquisition_effect_origin: std::sync::Arc<()>,
     acquisition_static_partitions:
         std::collections::BTreeMap<String, std::sync::Arc<static_collision_partition::Partition>>,

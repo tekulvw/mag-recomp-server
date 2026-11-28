@@ -36,7 +36,7 @@ publish the resulting effective tag.
 Sabotage has no source gameplay provider, so the order runtime keeps each
 squad's manual tag itself. The tag is a replacement policy, not a decoded native
 refresh: it stays until the leader clears or replaces it, the leader loses the
-role, or the round resets. The Sabotage objective catalog carries no FRAGO
+role, its side completes the objective (below), or the round resets. The Sabotage objective catalog carries no FRAGO
 fallback order list, so a cleared tag publishes FFFFFFFF. The squad's FRAGO assignment pairs that tag with
 the existing Sabotage primary, the first authored objective that is not Inactive,
 Completed or Locked. Kill, support and objective rewards use it with the existing
@@ -51,6 +51,27 @@ squads or restart the shared order gate. Reliable type-8 fields13–15 publish t
 effective tag, waypoint position and active bit after squad creation. Current
 recipients receive changes; late joiners receive retained state. Full queues defer
 updates, and failed records change neither baseline nor queued bytes.
+
+## Completed tags
+
+Retail clears a tag once the tagged objective is done for the side that tagged
+it. When a credited action of one side takes an objective to Deactivated,
+Repaired or Completed (a capture, a destroyed structure, a defuse or a repair),
+every squad of that side whose effective tag names the objective loses its
+manual tag, the same as a leader's clear: the mode refreshes the squad's tag
+from its authored fallback, which is empty in the retail Acquisition and
+Domination maps, so the squad's members receive FFFFFFFF through the ordinary
+publication and the leader may tag again. Retail sends no other notice. The
+tag compares object family and slot. The other side's tags on the same
+objective stay, so a defender's tag on its own structure survives the
+structure's destruction and points at the repair. A transition without a
+credited actor (an authored script effect) clears nothing.
+
+The server clears the tags at the next squad order publication, while the
+objective is still in that state. Tags the server keeps for bot-led squads
+([bot-squad-orders.md](bot-squad-orders.md)) are left to move with their
+bots. `squad_tags_cleared` records each cleared squad, its `objective`,
+`previous_tag` and whether the mode `applied` the clear.
 
 Population bots work on their squad's FRAGO while it stays open, and squads
 without a human leader carry an automatic tag on their bots' current objective

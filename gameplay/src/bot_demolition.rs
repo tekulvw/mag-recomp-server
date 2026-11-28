@@ -29,6 +29,9 @@
 //! - The team's nearest member becomes the structure's operator through the
 //!   ordinary objective operator selection and arms the charge with the same
 //!   request a player sends; the others take attack roles around it.
+//! - A squad that works on its human leader's FRAGO sends no team, and a team
+//!   it already has ends (`frago`) without making its side rest: the leader's
+//!   order keeps all of the squad's bots.
 //! - Once the charge is armed the structure is no longer a candidate: the team
 //!   ends and the armed-objective duties (`bot_armed_objectives`) guard it. A
 //!   team that has not armed its structure within `give_up_ms` gives it up and
@@ -191,6 +194,8 @@ pub(crate) struct Squad {
     pub squad: u16,
     pub team: u8,
     pub lane: Option<[f64; 3]>,
+    /// The squad works on its human leader's FRAGO: it sends no team.
+    pub ordered: bool,
 }
 
 /// One live bot, as seen by the team selection.
@@ -291,6 +296,8 @@ impl Book {
         for (&squad, team) in &self.teams {
             let reason = if !current.contains_key(&team.target) {
                 Some("unavailable")
+            } else if live.get(&squad).is_some_and(|s| s.ordered) {
+                Some("frago")
             } else if live.get(&squad).is_none_or(|s| s.lane.is_none()) {
                 Some("squad_unavailable")
             } else if now.saturating_sub(team.since) >= Duration::from_millis(policy.give_up_ms) {
@@ -304,8 +311,12 @@ impl Book {
         }
         for (squad, reason) in ended {
             let team = self.teams.remove(&squad).unwrap();
-            self.resting
-                .insert(team.team, now + Duration::from_millis(policy.rest_ms));
+            // A FRAGO takes the squad, not the side's turn: another squad of
+            // the side may send a team at once.
+            if reason != "frago" {
+                self.resting
+                    .insert(team.team, now + Duration::from_millis(policy.rest_ms));
+            }
             if reason == "gave_up" {
                 self.refused.insert(
                     (squad, team.target),
@@ -327,7 +338,8 @@ impl Book {
         }
         // New teams, squads in index order.
         for squad in squads {
-            if self.teams.contains_key(&squad.squad)
+            if squad.ordered
+                || self.teams.contains_key(&squad.squad)
                 || self.resting.contains_key(&squad.team)
                 || self.teams.values().filter(|t| t.team == squad.team).count()
                     >= policy.teams_per_side
@@ -550,6 +562,12 @@ impl<W: Write> Engine<W> {
                         .bot_squad_lane(squad)
                         .and_then(|lane| self.bot_objective_center(lane))
                         .map(|(center, _)| center.map(f64::from)),
+                    ordered: self
+                        .bot_registry
+                        .director
+                        .squad_orders
+                        .ordered
+                        .contains(&squad),
                 })
                 .collect();
             self.bot_registry.director.demolition.plan(

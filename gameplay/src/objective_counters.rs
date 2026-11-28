@@ -134,6 +134,7 @@ impl<W: Write> Engine<W> {
         } else {
             Effects::default()
         };
+        self.note_completed_squad_tag(entry);
         effects
             .audit
             .extend(self.stage_native_objective_rewards(entry, assignment, frame)?);
