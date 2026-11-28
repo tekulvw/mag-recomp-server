@@ -244,7 +244,7 @@ impl<W: Write> Engine<W> {
         }
         .encode_with_profile(self.wire_profile)?;
         self.firearm_assists.forget_victim(id);
-        self.broadcast_bot_state_packet(packet);
+        self.broadcast_bot_state_packet(id, packet);
         Ok(())
     }
 
@@ -440,7 +440,7 @@ impl<W: Write> Engine<W> {
         runtime.since = now;
         runtime.last_update = now;
         bot.target.runtime = Some(runtime);
-        self.broadcast_bot_state_packet(packet);
+        self.broadcast_bot_state_packet(id, packet);
         Ok(())
     }
 }

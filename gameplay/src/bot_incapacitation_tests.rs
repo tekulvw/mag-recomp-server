@@ -360,6 +360,8 @@ fn a_human_medic_revives_a_downed_bot_with_the_human_credit() {
     let patient = medic + PATIENT;
     arm_human_medic(&mut engine, medic, 0.4, [2., 0., 0.]);
     hit(&mut engine, patient, 40., false, at(0));
+    let healer = engine.active.as_ref().unwrap().reservation.id.clone();
+    engine.bot_registry.known_for_test(&healer).insert(patient);
     engine.active.as_mut().unwrap().pending_shared.clear();
     let messages = dispatch(
         &mut engine,

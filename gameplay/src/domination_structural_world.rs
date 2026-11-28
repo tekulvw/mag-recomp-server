@@ -847,7 +847,8 @@ impl<W: Write> Engine<W> {
                 .bots
                 .get(&(id as u16))
                 .ok_or("domination_structural_blast_unqualified_stance")?;
-            if bot.health == 0 {
+            // A downed bot, like a downed human, can still be finished.
+            if bot.health == 0 && bot.downed.is_none() {
                 return Ok(None);
             }
             let runtime = bot
@@ -1107,7 +1108,7 @@ impl<W: Write> Engine<W> {
         let Some(bot) = self.bot_registry.bots.get(&slot) else {
             return Ok(None);
         };
-        if bot.health == 0 {
+        if bot.health == 0 && bot.downed.is_none() {
             return Ok(None);
         }
         let runtime = bot
