@@ -144,6 +144,20 @@ launcher boot, character creation and login using the isolated test identity.
 
 ## Offline checks
 
+The explicit 1793 codec also supports offline purchase-message inspection:
+`MagPurchaseSkill212Request` uses wire ID `0268` and a signed 16-bit ordinal,
+without the common RSA/transaction header. `MagPurchaseSkillResponse` uses
+`0269`, one success bit and the full 1793 record unconditionally, including on
+failure. Use `TryParseForProtocol` / `SerializeForProtocol` with app 20231 and
+protocol 1793. The older request DTO and signed-byte format remain distinct.
+
+**Live purchase dispatch remains disabled.** `TryParseClientForProtocol` refuses
+the new request, and the bootstrap profile still rejects legacy skill inputs.
+The wire retains its full signed range for inspection; it does not authorize an
+ordinal. Native ownership supports 0..159, while complete purchase authorization,
+equipment rewards, default grants and native purchase acceptance remain separate
+work. No legacy Tiers table is substituted for the changed 2.12 resource fields.
+
 ```sh
 dotnet run --project horizon/Tests.MagPlugin -- patch
 python3 -m unittest discover -s tests -p test_v212_workflows.py

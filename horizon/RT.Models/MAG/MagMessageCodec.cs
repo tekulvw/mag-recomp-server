@@ -35,6 +35,8 @@ namespace RT.Models.MAG
 
         private static bool TryParseClientCore(byte[] payload, int applicationId, bool retail212, out MagMessage message)
         {
+            // MagPurchaseSkill212Request is intentionally absent: its offline
+            // wire representation is proven, but live purchase policy is not.
             if (TryParseCore(payload, applicationId, retail212, out message) && (message is MagRetailPartyInvite || message is MagRetailPartyInviteResponse ||
                 message is MagRetailPartyLeave || message is MagRetailPartyOpenInvite || message is MagRetailPartyRejoinRequest || message is MagRetailCancelJoinRequest || message is MagTrainingCompletedRequest || message is MagKeepAlive || message is MagJoinGameRequest || message is MagServerStatusRequest || message is MagHello || message is MagProtocolInfo || message is MagAccountLoginRequest || message is MagCharacterDataRequest ||
                 message is MagNpAuthenticateRequest || message is MagUniverseListRequest || message is MagRetailPatchRequest || message is MagPatch212Request || message is MagRetailAccountLogoutRequest ||
@@ -125,7 +127,7 @@ namespace RT.Models.MAG
                     0x0033 => new MagMapsHelloResponse(),
                     0x0034 => new MagUniverseListRequest(),
                     0x0035 => new MagUniverseListResponse(),
-                    0x0250 => new MagPurchaseSkillRequest(),
+                    0x0250 => retail212 ? new MagPurchaseSkill212Request() : new MagPurchaseSkillRequest(),
                     0x0251 => new MagPurchaseSkillResponse(),
                     0x0254 when applicationId == 20231 => new MagRetailSkillRespecRequest(),
                     0x0255 when applicationId == 20231 => new MagRetailSkillRespecResponse(),
@@ -155,6 +157,9 @@ namespace RT.Models.MAG
                 if (parsed is MagPluginClientMessage common) ReadHeader(reader, common);
                 switch (parsed)
                 {
+                    case MagPurchaseSkill212Request purchase:
+                        purchase.SkillId = unchecked((short)reader.ReadUInt16());
+                        break;
                     case MagPurchaseSkillRequest purchase:
                         purchase.SkillId = unchecked((sbyte)reader.ReadByte());
                         break;
@@ -384,7 +389,9 @@ namespace RT.Models.MAG
         {
             if (message == null) throw new ArgumentNullException(nameof(message));
             int itemBits = LoadoutItemBits(applicationId);
-            if (retail212 && (message is MagRetailPatchRequest ||
+            if (message is MagPurchaseSkill212Request && !retail212)
+                throw new ArgumentException("The signed16 purchase request requires protocol 1793.", nameof(message));
+            if (retail212 && (message is MagRetailPatchRequest || message is MagPurchaseSkillRequest ||
                 (message is MagNpAuthenticateRequest && message is not MagRetailNpAuthenticateRequest) ||
                 (message is MagNpAuthenticateResponse && message is not MagRetailNpAuthenticateResponse) ||
                 (message is MagMapsHelloResponse && message is not MagRetailMapsHelloResponse) ||
@@ -440,6 +447,9 @@ namespace RT.Models.MAG
                 case MagRetailPlayerGameInfoResponse gameInfo:
                     writer.WriteUInt32(gameInfo.AccountId); writer.WriteUInt32(gameInfo.GameId); writer.WriteString(gameInfo.LevelName ?? string.Empty);
                     writer.WriteByte(gameInfo.GameType); writer.WriteByte(gameInfo.TrailingValue1); writer.WriteByte(gameInfo.TrailingValue2);
+                    break;
+                case MagPurchaseSkill212Request purchase:
+                    writer.WriteUInt16(unchecked((ushort)purchase.SkillId));
                     break;
                 case MagPurchaseSkillRequest purchase:
                     writer.WriteByte(unchecked((byte)purchase.SkillId));
