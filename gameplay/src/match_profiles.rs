@@ -410,7 +410,7 @@ impl Registry {
             {
                 return Err(io::Error::other("match_profile_capacity_mismatch"));
             }
-            let objectives = source
+            let mut objectives = source
                 .objective_catalog
                 .as_ref()
                 .map(objective_catalog::ObjectiveCatalog::load)
@@ -610,6 +610,7 @@ impl Registry {
             let (
                 acquisition,
                 acquisition_hospital_turrets,
+                acquisition_hospital_rockets,
                 acquisition_ground_turrets,
                 acquisition_apc_turret_source,
                 acquisition_rocket_source,
@@ -665,9 +666,16 @@ impl Registry {
                         "acquisition_hospital_turrets_require_hospitals",
                     ));
                 }
+                let hospital_rockets = config.hospital_rocket_source()?;
+                if hospital_rockets.is_some() && !setup.has_projectile_contacts() {
+                    return Err(io::Error::other(
+                        "acquisition_hospital_rockets_require_contacts",
+                    ));
+                }
                 (
                     Some(Arc::new(setup)),
                     hospital_turrets.map(Arc::from),
+                    hospital_rockets.map(Arc::from),
                     config.ground_turret_source()?.map(Arc::from),
                     config.apc_turret_source()?.map(Arc::from),
                     config.infantry_rocket_source()?.map(Arc::from),
@@ -687,7 +695,7 @@ impl Registry {
                         "acquisition_gameplay_configuration_required"
                     }));
                 }
-                (None, None, None, None, None, None, None, None, None)
+                (None, None, None, None, None, None, None, None, None, None)
             };
             let damage = source
                 .character_damage_rules
@@ -727,14 +735,15 @@ impl Registry {
                         "domination_gameplay_requires_source_world_resources",
                     ));
                 }
-                let objectives =
-                    Arc::new(objectives.clone().ok_or_else(|| {
-                        io::Error::other("domination_gameplay_requires_objectives")
-                    })?);
+                let config = domination_gameplay_config::Configuration::load(path)?;
+                let catalog = objectives
+                    .as_mut()
+                    .ok_or_else(|| io::Error::other("domination_gameplay_requires_objectives"))?;
+                config.mark_permanent_completions(catalog)?;
+                let objectives = Arc::new(catalog.clone());
                 let bunkers = bunkers
                     .as_ref()
                     .ok_or_else(|| io::Error::other("domination_gameplay_requires_hospitals"))?;
-                let config = domination_gameplay_config::Configuration::load(path)?;
                 let source = config.hospital_turret_source()?.map(Arc::from);
                 let rocket_source = config.hospital_rocket_source()?.map(Arc::from);
                 let ground_turret_source = config.ground_turret_source()?.map(Arc::from);
@@ -767,7 +776,7 @@ impl Registry {
                     None,
                     acquisition_hospital_turrets,
                     acquisition_ground_turrets,
-                    None,
+                    acquisition_hospital_rockets,
                     acquisition_rocket_source,
                     acquisition_guided_source,
                     acquisition_gas_source,
@@ -1236,12 +1245,15 @@ impl Registry {
                 .as_ref()
                 .ok_or("hospital_turret_objectives_required")?;
             if let Some(rocket_source) = profile.hospital_rocket_source.take() {
-                if profile
+                let domination_contacts = profile
                     .domination
                     .as_ref()
-                    .and_then(|world| world.state.projectile_contacts.as_ref())
-                    .is_none()
-                {
+                    .is_some_and(|world| world.state.projectile_contacts.is_some());
+                let acquisition_contacts = profile
+                    .acquisition
+                    .as_ref()
+                    .is_some_and(|setup| setup.has_projectile_contacts());
+                if !domination_contacts && !acquisition_contacts {
                     return Err("hospital_rockets_require_contacts");
                 }
                 profile.hospital_rockets =

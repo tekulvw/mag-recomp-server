@@ -20,6 +20,11 @@ fn test_time(ms: u64) -> Duration {
 }
 
 fn fixture() -> (Runtime, ObjectiveWorld, SpawnCatalog, Round) {
+    fixture_with_permanent(&[])
+}
+
+/// The fixture with the given objective tokens marked as permanent completions.
+fn fixture_with_permanent(permanent: &[u32]) -> (Runtime, ObjectiveWorld, SpawnCatalog, Round) {
     let hash = "1".repeat(64);
     let squads: Vec<_> = (0..32)
         .map(|s| {
@@ -63,7 +68,7 @@ fn fixture() -> (Runtime, ObjectiveWorld, SpawnCatalog, Round) {
             ],
         }],
     }).to_string().into_bytes();
-    let objectives = Arc::new(ObjectiveCatalog::from_json(&json!({
+    let mut objectives = ObjectiveCatalog::from_json(&json!({
         "format":"mag_retail_objective_catalog","schema_version":1,"application_id":20231,
         "protocol":protocol::ProtocolInfo::RETAIL_PROTOCOL,"game_type":2,"map_name":"synthetic",
         "entity_family":12,"network_type":12,
@@ -85,7 +90,11 @@ fn fixture() -> (Runtime, ObjectiveWorld, SpawnCatalog, Round) {
                      {"centre":[4.,2.,1.],"axes":[[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]],"half_extents":[1.,1.,1.]}
                  ]}}
         ], "squads":orders,
-    }).to_string()).unwrap());
+    }).to_string()).unwrap();
+    objectives
+        .mark_permanent_completions(permanent.iter().copied())
+        .unwrap();
+    let objectives = Arc::new(objectives);
     let controller = domination_control::Catalog::from_json(json!({
         "format":"mag_domination_control","schema_version":1,"game_archive_sha256":hash,
         "metadata_sha256":hash,"script_sha256":[hash],
@@ -432,6 +441,73 @@ fn missing_external_effect_refuses_candidate_without_mutating_initial_authority(
         .unwrap();
     assert_eq!(retried.world.state(1), Some(ObjectiveState::Completed));
     assert_eq!(retried.runtime.callbacks.pending_count(), 1);
+}
+
+#[test]
+fn permanent_completion_refuses_the_owner_retake() {
+    use ObjectiveInteractionKind::{Deactivate, Nak};
+    let (runtime, world, spawns, round) = fixture_with_permanent(&[NEXT]);
+    let started = runtime
+        .stage_mission_start(frame(100, &world, &spawns, &round), Spy::default())
+        .unwrap();
+    let root = started
+        .runtime
+        .stage_objective_update(
+            frame(100, &started.world, &started.spawns, &started.round),
+            &BTreeMap::new(),
+            started.effects,
+        )
+        .unwrap();
+    assert_eq!(root.world.state(1), Some(ObjectiveState::Completed));
+    let actor = ObjectiveActor {
+        player: 3,
+        team: 1,
+        generation: 5,
+        position: crate::replication::CharacterPosition {
+            x: 4.,
+            y: 2.,
+            z: 1.,
+        },
+    };
+    let refused = root
+        .runtime
+        .stage_interaction(
+            frame(101, &root.world, &root.spawns, &root.round),
+            PlayerInteraction {
+                request: ObjectiveInteraction {
+                    target_object_id: 0x0c80_0001,
+                    kind: Deactivate,
+                    actor_index: 3,
+                    trigger_index: 0,
+                },
+                actor,
+                timer_modifier: 0.,
+            },
+            Spy::default(),
+        )
+        .unwrap();
+    assert_eq!(refused.reply.kind, Nak);
+    assert!(refused.candidate.deltas.is_empty());
+    assert_eq!(
+        refused.candidate.world.state(1),
+        Some(ObjectiveState::Completed)
+    );
+    // Later updates leave it destroyed: there is no retake window to expire.
+    let later = refused
+        .candidate
+        .runtime
+        .stage_objective_update(
+            frame(
+                5_000,
+                &refused.candidate.world,
+                &refused.candidate.spawns,
+                &refused.candidate.round,
+            ),
+            &BTreeMap::new(),
+            Spy::default(),
+        )
+        .unwrap();
+    assert_eq!(later.world.state(1), Some(ObjectiveState::Completed));
 }
 
 #[test]

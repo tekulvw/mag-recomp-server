@@ -658,6 +658,65 @@ fn arming_retasks_the_nearest_defenders_with_one_defuser_and_attackers_guard() {
     assert!(tasks.iter().any(|r| r["destination_role"] == "armed_guard"));
 }
 
+/// A bot mid-action on another objective (here a capture it is taking) is
+/// not drafted when a charge is armed: drafting it cancelled its action at
+/// once, flipping that objective back and replaying its voice line.
+#[test]
+fn a_bot_holding_another_objectives_action_is_not_drafted() {
+    let mut e = engine(&SLOTS, true);
+    set_caps(&mut e, 2, 2);
+    plan_tick(&mut e, 100);
+    let holder = bot_at(&e, 54., 60.);
+    let generation = e.bot_registry.bots[&holder]
+        .target
+        .runtime
+        .unwrap()
+        .generation;
+    let actor = crate::objective_control::ObjectiveActor {
+        player: holder,
+        team: 0,
+        generation,
+        position: replication::CharacterPosition {
+            x: 20.,
+            y: 0.,
+            z: 20.,
+        },
+    };
+    let request = protocol::ObjectiveInteraction {
+        target_object_id: 0x0c80_0000 | u32::from(CAPTURE),
+        kind: protocol::ObjectiveInteractionKind::Activate,
+        actor_index: holder,
+        trigger_index: 0,
+    };
+    let world = e.objective_world.as_mut().unwrap();
+    assert!(
+        world
+            .interact(request, actor, Duration::from_millis(120))
+            .accepted
+    );
+    world
+        .development_arm(PLANTED, Duration::from_millis(150))
+        .unwrap();
+    plan_tick(&mut e, 200);
+    assert!(
+        e.bot_registry.bots[&holder].task.armed.is_none(),
+        "the capturing bot was drafted onto the armed charge"
+    );
+    let world = e.objective_world.as_ref().unwrap();
+    assert_eq!(world.state(CAPTURE), Some(ObjectiveState::Activating));
+    assert_eq!(world.interaction_owner(CAPTURE).map(|o| o.0), Some(holder));
+    // The guard places still fill, from the next nearest attackers.
+    let guards: Vec<u16> = e
+        .bot_registry
+        .bots
+        .iter()
+        .filter(|(_, b)| b.task.armed.is_some_and(|d| d.duty == Duty::Guard))
+        .map(|(id, _)| *id)
+        .collect();
+    assert_eq!(guards.len(), 2);
+    assert!(guards.contains(&bot_at(&e, 52., 60.)));
+}
+
 #[test]
 fn defenders_start_a_defuse_once_clear_or_in_the_last_seconds() {
     // Contested: attackers stand by the charge. Only the late window opens it.

@@ -92,3 +92,33 @@ fn field_hospital_turret_rules_need_a_portable_nonempty_path() {
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn field_hospital_rocket_rules_need_turrets_contacts_and_a_portable_path() {
+    let mut config = configuration();
+    config["hospital_rockets"] = json!("resources/rockets.json");
+    let error = Configuration::from_json(&config.to_string())
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(error.contains("require_turrets_and_contacts"), "{error}");
+    config["hospital_turrets"] = json!("resources/turrets.json");
+    assert!(Configuration::from_json(&config.to_string()).is_err());
+    config["projectile_contacts"] = json!("contacts.json");
+    config["hospital_rockets"] = json!("");
+    assert!(Configuration::from_json(&config.to_string()).is_err());
+    config["hospital_rockets"] = json!("resources/rockets.json");
+    assert!(Configuration::from_json(&config.to_string()).is_ok());
+    let dir = std::env::temp_dir().join(format!(
+        "mag-acquisition-hospital-rockets-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("gameplay.json");
+    for (value, admitted) in [("resources/rockets.json", true), ("../rockets.json", false)] {
+        config["hospital_rockets"] = json!(value);
+        std::fs::write(&path, config.to_string()).unwrap();
+        assert_eq!(Configuration::load(&path).is_ok(), admitted, "{value}");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}

@@ -21,6 +21,7 @@ pub(crate) use statistics::{
     plan_bot_killed_human, plan_character_effect_consequences,
 };
 mod update_actions;
+mod vehicle_collision;
 
 #[cfg(test)]
 #[path = "../helo_frag_publication_tests.rs"]
@@ -132,11 +133,6 @@ struct SessionChanges {
     new_team_wave: Option<TeamWaveClock>,
     published_wave_deadline: Option<Duration>,
     cancel_pending_spawn: bool,
-    /// The character bled out on its own; its client opens the respawn
-    /// screen at this time.
-    respawn_screen_ready_at: Option<Duration>,
-    /// The client confirmed its respawn, so its respawn screen is open.
-    respawn_screen_open: bool,
     /// The dead character rejoined the respawn queue without a new
     /// confirmation (see `plan_update_reply`).
     automatic_respawn_queue: bool,
@@ -188,6 +184,7 @@ struct CombatChanges {
     death_notifications: Vec<death_notifications::Plan>,
     falling_death_notice: Option<death_notifications::CharacterEffectNotice>,
     self_kill_notice: Option<death_notifications::CharacterEffectNotice>,
+    vehicle_impact_notice: Option<death_notifications::CharacterEffectNotice>,
     new_damage_model: Option<replication::CharacterDamage>,
     revived_peer: Option<(String, u32, replication::CharacterDamage)>,
     new_healing: Option<Option<progression::HealingSession>>,
@@ -309,7 +306,8 @@ fn plan_message<W: Write>(
             | protocol::GameMessage::MountSeat(_)
             | protocol::GameMessage::DismountSeat(_)
             | protocol::GameMessage::Repair(_)
-            | protocol::GameMessage::CommandAbility(_))
+            | protocol::GameMessage::CommandAbility(_)
+            | protocol::GameMessage::VehicleReport(_))
     );
     if ctx.engine.match_terminal.is_some()
         && (spawn_or_selection || (combat && !ctx.engine.round_combat_allowed(ctx.now)))
@@ -430,6 +428,9 @@ fn plan_message<W: Write>(
                     crate::leadership_passives::HeldLeadershipRole::None
                 },
             ))
+        }
+        Ok(protocol::GameMessage::VehicleReport(report)) => {
+            vehicle_collision::plan(ctx, plan, report)
         }
         Ok(protocol::GameMessage::Unknown { message_type, body }) => Ok(
             crate::voice_diagnostics::unknown_message(message_type, body),
@@ -1234,7 +1235,6 @@ impl<W: Write> Engine<W> {
             if !life.is_alive() || plan.replication.spawn_delta.is_some() {
                 active.last_exit = None;
                 active.pending_spawn_deadline = None;
-                active.respawn_screen_ready_at = None;
             }
         }
         if plan.session.cancel_pending_spawn {
@@ -1243,12 +1243,6 @@ impl<W: Write> Engine<W> {
             active.pending_spawn_deadline = None;
             // Stay out of the queue until the player confirms again.
             active.respawn_held = true;
-        }
-        if plan.session.respawn_screen_ready_at.is_some() {
-            active.respawn_screen_ready_at = plan.session.respawn_screen_ready_at;
-        }
-        if plan.session.respawn_screen_open {
-            active.respawn_screen_ready_at = None;
         }
         if let Some(deadline) = plan.session.new_spawn_deadline {
             active.pending_spawn_deadline = Some(deadline);
@@ -1333,6 +1327,11 @@ impl<W: Write> Engine<W> {
             }
         }
         if let Some(seat) = plan.session.new_ground_seat {
+            if seat.is_none()
+                && let Some(left) = active.ground_seat
+            {
+                active.ground_exit = Some((left.vehicle_index, now));
+            }
             active.ground_seat = seat;
             active.last_exit = plan.session.last_exit;
             active.owner_fields.state = Some(seat.map_or(
@@ -1624,6 +1623,9 @@ impl<W: Write> Engine<W> {
             notice.commit(self);
         }
         if let Some(notice) = plan.combat.self_kill_notice {
+            notice.commit(self);
+        }
+        if let Some(notice) = plan.combat.vehicle_impact_notice {
             notice.commit(self);
         }
         if let Some(candidate) = plan.guided_warnings {

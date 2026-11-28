@@ -10,8 +10,9 @@ scheduler hits count an opposing shooter's kill and the victim's death in the
 same recorded shot. A human's first incapacitating collapse uses the existing
 human death statistic; finishing hits and expiry cannot add a second bot kill.
 Friendly bot victim deaths still count, without an enemy-kill increment.
-Generic damage helpers, environmental damage and other weapon classes do not
-silently gain firearm statistics.
+A bot killed by a ground vehicle's driver also counts its death, without a
+bot kill. Generic damage helpers, environmental damage and other weapon
+classes do not silently gain firearm statistics.
 
 A bot's immutable allocation generation is separate from its current life.
 Respawn preserves totals, while retirement, replacement and round reset discard

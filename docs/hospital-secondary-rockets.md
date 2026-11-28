@@ -1,6 +1,7 @@
 # Hospital secondary rocket support
 
-Domination hospital secondaries have optional server-owned launch, straight flight,
+Domination hospital and Acquisition field-hospital secondaries have optional
+server-owned launch, straight flight,
 contact, ordinary on-foot Character damage, optional qualified Ground and Helo
 damage and reliable cleanup. They remain off
 unless the selected profile explicitly supplies `core.hospital_turrets`,
@@ -12,9 +13,21 @@ and the match-profile registry validate the same source bindings. The CLI's
 `--validate-catalogs` path qualifies the weapon rules and contact inputs before
 advertising readiness, opening a listener or creating a log.
 
+Acquisition field hospitals carry the same emplacement variants and use this
+path through their own `hospital_rockets` configuration; see
+[Acquisition gameplay](acquisition-gameplay.md#field-hospital-rockets) for the
+targets they reach there.
+
 A current exclusive seat-0 grant, fresh secondary equipment evidence and the
 primary readiness fence authorize launch. Cadence and magazine state belong to
-the hospital and survive remount. Rockets and frag grenades share native slot
+the hospital and survive remount. The retail weapon fires a two-round magazine
+at a one-second refire, then reloads for ten seconds; its magazines are
+endless, so every reload completes. The server reloads on demand: the first
+request after the reload time refills the magazine. No world tick or reload
+packet is involved, because the client times its own reload. Refire and reload
+accept a request that arrives up to 250 ms early, since the server sees each
+request at its arrival and not when the client fired it. This allowance is a
+replacement scheduling choice. Rockets and frag grenades share native slot
 exclusion while retaining separate lifetime state. Owner position and terminal
 claims cannot move or detonate an admitted rocket. A flight survives dismount,
 death and respawn within its reservation; disconnect/idle removal retires its
@@ -22,7 +35,8 @@ wire object before the Character slot can be reused.
 
 ## Source-bound external rules
 
-`tools/extraction/project-retail-hospital-rockets.py` consumes an owner's original
+`tools/extraction/project-retail-hospital-rockets.py` (`--mode domination`,
+the default, or `--mode acquisition`) consumes an owner's original
 retail executable and archives, the item catalog/bindings, reproduced hospital
 rules and six profile pairs. It reproduces the hospital source first and refuses
 mismatches. The output binds the original ammo identity, default token override,
@@ -33,7 +47,10 @@ vehicle and objective blast channels. No game catalogs or binaries are shipped.
 The projector accepts `--elf`, `--game-archive`, `--main-archive`,
 `--hospital-sources`, `--hospital-turrets`, `--item-catalog`, `--item-bindings`,
 `--structures`, six repeated `--profile SPAWNS HOSPITALS`, `--output` and
-`--proof-output`. Repeat with `--check` to require byte-identical output.
+`--proof-output`. Acquisition mode omits `--hospital-sources`, reads the
+variants from the archives as the turret projector's Acquisition mode does, and
+takes the six Acquisition profile pairs. Repeat with `--check` to require
+byte-identical output.
 `hospital_rockets::Catalog::from_bytes` validates the typed output against the
 loaded item source, native source identity and exact hospital rules. Hash binding
 identifies the supplied source; it is not an independent runtime certification.

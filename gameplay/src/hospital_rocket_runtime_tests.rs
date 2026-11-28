@@ -15,7 +15,7 @@ fn hospital_rocket_magazine_is_independent_of_authored_reserve_count_and_reloads
     assert_eq!(first.rounds, 1);
     assert_eq!(first.refill, None);
     assert_eq!(
-        Magazine::after_shot(Some(first), WEAPON, at + Duration::from_secs(1)),
+        Magazine::after_shot(Some(first), WEAPON, at + Duration::from_millis(900)),
         Err("hospital_rocket_refire")
     );
     let second = Magazine::after_shot(Some(first), WEAPON, first.next_fire).unwrap();
@@ -29,8 +29,64 @@ fn hospital_rocket_magazine_is_independent_of_authored_reserve_count_and_reloads
     assert_eq!(third.rounds, 1);
 }
 
+/// SYNTHETIC: the retail shape of the emplacement secondary — a two-round
+/// salvo, a short refire, a long reload and endless magazines.
+const SALVO: hospital_rockets::Weapon = hospital_rockets::Weapon {
+    refire_seconds: 1.0,
+    reload_seconds: 10.0,
+    infinite_ammo: true,
+    magazine_size: 2,
+    initial_magazine_count: 1,
+};
+
+#[test]
+fn hospital_rocket_salvos_reload_without_end() {
+    let mut magazine = None;
+    let mut at = Duration::from_secs(5);
+    for salvo in 0..6 {
+        let first = Magazine::after_shot(magazine, SALVO, at).unwrap();
+        let second = Magazine::after_shot(Some(first), SALVO, at + Duration::from_secs(1))
+            .unwrap_or_else(|code| panic!("salvo {salvo} second rocket: {code}"));
+        assert_eq!(second.rounds, 0);
+        assert_eq!(
+            Magazine::after_shot(Some(second), SALVO, at + Duration::from_secs(6)),
+            Err("hospital_rocket_reloading")
+        );
+        let refill = second.refill.expect("an endless magazine always reloads");
+        assert_eq!(refill, at + Duration::from_secs(11));
+        magazine = Some(second);
+        at = refill;
+    }
+}
+
+#[test]
+fn hospital_rocket_cadence_absorbs_arrival_jitter_only() {
+    let at = Duration::from_secs(5);
+    let first = Magazine::after_shot(None, SALVO, at).unwrap();
+    let early = |by_ms| Duration::from_secs(1) - Duration::from_millis(by_ms);
+    assert_eq!(
+        Magazine::after_shot(Some(first), SALVO, at + early(300)),
+        Err("hospital_rocket_refire")
+    );
+    let second = Magazine::after_shot(Some(first), SALVO, at + early(200)).unwrap();
+    let refill = second.refill.unwrap();
+    assert_eq!(
+        Magazine::after_shot(Some(second), SALVO, refill - Duration::from_millis(300)),
+        Err("hospital_rocket_reloading")
+    );
+    let reloaded =
+        Magazine::after_shot(Some(second), SALVO, refill - Duration::from_millis(200)).unwrap();
+    assert_eq!(reloaded.rounds, 1);
+}
+
 fn equipped_fixture() -> Engine<Vec<u8>> {
-    let mut engine = structures::domination_bunker_seat_tests::fixture();
+    equipped_fixture_for_mode(2)
+}
+
+/// SYNTHETIC: the shooter holds seat 0 of indexed hospital 5 with both
+/// emplacement weapons reported, in a Domination (2) or Acquisition (1) match.
+pub(crate) fn equipped_fixture_for_mode(game_type: u8) -> Engine<Vec<u8>> {
+    let mut engine = structures::domination_bunker_seat_tests::fixture_for_mode(game_type);
     let catalog = hospital_rockets::tests::synthetic_catalog();
     let weapon = catalog.variants()[0].secondary_item_id;
     engine.hospital_rockets = Some(std::sync::Arc::new(catalog));

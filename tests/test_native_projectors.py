@@ -19,7 +19,7 @@ NAMES = (
     'extract-structure-catalog', 'project-character-blast-rules',
     'project-retail-combat', 'project-retail-bootstrap',
     'compare-native-item-catalog', 'extract-retail-falling-damage',
-    'extract-retail-skill-purchases',
+    'extract-retail-skill-purchases', 'extract-retail-vehicle-collision',
 )
 
 
@@ -158,6 +158,54 @@ class NativeProjectorTests(unittest.TestCase):
             result = tool.produce(elf, archive)
             self.assertEqual((result['min_height'], result['damage_factor'], result['minimum_damage_exclusive']), (2.5, 7, 6.5))
             self.assertEqual(result['jump_fall_state'], 3)
+            elf.write_bytes(raw + b'x')
+            with self.assertRaisesRegex(ValueError, 'SHA-256 mismatch'):
+                tool.produce(elf, archive)
+
+    def test_vehicle_collision_reads_synthetic_elf_archive_and_checks_operands(self):
+        tool = load('extract-retail-vehicle-collision')
+        # Two invented code windows and two invented float cells.
+        segments = [(0x7C6800, 0x100), (0x7ED600, 0xD00), (0x1B4CC00, 0x100), (0x1B4E400, 0x100)]
+        header = 64 + 56 * len(segments)
+        raw = bytearray(header + sum(length for _, length in segments))
+        raw[:7] = b'\x7fELF\x02\x02\x01'
+        struct.pack_into('>H', raw, 18, 21)
+        struct.pack_into('>Q', raw, 32, 64)
+        struct.pack_into('>HH', raw, 54, 56, len(segments))
+        offset = header
+        placed = {}
+        for index, (address, length) in enumerate(segments):
+            struct.pack_into('>IIQQQQQQ', raw, 64 + 56 * index, 1, 5, offset, address, 0, length, length, 4)
+            placed[address] = offset
+            offset += length
+        def put(address, fmt, value):
+            base = max(start for start in placed if start <= address)
+            struct.pack_into(fmt, raw, placed[base] + address - base, value)
+        for (address, high), low in zip(tool.IMMEDIATES.values(), [1700, 2600, 5, 3]):
+            put(address, '>I', high << 16 | low)
+        put(tool.FLOATS['catastrophic_damage_hp'], '>f', 222.0)
+        put(tool.FLOATS['minimum_motion_interval_ms'], '>f', 40.0)
+        zpr = b'Invented = { VehicleCollisionDamageMinVelocity = "4", VehicleCollisionDamageFactor = "21" }'
+        arc = archive_bytes({tool.MEMBER: zpr})
+        with tempfile.TemporaryDirectory() as directory:
+            elf, archive = Path(directory) / 'invented-elf', Path(directory) / 'invented-archive'
+            elf.write_bytes(raw)
+            archive.write_bytes(arc)
+            tool.SOURCES = {'retail': sha(raw), 'archive': sha(arc)}
+            result = tool.produce(elf, archive)
+            self.assertEqual(
+                [result[key] for key in ('minimum_velocity_mps', 'damage_per_mps', 'catastrophic_damage_hp',
+                                         'recent_exit_grace_ms', 'motion_freshness_ms',
+                                         'minimum_motion_interval_ms', 'damage_type', 'damage_source_type')],
+                [4, 21, 222.0, 1700, 2600, 40.0, 5, 3])
+            self.assertEqual(result['provenance']['server_properties_sha256'], sha(zpr))
+            # A different instruction at an operand address is refused.
+            address, high = tool.IMMEDIATES['recent_exit_grace_ms']
+            put(address, '>I', (high + 1) << 16 | 1700)
+            elf.write_bytes(raw)
+            tool.SOURCES['retail'] = sha(raw)
+            with self.assertRaisesRegex(ValueError, 'Unexpected native operand'):
+                tool.produce(elf, archive)
             elf.write_bytes(raw + b'x')
             with self.assertRaisesRegex(ValueError, 'SHA-256 mismatch'):
                 tool.produce(elf, archive)

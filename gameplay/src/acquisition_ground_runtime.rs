@@ -167,6 +167,8 @@ pub struct Vehicle {
     pub source_spawn_point_token: u32,
     capabilities: Capabilities,
     driver_position_at_ms: Option<u64>,
+    /// The accepted driver position before the current pose, and its time.
+    driver_previous_position: Option<(CharacterPosition, u64)>,
     driver_position_credit_m: f64,
     pub(crate) driver_controls: DriverControls,
     pub(crate) turret: Option<crate::hospital_turrets::Runtime>,
@@ -181,6 +183,20 @@ pub(crate) struct DriverControls {
 impl Vehicle {
     pub(crate) fn health_hp(&self) -> f32 {
         self.health_hp
+    }
+    /// The two latest accepted driver positions, oldest first.
+    pub(crate) fn driver_motion(
+        &self,
+    ) -> (
+        Option<crate::vehicle_collision::MotionSample>,
+        Option<crate::vehicle_collision::MotionSample>,
+    ) {
+        let sample = |(position, at_ms)| crate::vehicle_collision::MotionSample { position, at_ms };
+        (
+            self.driver_previous_position.map(sample),
+            self.driver_position_at_ms
+                .map(|at| sample((self.pose.position, at))),
+        )
     }
     pub fn is_dead(&self) -> bool {
         self.health_quarter_points == 0
@@ -350,6 +366,7 @@ impl Runtime {
             source_spawn_point_token: creation.spawn_point_token,
             capabilities: Capabilities::default(),
             driver_position_at_ms: None,
+            driver_previous_position: None,
             driver_position_credit_m: 0.,
             driver_controls: DriverControls::default(),
             turret: None,
@@ -446,6 +463,7 @@ impl Runtime {
         let key = self.get(index).ok_or("unknown_ground_vehicle")?.key;
         self.mutate(key, |vehicle| {
             vehicle.driver_position_at_ms = Some(now_ms);
+            vehicle.driver_previous_position = None;
             vehicle.driver_position_credit_m = 1. / 16.;
             Ok(())
         })
@@ -491,6 +509,8 @@ impl Runtime {
                     return Err("ground_vehicle_owner_pose_out_of_range");
                 }
                 vehicle.driver_position_credit_m = (credit - squared.sqrt()).max(0.);
+                vehicle.driver_previous_position =
+                    vehicle.driver_position_at_ms.map(|at| (previous, at));
                 vehicle.pose.position = position;
                 vehicle.driver_position_at_ms = Some(now_ms);
             }
@@ -585,6 +605,7 @@ impl Runtime {
                 }
                 v.pose = source.pose;
                 v.driver_position_at_ms = None;
+                v.driver_previous_position = None;
                 v.driver_position_credit_m = 0.;
                 v.driver_controls = DriverControls::default();
                 events.push(v.event(Effect::ForcePosition(v.pose.position)));
@@ -705,6 +726,7 @@ impl Runtime {
         };
         candidate.pose = original.pose;
         candidate.driver_position_at_ms = original.driver_position_at_ms;
+        candidate.driver_previous_position = original.driver_previous_position;
         candidate.driver_position_credit_m = original.driver_position_credit_m;
         candidate.driver_controls = original.driver_controls;
     }

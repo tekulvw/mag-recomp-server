@@ -320,7 +320,10 @@ fn owner_update(engine: &mut Engine<Vec<u8>>, now_ms: u64) {
 }
 
 #[test]
-fn the_killed_character_rejoins_the_next_wave_by_itself() {
+fn the_killed_character_rejoins_by_itself_but_never_on_a_wave_inside_the_cutoff() {
+    // The live case: an operator kill 2.15 s before the team's wave. That
+    // life reached a client still playing the death, which started a drop
+    // without a parachute and without new magazines.
     let mut engine = engine();
     reserve(&mut engine, 0);
     let actor = engine.active.as_mut().unwrap();
@@ -334,30 +337,42 @@ fn the_killed_character_rejoins_the_next_wave_by_itself() {
     owner_update(&mut engine, 150);
     assert!(engine.active.as_ref().unwrap().life.is_alive());
     engine.enable_world_ticks();
+    // Waves at 2.36 s, 22.36 s, ...
+    let team = usize::from(engine.active.as_ref().unwrap().team());
+    engine.team_waves[team] = Some(TeamWaveClock {
+        first_deadline: Duration::from_millis(2360),
+        period: Duration::from_secs(20),
+    });
 
     let killed_ms = 210;
     assert_eq!(outcome(&kill(&mut engine, FIRST, killed_ms)).0, "killed");
-    let actor = engine.active.as_ref().unwrap();
     assert!(matches!(
-        actor.life,
+        engine.active.as_ref().unwrap().life,
         CharacterLife::AwaitingRespawn { generation: 1 }
     ));
-    let wave = engine.team_waves[usize::from(actor.team())]
-        .unwrap()
-        .next_after(Duration::from_millis(killed_ms))
-        .unwrap();
-    // No confirmation: the world tick queues it for the next wave.
+    // No confirmation: the world tick queues it, past the close wave.
     let tick = engine.tick_world(
         Duration::from_millis(killed_ms + 10),
         1,
         "synthetic-tick".into(),
     );
     assert!(tick.ok, "{:?}", tick.error);
+    let actor = engine.active.as_ref().unwrap();
     assert_eq!(
-        engine.active.as_ref().unwrap().pending_spawn_deadline,
-        Some(wave)
+        actor.pending_spawn_deadline,
+        Some(Duration::from_millis(22_360))
     );
-    owner_update(&mut engine, wave.as_millis() as u64 + 30);
+    assert_eq!(
+        actor.published_wave_deadline,
+        Some(Duration::from_millis(22_360)),
+        "the countdown shows the wave it spawns on"
+    );
+    owner_update(&mut engine, 2400);
+    assert!(matches!(
+        engine.active.as_ref().unwrap().life,
+        CharacterLife::AwaitingRespawn { generation: 1 }
+    ));
+    owner_update(&mut engine, 22_400);
     assert!(matches!(
         engine.active.as_ref().unwrap().life,
         CharacterLife::Alive { generation: 2, .. }

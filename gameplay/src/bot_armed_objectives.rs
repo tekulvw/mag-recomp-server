@@ -462,6 +462,23 @@ impl<W: Write> Engine<W> {
         if armed.is_empty() && self.bot_registry.director.armed.is_empty() {
             return BTreeMap::new();
         }
+        // A bot holding an action on an objective that is not armed (planting
+        // a charge, taking a capture) finishes it first. Drafting it would
+        // cancel the action at once and flip that objective back.
+        let holding: BTreeSet<u16> = self
+            .objective_catalog
+            .as_ref()
+            .zip(self.objective_world.as_ref())
+            .map(|(catalog, world)| {
+                catalog
+                    .objects
+                    .iter()
+                    .filter(|o| !armed.iter().any(|a| a.index == o.object_index))
+                    .filter_map(|o| world.interaction_owner(o.object_index))
+                    .map(|(id, _, _)| id)
+                    .collect()
+            })
+            .unwrap_or_default();
         let bots: Vec<Candidate> = self
             .bot_registry
             .bots
@@ -476,7 +493,8 @@ impl<W: Write> Engine<W> {
                     squad: b.target.squad.squad_index(),
                     position: point(r.position),
                     available: !matches!(r.phase, development_target::BotPhase::Dead)
-                        && !b.has_supply_action(),
+                        && !b.has_supply_action()
+                        && !holding.contains(&id),
                 })
             })
             .collect();
