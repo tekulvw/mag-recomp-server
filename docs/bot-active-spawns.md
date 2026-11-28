@@ -119,6 +119,20 @@ So the server never routes for a spawn choice inside the world tick:
   its next point or its population slot. The answer and its receipt are
   stored on a later tick, provided the navmesh and its structure gates are
   unchanged. Otherwise the point is queued again.
+- A structure gate change does not discard answers. Every point and lane
+  qualification from earlier gates, usable or not, stays in use, marked
+  stale, and is routed again at most once every 15 s per key, by the
+  prefetch or by a spawn choice that uses it. Gates change between almost
+  every wave of a Domination match (breaching and repairs), and routing every
+  qualification again after each change kept the worker busy, mostly with
+  lane checks that fail and search the whole navmesh. Once world ticks took
+  the navmesh first, the worker answered about a tenth of the lane checks it
+  had before. A stale answer can be up to about 15 s out of date after a gate
+  change: a life may use a point a structure has just walled off, or skip one
+  that has just opened. Routes already queued when the gates change still
+  answer, through the gates they were planned with, and their answers are
+  kept the same way instead of being dropped and routed once more. Synthetic
+  tests that route inline still route again at once.
 - The defender lane points every population slot will ask for are queued
   ahead, at most once a second: while humans wait for their side's first
   wave, so the first defender lives normally already have their forward
@@ -128,6 +142,14 @@ So the server never routes for a spawn choice inside the world tick:
   point); a pass that meets more stops there and continues on the next tick.
   Before this, a 256-player Domination simulation probed about 45 defender
   points in one tick (200–360 ms), and again after every gate change.
+- The same pass queues the point routes of squads without ranked goals
+  (attackers on their lane): every point their active-spawn order tries
+  before the population slot, such as an open parachute drop zone or a human
+  leader's squad spawn, under the same probe budget. Before, these were
+  queued only when a life asked at its wave. In live Domination the answer
+  was still pending then, and the next structure gate change cleared it
+  again, so attacker lives used their population slot at every wave and
+  never the open drop zones.
 - The check behind squad fill order (whether a squad's population slots
   reach any objective; see `bot_population_unroutable_squads`) runs once per
   population on its own worker thread, started at the same time. Until it
@@ -188,10 +210,34 @@ population slot is the fallback.
 
 ## Parachute points
 
-The server has no airborne descent model for bot bodies. Bots arrive landed on
-the first supporting surface below each authored drop-line position (the line
-human parachutists are spaced along), then on a small ring around the first
-landing.
+A bot's landing spots are the first supporting surface below each authored
+drop-line position (the line human parachutists are spaced along), then a
+small ring around the first landing.
+
+A bot life that arrives at a drop zone comes down under its parachute, as a
+human does (`gameplay/src/bot_parachute.rs`):
+
+- Its respawn carries character state 17 (the state of a human parachute
+  respawn) and the drop zone's parachute yaw. Its position is straight above
+  its landing spot, at the drop zone's authored airborne height.
+- It descends at a steady 6.4 m/s. Human drops in live Domination came down
+  39-41 m in 5.8-6.9 s (5.9-6.7 m/s). Every 250 ms it publishes its height
+  to the recipients that hold its snapshot. A recipient that takes its
+  snapshot mid-descent (a joiner, or one waiting for a paced snapshot batch)
+  gets state 17 and the current height.
+- When the descent time is up it publishes standing state 1 on its landing
+  spot, and its life goes on from there.
+- While in the air it does not walk, fire, operate objectives, take cover or
+  react to threats. Other bots neither see nor aim at it. Its body is reserved
+  at its landing spot from the start, so no other life lands there. Damage
+  still applies. A bot hit in the air goes down or dies on its landing spot,
+  and its next life at an open drop zone descends again.
+- The descent is vertical: bots do not steer the way human parachutists drift
+  forward. A drop zone less than 1 m above the landing spot is arrived at
+  standing.
+
+`bot_respawn` adds `descent_ms`, the time to touchdown, and
+`bot_parachute_landed` (`position`, `descent_ms`) marks the touchdown.
 
 ## Scope
 

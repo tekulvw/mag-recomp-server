@@ -170,6 +170,18 @@ pub(crate) struct BotRegistry {
     /// Placements per (spawn point, population source spawn).
     pub(super) spawn_qualification:
         BTreeMap<(u16, u16), Result<crate::bot_spawn_selection::QualifiedPoint, &'static str>>,
+    /// Qualifications above that were routed through earlier structure
+    /// gates. They stay in use until revalidated (bot_spawn_selection).
+    pub(super) stale_spawn_qualification: BTreeSet<(u16, u16)>,
+    /// When each stale qualification's revalidation was last queued.
+    pub(super) spawn_revalidated_at: BTreeMap<(u16, u16), Duration>,
+    /// Lane qualifications below routed through earlier structure gates, and
+    /// when each one's revalidation was last queued, as for points.
+    pub(super) stale_lane_spawns: BTreeSet<(u16, u16, bool)>,
+    pub(super) lane_revalidated_at: BTreeMap<(u16, u16, bool), Duration>,
+    /// The time of the latest spawn-route prefetch pass, for revalidations a
+    /// spawn choice queues.
+    pub(super) spawn_route_clock: Duration,
     /// Grounded placements per spawn point before routing, for the collision
     /// world they were probed in. Structure gate changes leave them alone:
     /// they depend only on static collision and authored hospital exits.
@@ -247,6 +259,8 @@ pub(super) struct WorldBot {
     pub(super) task_before_down: Option<crate::bot_objectives::Task>,
     /// The spawn point this life started at, when it used one.
     pub(super) life_spawn: Option<u16>,
+    /// Set while this life comes down under its parachute.
+    pub(crate) descent: Option<crate::bot_parachute::Descent>,
     pub(super) move_attempted: bool,
     due_respawn_wave: Option<(u32, Duration)>,
     respawn_wait: Option<Duration>,
@@ -787,22 +801,35 @@ impl WorldBot {
                     .filter(|p| p.phase != DropPhase::Cleared)
             })
     }
-    fn snapshot(
+    pub(crate) fn snapshot(
         &self,
         now: Duration,
         profile: wire_profile::WireProfile,
     ) -> Result<Vec<u8>, &'static str> {
         let runtime = self.target.runtime.ok_or("bot_runtime_missing")?;
+        let descent = self.descent.filter(|_| self.health > 0);
         let physical = replication::CharacterRespawn {
             sequence: 1,
             timestamp_ms: now.as_millis() as u32,
             object_index: self.target.object_index,
-            state: replication::CharacterState {
-                state: if self.health == 0 { 7 } else { 1 },
-                stance: if self.health == 0 { 0 } else { self.stance },
-                user_data: [0; 3],
+            state: if self.health == 0 {
+                replication::CharacterState {
+                    state: 7,
+                    stance: 0,
+                    user_data: [0; 3],
+                }
+            } else if descent.is_some() {
+                crate::bot_parachute::parachute_state()
+            } else {
+                replication::CharacterState {
+                    state: 1,
+                    stance: self.stance,
+                    user_data: [0; 3],
+                }
             },
-            position: runtime.position,
+            // A recipient that meets the bot under its parachute sees it at
+            // its current height.
+            position: descent.map_or(runtime.position, |d| d.position(now)),
             pitch: self.firearm.packed_pitch(),
             yaw: self.yaw,
             damage: self.damage,
@@ -1429,10 +1456,12 @@ impl<W: Write> Engine<W> {
                 bot.target.runtime = Some(runtime);
                 return Ok(());
             }
-            let motion = runtime.physics_motion;
+            // A body hit in the air goes down on its landing spot.
+            let motion = bot.descent.map(|d| d.motion).or(runtime.physics_motion);
             bot.apply_damage_health(damage.health_quarter_points);
             bot.damage = damage;
             if bot.health == 0 {
+                bot.descent = None;
                 bot.downed = downed.map(|state| {
                     crate::bot_incapacitation::BotDowned::new(
                         state,
@@ -1886,6 +1915,15 @@ impl<W: Write> Engine<W> {
                     continue;
                 };
                 bot.target.position = spawn.position;
+                let drop_zone = (spawn.arrival
+                    == crate::bot_spawn_selection::Arrival::ParachuteLanding)
+                    .then(|| {
+                        let catalog = self.spawn_catalog.as_ref()?;
+                        let point = catalog.point(spawn.spawn_point?)?;
+                        let pose = point.parachute?;
+                        Some((point.position.y, pose.yaw))
+                    })
+                    .flatten();
                 let mut runtime = BotRuntime::spawned(now, bot.target.position);
                 runtime.generation = self.bot_registry.generations[&id]
                     .checked_add(1)
@@ -1898,12 +1936,26 @@ impl<W: Write> Engine<W> {
                     Err(error) => return Err(error.code()),
                 }
                 bot.respawn_wait = None;
+                // A drop zone life starts in the air above its landing spot
+                // (bot_parachute).
+                bot.descent = drop_zone.and_then(|(airborne_y, _)| {
+                    crate::bot_parachute::Descent::plan(
+                        spawn.position,
+                        airborne_y,
+                        now,
+                        runtime.physics_motion?,
+                    )
+                });
+                if let Some(descent) = bot.descent {
+                    runtime.physics_motion = Some(descent.airborne_motion());
+                }
                 self.bot_registry.generations.insert(id, runtime.generation);
                 runtime.phase = BotPhase::Complete;
                 bot.target.runtime = Some(runtime);
                 bot.due_respawn_wave = None;
                 bot.health = 400;
                 bot.stance = 0;
+                bot.yaw = bot.descent.and(drop_zone).map_or(0, |(_, yaw)| yaw);
                 bot.damage_revision = 0;
                 bot.firearm = Default::default();
                 bot.resupply = None;
@@ -1930,9 +1982,17 @@ impl<W: Write> Engine<W> {
                     bot.target.runtime.unwrap().physical_position(),
                     body,
                 )?;
-                packets.push((
-                    id,
-                    dummy::respawn_for(
+                let respawn = match bot.descent {
+                    Some(descent) => dummy::airborne_respawn_for(
+                        id,
+                        2,
+                        now.as_millis() as u32,
+                        descent.position(now),
+                        bot.yaw,
+                        &bot.target.loadout,
+                        self.wire_profile,
+                    )?,
+                    None => dummy::respawn_for(
                         id,
                         2,
                         now.as_millis() as u32,
@@ -1940,12 +2000,19 @@ impl<W: Write> Engine<W> {
                         &bot.target.loadout,
                         self.wire_profile,
                     )?,
-                ));
+                };
+                packets.push((id, respawn));
                 receipts.push(json!({"op":"bot_respawn","object_index":id,
                     "generation":runtime.generation,"spawn_point_index":spawn.spawn_point,
                     "arrival":spawn.arrival.code(),"position":spawn.position,
+                    "descent_ms":bot.descent.map(|d| d.lands.saturating_sub(now).as_millis() as u64),
                     "objective":spawn.objective.map(|o| o.0),
                     "objective_route_m":spawn.objective.map(|o| o.1)}));
+            }
+            // Under its parachute a bot only comes down (bot_parachute).
+            if bot.descent.is_some() {
+                self.tick_bot_descent(id, now, &mut packets, &mut receipts)?;
+                continue;
             }
             if !bot.has_supply_action()
                 && !self.bot_registry.config.as_ref().unwrap().autonomous
@@ -3840,6 +3907,7 @@ impl<W: Write> Engine<W> {
                     medic_approach: None,
                     task_before_down: None,
                     life_spawn: spawn.spawn_point,
+                    descent: None,
                     move_attempted: false,
                     due_respawn_wave: None,
                     respawn_wait: None,
@@ -3867,6 +3935,10 @@ impl<W: Write> Engine<W> {
         self.bot_registry.regional_unavailable = None;
         self.bot_registry.firearm_cursor = 0;
         self.bot_registry.spawn_qualification.clear();
+        self.bot_registry.stale_spawn_qualification.clear();
+        self.bot_registry.spawn_revalidated_at.clear();
+        self.bot_registry.stale_lane_spawns.clear();
+        self.bot_registry.lane_revalidated_at.clear();
         self.bot_registry.lane_spawns.clear();
         self.bot_registry.spawn_route_gates = None;
         self.bot_registry.spawn_candidates = Default::default();

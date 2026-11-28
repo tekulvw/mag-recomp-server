@@ -327,6 +327,8 @@ fn safe_for(bot: &WorldBot, allow_owned_walk: bool, held: bool) -> bool {
     let standing = !matches!(r.phase, BotPhase::Relocating);
     bot.health > 0
         && !matches!(r.phase, BotPhase::Dead)
+        // Nobody fires under a parachute (bot_parachute).
+        && bot.descent.is_none()
         && (allow_owned_walk || held || !matches!(r.phase, BotPhase::Relocating))
         && r.physics_motion
             .is_some_and(|m| m.grounded && m.slide_velocity == [0.; 2])
@@ -647,7 +649,8 @@ impl<W: Write> Engine<W> {
         }
         for (&id, bot) in &self.bot_registry.bots {
             let r = bot.target.runtime.unwrap();
-            if bot.health == 0 {
+            // No bot aims at one under its parachute (bot_parachute).
+            if bot.health == 0 || bot.descent.is_some() {
                 continue;
             }
             actors.push(Actor {

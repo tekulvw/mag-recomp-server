@@ -43,6 +43,13 @@ How it works:
   for. A run then depends on the CPU it runs on.
   Periodic events (snapshots, scripted structural completions) that fall
   inside a skipped interval are skipped with it.
+- `MAG_SIM_CLOCK=realtime` is the wall clock that also sleeps out the rest
+  of each tick's 50 ms slots, as the live scheduler waits for its next tick.
+  The off-tick workers then get the idle time between ticks that they get
+  live. With `wall`, ticks run back to back (1500 simulated seconds took
+  about 820 s), and since world ticks take the navmesh first the spawn-route
+  worker gets almost no time, far less than live. Use `realtime` to measure
+  worker throughput; a run takes its full simulated time.
 - `MAG_SIM_STALL=900@30` (wall clock only) adds 900 ms to one tick every 30
   simulated seconds, standing in for a slow tick, to measure whether the world
   recovers from one or keeps running late.

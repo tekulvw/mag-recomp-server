@@ -333,8 +333,9 @@ fn a_full_forward_drop_zone_falls_back_to_the_population_slot() {
     }
 }
 
-#[test]
-fn a_dead_bot_respawns_at_the_forward_point_after_activation() {
+/// A squad 0 bot that has just died, with the squad's drop zone open, an
+/// observer that holds every bot snapshot, and the bot's generation.
+fn dead_bot_with_open_drop_zone() -> (Engine<Vec<u8>>, u16, u32) {
     let mut engine = engine();
     engine
         .reconcile_bot_population(Duration::ZERO, 1, &mut Default::default())
@@ -379,6 +380,12 @@ fn a_dead_bot_respawns_at_the_forward_point_after_activation() {
             Duration::from_millis(500),
         )
         .unwrap();
+    (engine, id, generation)
+}
+
+#[test]
+fn a_dead_bot_respawns_at_the_forward_point_after_activation() {
+    let (mut engine, id, generation) = dead_bot_with_open_drop_zone();
     engine.tick_bots(Duration::from_secs(120), 2).unwrap();
     let bot = &engine.bot_registry.bots[&id];
     let runtime = bot.target.runtime.unwrap();
@@ -392,6 +399,244 @@ fn a_dead_bot_respawns_at_the_forward_point_after_activation() {
         .expect("a respawn receipt");
     assert_eq!(respawn["spawn_point_index"], DROP);
     assert_eq!(respawn["arrival"], "parachute_landing");
+}
+
+/// The synthetic drop zone's airborne height and parachute yaw.
+const DROP_TOP: f32 = 40.;
+const DROP_YAW: u16 = 256;
+
+fn observer_packets(engine: &mut Engine<Vec<u8>>) -> Vec<Vec<u8>> {
+    engine
+        .active
+        .as_mut()
+        .unwrap()
+        .pending_shared
+        .drain(..)
+        .collect()
+}
+
+fn descent_delta(
+    engine: &Engine<Vec<u8>>,
+    id: u16,
+    now: Duration,
+    y: f32,
+    state: Option<u8>,
+) -> Vec<u8> {
+    let fields = player_tracking::ClientCharacterFields {
+        state: state.map(|state| replication::CharacterState {
+            state,
+            stance: 0,
+            user_data: [0; 3],
+        }),
+        position: Some(replication::CharacterPosition { x: 20., y, z: 30. }),
+        ..Default::default()
+    };
+    replication::multiplayer::CharacterOwnerDelta {
+        sequence: 2,
+        timestamp_ms: now.as_millis() as u32,
+        player: id,
+        fields: &fields,
+    }
+    .encode_with_profile(engine.wire_profile)
+    .unwrap()
+}
+
+fn receipts(engine: &Engine<Vec<u8>>, op: &str) -> Vec<Value> {
+    String::from_utf8(engine.writer.clone())
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|entry| entry["op"] == op)
+        .collect()
+}
+
+#[test]
+fn a_drop_zone_life_comes_down_under_its_parachute_and_lands_standing() {
+    let (mut engine, id, _) = dead_bot_with_open_drop_zone();
+    observer_packets(&mut engine);
+    let spawn = Duration::from_secs(120);
+    engine.tick_bots(spawn, 2).unwrap();
+    // The life starts in the parachute state straight above its landing
+    // spot, at the drop zone's airborne height, facing its parachute yaw.
+    let bot = &engine.bot_registry.bots[&id];
+    let descent = bot.descent.expect("a parachute descent");
+    let runtime = bot.target.runtime.unwrap();
+    let lands = spawn + Duration::from_secs_f64(f64::from(DROP_TOP - runtime.position.y) / 6.4);
+    assert!(descent.lands.abs_diff(lands) < Duration::from_millis(1));
+    let lands = descent.lands;
+    assert!(
+        runtime.position.y.abs() < 0.05,
+        "the body is reserved at its landing spot"
+    );
+    assert!(!runtime.physics_motion.unwrap().grounded);
+    let airborne = dummy::airborne_respawn_for(
+        id,
+        2,
+        spawn.as_millis() as u32,
+        replication::CharacterPosition {
+            x: 20.,
+            y: DROP_TOP,
+            z: 30.,
+        },
+        DROP_YAW,
+        &bot.target.loadout,
+        engine.wire_profile,
+    )
+    .unwrap();
+    assert!(observer_packets(&mut engine).contains(&airborne));
+    assert!(
+        receipts(&engine, "bot_respawn")[0]["descent_ms"]
+            .as_u64()
+            .unwrap()
+            >= 6000
+    );
+
+    // Every 250 ms it publishes its height, and nothing else moves it.
+    let t = spawn + Duration::from_millis(250);
+    engine.tick_bots(t, 3).unwrap();
+    let packets = observer_packets(&mut engine);
+    let height = engine.bot_registry.bots[&id].descent.unwrap().position(t).y;
+    assert!((height - (DROP_TOP - 1.6)).abs() < 0.01, "{height}");
+    assert!(packets.contains(&descent_delta(&engine, id, t, height, None)));
+    engine.tick_bots(t + Duration::from_millis(50), 3).unwrap();
+    assert!(
+        observer_packets(&mut engine).is_empty(),
+        "no publication between intervals"
+    );
+
+    // At touchdown it stands on its landing spot, grounded, and goes on.
+    engine.tick_bots(lands, 4).unwrap();
+    let packets = observer_packets(&mut engine);
+    let bot = &engine.bot_registry.bots[&id];
+    assert!(bot.descent.is_none());
+    let runtime = bot.target.runtime.unwrap();
+    // Its body is the one placed at the landing spot; physics grounds it on
+    // the next step as it does any new life.
+    assert_eq!(
+        runtime.physics_motion.unwrap().position,
+        descent.motion.position
+    );
+    let landing = runtime.position;
+    assert!(packets.contains(&descent_delta(&engine, id, lands, landing.y, Some(1))));
+    let landed = receipts(&engine, "bot_parachute_landed");
+    assert_eq!(landed.len(), 1);
+    assert_eq!(landed[0]["object_index"], id);
+}
+
+#[test]
+fn a_late_joiner_meets_a_descending_bot_under_its_parachute() {
+    // A recipient that takes the bot's snapshot mid-descent (a joiner, or one
+    // still waiting for its paced snapshot batch) gets the parachute state and
+    // the current height, not a standing body on the ground.
+    let (mut engine, id, _) = dead_bot_with_open_drop_zone();
+    let spawn = Duration::from_secs(120);
+    engine.tick_bots(spawn, 2).unwrap();
+    let t = spawn + Duration::from_secs(3);
+    let profile = engine.wire_profile;
+    let bot = &engine.bot_registry.bots[&id];
+    let height = bot.descent.unwrap().position(t).y;
+    assert!(height > 15. && height < 25., "{height}");
+    let mut loadout = bot.target.loadout.clone();
+    loadout.primary = bot.firearm.item(loadout.primary);
+    let runtime = bot.target.runtime.unwrap();
+    let expected = |state: replication::CharacterState, y: f32| {
+        dummy::character_snapshot(
+            id,
+            1,
+            t.as_millis() as u32,
+            &loadout,
+            bot.target.faction,
+            profile,
+            bot.target.display_name.as_deref().unwrap(),
+            bot.target.squad,
+            Some(&replication::CharacterRespawn {
+                sequence: 1,
+                timestamp_ms: t.as_millis() as u32,
+                object_index: id,
+                state,
+                position: replication::CharacterPosition {
+                    y,
+                    ..runtime.position
+                },
+                pitch: bot.firearm.packed_pitch(),
+                yaw: bot.yaw,
+                damage: bot.damage,
+            }),
+            bot.appearance(),
+        )
+        .unwrap()
+    };
+    let snapshot = bot.snapshot(t, profile).unwrap();
+    assert_eq!(
+        snapshot,
+        expected(crate::bot_parachute::parachute_state(), height)
+    );
+    assert_ne!(
+        snapshot,
+        expected(
+            replication::CharacterState {
+                state: 1,
+                stance: 0,
+                user_data: [0; 3]
+            },
+            runtime.position.y
+        )
+    );
+    assert_eq!(bot.yaw, DROP_YAW);
+}
+
+#[test]
+fn a_bot_shot_down_under_its_parachute_dies_and_its_next_life_drops_again() {
+    let (mut engine, id, _) = dead_bot_with_open_drop_zone();
+    let spawn = Duration::from_secs(120);
+    engine.tick_bots(spawn, 2).unwrap();
+    let generation = engine.bot_registry.bots[&id]
+        .target
+        .runtime
+        .unwrap()
+        .generation;
+    engine
+        .commit_bot_damage(
+            id,
+            generation,
+            replication::CharacterDamage {
+                health_quarter_points: 0,
+                ..bot_registry_initial_damage()
+            },
+            spawn + Duration::from_secs(2),
+        )
+        .unwrap();
+    let bot = &engine.bot_registry.bots[&id];
+    assert!(
+        bot.descent.is_none(),
+        "a body hit in the air stops descending"
+    );
+    observer_packets(&mut engine);
+    engine
+        .tick_bots(spawn + Duration::from_millis(2250), 3)
+        .unwrap();
+    assert!(
+        engine.bot_registry.bots[&id].descent.is_none(),
+        "a dead body publishes no descent"
+    );
+    assert!(receipts(&engine, "bot_parachute_landed").is_empty());
+    // The next life at the open drop zone comes down under its parachute too.
+    engine.tick_bots(Duration::from_secs(240), 4).unwrap();
+    let bot = &engine.bot_registry.bots[&id];
+    assert_eq!(bot.target.runtime.unwrap().generation, generation + 1);
+    assert!(bot.descent.is_some());
+}
+
+#[test]
+fn a_ground_point_life_still_arrives_standing() {
+    let (mut engine, id, _) = dead_bot_with_open_drop_zone();
+    // Close the drop zone again: the life uses its population slot.
+    engine.spawn_catalog = Some(spawns());
+    engine.tick_bots(Duration::from_secs(120), 2).unwrap();
+    let bot = &engine.bot_registry.bots[&id];
+    assert!(bot.descent.is_none());
+    assert_eq!(bot.yaw, 0);
+    assert!(receipts(&engine, "bot_respawn")[0]["descent_ms"].is_null());
 }
 
 fn bot_registry_initial_damage() -> replication::CharacterDamage {
@@ -1033,7 +1278,7 @@ fn a_slow_defender_route_never_holds_the_spawn_choice() {
 }
 
 #[test]
-fn queued_routes_through_replaced_structure_gates_are_routed_again() {
+fn queued_routes_through_replaced_structure_gates_are_kept_stale_and_routed_again() {
     let mut engine = engine_with_defence();
     engine.bot_spawn_routes.inline = false;
     engine.bot_spawn_routes.blocking = true;
@@ -1042,20 +1287,27 @@ fn queued_routes_through_replaced_structure_gates_are_routed_again() {
     let (first, _) = choose_defender(&mut engine, 200, &Default::default());
     assert_eq!(first.arrival, Arrival::PopulationSlot);
     // The gates change while the answers are in flight.
-    let structures = std::sync::Arc::new(crate::bot_structure_collision::StructureObstacles::new(
-        &crate::domination_structural_world::SequenceCollisionState::default(),
-        1,
-    ));
-    let mesh = engine.navmesh_world.clone().unwrap();
-    crate::navmesh_structure_gates::install_now(&mesh, Some(&structures)).unwrap();
+    change_structure_gates(&mut engine, 1);
     engine.wait_bot_spawn_routes(1).unwrap();
+    // The answers through the old gates are used rather than thrown away...
     let (stale, receipts) = choose_defender(&mut engine, 200, &Default::default());
-    assert_eq!(
-        stale.arrival,
-        Arrival::PopulationSlot,
-        "answers routed through the old gates are dropped"
+    assert!(
+        [Some(NORTH), Some(SOUTH)].contains(&stale.spawn_point),
+        "{stale:?}"
     );
-    assert_eq!(lane_receipts(&receipts), 0, "{receipts:?}");
+    assert!(lane_receipts(&receipts) > 0);
+    assert!(!engine.bot_registry.stale_lane_spawns.is_empty());
+    // ...and routed again through the current gates.
+    engine
+        .prefetch_bot_spawn_routes(Duration::from_secs(1), 1)
+        .unwrap();
+    assert!(
+        engine
+            .bot_spawn_routes
+            .pending
+            .iter()
+            .any(|key| matches!(key, SpawnRouteKey::Lane(..)))
+    );
     engine.wait_bot_spawn_routes(1).unwrap();
     let (current, receipts) = choose_defender(&mut engine, 200, &Default::default());
     assert!(
@@ -1136,4 +1388,200 @@ fn structure_gate_changes_route_again_without_probing_placements_again() {
     );
     assert!(lane_receipts(&receipts) > 0);
     assert_eq!(engine.bot_registry.spawn_candidates.probes, probed);
+}
+
+#[test]
+fn defender_lane_answers_survive_gate_changes_and_revalidate_at_most_every_15_s() {
+    let mut engine = engine_with_defence();
+    engine.bot_spawn_routes.inline = false;
+    engine.bot_spawn_routes.blocking = true;
+    for t in [0, 50] {
+        engine
+            .prefetch_bot_spawn_routes(Duration::from_millis(t), 1)
+            .unwrap();
+    }
+    engine.wait_bot_spawn_routes(1).unwrap();
+    choose_defender(&mut engine, 200, &Default::default());
+    let answers = engine.bot_registry.lane_spawns.len();
+    assert!(answers > 0);
+    let lanes_pending = |engine: &Engine<Vec<u8>>| {
+        engine
+            .bot_spawn_routes
+            .pending
+            .iter()
+            .filter(|key| matches!(key, SpawnRouteKey::Lane(..)))
+            .count()
+    };
+
+    // A gate change keeps every answer, usable or not, in use and queues
+    // each one once.
+    change_structure_gates(&mut engine, 1);
+    engine
+        .prefetch_bot_spawn_routes(Duration::from_secs(2), 1)
+        .unwrap();
+    assert_eq!(engine.bot_registry.lane_spawns.len(), answers);
+    assert_eq!(engine.bot_registry.stale_lane_spawns.len(), answers);
+    let queued = lanes_pending(&engine);
+    assert!(queued > 0);
+    let (spawn, _) = choose_defender(&mut engine, 200, &Default::default());
+    assert!(
+        [Some(NORTH), Some(SOUTH)].contains(&spawn.spawn_point),
+        "the earlier answers are in use: {spawn:?}"
+    );
+    engine.wait_bot_spawn_routes(1).unwrap();
+    choose_defender(&mut engine, 200, &Default::default());
+
+    // Another change within 15 s routes nothing again; after it, it does.
+    change_structure_gates(&mut engine, 2);
+    engine
+        .prefetch_bot_spawn_routes(Duration::from_secs(5), 1)
+        .unwrap();
+    assert!(!engine.bot_registry.stale_lane_spawns.is_empty());
+    assert_eq!(lanes_pending(&engine), 0);
+    let (spawn, _) = choose_defender(&mut engine, 200, &Default::default());
+    assert!([Some(NORTH), Some(SOUTH)].contains(&spawn.spawn_point));
+    engine
+        .prefetch_bot_spawn_routes(Duration::from_secs(17), 1)
+        .unwrap();
+    assert!(lanes_pending(&engine) > 0);
+}
+
+/// The live case: an attacking squad's open parachute drop zone was routed
+/// only when a life asked for it at the wave. The answer was still pending
+/// then, so the life fell back to its population slot, and every structure
+/// gate change cleared it again before the next wave.
+#[test]
+fn an_open_drop_zone_is_routed_before_the_wave_so_attacker_lives_land_there() {
+    let actors = crate::actor_collision::ActorGrid::default();
+    let mut unprefetched = engine();
+    activate_forward(&mut unprefetched);
+    unprefetched.bot_spawn_routes.inline = false;
+    unprefetched.bot_spawn_routes.blocking = true;
+    let (choice, _) = choose(&mut unprefetched, &actors);
+    let fallback = spawned(choice);
+    assert_eq!(fallback.spawn_point, Some(HOME), "{fallback:?}");
+    assert_eq!(fallback.arrival, Arrival::PopulationSlot);
+
+    let mut engine = engine();
+    activate_forward(&mut engine);
+    engine.bot_spawn_routes.inline = false;
+    engine.bot_spawn_routes.blocking = true;
+    assert!(engine.bot_spawn_goals(SQUAD).is_empty());
+    engine.prefetch_bot_spawn_routes(Duration::ZERO, 1).unwrap();
+    assert!(
+        engine
+            .bot_spawn_routes
+            .pending
+            .contains(&SpawnRouteKey::Point(DROP, HOME)),
+        "the drop zone is queued before any life asks"
+    );
+    assert!(
+        !engine
+            .bot_spawn_routes
+            .pending
+            .contains(&SpawnRouteKey::Point(ALTERNATE, HOME)),
+        "points after the population slot are never tried"
+    );
+    engine.wait_bot_spawn_routes(1).unwrap();
+    let (choice, receipts) = choose(&mut engine, &actors);
+    let spawn = spawned(choice);
+    assert_eq!(spawn.spawn_point, Some(DROP), "{spawn:?}");
+    assert_eq!(spawn.arrival, Arrival::ParachuteLanding);
+    assert!(
+        receipts
+            .iter()
+            .any(|r| r["op"] == "bot_spawn_point_qualified" && r["spawn_point_index"] == DROP)
+    );
+}
+
+fn change_structure_gates(engine: &mut Engine<Vec<u8>>, revision: u32) {
+    let structures = std::sync::Arc::new(crate::bot_structure_collision::StructureObstacles::new(
+        &crate::domination_structural_world::SequenceCollisionState::default(),
+        revision,
+    ));
+    let mesh = engine.navmesh_world.clone().unwrap();
+    crate::navmesh_structure_gates::install_now(&mesh, Some(&structures)).unwrap();
+}
+
+#[test]
+fn a_structure_gate_change_keeps_the_drop_zone_and_revalidates_it_at_most_every_15_s() {
+    let actors = crate::actor_collision::ActorGrid::default();
+    let mut engine = engine();
+    activate_forward(&mut engine);
+    engine.bot_spawn_routes.inline = false;
+    engine.bot_spawn_routes.blocking = true;
+    engine.prefetch_bot_spawn_routes(Duration::ZERO, 1).unwrap();
+    engine.wait_bot_spawn_routes(1).unwrap();
+    assert_eq!(
+        spawned(choose(&mut engine, &actors).0).spawn_point,
+        Some(DROP)
+    );
+    // A cached qualification is not queued again.
+    engine
+        .prefetch_bot_spawn_routes(Duration::from_secs(1), 1)
+        .unwrap();
+    assert!(engine.bot_spawn_routes.pending.is_empty());
+    let key = SpawnRouteKey::Point(DROP, HOME);
+
+    // A gate change queues one revalidation; lives keep the drop zone
+    // meanwhile instead of falling back to their slot.
+    change_structure_gates(&mut engine, 1);
+    let probed = engine.bot_registry.spawn_candidates.probes;
+    engine
+        .prefetch_bot_spawn_routes(Duration::from_secs(2), 1)
+        .unwrap();
+    assert!(engine.bot_spawn_routes.pending.contains(&key));
+    assert_eq!(engine.bot_registry.spawn_candidates.probes, probed);
+    // The revalidation may or may not have answered yet; either way the
+    // life uses the drop zone.
+    let (choice, mut receipts) = choose(&mut engine, &actors);
+    assert_eq!(spawned(choice).spawn_point, Some(DROP));
+    engine.wait_bot_spawn_routes(1).unwrap();
+    let (choice, later) = choose(&mut engine, &actors);
+    assert_eq!(spawned(choice).spawn_point, Some(DROP));
+    receipts.extend(later);
+    assert!(
+        receipts
+            .iter()
+            .any(|r| r["op"] == "bot_spawn_point_qualified"),
+        "the revalidation is stored"
+    );
+    assert!(engine.bot_registry.stale_spawn_qualification.is_empty());
+
+    // Another change within 15 s of that revalidation routes nothing.
+    change_structure_gates(&mut engine, 2);
+    engine
+        .prefetch_bot_spawn_routes(Duration::from_secs(5), 1)
+        .unwrap();
+    assert!(
+        engine
+            .bot_registry
+            .stale_spawn_qualification
+            .contains(&(DROP, HOME)),
+        "the gates changed again"
+    );
+    assert!(engine.bot_spawn_routes.pending.is_empty());
+    let spawn = spawned(choose(&mut engine, &actors).0);
+    assert_eq!(spawn.spawn_point, Some(DROP), "{spawn:?}");
+    assert_eq!(spawn.arrival, Arrival::ParachuteLanding);
+    engine
+        .prefetch_bot_spawn_routes(Duration::from_secs(17), 1)
+        .unwrap();
+    assert!(engine.bot_spawn_routes.pending.contains(&key));
+}
+
+#[test]
+fn a_squad_on_its_authored_default_queues_no_point_routes() {
+    let mut engine = engine();
+    engine.bot_spawn_routes.inline = false;
+    engine.bot_spawn_routes.blocking = true;
+    engine.prefetch_bot_spawn_routes(Duration::ZERO, 1).unwrap();
+    assert!(
+        !engine
+            .bot_spawn_routes
+            .pending
+            .iter()
+            .any(|key| matches!(key, SpawnRouteKey::Point(..))),
+        "the population slot comes first: nothing to route"
+    );
 }
