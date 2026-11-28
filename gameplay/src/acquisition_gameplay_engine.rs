@@ -15,7 +15,10 @@ use crate::{
     replication::{ObjectiveControlDelta, ObjectiveState},
     *,
 };
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 pub struct Setup {
     pub controller: Catalog,
@@ -56,10 +59,22 @@ struct ObjectiveCommit {
     characters: CharacterCandidate,
     native: BTreeMap<u32, NativeState>,
     leadership: Option<leadership_runtime::LeadershipPlan>,
-    refresh_assignments: bool,
+    orders: OrderRefresh,
     hospitals: Option<crate::structures::BunkerWorld>,
     hospital_packets: Vec<Vec<u8>>,
     audit: Value,
+}
+
+/// Which humans get their squad's order sent again after a commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OrderRefresh {
+    /// Startup: every human takes the order its squad starts with.
+    Everyone,
+    /// Only humans whose squad's primary objective this commit changed. An
+    /// objective changing state elsewhere leaves an unchanged order alone: a
+    /// clear and resend of the same order replays its voice line on the
+    /// client, once per plant, defuse or capture anywhere on the map.
+    Changed,
 }
 
 struct CaptureWitness {
@@ -664,7 +679,7 @@ impl<W: Write> Engine<W> {
                 ground,
                 round: None,
                 spawns: Some(spawns),
-                refresh_assignments: !changed.is_empty(),
+                orders: OrderRefresh::Changed,
                 changed,
                 ground_changes,
                 sequence_deltas,
@@ -746,7 +761,6 @@ impl<W: Write> Engine<W> {
             return Ok(vec![]);
         }
         let setup = Arc::clone(&runtime.setup);
-        let assignments_before = squad_assignments(&runtime);
         let mut world = self
             .objective_world
             .clone()
@@ -1054,9 +1068,13 @@ impl<W: Write> Engine<W> {
             return Ok(vec![]);
         }
         // Squad orders follow objective state. A tick that only moved ground,
-        // ability or character state leaves every HUD order as published.
-        let refresh_assignments =
-            starting || !changed.is_empty() || squad_assignments(&runtime) != assignments_before;
+        // ability or character state leaves every HUD order as published, and
+        // so does an objective change that leaves a squad's primary in place.
+        let orders = if starting {
+            OrderRefresh::Everyone
+        } else {
+            OrderRefresh::Changed
+        };
         let audit = json!({
             "op":"acquisition_objective_tick", "timestamp_ms":now.as_millis() as u64,
             "startup":starting, "controller_sha256":setup.controller.fingerprint(),
@@ -1076,7 +1094,7 @@ impl<W: Write> Engine<W> {
                 characters,
                 native,
                 leadership: None,
-                refresh_assignments,
+                orders,
                 hospitals,
                 hospital_packets,
                 audit,
@@ -1105,7 +1123,7 @@ impl<W: Write> Engine<W> {
             characters,
             mut native,
             leadership,
-            refresh_assignments,
+            orders,
             hospitals,
             hospital_packets,
             mut audit,
@@ -1194,6 +1212,13 @@ impl<W: Write> Engine<W> {
         if let Some(round) = round {
             self.acquisition_round = Some(round);
         }
+        let reordered = match orders {
+            OrderRefresh::Everyone => None,
+            OrderRefresh::Changed => Some(changed_primaries(
+                self.acquisition_gameplay.as_ref(),
+                &runtime,
+            )),
+        };
         self.acquisition_gameplay = Some(runtime);
         if let Some(spawns) = spawns {
             self.spawn_catalog = Some(spawns);
@@ -1237,8 +1262,11 @@ impl<W: Write> Engine<W> {
                 recipient.queue_shared(packet.clone());
             }
         }
-        if refresh_assignments {
-            for actor in self.active.iter_mut().chain(self.peers.values_mut()) {
+        for actor in self.active.iter_mut().chain(self.peers.values_mut()) {
+            if reordered
+                .as_ref()
+                .is_none_or(|squads| squads.contains(&actor.squad_catalog.squad_index()))
+            {
                 actor.objective_assigned = false;
                 actor.objective_needs_clear = true;
             }
@@ -1247,11 +1275,17 @@ impl<W: Write> Engine<W> {
     }
 }
 
-fn squad_assignments(
-    runtime: &Runtime,
-) -> Vec<(u16, crate::acquisition_objective_runtime::Assignment)> {
+/// Squads whose primary objective (the order a human's HUD shows) differs
+/// between the committed runtime and its candidate.
+fn changed_primaries(before: Option<&Runtime>, after: &Runtime) -> BTreeSet<u16> {
+    let primary = |runtime: &Runtime, squad: u16| {
+        runtime
+            .state
+            .squad(squad)
+            .map(|s| s.assignment.primary_index)
+    };
     (0..32)
-        .filter_map(|index| runtime.state.squad(index).map(|s| (index, s.assignment)))
+        .filter(|&squad| before.and_then(|b| primary(b, squad)) != primary(after, squad))
         .collect()
 }
 

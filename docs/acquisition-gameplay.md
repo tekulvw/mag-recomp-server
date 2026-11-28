@@ -156,6 +156,13 @@ and network release. A failed query, effect or record leaves live authority
 unchanged. Completed and subsequent Locked states retain their publication order;
 capture holders receive the existing same-generation exit handshake.
 
+A human's squad order (the squad's primary objective, which the HUD shows) is
+cleared and sent again only when a commit changes that squad's primary, and to
+everyone at startup. An objective changing state elsewhere leaves an unchanged
+order alone. The client plays the order's voice line each time it is set, so
+resending the same order after every plant, defuse or capture on the map
+replayed that line over and over.
+
 Capture activates the exact existing Escort source and clears spawn blockers
 through real convex queries. The owner grant uses the authenticated connection
 index. Vehicle dynamics require the currently held driver seat, a fresh owner
