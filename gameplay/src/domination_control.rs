@@ -372,6 +372,40 @@ impl Map {
             .any(|command| matches!(command, Command::Ability { enabled: true, .. }))
     }
 
+    /// Objectives the authored stage rules advance together: each group is a
+    /// rule that requires every member to be completed at once and then locks
+    /// them all (in Domination, the points of one stage of a platoon). Groups
+    /// come in binding order and members in condition order, without repeats.
+    pub(crate) fn stage_groups(&self) -> Vec<Vec<u32>> {
+        let mut groups: Vec<Vec<u32>> = Vec::new();
+        for rule in self
+            .bindings
+            .values()
+            .flatten()
+            .flat_map(|entry| &entry.rules)
+        {
+            let mut members: Vec<u32> = Vec::new();
+            for condition in &rule.conditions {
+                if condition.equal
+                    && condition.state == State::Completed
+                    && !members.contains(&condition.objective_token)
+                {
+                    members.push(condition.objective_token);
+                }
+            }
+            let locks_all = members.iter().all(|token| {
+                rule.commands.iter().any(|command| {
+                    matches!(command, Command::SetState { objective_token, state: State::Locked, .. }
+                        if objective_token == token)
+                })
+            });
+            if members.len() >= 2 && locks_all && !groups.contains(&members) {
+                groups.push(members);
+            }
+        }
+        groups
+    }
+
     pub fn unresolved_hook(&self, objective_token: u32, event: Event) -> Option<u32> {
         self.hooks
             .get(&(objective_token, event))
@@ -502,6 +536,22 @@ mod tests {
                 ]
             }]
         })
+    }
+
+    #[test]
+    fn stage_groups_are_the_rules_that_lock_points_completed_together() {
+        let catalog = Catalog::from_json(&synthetic_catalog().to_string().into_bytes()).unwrap();
+        let map = catalog.map("synthetic").unwrap();
+        // Binding 51 locks 1 and 2 once both are completed. The ability rule
+        // tests one objective and locks nothing, so it is not a stage.
+        assert_eq!(map.stage_groups(), vec![vec![1, 2]]);
+
+        let mut raw = synthetic_catalog();
+        let rule = &mut raw["maps"][0]["bindings"][0]["entries"][0]["rules"][0];
+        // A rule that requires both but locks only one is not a stage either.
+        rule["commands"].as_array_mut().unwrap().remove(1);
+        let catalog = Catalog::from_json(&raw.to_string().into_bytes()).unwrap();
+        assert!(catalog.map("synthetic").unwrap().stage_groups().is_empty());
     }
 
     #[test]

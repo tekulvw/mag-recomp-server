@@ -44,6 +44,7 @@ pub mod blast_rules;
 pub mod blast_visibility;
 pub mod bootstrap_loadouts;
 mod bot_armed_objectives;
+mod bot_assault;
 mod bot_blast;
 mod bot_breach;
 mod bot_cover;
