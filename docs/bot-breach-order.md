@@ -67,7 +67,10 @@ The squads are re-planned every bot tick, while the match is playing:
    that has bots and whose lane objective is that capture works a defence
    instead. Squads are ranked by squad index, and the n-th takes the n-th
    standing defence, so a lane's squads work its outermost defences side by
-   side. The last `attacker_reserve_squads` of them stay on the capture.
+   side. The last `attacker_reserve_squads` of them stay on the capture
+   (in Domination also up to the assault policy's `breach_reserve_squads`,
+   but never the lane's last squad; see
+   [bot-assault.md](bot-assault.md#defences)).
 2. The lane's defending squads spread the same way over the defences the
    attackers work. The last `defender_reserve_squads` (default one) stay on
    the capture.

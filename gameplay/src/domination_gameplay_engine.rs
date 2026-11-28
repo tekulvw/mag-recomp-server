@@ -387,6 +387,22 @@ impl Runtime {
         self.setup.category_zero_indices()
     }
 
+    /// The objective indices of each stage the authored controller advances
+    /// only while all of its points are completed at once, for bot planning.
+    pub(crate) fn stage_groups(&self) -> Vec<Vec<u16>> {
+        self.setup
+            .map
+            .stage_groups()
+            .into_iter()
+            .filter_map(|tokens| {
+                tokens
+                    .iter()
+                    .map(|token| self.setup.indices_by_token.get(token).copied())
+                    .collect::<Option<Vec<u16>>>()
+            })
+            .collect()
+    }
+
     /// What completing each structural objective changes, for bot planning.
     pub(crate) fn structure_hints(&self) -> BTreeMap<u16, crate::bot_demolition::Hint> {
         use crate::domination_fsp::{FspType, SquadRouting};

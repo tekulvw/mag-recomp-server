@@ -71,6 +71,9 @@ pub(crate) enum Source {
     Lane,
     /// The nearest objective of another squad of the team (lane exhausted).
     Nearest,
+    /// An open point of the stage whose secured point the squad left to
+    /// reinforce it (bot_assault).
+    Stage,
 }
 impl Source {
     pub(crate) fn code(self) -> &'static str {
@@ -78,6 +81,7 @@ impl Source {
             Self::Order => "frago",
             Self::Lane => "lane",
             Self::Nearest => "nearest_lane",
+            Self::Stage => "stage",
         }
     }
 }
@@ -299,7 +303,7 @@ impl<W: Write> Engine<W> {
                 position: (alive > 0).then(|| sum.map(|v| v / alive as f64)),
             });
         }
-        let chosen = choose(
+        let mut chosen = choose(
             &inputs,
             policy.follow_orders,
             |index, team| self.objective_open_for(index, team),
@@ -308,6 +312,11 @@ impl<W: Write> Engine<W> {
                     .map(|(c, _)| c.map(f64::from))
             },
         );
+        // Squads a secured point can spare reinforce the open points of its
+        // stage (bot_assault).
+        for (squad, point) in self.assault_reinforcements(&inputs, &chosen) {
+            chosen.insert(squad, Some((point, Source::Stage)));
+        }
         // Squads without a human order keep their tag on what their bots do.
         let tags: Vec<(u16, u32, u32, Choice)> =
             if policy.automatic_orders && playing && self.squad_orders.is_some() {

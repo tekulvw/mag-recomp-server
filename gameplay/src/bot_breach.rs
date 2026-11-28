@@ -264,6 +264,9 @@ pub(crate) struct SquadLane {
 pub(crate) struct Reserves {
     pub attackers: u16,
     pub defenders: u16,
+    /// Attacking squads that also stay on the capture while another squad
+    /// of the lane is left to break its defences (bot_assault).
+    pub point_attackers: u16,
 }
 
 /// The defence each squad works instead of its lane objective. `open` says
@@ -292,9 +295,9 @@ pub(crate) fn assign(
         members.sort_by_key(|s| s.squad);
         let (attackers, defenders): (Vec<&SquadLane>, Vec<&SquadLane>) =
             members.into_iter().partition(|s| s.team != lane.defender);
-        let working = attackers
-            .len()
-            .saturating_sub(usize::from(reserves.attackers));
+        let kept = usize::from(reserves.attackers)
+            .max(usize::from(reserves.point_attackers).min(attackers.len().saturating_sub(1)));
+        let working = attackers.len().saturating_sub(kept);
         for (rank, s) in attackers.iter().take(working).enumerate() {
             chosen.insert(s.squad, standing[rank % standing.len()]);
         }
@@ -619,6 +622,11 @@ impl<W: Write> Engine<W> {
         let Some(world) = self.objective_world.as_ref() else {
             return Ok(());
         };
+        // Domination attackers keep squads on the point while others break
+        // its defences (bot_assault).
+        let assault_reserve = self
+            .bot_assault_policy()
+            .map_or(0, |a| a.breach_reserve_squads);
         let mut events = Vec::new();
         let book = &mut self.bot_registry.director.breach;
         for lane in &plan.lanes {
@@ -641,6 +649,7 @@ impl<W: Write> Engine<W> {
             Reserves {
                 attackers: policy.attacker_reserve_squads,
                 defenders: policy.defender_reserve_squads,
+                point_attackers: assault_reserve,
             },
         );
         // Defences attacking squads work now; a defence worked too long is passed by.

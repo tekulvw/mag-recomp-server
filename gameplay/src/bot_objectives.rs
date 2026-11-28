@@ -1,7 +1,7 @@
 //! World-owned phase-aware tactical routes and bounded physical objective operators.
 use super::*;
 use development_target::BotPhase;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -326,6 +326,8 @@ pub(super) struct Director {
     pub(super) demolition: crate::bot_demolition::Book,
     pub(super) squad_orders: crate::bot_squad_orders::Book,
     pub(super) breach: crate::bot_breach::Book,
+    /// Each attacking squad's wave on its open point (bot_assault).
+    pub(super) waves: BTreeMap<u16, crate::bot_assault::Wave>,
     /// (medic, patient) pairs whose approach route failed, until when.
     pub(super) medic_failures: BTreeMap<(u16, crate::bot_medic_approach::Patient), Duration>,
 }
@@ -354,6 +356,8 @@ pub(super) struct Task {
     pub(super) repair: Option<u16>,
     /// When this engineer's repair tool may submit again.
     pub(super) repair_next_at: Duration,
+    /// The bot waits at its squad's rally place before the push (bot_assault).
+    pub(super) rally: bool,
     continuing: bool,
     routed: bool,
     wide: bool,
@@ -2798,6 +2802,44 @@ impl<W: Write> Engine<W> {
                     .map_or(assigned[&squad], Some)
             })
         };
+        // Attacking squads gather before they push into an open point
+        // (bot_assault). Only bots working on the squad's objective count:
+        // not downed bots, nor medics on their way to a downed teammate.
+        let assault = self.bot_assault_policy();
+        let rallying = {
+            let mut members: BTreeMap<u16, Vec<[f64; 3]>> = BTreeMap::new();
+            if assault.is_some() {
+                for (&id, bot) in &self.bot_registry.bots {
+                    let squad = bot.target.squad.squad_index();
+                    if bot.health > 0
+                        && bot.downed.is_none()
+                        && bot.medic_approach.is_none()
+                        && let Some(r) = bot.target.runtime
+                        && target_of(id, squad) == assigned[&squad]
+                    {
+                        members.entry(squad).or_default().push(point(r.position));
+                    }
+                }
+            }
+            self.plan_assault_waves(assault.as_ref(), &assigned, &members, now, &mut receipts)
+        };
+        // Secure-and-hold points whose attackers stand on the point's ring.
+        let points: BTreeSet<u16> = match (&assault, &self.objective_catalog) {
+            (Some(_), Some(catalog)) => catalog
+                .objects
+                .iter()
+                .filter(|o| o.native_class == Some(objective_catalog::NativeClass::SecureHold))
+                .map(|o| o.object_index)
+                .collect(),
+            _ => BTreeSet::new(),
+        };
+        let guard_outer = |objective: u16| match &assault {
+            Some(a) if points.contains(&objective) => a.hold_radius_m[1],
+            _ => policy.armed.guard_radius_m[1],
+        };
+        let rallies = |id: u16, squad: u16| {
+            rallying.contains(&squad) && target_of(id, squad) == assigned[&squad]
+        };
         let mut operators = BTreeMap::new();
         if policy.interactions_enabled
             && self.match_started
@@ -2827,6 +2869,7 @@ impl<W: Write> Engine<W> {
                     // for an ordinary interaction; an armed duty releases it.
                     if target_of(id, bot.target.squad.squad_index()) != Some(index)
                         || !operator_safe(bot)
+                        || rallies(id, bot.target.squad.squad_index())
                         || (bot.medic_approach.is_some() && !duties.contains_key(&id))
                     {
                         continue;
@@ -2939,10 +2982,12 @@ impl<W: Write> Engine<W> {
                         > 2
                 });
             let operator = target.is_some_and(|index| operators.get(&index) == Some(&id));
+            let rally = !operator && rallies(id, bot.target.squad.squad_index());
             let changed = t.objective != target
                 || t.wide != wide
                 || t.operator != operator
-                || t.armed != armed;
+                || t.armed != armed
+                || t.rally != rally;
             if changed {
                 if t.operator != operator {
                     receipts.push(json!({"op":"bot_objective_operator","object_index":id,"generation":r.generation,"objective":target,"selected":operator,"timestamp_ms":now.as_millis()as u64}));
@@ -2959,6 +3004,7 @@ impl<W: Write> Engine<W> {
                 bot.drop_approach_ready = false;
                 t.wide = wide;
                 t.armed = armed;
+                t.rally = rally;
                 t.objective = target;
                 t.routed = false;
                 t.retry_at = now;
@@ -2972,7 +3018,12 @@ impl<W: Write> Engine<W> {
                     && let Some(center) = centers.get(&duty.objective)
                     && (f64::from(r.position.x) - center[0])
                         .hypot(f64::from(r.position.z) - center[2])
-                        <= duty.duty.ring(&policy.armed)[1]
+                        <= match duty.duty {
+                            crate::bot_armed_objectives::Duty::Guard => guard_outer(duty.objective),
+                            crate::bot_armed_objectives::Duty::Converge => {
+                                duty.duty.ring(&policy.armed)[1]
+                            }
+                        }
                     && !zones.get(&duty.objective).is_some_and(|zone| {
                         zone.attackers == bot.target.squad.team()
                             && zone.contains([r.position.x.into(), 0., r.position.z.into()])
@@ -3358,9 +3409,26 @@ impl<W: Write> Engine<W> {
                 back_m: 0.,
                 side_m: 0.,
             });
+            // Attackers of a secure-and-hold point stand on its ring, or wait
+            // at their squad's rally place (bot_assault).
+            let assault_role = assault
+                .as_ref()
+                .filter(|_| !operator && armed.is_none() && !defending)
+                .filter(|_| points.contains(&objective))
+                .map(|a| {
+                    let rally = bot.task.rally;
+                    let role = DestinationRole {
+                        name: if rally { "rally" } else { "point_ring" }.into(),
+                        back_m: 0.,
+                        side_m: 0.,
+                    };
+                    (a, rally, role)
+                });
             let role = if operator {
                 &operator_role
             } else if let Some(role) = &armed_role {
+                role
+            } else if let Some((_, _, role)) = &assault_role {
                 role
             } else if defending {
                 &policy.defend_roles[usize::from(bot.role_slot)]
@@ -3397,9 +3465,27 @@ impl<W: Write> Engine<W> {
                     center.map(f64::from),
                     objective,
                     duty,
-                    &Self::armed_policy_outside_blast(&zones, objective, &policy.armed),
+                    &Self::armed_policy_outside_blast(
+                        &zones,
+                        objective,
+                        &self.assault_armed_policy(objective, &policy.armed, assault.as_ref()),
+                    ),
                     candidate_attempt,
                 ))
+            } else if let Some((a, rally, _)) = &assault_role {
+                let slot = usize::from(bot.role_slot) + 8 * usize::from(squad % 4);
+                let center = center.map(f64::from);
+                position(if *rally {
+                    let home = [anchor.x.into(), anchor.y.into(), anchor.z.into()];
+                    crate::bot_assault::ring_point(
+                        crate::bot_assault::rally_point(center, home, a.rally_back_m),
+                        [1.5, a.rally_radius_m / 2.],
+                        slot,
+                        candidate_attempt,
+                    )
+                } else {
+                    crate::bot_assault::ring_point(center, a.hold_radius_m, slot, candidate_attempt)
+                })
             } else {
                 role_candidate(center, anchor, role, offset)
             };

@@ -34,7 +34,10 @@ Each squad with bots works on one objective, chosen every bot tick:
    still inactive; holding that point is the native primary.
    While the lane's defences stand, the lane objective is the defence the
    squad breaks first ([bot-breach-order.md](bot-breach-order.md)).
-3. **The nearest active objective.** A squad whose lane is exhausted helps the
+3. **The stage.** In Domination, an attacking squad on a secured point that
+   its stage can spare reinforces the stage's open point instead
+   ([bot-assault.md](bot-assault.md#stages)).
+4. **The nearest active objective.** A squad whose lane is exhausted helps the
    objective, among those other squads of its team work on, nearest to the
    mean position of its living bots. Ties go to the lower objective index.
 
@@ -94,7 +97,7 @@ The population file's `squad_orders` object. Omitted fields use the defaults:
 
 - `bot_squad_orders`: automatic tags written this tick, per squad:
   `previous_tag`, `tag`, the `objective`, its `source` (`lane`,
-  `nearest_lane` or `frago`) and whether it `applied` (`error` when the mode
+  `nearest_lane`, `stage` or `frago`) and whether it `applied` (`error` when the mode
   refused it). A refused tag is not requested again for that squad until
   another tag applies.
 - `bot_objective_task` and `bot_objective_waiting`: the bot's `objective`, as
