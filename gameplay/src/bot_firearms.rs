@@ -1288,7 +1288,7 @@ impl<W: Write> Engine<W> {
             }
             // The shooter's own pose follows its snapshot; damage can be to a human.
             if let Some(packet) = owner_packet {
-                self.broadcast_bot_state_packet(packet);
+                self.broadcast_bot_state_packet(id, packet);
             }
             if let Some(packet) = damage_packet {
                 self.broadcast_bot_packet(packet);
