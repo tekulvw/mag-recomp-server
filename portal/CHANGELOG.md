@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.0](https://github.com/tekulvw/mag-recomp-server/compare/portal-v0.10.0...portal-v0.11.0) (2026-11-28)
+
+
+### Features
+
+* **medius:** handle skill respecs and add an operator respec point floor ([#428](https://github.com/tekulvw/mag-recomp-server/issues/428)) ([c2917d9](https://github.com/tekulvw/mag-recomp-server/commit/c2917d9c6e5e67df392c6dc054e932de8df3ca88))
+
 ## [0.10.0](https://github.com/tekulvw/mag-recomp-server/compare/portal-v0.9.0...portal-v0.10.0) (2026-11-28)
 
 

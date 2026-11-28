@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.14.0](https://github.com/tekulvw/mag-recomp-server/compare/chart-v0.13.1...chart-v0.14.0) (2026-11-28)
+
+
+### Features
+
+* **medius:** cap respec fees so a matching floor allows unlimited respecs ([#432](https://github.com/tekulvw/mag-recomp-server/issues/432)) ([6b67b81](https://github.com/tekulvw/mag-recomp-server/commit/6b67b818b79f209aaaf29d1347717583840ef006))
+* **medius:** handle skill respecs and add an operator respec point floor ([#428](https://github.com/tekulvw/mag-recomp-server/issues/428)) ([c2917d9](https://github.com/tekulvw/mag-recomp-server/commit/c2917d9c6e5e67df392c6dc054e932de8df3ca88))
+
 ## [0.13.1](https://github.com/tekulvw/mag-recomp-server/compare/chart-v0.13.0...chart-v0.13.1) (2026-11-26)
 
 
