@@ -6,6 +6,14 @@ namespace RT.Models.MAG
         public override ushort MessageType => 0x0250;
         public sbyte SkillId { get; set; } = -1;
     }
+    // Protocol 1793 uses plain NetGameMessage 0268 and a signed 16-bit ordinal. Keep
+    // the older signed-byte DTO distinct. This request is offline-codec only
+    // until the 1793 catalog and live purchase policy are qualified.
+    public sealed class MagPurchaseSkill212Request : MagMessage
+    {
+        public override ushort MessageType => 0x0250;
+        public short SkillId { get; set; } = -1;
+    }
     // Native 0251 always carries the full record, including on failure.
     public sealed class MagPurchaseSkillResponse : MagMessage
     {
