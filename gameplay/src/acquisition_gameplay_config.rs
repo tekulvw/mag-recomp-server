@@ -46,6 +46,10 @@ pub struct Configuration {
     /// Field-hospital turret rules from
     /// `project-retail-hospital-turrets.py --mode acquisition`.
     hospital_turrets: Option<PathBuf>,
+    /// Field-hospital secondary rocket rules from
+    /// `project-retail-hospital-rockets.py --mode acquisition`. They bind to
+    /// `hospital_turrets` and fly against `projectile_contacts`.
+    hospital_rockets: Option<PathBuf>,
     #[serde(default)]
     frag_character_blast: bool,
     frag_ground_areas: Option<PathBuf>,
@@ -207,6 +211,9 @@ impl Configuration {
         if let Some(source) = &mut result.hospital_turrets {
             crate::resources::resolve_manifest_path(directory, source)?;
         }
+        if let Some(source) = &mut result.hospital_rockets {
+            crate::resources::resolve_manifest_path(directory, source)?;
+        }
         if let Some(source) = &mut result.frag_ground_areas {
             *source = directory.join(&*source);
         }
@@ -292,6 +299,18 @@ impl Configuration {
             return Err("empty_acquisition_hospital_turret_source_path");
         }
         if self
+            .hospital_rockets
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            return Err("empty_acquisition_hospital_rocket_source_path");
+        }
+        if self.hospital_rockets.is_some()
+            && (self.hospital_turrets.is_none() || self.projectile_contacts.is_none())
+        {
+            return Err("acquisition_hospital_rockets_require_turrets_and_contacts");
+        }
+        if self
             .frag_ground_areas
             .as_ref()
             .is_some_and(|path| path.as_os_str().is_empty())
@@ -361,6 +380,25 @@ impl Configuration {
     /// once the item catalog is loaded.
     pub(crate) fn hospital_turret_source(&self) -> io::Result<Option<Vec<u8>>> {
         Self::read_ground_turret_source(self.hospital_turrets.as_ref())
+    }
+
+    /// The field-hospital secondary rocket rules; they bind to the hospital
+    /// turret rules and the item catalog with the profile.
+    pub(crate) fn hospital_rocket_source(&self) -> io::Result<Option<Vec<u8>>> {
+        const MAX_ROCKET_BYTES: u64 = 1 << 20;
+        let Some(path) = &self.hospital_rockets else {
+            return Ok(None);
+        };
+        let mut bytes = Vec::new();
+        File::open(path)?
+            .take(MAX_ROCKET_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_ROCKET_BYTES {
+            return Err(io::Error::other(
+                "acquisition_hospital_rocket_source_too_large",
+            ));
+        }
+        Ok(Some(bytes))
     }
 
     fn read_ground_turret_source(path: Option<&PathBuf>) -> io::Result<Option<Vec<u8>>> {

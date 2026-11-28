@@ -26,6 +26,10 @@ const MAX_ADVANCES_PER_TICK: usize = 16;
 const QUERY_RETRY_MS: u64 = 2_000;
 const POSITION_INTERVAL: Duration = Duration::from_millis(200);
 const CLEANUP_GRACE: Duration = Duration::from_millis(500);
+/// The client times refire and reload from its own shots, while the server
+/// sees each request at its arrival. A request that arrives this much early
+/// is network jitter, not a faster weapon. Replacement scheduling choice.
+const ARRIVAL_JITTER: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Flights {
@@ -70,12 +74,13 @@ impl Magazine {
             next_fire: now,
             refill: None,
         });
-        if now < next.next_fire {
+        let arrived = now.saturating_add(ARRIVAL_JITTER);
+        if arrived < next.next_fire {
             return Err("hospital_rocket_refire");
         }
         if next.rounds == 0 {
             let refill = next.refill.ok_or("hospital_rocket_ammo_empty")?;
-            if now < refill {
+            if arrived < refill {
                 return Err("hospital_rocket_reloading");
             }
             if !weapon.infinite_ammo {
@@ -196,8 +201,10 @@ impl<W: Write> Engine<W> {
             .hospital_rockets
             .as_ref()
             .ok_or("hospital_rocket_rules_required")?;
+        // Acquisition (1) field hospitals carry the Domination (2) hospital
+        // emplacement; each mode's profile binds its own rules and contacts.
         if self.wire_profile.application_id() != 20231
-            || self.match_profile().game_type != 2
+            || !matches!(self.match_profile().game_type, 1 | 2)
             || !self.match_started
             || !self.round_combat_allowed(now)
         {
@@ -483,11 +490,16 @@ impl<W: Write> Engine<W> {
         flights: &[Flight],
         now_ms: u64,
     ) -> Result<Vec<Result<Advance<OwnedContact>, &'static str>>, &'static str> {
-        let state = &self
-            .domination_gameplay
-            .as_ref()
-            .ok_or("hospital_rocket_domination_world_required")?
-            .state;
+        let (sequences, filter_rows) = if let Some(world) = &self.domination_gameplay {
+            (&world.state.collisions, world.state.filter_rows)
+        } else {
+            let collision = self
+                .acquisition_gameplay
+                .as_ref()
+                .and_then(|runtime| runtime.blast_collision())
+                .ok_or("hospital_rocket_mode_world_required")?;
+            (collision.sequences, *collision.filter_rows)
+        };
         let static_world = self
             .collision_world
             .as_ref()
@@ -496,15 +508,9 @@ impl<W: Write> Engine<W> {
             .projectile_contacts
             .as_ref()
             .ok_or("hospital_rocket_contact_bindings_required")?;
-        let snapshot = self.dynamic_collision_snapshot(state.filter_rows[6])?;
-        let scene = Scene::new(
-            static_world,
-            &state.collisions,
-            &snapshot,
-            bindings,
-            state.filter_rows,
-        )
-        .with_dynamic_catalog(self)?;
+        let snapshot = self.dynamic_collision_snapshot(filter_rows[6])?;
+        let scene = Scene::new(static_world, sequences, &snapshot, bindings, filter_rows)
+            .with_dynamic_catalog(self)?;
         let mut budget = QueryLimits::default().max_support_points;
         Ok(flights
             .iter()
@@ -715,6 +721,9 @@ impl<W: Write> Engine<W> {
         position: [f64; 3],
         now: Duration,
     ) -> Result<RocketEffects, &'static str> {
+        if self.domination_gameplay.is_none() {
+            return self.prepare_acquisition_rocket_effects(flight, position, now);
+        }
         let state = &self
             .domination_gameplay
             .as_ref()
@@ -787,6 +796,62 @@ impl<W: Write> Engine<W> {
             ground,
             helo,
             hospital,
+        })
+    }
+
+    /// An Acquisition field-hospital rocket damages Characters and the
+    /// Escort/APC through the same equipment-blast paths as an infantry rocket.
+    /// Field hospitals, Helos and structural objectives are not targets here.
+    fn prepare_acquisition_rocket_effects(
+        &mut self,
+        flight: &Flight,
+        position: [f64; 3],
+        now: Duration,
+    ) -> Result<RocketEffects, &'static str> {
+        let runtime = self
+            .acquisition_gameplay
+            .clone()
+            .ok_or("hospital_rocket_mode_world_required")?;
+        let collision = runtime
+            .blast_collision()
+            .ok_or("hospital_rocket_collision_required")?;
+        let (character, native) = self.prepare_hospital_rocket_character_blast(
+            &flight.source,
+            position,
+            flight.blast,
+            collision,
+            now,
+        )?;
+        // Ground damage is optional, as in Domination: a profile without
+        // classified Escort/APC areas still damages Characters.
+        let ground = self
+            .ground_frag_areas()
+            .is_some()
+            .then(|| {
+                self.prepare_underbarrel_acquisition_ground(
+                    &flight.source,
+                    position,
+                    crate::item_catalog::TargetDamageParameters {
+                        amount: flight.blast.vehicle_hp,
+                        armor_pierce: 0.,
+                        armor_redux: 0.,
+                    },
+                    flight.blast,
+                    now,
+                )
+            })
+            .transpose()?
+            .map(|ground| GroundRocketCandidate {
+                after: ground.after,
+                packet: ground.packet,
+                audit: ground.audit,
+            });
+        Ok(RocketEffects {
+            character,
+            native,
+            ground,
+            helo: None,
+            hospital: None,
         })
     }
 
@@ -1018,3 +1083,7 @@ fn rotate(rotation: [f64; 4], [x, y, z]: [f64; 3]) -> [f64; 3] {
 #[cfg(test)]
 #[path = "hospital_rocket_runtime_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "hospital_rocket_reload_tests.rs"]
+mod reload_tests;
