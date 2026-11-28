@@ -119,6 +119,20 @@ So the server never routes for a spawn choice inside the world tick:
   its next point or its population slot. The answer and its receipt are
   stored on a later tick, provided the navmesh and its structure gates are
   unchanged. Otherwise the point is queued again.
+- A structure gate change does not discard answers. Every point and lane
+  qualification from earlier gates, usable or not, stays in use, marked
+  stale, and is routed again at most once every 15 s per key, by the
+  prefetch or by a spawn choice that uses it. Gates change between almost
+  every wave of a Domination match (breaching and repairs), and routing every
+  qualification again after each change kept the worker busy, mostly with
+  lane checks that fail and search the whole navmesh. Once world ticks took
+  the navmesh first, the worker answered about a tenth of the lane checks it
+  had before. A stale answer can be up to about 15 s out of date after a gate
+  change: a life may use a point a structure has just walled off, or skip one
+  that has just opened. Routes already queued when the gates change still
+  answer, through the gates they were planned with, and their answers are
+  kept the same way instead of being dropped and routed once more. Synthetic
+  tests that route inline still route again at once.
 - The defender lane points every population slot will ask for are queued
   ahead, at most once a second: while humans wait for their side's first
   wave, so the first defender lives normally already have their forward

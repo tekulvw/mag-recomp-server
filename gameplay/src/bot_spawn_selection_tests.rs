@@ -1278,7 +1278,7 @@ fn a_slow_defender_route_never_holds_the_spawn_choice() {
 }
 
 #[test]
-fn queued_routes_through_replaced_structure_gates_are_routed_again() {
+fn queued_routes_through_replaced_structure_gates_are_kept_stale_and_routed_again() {
     let mut engine = engine_with_defence();
     engine.bot_spawn_routes.inline = false;
     engine.bot_spawn_routes.blocking = true;
@@ -1287,20 +1287,27 @@ fn queued_routes_through_replaced_structure_gates_are_routed_again() {
     let (first, _) = choose_defender(&mut engine, 200, &Default::default());
     assert_eq!(first.arrival, Arrival::PopulationSlot);
     // The gates change while the answers are in flight.
-    let structures = std::sync::Arc::new(crate::bot_structure_collision::StructureObstacles::new(
-        &crate::domination_structural_world::SequenceCollisionState::default(),
-        1,
-    ));
-    let mesh = engine.navmesh_world.clone().unwrap();
-    crate::navmesh_structure_gates::install_now(&mesh, Some(&structures)).unwrap();
+    change_structure_gates(&mut engine, 1);
     engine.wait_bot_spawn_routes(1).unwrap();
+    // The answers through the old gates are used rather than thrown away...
     let (stale, receipts) = choose_defender(&mut engine, 200, &Default::default());
-    assert_eq!(
-        stale.arrival,
-        Arrival::PopulationSlot,
-        "answers routed through the old gates are dropped"
+    assert!(
+        [Some(NORTH), Some(SOUTH)].contains(&stale.spawn_point),
+        "{stale:?}"
     );
-    assert_eq!(lane_receipts(&receipts), 0, "{receipts:?}");
+    assert!(lane_receipts(&receipts) > 0);
+    assert!(!engine.bot_registry.stale_lane_spawns.is_empty());
+    // ...and routed again through the current gates.
+    engine
+        .prefetch_bot_spawn_routes(Duration::from_secs(1), 1)
+        .unwrap();
+    assert!(
+        engine
+            .bot_spawn_routes
+            .pending
+            .iter()
+            .any(|key| matches!(key, SpawnRouteKey::Lane(..)))
+    );
     engine.wait_bot_spawn_routes(1).unwrap();
     let (current, receipts) = choose_defender(&mut engine, 200, &Default::default());
     assert!(
@@ -1381,6 +1388,62 @@ fn structure_gate_changes_route_again_without_probing_placements_again() {
     );
     assert!(lane_receipts(&receipts) > 0);
     assert_eq!(engine.bot_registry.spawn_candidates.probes, probed);
+}
+
+#[test]
+fn defender_lane_answers_survive_gate_changes_and_revalidate_at_most_every_15_s() {
+    let mut engine = engine_with_defence();
+    engine.bot_spawn_routes.inline = false;
+    engine.bot_spawn_routes.blocking = true;
+    for t in [0, 50] {
+        engine
+            .prefetch_bot_spawn_routes(Duration::from_millis(t), 1)
+            .unwrap();
+    }
+    engine.wait_bot_spawn_routes(1).unwrap();
+    choose_defender(&mut engine, 200, &Default::default());
+    let answers = engine.bot_registry.lane_spawns.len();
+    assert!(answers > 0);
+    let lanes_pending = |engine: &Engine<Vec<u8>>| {
+        engine
+            .bot_spawn_routes
+            .pending
+            .iter()
+            .filter(|key| matches!(key, SpawnRouteKey::Lane(..)))
+            .count()
+    };
+
+    // A gate change keeps every answer, usable or not, in use and queues
+    // each one once.
+    change_structure_gates(&mut engine, 1);
+    engine
+        .prefetch_bot_spawn_routes(Duration::from_secs(2), 1)
+        .unwrap();
+    assert_eq!(engine.bot_registry.lane_spawns.len(), answers);
+    assert_eq!(engine.bot_registry.stale_lane_spawns.len(), answers);
+    let queued = lanes_pending(&engine);
+    assert!(queued > 0);
+    let (spawn, _) = choose_defender(&mut engine, 200, &Default::default());
+    assert!(
+        [Some(NORTH), Some(SOUTH)].contains(&spawn.spawn_point),
+        "the earlier answers are in use: {spawn:?}"
+    );
+    engine.wait_bot_spawn_routes(1).unwrap();
+    choose_defender(&mut engine, 200, &Default::default());
+
+    // Another change within 15 s routes nothing again; after it, it does.
+    change_structure_gates(&mut engine, 2);
+    engine
+        .prefetch_bot_spawn_routes(Duration::from_secs(5), 1)
+        .unwrap();
+    assert!(!engine.bot_registry.stale_lane_spawns.is_empty());
+    assert_eq!(lanes_pending(&engine), 0);
+    let (spawn, _) = choose_defender(&mut engine, 200, &Default::default());
+    assert!([Some(NORTH), Some(SOUTH)].contains(&spawn.spawn_point));
+    engine
+        .prefetch_bot_spawn_routes(Duration::from_secs(17), 1)
+        .unwrap();
+    assert!(lanes_pending(&engine) > 0);
 }
 
 /// The live case: an attacking squad's open parachute drop zone was routed
